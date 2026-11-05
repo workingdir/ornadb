@@ -6,7 +6,7 @@ Accepted for the first implementation slice of [ADR 0111](0111-sys-baked-module-
 
 ## Decision
 
-The `orna-sys-v1` build collects operation declarations and semantic-role claims
+The `orna-sys` build collects operation declarations and semantic-role claims
 from `#[ornasys]` implementation methods. It emits two deterministic build
 products from that same collection:
 

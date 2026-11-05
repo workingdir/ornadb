@@ -144,7 +144,7 @@ fn vim_lsp_attaches_and_exposes_hover_semantic_tokens_and_completion() {
         .trim_end()
         .to_owned();
     assert!(
-        orna_syntax_v1::parse_module(&diagnostic_recovery)
+        orna_syntax::parse_module(&diagnostic_recovery)
             .diagnostics
             .is_empty()
     );
@@ -1128,7 +1128,7 @@ fn emacs_eglot_attaches_and_exposes_syntax_v1_completion_at_point() {
 
 fn assert_v1_attachment_fixture() {
     for (name, source) in [("consumer", SOURCE), ("provider", PROVIDER_SOURCE)] {
-        let parsed = orna_syntax_v1::parse_module(source);
+        let parsed = orna_syntax::parse_module(source);
         assert!(
             parsed.is_ok(),
             "the editor attachment {name} fixture must contain only syntax-v1 source: {:?}",

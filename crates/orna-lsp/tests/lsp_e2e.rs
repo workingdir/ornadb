@@ -781,7 +781,7 @@ fn type_hierarchy_and_monikers_resolve_workspace_declarations_and_fail_closed() 
         }),
     );
     let declaration_moniker = &declaration_moniker.as_array().unwrap()[0];
-    assert_eq!(declaration_moniker["scheme"], "orna-syntax-v1");
+    assert_eq!(declaration_moniker["scheme"], "orna-syntax");
     assert_eq!(declaration_moniker["unique"], "project");
     assert_eq!(declaration_moniker["kind"], "export");
 
@@ -1170,9 +1170,7 @@ fn incremental_changes_apply_in_order_with_utf16_positions_and_ignore_stale_vers
     let mut expected = intermediate.clone();
     expected.replace_range(semicolon + 1..semicolon + 2, "2");
     assert!(
-        orna_syntax_v1::parse_module(&expected)
-            .diagnostics
-            .is_empty(),
+        orna_syntax::parse_module(&expected).diagnostics.is_empty(),
         "expected source: {expected:?}"
     );
 
@@ -1746,11 +1744,7 @@ fn code_actions_offer_only_verified_missing_semicolon_fixes() {
         &MISSING_SEMICOLON_SOURCE[..insertion],
         &MISSING_SEMICOLON_SOURCE[insertion..]
     );
-    assert!(
-        orna_syntax_v1::parse_module(&repaired)
-            .diagnostics
-            .is_empty()
-    );
+    assert!(orna_syntax::parse_module(&repaired).diagnostics.is_empty());
 
     let mut non_quickfix_params = params.clone();
     non_quickfix_params["context"]["only"] = json!(["refactor"]);

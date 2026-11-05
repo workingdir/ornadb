@@ -1,0 +1,33 @@
+[package]
+name = "orna-live"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.95"
+license = "Apache-2.0"
+description = "Transport-facing live-session adapter for orna.present.v1"
+
+[features]
+# Exposes the owner-bound runtime handle to this crate's integration tests.
+test-support = []
+
+[dependencies]
+futures = "0.3.31"
+getrandom = "0.3.4"
+orna-foundation = { path = "../orna-foundation" }
+orna-protocol = { path = "../orna-protocol" }
+orna-runtime = { path = "../orna-runtime" }
+orna-security = { path = "../orna-security" }
+orna-serving = { path = "../orna-serving" }
+orna-stream = { path = "../orna-stream" }
+orna-value = { path = "../orna-value" }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+
+[dev-dependencies]
+orna-repository = { path = "../orna-repository" }
+orna-live = { path = ".", features = ["test-support"] }

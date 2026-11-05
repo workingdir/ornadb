@@ -1,0 +1,6331 @@
+//! Canonical compact-manifest readers for legacy format-1/2 snapshots.
+//!
+//! The compact row writer is retired (ORNA-UPGRADE-003): this module only
+//! verifies committed manifests, shards and Parquet segments and projects
+//! their rows read-only. The candidate builder survives solely as a test
+//! fixture writer (`legacy-fixture-writer`) so the legacy readers stay
+//! tested; production builds never contain it.
+
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
+
+use bytes::Bytes;
+use orna_foundation::{CanonicalValue, OvbRaw, SchemaDescriptor, compare_primary_keys};
+use orna_syntax::{Expr, LiteralKind, parse_row};
+use parquet::{
+    basic::{Compression, ConvertedType, Encoding, PageType, Type},
+    column::{page::Page, reader::ColumnReader},
+    file::reader::{FileReader, SerializedFileReader},
+};
+use sha2::{Digest, Sha256};
+use uuid::{Uuid, Version};
+
+#[cfg(any(test, feature = "legacy-fixture-writer"))]
+use crate::PublicationJournalEntry;
+use crate::{
+    GitCommitRef, IndexGeneration, ManagedFileChange, ManagedPath, PrivateCommit,
+    PublicationJournal, Repository, RepositoryError,
+};
+
+/// Maximum number of entries in one canonical compact-manifest shard.
+pub const COMPACT_MANIFEST_SHARD_LIMIT: usize = 256;
+/// Maximum declared uncompressed size of one compact Parquet page.
+///
+/// This is the compact profile's 16 MiB uncompressed row-group ceiling used
+/// as the decoded allocation ceiling for a page as well.  It is checked from
+/// the serialized page header before parquet-rs can allocate its decompressed
+/// buffer.
+pub const COMPACT_MAX_UNCOMPRESSED_PAGE_BYTES: usize = 16 * 1024 * 1024;
+const COMPACT_PROFILE: &str = "compact-storage-v1";
+const MAX_COMPACT_FILE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_COMPACT_ROW_GROUP_ROWS: i64 = 65_536;
+
+fn canonical_key_order(left: &[u8], right: &[u8]) -> Result<Ordering, RepositoryError> {
+    let left_value =
+        CanonicalValue::decode(left).map_err(|_| RepositoryError::InvalidCompactManifest)?;
+    let right_value =
+        CanonicalValue::decode(right).map_err(|_| RepositoryError::InvalidCompactManifest)?;
+    compare_primary_keys(&left_value, &right_value)
+        .map_err(|_| RepositoryError::InvalidCompactManifest)
+}
+
+fn canonical_key_extrema<'a, I>(mut keys: I) -> Result<(&'a [u8], &'a [u8]), RepositoryError>
+where
+    I: Iterator<Item = &'a [u8]>,
+{
+    let first = keys.next().ok_or(RepositoryError::InvalidCompactManifest)?;
+    keys.try_fold((first, first), |(min, max), key| {
+        let min = if canonical_key_order(key, min)? == Ordering::Less {
+            key
+        } else {
+            min
+        };
+        let max = if canonical_key_order(key, max)? == Ordering::Greater {
+            key
+        } else {
+            max
+        };
+        Ok::<_, RepositoryError>((min, max))
+    })
+}
+
+fn validate_event_time_bounds(
+    min_event_time: Option<&str>,
+    max_event_time: Option<&str>,
+) -> Result<(), RepositoryError> {
+    let (Some(min_event_time), Some(max_event_time)) = (min_event_time, max_event_time) else {
+        return if min_event_time.is_none() && max_event_time.is_none() {
+            Ok(())
+        } else {
+            Err(RepositoryError::InvalidCompactManifest)
+        };
+    };
+    let min = parse_canonical_utc_instant(min_event_time)?;
+    let max = parse_canonical_utc_instant(max_event_time)?;
+    if min > max {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+    Ok(())
+}
+
+fn parse_canonical_utc_instant(value: &str) -> Result<(i64, u32), RepositoryError> {
+    let bytes = value.as_bytes();
+    if bytes.len() < 20
+        || !bytes.is_ascii()
+        || bytes.get(4) != Some(&b'-')
+        || bytes.get(7) != Some(&b'-')
+        || bytes.get(10) != Some(&b'T')
+        || bytes.get(13) != Some(&b':')
+        || bytes.get(16) != Some(&b':')
+    {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+    let component = |start: usize, end: usize| {
+        bytes
+            .get(start..end)
+            .filter(|part| part.iter().all(u8::is_ascii_digit))
+            .and_then(|part| std::str::from_utf8(part).ok())
+            .and_then(|part| part.parse::<u32>().ok())
+    };
+    let (year, month, day, hour, minute, second) = (
+        component(0, 4),
+        component(5, 7),
+        component(8, 10),
+        component(11, 13),
+        component(14, 16),
+        component(17, 19),
+    );
+    let (Some(year), Some(month), Some(day), Some(hour), Some(minute), Some(second)) =
+        (year, month, day, hour, minute, second)
+    else {
+        return Err(RepositoryError::InvalidCompactManifest);
+    };
+    if !(1..=9999).contains(&year)
+        || !(1..=12).contains(&month)
+        || hour >= 24
+        || minute >= 60
+        || second >= 60
+    {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let maximum_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return Err(RepositoryError::InvalidCompactManifest),
+    };
+    if !(1..=maximum_day).contains(&day) {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+
+    let mut at = 19;
+    let nanosecond = if bytes.get(at) == Some(&b'.') {
+        at += 1;
+        let start = at;
+        while bytes.get(at).is_some_and(u8::is_ascii_digit) {
+            at += 1;
+        }
+        let digits = at - start;
+        if !(1..=9).contains(&digits) {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        let fraction = component(start, at).ok_or(RepositoryError::InvalidCompactManifest)?;
+        fraction * 10_u32.pow((9 - digits) as u32)
+    } else {
+        0
+    };
+    if bytes.get(at..).is_none_or(|tail| tail != b"Z") {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+
+    let year = i64::from(year);
+    let month = i64::from(month);
+    let day = i64::from(day);
+    let years_before = year - 1;
+    let days_before_year =
+        years_before * 365 + years_before / 4 - years_before / 100 + years_before / 400;
+    let days_before_epoch = 1969 * 365 + 1969 / 4 - 1969 / 100 + 1969 / 400;
+    let days_before_month = match month {
+        1 => 0,
+        2 => 31,
+        3 => 59,
+        4 => 90,
+        5 => 120,
+        6 => 151,
+        7 => 181,
+        8 => 212,
+        9 => 243,
+        10 => 273,
+        11 => 304,
+        12 => 334,
+        _ => unreachable!("month validated above"),
+    } + i64::from(month > 2 && leap);
+    let days = days_before_year + days_before_month + day - 1 - days_before_epoch;
+    let seconds =
+        days * 86_400 + i64::from(hour) * 3_600 + i64::from(minute) * 60 + i64::from(second);
+    Ok((seconds, nanosecond))
+}
+
+/// The compact role of one immutable segment.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CompactSegmentRole {
+    Data,
+    Replacement,
+    Deletion,
+}
+
+impl CompactSegmentRole {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Data => "data",
+            Self::Replacement => "replacement",
+            Self::Deletion => "deletion",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, RepositoryError> {
+        match value {
+            "data" => Ok(Self::Data),
+            "replacement" => Ok(Self::Replacement),
+            "deletion" => Ok(Self::Deletion),
+            _ => Err(RepositoryError::InvalidCompactManifest),
+        }
+    }
+}
+/// One canonical logical row projected from a verified committed segment.
+///
+/// `key` and `value` are decoded and re-encoded OVB values. They are never
+/// treated as arbitrary Parquet or byte-array payloads. A deletion carries its
+/// key and no value; data and replacement segments carry a complete row value.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompactCommittedRow {
+    key: CanonicalValue,
+    value: Option<CanonicalValue>,
+}
+
+impl CompactCommittedRow {
+    pub fn key(&self) -> &CanonicalValue {
+        &self.key
+    }
+
+    pub fn value(&self) -> Option<&CanonicalValue> {
+        self.value.as_ref()
+    }
+}
+
+/// The verified logical projection of one committed compact segment.
+///
+/// This is the repository-to-storage producer boundary. The projection is
+/// available only after the committed Git object, manifest identity, Parquet
+/// profile, schema descriptor, and every physical value have been verified.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompactCommittedSegmentProjection {
+    table_id: Uuid,
+    schema_id: [u8; 32],
+    schema: SchemaDescriptor,
+    source_schema_id: [u8; 32],
+    source_schema: SchemaDescriptor,
+    profile: &'static str,
+    encoder_version: String,
+    generation: u64,
+    role: CompactSegmentRole,
+    rows: Vec<CompactCommittedRow>,
+}
+
+impl CompactCommittedSegmentProjection {
+    pub const fn table_id(&self) -> Uuid {
+        self.table_id
+    }
+
+    pub const fn schema_id(&self) -> [u8; 32] {
+        self.schema_id
+    }
+
+    /// The logical schema of the projected rows. It equals the encoded schema
+    /// on the exact-schema read path.
+    pub fn schema(&self) -> &SchemaDescriptor {
+        &self.schema
+    }
+
+    /// The verified descriptor and fingerprint used to encode the physical
+    /// segment, retained after a history-aware projection.
+    pub fn source_schema(&self) -> &SchemaDescriptor {
+        &self.source_schema
+    }
+
+    pub const fn source_schema_id(&self) -> [u8; 32] {
+        self.source_schema_id
+    }
+
+    pub const fn profile(&self) -> &'static str {
+        self.profile
+    }
+
+    pub fn encoder_version(&self) -> &str {
+        &self.encoder_version
+    }
+
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub const fn role(&self) -> CompactSegmentRole {
+        self.role
+    }
+
+    pub fn rows(&self) -> &[CompactCommittedRow] {
+        &self.rows
+    }
+}
+
+/// Observed compact-storage layout at one commit: manifest-holding tables
+/// paired with their validated shard/data paths.
+type CompactInventoryPaths = (BTreeSet<Uuid>, BTreeMap<Uuid, BTreeSet<String>>);
+
+/// One newly encoded immutable compact segment for the test-only legacy
+/// fixture writer. Its generation and native object ID are allocated only
+/// after the base manifest has been verified.
+#[cfg(any(test, feature = "legacy-fixture-writer"))]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompactSegment {
+    segment_id: Uuid,
+    role: CompactSegmentRole,
+    schema: [u8; 32],
+    encoder_version: String,
+    relative_path: ManagedPath,
+    bytes: Vec<u8>,
+    min_key: Vec<u8>,
+    max_key: Vec<u8>,
+    min_event_time: Option<String>,
+    max_event_time: Option<String>,
+    row_count: u64,
+    columns: Vec<u8>,
+    row_group_index: bool,
+    bloom: bool,
+}
+
+#[cfg(any(test, feature = "legacy-fixture-writer"))]
+impl CompactSegment {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        segment_id: Uuid,
+        role: CompactSegmentRole,
+        schema: [u8; 32],
+        encoder_version: impl Into<String>,
+        relative_path: ManagedPath,
+        bytes: Vec<u8>,
+        min_key: Vec<u8>,
+        max_key: Vec<u8>,
+        row_count: u64,
+        columns: Vec<u8>,
+        row_group_index: bool,
+        bloom: bool,
+    ) -> Result<Self, RepositoryError> {
+        let value = Self {
+            segment_id,
+            role,
+            schema,
+            encoder_version: encoder_version.into(),
+            relative_path,
+            bytes,
+            min_key,
+            max_key,
+            min_event_time: None,
+            max_event_time: None,
+            row_count,
+            columns,
+            row_group_index,
+            bloom,
+        };
+        value.validate_unallocated()?;
+        Ok(value)
+    }
+
+    pub fn with_event_time_bounds(
+        mut self,
+        min_event_time: impl Into<String>,
+        max_event_time: impl Into<String>,
+    ) -> Result<Self, RepositoryError> {
+        self.min_event_time = Some(min_event_time.into());
+        self.max_event_time = Some(max_event_time.into());
+        self.validate_unallocated()?;
+        Ok(self)
+    }
+
+    fn validate_unallocated(&self) -> Result<(), RepositoryError> {
+        if self.segment_id.get_version() != Some(Version::SortRand)
+            || self.encoder_version.is_empty()
+            || !self.encoder_version.bytes().all(is_safe_atom)
+            || self.bytes.is_empty()
+            || canonical_key_order(&self.min_key, &self.max_key)? == Ordering::Greater
+            || self.row_count == 0
+            || self
+                .relative_path
+                .as_path()
+                .extension()
+                .and_then(|value| value.to_str())
+                != Some("parquet")
+        {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        validate_event_time_bounds(
+            self.min_event_time.as_deref(),
+            self.max_event_time.as_deref(),
+        )?;
+        Ok(())
+    }
+}
+
+/// The canonical metadata for one immutable compact file.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompactManifestEntry {
+    segment_id: Uuid,
+    role: CompactSegmentRole,
+    generation: u64,
+    schema: [u8; 32],
+    encoder_version: String,
+    relative_path: ManagedPath,
+    git_object_id: String,
+    sha256: [u8; 32],
+    min_key: Vec<u8>,
+    max_key: Vec<u8>,
+    min_event_time: Option<String>,
+    max_event_time: Option<String>,
+    row_count: u64,
+    compressed_bytes: u64,
+    columns: Vec<u8>,
+    row_group_index: bool,
+    bloom: bool,
+}
+
+impl CompactManifestEntry {
+    pub fn segment_id(&self) -> Uuid {
+        self.segment_id
+    }
+
+    /// Returns the immutable logical role recorded for this manifest entry.
+    pub const fn role(&self) -> CompactSegmentRole {
+        self.role
+    }
+
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Returns the number of rows the physical segment must enumerate.
+    pub const fn row_count(&self) -> u64 {
+        self.row_count
+    }
+
+    /// Returns the verified compressed byte size declared by this entry.
+    pub const fn compressed_bytes(&self) -> u64 {
+        self.compressed_bytes
+    }
+
+    /// Returns the schema fingerprint authenticated by the committed
+    /// segment's manifest entry.
+    pub const fn schema_id(&self) -> [u8; 32] {
+        self.schema
+    }
+
+    /// Returns the canonical physical-column descriptor bytes authenticated
+    /// by the committed segment's manifest entry.
+    pub fn columns(&self) -> &[u8] {
+        &self.columns
+    }
+
+    /// Returns the encoder identity recorded by the committed manifest.
+    pub fn encoder_version(&self) -> &str {
+        &self.encoder_version
+    }
+
+    pub fn relative_path(&self) -> &ManagedPath {
+        &self.relative_path
+    }
+
+    pub fn git_object_id(&self) -> &str {
+        &self.git_object_id
+    }
+
+    pub const fn sha256(&self) -> [u8; 32] {
+        self.sha256
+    }
+
+    /// Returns the immutable canonical key lower bound recorded in this
+    /// manifest entry.
+    pub fn min_key(&self) -> &[u8] {
+        &self.min_key
+    }
+
+    /// Returns the immutable canonical key upper bound recorded in this
+    /// manifest entry.
+    pub fn max_key(&self) -> &[u8] {
+        &self.max_key
+    }
+
+    #[cfg(any(test, feature = "legacy-fixture-writer"))]
+    fn from_segment(
+        table: Uuid,
+        segment: &CompactSegment,
+        generation: u64,
+        git_object_id: String,
+    ) -> Result<Self, RepositoryError> {
+        segment.validate_unallocated()?;
+        verify_physical_segment(table, segment, &segment.bytes)?;
+        if generation == 0 || git_object_id.is_empty() || !git_object_id.bytes().all(is_hex) {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        let compressed_bytes = u64::try_from(segment.bytes.len())
+            .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+        Ok(Self {
+            segment_id: segment.segment_id,
+            role: segment.role,
+            generation,
+            schema: segment.schema,
+            encoder_version: segment.encoder_version.clone(),
+            relative_path: segment.relative_path.clone(),
+            git_object_id,
+            sha256: Sha256::digest(&segment.bytes).into(),
+            min_key: segment.min_key.clone(),
+            max_key: segment.max_key.clone(),
+            min_event_time: segment.min_event_time.clone(),
+            max_event_time: segment.max_event_time.clone(),
+            row_count: segment.row_count,
+            compressed_bytes,
+            columns: segment.columns.clone(),
+            row_group_index: segment.row_group_index,
+            bloom: segment.bloom,
+        })
+    }
+
+    fn validate(
+        &self,
+        table: Uuid,
+        object_id_length: Option<usize>,
+    ) -> Result<(), RepositoryError> {
+        if self.segment_id.get_version() != Some(Version::SortRand)
+            || self.generation == 0
+            || self.encoder_version.is_empty()
+            || !self.encoder_version.bytes().all(is_safe_atom)
+            || canonical_key_order(&self.min_key, &self.max_key)? == Ordering::Greater
+            || self.row_count == 0
+            || self.compressed_bytes == 0
+            || !self.git_object_id.bytes().all(is_hex)
+            || object_id_length.is_some_and(|length| self.git_object_id.len() != length)
+            || self.relative_path != compact_segment_path(table, self.segment_id)?
+            || self
+                .relative_path
+                .as_path()
+                .extension()
+                .and_then(|value| value.to_str())
+                != Some("parquet")
+        {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        validate_event_time_bounds(
+            self.min_event_time.as_deref(),
+            self.max_event_time.as_deref(),
+        )?;
+        Ok(())
+    }
+}
+
+/// Reads only the physical representation boundary needed by the fixture
+/// writer. Logical row decoding and the complete descriptor/OVB semantics
+/// remain owned by the storage reader; the fixture writer nevertheless rejects
+/// a non-Parquet blob or a manifest that lies about its required file metadata.
+#[cfg(any(test, feature = "legacy-fixture-writer"))]
+fn verify_physical_segment(
+    table: Uuid,
+    segment: &CompactSegment,
+    bytes: &[u8],
+) -> Result<(), RepositoryError> {
+    verify_physical_metadata(
+        table,
+        segment.role,
+        segment.schema,
+        &segment.encoder_version,
+        &segment.columns,
+        segment.row_count,
+        bytes,
+    )
+}
+
+fn verify_physical_entry(
+    table: Uuid,
+    entry: &CompactManifestEntry,
+    bytes: &[u8],
+) -> Result<(), RepositoryError> {
+    if entry.compressed_bytes
+        != u64::try_from(bytes.len()).map_err(|_| RepositoryError::InvalidCompactManifest)?
+    {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+    verify_physical_metadata(
+        table,
+        entry.role,
+        entry.schema,
+        &entry.encoder_version,
+        &entry.columns,
+        entry.row_count,
+        bytes,
+    )
+}
+
+/// Applies the full committed-manifest witness to one materialized segment.
+/// Keeping this as the single byte-verification boundary makes committed reads
+/// and no-lazy hydration planning reject the same object substitution, digest,
+/// size, and physical-Parquet failures.
+fn verify_manifest_segment_bytes(
+    table: Uuid,
+    entry: &CompactManifestEntry,
+    object: &str,
+    bytes: &[u8],
+) -> Result<(), RepositoryError> {
+    if object != entry.git_object_id
+        || Sha256::digest(bytes).as_slice() != entry.sha256
+        || verify_physical_entry(table, entry, bytes).is_err()
+    {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+    Ok(())
+}
+
+fn verify_physical_metadata(
+    table: Uuid,
+    role: CompactSegmentRole,
+    schema: [u8; 32],
+    encoder_version: &str,
+    columns: &[u8],
+    row_count: u64,
+    bytes: &[u8],
+) -> Result<(), RepositoryError> {
+    if bytes.is_empty() || bytes.len() > MAX_COMPACT_FILE_BYTES {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+    let reader = SerializedFileReader::new(Bytes::copy_from_slice(bytes))
+        .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+    let metadata = reader.metadata().file_metadata();
+    if metadata.version() != 1
+        || metadata.num_rows()
+            != i64::try_from(row_count).map_err(|_| RepositoryError::InvalidCompactManifest)?
+    {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+    let required = required_physical_metadata(table, schema, encoder_version, columns);
+    let mut found = BTreeMap::new();
+    for item in metadata.key_value_metadata().into_iter().flatten() {
+        let Some(value) = item.value.as_deref() else {
+            return Err(RepositoryError::InvalidCompactManifest);
+        };
+        if (required.contains_key(item.key.as_str()) || item.key == "orna.schema.ovb")
+            && found.insert(item.key.as_str(), value).is_some()
+        {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+    }
+    if required
+        .iter()
+        .any(|(key, value)| found.get(key.as_str()) != Some(&value.as_str()))
+    {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+    let schema_ovb = found
+        .get("orna.schema.ovb")
+        .ok_or(RepositoryError::InvalidCompactManifest)
+        .and_then(|value| decode_base64(value))?;
+    let descriptor = SchemaDescriptor::decode(&schema_ovb)
+        .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+    if schema_descriptor_fingerprint(&descriptor)? != schema {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+    if schema_descriptor_table(&descriptor)? != table {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+    let (ovb_columns, physical_columns) =
+        verify_physical_columns(columns, metadata.schema_descr(), &descriptor, role)?;
+    verify_ovb_values(&reader, &ovb_columns, &physical_columns)?;
+    if reader.num_row_groups() == 0 {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+    verify_page_checksums(bytes, reader.metadata().row_groups())?;
+    for row_group in reader.metadata().row_groups() {
+        if row_group.num_rows() <= 0
+            || row_group.num_rows() > MAX_COMPACT_ROW_GROUP_ROWS
+            || row_group.num_columns() == 0
+        {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        for (column_index, column) in row_group.columns().iter().enumerate() {
+            let physical = physical_columns
+                .get(&column_index)
+                .ok_or(RepositoryError::InvalidCompactManifest)?;
+            let schema_column = metadata
+                .schema_descr()
+                .columns()
+                .get(column_index)
+                .ok_or(RepositoryError::InvalidCompactManifest)?;
+            // Primary-key leaves are one required value per complete row. A
+            // repeated or nullable key column would make key ordering and
+            // exact-key admission ambiguous, so reject either physical level
+            // even when an all-Some/one-element fixture happens to have one
+            // encoded value per row.
+            if physical.is_key
+                && (column.num_values() != row_group.num_rows()
+                    || schema_column.max_def_level() != 0
+                    || schema_column.max_rep_level() != 0)
+            {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            if !matches!(column.compression(), Compression::ZSTD(_))
+                || column.encodings().any(|encoding| {
+                    !matches!(
+                        encoding,
+                        Encoding::PLAIN | Encoding::RLE | Encoding::RLE_DICTIONARY
+                    )
+                })
+                || column.compressed_size() <= 0
+                || column.uncompressed_size() <= 0
+                || column.statistics().is_none()
+            {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+        }
+    }
+    // Drive every compressed page through parquet-rs so malformed compressed
+    // data and any supplied page checksum are rejected before publication.
+    // Data-page V2 exposes the number of logical rows represented by each
+    // page.  That is the correct cardinality check for optional/repeated
+    // leaves; their encoded value count can legitimately differ from the
+    // row-group count.
+    for row_group in 0..reader.num_row_groups() {
+        let group = reader
+            .get_row_group(row_group)
+            .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+        for column in 0..group.num_columns() {
+            let pages = group
+                .get_column_page_reader(column)
+                .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+            let mut data_pages = 0usize;
+            let mut page_values = 0_i64;
+            let mut page_rows = 0_i64;
+            for page in pages {
+                let page = page.map_err(|_| RepositoryError::InvalidCompactManifest)?;
+                if page.is_data_page() {
+                    data_pages = data_pages
+                        .checked_add(1)
+                        .ok_or(RepositoryError::InvalidCompactManifest)?;
+                    page_values = page_values
+                        .checked_add(i64::from(page.num_values()))
+                        .ok_or(RepositoryError::InvalidCompactManifest)?;
+                    let Page::DataPageV2 { num_rows, .. } = &page else {
+                        return Err(RepositoryError::InvalidCompactManifest);
+                    };
+                    page_rows = page_rows
+                        .checked_add(i64::from(*num_rows))
+                        .ok_or(RepositoryError::InvalidCompactManifest)?;
+                    if page.page_type() != PageType::DATA_PAGE_V2 {
+                        return Err(RepositoryError::InvalidCompactManifest);
+                    }
+                    if !matches!(page.encoding(), Encoding::PLAIN | Encoding::RLE_DICTIONARY) {
+                        return Err(RepositoryError::InvalidCompactManifest);
+                    }
+                } else if page.is_dictionary_page() && page.encoding() != Encoding::PLAIN {
+                    return Err(RepositoryError::InvalidCompactManifest);
+                }
+            }
+            if data_pages == 0 {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            let column_metadata = group.metadata().column(column);
+            if page_values != column_metadata.num_values()
+                || page_rows != group.metadata().num_rows()
+            {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Reads the owning table identity from the canonical Format §29 descriptor.
+/// The descriptor decoder verifies its closed shape; this explicit binding
+/// prevents a valid descriptor for one table from authorizing physical data
+/// published under another table's metadata and manifest.
+fn schema_descriptor_table(descriptor: &SchemaDescriptor) -> Result<Uuid, RepositoryError> {
+    let OvbRaw::Map(entries) = descriptor.raw() else {
+        return Err(RepositoryError::InvalidCompactManifest);
+    };
+    let table = entries
+        .iter()
+        .find_map(|(key, value)| {
+            matches!(key, OvbRaw::Int(number) if number.to_string() == "1").then_some(value)
+        })
+        .ok_or(RepositoryError::InvalidCompactManifest)?;
+    let OvbRaw::Tag(37, table) = table else {
+        return Err(RepositoryError::InvalidCompactManifest);
+    };
+    let OvbRaw::Bytes(table) = table.as_ref() else {
+        return Err(RepositoryError::InvalidCompactManifest);
+    };
+    Uuid::from_slice(table).map_err(|_| RepositoryError::InvalidCompactManifest)
+}
+
+/// Verifies the compact scalar descriptor mapping supported by this publication
+/// witness.  The stable field identity must derive the physical leaf name, and
+/// the logical type, encoding, parameters, and Parquet primitive must agree.
+/// This keeps a manifest from authorizing a file through arbitrary same-shape
+/// metadata that names the right leaf but a different logical field.
+/// Verified physical leaves: the fallback kind and physical info for each
+/// column index named by the manifest.
+type VerifiedPhysicalColumns = (
+    BTreeMap<usize, OvbFallbackKind>,
+    BTreeMap<usize, PhysicalColumnInfo>,
+);
+
+fn verify_physical_columns(
+    columns: &[u8],
+    schema: &parquet::schema::types::SchemaDescriptor,
+    descriptor: &SchemaDescriptor,
+    segment_role: CompactSegmentRole,
+) -> Result<VerifiedPhysicalColumns, RepositoryError> {
+    let required_fields = required_physical_leaves(descriptor, segment_role)?;
+    let value =
+        CanonicalValue::decode(columns).map_err(|_| RepositoryError::InvalidCompactManifest)?;
+    let OvbRaw::Array(descriptors) = value.raw() else {
+        return Err(RepositoryError::InvalidCompactManifest);
+    };
+    if descriptors.len() != schema.num_columns() {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+    let mut previous = None;
+    let mut mapped_fields = BTreeSet::new();
+    let mut ovb_columns = BTreeMap::new();
+    let mut physical_columns = BTreeMap::new();
+    for (column_index, (descriptor, column)) in descriptors.iter().zip(schema.columns()).enumerate()
+    {
+        let OvbRaw::Array(fields) = descriptor else {
+            return Err(RepositoryError::InvalidCompactManifest);
+        };
+        if fields.len() != 5 {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        let OvbRaw::Array(field_id_path) = &fields[0] else {
+            return Err(RepositoryError::InvalidCompactManifest);
+        };
+        let (field_id, field_id_suffix) = parse_physical_field_id_path(field_id_path)?;
+        let OvbRaw::Array(path) = &fields[1] else {
+            return Err(RepositoryError::InvalidCompactManifest);
+        };
+        let path = path
+            .iter()
+            .map(|part| match part {
+                OvbRaw::Text(part) if !part.is_empty() => Ok(part.clone()),
+                _ => Err(RepositoryError::InvalidCompactManifest),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let expected = required_fields
+            .iter()
+            .find(|expected| {
+                expected.field_id == field_id
+                    && expected.field_id_path == field_id_suffix
+                    && expected.physical_path == path
+            })
+            .ok_or(RepositoryError::InvalidCompactManifest)?;
+        if !mapped_fields.insert((field_id, field_id_suffix.clone())) {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        if path
+            != column
+                .path()
+                .parts()
+                .iter()
+                .map(|part| part.to_owned())
+                .collect::<Vec<_>>()
+        {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        if fields[2] != expected.logical_type {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        let OvbRaw::Array(logical_type) = &fields[2] else {
+            return Err(RepositoryError::InvalidCompactManifest);
+        };
+        let [OvbRaw::Int(type_code), OvbRaw::Text(type_name)] = logical_type.as_slice() else {
+            return Err(RepositoryError::InvalidCompactManifest);
+        };
+        let OvbRaw::Text(encoding) = &fields[3] else {
+            return Err(RepositoryError::InvalidCompactManifest);
+        };
+        let int_mapping =
+            type_name == "Int" && encoding == "int64" && column.physical_type() == Type::INT64;
+        let bool_mapping =
+            type_name == "Bool" && encoding == "bool" && column.physical_type() == Type::BOOLEAN;
+        let ovb_int_mapping =
+            type_name == "Int" && encoding == "ovb" && column.physical_type() == Type::BYTE_ARRAY;
+        let ovb_bool_mapping =
+            type_name == "Bool" && encoding == "ovb" && column.physical_type() == Type::BYTE_ARRAY;
+        let ovb_kind = if ovb_int_mapping {
+            Some(OvbFallbackKind::Int)
+        } else if ovb_bool_mapping {
+            Some(OvbFallbackKind::Bool)
+        } else {
+            None
+        };
+        let string_mapping = type_name == "Str"
+            && encoding == "utf8"
+            && column.physical_type() == Type::BYTE_ARRAY
+            && column.logical_type_ref() == Some(&parquet::basic::LogicalType::String);
+        let date_mapping = type_name == "Date"
+            && encoding == "date"
+            && column.physical_type() == Type::INT32
+            && column.logical_type_ref() == Some(&parquet::basic::LogicalType::Date);
+        // 1.0.0 `23-storage.md:184`: `Blob | blob | Unannotated BYTE_ARRAY;
+        // parameters []`. The column carries the payload bytes only; the
+        // annotated value identity is a format-3 concern (ORNA-BLOB-009 keeps
+        // the legacy bytes-only semantics, and ORNA-UPGRADE-004's explicit
+        // octet-stream default belongs to the migration layer, not here).
+        let blob_mapping = type_name == "Blob"
+            && encoding == "blob"
+            && column.physical_type() == Type::BYTE_ARRAY
+            && column.logical_type_ref().is_none();
+        if type_code.to_string() != "0"
+            || !(int_mapping
+                || bool_mapping
+                || ovb_int_mapping
+                || ovb_bool_mapping
+                || string_mapping
+                || date_mapping
+                || blob_mapping)
+            || !matches!(&fields[4], OvbRaw::Array(parameters) if
+            if ovb_kind.is_some() {
+                parameters == &[OvbRaw::Int(1.into())]
+            } else {
+                parameters.is_empty()
+            })
+            || (!(string_mapping || date_mapping) && column.logical_type_ref().is_some())
+            || ((ovb_kind.is_some() || blob_mapping)
+                && column.converted_type() != ConvertedType::NONE)
+            || column.max_def_level() != expected.max_def_level
+            || column.max_rep_level() != expected.max_rep_level
+        {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        if let Some(kind) = ovb_kind {
+            ovb_columns.insert(column_index, kind);
+        }
+        physical_columns.insert(
+            column_index,
+            PhysicalColumnInfo {
+                field_id: expected.field_id,
+                is_key: expected.is_key,
+                max_def_level: expected.max_def_level,
+                max_rep_level: expected.max_rep_level,
+                kind: if let Some(kind) = ovb_kind {
+                    PhysicalValueKind::Ovb(kind)
+                } else if int_mapping {
+                    PhysicalValueKind::Int
+                } else if bool_mapping {
+                    PhysicalValueKind::Bool
+                } else if string_mapping {
+                    PhysicalValueKind::Str
+                } else if date_mapping {
+                    PhysicalValueKind::Date
+                } else if blob_mapping {
+                    PhysicalValueKind::Blob
+                } else {
+                    return Err(RepositoryError::InvalidCompactManifest);
+                },
+            },
+        );
+        let path = path.join(".");
+        if previous
+            .as_ref()
+            .is_some_and(|previous: &String| previous >= &path)
+        {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        previous = Some(path);
+    }
+    if mapped_fields.len() != required_fields.len() {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+    Ok((ovb_columns, physical_columns))
+}
+
+#[derive(Clone, Copy)]
+struct PhysicalColumnInfo {
+    field_id: Uuid,
+    is_key: bool,
+    max_def_level: i16,
+    max_rep_level: i16,
+    kind: PhysicalValueKind,
+}
+
+#[derive(Clone, Copy)]
+enum PhysicalValueKind {
+    Int,
+    Bool,
+    Str,
+    Date,
+    /// 1.0.0 `23-storage.md:184`: unannotated `BYTE_ARRAY`, decoded as the raw
+    /// payload bytes of the row's `Blob` field.
+    Blob,
+    Ovb(OvbFallbackKind),
+}
+
+#[derive(Clone, Copy)]
+enum OvbFallbackKind {
+    Int,
+    Bool,
+}
+
+fn verify_ovb_values(
+    reader: &SerializedFileReader<Bytes>,
+    columns: &BTreeMap<usize, OvbFallbackKind>,
+    physical_columns: &BTreeMap<usize, PhysicalColumnInfo>,
+) -> Result<(), RepositoryError> {
+    for (&column_index, &kind) in columns {
+        let physical = physical_columns
+            .get(&column_index)
+            .ok_or(RepositoryError::InvalidCompactManifest)?;
+        for row_group_index in 0..reader.num_row_groups() {
+            let row_group = reader
+                .get_row_group(row_group_index)
+                .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+            let expected_rows = usize::try_from(row_group.metadata().num_rows())
+                .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+            let column = row_group
+                .get_column_reader(column_index)
+                .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+            let ColumnReader::ByteArrayColumnReader(mut column) = column else {
+                return Err(RepositoryError::InvalidCompactManifest);
+            };
+            let mut values = Vec::new();
+            let mut definitions = Vec::new();
+            let mut repetitions = Vec::new();
+            let mut records = 0usize;
+            while records < expected_rows {
+                let remaining = expected_rows - records;
+                let definition_levels = (physical.max_def_level != 0).then_some(&mut definitions);
+                let repetition_levels = (physical.max_rep_level != 0).then_some(&mut repetitions);
+                let (read_records, _values_read, levels_read) = column
+                    .read_records(remaining, definition_levels, repetition_levels, &mut values)
+                    .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+                if read_records == 0 || levels_read != read_records {
+                    return Err(RepositoryError::InvalidCompactManifest);
+                }
+                records = records
+                    .checked_add(read_records)
+                    .ok_or(RepositoryError::InvalidCompactManifest)?;
+            }
+            if records != expected_rows {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            let definitions = if physical.max_def_level == 0 {
+                vec![0; expected_rows]
+            } else {
+                definitions
+            };
+            let repetitions = if physical.max_rep_level == 0 {
+                vec![0; definitions.len()]
+            } else {
+                repetitions
+            };
+            if definitions.len() != repetitions.len()
+                || repetitions.first().is_some_and(|level| *level != 0)
+            {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            let mut value_index = 0usize;
+            for (definition, repetition) in definitions.into_iter().zip(repetitions) {
+                if definition < 0
+                    || definition > physical.max_def_level
+                    || repetition < 0
+                    || repetition > physical.max_rep_level
+                {
+                    return Err(RepositoryError::InvalidCompactManifest);
+                }
+                if definition == physical.max_def_level {
+                    let value = values
+                        .get(value_index)
+                        .ok_or(RepositoryError::InvalidCompactManifest)?;
+                    value_index = value_index
+                        .checked_add(1)
+                        .ok_or(RepositoryError::InvalidCompactManifest)?;
+                    let value = CanonicalValue::decode(value.data())
+                        .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+                    let supported = match kind {
+                        OvbFallbackKind::Int => matches!(value.raw(), OvbRaw::Int(_)),
+                        OvbFallbackKind::Bool => matches!(value.raw(), OvbRaw::Bool(_)),
+                    };
+                    if !supported {
+                        return Err(RepositoryError::InvalidCompactManifest);
+                    }
+                }
+            }
+            if value_index != values.len() {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn decode_projection_column(
+    row_group: &dyn parquet::file::reader::RowGroupReader,
+    index: usize,
+    kind: PhysicalValueKind,
+    max_def_level: i16,
+    max_rep_level: i16,
+    expected_rows: usize,
+) -> Result<Vec<Option<OvbRaw>>, RepositoryError> {
+    if max_rep_level != 0 {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+    let reader = row_group
+        .get_column_reader(index)
+        .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+
+    macro_rules! read_values {
+        ($column:expr, $value_type:ty, $convert:expr) => {{
+            let mut values: Vec<$value_type> = Vec::new();
+            let mut definitions = Vec::new();
+            let mut records = 0usize;
+            while records < expected_rows {
+                let remaining = expected_rows - records;
+                let definition_levels = (max_def_level != 0).then_some(&mut definitions);
+                let (read_records, values_read, levels_read) = $column
+                    .read_records(remaining, definition_levels, None, &mut values)
+                    .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+                if read_records == 0 || levels_read != read_records {
+                    return Err(RepositoryError::InvalidCompactManifest);
+                }
+                if max_def_level == 0 && values_read != read_records {
+                    return Err(RepositoryError::InvalidCompactManifest);
+                }
+                records = records
+                    .checked_add(read_records)
+                    .ok_or(RepositoryError::InvalidCompactManifest)?;
+            }
+            if records != expected_rows
+                || (max_def_level == 0 && values.len() != expected_rows)
+                || (max_def_level != 0 && definitions.len() != expected_rows)
+            {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            let mut value_index = 0usize;
+            let definitions = if max_def_level == 0 {
+                vec![0; expected_rows]
+            } else {
+                definitions
+            };
+            let output = definitions
+                .into_iter()
+                .map(|definition| {
+                    if definition == max_def_level {
+                        let value = values
+                            .get(value_index)
+                            .ok_or(RepositoryError::InvalidCompactManifest)?;
+                        value_index = value_index
+                            .checked_add(1)
+                            .ok_or(RepositoryError::InvalidCompactManifest)?;
+                        Ok(Some(($convert)(value)?))
+                    } else if definition < max_def_level {
+                        Ok(None)
+                    } else {
+                        Err(RepositoryError::InvalidCompactManifest)
+                    }
+                })
+                .collect::<Result<Vec<_>, RepositoryError>>()?;
+            if value_index != values.len() {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            Ok(output)
+        }};
+    }
+
+    match kind {
+        PhysicalValueKind::Int => {
+            let ColumnReader::Int64ColumnReader(mut column) = reader else {
+                return Err(RepositoryError::InvalidCompactManifest);
+            };
+            read_values!(column, i64, |value: &i64| Ok(OvbRaw::Int((*value).into())))
+        }
+        PhysicalValueKind::Bool => {
+            let ColumnReader::BoolColumnReader(mut column) = reader else {
+                return Err(RepositoryError::InvalidCompactManifest);
+            };
+            read_values!(column, bool, |value: &bool| Ok(OvbRaw::Bool(*value)))
+        }
+        PhysicalValueKind::Str => {
+            let ColumnReader::ByteArrayColumnReader(mut column) = reader else {
+                return Err(RepositoryError::InvalidCompactManifest);
+            };
+            read_values!(
+                column,
+                parquet::data_type::ByteArray,
+                |value: &parquet::data_type::ByteArray| {
+                    String::from_utf8(value.data().to_vec())
+                        .map(OvbRaw::Text)
+                        .map_err(|_| RepositoryError::InvalidCompactManifest)
+                }
+            )
+        }
+        PhysicalValueKind::Date => {
+            let ColumnReader::Int32ColumnReader(mut column) = reader else {
+                return Err(RepositoryError::InvalidCompactManifest);
+            };
+            read_values!(column, i32, |value: &i32| { compact_date_value(*value) })
+        }
+        PhysicalValueKind::Blob => {
+            let ColumnReader::ByteArrayColumnReader(mut column) = reader else {
+                return Err(RepositoryError::InvalidCompactManifest);
+            };
+            // 1.0.0 `23-storage.md:184` stores the payload as an unannotated
+            // BYTE_ARRAY, so the decoded logical value is the raw byte string
+            // alone. No media type or suffix is invented here: the annotated
+            // identity is a format-3 value, and the migration layer applies the
+            // ORNA-UPGRADE-004 default explicitly (ORNA-BLOB-009).
+            read_values!(
+                column,
+                parquet::data_type::ByteArray,
+                |value: &parquet::data_type::ByteArray| {
+                    Ok(OvbRaw::Bytes(value.data().to_vec()))
+                }
+            )
+        }
+        PhysicalValueKind::Ovb(fallback) => {
+            let ColumnReader::ByteArrayColumnReader(mut column) = reader else {
+                return Err(RepositoryError::InvalidCompactManifest);
+            };
+            read_values!(
+                column,
+                parquet::data_type::ByteArray,
+                |value: &parquet::data_type::ByteArray| {
+                    let value = CanonicalValue::decode(value.data())
+                        .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+                    let supported = match fallback {
+                        OvbFallbackKind::Int => matches!(value.raw(), OvbRaw::Int(_)),
+                        OvbFallbackKind::Bool => matches!(value.raw(), OvbRaw::Bool(_)),
+                    };
+                    supported
+                        .then(|| value.raw().clone())
+                        .ok_or(RepositoryError::InvalidCompactManifest)
+                }
+            )
+        }
+    }
+}
+
+fn compact_date_value(days: i32) -> Result<OvbRaw, RepositoryError> {
+    let z = i64::from(days) + 719_468;
+    let era = if z >= 0 {
+        z / 146_097
+    } else {
+        (z - 146_096) / 146_097
+    };
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let month0 = (5 * doy + 2) / 153;
+    let day = doy - (153 * month0 + 2) / 5 + 1;
+    let month = month0 + if month0 < 10 { 3 } else { -9 };
+    if month <= 2 {
+        year += 1;
+    }
+    if !(1..=9_999).contains(&year) {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+    Ok(OvbRaw::Tag(
+        60001,
+        Box::new(OvbRaw::Text(format!("{year:04}-{month:02}-{day:02}"))),
+    ))
+}
+
+fn schema_row_fields(
+    descriptor: &SchemaDescriptor,
+) -> Result<(Vec<Uuid>, Vec<Uuid>), RepositoryError> {
+    let OvbRaw::Map(entries) = descriptor.raw() else {
+        return Err(RepositoryError::InvalidCompactManifest);
+    };
+    let value_for = |number: i64| {
+        entries
+            .iter()
+            .find_map(|(key, value)| {
+                matches!(key, OvbRaw::Int(value) if *value == number.into()).then_some(value)
+            })
+            .ok_or(RepositoryError::InvalidCompactManifest)
+    };
+    let ids = |value: &OvbRaw| {
+        let OvbRaw::Array(values) = value else {
+            return Err(RepositoryError::InvalidCompactManifest);
+        };
+        values
+            .iter()
+            .map(|value| {
+                let OvbRaw::Tag(37, value) = value else {
+                    return Err(RepositoryError::InvalidCompactManifest);
+                };
+                let OvbRaw::Bytes(value) = value.as_ref() else {
+                    return Err(RepositoryError::InvalidCompactManifest);
+                };
+                Uuid::from_slice(value).map_err(|_| RepositoryError::InvalidCompactManifest)
+            })
+            .collect::<Result<Vec<_>, _>>()
+    };
+    let key_ids = ids(value_for(2)?)?;
+    let OvbRaw::Array(fields) = value_for(3)? else {
+        return Err(RepositoryError::InvalidCompactManifest);
+    };
+    let mut stored = BTreeSet::new();
+    let mut declared = BTreeSet::new();
+    for field in fields {
+        let OvbRaw::Array(field) = field else {
+            return Err(RepositoryError::InvalidCompactManifest);
+        };
+        let [OvbRaw::Tag(37, id), _, _, OvbRaw::Int(role), _] = field.as_slice() else {
+            return Err(RepositoryError::InvalidCompactManifest);
+        };
+        let OvbRaw::Bytes(id) = id.as_ref() else {
+            return Err(RepositoryError::InvalidCompactManifest);
+        };
+        let id = Uuid::from_slice(id).map_err(|_| RepositoryError::InvalidCompactManifest)?;
+        if !declared.insert(id) {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        if role.to_string() == "1" {
+            stored.insert(id);
+        }
+    }
+    if key_ids.iter().any(|id| !declared.contains(id)) {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+    let stored = stored
+        .into_iter()
+        .filter(|id| !key_ids.contains(id))
+        .collect();
+    Ok((key_ids, stored))
+}
+
+fn decode_compact_segment_projection(
+    table: Uuid,
+    entry: &CompactManifestEntry,
+    bytes: &[u8],
+) -> Result<CompactCommittedSegmentProjection, RepositoryError> {
+    let reader = SerializedFileReader::new(Bytes::copy_from_slice(bytes))
+        .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+    let schema_bytes = reader
+        .metadata()
+        .file_metadata()
+        .key_value_metadata()
+        .into_iter()
+        .flatten()
+        .find(|item| item.key == "orna.schema.ovb")
+        .and_then(|item| item.value.as_deref())
+        .ok_or(RepositoryError::InvalidCompactManifest)
+        .and_then(decode_base64)?;
+    let descriptor = SchemaDescriptor::decode(&schema_bytes)
+        .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+    if schema_descriptor_fingerprint(&descriptor)? != entry.schema_id()
+        || schema_descriptor_table(&descriptor)? != table
+    {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+    let (_, physical_columns) = verify_physical_columns(
+        &entry.columns,
+        reader.metadata().file_metadata().schema_descr(),
+        &descriptor,
+        entry.role(),
+    )?;
+    let (key_fields, stored_fields) = schema_row_fields(&descriptor)?;
+    let mut field_values = BTreeMap::<Uuid, Vec<Option<OvbRaw>>>::new();
+    for (column_index, info) in &physical_columns {
+        if field_values.contains_key(&info.field_id) {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        let mut values = Vec::new();
+        for row_group_index in 0..reader.num_row_groups() {
+            let row_group = reader
+                .get_row_group(row_group_index)
+                .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+            let rows = usize::try_from(row_group.metadata().num_rows())
+                .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+            values.extend(decode_projection_column(
+                &*row_group,
+                *column_index,
+                info.kind,
+                info.max_def_level,
+                info.max_rep_level,
+                rows,
+            )?);
+        }
+        if values.len()
+            != usize::try_from(entry.row_count())
+                .map_err(|_| RepositoryError::InvalidCompactManifest)?
+        {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        field_values.insert(info.field_id, values);
+    }
+    let row_count =
+        usize::try_from(entry.row_count()).map_err(|_| RepositoryError::InvalidCompactManifest)?;
+    let mut rows = Vec::with_capacity(row_count);
+    for row in 0..row_count {
+        let mut key_components = Vec::with_capacity(key_fields.len());
+        for field in &key_fields {
+            let value = field_values
+                .get(field)
+                .and_then(|values| values.get(row))
+                .and_then(Option::as_ref)
+                .ok_or(RepositoryError::InvalidCompactManifest)?
+                .clone();
+            key_components.push(value);
+        }
+        let key_raw = match key_components.as_slice() {
+            [value] => value.clone(),
+            [] => return Err(RepositoryError::InvalidCompactManifest),
+            values => OvbRaw::Tag(60015, Box::new(OvbRaw::Array(values.to_vec()))),
+        };
+        let key =
+            CanonicalValue::new(key_raw).map_err(|_| RepositoryError::InvalidCompactManifest)?;
+        let value = if entry.role() == CompactSegmentRole::Deletion {
+            None
+        } else {
+            let mut fields = Vec::with_capacity(key_fields.len() + stored_fields.len());
+            for field in key_fields.iter().chain(stored_fields.iter()) {
+                let value = field_values
+                    .get(field)
+                    .and_then(|values| values.get(row))
+                    .ok_or(RepositoryError::InvalidCompactManifest)?
+                    .clone()
+                    .unwrap_or(OvbRaw::Null);
+                fields.push(OvbRaw::Array(vec![
+                    OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(field.as_bytes().to_vec()))),
+                    value,
+                ]));
+            }
+            let raw = OvbRaw::Tag(
+                60009,
+                Box::new(OvbRaw::Array(vec![OvbRaw::Null, OvbRaw::Array(fields)])),
+            );
+            Some(CanonicalValue::new(raw).map_err(|_| RepositoryError::InvalidCompactManifest)?)
+        };
+        rows.push(CompactCommittedRow { key, value });
+    }
+    let keys = rows
+        .iter()
+        .map(|row| row.key.encode())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+    let (min_key, max_key) = canonical_key_extrema(keys.iter().map(Vec::as_slice))?;
+    if min_key != entry.min_key() || max_key != entry.max_key() {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+    Ok(CompactCommittedSegmentProjection {
+        table_id: table,
+        schema_id: entry.schema_id(),
+        schema: descriptor.clone(),
+        source_schema_id: entry.schema_id(),
+        source_schema: descriptor,
+        profile: COMPACT_PROFILE,
+        encoder_version: entry.encoder_version().to_owned(),
+        generation: entry.generation(),
+        role: entry.role(),
+        rows,
+    })
+}
+
+/// Projects verified canonical rows by stable field identity. This accepts
+/// only the evolution cases described by the compact reader contract:
+/// retained field identity/type/role, field rename, field removal, optional
+/// additions, and required additions with a frozen introduction fallback.
+fn project_compact_segment_schema(
+    projection: &CompactCommittedSegmentProjection,
+    target: &SchemaDescriptor,
+) -> Result<CompactCommittedSegmentProjection, RepositoryError> {
+    let source_fp = schema_descriptor_fingerprint(&projection.source_schema)?;
+    let target_fp = schema_descriptor_fingerprint(target)?;
+    if source_fp != projection.schema_id || schema_descriptor_table(target)? != projection.table_id
+    {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+    let source = schema_projection_parts(&projection.source_schema)?;
+    let destination = schema_projection_parts(target)?;
+    if source.table != destination.table
+        || source.keys != destination.keys
+        || source.definitions != destination.definitions
+    {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+    for key in &source.keys {
+        let before = source
+            .fields
+            .get(key)
+            .ok_or(RepositoryError::InvalidCompactManifest)?;
+        let after = destination
+            .fields
+            .get(key)
+            .ok_or(RepositoryError::InvalidCompactManifest)?;
+        if before.role != 0
+            || after.role != 0
+            || before.ty != after.ty
+            || before.fallback != after.fallback
+        {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+    }
+    for (id, before) in &source.fields {
+        let Some(after) = destination.fields.get(id) else {
+            if before.role == 0 {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            continue;
+        };
+        if before.role != after.role
+            || !field_types_evolution_compatible(&before.ty, &after.ty)
+            || (before.role != 2 && before.fallback != after.fallback)
+        {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+    }
+
+    let mut rows = Vec::with_capacity(projection.rows.len());
+    for row in &projection.rows {
+        let value = row
+            .value
+            .as_ref()
+            .map(|value| project_compact_row_value(value, &source, &destination))
+            .transpose()?;
+        rows.push(CompactCommittedRow {
+            key: row.key.clone(),
+            value,
+        });
+    }
+    Ok(CompactCommittedSegmentProjection {
+        table_id: projection.table_id,
+        schema_id: target_fp,
+        schema: target.clone(),
+        source_schema_id: projection.source_schema_id,
+        source_schema: projection.source_schema.clone(),
+        profile: projection.profile,
+        encoder_version: projection.encoder_version.clone(),
+        generation: projection.generation,
+        role: projection.role,
+        rows,
+    })
+}
+
+struct SchemaProjectionField {
+    ty: OvbRaw,
+    role: u64,
+    fallback: OvbRaw,
+}
+
+struct SchemaProjectionParts {
+    table: Uuid,
+    keys: Vec<Uuid>,
+    fields: BTreeMap<Uuid, SchemaProjectionField>,
+    definitions: BTreeMap<Uuid, OvbRaw>,
+}
+
+fn schema_projection_parts(
+    descriptor: &SchemaDescriptor,
+) -> Result<SchemaProjectionParts, RepositoryError> {
+    let OvbRaw::Map(entries) = descriptor.raw() else {
+        return Err(RepositoryError::InvalidCompactManifest);
+    };
+    let value_for = |number: i64| {
+        entries
+            .iter()
+            .find_map(|(key, value)| {
+                matches!(key, OvbRaw::Int(key) if key.to_string() == number.to_string())
+                    .then_some(value)
+            })
+            .ok_or(RepositoryError::InvalidCompactManifest)
+    };
+    let table = schema_descriptor_table(descriptor)?;
+    let OvbRaw::Array(keys) = value_for(2)? else {
+        return Err(RepositoryError::InvalidCompactManifest);
+    };
+    let keys = keys
+        .iter()
+        .map(|raw| match raw {
+            OvbRaw::Tag(37, payload) => match payload.as_ref() {
+                OvbRaw::Bytes(bytes) => {
+                    Uuid::from_slice(bytes).map_err(|_| RepositoryError::InvalidCompactManifest)
+                }
+                _ => Err(RepositoryError::InvalidCompactManifest),
+            },
+            _ => Err(RepositoryError::InvalidCompactManifest),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let OvbRaw::Array(raw_fields) = value_for(3)? else {
+        return Err(RepositoryError::InvalidCompactManifest);
+    };
+    let mut fields = BTreeMap::new();
+    for raw in raw_fields {
+        let OvbRaw::Array(parts) = raw else {
+            return Err(RepositoryError::InvalidCompactManifest);
+        };
+        let [
+            OvbRaw::Tag(37, raw_id),
+            _,
+            ty,
+            OvbRaw::Int(raw_role),
+            fallback,
+        ] = parts.as_slice()
+        else {
+            return Err(RepositoryError::InvalidCompactManifest);
+        };
+        let OvbRaw::Bytes(raw_id) = raw_id.as_ref() else {
+            return Err(RepositoryError::InvalidCompactManifest);
+        };
+        let id = Uuid::from_slice(raw_id).map_err(|_| RepositoryError::InvalidCompactManifest)?;
+        let role = raw_role
+            .to_string()
+            .parse::<u64>()
+            .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+        if role > 2
+            || fields
+                .insert(
+                    id,
+                    SchemaProjectionField {
+                        ty: ty.clone(),
+                        role,
+                        fallback: fallback.clone(),
+                    },
+                )
+                .is_some()
+        {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+    }
+    let OvbRaw::Array(raw_definitions) = value_for(4)? else {
+        return Err(RepositoryError::InvalidCompactManifest);
+    };
+    let mut definitions = BTreeMap::new();
+    for raw in raw_definitions {
+        let OvbRaw::Array(parts) = raw else {
+            return Err(RepositoryError::InvalidCompactManifest);
+        };
+        let [OvbRaw::Tag(37, raw_id), _, ..] = parts.as_slice() else {
+            return Err(RepositoryError::InvalidCompactManifest);
+        };
+        let OvbRaw::Bytes(raw_id) = raw_id.as_ref() else {
+            return Err(RepositoryError::InvalidCompactManifest);
+        };
+        let id = Uuid::from_slice(raw_id).map_err(|_| RepositoryError::InvalidCompactManifest)?;
+        if definitions.insert(id, raw.clone()).is_some() {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+    }
+    Ok(SchemaProjectionParts {
+        table,
+        keys,
+        fields,
+        definitions,
+    })
+}
+
+fn field_types_evolution_compatible(before: &OvbRaw, after: &OvbRaw) -> bool {
+    if before == after {
+        return true;
+    }
+    fn optional_inner(value: &OvbRaw) -> Option<OvbRaw> {
+        match value {
+            OvbRaw::Array(parts) if parts.len() == 2 => {
+                matches!(&parts[0], OvbRaw::Int(code) if code.to_string() == "2")
+                    .then(|| parts[1].clone())
+            }
+            _ => None,
+        }
+    }
+    match (optional_inner(before), optional_inner(after)) {
+        (None, Some(after_inner)) => *before == after_inner,
+        _ => false,
+    }
+}
+
+fn descriptor_field_is_optional(ty: &OvbRaw) -> bool {
+    matches!(
+        ty,
+        OvbRaw::Array(parts)
+            if parts.len() == 2 && matches!(&parts[0], OvbRaw::Int(code) if code.to_string() == "2")
+    )
+}
+
+fn descriptor_fallback_value(fallback: &OvbRaw) -> Option<OvbRaw> {
+    let OvbRaw::Array(parts) = fallback else {
+        return None;
+    };
+    match parts.as_slice() {
+        [OvbRaw::Int(tag), value] if tag.to_string() == "1" => Some(value.clone()),
+        _ => None,
+    }
+}
+
+fn project_compact_row_value(
+    value: &CanonicalValue,
+    source: &SchemaProjectionParts,
+    target: &SchemaProjectionParts,
+) -> Result<CanonicalValue, RepositoryError> {
+    let OvbRaw::Tag(60009, payload) = value.raw() else {
+        return Err(RepositoryError::InvalidCompactManifest);
+    };
+    let OvbRaw::Array(row) = payload.as_ref() else {
+        return Err(RepositoryError::InvalidCompactManifest);
+    };
+    let [row_type, OvbRaw::Array(fields)] = row.as_slice() else {
+        return Err(RepositoryError::InvalidCompactManifest);
+    };
+    let mut source_values = BTreeMap::new();
+    for field in fields {
+        let OvbRaw::Array(parts) = field else {
+            return Err(RepositoryError::InvalidCompactManifest);
+        };
+        let [OvbRaw::Tag(37, raw_id), raw_value] = parts.as_slice() else {
+            return Err(RepositoryError::InvalidCompactManifest);
+        };
+        let OvbRaw::Bytes(raw_id) = raw_id.as_ref() else {
+            return Err(RepositoryError::InvalidCompactManifest);
+        };
+        let id = Uuid::from_slice(raw_id).map_err(|_| RepositoryError::InvalidCompactManifest)?;
+        if !source.fields.contains_key(&id) || source_values.insert(id, raw_value.clone()).is_some()
+        {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+    }
+    let mut projected_fields = Vec::new();
+    for (id, field) in &target.fields {
+        if field.role == 2 {
+            continue;
+        }
+        let value = if let Some(value) = source_values.remove(id) {
+            value
+        } else if field.role == 1 && descriptor_field_is_optional(&field.ty) {
+            OvbRaw::Null
+        } else if field.role == 1 {
+            descriptor_fallback_value(&field.fallback)
+                .ok_or(RepositoryError::InvalidCompactManifest)?
+        } else {
+            return Err(RepositoryError::InvalidCompactManifest);
+        };
+        projected_fields.push(OvbRaw::Array(vec![
+            OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(id.as_bytes().to_vec()))),
+            value,
+        ]));
+    }
+    // Values left in `source_values` belong to deleted fields and are omitted.
+    CanonicalValue::new(OvbRaw::Tag(
+        60009,
+        Box::new(OvbRaw::Array(vec![
+            row_type.clone(),
+            OvbRaw::Array(projected_fields),
+        ])),
+    ))
+    .map_err(|_| RepositoryError::InvalidCompactManifest)
+}
+
+struct ExpectedPhysicalLeaf {
+    field_id: Uuid,
+    field_id_path: Vec<String>,
+    physical_path: Vec<String>,
+    logical_type: OvbRaw,
+    is_key: bool,
+    max_def_level: i16,
+    max_rep_level: i16,
+}
+
+fn parse_physical_field_id_path(path: &[OvbRaw]) -> Result<(Uuid, Vec<String>), RepositoryError> {
+    let Some((OvbRaw::Tag(37, field_id), suffix)) = path.split_first() else {
+        return Err(RepositoryError::InvalidCompactManifest);
+    };
+    let OvbRaw::Bytes(field_id) = field_id.as_ref() else {
+        return Err(RepositoryError::InvalidCompactManifest);
+    };
+    let field_id =
+        Uuid::from_slice(field_id).map_err(|_| RepositoryError::InvalidCompactManifest)?;
+    let suffix = suffix
+        .iter()
+        .map(|part| match part {
+            OvbRaw::Text(part) if !part.is_empty() => Ok(part.clone()),
+            _ => Err(RepositoryError::InvalidCompactManifest),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((field_id, suffix))
+}
+
+fn required_physical_leaves(
+    descriptor: &SchemaDescriptor,
+    segment_role: CompactSegmentRole,
+) -> Result<Vec<ExpectedPhysicalLeaf>, RepositoryError> {
+    let OvbRaw::Map(entries) = descriptor.raw() else {
+        return Err(RepositoryError::InvalidCompactManifest);
+    };
+    let fields = entries
+        .iter()
+        .find_map(|(key, value)| {
+            matches!(key, OvbRaw::Int(number) if number.to_string() == "3").then_some(value)
+        })
+        .and_then(|value| match value {
+            OvbRaw::Array(fields) => Some(fields),
+            _ => None,
+        })
+        .ok_or(RepositoryError::InvalidCompactManifest)?;
+    let mut required = Vec::new();
+    for field in fields {
+        let OvbRaw::Array(parts) = field else {
+            return Err(RepositoryError::InvalidCompactManifest);
+        };
+        let [field_id, _, logical_type, OvbRaw::Int(role), _] = parts.as_slice() else {
+            return Err(RepositoryError::InvalidCompactManifest);
+        };
+        let OvbRaw::Tag(37, field_id) = field_id else {
+            return Err(RepositoryError::InvalidCompactManifest);
+        };
+        let OvbRaw::Bytes(field_id_bytes) = field_id.as_ref() else {
+            return Err(RepositoryError::InvalidCompactManifest);
+        };
+        let field_id = Uuid::from_slice(field_id_bytes)
+            .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+        let role_is_key = role.to_string() == "0";
+        let required_for_segment = match (segment_role, role.to_string().as_str()) {
+            (CompactSegmentRole::Data | CompactSegmentRole::Replacement, "0" | "1")
+            | (CompactSegmentRole::Deletion, "0") => true,
+            (CompactSegmentRole::Data | CompactSegmentRole::Replacement, "2")
+            | (CompactSegmentRole::Deletion, "1" | "2") => false,
+            _ => return Err(RepositoryError::InvalidCompactManifest),
+        };
+        if !required_for_segment {
+            continue;
+        }
+        let mut field_id_path = Vec::new();
+        let mut physical_path = vec![format!("f_{}", field_id.simple())];
+        flatten_physical_type(
+            field_id,
+            logical_type,
+            &mut field_id_path,
+            &mut physical_path,
+            0,
+            0,
+            &mut required,
+            role_is_key,
+        )?;
+    }
+    Ok(required)
+}
+
+/// The parameters describe one record; each caller passes them straight through.
+#[allow(clippy::too_many_arguments)]
+fn flatten_physical_type(
+    field_id: Uuid,
+    logical_type: &OvbRaw,
+    field_id_path: &mut Vec<String>,
+    physical_path: &mut Vec<String>,
+    max_def_level: i16,
+    max_rep_level: i16,
+    output: &mut Vec<ExpectedPhysicalLeaf>,
+    is_key: bool,
+) -> Result<(), RepositoryError> {
+    if field_id_path.len() > 64 {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+    let OvbRaw::Array(node) = logical_type else {
+        return Err(RepositoryError::InvalidCompactManifest);
+    };
+    let Some(OvbRaw::Int(code)) = node.first() else {
+        return Err(RepositoryError::InvalidCompactManifest);
+    };
+    match code.to_string().as_str() {
+        "0" => {
+            if node.len() != 2 {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            output.push(ExpectedPhysicalLeaf {
+                field_id,
+                field_id_path: field_id_path.clone(),
+                physical_path: physical_path.clone(),
+                logical_type: logical_type.clone(),
+                is_key,
+                max_def_level,
+                max_rep_level,
+            });
+            Ok(())
+        }
+        "1" => {
+            if node.len() != 2 {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            // The repeated `list` node contributes one definition level as
+            // well as one repetition level, even when the outer list and
+            // element are both required.
+            field_id_path.extend(["list".to_owned(), "element".to_owned()]);
+            physical_path.extend(["list".to_owned(), "element".to_owned()]);
+            flatten_physical_type(
+                field_id,
+                &node[1],
+                field_id_path,
+                physical_path,
+                max_def_level + 1,
+                max_rep_level + 1,
+                output,
+                is_key,
+            )?;
+            field_id_path.truncate(field_id_path.len().saturating_sub(2));
+            physical_path.truncate(physical_path.len().saturating_sub(2));
+            Ok(())
+        }
+        "2" => {
+            if node.len() != 2 {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            field_id_path.push("value".to_owned());
+            physical_path.push("value".to_owned());
+            flatten_physical_type(
+                field_id,
+                &node[1],
+                field_id_path,
+                physical_path,
+                max_def_level + 1,
+                max_rep_level,
+                output,
+                is_key,
+            )?;
+            field_id_path.pop();
+            physical_path.pop();
+            Ok(())
+        }
+        _ => Err(RepositoryError::InvalidCompactManifest),
+    }
+}
+
+/// The Parquet reader verifies a present CRC while decoding a page, but the
+/// compact profile also requires every serialized page to carry one. The
+/// reader intentionally accepts absent CRC fields for generic Parquet input,
+/// so inspect each compact Thrift page header before treating a segment as
+/// authoritative.
+fn verify_page_checksums(
+    bytes: &[u8],
+    row_groups: &[parquet::file::metadata::RowGroupMetaData],
+) -> Result<(), RepositoryError> {
+    scan_compact_page_headers(bytes, row_groups, true, true)
+}
+
+/// Validates the complete compact page framing required at a storage-reader
+/// boundary. This is intentionally shared with repository admission so a
+/// direct reader cannot accept a weaker Parquet profile than publication.
+pub fn validate_compact_page_uncompressed_sizes(
+    bytes: &[u8],
+    row_groups: &[parquet::file::metadata::RowGroupMetaData],
+) -> Result<(), RepositoryError> {
+    scan_compact_page_headers(bytes, row_groups, true, true)
+}
+
+fn scan_compact_page_headers(
+    bytes: &[u8],
+    row_groups: &[parquet::file::metadata::RowGroupMetaData],
+    require_checksums: bool,
+    require_data_page_v2: bool,
+) -> Result<(), RepositoryError> {
+    for row_group in row_groups {
+        let mut row_group_uncompressed_len = 0usize;
+        for column in row_group.columns() {
+            let start = column
+                .dictionary_page_offset()
+                .unwrap_or_else(|| column.data_page_offset());
+            let length = column.compressed_size();
+            let start =
+                usize::try_from(start).map_err(|_| RepositoryError::InvalidCompactManifest)?;
+            let length =
+                usize::try_from(length).map_err(|_| RepositoryError::InvalidCompactManifest)?;
+            let end = start
+                .checked_add(length)
+                .filter(|end| *end <= bytes.len())
+                .ok_or(RepositoryError::InvalidCompactManifest)?;
+            let mut cursor = start;
+            while cursor < end {
+                let header = parse_compact_page_header(&bytes[cursor..end])?;
+                if (require_checksums && !header.has_checksum)
+                    || header.uncompressed_len > COMPACT_MAX_UNCOMPRESSED_PAGE_BYTES
+                    || (require_data_page_v2 && !matches!(header.page_type, 2 | 3))
+                {
+                    return Err(RepositoryError::InvalidCompactManifest);
+                }
+                row_group_uncompressed_len = row_group_uncompressed_len
+                    .checked_add(header.uncompressed_len)
+                    .filter(|size| *size <= COMPACT_MAX_UNCOMPRESSED_PAGE_BYTES)
+                    .ok_or(RepositoryError::InvalidCompactManifest)?;
+                cursor = cursor
+                    .checked_add(header.encoded_len)
+                    .and_then(|value| value.checked_add(header.compressed_len))
+                    .filter(|value| *value <= end)
+                    .ok_or(RepositoryError::InvalidCompactManifest)?;
+            }
+            if cursor != end {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+        }
+    }
+    Ok(())
+}
+
+struct CompactPageHeader {
+    encoded_len: usize,
+    compressed_len: usize,
+    uncompressed_len: usize,
+    has_checksum: bool,
+    page_type: i32,
+}
+
+fn parse_compact_page_header(bytes: &[u8]) -> Result<CompactPageHeader, RepositoryError> {
+    let mut cursor = 0;
+    let mut last_field = 0_i16;
+    let mut compressed_len = None;
+    let mut uncompressed_len = None;
+    let mut has_checksum = false;
+    let mut page_type = None;
+    loop {
+        let tag = take_compact_byte(bytes, &mut cursor)?;
+        let kind = tag & 0x0f;
+        if kind == 0 {
+            break;
+        }
+        let delta = i16::from(tag >> 4);
+        let field = if delta == 0 {
+            decode_compact_i16(bytes, &mut cursor)?
+        } else {
+            last_field
+                .checked_add(delta)
+                .ok_or(RepositoryError::InvalidCompactManifest)?
+        };
+        if field <= last_field {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        last_field = field;
+        if field == 1 && kind == 5 {
+            page_type = Some(decode_compact_i32(bytes, &mut cursor)?);
+        } else if field == 2 && kind == 5 {
+            let value = decode_compact_i32(bytes, &mut cursor)?;
+            uncompressed_len =
+                Some(usize::try_from(value).map_err(|_| RepositoryError::InvalidCompactManifest)?);
+        } else if field == 3 && kind == 5 {
+            let value = decode_compact_i32(bytes, &mut cursor)?;
+            compressed_len =
+                Some(usize::try_from(value).map_err(|_| RepositoryError::InvalidCompactManifest)?);
+        } else {
+            if field == 4 && kind == 5 {
+                has_checksum = true;
+            }
+            skip_compact_value(bytes, &mut cursor, kind, 0)?;
+        }
+    }
+    Ok(CompactPageHeader {
+        encoded_len: cursor,
+        compressed_len: compressed_len.ok_or(RepositoryError::InvalidCompactManifest)?,
+        uncompressed_len: uncompressed_len.ok_or(RepositoryError::InvalidCompactManifest)?,
+        has_checksum,
+        page_type: page_type.ok_or(RepositoryError::InvalidCompactManifest)?,
+    })
+}
+
+fn skip_compact_value(
+    bytes: &[u8],
+    cursor: &mut usize,
+    kind: u8,
+    depth: usize,
+) -> Result<(), RepositoryError> {
+    if depth > 64 {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+    match kind {
+        1 | 2 => Ok(()),
+        3 => {
+            take_compact_byte(bytes, cursor)?;
+            Ok(())
+        }
+        4..=6 => {
+            let _ = decode_compact_varint(bytes, cursor)?;
+            Ok(())
+        }
+        7 => {
+            let end = cursor
+                .checked_add(8)
+                .filter(|end| *end <= bytes.len())
+                .ok_or(RepositoryError::InvalidCompactManifest)?;
+            *cursor = end;
+            Ok(())
+        }
+        8 => {
+            let length = usize::try_from(decode_compact_varint(bytes, cursor)?)
+                .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+            let end = cursor
+                .checked_add(length)
+                .filter(|end| *end <= bytes.len())
+                .ok_or(RepositoryError::InvalidCompactManifest)?;
+            *cursor = end;
+            Ok(())
+        }
+        9 | 10 => {
+            let size_and_kind = take_compact_byte(bytes, cursor)?;
+            let size = if size_and_kind >> 4 == 15 {
+                usize::try_from(decode_compact_varint(bytes, cursor)?)
+                    .map_err(|_| RepositoryError::InvalidCompactManifest)?
+            } else {
+                usize::from(size_and_kind >> 4)
+            };
+            let item_kind = size_and_kind & 0x0f;
+            if size > bytes.len() {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            for _ in 0..size {
+                skip_compact_value(bytes, cursor, item_kind, depth + 1)?;
+            }
+            Ok(())
+        }
+        11 => {
+            let size = usize::try_from(decode_compact_varint(bytes, cursor)?)
+                .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+            if size == 0 {
+                return Ok(());
+            }
+            let kinds = take_compact_byte(bytes, cursor)?;
+            let key_kind = kinds >> 4;
+            let value_kind = kinds & 0x0f;
+            for _ in 0..size {
+                skip_compact_value(bytes, cursor, key_kind, depth + 1)?;
+                skip_compact_value(bytes, cursor, value_kind, depth + 1)?;
+            }
+            Ok(())
+        }
+        12 => skip_compact_struct(bytes, cursor, depth + 1),
+        _ => Err(RepositoryError::InvalidCompactManifest),
+    }
+}
+
+fn skip_compact_struct(
+    bytes: &[u8],
+    cursor: &mut usize,
+    depth: usize,
+) -> Result<(), RepositoryError> {
+    let mut last_field = 0_i16;
+    loop {
+        let tag = take_compact_byte(bytes, cursor)?;
+        let kind = tag & 0x0f;
+        if kind == 0 {
+            return Ok(());
+        }
+        let delta = i16::from(tag >> 4);
+        let field = if delta == 0 {
+            decode_compact_i16(bytes, cursor)?
+        } else {
+            last_field
+                .checked_add(delta)
+                .ok_or(RepositoryError::InvalidCompactManifest)?
+        };
+        if field <= last_field {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        last_field = field;
+        skip_compact_value(bytes, cursor, kind, depth)?;
+    }
+}
+
+fn take_compact_byte(bytes: &[u8], cursor: &mut usize) -> Result<u8, RepositoryError> {
+    let value = *bytes
+        .get(*cursor)
+        .ok_or(RepositoryError::InvalidCompactManifest)?;
+    *cursor = cursor
+        .checked_add(1)
+        .ok_or(RepositoryError::InvalidCompactManifest)?;
+    Ok(value)
+}
+
+fn decode_compact_varint(bytes: &[u8], cursor: &mut usize) -> Result<u64, RepositoryError> {
+    let mut value = 0_u64;
+    for shift in (0..64).step_by(7) {
+        let byte = take_compact_byte(bytes, cursor)?;
+        value |= u64::from(byte & 0x7f)
+            .checked_shl(shift)
+            .ok_or(RepositoryError::InvalidCompactManifest)?;
+        if byte & 0x80 == 0 {
+            return Ok(value);
+        }
+    }
+    Err(RepositoryError::InvalidCompactManifest)
+}
+
+fn decode_compact_i16(bytes: &[u8], cursor: &mut usize) -> Result<i16, RepositoryError> {
+    let value = decode_compact_varint(bytes, cursor)?;
+    let value = i64::try_from(value).map_err(|_| RepositoryError::InvalidCompactManifest)?;
+    i16::try_from((value >> 1) ^ -(value & 1)).map_err(|_| RepositoryError::InvalidCompactManifest)
+}
+
+fn decode_compact_i32(bytes: &[u8], cursor: &mut usize) -> Result<i32, RepositoryError> {
+    let value = decode_compact_varint(bytes, cursor)?;
+    let value = i64::try_from(value).map_err(|_| RepositoryError::InvalidCompactManifest)?;
+    i32::try_from((value >> 1) ^ -(value & 1)).map_err(|_| RepositoryError::InvalidCompactManifest)
+}
+
+fn required_physical_metadata(
+    table: Uuid,
+    schema: [u8; 32],
+    encoder_version: &str,
+    columns: &[u8],
+) -> BTreeMap<String, String> {
+    BTreeMap::from([
+        ("orna.profile".to_owned(), COMPACT_PROFILE.to_owned()),
+        ("orna.table".to_owned(), table.to_string()),
+        ("orna.schema.sha256".to_owned(), hex(&schema)),
+        (
+            "orna.columns.ovb".to_owned(),
+            orna_value::base64_encode(columns),
+        ),
+        ("orna.encoder".to_owned(), encoder_version.to_owned()),
+    ])
+}
+
+/// Computes the fixed Format §29 storage-schema identity from a closed,
+/// canonical descriptor.  The descriptor API both rejects malformed OVB and
+/// guarantees that the bytes fed to the established domain digest are exact.
+fn schema_descriptor_fingerprint(
+    descriptor: &SchemaDescriptor,
+) -> Result<[u8; 32], RepositoryError> {
+    let bytes = descriptor
+        .encode()
+        .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+    let mut digest = Sha256::new();
+    digest.update(b"orna.schema.v1\0");
+    digest.update(bytes);
+    Ok(digest.finalize().into())
+}
+
+/// A complete canonical compact manifest for one table snapshot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompactManifest {
+    table: Uuid,
+    schema: [u8; 32],
+    next_generation: u64,
+    entries: Vec<CompactManifestEntry>,
+}
+
+impl CompactManifest {
+    pub fn empty(table: Uuid, schema: [u8; 32]) -> Self {
+        Self {
+            table,
+            schema,
+            next_generation: 1,
+            entries: Vec::new(),
+        }
+    }
+
+    pub fn table(&self) -> Uuid {
+        self.table
+    }
+
+    /// Returns the retained logical schema fingerprint for this manifest.
+    pub const fn schema(&self) -> [u8; 32] {
+        self.schema
+    }
+
+    pub const fn next_generation(&self) -> u64 {
+        self.next_generation
+    }
+
+    pub fn entries(&self) -> &[CompactManifestEntry] {
+        &self.entries
+    }
+
+    pub fn manifest_path(&self) -> ManagedPath {
+        managed_child(&compact_root(self.table), "manifest.orna").expect("constant safe path")
+    }
+
+    /// Validates manifest bookkeeping. Segment schema IDs identify the
+    /// revisions that encoded those immutable files and may differ from the
+    /// table's current manifest schema; a reader must prove compatibility
+    /// from each verified embedded descriptor before projecting those rows.
+    fn validate(&self, object_id_length: Option<usize>) -> Result<(), RepositoryError> {
+        if self.next_generation == 0 {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        let mut ids = BTreeSet::new();
+        let mut paths = BTreeSet::new();
+        for entry in &self.entries {
+            entry.validate(self.table, object_id_length)?;
+            if entry.generation >= self.next_generation
+                || !ids.insert(entry.segment_id)
+                || !paths.insert(path_key(&entry.relative_path)?)
+            {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+        }
+        Ok(())
+    }
+
+    fn sorted_entries(&self) -> Vec<&CompactManifestEntry> {
+        let mut entries = self.entries.iter().collect::<Vec<_>>();
+        entries.sort_by_key(|entry| entry.segment_id.as_bytes().to_owned());
+        entries
+    }
+
+    fn canonical_files(&self) -> Result<Vec<ManagedFileChange>, RepositoryError> {
+        self.validate(None)?;
+        let entries = self.sorted_entries();
+        let mut shards = Vec::new();
+        for (number, entries) in entries.chunks(COMPACT_MANIFEST_SHARD_LIMIT).enumerate() {
+            let number =
+                u64::try_from(number).map_err(|_| RepositoryError::InvalidCompactManifest)?;
+            let file = shard_path(self.table, number)?;
+            let bytes = canonical_shard(entries)?;
+            let (min_key, max_key) = canonical_key_extrema(
+                entries
+                    .iter()
+                    .flat_map(|entry| [entry.min_key.as_slice(), entry.max_key.as_slice()]),
+            )?;
+            shards.push(ShardDescriptor {
+                number,
+                min_key: min_key.to_vec(),
+                max_key: max_key.to_vec(),
+                entries: entries.len(),
+                file,
+                hash: Sha256::digest(&bytes).into(),
+                bytes,
+            });
+        }
+        let manifest = canonical_manifest(self, &shards)?;
+        let mut files = shards
+            .into_iter()
+            .map(|shard| ManagedFileChange::new(shard.file, Some(shard.bytes)))
+            .collect::<Vec<_>>();
+        files.push(ManagedFileChange::new(self.manifest_path(), Some(manifest)));
+        Ok(files)
+    }
+
+    #[cfg(any(test, feature = "legacy-fixture-writer"))]
+    fn witness(
+        &self,
+        base_sha256: [u8; 32],
+        selected_ref: String,
+        runtime_intent_id: [u8; 16],
+        cleanup_watermark: [u8; 32],
+    ) -> Result<CompactManifestWitness, RepositoryError> {
+        let manifest = self
+            .canonical_files()?
+            .into_iter()
+            .find(|change| change.path() == &self.manifest_path())
+            .and_then(|change| change.bytes().map(ToOwned::to_owned))
+            .ok_or(RepositoryError::InvalidCompactManifest)?;
+        Ok(CompactManifestWitness {
+            table: self.table,
+            selected_ref,
+            runtime_intent_id,
+            cleanup_watermark,
+            manifest_path: self.manifest_path(),
+            base_sha256,
+            manifest_sha256: Sha256::digest(manifest).into(),
+            generation: self
+                .next_generation
+                .checked_sub(1)
+                .ok_or(RepositoryError::InvalidCompactManifest)?,
+            entries: self
+                .entries
+                .iter()
+                .map(|entry| CompactManifestObject {
+                    path: entry.relative_path.clone(),
+                    object_id: entry.git_object_id.clone(),
+                    sha256: entry.sha256,
+                })
+                .collect(),
+        })
+    }
+}
+
+struct ShardDescriptor {
+    number: u64,
+    min_key: Vec<u8>,
+    max_key: Vec<u8>,
+    entries: usize,
+    file: ManagedPath,
+    hash: [u8; 32],
+    bytes: Vec<u8>,
+}
+
+/// The compact-specific portion of a durable publication journal.  It records
+/// the base and candidate manifest identities plus every data object identity
+/// named by the candidate, so restart cannot consume a runtime prefix on a
+/// merely plausible commit.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompactManifestWitness {
+    table: Uuid,
+    selected_ref: String,
+    runtime_intent_id: [u8; 16],
+    cleanup_watermark: [u8; 32],
+    manifest_path: ManagedPath,
+    base_sha256: [u8; 32],
+    manifest_sha256: [u8; 32],
+    generation: u64,
+    entries: Vec<CompactManifestObject>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CompactManifestObject {
+    path: ManagedPath,
+    object_id: String,
+    sha256: [u8; 32],
+}
+
+impl CompactManifestWitness {
+    pub fn table(&self) -> Uuid {
+        self.table
+    }
+
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub const fn manifest_sha256(&self) -> [u8; 32] {
+        self.manifest_sha256
+    }
+
+    pub(crate) fn selected_ref(&self) -> &str {
+        &self.selected_ref
+    }
+
+    pub(crate) const fn runtime_intent_id(&self) -> [u8; 16] {
+        self.runtime_intent_id
+    }
+
+    pub const fn cleanup_watermark(&self) -> [u8; 32] {
+        self.cleanup_watermark
+    }
+
+    pub fn object_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub(crate) fn validate(&self, object_id_length: Option<usize>) -> Result<(), RepositoryError> {
+        if self.generation == 0
+            || self.runtime_intent_id == [0; 16]
+            || self.cleanup_watermark == [0; 32]
+            || !is_selected_ref(&self.selected_ref)
+            || self.entries.is_empty()
+            || self.manifest_path != managed_child(&compact_root(self.table), "manifest.orna")?
+        {
+            return Err(RepositoryError::InvalidPublicationJournal);
+        }
+        let mut paths = BTreeSet::new();
+        for entry in &self.entries {
+            if !paths.insert(path_key(&entry.path)?)
+                || !entry
+                    .path
+                    .as_path()
+                    .starts_with(compact_data_root(self.table).as_path())
+                || !entry.object_id.bytes().all(is_hex)
+                || object_id_length.is_some_and(|length| entry.object_id.len() != length)
+            {
+                return Err(RepositoryError::InvalidPublicationJournal);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn encode(&self, bytes: &mut Vec<u8>) -> Result<(), RepositoryError> {
+        self.validate(None)?;
+        bytes.extend_from_slice(self.table.as_bytes());
+        put_string(bytes, &self.selected_ref)?;
+        bytes.extend_from_slice(&self.runtime_intent_id);
+        bytes.extend_from_slice(&self.cleanup_watermark);
+        put_string(
+            bytes,
+            self.manifest_path
+                .as_path()
+                .to_str()
+                .ok_or(RepositoryError::InvalidPublicationJournal)?,
+        )?;
+        bytes.extend_from_slice(&self.base_sha256);
+        bytes.extend_from_slice(&self.manifest_sha256);
+        put_u64(bytes, self.generation);
+        put_u32(bytes, self.entries.len())?;
+        for entry in &self.entries {
+            put_string(
+                bytes,
+                entry
+                    .path
+                    .as_path()
+                    .to_str()
+                    .ok_or(RepositoryError::InvalidPublicationJournal)?,
+            )?;
+            put_string(bytes, &entry.object_id)?;
+            bytes.extend_from_slice(&entry.sha256);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn decode(
+        bytes: &[u8],
+        cursor: &mut usize,
+        object_id_length: usize,
+    ) -> Result<Self, RepositoryError> {
+        let table = Uuid::from_bytes(take_fixed::<16>(bytes, cursor)?);
+        let selected_ref = take_string(bytes, cursor)?;
+        let runtime_intent_id = take_fixed::<16>(bytes, cursor)?;
+        let cleanup_watermark = take_fixed::<32>(bytes, cursor)?;
+        let manifest_path = ManagedPath::new(take_string(bytes, cursor)?)?;
+        let base_sha256 = take_fixed::<32>(bytes, cursor)?;
+        let manifest_sha256 = take_fixed::<32>(bytes, cursor)?;
+        let generation = take_u64(bytes, cursor)?;
+        let count = take_u32(bytes, cursor)? as usize;
+        if count == 0 || count > 1_000_000 {
+            return Err(RepositoryError::InvalidPublicationJournal);
+        }
+        let mut entries = Vec::with_capacity(count.min(1024));
+        for _ in 0..count {
+            entries.push(CompactManifestObject {
+                path: ManagedPath::new(take_string(bytes, cursor)?)?,
+                object_id: take_string(bytes, cursor)?,
+                sha256: take_fixed::<32>(bytes, cursor)?,
+            });
+        }
+        let witness = Self {
+            table,
+            selected_ref,
+            runtime_intent_id,
+            cleanup_watermark,
+            manifest_path,
+            base_sha256,
+            manifest_sha256,
+            generation,
+            entries,
+        };
+        witness.validate(Some(object_id_length))?;
+        Ok(witness)
+    }
+}
+
+/// A compact candidate and the journal a retired compact writer would have
+/// recorded for it. Only the test-only legacy fixture writer creates one, and
+/// nothing can publish it.
+#[cfg(any(test, feature = "legacy-fixture-writer"))]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompactPublicationPlan {
+    candidate: PrivateCommit,
+    manifest: CompactManifest,
+    journal: PublicationJournal,
+}
+
+/// The pending identity of a compact publication recorded by a retired
+/// compact writer. No build of this repository produces one any more; the
+/// type stays only for the runtime's legacy compact receipt records.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompactPublicationPending {
+    index: IndexGeneration,
+    commit: GitCommitRef,
+    runtime_intent_id: [u8; 16],
+    cleanup_watermark: [u8; 32],
+    journal_verifier: [u8; 32],
+}
+impl CompactPublicationPending {
+    pub fn index(&self) -> &IndexGeneration {
+        &self.index
+    }
+
+    pub fn commit(&self) -> &GitCommitRef {
+        &self.commit
+    }
+
+    /// Returns the durable runtime intent that must be completed before the
+    /// compact journal may be finalized.
+    pub const fn runtime_intent_id(&self) -> [u8; 16] {
+        self.runtime_intent_id
+    }
+
+    /// Returns the exact frozen runtime prefix covered by a valid receipt.
+    pub const fn cleanup_watermark(&self) -> [u8; 32] {
+        self.cleanup_watermark
+    }
+
+    /// Returns the non-secret journal binding a receipt must carry.
+    pub const fn journal_verifier(&self) -> [u8; 32] {
+        self.journal_verifier
+    }
+}
+
+#[cfg(any(test, feature = "legacy-fixture-writer"))]
+impl CompactPublicationPlan {
+    /// Returns the canonical compact manifest committed by the candidate.
+    pub fn manifest(&self) -> &CompactManifest {
+        &self.manifest
+    }
+
+    /// Returns the private candidate commit built by the fixture writer.
+    pub fn candidate(&self) -> &PrivateCommit {
+        &self.candidate
+    }
+
+    /// Returns the Git identity of the candidate commit.
+    pub fn candidate_commit(&self) -> &GitCommitRef {
+        self.candidate.commit()
+    }
+
+    /// Returns the compact journal the retired writer would have persisted
+    /// before advancing its ref.
+    pub fn journal(&self) -> &PublicationJournal {
+        &self.journal
+    }
+}
+
+/// A fixed-format, signed runtime completion receipt for compact publication.
+///
+/// Runtime/storage must create one only in the transaction that records the
+/// candidate completion and consumes the exact frozen prefix. Repository code
+/// verifies the detached Ed25519 signature using its configured public key.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompactRuntimeReceipt {
+    runtime_intent_id: [u8; 16],
+    cleanup_watermark: [u8; 32],
+    commit: GitCommitRef,
+    journal_verifier: [u8; 32],
+    signature: [u8; 64],
+}
+
+impl CompactRuntimeReceipt {
+    const VERSION: u8 = 1;
+
+    /// Creates a receipt from a runtime-produced Ed25519 signature. The
+    /// repository authenticates the signature before finalization.
+    pub fn new(
+        runtime_intent_id: [u8; 16],
+        cleanup_watermark: [u8; 32],
+        commit: GitCommitRef,
+        journal_verifier: [u8; 32],
+        signature: [u8; 64],
+    ) -> Result<Self, RepositoryError> {
+        if runtime_intent_id == [0; 16] || cleanup_watermark == [0; 32] {
+            return Err(RepositoryError::InvalidPublicationJournal);
+        }
+        Ok(Self {
+            runtime_intent_id,
+            cleanup_watermark,
+            commit,
+            journal_verifier,
+            signature,
+        })
+    }
+
+    /// Returns the canonical, domain-separated bytes which runtime/storage
+    /// must sign. They bind intent, frozen watermark, candidate, and journal.
+    pub fn signing_bytes(
+        runtime_intent_id: [u8; 16],
+        cleanup_watermark: [u8; 32],
+        commit: &GitCommitRef,
+        journal_verifier: [u8; 32],
+    ) -> Result<Vec<u8>, RepositoryError> {
+        if runtime_intent_id == [0; 16] || cleanup_watermark == [0; 32] {
+            return Err(RepositoryError::InvalidPublicationJournal);
+        }
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"orna.compact.runtime.receipt\0");
+        bytes.push(Self::VERSION);
+        bytes.extend_from_slice(&runtime_intent_id);
+        bytes.extend_from_slice(&cleanup_watermark);
+        put_string(&mut bytes, commit.as_str())?;
+        bytes.extend_from_slice(&journal_verifier);
+        Ok(bytes)
+    }
+
+    /// Encodes the complete persisted receipt. The wire form is fixed-width
+    /// except for the verified native Git object identifier.
+    pub fn encode(&self) -> Result<Vec<u8>, RepositoryError> {
+        let mut bytes = Self::signing_bytes(
+            self.runtime_intent_id,
+            self.cleanup_watermark,
+            &self.commit,
+            self.journal_verifier,
+        )?;
+        bytes.extend_from_slice(&self.signature);
+        Ok(bytes)
+    }
+
+    /// Decodes a persisted receipt while rejecting truncation, extra bytes,
+    /// invalid object identifiers, and every unsupported wire version.
+    pub fn decode(bytes: &[u8]) -> Result<Self, RepositoryError> {
+        const DOMAIN: &[u8] = b"orna.compact.runtime.receipt\0";
+        let mut cursor = 0;
+        if bytes.get(..DOMAIN.len()) != Some(DOMAIN) {
+            return Err(RepositoryError::InvalidPublicationJournal);
+        }
+        cursor += DOMAIN.len();
+        if *bytes
+            .get(cursor)
+            .ok_or(RepositoryError::InvalidPublicationJournal)?
+            != Self::VERSION
+        {
+            return Err(RepositoryError::InvalidPublicationJournal);
+        }
+        cursor += 1;
+        let runtime_intent_id = take_fixed::<16>(bytes, &mut cursor)?;
+        let cleanup_watermark = take_fixed::<32>(bytes, &mut cursor)?;
+        let commit_text = take_string(bytes, &mut cursor)?;
+        let commit_length = commit_text.len();
+        if !matches!(commit_length, 40 | 64) {
+            return Err(RepositoryError::InvalidPublicationJournal);
+        }
+        let commit = GitCommitRef::from_verified_commit(commit_text, commit_length)?;
+        let journal_verifier = take_fixed::<32>(bytes, &mut cursor)?;
+        let signature = take_fixed::<64>(bytes, &mut cursor)?;
+        if cursor != bytes.len() {
+            return Err(RepositoryError::InvalidPublicationJournal);
+        }
+        Self::new(
+            runtime_intent_id,
+            cleanup_watermark,
+            commit,
+            journal_verifier,
+            signature,
+        )
+    }
+
+    pub const fn runtime_intent_id(&self) -> [u8; 16] {
+        self.runtime_intent_id
+    }
+
+    pub const fn cleanup_watermark(&self) -> [u8; 32] {
+        self.cleanup_watermark
+    }
+
+    pub fn commit(&self) -> &GitCommitRef {
+        &self.commit
+    }
+
+    pub const fn journal_verifier(&self) -> [u8; 32] {
+        self.journal_verifier
+    }
+
+    pub const fn signature(&self) -> &[u8; 64] {
+        &self.signature
+    }
+}
+
+impl Repository {
+    /// Returns the bytes of one committed compact segment after rechecking its
+    /// committed tree object, digest, size, and physical Parquet witness.
+    ///
+    /// The entry must come from the validated manifest for the same table and
+    /// commit. This is a read-only handoff of verified physical bytes; logical
+    /// row and key decoding remains owned by storage.
+    pub fn read_verified_compact_segment(
+        &self,
+        commit: &GitCommitRef,
+        table: Uuid,
+        entry: &CompactManifestEntry,
+    ) -> Result<Vec<u8>, RepositoryError> {
+        let Some((mode, object)) = self.tree_entry_at(commit, &entry.relative_path)? else {
+            return Err(RepositoryError::InvalidCompactManifest);
+        };
+        if !is_regular_git_file_mode(&mode) {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        let bytes = self.git_bytes(["cat-file", "blob", &object])?;
+        verify_manifest_segment_bytes(table, entry, &object, &bytes)?;
+        Ok(bytes)
+    }
+
+    /// Projects the complete logical base of one committed compact table
+    /// through a schema-bound consumer. Every callback input has already
+    /// passed committed Git object, checksum, manifest, Parquet, descriptor,
+    /// and canonical-row validation; no manifest bound or physical hash is
+    /// used as row data.
+    pub fn read_compact_committed_base<T, F>(
+        &self,
+        expected_head: &GitCommitRef,
+        table: Uuid,
+        expected_schema: [u8; 32],
+        expected_profile: &str,
+        project: F,
+    ) -> Result<Vec<T>, RepositoryError>
+    where
+        F: FnMut(
+            &CompactManifestEntry,
+            &CompactCommittedSegmentProjection,
+        ) -> Result<T, RepositoryError>,
+    {
+        if expected_profile != COMPACT_PROFILE || self.head()?.as_ref() != Some(expected_head) {
+            return Err(RepositoryError::StaleHead);
+        }
+        let projected = self.read_compact_committed_base_from_commit(
+            expected_head,
+            table,
+            expected_schema,
+            expected_profile,
+            project,
+        )?;
+        if self.head()?.as_ref() != Some(expected_head) {
+            return Err(RepositoryError::StaleHead);
+        }
+        Ok(projected)
+    }
+
+    /// Projects a committed compact table through the supplied current schema
+    /// while retaining the verified schema used by each source segment.
+    /// Compatibility and row projection are checked here by stable field ID;
+    /// schema fingerprints are never treated as an evolution proof.
+    pub fn read_compact_committed_base_with_schema_history<T, F>(
+        &self,
+        expected_head: &GitCommitRef,
+        table: Uuid,
+        expected_schema: [u8; 32],
+        target_schema: &SchemaDescriptor,
+        expected_profile: &str,
+        project: F,
+    ) -> Result<Vec<T>, RepositoryError>
+    where
+        F: FnMut(
+            &CompactManifestEntry,
+            &CompactCommittedSegmentProjection,
+        ) -> Result<T, RepositoryError>,
+    {
+        if expected_profile != COMPACT_PROFILE
+            || schema_descriptor_fingerprint(target_schema)? != expected_schema
+        {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        if self.head()?.as_ref() != Some(expected_head) {
+            return Err(RepositoryError::StaleHead);
+        }
+        let projected = self.read_compact_committed_base_from_commit_with_schema_history(
+            expected_head,
+            table,
+            expected_schema,
+            target_schema,
+            expected_profile,
+            project,
+        )?;
+        if self.head()?.as_ref() != Some(expected_head) {
+            return Err(RepositoryError::StaleHead);
+        }
+        Ok(projected)
+    }
+
+    /// Projects rows from an immutable commit even after another commit has
+    /// advanced the selected ref.
+    pub fn read_compact_committed_base_from_commit<T, F>(
+        &self,
+        commit: &GitCommitRef,
+        table: Uuid,
+        expected_schema: [u8; 32],
+        expected_profile: &str,
+        project: F,
+    ) -> Result<Vec<T>, RepositoryError>
+    where
+        F: FnMut(
+            &CompactManifestEntry,
+            &CompactCommittedSegmentProjection,
+        ) -> Result<T, RepositoryError>,
+    {
+        self.read_compact_committed_base_from_commit_inner(
+            commit,
+            table,
+            expected_schema,
+            None,
+            expected_profile,
+            project,
+        )
+    }
+
+    /// As above, but accepts historical segment schemas only when the
+    /// verified source descriptor has a valid projection into `target_schema`.
+    /// The manifest itself remains bound to the current expected schema.
+    pub fn read_compact_committed_base_from_commit_with_schema_history<T, F>(
+        &self,
+        commit: &GitCommitRef,
+        table: Uuid,
+        expected_schema: [u8; 32],
+        target_schema: &SchemaDescriptor,
+        expected_profile: &str,
+        project: F,
+    ) -> Result<Vec<T>, RepositoryError>
+    where
+        F: FnMut(
+            &CompactManifestEntry,
+            &CompactCommittedSegmentProjection,
+        ) -> Result<T, RepositoryError>,
+    {
+        if schema_descriptor_fingerprint(target_schema)? != expected_schema {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        self.read_compact_committed_base_from_commit_inner(
+            commit,
+            table,
+            expected_schema,
+            Some(target_schema),
+            expected_profile,
+            project,
+        )
+    }
+
+    fn read_compact_committed_base_from_commit_inner<T, F>(
+        &self,
+        commit: &GitCommitRef,
+        table: Uuid,
+        expected_schema: [u8; 32],
+        target_schema: Option<&SchemaDescriptor>,
+        expected_profile: &str,
+        mut project: F,
+    ) -> Result<Vec<T>, RepositoryError>
+    where
+        F: FnMut(
+            &CompactManifestEntry,
+            &CompactCommittedSegmentProjection,
+        ) -> Result<T, RepositoryError>,
+    {
+        if expected_profile != COMPACT_PROFILE {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        let manifest = self
+            .read_compact_manifest(commit, table)?
+            .ok_or(RepositoryError::InvalidCompactManifest)?;
+        if manifest.table() != table || manifest.schema() != expected_schema {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        let mut segments = Vec::with_capacity(manifest.entries().len());
+        for entry in manifest.entries() {
+            if entry.schema_id() != expected_schema && target_schema.is_none() {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            let bytes = self.read_verified_compact_segment(commit, table, entry)?;
+            let mut projection = decode_compact_segment_projection(table, entry, &bytes)?;
+            if projection.profile() != expected_profile || projection.table_id() != table {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            if let Some(target_schema) = target_schema {
+                if projection.schema_id() != expected_schema {
+                    projection = project_compact_segment_schema(&projection, target_schema)?;
+                }
+            } else if projection.schema_id() != expected_schema {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            segments.push((entry, projection));
+        }
+        let mut authoritative = BTreeSet::new();
+        for (entry, projection) in &segments {
+            for row in projection.rows() {
+                let key = row
+                    .key()
+                    .encode()
+                    .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+                if !authoritative.insert((key, entry.generation())) {
+                    return Err(RepositoryError::InvalidCompactManifest);
+                }
+            }
+        }
+        let mut projected = Vec::with_capacity(segments.len());
+        for (entry, projection) in &segments {
+            projected.push(project(entry, projection)?);
+        }
+        Ok(projected)
+    }
+}
+
+/// One live row of a format-1 compact table after generation resolution.
+///
+/// Only rows whose winning mutation carries a value are materialized. A
+/// winning deletion leaves its key absent.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LegacyAuthoritativeRow {
+    key: CanonicalValue,
+    value: CanonicalValue,
+}
+
+impl LegacyAuthoritativeRow {
+    pub fn key(&self) -> &CanonicalValue {
+        &self.key
+    }
+
+    pub fn value(&self) -> &CanonicalValue {
+        &self.value
+    }
+}
+
+/// The authoritative live rows of one format-1 compact table, ordered by the
+/// encoded key.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LegacyAuthoritativeTable {
+    table: Uuid,
+    schema: [u8; 32],
+    rows: Vec<LegacyAuthoritativeRow>,
+}
+
+impl LegacyAuthoritativeTable {
+    pub fn table(&self) -> Uuid {
+        self.table
+    }
+
+    pub fn schema(&self) -> [u8; 32] {
+        self.schema
+    }
+
+    pub fn rows(&self) -> &[LegacyAuthoritativeRow] {
+        &self.rows
+    }
+}
+
+/// Resolves committed mutations to authoritative state. For each encoded key
+/// the mutation with the greatest generation wins, and a winning deletion
+/// leaves the key absent. Two mutations of one key at one generation are
+/// corruption.
+fn resolve_legacy_authoritative_rows(
+    mutations: Vec<(u64, Vec<CompactCommittedRow>)>,
+) -> Result<Vec<LegacyAuthoritativeRow>, RepositoryError> {
+    let mut winners: BTreeMap<Vec<u8>, (u64, CompactCommittedRow)> = BTreeMap::new();
+    for (generation, rows) in mutations {
+        for row in rows {
+            let key = row
+                .key()
+                .encode()
+                .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+            if let Some((winner, _)) = winners.get(&key) {
+                if *winner == generation {
+                    return Err(RepositoryError::InvalidCompactManifest);
+                }
+                if *winner > generation {
+                    continue;
+                }
+            }
+            winners.insert(key, (generation, row));
+        }
+    }
+    Ok(winners
+        .into_values()
+        .filter_map(|(_, row)| {
+            let CompactCommittedRow { key, value } = row;
+            value.map(|value| LegacyAuthoritativeRow { key, value })
+        })
+        .collect())
+}
+
+impl Repository {
+    /// Reads the authoritative live rows of every compact table in a
+    /// format-1 commit without mutating the repository.
+    ///
+    /// The commit must open as `RepositoryFormat::Legacy1`; format-2 and
+    /// format-3 commits are refused with `InvalidFormatMigration`. Each table
+    /// is read through the verified committed-manifest boundary, so every
+    /// segment is checked before its rows take part in resolution.
+    pub fn read_legacy_authoritative_tables(
+        &self,
+        commit: &GitCommitRef,
+    ) -> Result<Vec<LegacyAuthoritativeTable>, RepositoryError> {
+        let snapshot = self
+            .pin_snapshot(commit.as_str())
+            .map_err(|_| RepositoryError::InvalidFormatMigration)?;
+        let context = self
+            .open_format_context_at(&snapshot)
+            .map_err(|_| RepositoryError::InvalidFormatMigration)?;
+        if context.repository_format() != crate::RepositoryFormat::Legacy1 {
+            return Err(RepositoryError::InvalidFormatMigration);
+        }
+        let inventory = self.read_compact_manifest_inventory(commit)?;
+        let mut tables = Vec::with_capacity(inventory.len());
+        for (table, manifest) in inventory {
+            let schema = manifest.schema();
+            let mutations = self.read_compact_committed_base_from_commit(
+                commit,
+                table,
+                schema,
+                COMPACT_PROFILE,
+                |entry, projection| Ok((entry.generation(), projection.rows().to_vec())),
+            )?;
+            tables.push(LegacyAuthoritativeTable {
+                table,
+                schema,
+                rows: resolve_legacy_authoritative_rows(mutations)?,
+            });
+        }
+        Ok(tables)
+    }
+}
+
+impl Repository {
+    /// Reads every compact manifest tracked by `commit` as one committed
+    /// snapshot inventory.
+    ///
+    /// A table root which contains only `policy.orna` has no compact state and
+    /// is not included. Every manifest, shard, or data entry is otherwise
+    /// validated against the compact layout: manifests and policy are regular
+    /// files, and shard or segment entries without a manifest are rejected.
+    /// Each discovered manifest is read through the ordinary committed-manifest
+    /// boundary, so its shards, segment object identities, checksums, sizes,
+    /// and physical Parquet witnesses are verified before the inventory is
+    /// returned.
+    pub fn read_compact_manifest_inventory(
+        &self,
+        commit: &GitCommitRef,
+    ) -> Result<BTreeMap<Uuid, CompactManifest>, RepositoryError> {
+        self.objects()
+            .check_expansion(commit.as_str(), ".orna/storage")?;
+        let mut command = self.command();
+        command.args([
+            "ls-tree",
+            "-rz",
+            "--full-tree",
+            commit.as_str(),
+            "--",
+            ".orna/storage",
+        ]);
+        let output = self.run(command)?.stdout;
+        let mut manifests = BTreeSet::new();
+        let mut compact_paths = BTreeMap::<Uuid, BTreeSet<String>>::new();
+        for record in output
+            .split(|byte| *byte == 0)
+            .filter(|record| !record.is_empty())
+        {
+            let Some(separator) = record.iter().position(|byte| *byte == b'\t') else {
+                return Err(RepositoryError::InvalidCompactManifest);
+            };
+            let fields = &record[..separator];
+            let mut fields = fields.split(|byte| *byte == b' ');
+            let mode = fields
+                .next()
+                .ok_or(RepositoryError::InvalidCompactManifest)?;
+            let kind = fields.next();
+            let object = fields.next();
+            if kind != Some(b"blob")
+                || object.is_none()
+                || fields.next().is_some()
+                || !matches!(mode, b"100644" | b"100755")
+            {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            let path = &record[separator + 1..];
+            let path =
+                std::str::from_utf8(path).map_err(|_| RepositoryError::InvalidCompactManifest)?;
+            let Some((table_name, entry)) = path
+                .strip_prefix(".orna/storage/")
+                .and_then(|path| path.split_once('/'))
+            else {
+                return Err(RepositoryError::InvalidCompactManifest);
+            };
+            let table =
+                Uuid::parse_str(table_name).map_err(|_| RepositoryError::InvalidCompactManifest)?;
+            if table.to_string() != table_name {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            match entry {
+                "policy.orna" => {}
+                "manifest.orna" => {
+                    if !manifests.insert(table) {
+                        return Err(RepositoryError::InvalidCompactManifest);
+                    }
+                }
+                entry if entry.starts_with("shards/") || entry.starts_with("data/") => {
+                    if !compact_paths
+                        .entry(table)
+                        .or_default()
+                        .insert(path.to_owned())
+                    {
+                        return Err(RepositoryError::InvalidCompactManifest);
+                    }
+                }
+                _ => return Err(RepositoryError::InvalidCompactManifest),
+            }
+        }
+
+        if !compact_paths.keys().all(|table| manifests.contains(table)) {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+
+        let mut inventory = BTreeMap::new();
+        for table in manifests {
+            let manifest = self
+                .read_compact_manifest(commit, table)?
+                .ok_or(RepositoryError::InvalidCompactManifest)?;
+            let mut declared_paths = BTreeSet::new();
+            for number in 0..manifest
+                .entries()
+                .len()
+                .div_ceil(COMPACT_MANIFEST_SHARD_LIMIT)
+            {
+                let number =
+                    u64::try_from(number).map_err(|_| RepositoryError::InvalidCompactManifest)?;
+                if !declared_paths.insert(path_key(&shard_path(table, number)?)?) {
+                    return Err(RepositoryError::InvalidCompactManifest);
+                }
+            }
+            for entry in manifest.entries() {
+                if !declared_paths.insert(path_key(entry.relative_path())?) {
+                    return Err(RepositoryError::InvalidCompactManifest);
+                }
+            }
+            if compact_paths.remove(&table).unwrap_or_default() != declared_paths {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            inventory.insert(table, manifest);
+        }
+        Ok(inventory)
+    }
+
+    /// Reads and verifies the canonical compact manifest at `commit`.  A
+    /// missing manifest is represented by `None`; malformed or incomplete
+    /// committed state is never treated as an empty table.
+    pub fn read_compact_manifest(
+        &self,
+        commit: &GitCommitRef,
+        table: Uuid,
+    ) -> Result<Option<CompactManifest>, RepositoryError> {
+        let manifest_path = managed_child(&compact_root(table), "manifest.orna")?;
+        let Some(bytes) = self.committed_file_bytes(commit, &manifest_path)? else {
+            return Ok(None);
+        };
+        let header = parse_manifest_header(&bytes)?;
+        if header.table != table {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        let mut entries = Vec::new();
+        let mut shard_bytes_by_path = Vec::new();
+        for shard in &header.shards {
+            let shard_bytes = self
+                .committed_file_bytes(commit, &shard.file)?
+                .ok_or(RepositoryError::InvalidCompactManifest)?;
+            if Sha256::digest(&shard_bytes).as_slice() != shard.hash {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            let parsed = parse_shard(&shard_bytes)?;
+            let (min_key, max_key) = canonical_key_extrema(
+                parsed
+                    .iter()
+                    .flat_map(|entry| [entry.min_key.as_slice(), entry.max_key.as_slice()]),
+            )?;
+            if parsed.len() != shard.entries
+                || min_key != shard.min_key.as_slice()
+                || max_key != shard.max_key.as_slice()
+            {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            shard_bytes_by_path.push((shard.file.clone(), shard_bytes));
+            entries.extend(parsed);
+        }
+        let manifest = CompactManifest {
+            table: header.table,
+            schema: header.schema,
+            next_generation: header.next_generation,
+            entries,
+        };
+        manifest.validate(Some(self.native_object_id_length()?))?;
+        verify_canonical_manifest_files(&manifest, &bytes, &shard_bytes_by_path)?;
+        self.verify_manifest_at_commit(commit, &manifest)?;
+        Ok(Some(manifest))
+    }
+
+    /// Observes whether the locally materialized compact manifest at `commit`
+    /// declares only materialized or locally proven-promised segment blobs.
+    ///
+    /// This is deliberately a storage-manifest observation, not a claim that
+    /// every object required by an Orna logical snapshot has been declared.
+    /// The manifest and shard metadata must themselves be locally readable;
+    /// their absence or an unavailable declared segment fails closed. Git lazy
+    /// fetch is disabled for every metadata read.
+    pub fn observe_compact_manifest_segment_blobs(
+        &self,
+        commit: &GitCommitRef,
+        table: Uuid,
+    ) -> Result<crate::GitDeclaredObjectSetState, RepositoryError> {
+        if !matches!(
+            self.observe_git_object(commit.as_str())?,
+            crate::GitObjectState::Materialized {
+                kind: crate::GitObjectKind::Commit,
+                ..
+            }
+        ) {
+            return Ok(crate::GitDeclaredObjectSetState::Incomplete);
+        }
+        let manifest_path = managed_child(&compact_root(table), "manifest.orna")?;
+        let Some(bytes) = self.observed_committed_file_bytes(commit, &manifest_path)? else {
+            return Ok(crate::GitDeclaredObjectSetState::Incomplete);
+        };
+        let header = match parse_manifest_header(&bytes) {
+            Ok(header) if header.table == table => header,
+            _ => return Ok(crate::GitDeclaredObjectSetState::Malformed),
+        };
+        let mut entries = Vec::new();
+        let mut shard_bytes_by_path = Vec::new();
+        for shard in &header.shards {
+            let Some(shard_bytes) = self.observed_committed_file_bytes(commit, &shard.file)? else {
+                return Ok(crate::GitDeclaredObjectSetState::Incomplete);
+            };
+            if Sha256::digest(&shard_bytes).as_slice() != shard.hash {
+                return Ok(crate::GitDeclaredObjectSetState::Malformed);
+            }
+            let parsed = match parse_shard(&shard_bytes) {
+                Ok(parsed) => parsed,
+                Err(_) => return Ok(crate::GitDeclaredObjectSetState::Malformed),
+            };
+            let (min_key, max_key) = match canonical_key_extrema(
+                parsed
+                    .iter()
+                    .flat_map(|entry| [entry.min_key.as_slice(), entry.max_key.as_slice()]),
+            ) {
+                Ok(extrema) => extrema,
+                Err(_) => return Ok(crate::GitDeclaredObjectSetState::Malformed),
+            };
+            if parsed.len() != shard.entries
+                || min_key != shard.min_key.as_slice()
+                || max_key != shard.max_key.as_slice()
+            {
+                return Ok(crate::GitDeclaredObjectSetState::Malformed);
+            }
+            shard_bytes_by_path.push((shard.file.clone(), shard_bytes));
+            entries.extend(parsed);
+        }
+        let manifest = CompactManifest {
+            table: header.table,
+            schema: header.schema,
+            next_generation: header.next_generation,
+            entries,
+        };
+        if manifest
+            .validate(Some(self.observer_native_object_id_length()?))
+            .is_err()
+            || verify_canonical_manifest_files(&manifest, &bytes, &shard_bytes_by_path).is_err()
+        {
+            return Ok(crate::GitDeclaredObjectSetState::Malformed);
+        }
+        for entry in manifest.entries() {
+            let Ok(Some((mode, object))) =
+                self.observed_tree_entry_at(commit, &entry.relative_path)
+            else {
+                return Ok(crate::GitDeclaredObjectSetState::Malformed);
+            };
+            if !is_regular_git_file_mode(&mode) || object != entry.git_object_id {
+                return Ok(crate::GitDeclaredObjectSetState::Malformed);
+            }
+        }
+        let object_ids = manifest
+            .entries()
+            .iter()
+            .map(CompactManifestEntry::git_object_id)
+            .collect::<Vec<_>>();
+        self.observe_declared_segment_blob_set(&object_ids)
+    }
+
+    /// Plans the exact compact-segment objects required to hydrate `table` at
+    /// `commit`, without fetching or changing any local Git state.
+    ///
+    /// Manifest and shard metadata must be locally materialized and canonical.
+    /// Every materialized segment is verified using the same object identity,
+    /// SHA-256, compressed-size, and physical-Parquet checks used by committed
+    /// manifest reads. A locally absent segment is retained only when the
+    /// no-lazy observer proves it is a promised blob. Missing, malformed, or
+    /// otherwise unverified state fails closed.
+    pub fn plan_compact_manifest_hydration(
+        &self,
+        commit: &GitCommitRef,
+        table: Uuid,
+    ) -> Result<BTreeMap<String, crate::GitObjectState>, RepositoryError> {
+        let manifest = self.observed_compact_manifest(commit, table)?;
+
+        self.plan_observed_compact_manifest_hydration(commit, table, &manifest)
+    }
+
+    /// Plans the exact compact-segment objects for every compact table tracked
+    /// by `commit`, without fetching or changing local Git state.
+    ///
+    /// Table roots containing only `policy.orna` are ignored. All discovered
+    /// manifest, shard, and data paths must exactly match a canonical compact
+    /// manifest closure. Metadata is read through no-lazy observer commands;
+    /// materialized segments are fully verified and locally absent segments
+    /// are retained only when the per-table planner proves them promised.
+    pub fn plan_compact_manifest_inventory_hydration(
+        &self,
+        commit: &GitCommitRef,
+    ) -> Result<BTreeMap<Uuid, BTreeMap<String, crate::GitObjectState>>, RepositoryError> {
+        let (manifests, mut compact_paths) =
+            self.observed_compact_manifest_inventory_paths(commit)?;
+        let mut inventory = BTreeMap::new();
+        for table in manifests {
+            let manifest = self.observed_compact_manifest(commit, table)?;
+            let mut declared_paths = BTreeSet::new();
+            for number in 0..manifest
+                .entries()
+                .len()
+                .div_ceil(COMPACT_MANIFEST_SHARD_LIMIT)
+            {
+                let number =
+                    u64::try_from(number).map_err(|_| RepositoryError::InvalidCompactManifest)?;
+                if !declared_paths.insert(path_key(&shard_path(table, number)?)?) {
+                    return Err(RepositoryError::InvalidCompactManifest);
+                }
+            }
+            for entry in manifest.entries() {
+                if !declared_paths.insert(path_key(entry.relative_path())?) {
+                    return Err(RepositoryError::InvalidCompactManifest);
+                }
+            }
+            if compact_paths.remove(&table).unwrap_or_default() != declared_paths {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            let plan = self.plan_observed_compact_manifest_hydration(commit, table, &manifest)?;
+            inventory.insert(table, plan);
+        }
+        Ok(inventory)
+    }
+
+    fn plan_observed_compact_manifest_hydration(
+        &self,
+        commit: &GitCommitRef,
+        table: Uuid,
+        manifest: &CompactManifest,
+    ) -> Result<BTreeMap<String, crate::GitObjectState>, RepositoryError> {
+        let mut plan = BTreeMap::new();
+        for entry in manifest.entries() {
+            let Some((mode, object)) = self.observed_tree_entry_at(commit, &entry.relative_path)?
+            else {
+                return Err(RepositoryError::InvalidCompactManifest);
+            };
+            if !matches!(mode.as_str(), "100644" | "100755") || object != entry.git_object_id {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            let state = self.observe_git_object(&object)?;
+            match state {
+                crate::GitObjectState::Materialized {
+                    kind: crate::GitObjectKind::Blob,
+                    ..
+                } => {
+                    let bytes = self.observed_git_blob_bytes(&object)?;
+                    verify_manifest_segment_bytes(table, entry, &object, &bytes)?;
+                }
+                crate::GitObjectState::Promised => {}
+                crate::GitObjectState::Materialized { .. }
+                | crate::GitObjectState::Unavailable
+                | crate::GitObjectState::Malformed => {
+                    return Err(RepositoryError::InvalidCompactManifest);
+                }
+            }
+            plan.insert(object, state);
+        }
+        Ok(plan)
+    }
+
+    fn observed_compact_manifest_inventory_paths(
+        &self,
+        commit: &GitCommitRef,
+    ) -> Result<CompactInventoryPaths, RepositoryError> {
+        if !matches!(
+            self.observe_git_object(commit.as_str())?,
+            crate::GitObjectState::Materialized {
+                kind: crate::GitObjectKind::Commit,
+                ..
+            }
+        ) {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        self.objects()
+            .check_expansion(commit.as_str(), ".orna/storage")?;
+        let mut command = self.observer_command();
+        command.env("GIT_NO_LAZY_FETCH", "1").args([
+            "ls-tree",
+            "-rz",
+            "--full-tree",
+            commit.as_str(),
+            "--",
+            ".orna/storage",
+        ]);
+        let output = self.run(command)?.stdout;
+        let mut manifests = BTreeSet::new();
+        let mut compact_paths = BTreeMap::<Uuid, BTreeSet<String>>::new();
+        for record in output
+            .split(|byte| *byte == 0)
+            .filter(|record| !record.is_empty())
+        {
+            let Some(separator) = record.iter().position(|byte| *byte == b'\t') else {
+                return Err(RepositoryError::InvalidCompactManifest);
+            };
+            let fields = &record[..separator];
+            let mut fields = fields.split(|byte| *byte == b' ');
+            let mode = fields
+                .next()
+                .ok_or(RepositoryError::InvalidCompactManifest)?;
+            let kind = fields.next();
+            let object = fields.next();
+            if kind != Some(b"blob")
+                || object.is_none()
+                || fields.next().is_some()
+                || !matches!(mode, b"100644" | b"100755")
+            {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            let path = std::str::from_utf8(&record[separator + 1..])
+                .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+            let Some((table_name, entry)) = path
+                .strip_prefix(".orna/storage/")
+                .and_then(|path| path.split_once('/'))
+            else {
+                return Err(RepositoryError::InvalidCompactManifest);
+            };
+            let table =
+                Uuid::parse_str(table_name).map_err(|_| RepositoryError::InvalidCompactManifest)?;
+            if table.to_string() != table_name {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            match entry {
+                "policy.orna" => {}
+                "manifest.orna" if manifests.insert(table) => {}
+                "manifest.orna" => return Err(RepositoryError::InvalidCompactManifest),
+                entry if entry.starts_with("shards/") || entry.starts_with("data/") => {
+                    if !compact_paths
+                        .entry(table)
+                        .or_default()
+                        .insert(path.to_owned())
+                    {
+                        return Err(RepositoryError::InvalidCompactManifest);
+                    }
+                }
+                _ => return Err(RepositoryError::InvalidCompactManifest),
+            }
+        }
+        if !compact_paths.keys().all(|table| manifests.contains(table)) {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        Ok((manifests, compact_paths))
+    }
+
+    /// Plans the exact compact-segment objects whose inclusive key bounds
+    /// overlap `[lower_key, upper_key]` at `commit`, without fetching or
+    /// changing any local Git state. The interval and every selected segment
+    /// are validated with the same canonical manifest, Git identity, digest,
+    /// size, and physical-Parquet checks as full-manifest planning.
+    ///
+    /// An invalid or reversed canonical interval fails closed. Segments whose
+    /// manifest bounds cannot overlap the interval are not observed or
+    /// hydrated, so a promised non-overlapping segment remains unselected.
+    pub fn plan_compact_manifest_hydration_for_key_range(
+        &self,
+        commit: &GitCommitRef,
+        table: Uuid,
+        lower_key: &[u8],
+        upper_key: &[u8],
+    ) -> Result<BTreeMap<String, crate::GitObjectState>, RepositoryError> {
+        if canonical_key_order(lower_key, upper_key)? == Ordering::Greater {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        let manifest = self.observed_compact_manifest(commit, table)?;
+        let mut plan = BTreeMap::new();
+        for entry in manifest.entries() {
+            if canonical_key_order(entry.min_key(), upper_key)? == Ordering::Greater
+                || canonical_key_order(entry.max_key(), lower_key)? == Ordering::Less
+            {
+                continue;
+            }
+            let Some((mode, object)) = self.observed_tree_entry_at(commit, &entry.relative_path)?
+            else {
+                return Err(RepositoryError::InvalidCompactManifest);
+            };
+            if !matches!(mode.as_str(), "100644" | "100755") || object != entry.git_object_id {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            let state = self.observe_git_object(&object)?;
+            match state {
+                crate::GitObjectState::Materialized {
+                    kind: crate::GitObjectKind::Blob,
+                    ..
+                } => {
+                    let bytes = self.observed_git_blob_bytes(&object)?;
+                    verify_manifest_segment_bytes(table, entry, &object, &bytes)?;
+                }
+                crate::GitObjectState::Promised => {}
+                crate::GitObjectState::Materialized { .. }
+                | crate::GitObjectState::Unavailable
+                | crate::GitObjectState::Malformed => {
+                    return Err(RepositoryError::InvalidCompactManifest);
+                }
+            }
+            plan.insert(object, state);
+        }
+        Ok(plan)
+    }
+
+    fn observed_compact_manifest(
+        &self,
+        commit: &GitCommitRef,
+        table: Uuid,
+    ) -> Result<CompactManifest, RepositoryError> {
+        if !matches!(
+            self.observe_git_object(commit.as_str())?,
+            crate::GitObjectState::Materialized {
+                kind: crate::GitObjectKind::Commit,
+                ..
+            }
+        ) {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+
+        let manifest_path = managed_child(&compact_root(table), "manifest.orna")?;
+        let manifest_bytes = self
+            .observed_committed_file_bytes(commit, &manifest_path)?
+            .ok_or(RepositoryError::InvalidCompactManifest)?;
+        let header = parse_manifest_header(&manifest_bytes)?;
+        if header.table != table {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+
+        let mut entries = Vec::new();
+        let mut shard_bytes_by_path = Vec::new();
+        for shard in &header.shards {
+            let shard_bytes = self
+                .observed_committed_file_bytes(commit, &shard.file)?
+                .ok_or(RepositoryError::InvalidCompactManifest)?;
+            if Sha256::digest(&shard_bytes).as_slice() != shard.hash {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            let parsed = parse_shard(&shard_bytes)?;
+            let (min_key, max_key) = canonical_key_extrema(
+                parsed
+                    .iter()
+                    .flat_map(|entry| [entry.min_key.as_slice(), entry.max_key.as_slice()]),
+            )?;
+            if parsed.len() != shard.entries
+                || min_key != shard.min_key.as_slice()
+                || max_key != shard.max_key.as_slice()
+            {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            shard_bytes_by_path.push((shard.file.clone(), shard_bytes));
+            entries.extend(parsed);
+        }
+        let manifest = CompactManifest {
+            table: header.table,
+            schema: header.schema,
+            next_generation: header.next_generation,
+            entries,
+        };
+        manifest.validate(Some(self.observer_native_object_id_length()?))?;
+        verify_canonical_manifest_files(&manifest, &manifest_bytes, &shard_bytes_by_path)?;
+        Ok(manifest)
+    }
+
+    fn observed_committed_file_bytes(
+        &self,
+        commit: &GitCommitRef,
+        path: &ManagedPath,
+    ) -> Result<Option<Vec<u8>>, RepositoryError> {
+        let Some((mode, object)) = self.observed_tree_entry_at(commit, path)? else {
+            return Ok(None);
+        };
+        if !is_regular_git_file_mode(&mode) {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        Ok(Some(self.observed_git_blob_bytes(&object)?))
+    }
+
+    fn observed_git_blob_bytes(&self, object: &str) -> Result<Vec<u8>, RepositoryError> {
+        let mut command = self.observer_command();
+        command
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .args(["cat-file", "blob", object]);
+        Ok(self.run(command)?.stdout)
+    }
+
+    fn observed_tree_entry_at(
+        &self,
+        commit: &GitCommitRef,
+        path: &ManagedPath,
+    ) -> Result<Option<(String, String)>, RepositoryError> {
+        let mut command = self.observer_command();
+        command
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .args(["ls-tree", "-z", "--full-tree", commit.as_str(), "--"])
+            .arg(path.as_path());
+        let output = self.run(command)?.stdout;
+        parse_tree_entry(&output, path, self.observer_native_object_id_length()?)
+    }
+
+    /// Test-only fixture writer for legacy compact reader tests. It assembles
+    /// a compact candidate (Parquet segments plus the canonical manifest and
+    /// shards) on top of `expected_head`, and the journal the retired compact
+    /// writer would have recorded for it. Nothing can publish the candidate:
+    /// tests read its commit directly or adopt it as a committed fixture.
+    /// Production builds never contain it (ORNA-UPGRADE-003).
+    #[cfg(any(test, feature = "legacy-fixture-writer"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_compact_publication(
+        &self,
+        expected_head: &GitCommitRef,
+        expected_index: IndexGeneration,
+        base: CompactManifest,
+        runtime_intent_id: [u8; 16],
+        cleanup_watermark: [u8; 32],
+        segments: &[CompactSegment],
+        message: &str,
+    ) -> Result<CompactPublicationPlan, RepositoryError> {
+        if runtime_intent_id == [0; 16]
+            || segments.is_empty()
+            || expected_index.head() != Some(expected_head)
+        {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        self.verify_manifest_at_commit(expected_head, &base)?;
+        let object_id_length = self.native_object_id_length()?;
+        let generation = base.next_generation;
+        let root = compact_data_root(base.table);
+        let mut paths = BTreeSet::new();
+        let mut additions = Vec::with_capacity(segments.len());
+        for segment in segments {
+            segment.validate_unallocated()?;
+            if !segment.relative_path.as_path().starts_with(root.as_path())
+                || !paths.insert(path_key(&segment.relative_path)?)
+            {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            let object_id = self.hash_object(&segment.bytes)?;
+            if object_id.len() != object_id_length {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            additions.push(CompactManifestEntry::from_segment(
+                base.table, segment, generation, object_id,
+            )?);
+        }
+        let mut entries = base.entries.clone();
+        entries.extend(additions);
+        entries.sort_by_key(|entry| entry.segment_id.as_bytes().to_owned());
+        let next_generation = generation
+            .checked_add(1)
+            .ok_or(RepositoryError::InvalidCompactManifest)?;
+        let manifest = CompactManifest {
+            table: base.table,
+            schema: base.schema,
+            next_generation,
+            entries,
+        };
+        manifest.validate(Some(object_id_length))?;
+        let base_sha256 = self.manifest_digest_at_commit(expected_head, &base)?;
+        let selected_ref = self.symbolic_head_ref()?;
+        let witness = manifest.witness(
+            base_sha256,
+            selected_ref,
+            runtime_intent_id,
+            cleanup_watermark,
+        )?;
+
+        let mut changes = segments
+            .iter()
+            .map(|segment| {
+                ManagedFileChange::new(segment.relative_path.clone(), Some(segment.bytes.clone()))
+            })
+            .collect::<Vec<_>>();
+        changes.extend(manifest.canonical_files()?);
+        let candidate = self.build_private_commit(expected_head, &changes, message)?;
+        self.verify_candidate_compact_manifest(&candidate, &manifest, &witness)?;
+
+        let journal_entries = changes
+            .iter()
+            .map(|change| {
+                Ok(PublicationJournalEntry::new(
+                    change.path().clone(),
+                    self.managed_file_bytes(change.path())?,
+                    change.bytes().map(ToOwned::to_owned),
+                ))
+            })
+            .collect::<Result<Vec<_>, RepositoryError>>()?;
+        let base_index_tree = expected_index
+            .tree()
+            .cloned()
+            .ok_or(RepositoryError::InvalidCompactManifest)?;
+        let journal = PublicationJournal::new_with_runtime_intent(
+            expected_head.clone(),
+            candidate.commit().clone(),
+            base_index_tree,
+            runtime_intent_id,
+            journal_entries,
+        )?
+        .with_compact_manifest(witness)?;
+        Ok(CompactPublicationPlan {
+            candidate,
+            manifest,
+            journal,
+        })
+    }
+
+    pub(crate) fn verify_compact_journal(
+        &self,
+        candidate: &PrivateCommit,
+        witness: &CompactManifestWitness,
+    ) -> Result<(), RepositoryError> {
+        witness.validate(Some(self.native_object_id_length()?))?;
+        let manifest_path = &witness.manifest_path;
+        let bytes = self
+            .candidate_file_bytes(candidate, manifest_path)?
+            .ok_or(RepositoryError::InvalidPublicationJournal)?;
+        if Sha256::digest(&bytes).as_slice() != witness.manifest_sha256 {
+            return Err(RepositoryError::InvalidPublicationJournal);
+        }
+        let manifest = self
+            .read_compact_manifest_from_candidate(candidate, &bytes)
+            .map_err(|_| RepositoryError::InvalidPublicationJournal)?;
+        if manifest.table != witness.table
+            || manifest.next_generation.checked_sub(1) != Some(witness.generation)
+            || manifest.entries.len() != witness.entries.len()
+        {
+            return Err(RepositoryError::InvalidPublicationJournal);
+        }
+        for object in &witness.entries {
+            let Some((_mode, actual)) = self.candidate_tree_entry(candidate, &object.path)? else {
+                return Err(RepositoryError::InvalidPublicationJournal);
+            };
+            let bytes = self.git_bytes(["cat-file", "blob", &actual])?;
+            let manifest_entry = manifest
+                .entries
+                .iter()
+                .find(|entry| entry.relative_path == object.path)
+                .ok_or(RepositoryError::InvalidPublicationJournal)?;
+            if actual != object.object_id
+                || manifest_entry.git_object_id != object.object_id
+                || manifest_entry.sha256 != object.sha256
+                || Sha256::digest(&bytes).as_slice() != object.sha256
+                || verify_physical_entry(witness.table, manifest_entry, &bytes).is_err()
+            {
+                return Err(RepositoryError::InvalidPublicationJournal);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn verify_compact_publication_binding(
+        &self,
+        journal: &PublicationJournal,
+        candidate: &PrivateCommit,
+    ) -> Result<(), RepositoryError> {
+        let witness = journal
+            .compact_manifest()
+            .ok_or(RepositoryError::InvalidPublicationJournal)?;
+        if journal.runtime_intent_id() != Some(witness.runtime_intent_id())
+            || self.symbolic_head_ref()? != witness.selected_ref()
+        {
+            return Err(RepositoryError::InvalidPublicationJournal);
+        }
+        let manifest_path = witness.manifest_path.clone();
+        let base = self.committed_file_bytes(journal.old_head(), &manifest_path)?;
+        match base {
+            Some(bytes) if Sha256::digest(&bytes).as_slice() == witness.base_sha256 => {
+                let manifest = self
+                    .read_compact_manifest(journal.old_head(), witness.table)?
+                    .ok_or(RepositoryError::InvalidPublicationJournal)?;
+                if manifest.next_generation != witness.generation {
+                    return Err(RepositoryError::InvalidPublicationJournal);
+                }
+            }
+            None if witness.base_sha256 == [0; 32] => {}
+            _ => return Err(RepositoryError::InvalidPublicationJournal),
+        }
+        self.verify_compact_journal(candidate, witness)
+    }
+
+    fn verify_manifest_at_commit(
+        &self,
+        commit: &GitCommitRef,
+        manifest: &CompactManifest,
+    ) -> Result<(), RepositoryError> {
+        let expected = manifest.canonical_files()?;
+        if manifest.entries.is_empty() {
+            match self.committed_file_bytes(commit, &manifest.manifest_path())? {
+                Some(actual) if expected[0].bytes() == Some(actual.as_slice()) => {}
+                Some(_) => return Err(RepositoryError::InvalidCompactManifest),
+                None => return Ok(()),
+            }
+        }
+        for change in expected {
+            if self.committed_file_bytes(commit, change.path())?.as_deref() != change.bytes() {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+        }
+        for entry in &manifest.entries {
+            let Some((mode, object)) = self.tree_entry_at(commit, &entry.relative_path)? else {
+                return Err(RepositoryError::InvalidCompactManifest);
+            };
+            if !is_regular_git_file_mode(&mode) {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            let bytes = self.git_bytes(["cat-file", "blob", &object])?;
+            verify_manifest_segment_bytes(manifest.table, entry, &object, &bytes)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "legacy-fixture-writer"))]
+    fn manifest_digest_at_commit(
+        &self,
+        commit: &GitCommitRef,
+        manifest: &CompactManifest,
+    ) -> Result<[u8; 32], RepositoryError> {
+        match self.committed_file_bytes(commit, &manifest.manifest_path())? {
+            Some(bytes) => Ok(Sha256::digest(bytes).into()),
+            None if manifest.entries.is_empty() => Ok([0; 32]),
+            None => Err(RepositoryError::InvalidCompactManifest),
+        }
+    }
+
+    #[cfg(any(test, feature = "legacy-fixture-writer"))]
+    fn verify_candidate_compact_manifest(
+        &self,
+        candidate: &PrivateCommit,
+        manifest: &CompactManifest,
+        witness: &CompactManifestWitness,
+    ) -> Result<(), RepositoryError> {
+        self.verify_compact_journal(candidate, witness)
+            .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+        let actual = self
+            .candidate_file_bytes(candidate, &manifest.manifest_path())?
+            .ok_or(RepositoryError::InvalidCompactManifest)?;
+        let parsed = self.read_compact_manifest_from_candidate(candidate, &actual)?;
+        if parsed != *manifest {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        Ok(())
+    }
+
+    fn committed_file_bytes(
+        &self,
+        commit: &GitCommitRef,
+        path: &ManagedPath,
+    ) -> Result<Option<Vec<u8>>, RepositoryError> {
+        let Some((mode, object)) = self.tree_entry_at(commit, path)? else {
+            return Ok(None);
+        };
+        if !is_regular_git_file_mode(&mode) {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        Ok(Some(self.git_bytes(["cat-file", "blob", &object])?))
+    }
+
+    fn candidate_file_bytes(
+        &self,
+        candidate: &PrivateCommit,
+        path: &ManagedPath,
+    ) -> Result<Option<Vec<u8>>, RepositoryError> {
+        let Some((mode, object)) = self.candidate_tree_entry(candidate, path)? else {
+            return Ok(None);
+        };
+        if !is_regular_git_file_mode(&mode) {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        Ok(Some(self.git_bytes(["cat-file", "blob", &object])?))
+    }
+
+    fn tree_entry_at(
+        &self,
+        commit: &GitCommitRef,
+        path: &ManagedPath,
+    ) -> Result<Option<(String, String)>, RepositoryError> {
+        let mut command = self.command();
+        command
+            .args(["ls-tree", "-z", "--full-tree", commit.as_str(), "--"])
+            .arg(path.as_path());
+        let output = self.run(command)?.stdout;
+        parse_tree_entry(&output, path, self.native_object_id_length()?)
+    }
+
+    fn read_compact_manifest_from_candidate(
+        &self,
+        candidate: &PrivateCommit,
+        manifest_bytes: &[u8],
+    ) -> Result<CompactManifest, RepositoryError> {
+        let header = parse_manifest_header(manifest_bytes)?;
+        let mut entries = Vec::new();
+        let mut shard_bytes_by_path = Vec::new();
+        for shard in &header.shards {
+            let shard_bytes = self
+                .candidate_file_bytes(candidate, &shard.file)?
+                .ok_or(RepositoryError::InvalidCompactManifest)?;
+            if Sha256::digest(&shard_bytes).as_slice() != shard.hash {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            let parsed = parse_shard(&shard_bytes)?;
+            let (min_key, max_key) = canonical_key_extrema(
+                parsed
+                    .iter()
+                    .flat_map(|entry| [entry.min_key.as_slice(), entry.max_key.as_slice()]),
+            )?;
+            if parsed.len() != shard.entries
+                || min_key != shard.min_key.as_slice()
+                || max_key != shard.max_key.as_slice()
+            {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            shard_bytes_by_path.push((shard.file.clone(), shard_bytes));
+            entries.extend(parsed);
+        }
+        let manifest = CompactManifest {
+            table: header.table,
+            schema: header.schema,
+            next_generation: header.next_generation,
+            entries,
+        };
+        manifest.validate(Some(self.native_object_id_length()?))?;
+        verify_canonical_manifest_files(&manifest, manifest_bytes, &shard_bytes_by_path)?;
+        Ok(manifest)
+    }
+}
+
+/// Reject committed compact records which decode correctly but do not use the
+/// single canonical manifest/shard serialization.  A shard hash proves only
+/// that a manifest names the bytes it carries; canonical reconstruction also
+/// proves that those bytes are the required representation of their content.
+fn verify_canonical_manifest_files(
+    manifest: &CompactManifest,
+    manifest_bytes: &[u8],
+    shard_bytes_by_path: &[(ManagedPath, Vec<u8>)],
+) -> Result<(), RepositoryError> {
+    for expected in manifest.canonical_files()? {
+        let actual = if expected.path() == &manifest.manifest_path() {
+            manifest_bytes
+        } else {
+            shard_bytes_by_path
+                .iter()
+                .find(|(path, _)| path == expected.path())
+                .map(|(_, bytes)| bytes.as_slice())
+                .ok_or(RepositoryError::InvalidCompactManifest)?
+        };
+        if expected.bytes() != Some(actual) {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+    }
+    Ok(())
+}
+
+fn parse_tree_entry(
+    output: &[u8],
+    path: &ManagedPath,
+    object_id_length: usize,
+) -> Result<Option<(String, String)>, RepositoryError> {
+    let Some(entry) = output.split(|byte| *byte == 0).next() else {
+        return Ok(None);
+    };
+    if entry.is_empty() {
+        return Ok(None);
+    }
+    let tab = entry
+        .iter()
+        .position(|byte| *byte == b'\t')
+        .ok_or(RepositoryError::GitOperationFailed)?;
+    if &entry[tab + 1..] != path.as_path().as_os_str().as_encoded_bytes() {
+        return Err(RepositoryError::GitOperationFailed);
+    }
+    let mut fields = entry[..tab].split(|byte| *byte == b' ');
+    let mode = String::from_utf8(fields.next().unwrap_or_default().to_vec())
+        .map_err(|_| RepositoryError::GitOperationFailed)?;
+    let kind = fields.next().unwrap_or_default();
+    let object = String::from_utf8(fields.next().unwrap_or_default().to_vec())
+        .map_err(|_| RepositoryError::GitOperationFailed)?;
+    if kind != b"blob"
+        || fields.next().is_some()
+        || object.len() != object_id_length
+        || !object.bytes().all(is_hex)
+    {
+        return Err(RepositoryError::GitOperationFailed);
+    }
+    Ok(Some((mode, object)))
+}
+
+fn is_regular_git_file_mode(mode: &str) -> bool {
+    matches!(mode, "100644" | "100755")
+}
+
+fn compact_root(table: Uuid) -> ManagedPath {
+    ManagedPath::new(format!(".orna/storage/{table}")).expect("UUID produces safe managed path")
+}
+
+fn compact_data_root(table: Uuid) -> ManagedPath {
+    managed_child(&compact_root(table), "data").expect("constant safe path")
+}
+
+fn compact_segment_path(table: Uuid, segment_id: Uuid) -> Result<ManagedPath, RepositoryError> {
+    let segment = segment_id.to_string();
+    let prefix = segment
+        .get(..2)
+        .ok_or(RepositoryError::InvalidCompactManifest)?;
+    managed_child(
+        &compact_data_root(table),
+        &format!("{prefix}/{segment}.parquet"),
+    )
+}
+
+fn shard_path(table: Uuid, number: u64) -> Result<ManagedPath, RepositoryError> {
+    managed_child(&compact_root(table), &format!("shards/{number:08}.orna"))
+}
+
+fn managed_child(root: &ManagedPath, child: &str) -> Result<ManagedPath, RepositoryError> {
+    let root = root
+        .as_path()
+        .to_str()
+        .ok_or(RepositoryError::UnsafeManagedPath)?;
+    ManagedPath::new(format!("{root}/{child}"))
+}
+
+fn path_key(path: &ManagedPath) -> Result<String, RepositoryError> {
+    path.as_path()
+        .to_str()
+        .map(ToOwned::to_owned)
+        .ok_or(RepositoryError::InvalidCompactManifest)
+}
+
+fn canonical_manifest(
+    manifest: &CompactManifest,
+    shards: &[ShardDescriptor],
+) -> Result<Vec<u8>, RepositoryError> {
+    let mut output = format!(
+        "{{profile: \"{COMPACT_PROFILE}\", table: \"{}\", schema: \"{}\", next_generation: {}, shards: [",
+        manifest.table,
+        hex(&manifest.schema),
+        manifest.next_generation,
+    );
+    for (index, shard) in shards.iter().enumerate() {
+        if index != 0 {
+            output.push_str(", ");
+        }
+        let root = compact_root(manifest.table);
+        let relative = shard
+            .file
+            .as_path()
+            .strip_prefix(root.as_path())
+            .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+        output.push_str(&format!(
+            "{{number: {}, min_key: \"{}\", max_key: \"{}\", entries: {}, file: \"{}\", hash: \"{}\"}}",
+            shard.number,
+            hex(&shard.min_key),
+            hex(&shard.max_key),
+            shard.entries,
+            relative.to_str().ok_or(RepositoryError::InvalidCompactManifest)?,
+            hex(&shard.hash),
+        ));
+    }
+    output.push_str("]}\n");
+    parse_row(&output)
+        .is_ok()
+        .then_some(output.into_bytes())
+        .ok_or(RepositoryError::InvalidCompactManifest)
+}
+
+fn canonical_shard(entries: &[&CompactManifestEntry]) -> Result<Vec<u8>, RepositoryError> {
+    if entries.is_empty() || entries.len() > COMPACT_MANIFEST_SHARD_LIMIT {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+    let mut output = String::from("{entries: [");
+    for (index, entry) in entries.iter().enumerate() {
+        if index != 0 {
+            output.push_str(", ");
+        }
+        output.push_str(&format!(
+            "{{segment_id: \"{}\", role: \"{}\", generation: {}, schema_id: \"{}\", profile_version: 1, encoder_version: \"{}\", relative_path: \"{}\", git_object_id: \"{}\", sha256: \"{}\", min_key: \"{}\", max_key: \"{}\", min_event_time: {}, max_event_time: {}, row_count: {}, compressed_bytes: {}, columns: \"{}\", row_group_index: {}, bloom: {}}}",
+            entry.segment_id,
+            entry.role.as_str(),
+            entry.generation,
+            hex(&entry.schema),
+            entry.encoder_version,
+            entry.relative_path.as_path().to_str().ok_or(RepositoryError::InvalidCompactManifest)?,
+            entry.git_object_id,
+            hex(&entry.sha256),
+            hex(&entry.min_key),
+            hex(&entry.max_key),
+            entry.min_event_time.as_ref().map(|value| format!("\"{value}\"")).unwrap_or_else(|| "null".into()),
+            entry.max_event_time.as_ref().map(|value| format!("\"{value}\"")).unwrap_or_else(|| "null".into()),
+            entry.row_count,
+            entry.compressed_bytes,
+            orna_value::base64_encode(&entry.columns),
+            entry.row_group_index,
+            entry.bloom,
+        ));
+    }
+    output.push_str("]}\n");
+    parse_row(&output)
+        .is_ok()
+        .then_some(output.into_bytes())
+        .ok_or(RepositoryError::InvalidCompactManifest)
+}
+
+struct ParsedManifestHeader {
+    table: Uuid,
+    schema: [u8; 32],
+    next_generation: u64,
+    shards: Vec<ParsedShard>,
+}
+
+struct ParsedShard {
+    file: ManagedPath,
+    min_key: Vec<u8>,
+    max_key: Vec<u8>,
+    entries: usize,
+    hash: [u8; 32],
+}
+
+fn parse_manifest_header(bytes: &[u8]) -> Result<ParsedManifestHeader, RepositoryError> {
+    let record = parse_record(bytes)?;
+    reject_unknown(
+        &record,
+        &["profile", "table", "schema", "next_generation", "shards"],
+    )?;
+    if string_field(&record, "profile")? != COMPACT_PROFILE {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+    let table = Uuid::parse_str(string_field(&record, "table")?)
+        .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+    let schema = parse_hex_32(string_field(&record, "schema")?)?;
+    let next_generation = integer_field(&record, "next_generation")?;
+    if next_generation == 0 {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+    let mut shards = Vec::new();
+    let mut expected_number = 0_u64;
+    let mut expected_shard_paths = BTreeSet::new();
+    for shard in list_field(&record, "shards")? {
+        let shard = as_record(shard)?;
+        reject_unknown(
+            &shard,
+            &["number", "min_key", "max_key", "entries", "file", "hash"],
+        )?;
+        let number = integer_field(&shard, "number")?;
+        let declared_entries = usize::try_from(integer_field(&shard, "entries")?)
+            .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+        if number != expected_number
+            || declared_entries == 0
+            || declared_entries > COMPACT_MANIFEST_SHARD_LIMIT
+        {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        expected_number = expected_number
+            .checked_add(1)
+            .ok_or(RepositoryError::InvalidCompactManifest)?;
+        let file = shard_path(table, number)?;
+        let expected_relative = file
+            .as_path()
+            .strip_prefix(compact_root(table).as_path())
+            .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+        if string_field(&shard, "file")?
+            != expected_relative
+                .to_str()
+                .ok_or(RepositoryError::InvalidCompactManifest)?
+            || !expected_shard_paths.insert(path_key(&file)?)
+        {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        let hash = parse_hex_32(string_field(&shard, "hash")?)?;
+        let min_key = decode_hex(string_field(&shard, "min_key")?)?;
+        let max_key = decode_hex(string_field(&shard, "max_key")?)?;
+        shards.push(ParsedShard {
+            file,
+            min_key,
+            max_key,
+            entries: declared_entries,
+            hash,
+        });
+    }
+    Ok(ParsedManifestHeader {
+        table,
+        schema,
+        next_generation,
+        shards,
+    })
+}
+
+fn parse_shard(bytes: &[u8]) -> Result<Vec<CompactManifestEntry>, RepositoryError> {
+    let record = parse_record(bytes)?;
+    reject_unknown(&record, &["entries"])?;
+    let mut entries = Vec::new();
+    for value in list_field(&record, "entries")? {
+        let fields = as_record(value)?;
+        reject_unknown(
+            &fields,
+            &[
+                "segment_id",
+                "role",
+                "generation",
+                "schema_id",
+                "profile_version",
+                "encoder_version",
+                "relative_path",
+                "git_object_id",
+                "sha256",
+                "min_key",
+                "max_key",
+                "min_event_time",
+                "max_event_time",
+                "row_count",
+                "compressed_bytes",
+                "columns",
+                "row_group_index",
+                "bloom",
+            ],
+        )?;
+        if integer_field(&fields, "profile_version")? != 1 {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        let segment_id = Uuid::parse_str(string_field(&fields, "segment_id")?)
+            .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+        let min_event_time = nullable_string_field(&fields, "min_event_time")?;
+        let max_event_time = nullable_string_field(&fields, "max_event_time")?;
+        let entry = CompactManifestEntry {
+            segment_id,
+            role: CompactSegmentRole::parse(string_field(&fields, "role")?)?,
+            generation: integer_field(&fields, "generation")?,
+            schema: parse_hex_32(string_field(&fields, "schema_id")?)?,
+            encoder_version: string_field(&fields, "encoder_version")?.to_owned(),
+            relative_path: ManagedPath::new(string_field(&fields, "relative_path")?)?,
+            git_object_id: string_field(&fields, "git_object_id")?.to_owned(),
+            sha256: parse_hex_32(string_field(&fields, "sha256")?)?,
+            min_key: decode_hex(string_field(&fields, "min_key")?)?,
+            max_key: decode_hex(string_field(&fields, "max_key")?)?,
+            min_event_time,
+            max_event_time,
+            row_count: integer_field(&fields, "row_count")?,
+            compressed_bytes: integer_field(&fields, "compressed_bytes")?,
+            columns: decode_base64(string_field(&fields, "columns")?)?,
+            row_group_index: boolean_field(&fields, "row_group_index")?,
+            bloom: boolean_field(&fields, "bloom")?,
+        };
+        entries.push(entry);
+    }
+    if entries.is_empty() || entries.len() > COMPACT_MANIFEST_SHARD_LIMIT {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+    Ok(entries)
+}
+
+fn parse_record(bytes: &[u8]) -> Result<Vec<orna_syntax::RecordField>, RepositoryError> {
+    let text = std::str::from_utf8(bytes).map_err(|_| RepositoryError::InvalidCompactManifest)?;
+    let parsed = parse_row(text);
+    if !parsed.is_ok() {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+    as_record(&parsed.value)
+}
+
+fn as_record(value: &Expr) -> Result<Vec<orna_syntax::RecordField>, RepositoryError> {
+    match value {
+        Expr::Record { fields, .. } => Ok(fields.clone()),
+        _ => Err(RepositoryError::InvalidCompactManifest),
+    }
+}
+
+fn reject_unknown(
+    fields: &[orna_syntax::RecordField],
+    names: &[&str],
+) -> Result<(), RepositoryError> {
+    let mut seen = BTreeSet::new();
+    if fields
+        .iter()
+        .any(|field| !names.contains(&field.name.as_str()) || !seen.insert(field.name.as_str()))
+    {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+    Ok(())
+}
+
+fn field<'a>(
+    fields: &'a [orna_syntax::RecordField],
+    name: &str,
+) -> Result<&'a Expr, RepositoryError> {
+    let mut values = fields
+        .iter()
+        .filter(|field| field.name == name)
+        .map(|field| &field.value);
+    let Some(value) = values.next() else {
+        return Err(RepositoryError::InvalidCompactManifest);
+    };
+    if values.next().is_some() {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+    Ok(value)
+}
+
+fn string_field<'a>(
+    fields: &'a [orna_syntax::RecordField],
+    name: &str,
+) -> Result<&'a str, RepositoryError> {
+    let Expr::Literal {
+        text,
+        kind: LiteralKind::String,
+        ..
+    } = field(fields, name)?
+    else {
+        return Err(RepositoryError::InvalidCompactManifest);
+    };
+    let value = text
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .ok_or(RepositoryError::InvalidCompactManifest)?;
+    if value.contains('\\') {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+    Ok(value)
+}
+
+fn integer_field(fields: &[orna_syntax::RecordField], name: &str) -> Result<u64, RepositoryError> {
+    let Expr::Literal {
+        text,
+        kind: LiteralKind::Integer,
+        ..
+    } = field(fields, name)?
+    else {
+        return Err(RepositoryError::InvalidCompactManifest);
+    };
+    text.parse()
+        .map_err(|_| RepositoryError::InvalidCompactManifest)
+}
+
+fn nullable_string_field(
+    fields: &[orna_syntax::RecordField],
+    name: &str,
+) -> Result<Option<String>, RepositoryError> {
+    match field(fields, name)? {
+        Expr::Literal {
+            text,
+            kind: LiteralKind::Null,
+            ..
+        } if text == "null" => Ok(None),
+        Expr::Literal {
+            text,
+            kind: LiteralKind::String,
+            ..
+        } => {
+            let value = text
+                .strip_prefix('"')
+                .and_then(|value| value.strip_suffix('"'))
+                .ok_or(RepositoryError::InvalidCompactManifest)?;
+            if value.is_empty() || value.contains('\\') || !value.bytes().all(is_safe_atom) {
+                return Err(RepositoryError::InvalidCompactManifest);
+            }
+            Ok(Some(value.to_owned()))
+        }
+        _ => Err(RepositoryError::InvalidCompactManifest),
+    }
+}
+
+fn boolean_field(fields: &[orna_syntax::RecordField], name: &str) -> Result<bool, RepositoryError> {
+    let Expr::Literal {
+        text,
+        kind: LiteralKind::Boolean,
+        ..
+    } = field(fields, name)?
+    else {
+        return Err(RepositoryError::InvalidCompactManifest);
+    };
+    match text.as_str() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(RepositoryError::InvalidCompactManifest),
+    }
+}
+
+fn list_field<'a>(
+    fields: &'a [orna_syntax::RecordField],
+    name: &str,
+) -> Result<&'a [Expr], RepositoryError> {
+    let Expr::List { elements, .. } = field(fields, name)? else {
+        return Err(RepositoryError::InvalidCompactManifest);
+    };
+    Ok(elements)
+}
+
+fn hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut result = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        result.push(HEX[usize::from(byte >> 4)] as char);
+        result.push(HEX[usize::from(byte & 15)] as char);
+    }
+    result
+}
+
+fn decode_hex(value: &str) -> Result<Vec<u8>, RepositoryError> {
+    if !value.len().is_multiple_of(2) || !value.bytes().all(is_hex) {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+    let (pairs, []) = value.as_bytes().as_chunks::<2>() else {
+        return Err(RepositoryError::InvalidCompactManifest);
+    };
+    pairs
+        .iter()
+        .map(|pair| {
+            let high = (pair[0] as char)
+                .to_digit(16)
+                .ok_or(RepositoryError::InvalidCompactManifest)?;
+            let low = (pair[1] as char)
+                .to_digit(16)
+                .ok_or(RepositoryError::InvalidCompactManifest)?;
+            u8::try_from((high << 4) | low).map_err(|_| RepositoryError::InvalidCompactManifest)
+        })
+        .collect()
+}
+
+fn parse_hex_32(value: &str) -> Result<[u8; 32], RepositoryError> {
+    let bytes = decode_hex(value)?;
+    bytes
+        .try_into()
+        .map_err(|_| RepositoryError::InvalidCompactManifest)
+}
+
+fn decode_base64(value: &str) -> Result<Vec<u8>, RepositoryError> {
+    orna_value::base64_decode(value).map_err(|_| RepositoryError::InvalidCompactManifest)
+}
+
+fn is_hex(byte: u8) -> bool {
+    byte.is_ascii_hexdigit()
+}
+fn is_safe_atom(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b':' | b'+')
+}
+
+fn is_selected_ref(value: &str) -> bool {
+    value.starts_with("refs/heads/")
+        && value.len() > "refs/heads/".len()
+        && !value.ends_with('/')
+        && !value.contains("//")
+        && !value.contains("..")
+        && value.bytes().all(|byte| is_safe_atom(byte) || byte == b'/')
+}
+
+fn put_u32(bytes: &mut Vec<u8>, value: usize) -> Result<(), RepositoryError> {
+    let value = u32::try_from(value).map_err(|_| RepositoryError::InvalidPublicationJournal)?;
+    bytes.extend_from_slice(&value.to_be_bytes());
+    Ok(())
+}
+fn put_u64(bytes: &mut Vec<u8>, value: u64) {
+    bytes.extend_from_slice(&value.to_be_bytes());
+}
+fn put_string(bytes: &mut Vec<u8>, value: &str) -> Result<(), RepositoryError> {
+    put_u32(bytes, value.len())?;
+    bytes.extend_from_slice(value.as_bytes());
+    Ok(())
+}
+fn take_u32(bytes: &[u8], cursor: &mut usize) -> Result<u32, RepositoryError> {
+    Ok(u32::from_be_bytes(take_fixed::<4>(bytes, cursor)?))
+}
+fn take_u64(bytes: &[u8], cursor: &mut usize) -> Result<u64, RepositoryError> {
+    Ok(u64::from_be_bytes(take_fixed::<8>(bytes, cursor)?))
+}
+fn take_string(bytes: &[u8], cursor: &mut usize) -> Result<String, RepositoryError> {
+    let length = usize::try_from(take_u32(bytes, cursor)?)
+        .map_err(|_| RepositoryError::InvalidPublicationJournal)?;
+    let end = cursor
+        .checked_add(length)
+        .ok_or(RepositoryError::InvalidPublicationJournal)?;
+    let value = bytes
+        .get(*cursor..end)
+        .ok_or(RepositoryError::InvalidPublicationJournal)?;
+    *cursor = end;
+    String::from_utf8(value.to_vec()).map_err(|_| RepositoryError::InvalidPublicationJournal)
+}
+fn take_fixed<const N: usize>(
+    bytes: &[u8],
+    cursor: &mut usize,
+) -> Result<[u8; N], RepositoryError> {
+    let end = cursor
+        .checked_add(N)
+        .ok_or(RepositoryError::InvalidPublicationJournal)?;
+    let value = bytes
+        .get(*cursor..end)
+        .ok_or(RepositoryError::InvalidPublicationJournal)?;
+    *cursor = end;
+    value
+        .try_into()
+        .map_err(|_| RepositoryError::InvalidPublicationJournal)
+}
+
+impl fmt::Display for CompactSegmentRole {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[cfg(feature = "legacy-fixture-writer")]
+mod legacy_fixture_builder;
+#[cfg(any(test, feature = "legacy-fixture-writer"))]
+mod legacy_fixture_writer;
+#[cfg(feature = "legacy-fixture-writer")]
+pub use legacy_fixture_builder::{
+    write_legacy_format1_fixture, write_legacy_format1_golden_fixture,
+};
+
+#[cfg(test)]
+mod legacy_reader_tests;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+    use parquet::{
+        basic::{Compression, PageType},
+        column::reader::ColumnReader,
+        data_type::{BoolType, Int64Type},
+        file::{
+            metadata::{KeyValue, ParquetMetaDataWriter},
+            properties::{WriterProperties, WriterVersion},
+            reader::{FileReader, SerializedFileReader},
+            writer::SerializedFileWriter,
+        },
+        schema::parser::parse_message_type,
+    };
+    use std::{fs, path::Path, process::Command, sync::Arc};
+    use tempfile::TempDir;
+
+    const BOOL_TABLE: Uuid = Uuid::from_u128(2);
+    const BOOL_FIELD: Uuid = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0001);
+    const BOOL_SEGMENT: Uuid = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0002);
+
+    fn bool_columns(field: Uuid) -> Vec<u8> {
+        CanonicalValue::new(OvbRaw::Array(vec![OvbRaw::Array(vec![
+            OvbRaw::Array(vec![OvbRaw::Tag(
+                37,
+                Box::new(OvbRaw::Bytes(field.as_bytes().to_vec())),
+            )]),
+            OvbRaw::Array(vec![OvbRaw::Text(format!("f_{}", field.simple()))]),
+            OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Bool".to_owned())]),
+            OvbRaw::Text("bool".to_owned()),
+            OvbRaw::Array(Vec::new()),
+        ])]))
+        .unwrap()
+        .encode()
+        .unwrap()
+    }
+
+    fn bool_schema(table: Uuid, field: Uuid) -> SchemaDescriptor {
+        SchemaDescriptor::new(OvbRaw::Map(vec![
+            (OvbRaw::Int(0.into()), OvbRaw::Int(1.into())),
+            (
+                OvbRaw::Int(1.into()),
+                OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(table.as_bytes().to_vec()))),
+            ),
+            (
+                OvbRaw::Int(2.into()),
+                OvbRaw::Array(vec![OvbRaw::Tag(
+                    37,
+                    Box::new(OvbRaw::Bytes(field.as_bytes().to_vec())),
+                )]),
+            ),
+            (
+                OvbRaw::Int(3.into()),
+                OvbRaw::Array(vec![OvbRaw::Array(vec![
+                    OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(field.as_bytes().to_vec()))),
+                    OvbRaw::Text(format!("f_{}", field.simple())),
+                    OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Bool".to_owned())]),
+                    OvbRaw::Int(0.into()),
+                    OvbRaw::Array(vec![OvbRaw::Int(0.into())]),
+                ])]),
+            ),
+            (OvbRaw::Int(4.into()), OvbRaw::Array(Vec::new())),
+        ]))
+        .unwrap()
+    }
+
+    const NESTED_TABLE: Uuid = Uuid::from_u128(3);
+    const NESTED_KEY: Uuid = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0010);
+    const NESTED_OPTION: Uuid = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0011);
+    const NESTED_LIST: Uuid = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0012);
+
+    fn nested_schema() -> SchemaDescriptor {
+        nested_schema_with_list_type(
+            OvbRaw::Array(vec![
+                OvbRaw::Int(1.into()),
+                OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Int".into())]),
+            ]),
+            OvbRaw::Int(1.into()),
+        )
+    }
+
+    fn nested_schema_with_list_role(list_role: OvbRaw) -> SchemaDescriptor {
+        nested_schema_with_list_type(
+            OvbRaw::Array(vec![
+                OvbRaw::Int(1.into()),
+                OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Int".into())]),
+            ]),
+            list_role,
+        )
+    }
+
+    fn nested_schema_with_list_type(list_type: OvbRaw, list_role: OvbRaw) -> SchemaDescriptor {
+        let primitive = OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Int".into())]);
+        let list_is_key = matches!(&list_role, OvbRaw::Int(value) if value.to_string() == "0");
+        let mut key_fields = vec![OvbRaw::Tag(
+            37,
+            Box::new(OvbRaw::Bytes(NESTED_KEY.as_bytes().to_vec())),
+        )];
+        if list_is_key {
+            key_fields.push(OvbRaw::Tag(
+                37,
+                Box::new(OvbRaw::Bytes(NESTED_LIST.as_bytes().to_vec())),
+            ));
+        }
+        SchemaDescriptor::new(OvbRaw::Map(vec![
+            (OvbRaw::Int(0.into()), OvbRaw::Int(1.into())),
+            (
+                OvbRaw::Int(1.into()),
+                OvbRaw::Tag(
+                    37,
+                    Box::new(OvbRaw::Bytes(NESTED_TABLE.as_bytes().to_vec())),
+                ),
+            ),
+            (OvbRaw::Int(2.into()), OvbRaw::Array(key_fields)),
+            (
+                OvbRaw::Int(3.into()),
+                OvbRaw::Array(vec![
+                    OvbRaw::Array(vec![
+                        OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(NESTED_KEY.as_bytes().to_vec()))),
+                        OvbRaw::Text("key".into()),
+                        primitive.clone(),
+                        OvbRaw::Int(0.into()),
+                        OvbRaw::Array(vec![OvbRaw::Int(0.into())]),
+                    ]),
+                    OvbRaw::Array(vec![
+                        OvbRaw::Tag(
+                            37,
+                            Box::new(OvbRaw::Bytes(NESTED_OPTION.as_bytes().to_vec())),
+                        ),
+                        OvbRaw::Text("optional".into()),
+                        OvbRaw::Array(vec![OvbRaw::Int(2.into()), primitive.clone()]),
+                        OvbRaw::Int(1.into()),
+                        OvbRaw::Array(vec![OvbRaw::Int(0.into())]),
+                    ]),
+                    OvbRaw::Array(vec![
+                        OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(NESTED_LIST.as_bytes().to_vec()))),
+                        OvbRaw::Text("list".into()),
+                        list_type,
+                        list_role,
+                        OvbRaw::Array(vec![OvbRaw::Int(0.into())]),
+                    ]),
+                ]),
+            ),
+            (OvbRaw::Int(4.into()), OvbRaw::Array(Vec::new())),
+        ]))
+        .unwrap()
+    }
+    fn nested_columns() -> Vec<u8> {
+        nested_columns_with_list_suffix(&["list", "element"])
+    }
+
+    fn nested_columns_with_list_suffix(list_suffix: &[&str]) -> Vec<u8> {
+        let descriptor = |field: Uuid, suffix: &[&str]| {
+            let mut ids = vec![OvbRaw::Tag(
+                37,
+                Box::new(OvbRaw::Bytes(field.as_bytes().to_vec())),
+            )];
+            ids.extend(suffix.iter().map(|part| OvbRaw::Text((*part).into())));
+            let mut path = vec![OvbRaw::Text(format!("f_{}", field.simple()))];
+            path.extend(suffix.iter().map(|part| OvbRaw::Text((*part).into())));
+            OvbRaw::Array(vec![
+                OvbRaw::Array(ids),
+                OvbRaw::Array(path),
+                OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Int".into())]),
+                OvbRaw::Text("int64".into()),
+                OvbRaw::Array(Vec::new()),
+            ])
+        };
+        CanonicalValue::new(OvbRaw::Array(vec![
+            descriptor(NESTED_KEY, &[]),
+            descriptor(NESTED_OPTION, &["value"]),
+            descriptor(NESTED_LIST, list_suffix),
+        ]))
+        .unwrap()
+        .encode()
+        .unwrap()
+    }
+    fn nested_ovb_columns() -> Vec<u8> {
+        let descriptor = |field: Uuid, suffix: &[&str], encoding: &str, parameters: Vec<OvbRaw>| {
+            let mut ids = vec![OvbRaw::Tag(
+                37,
+                Box::new(OvbRaw::Bytes(field.as_bytes().to_vec())),
+            )];
+            ids.extend(suffix.iter().map(|part| OvbRaw::Text((*part).into())));
+            let mut path = vec![OvbRaw::Text(format!("f_{}", field.simple()))];
+            path.extend(suffix.iter().map(|part| OvbRaw::Text((*part).into())));
+            OvbRaw::Array(vec![
+                OvbRaw::Array(ids),
+                OvbRaw::Array(path),
+                OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Int".into())]),
+                OvbRaw::Text(encoding.into()),
+                OvbRaw::Array(parameters),
+            ])
+        };
+        CanonicalValue::new(OvbRaw::Array(vec![
+            descriptor(NESTED_KEY, &[], "int64", Vec::new()),
+            descriptor(
+                NESTED_OPTION,
+                &["value"],
+                "ovb",
+                vec![OvbRaw::Int(1.into())],
+            ),
+            descriptor(
+                NESTED_LIST,
+                &["list", "element"],
+                "ovb",
+                vec![OvbRaw::Int(1.into())],
+            ),
+        ]))
+        .unwrap()
+        .encode()
+        .unwrap()
+    }
+
+    #[derive(Clone, Copy)]
+    enum NestedListShape {
+        Required,
+        OptionList,
+        ListOption,
+    }
+
+    fn nested_parquet(schema: &SchemaDescriptor, columns: &[u8]) -> Vec<u8> {
+        nested_parquet_with_list_values(
+            schema,
+            columns,
+            NestedListShape::Required,
+            false,
+            &[20, 21, 22],
+            &[0, 1, 0],
+        )
+    }
+
+    fn nested_parquet_with_list_element_optional(
+        schema: &SchemaDescriptor,
+        columns: &[u8],
+        optional_element: bool,
+    ) -> Vec<u8> {
+        nested_parquet_with_list_values(
+            schema,
+            columns,
+            NestedListShape::Required,
+            optional_element,
+            &[20, 21, 22],
+            &[0, 1, 0],
+        )
+    }
+
+    fn nested_parquet_with_list_values(
+        schema: &SchemaDescriptor,
+        columns: &[u8],
+        shape: NestedListShape,
+        optional_element: bool,
+        list_values: &[i64],
+        list_repetition_levels: &[i16],
+    ) -> Vec<u8> {
+        assert_eq!(list_values.len(), list_repetition_levels.len());
+        let element = if optional_element {
+            "OPTIONAL INT64 element;"
+        } else {
+            "REQUIRED INT64 element;"
+        };
+        let list_schema = match shape {
+            NestedListShape::Required => format!(
+                "REQUIRED group f_{} (LIST) {{
+                    REPEATED group list {{ {element} }}
+                }}",
+                NESTED_LIST.simple(),
+            ),
+            NestedListShape::OptionList => format!(
+                "OPTIONAL group f_{} {{
+                    REQUIRED group value (LIST) {{
+                        REPEATED group list {{ REQUIRED INT64 element; }}
+                    }}
+                }}",
+                NESTED_LIST.simple(),
+            ),
+            NestedListShape::ListOption => format!(
+                "REQUIRED group f_{} (LIST) {{
+                    REPEATED group list {{
+                        OPTIONAL group element {{ REQUIRED INT64 value; }}
+                    }}
+                }}",
+                NESTED_LIST.simple(),
+            ),
+        };
+        let schema_descriptor = Arc::new(
+            parse_message_type(&format!(
+                "message schema {{
+                    REQUIRED INT64 f_{};
+                    OPTIONAL group f_{} {{ REQUIRED INT64 value; }}
+                    {list_schema}
+                }}",
+                NESTED_KEY.simple(),
+                NESTED_OPTION.simple(),
+            ))
+            .unwrap(),
+        );
+        let metadata = vec![
+            KeyValue::new("orna.profile".into(), Some(COMPACT_PROFILE.into())),
+            KeyValue::new("orna.table".into(), Some(NESTED_TABLE.to_string())),
+            KeyValue::new(
+                "orna.schema.sha256".into(),
+                Some(hex(&schema_descriptor_fingerprint(schema).unwrap())),
+            ),
+            KeyValue::new(
+                "orna.schema.ovb".into(),
+                Some(orna_value::base64_encode(&schema.encode().unwrap())),
+            ),
+            KeyValue::new(
+                "orna.columns.ovb".into(),
+                Some(orna_value::base64_encode(columns)),
+            ),
+            KeyValue::new("orna.encoder".into(), Some("test-encoder-v1".into())),
+        ];
+        let properties = Arc::new(
+            WriterProperties::builder()
+                .set_compression(Compression::ZSTD(Default::default()))
+                .set_dictionary_enabled(false)
+                .set_encoding(Encoding::PLAIN)
+                .set_writer_version(WriterVersion::PARQUET_2_0)
+                .set_key_value_metadata(Some(metadata))
+                .build(),
+        );
+        let mut bytes = Vec::new();
+        let mut writer =
+            SerializedFileWriter::new(&mut bytes, schema_descriptor, properties).unwrap();
+        let mut row_group = writer.next_row_group().unwrap();
+        let mut column = row_group.next_column().unwrap().unwrap();
+        column
+            .typed::<Int64Type>()
+            .write_batch(&[1, 2], None, None)
+            .unwrap();
+        column.close().unwrap();
+        let mut column = row_group.next_column().unwrap().unwrap();
+        column
+            .typed::<Int64Type>()
+            .write_batch(&[10], Some(&[1, 0]), None)
+            .unwrap();
+        column.close().unwrap();
+        let element_definition_level: i16 = match shape {
+            NestedListShape::Required => {
+                if optional_element {
+                    2
+                } else {
+                    1
+                }
+            }
+            NestedListShape::OptionList | NestedListShape::ListOption => 2,
+        };
+        let element_definition_levels = vec![element_definition_level; list_values.len()];
+        let mut column = row_group.next_column().unwrap().unwrap();
+        column
+            .typed::<Int64Type>()
+            .write_batch(
+                list_values,
+                Some(&element_definition_levels),
+                Some(list_repetition_levels),
+            )
+            .unwrap();
+        column.close().unwrap();
+        row_group.close().unwrap();
+        writer.close().unwrap();
+        let footer = footer_start(&bytes);
+        assert_eq!(&bytes[footer..footer + 2], &[0x15, 0x04]);
+        bytes[footer + 1] = 0x02;
+        with_page_checksums_for_all_columns(bytes)
+    }
+
+    fn test_repository() -> (TempDir, Repository) {
+        let temp = TempDir::new().unwrap();
+        test_git(temp.path(), &["init", "-b", "main"]);
+        crate::test_support::configure_fixture_git_identity(temp.path());
+        test_git(temp.path(), &["config", "commit.gpgsign", "false"]);
+        fs::write(temp.path().join("main.orna"), "module main;\n").unwrap();
+        fs::create_dir_all(temp.path().join(".orna")).unwrap();
+        fs::write(
+            temp.path().join(".orna/format.orna"),
+            "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n",
+        )
+        .unwrap();
+        test_git(temp.path(), &["add", "."]);
+        test_git(temp.path(), &["commit", "-m", "initial"]);
+        let repository = Repository::discover(temp.path()).unwrap();
+        (temp, repository)
+    }
+
+    fn publish_and_read_nested_shape(
+        schema_descriptor: SchemaDescriptor,
+        columns: Vec<u8>,
+        bytes: Vec<u8>,
+        segment_id: Uuid,
+    ) {
+        let schema = schema_descriptor_fingerprint(&schema_descriptor).unwrap();
+        let (root, repository) = test_repository();
+        let path = ManagedPath::new(format!(
+            ".orna/storage/{NESTED_TABLE}/data/{}/{segment_id}.parquet",
+            &segment_id.to_string()[..2]
+        ))
+        .unwrap();
+        let key_min = CanonicalValue::new(OvbRaw::Int(1.into()))
+            .unwrap()
+            .encode()
+            .unwrap();
+        let key_max = CanonicalValue::new(OvbRaw::Int(2.into()))
+            .unwrap()
+            .encode()
+            .unwrap();
+        let segment = CompactSegment::new(
+            segment_id,
+            CompactSegmentRole::Data,
+            schema,
+            "test-encoder-v1",
+            path,
+            bytes,
+            key_min,
+            key_max,
+            2,
+            columns,
+            true,
+            false,
+        )
+        .unwrap();
+        let head = repository.head().unwrap().unwrap();
+        let plan = repository
+            .prepare_compact_publication(
+                &head,
+                repository.index_generation().unwrap(),
+                CompactManifest::empty(NESTED_TABLE, schema),
+                [11; 16],
+                [11; 32],
+                &[segment],
+                "publish nested List shape",
+            )
+            .unwrap();
+        let manifest = plan.manifest().clone();
+        repository
+            .read_verified_compact_segment(
+                plan.candidate_commit(),
+                NESTED_TABLE,
+                &manifest.entries()[0],
+            )
+            .unwrap();
+        drop(root);
+    }
+
+    fn test_git(directory: &Path, arguments: &[&str]) {
+        let output = Command::new("git")
+            .current_dir(directory)
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {arguments:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn bool_parquet(table: Uuid, schema: &SchemaDescriptor, columns: &[u8]) -> Vec<u8> {
+        bool_parquet_with_encoding(table, schema, columns, Encoding::PLAIN)
+    }
+
+    fn bool_parquet_with_encoding(
+        table: Uuid,
+        schema: &SchemaDescriptor,
+        columns: &[u8],
+        encoding: Encoding,
+    ) -> Vec<u8> {
+        let physical_name = format!("f_{}", BOOL_FIELD.simple());
+        let schema_descriptor = Arc::new(
+            parse_message_type(&format!(
+                "message schema {{ REQUIRED BOOLEAN {physical_name}; }}"
+            ))
+            .unwrap(),
+        );
+        let metadata = vec![
+            KeyValue::new("orna.profile".to_owned(), Some(COMPACT_PROFILE.to_owned())),
+            KeyValue::new("orna.table".to_owned(), Some(table.to_string())),
+            KeyValue::new(
+                "orna.schema.sha256".to_owned(),
+                Some(hex(&schema_descriptor_fingerprint(schema).unwrap())),
+            ),
+            KeyValue::new(
+                "orna.schema.ovb".to_owned(),
+                Some(orna_value::base64_encode(&schema.encode().unwrap())),
+            ),
+            KeyValue::new(
+                "orna.columns.ovb".to_owned(),
+                Some(orna_value::base64_encode(columns)),
+            ),
+            KeyValue::new(
+                "orna.encoder".to_owned(),
+                Some("test-encoder-v1".to_owned()),
+            ),
+        ];
+        let properties = Arc::new(
+            WriterProperties::builder()
+                .set_compression(Compression::ZSTD(Default::default()))
+                .set_dictionary_enabled(false)
+                .set_encoding(encoding)
+                .set_writer_version(WriterVersion::PARQUET_2_0)
+                .set_key_value_metadata(Some(metadata))
+                .build(),
+        );
+        let mut bytes = Vec::new();
+        let mut writer =
+            SerializedFileWriter::new(&mut bytes, schema_descriptor, properties).unwrap();
+        let mut row_group = writer.next_row_group().unwrap();
+        let mut column = row_group.next_column().unwrap().unwrap();
+        column
+            .typed::<BoolType>()
+            .write_batch(&[false, true], None, None)
+            .unwrap();
+        column.close().unwrap();
+        row_group.close().unwrap();
+        writer.close().unwrap();
+
+        let footer = footer_start(&bytes);
+        assert_eq!(&bytes[footer..footer + 2], &[0x15, 0x04]);
+        bytes[footer + 1] = 0x02;
+        with_page_checksum(bytes)
+    }
+
+    struct TestPageHeader {
+        encoded_len: usize,
+        compressed_len: usize,
+        checksum_predecessor: u8,
+        next_field_offset: Option<usize>,
+        next_field_id: Option<u8>,
+        stop_offset: usize,
+    }
+
+    fn page_header(bytes: &[u8]) -> TestPageHeader {
+        let mut cursor = 0;
+        let mut previous = 0_u8;
+        let mut compressed_len = None;
+        let mut next_field_offset = None;
+        let mut next_field_id = None;
+        let mut checksum_predecessor = None;
+        loop {
+            let field_offset = cursor;
+            let tag = take_compact_byte(bytes, &mut cursor).unwrap();
+            let kind = tag & 0x0f;
+            if kind == 0 {
+                return TestPageHeader {
+                    encoded_len: cursor,
+                    compressed_len: compressed_len.unwrap(),
+                    checksum_predecessor: checksum_predecessor.unwrap_or(previous),
+                    next_field_offset,
+                    next_field_id,
+                    stop_offset: field_offset,
+                };
+            }
+            let delta = tag >> 4;
+            let field = if delta == 0 {
+                decode_compact_i16(bytes, &mut cursor).unwrap() as u8
+            } else {
+                previous.checked_add(delta).unwrap()
+            };
+            if field > 4 && next_field_offset.is_none() {
+                next_field_offset = Some(field_offset);
+                next_field_id = Some(field);
+                checksum_predecessor = Some(previous);
+            }
+            if field == 3 && kind == 5 {
+                compressed_len =
+                    Some(usize::try_from(decode_compact_i32(bytes, &mut cursor).unwrap()).unwrap());
+            } else {
+                skip_compact_value(bytes, &mut cursor, kind, 0).unwrap();
+            }
+            previous = field;
+        }
+    }
+
+    fn with_page_checksum(bytes: Vec<u8>) -> Vec<u8> {
+        let reader = SerializedFileReader::new(Bytes::from(bytes.clone())).unwrap();
+        let metadata = reader.metadata().clone();
+        let column = metadata.row_group(0).column(0);
+        let start = usize::try_from(column.data_page_offset()).unwrap();
+        let length = usize::try_from(column.compressed_size()).unwrap();
+        let header = page_header(&bytes[start..start + length]);
+        let body_start = start + header.encoded_len;
+        let body_end = body_start + header.compressed_len;
+        let checksum = crc32(&bytes[body_start..body_end]) as i32;
+        let checksum_delta = 4_u8
+            .checked_sub(header.checksum_predecessor)
+            .expect("checksum field follows compressed length");
+        let mut checksum_field = vec![(checksum_delta << 4) | 5];
+        encode_compact_varint(
+            ((i64::from(checksum) << 1) ^ (i64::from(checksum) >> 31)) as u64,
+            &mut checksum_field,
+        );
+        let footer = footer_start(&bytes);
+        let mut data = bytes[..footer].to_vec();
+        let insertion = start + header.next_field_offset.unwrap_or(header.stop_offset);
+        data.splice(insertion..insertion, checksum_field.iter().copied());
+        if let Some(next) = header.next_field_offset {
+            let position = start + next + checksum_field.len();
+            let delta = header.next_field_id.unwrap().checked_sub(4).unwrap();
+            data[position] = (data[position] & 0x0f) | (delta << 4);
+        }
+
+        let mut metadata = metadata.into_builder();
+        let mut row_groups = metadata.take_row_groups();
+        let row_group = row_groups.pop().unwrap();
+        let mut row_group = row_group.into_builder();
+        let mut columns = row_group.take_columns();
+        let column = columns.pop().unwrap();
+        let compressed_size = column.compressed_size();
+        columns.push(
+            column
+                .into_builder()
+                .set_total_compressed_size(
+                    compressed_size + i64::try_from(data.len() - footer).unwrap(),
+                )
+                .build()
+                .unwrap(),
+        );
+        let row_group = row_group.set_column_metadata(columns).build().unwrap();
+        let metadata = metadata.add_row_group(row_group).build();
+        let mut new_footer = Vec::new();
+        ParquetMetaDataWriter::new(&mut new_footer, &metadata)
+            .finish()
+            .unwrap();
+        data.extend(new_footer);
+
+        let reader = SerializedFileReader::new(Bytes::from(data.clone())).unwrap();
+        assert_eq!(reader.metadata().file_metadata().version(), 1);
+        let group = reader.get_row_group(0).unwrap();
+        let mut pages = group.get_column_page_reader(0).unwrap();
+        let page = pages.next().unwrap().unwrap();
+        assert!(page.is_data_page());
+        assert_eq!(page.page_type(), PageType::DATA_PAGE_V2);
+        assert!(pages.next().is_none());
+        data
+    }
+
+    fn with_page_checksums_for_all_columns(bytes: Vec<u8>) -> Vec<u8> {
+        let reader = SerializedFileReader::new(Bytes::from(bytes.clone())).unwrap();
+        let metadata = reader.metadata().clone();
+        let footer = footer_start(&bytes);
+        let mut insertions = Vec::new();
+        for column in metadata.row_group(0).columns() {
+            let start = usize::try_from(column.data_page_offset()).unwrap();
+            let length = usize::try_from(column.compressed_size()).unwrap();
+            let header = page_header(&bytes[start..start + length]);
+            let body_start = start + header.encoded_len;
+            let body_end = body_start + header.compressed_len;
+            let checksum = crc32(&bytes[body_start..body_end]) as i32;
+            let delta = 4_u8.checked_sub(header.checksum_predecessor).unwrap();
+            let mut field = vec![(delta << 4) | 5];
+            encode_compact_varint(
+                ((i64::from(checksum) << 1) ^ (i64::from(checksum) >> 31)) as u64,
+                &mut field,
+            );
+            insertions.push((
+                start,
+                start + header.next_field_offset.unwrap_or(header.stop_offset),
+                field,
+                header,
+            ));
+        }
+        let mut data = bytes[..footer].to_vec();
+        for (page_start, insertion, field, header) in insertions.iter().rev() {
+            data.splice(*insertion..*insertion, field.iter().copied());
+            if let Some(next) = header.next_field_offset {
+                let position = *page_start + next + field.len();
+                let delta = header.next_field_id.unwrap().checked_sub(4).unwrap();
+                data[position] = (data[position] & 0x0f) | (delta << 4);
+            }
+        }
+        let mut metadata = metadata.into_builder();
+        let mut row_groups = metadata.take_row_groups();
+        let row_group = row_groups.pop().unwrap();
+        let mut row_group = row_group.into_builder();
+        let columns = row_group
+            .take_columns()
+            .into_iter()
+            .enumerate()
+            .map(|(index, column)| {
+                let shift = insertions
+                    .iter()
+                    .take(index)
+                    .map(|(_, _, field, _)| i64::try_from(field.len()).unwrap())
+                    .sum::<i64>();
+                let field_len = i64::try_from(insertions[index].2.len()).unwrap();
+                let start = column.data_page_offset();
+                let compressed_size = column.compressed_size();
+                column
+                    .into_builder()
+                    .set_data_page_offset(start + shift)
+                    .set_total_compressed_size(compressed_size + field_len)
+                    .build()
+                    .unwrap()
+            })
+            .collect();
+        let row_group = row_group.set_column_metadata(columns).build().unwrap();
+        let metadata = metadata.add_row_group(row_group).build();
+        let mut new_footer = Vec::new();
+        ParquetMetaDataWriter::new(&mut new_footer, &metadata)
+            .finish()
+            .unwrap();
+        data.extend(new_footer);
+        data
+    }
+
+    fn footer_start(bytes: &[u8]) -> usize {
+        let length =
+            u32::from_le_bytes(bytes[bytes.len() - 8..bytes.len() - 4].try_into().unwrap());
+        bytes.len() - 8 - usize::try_from(length).unwrap()
+    }
+
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut value = !0_u32;
+        for byte in bytes {
+            value ^= u32::from(*byte);
+            for _ in 0..8 {
+                let mask = 0_u32.wrapping_sub(value & 1);
+                value = (value >> 1) ^ (0xedb8_8320 & mask);
+            }
+        }
+        !value
+    }
+
+    fn encode_compact_varint(mut value: u64, output: &mut Vec<u8>) {
+        while value >= 0x80 {
+            output.push((value as u8 & 0x7f) | 0x80);
+            value >>= 7;
+        }
+        output.push(value as u8);
+    }
+
+    #[test]
+    fn compact_key_order_rejects_incompatible_canonical_types() {
+        let integer = CanonicalValue::new(OvbRaw::Int(1.into()))
+            .unwrap()
+            .encode()
+            .unwrap();
+        let text = CanonicalValue::new(OvbRaw::Text("1".to_owned()))
+            .unwrap()
+            .encode()
+            .unwrap();
+
+        assert!(matches!(
+            canonical_key_order(&integer, &text),
+            Err(RepositoryError::InvalidCompactManifest)
+        ));
+        assert!(matches!(
+            canonical_key_order(&text, &integer),
+            Err(RepositoryError::InvalidCompactManifest)
+        ));
+    }
+
+    #[test]
+    fn compact_key_order_uses_signed_logical_integer_order() {
+        let negative_twelve = CanonicalValue::new(OvbRaw::Int((-12).into()))
+            .unwrap()
+            .encode()
+            .unwrap();
+        let negative_two = CanonicalValue::new(OvbRaw::Int((-2).into()))
+            .unwrap()
+            .encode()
+            .unwrap();
+        let zero = CanonicalValue::new(OvbRaw::Int(0.into()))
+            .unwrap()
+            .encode()
+            .unwrap();
+
+        assert_eq!(
+            canonical_key_order(&negative_twelve, &negative_two).unwrap(),
+            Ordering::Less
+        );
+        assert_eq!(
+            canonical_key_order(&negative_two, &zero).unwrap(),
+            Ordering::Less
+        );
+    }
+
+    #[test]
+    fn compact_manifest_exposes_its_retained_schema_fingerprint() {
+        let schema = [0x42; 32];
+        let manifest = CompactManifest::empty(Uuid::from_bytes([0x11; 16]), schema);
+        assert_eq!(manifest.schema(), schema);
+    }
+
+    #[test]
+    fn compact_event_time_bounds_reject_malformed_instants() {
+        assert!(
+            validate_event_time_bounds(Some("2026-02-30T00:00:00Z"), Some("2026-03-01T00:00:00Z"),)
+                .is_err()
+        );
+        assert!(
+            validate_event_time_bounds(Some("2026-03-01T00:00:00"), Some("2026-03-01T00:00:01Z"),)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn compact_event_time_bounds_reject_non_canonical_offsets() {
+        for offset in ["+00:00", "+05:30", "-04:00"] {
+            let min = format!("2026-03-01T00:00:00{offset}");
+            assert!(validate_event_time_bounds(Some(&min), Some("2026-03-01T00:00:01Z"),).is_err());
+        }
+    }
+
+    #[test]
+    fn compact_event_time_bounds_reject_unpaired_bounds() {
+        assert!(validate_event_time_bounds(Some("2026-03-01T00:00:00Z"), None).is_err());
+        assert!(validate_event_time_bounds(None, Some("2026-03-01T00:00:00Z")).is_err());
+    }
+
+    #[test]
+    fn compact_event_time_bounds_reject_reverse_bounds() {
+        assert!(
+            validate_event_time_bounds(Some("2026-03-01T00:00:01Z"), Some("2026-03-01T00:00:00Z"),)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn compact_event_time_bounds_accept_equal_bounds() {
+        assert!(
+            validate_event_time_bounds(
+                Some("2026-03-01T00:00:00.1Z"),
+                Some("2026-03-01T00:00:00.100000000Z"),
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn compact_event_time_bounds_accept_ascending_bounds() {
+        assert!(
+            validate_event_time_bounds(
+                Some("2026-03-01T00:00:00.999999999Z"),
+                Some("2026-03-01T00:00:01Z"),
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn compact_event_time_bounds_cover_gregorian_boundaries() {
+        assert!(
+            validate_event_time_bounds(Some("2000-02-29T00:00:00Z"), Some("2000-03-01T00:00:00Z"),)
+                .is_ok()
+        );
+        assert!(
+            validate_event_time_bounds(Some("1900-02-29T00:00:00Z"), Some("1900-03-01T00:00:00Z"),)
+                .is_err()
+        );
+        assert!(
+            validate_event_time_bounds(Some("0001-01-01T00:00:00Z"), Some("9999-12-31T23:59:59Z"),)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn compact_event_time_bounds_cover_fraction_boundaries() {
+        assert!(validate_event_time_bounds(
+            Some("2026-03-01T00:00:00.Z"),
+            Some("2026-03-01T00:00:01Z"),
+        )
+        .is_err());
+        assert!(
+            validate_event_time_bounds(
+                Some("2026-03-01T00:00:00.123456789Z"),
+                Some("2026-03-01T00:00:01Z"),
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_event_time_bounds(
+                Some("2026-03-01T00:00:00.1234567890Z"),
+                Some("2026-03-01T00:00:01Z"),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn compact_event_time_bounds_order_across_epoch_boundary() {
+        assert!(
+            validate_event_time_bounds(
+                Some("1969-12-31T23:59:59.999999999Z"),
+                Some("1970-01-01T00:00:00Z"),
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn compact_segment_validation_invokes_event_time_bound_validator() {
+        let segment_id = Uuid::from_bytes([0, 0, 0, 0, 0, 0, 0x70, 0, 0x80, 0, 0, 0, 0, 0, 0, 1]);
+        let segment = CompactSegment::new(
+            segment_id,
+            CompactSegmentRole::Data,
+            [0; 32],
+            "test-encoder-v1",
+            ManagedPath::new("segment.parquet").unwrap(),
+            vec![1],
+            vec![0],
+            vec![1],
+            1,
+            Vec::new(),
+            false,
+            false,
+        )
+        .unwrap();
+        assert!(
+            segment
+                .with_event_time_bounds("2026-03-01T00:00:01Z", "2026-03-01T00:00:00Z",)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn compact_manifest_entry_exposes_validated_role_and_row_count() {
+        let table = Uuid::from_bytes([0x11; 16]);
+        let segment_id = Uuid::from_bytes([0, 0, 0, 0, 0, 0, 0x70, 0, 0x80, 0, 0, 0, 0, 0, 0, 1]);
+        let entry = CompactManifestEntry {
+            segment_id,
+            role: CompactSegmentRole::Replacement,
+            generation: 9,
+            schema: [0x42; 32],
+            encoder_version: "test".to_owned(),
+            relative_path: compact_segment_path(table, segment_id).unwrap(),
+            git_object_id: "a".repeat(40),
+            sha256: [0x43; 32],
+            min_key: vec![0],
+            max_key: vec![1],
+            min_event_time: None,
+            max_event_time: None,
+            row_count: 37,
+            compressed_bytes: 1,
+            columns: Vec::new(),
+            row_group_index: true,
+            bloom: true,
+        };
+        entry.validate(table, Some(40)).unwrap();
+        assert_eq!(entry.role(), CompactSegmentRole::Replacement);
+        assert_eq!(entry.generation(), 9);
+        assert_eq!(entry.row_count(), 37);
+        assert_eq!(entry.schema_id(), [0x42; 32]);
+        assert!(entry.columns().is_empty());
+        assert_eq!(entry.encoder_version(), "test");
+    }
+
+    #[test]
+    fn compact_manifest_entry_rejects_invalid_event_time_bounds() {
+        let table = Uuid::from_bytes([0x11; 16]);
+        let segment_id = Uuid::from_bytes([0, 0, 0, 0, 0, 0, 0x70, 0, 0x80, 0, 0, 0, 0, 0, 0, 1]);
+        let mut entry = CompactManifestEntry {
+            segment_id,
+            role: CompactSegmentRole::Data,
+            generation: 9,
+            schema: [0x42; 32],
+            encoder_version: "test".to_owned(),
+            relative_path: compact_segment_path(table, segment_id).unwrap(),
+            git_object_id: "a".repeat(40),
+            sha256: [0x43; 32],
+            min_key: vec![0],
+            max_key: vec![1],
+            min_event_time: Some("2026-03-01T00:00:00Z".to_owned()),
+            max_event_time: Some("2026-03-01T00:00:01Z".to_owned()),
+            row_count: 37,
+            compressed_bytes: 1,
+            columns: Vec::new(),
+            row_group_index: true,
+            bloom: true,
+        };
+        entry.validate(table, Some(40)).unwrap();
+
+        let invalid_bounds = [
+            (Some("2026-02-30T00:00:00Z"), Some("2026-03-01T00:00:00Z")),
+            (Some("2026-03-01T00:00:00Z"), None),
+            (None, Some("2026-03-01T00:00:00Z")),
+            (Some("2026-03-01T00:00:01Z"), Some("2026-03-01T00:00:00Z")),
+        ];
+        for (min_event_time, max_event_time) in invalid_bounds {
+            entry.min_event_time = min_event_time.map(str::to_owned);
+            entry.max_event_time = max_event_time.map(str::to_owned);
+            assert!(matches!(
+                entry.validate(table, Some(40)),
+                Err(RepositoryError::InvalidCompactManifest)
+            ));
+        }
+    }
+
+    #[test]
+    fn compact_parsed_consumer_rejects_invalid_event_time_bounds() {
+        let table = Uuid::from_bytes([0x11; 16]);
+        let segment_id = Uuid::from_bytes([0, 0, 0, 0, 0, 0, 0x70, 0, 0x80, 0, 0, 0, 0, 0, 0, 1]);
+        let shard_path = shard_path(table, 0).unwrap();
+        let manifest_path = managed_child(&compact_root(table), "manifest.orna").unwrap();
+        let mut entry = CompactManifestEntry {
+            segment_id,
+            role: CompactSegmentRole::Data,
+            generation: 1,
+            schema: [0x42; 32],
+            encoder_version: "test".to_owned(),
+            relative_path: compact_segment_path(table, segment_id).unwrap(),
+            git_object_id: "a".repeat(40),
+            sha256: [0x43; 32],
+            min_key: vec![0],
+            max_key: vec![1],
+            min_event_time: None,
+            max_event_time: None,
+            row_count: 1,
+            compressed_bytes: 1,
+            columns: Vec::new(),
+            row_group_index: false,
+            bloom: false,
+        };
+        let invalid_bounds = [
+            (Some("2026-02-30T00:00:00Z"), Some("2026-03-01T00:00:00Z")),
+            (Some("2026-03-01T00:00:00Z"), None),
+            (None, Some("2026-03-01T00:00:00Z")),
+            (Some("2026-03-01T00:00:01Z"), Some("2026-03-01T00:00:00Z")),
+        ];
+        let (root, repository) = test_repository();
+        let head = repository.head().unwrap().unwrap();
+        for (min_event_time, max_event_time) in invalid_bounds {
+            entry.min_event_time = min_event_time.map(str::to_owned);
+            entry.max_event_time = max_event_time.map(str::to_owned);
+            let shard_bytes = canonical_shard(&[&entry]).unwrap();
+            let shard = ShardDescriptor {
+                number: 0,
+                min_key: entry.min_key.clone(),
+                max_key: entry.max_key.clone(),
+                entries: 1,
+                file: shard_path.clone(),
+                hash: Sha256::digest(&shard_bytes).into(),
+                bytes: shard_bytes.clone(),
+            };
+            let manifest_bytes = canonical_manifest(
+                &CompactManifest {
+                    table,
+                    schema: entry.schema,
+                    next_generation: 2,
+                    entries: vec![entry.clone()],
+                },
+                &[shard],
+            )
+            .unwrap();
+            let candidate = repository
+                .build_private_commit(
+                    &head,
+                    &[
+                        ManagedFileChange::new(shard_path.clone(), Some(shard_bytes)),
+                        ManagedFileChange::new(manifest_path.clone(), Some(manifest_bytes.clone())),
+                    ],
+                    "invalid compact event-time consumer regression",
+                )
+                .unwrap();
+            assert!(matches!(
+                repository.read_compact_manifest_from_candidate(&candidate, &manifest_bytes),
+                Err(RepositoryError::InvalidCompactManifest)
+            ));
+        }
+        drop(root);
+    }
+
+    #[test]
+    fn publishes_and_reads_verified_bool_segment_for_bool_decoder() {
+        let descriptor = bool_schema(BOOL_TABLE, BOOL_FIELD);
+        let schema = schema_descriptor_fingerprint(&descriptor).unwrap();
+        let columns = bool_columns(BOOL_FIELD);
+        let bytes = bool_parquet(BOOL_TABLE, &descriptor, &columns);
+        let (root, repository) = test_repository();
+        let path = ManagedPath::new(format!(
+            ".orna/storage/{BOOL_TABLE}/data/{}/{BOOL_SEGMENT}.parquet",
+            &BOOL_SEGMENT.to_string()[..2]
+        ))
+        .unwrap();
+        let min_key = CanonicalValue::new(OvbRaw::Bool(false))
+            .unwrap()
+            .encode()
+            .unwrap();
+        let max_key = CanonicalValue::new(OvbRaw::Bool(true))
+            .unwrap()
+            .encode()
+            .unwrap();
+        let segment = CompactSegment::new(
+            BOOL_SEGMENT,
+            CompactSegmentRole::Data,
+            schema,
+            "test-encoder-v1",
+            path,
+            bytes,
+            min_key,
+            max_key,
+            2,
+            columns,
+            true,
+            false,
+        )
+        .unwrap();
+        let head = repository.head().unwrap().unwrap();
+        let plan = repository
+            .prepare_compact_publication(
+                &head,
+                repository.index_generation().unwrap(),
+                CompactManifest::empty(BOOL_TABLE, schema),
+                [2; 16],
+                [3; 32],
+                &[segment],
+                "bool compact publication",
+            )
+            .unwrap();
+        let manifest = plan.manifest().clone();
+        repository
+            .advance_current_ref(&head, plan.candidate())
+            .unwrap();
+        let committed = plan.candidate_commit();
+        let entry = &manifest.entries()[0];
+        let verified = repository
+            .read_verified_compact_segment(committed, BOOL_TABLE, entry)
+            .unwrap();
+        let reader = SerializedFileReader::new(Bytes::from(verified)).unwrap();
+        let group = reader.get_row_group(0).unwrap();
+        let ColumnReader::BoolColumnReader(mut bool_reader) = group.get_column_reader(0).unwrap()
+        else {
+            panic!("verified Bool segment did not reach a Bool decoder");
+        };
+        let mut values = Vec::new();
+        let (records, values_read, levels_read) = bool_reader
+            .read_records(2, None, None, &mut values)
+            .unwrap();
+        assert_eq!((records, values_read, levels_read), (2, 2, 2));
+        assert_eq!(values, [false, true]);
+        let projected = repository
+            .read_compact_committed_base(
+                committed,
+                BOOL_TABLE,
+                schema,
+                COMPACT_PROFILE,
+                |_entry, projection| Ok(projection.clone()),
+            )
+            .unwrap();
+        assert_eq!(projected.len(), 1);
+        let projection = &projected[0];
+        assert_eq!(projection.table_id(), BOOL_TABLE);
+        assert_eq!(projection.schema_id(), schema);
+        assert_eq!(projection.profile(), COMPACT_PROFILE);
+        assert_eq!(projection.generation(), 1);
+        assert_eq!(projection.rows().len(), 2);
+        assert!(matches!(
+            projection.rows()[0].key().raw(),
+            OvbRaw::Bool(false)
+        ));
+        assert!(matches!(
+            projection.rows()[1].key().raw(),
+            OvbRaw::Bool(true)
+        ));
+        assert!(projection.rows().iter().all(|row| row.value().is_some()));
+        drop(root);
+    }
+
+    #[test]
+    fn committed_compact_base_projects_old_segment_through_current_schema() {
+        let source_descriptor = bool_schema(BOOL_TABLE, BOOL_FIELD);
+        let source_schema = schema_descriptor_fingerprint(&source_descriptor).unwrap();
+        let optional_field = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0003);
+        let uuid_raw = |id: Uuid| OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(id.as_bytes().to_vec())));
+        let target_descriptor = SchemaDescriptor::new(OvbRaw::Map(vec![
+            (OvbRaw::Int(0.into()), OvbRaw::Int(1.into())),
+            (OvbRaw::Int(1.into()), uuid_raw(BOOL_TABLE)),
+            (
+                OvbRaw::Int(2.into()),
+                OvbRaw::Array(vec![uuid_raw(BOOL_FIELD)]),
+            ),
+            (
+                OvbRaw::Int(3.into()),
+                OvbRaw::Array(vec![
+                    OvbRaw::Array(vec![
+                        uuid_raw(BOOL_FIELD),
+                        OvbRaw::Text("identity".into()),
+                        OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Bool".into())]),
+                        OvbRaw::Int(0.into()),
+                        OvbRaw::Array(vec![OvbRaw::Int(0.into())]),
+                    ]),
+                    OvbRaw::Array(vec![
+                        uuid_raw(optional_field),
+                        OvbRaw::Text("label".into()),
+                        OvbRaw::Array(vec![
+                            OvbRaw::Int(2.into()),
+                            OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Str".into())]),
+                        ]),
+                        OvbRaw::Int(1.into()),
+                        OvbRaw::Array(vec![OvbRaw::Int(0.into())]),
+                    ]),
+                ]),
+            ),
+            (OvbRaw::Int(4.into()), OvbRaw::Array(Vec::new())),
+        ]))
+        .unwrap();
+        let target_schema = schema_descriptor_fingerprint(&target_descriptor).unwrap();
+        let columns = bool_columns(BOOL_FIELD);
+        let bytes = bool_parquet(BOOL_TABLE, &source_descriptor, &columns);
+        let (root, repository) = test_repository();
+        let path = ManagedPath::new(format!(
+            ".orna/storage/{BOOL_TABLE}/data/{}/{BOOL_SEGMENT}.parquet",
+            &BOOL_SEGMENT.to_string()[..2]
+        ))
+        .unwrap();
+        let min_key = CanonicalValue::new(OvbRaw::Bool(false))
+            .unwrap()
+            .encode()
+            .unwrap();
+        let max_key = CanonicalValue::new(OvbRaw::Bool(true))
+            .unwrap()
+            .encode()
+            .unwrap();
+        let segment = CompactSegment::new(
+            BOOL_SEGMENT,
+            CompactSegmentRole::Data,
+            source_schema,
+            "test-encoder-v1",
+            path,
+            bytes,
+            min_key,
+            max_key,
+            2,
+            columns,
+            true,
+            false,
+        )
+        .unwrap();
+        let head = repository.head().unwrap().unwrap();
+        let plan = repository
+            .prepare_compact_publication(
+                &head,
+                repository.index_generation().unwrap(),
+                CompactManifest::empty(BOOL_TABLE, target_schema),
+                [4; 16],
+                [5; 32],
+                &[segment],
+                "schema history projection",
+            )
+            .unwrap();
+        repository
+            .advance_current_ref(&head, plan.candidate())
+            .unwrap();
+        let projected = repository
+            .read_compact_committed_base_with_schema_history(
+                plan.candidate_commit(),
+                BOOL_TABLE,
+                target_schema,
+                &target_descriptor,
+                COMPACT_PROFILE,
+                |_entry, projection| Ok(projection.clone()),
+            )
+            .unwrap();
+        assert_eq!(projected.len(), 1);
+        let projection = &projected[0];
+        assert_eq!(projection.schema_id(), target_schema);
+        assert_eq!(projection.source_schema_id(), source_schema);
+        assert_eq!(projection.schema(), &target_descriptor);
+        assert_eq!(projection.source_schema(), &source_descriptor);
+        for row in projection.rows() {
+            let value = row.value().unwrap();
+            let OvbRaw::Tag(60009, payload) = value.raw() else {
+                panic!("history projection must return a canonical row");
+            };
+            let OvbRaw::Array(parts) = payload.as_ref() else {
+                panic!("canonical row payload must be an array");
+            };
+            let [_, OvbRaw::Array(fields)] = parts.as_slice() else {
+                panic!("canonical row must contain fields");
+            };
+            assert_eq!(fields.len(), 2);
+            assert!(matches!(
+                fields[1],
+                OvbRaw::Array(ref field)
+                    if field.len() == 2 && field[1] == OvbRaw::Null
+            ));
+        }
+        drop(root);
+    }
+
+    #[test]
+    fn publishes_verified_manifest_with_nullable_and_repeated_non_key_columns() {
+        let schema_descriptor = nested_schema();
+        let schema = schema_descriptor_fingerprint(&schema_descriptor).unwrap();
+        let columns = nested_columns();
+        let bytes = nested_parquet(&schema_descriptor, &columns);
+        let physical_reader = SerializedFileReader::new(Bytes::from(bytes.clone())).unwrap();
+        let physical_group = physical_reader.get_row_group(0).unwrap();
+        assert_eq!(physical_group.metadata().num_rows(), 2);
+        assert_eq!(physical_group.metadata().column(2).num_values(), 3);
+        let (root, repository) = test_repository();
+        let segment_id = Uuid::from_u128(0x13000000000070008000000000000000);
+        let path = ManagedPath::new(format!(
+            ".orna/storage/{NESTED_TABLE}/data/{}/{segment_id}.parquet",
+            &segment_id.to_string()[..2]
+        ))
+        .unwrap();
+        let key_min = CanonicalValue::new(OvbRaw::Int(1.into()))
+            .unwrap()
+            .encode()
+            .unwrap();
+        let key_max = CanonicalValue::new(OvbRaw::Int(2.into()))
+            .unwrap()
+            .encode()
+            .unwrap();
+        let segment = CompactSegment::new(
+            segment_id,
+            CompactSegmentRole::Data,
+            schema,
+            "test-encoder-v1",
+            path,
+            bytes,
+            key_min,
+            key_max,
+            2,
+            columns,
+            true,
+            false,
+        )
+        .unwrap();
+        let head = repository.head().unwrap().unwrap();
+        let malformed = {
+            let mut malformed = segment.clone();
+            malformed.row_count = 1;
+            malformed
+        };
+        assert!(matches!(
+            repository.prepare_compact_publication(
+                &head,
+                repository.index_generation().unwrap(),
+                CompactManifest::empty(NESTED_TABLE, schema),
+                [9; 16],
+                [9; 32],
+                &[malformed],
+                "reject nested physical row-count mismatch",
+            ),
+            Err(RepositoryError::InvalidCompactManifest)
+        ));
+        let plan = repository
+            .prepare_compact_publication(
+                &head,
+                repository.index_generation().unwrap(),
+                CompactManifest::empty(NESTED_TABLE, schema),
+                [10; 16],
+                [10; 32],
+                &[segment],
+                "publish nested physical columns",
+            )
+            .unwrap();
+        let manifest = plan.manifest().clone();
+        repository
+            .read_verified_compact_segment(
+                plan.candidate_commit(),
+                NESTED_TABLE,
+                &manifest.entries()[0],
+            )
+            .unwrap();
+        drop(root);
+    }
+
+    #[test]
+    fn publishes_and_reads_option_list_and_list_option_shapes() {
+        let primitive = OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Int".into())]);
+        let option_list = OvbRaw::Array(vec![
+            OvbRaw::Int(2.into()),
+            OvbRaw::Array(vec![OvbRaw::Int(1.into()), primitive.clone()]),
+        ]);
+        let option_list_schema = nested_schema_with_list_type(option_list, OvbRaw::Int(1.into()));
+        let option_list_columns = nested_columns_with_list_suffix(&["value", "list", "element"]);
+        let option_list_bytes = nested_parquet_with_list_values(
+            &option_list_schema,
+            &option_list_columns,
+            NestedListShape::OptionList,
+            false,
+            &[20, 21],
+            &[0, 0],
+        );
+        publish_and_read_nested_shape(
+            option_list_schema,
+            option_list_columns,
+            option_list_bytes,
+            Uuid::from_u128(0x14000000000070008000000000000000),
+        );
+
+        let list_option = OvbRaw::Array(vec![
+            OvbRaw::Int(1.into()),
+            OvbRaw::Array(vec![OvbRaw::Int(2.into()), primitive]),
+        ]);
+        let list_option_schema = nested_schema_with_list_type(list_option, OvbRaw::Int(1.into()));
+        let list_option_columns = nested_columns_with_list_suffix(&["list", "element", "value"]);
+        let list_option_bytes = nested_parquet_with_list_values(
+            &list_option_schema,
+            &list_option_columns,
+            NestedListShape::ListOption,
+            false,
+            &[20, 21],
+            &[0, 0],
+        );
+        publish_and_read_nested_shape(
+            list_option_schema,
+            list_option_columns,
+            list_option_bytes,
+            Uuid::from_u128(0x15000000000070008000000000000000),
+        );
+    }
+
+    #[test]
+    fn rejects_list_leaf_with_malformed_definition_level() {
+        let schema_descriptor = nested_schema();
+        let schema = schema_descriptor_fingerprint(&schema_descriptor).unwrap();
+        let columns = nested_columns();
+        let bytes = nested_parquet_with_list_element_optional(&schema_descriptor, &columns, true);
+
+        assert!(matches!(
+            verify_physical_metadata(
+                NESTED_TABLE,
+                CompactSegmentRole::Data,
+                schema,
+                "test-encoder-v1",
+                &columns,
+                2,
+                &bytes,
+            ),
+            Err(RepositoryError::InvalidCompactManifest)
+        ));
+    }
+
+    #[test]
+    fn rejects_repeated_primary_key_even_when_one_value_per_row() {
+        let schema_descriptor = nested_schema_with_list_role(OvbRaw::Int(0.into()));
+        let schema = schema_descriptor_fingerprint(&schema_descriptor).unwrap();
+        let columns = nested_columns();
+        let bytes = nested_parquet_with_list_values(
+            &schema_descriptor,
+            &columns,
+            NestedListShape::Required,
+            false,
+            &[20, 21],
+            &[0, 0],
+        );
+        let reader = SerializedFileReader::new(Bytes::from(bytes.clone())).unwrap();
+        let group = reader.get_row_group(0).unwrap();
+        assert_eq!(group.metadata().num_rows(), 2);
+        assert_eq!(group.metadata().column(2).num_values(), 2);
+
+        assert!(matches!(
+            verify_physical_metadata(
+                NESTED_TABLE,
+                CompactSegmentRole::Data,
+                schema,
+                "test-encoder-v1",
+                &columns,
+                2,
+                &bytes,
+            ),
+            Err(RepositoryError::InvalidCompactManifest)
+        ));
+    }
+    #[test]
+    fn accepts_ovb_optional_and_repeated_non_key_mappings() {
+        let descriptor = nested_schema();
+        let parquet_schema = Arc::new(
+            parse_message_type(&format!(
+                "message schema {{
+                    REQUIRED INT64 f_{};
+                    OPTIONAL group f_{} {{ REQUIRED BYTE_ARRAY value; }}
+                    REQUIRED group f_{} (LIST) {{
+                        REPEATED group list {{ REQUIRED BYTE_ARRAY element; }}
+                    }}
+                }}",
+                NESTED_KEY.simple(),
+                NESTED_OPTION.simple(),
+                NESTED_LIST.simple(),
+            ))
+            .unwrap(),
+        );
+        let parquet_schema = parquet::schema::types::SchemaDescriptor::new(parquet_schema);
+        let columns = nested_ovb_columns();
+        let result = verify_physical_columns(
+            &columns,
+            &parquet_schema,
+            &descriptor,
+            CompactSegmentRole::Data,
+        );
+        let (_, physical) = result.unwrap();
+        assert_eq!(
+            (physical[&1].max_def_level, physical[&1].max_rep_level),
+            (1, 0)
+        );
+        assert_eq!(
+            (physical[&2].max_def_level, physical[&2].max_rep_level),
+            (1, 1)
+        );
+    }
+
+    #[test]
+    fn list_definition_and_repetition_levels_include_optional_layers() {
+        let primitive = OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Int".into())]);
+        let levels = |logical_type: OvbRaw| {
+            let mut output = Vec::new();
+            flatten_physical_type(
+                NESTED_LIST,
+                &logical_type,
+                &mut Vec::new(),
+                &mut vec![format!("f_{}", NESTED_LIST.simple())],
+                0,
+                0,
+                &mut output,
+                false,
+            )
+            .unwrap();
+            (output[0].max_def_level, output[0].max_rep_level)
+        };
+
+        assert_eq!(
+            levels(OvbRaw::Array(vec![
+                OvbRaw::Int(1.into()),
+                primitive.clone()
+            ])),
+            (1, 1)
+        );
+        assert_eq!(
+            levels(OvbRaw::Array(vec![
+                OvbRaw::Int(2.into()),
+                OvbRaw::Array(vec![OvbRaw::Int(1.into()), primitive.clone()]),
+            ])),
+            (2, 1)
+        );
+        assert_eq!(
+            levels(OvbRaw::Array(vec![
+                OvbRaw::Int(1.into()),
+                OvbRaw::Array(vec![OvbRaw::Int(2.into()), primitive]),
+            ])),
+            (2, 1)
+        );
+    }
+
+    #[test]
+    fn rejects_forbidden_compact_value_encoding_before_publication() {
+        let descriptor = bool_schema(BOOL_TABLE, BOOL_FIELD);
+        let schema = schema_descriptor_fingerprint(&descriptor).unwrap();
+        let columns = bool_columns(BOOL_FIELD);
+        let bytes = bool_parquet_with_encoding(BOOL_TABLE, &descriptor, &columns, Encoding::RLE);
+
+        assert!(matches!(
+            verify_physical_metadata(
+                BOOL_TABLE,
+                CompactSegmentRole::Data,
+                schema,
+                "test-encoder-v1",
+                &columns,
+                2,
+                &bytes,
+            ),
+            Err(RepositoryError::InvalidCompactManifest)
+        ));
+    }
+
+    #[test]
+    fn compact_schema_history_projects_by_field_id_and_frozen_fallback() {
+        let table = Uuid::from_u128(0x400);
+        let key = Uuid::from_u128(0x401);
+        let name = Uuid::from_u128(0x402);
+        let email = Uuid::from_u128(0x403);
+        let country = Uuid::from_u128(0x404);
+        let computed = Uuid::from_u128(0x405);
+        let uuid_raw = |id: Uuid| OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(id.as_bytes().to_vec())));
+        let field = |id: Uuid, name: &str, ty: OvbRaw, role: i64, fallback: OvbRaw| {
+            OvbRaw::Array(vec![
+                uuid_raw(id),
+                OvbRaw::Text(name.to_owned()),
+                ty,
+                OvbRaw::Int(role.into()),
+                fallback,
+            ])
+        };
+        let no_fallback = OvbRaw::Array(vec![OvbRaw::Int(0.into())]);
+        let bool_ty = OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Bool".into())]);
+        let str_ty = OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Str".into())]);
+        let optional_str = OvbRaw::Array(vec![OvbRaw::Int(2.into()), str_ty.clone()]);
+        let schema = |fields: Vec<OvbRaw>| {
+            SchemaDescriptor::new(OvbRaw::Map(vec![
+                (OvbRaw::Int(0.into()), OvbRaw::Int(1.into())),
+                (OvbRaw::Int(1.into()), uuid_raw(table)),
+                (OvbRaw::Int(2.into()), OvbRaw::Array(vec![uuid_raw(key)])),
+                (OvbRaw::Int(3.into()), OvbRaw::Array(fields)),
+                (OvbRaw::Int(4.into()), OvbRaw::Array(Vec::new())),
+            ]))
+            .unwrap()
+        };
+        let source = schema(vec![
+            field(key, "id", bool_ty.clone(), 0, no_fallback.clone()),
+            field(name, "name", optional_str.clone(), 1, no_fallback.clone()),
+        ]);
+        let target = schema(vec![
+            field(key, "identity", bool_ty, 0, no_fallback.clone()),
+            field(
+                name,
+                "display_name",
+                optional_str.clone(),
+                1,
+                no_fallback.clone(),
+            ),
+            field(email, "email", optional_str, 1, no_fallback.clone()),
+            field(
+                country,
+                "country",
+                str_ty,
+                1,
+                OvbRaw::Array(vec![OvbRaw::Int(1.into()), OvbRaw::Text("GB".into())]),
+            ),
+            field(
+                computed,
+                "label",
+                OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Str".into())]),
+                2,
+                OvbRaw::Array(vec![OvbRaw::Int(2.into()), OvbRaw::Bytes(vec![9; 32])]),
+            ),
+        ]);
+        let row = CanonicalValue::new(OvbRaw::Tag(
+            60009,
+            Box::new(OvbRaw::Array(vec![
+                OvbRaw::Null,
+                OvbRaw::Array(vec![
+                    OvbRaw::Array(vec![uuid_raw(key), OvbRaw::Bool(true)]),
+                    OvbRaw::Array(vec![uuid_raw(name), OvbRaw::Text("Ada".into())]),
+                ]),
+            ])),
+        ))
+        .unwrap();
+        let source_id = schema_descriptor_fingerprint(&source).unwrap();
+        let projection = CompactCommittedSegmentProjection {
+            table_id: table,
+            schema_id: source_id,
+            schema: source.clone(),
+            source_schema_id: source_id,
+            source_schema: source,
+            profile: COMPACT_PROFILE,
+            encoder_version: "test-encoder-v1".into(),
+            generation: 1,
+            role: CompactSegmentRole::Data,
+            rows: vec![CompactCommittedRow {
+                key: CanonicalValue::new(OvbRaw::Bool(true)).unwrap(),
+                value: Some(row),
+            }],
+        };
+
+        let projected = project_compact_segment_schema(&projection, &target).unwrap();
+        assert_eq!(
+            projected.schema_id(),
+            schema_descriptor_fingerprint(&target).unwrap()
+        );
+        let value = projected.rows()[0].value().unwrap();
+        let OvbRaw::Tag(60009, payload) = value.raw() else {
+            panic!("projected row must retain the canonical row envelope");
+        };
+        let OvbRaw::Array(row) = payload.as_ref() else {
+            panic!("projected row must retain canonical fields");
+        };
+        let [OvbRaw::Null, OvbRaw::Array(fields)] = row.as_slice() else {
+            panic!("projected row must retain row type and field list");
+        };
+        let projected_values: BTreeMap<_, _> = fields
+            .iter()
+            .map(|field| {
+                let OvbRaw::Array(parts) = field else {
+                    panic!("field must be canonical pair");
+                };
+                let [OvbRaw::Tag(37, id), value] = parts.as_slice() else {
+                    panic!("field must carry stable ObjectId");
+                };
+                let OvbRaw::Bytes(id) = id.as_ref() else {
+                    panic!("ObjectId must be UUID bytes");
+                };
+                (Uuid::from_slice(id).unwrap(), value)
+            })
+            .collect();
+        assert_eq!(projected_values.len(), 4);
+        assert_eq!(projected_values.get(&key), Some(&&OvbRaw::Bool(true)));
+        assert_eq!(
+            projected_values.get(&name),
+            Some(&&OvbRaw::Text("Ada".into()))
+        );
+        assert_eq!(projected_values.get(&email), Some(&&OvbRaw::Null));
+        assert_eq!(
+            projected_values.get(&country),
+            Some(&&OvbRaw::Text("GB".into()))
+        );
+        assert!(!projected_values.contains_key(&computed));
+    }
+
+    #[test]
+    fn compact_manifest_witness_decodes_and_refuses_hostile_entry_paths() {
+        let table = Uuid::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
+        let witness = CompactManifestWitness {
+            table,
+            selected_ref: "refs/heads/x".into(),
+            runtime_intent_id: [1; 16],
+            cleanup_watermark: [2; 32],
+            manifest_path: managed_child(&compact_root(table), "manifest.orna").unwrap(),
+            base_sha256: [4; 32],
+            manifest_sha256: [5; 32],
+            generation: 1,
+            entries: vec![CompactManifestObject {
+                path: managed_child(&compact_data_root(table), "a.orna").unwrap(),
+                object_id: "a".repeat(40),
+                sha256: [3; 32],
+            }],
+        };
+        let mut bytes = Vec::new();
+        witness.encode(&mut bytes).unwrap();
+        assert_eq!(
+            CompactManifestWitness::decode(&bytes, &mut 0, 40).unwrap(),
+            witness
+        );
+        let data_path = witness.entries[0]
+            .path
+            .as_path()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        for hostile in ["../escape", "/etc/passwd", "a\\b", "a\0b", "a//b"] {
+            let spliced =
+                crate::tests::splice_length_prefixed(&bytes, &data_path, hostile, u32::to_be_bytes);
+            assert!(
+                CompactManifestWitness::decode(&spliced, &mut 0, 40).is_err(),
+                "compact entry path {hostile:?} must not decode"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod base64_accept_table {
+    use super::decode_base64;
+
+    #[test]
+    fn manifest_base64_follows_the_workspace_strict_profile() {
+        let cases: &[(&str, bool)] = &[
+            ("", true),
+            ("Zm8=", true),
+            ("+/8=", true),
+            ("-_8=", false),
+            ("Zm8", false),
+            ("Zm9v=", false),
+            ("Zh==", false),
+            ("Zm8= ", false),
+            ("Zg==Zm9v", false),
+        ];
+        for &(input, accepted) in cases {
+            assert_eq!(decode_base64(input).is_ok(), accepted, "input {input:?}");
+        }
+    }
+}

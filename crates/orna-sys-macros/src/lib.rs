@@ -1,4 +1,4 @@
-//! Attribute markers consumed by the `orna-sys-v1` build-time API collector.
+//! Attribute markers consumed by the `orna-sys` build-time API collector.
 
 use proc_macro::TokenStream;
 
@@ -11,7 +11,7 @@ pub fn ornasys(_metadata: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 /// Marks a native built-in host operation whose typed contract is collected
-/// by `orna-sys-v1` at build time. The attribute leaves the Rust method intact;
+/// by `orna-sys` at build time. The attribute leaves the Rust method intact;
 /// its metadata is consumed by the sys registry generator.
 #[proc_macro_attribute]
 pub fn sys_host_operation(_metadata: TokenStream, item: TokenStream) -> TokenStream {

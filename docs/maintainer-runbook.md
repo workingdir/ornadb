@@ -14,11 +14,11 @@ builds it as the `orna` binary. The Linux package installs it as
 dependency graph:
 
 ```text
-cargo run --locked -p orna-cli-v1 -- --help
+cargo run --locked -p orna-cli -- --help
 ```
 
 The examples below write `orna`. In a checkout, use
-`cargo run --locked -p orna-cli-v1 --` in its place.
+`cargo run --locked -p orna-cli --` in its place.
 
 The workspace declares Rust 1.95. Git and Cargo are required for project
 initialisation and source loading. Use `--offline` only after the locked
@@ -43,7 +43,7 @@ worktree. `init` takes its directory as a positional argument and rejects
 With no command, `orna` starts the REPL.
 
 This table lists every command that the parser in
-`crates/orna-cli-v1/src/cli_args.rs` accepts. `orna --help` shows the
+`crates/orna-cli/src/cli_args.rs` accepts. `orna --help` shows the
 options and exit statuses of each command. The table does not claim that a
 command meets every Orna 1.1.0 requirement.
 
@@ -118,10 +118,10 @@ failed selection retains the previous session. Remote endpoints are not a
 fallback for a local project: use a local Git worktree and an explicit `--db
 PATH` when selecting a project.
 
-The REPL help text lists `:help [name]` (`REPL_HELP` in `crates/orna-cli-v1/src/repl.rs`). The
+The REPL help text lists `:help [name]` (`REPL_HELP` in `crates/orna-cli/src/repl.rs`). The
 `:watch expression` command needs a host-owned live watch source. The `orna`
 binary does not wire one, so `:watch` reports `ORNA-REPL-COMMAND` there;
-it is exercised only by the test harness in `crates/orna-cli-v1/tests/watch_command.rs`.
+it is exercised only by the test harness in `crates/orna-cli/tests/watch_command.rs`.
 
 ### Diagnostics and exit behaviour
 
@@ -135,7 +135,7 @@ success/failure label.
 ## Embedded libsql state
 
 The v1 runtime uses the `libsql` crate's local database builder for private
-state; it does not require a separate database service. `orna-runtime-v1`
+state; it does not require a separate database service. `orna-runtime`
 opens the `state.db` path supplied by the repository's per-worktree runtime
 paths, creates the database locally, and applies the runtime schema before
 admitting work. The schema enables WAL journaling and foreign-key enforcement.
@@ -180,10 +180,10 @@ Run the smallest check that covers the change. These are package-scoped checks,
 not a claim that the whole product is validated:
 
 ```text
-cargo test --locked -p orna-cli-v1 --test init
-cargo test --locked -p orna-cli-v1 --test project_runtime
-ORNA_REQUIRE_FUSE=1 cargo test --locked -p orna-cli-v1 --test vfs_editor_compat
-cargo test --locked -p orna-runtime-v1 --lib
+cargo test --locked -p orna-cli --test init
+cargo test --locked -p orna-cli --test project_runtime
+ORNA_REQUIRE_FUSE=1 cargo test --locked -p orna-cli --test vfs_editor_compat
+cargo test --locked -p orna-runtime --lib
 ```
 
 For a command smoke check, use a temporary local project and exercise
@@ -253,7 +253,7 @@ blob. CI runs the same two commands in the `fixture-and-editor-artifacts` job of
 `.github/workflows/source-audits.yml`, after a recursive submodule checkout.
 
 Then run the package-scoped Rust checks that cover the snapshot you changed
-(for example `cargo test --locked -p orna-evaluator-v1 --test standard_profile_v1`), with the cargo limits from
+(for example `cargo test --locked -p orna-evaluator --test standard_profile_v1`), with the cargo limits from
 the repository rules. A check that could not run is unavailable, not a pass.
 
 ### Moving a Rust shadow into the standard library
@@ -272,19 +272,19 @@ express; the bits primitives cannot move because Orna has no bitwise operator):
 3. Gate the Rust shadow before removing it. Key the decision on the module's
    pinned digest or stub shape, following `captured_timezone_snapshot_matches`.
    Then drop the op from `STANDARD_BINDING_MODULES` in
-   `crates/orna-evaluator-v1/src/lib.rs`, its dispatch arm, and its arity-name
+   `crates/orna-evaluator/src/lib.rs`, its dispatch arm, and its arity-name
    table entry, for pins that carry real bodies. Keep the shadow for the old
    stub digests so historical pins behave identically under ORNA-LIB-001.
 4. Update the tests that pin the old shape: the `stub_candidates == 30` and
    `registered >= 4` asserts in `registry_covers_pinned_intrinsic_and_sys_host_stubs`,
    the module's `standard_library_*` evaluator tests, and the declaration and
-   index asserts in `crates/orna-evaluator-v1/tests/standard_profile_v1.rs`. Check `scripts/fixture-manifest.sha256` only
+   index asserts in `crates/orna-evaluator/tests/standard_profile_v1.rs`. Check `scripts/fixture-manifest.sha256` only
    if fixtures change.
 5. Add a golden test for each moved function that runs the new bytes with no
    shadow, and a replay test (as in `standard_snapshot_replay.rs`) showing that the
    old stub commit still behaves identically.
 6. Run `python3 scripts/check_standard_library_pin.py --check`, then
-   `cargo test --locked -p orna-evaluator-v1` (this includes `standard_profile_v1`), under the
+   `cargo test --locked -p orna-evaluator` (this includes `standard_profile_v1`), under the
    repository cargo limits, then the fixture-manifest check.
 
 ## 1.1.0 requirement evidence report
@@ -293,7 +293,7 @@ From the repository root, generate the machine-readable report against the
 frozen reference bundle beside this checkout:
 
 ```text
-cargo run --locked -p orna-traceability-v1 -- ../reference/Orna-1.1.0 > /tmp/orna-traceability.json
+cargo run --locked -p orna-traceability -- ../reference/Orna-1.1.0 > /tmp/orna-traceability.json
 ```
 
 The report pins the specification version and publication digests. It lists

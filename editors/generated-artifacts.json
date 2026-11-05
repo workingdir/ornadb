@@ -1,5 +1,5 @@
 {
-  "source": "orna-syntax-v1",
+  "source": "orna-syntax",
   "languageVersion": "1.1.0",
   "emitters": [
     "TextMate grammar",

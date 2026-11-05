@@ -23,23 +23,23 @@
 #   intermittent  optional; true when the test fails only on some runs, so a pass is expected
 
 [[failure]]
-package = "orna-cli-v1"
+package = "orna-cli"
 target = "test:req_vfs"
 test = "vfs_mount_integration::cwd_mount_sigterm_unmounts_and_detaches_the_view"
 bead = "ornadb-9aj6"
-reason = "Fails intermittently in a full req_vfs run on main. Passed in the d35b7c0c3 baseline (orna-cli-v1 req_vfs: 36 of 36)."
+reason = "Fails intermittently in a full req_vfs run on main. Passed in the d35b7c0c3 baseline (orna-cli req_vfs: 36 of 36)."
 intermittent = true
 
 [[failure]]
-package = "orna-repository-v1"
+package = "orna-repository"
 target = "lib"
 test = "tests::runtime_owner_chain_survives_repeated_startup_crashes"
 bead = "ornadb-mmsa.37"
-reason = "Failed on main CI run 39347800291; intermittent in the parallel library suite. Passed in the d35b7c0c3 baseline run (orna-repository-v1 lib: 304 of 304)."
+reason = "Failed on main CI run 39347800291; intermittent in the parallel library suite. Passed in the d35b7c0c3 baseline run (orna-repository lib: 304 of 304)."
 intermittent = true
 
 [[failure]]
-package = "orna-cli-v1"
+package = "orna-cli"
 target = "test:publication_crash_matrix"
 test = "cli_publication_reopens_after_process_kill_at_each_reachable_boundary"
 bead = "ornadb-aflz"
@@ -47,7 +47,7 @@ reason = "Fails intermittently on main (NotFound at publication_crash_matrix.rs:
 intermittent = true
 
 [[failure]]
-package = "orna-cli-v1"
+package = "orna-cli"
 target = "test:publication_crash_matrix"
 test = "recovery_consumes_only_frozen_range_and_preserves_unrelated_work"
 bead = "ornadb-aflz"

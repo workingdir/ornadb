@@ -221,7 +221,7 @@ fn captured_standard_project(standard: &[(&str, &str)], files: &[(&str, &str)]) 
     let root = project.root().to_path_buf();
     let module = root.join("stdlib/std");
     std::fs::create_dir_all(&module).expect("standard module directory");
-    orna_repository_v1::initialize_repository(&module).expect("standard module repository");
+    orna_repository::initialize_repository(&module).expect("standard module repository");
     for (name, source) in standard {
         std::fs::write(module.join(name), source).expect("standard source");
     }

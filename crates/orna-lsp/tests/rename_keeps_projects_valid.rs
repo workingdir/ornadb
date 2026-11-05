@@ -14,7 +14,7 @@ mod lsp_client;
 use std::collections::BTreeMap;
 
 use lsp_client::{Client, Project, byte_at, position_of};
-use orna_syntax_v1::TokenKind;
+use orna_syntax::TokenKind;
 use serde_json::{Value, json};
 
 const CATALOG: &str = "pub dim Length;
@@ -72,7 +72,7 @@ fn apply(source: &str, edits: &[Value]) -> String {
 }
 
 fn identifiers(source: &str) -> Vec<String> {
-    orna_syntax_v1::lex(source)
+    orna_syntax::lex(source)
         .expect("renamed source lexes")
         .into_iter()
         .filter(|token| matches!(token.kind, TokenKind::Identifier { .. }))

@@ -1,4 +1,4 @@
-" Generated from orna-syntax-v1; edit crates/orna-syntax-v1/src/editor.rs instead.
+" Generated from orna-syntax; edit crates/orna-syntax/src/editor.rs instead.
 if exists("b:current_syntax") | finish | endif
 syntax case match
 syntax match ornaIdentifier /\v<%([_a-zA-Z]|[^\x00-\x7f])%([_a-zA-Z0-9]|[^\x00-\x7f])*/

@@ -16,7 +16,7 @@ Use a Rust 1.95 (or newer) toolchain and Git:
 
 ```sh
 cargo fetch --locked
-cargo build --locked -p orna-cli-v1
+cargo build --locked -p orna-cli
 ```
 
 ### Initialize and check a project
@@ -25,10 +25,10 @@ Initialize a repository in the current directory or at an explicit path, then
 check its reachable Orna source modules:
 
 ```sh
-cargo run --locked -p orna-cli-v1 -- init
-cargo run --locked -p orna-cli-v1 -- init ./my-project
-cargo run --locked -p orna-cli-v1 -- check
-cargo run --locked -p orna-cli-v1 -- status
+cargo run --locked -p orna-cli -- init
+cargo run --locked -p orna-cli -- init ./my-project
+cargo run --locked -p orna-cli -- check
+cargo run --locked -p orna-cli -- status
 ```
 
 `init` preserves existing source and repository metadata. `check` reports
@@ -40,9 +40,9 @@ Run a reachable project entry point, or invoke a reachable zero-argument pure
 function:
 
 ```sh
-cargo run --locked -p orna-cli-v1 -- run
-cargo run --locked -p orna-cli-v1 -- run main.main
-cargo run --locked -p orna-cli-v1 -- invoke library.value
+cargo run --locked -p orna-cli -- run
+cargo run --locked -p orna-cli -- run main.main
+cargo run --locked -p orna-cli -- invoke library.value
 ```
 
 The bounded implementation reports unsupported declarations and operations as
@@ -53,8 +53,8 @@ diagnostics; it does not claim the complete language or every runtime workflow.
 Start an interactive local session or evaluate one expression:
 
 ```sh
-cargo run --locked -p orna-cli-v1 -- repl
-cargo run --locked -p orna-cli-v1 -- repl 'let n: Int = 21;'
+cargo run --locked -p orna-cli -- repl
+cargo run --locked -p orna-cli -- repl 'let n: Int = 21;'
 ```
 
 REPL evaluation is bounded and read-only for previews. A failed submission
@@ -65,7 +65,7 @@ does not replace the last successful result or retained declarations.
 Run focused checks for the package or the editor protocol surface:
 
 ```sh
-cargo test --locked -p orna-cli-v1
+cargo test --locked -p orna-cli
 cargo test --locked -p orna-lsp
 ```
 

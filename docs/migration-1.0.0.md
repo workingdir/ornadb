@@ -1,9 +1,9 @@
 # Migrating to OrnaDB 1.0.0
 
 > **Legacy guide.** The source-command workflow below belongs to the removed
-> `orna` binary and the legacy `orna-core` crate, not the current `orna-cli-v1`
+> `orna` binary and the legacy `orna-core` crate, not the current `orna-cli`
 > CLI. Command names in this file were checked against
-> `crates/orna-cli-v1/src/cli_args.rs`.
+> `crates/orna-cli/src/cli_args.rs`.
 
 **Status:** This is migration guidance for the current source tree, not a
 promise that a production package is available. The checkout has no
@@ -59,7 +59,7 @@ upgrade path exists in this checkout.
 
 The `orna source check`, `orna source diff` and `orna source apply` commands
 that earlier revisions of this guide documented are not part of the current
-`orna` CLI. The verb list in `crates/orna-cli-v1/src/cli_args.rs` has no
+`orna` CLI. The verb list in `crates/orna-cli/src/cli_args.rs` has no
 `source` verb. These commands existed only in the legacy `orna-core` crate and
 the removed `orna` binary; [CHANGELOG.md](../CHANGELOG.md) records their
 removal. Do not follow the removed workflow to change an installed
@@ -74,9 +74,9 @@ adapter, its supported and rejected shapes, and a checked-in
 `0046_application_migrations.orna` migration source) describe the legacy
 `orna-core` surface. None of them is verified against the v1 CLI in this
 checkout: `crates/orna-storage` does not exist (the storage crate is
-`crates/orna-storage-v1`), and no `0046_application_migrations.orna` file is
+`crates/orna-storage`), and no `0046_application_migrations.orna` file is
 present. Do not rely on those statements. For the `--db` endpoint forms the
-v1 CLI accepts, read `Endpoint::parse` in `crates/orna-cli-v1/src/main.rs`.
+v1 CLI accepts, read `Endpoint::parse` in `crates/orna-cli/src/main.rs`.
 
 
 ## Standard-library compatibility (managed-product evidence)
@@ -202,10 +202,10 @@ For command details and the current evidence map, see the
 
 ## Legacy format-1 compact fixture (bead 5il1.394, partial slice)
 
-Fixture: `crates/orna-cli-v1/tests/fixtures/legacy-format1.bundle`, built by the
-`build_legacy_fixture` example in `orna-repository-v1` (feature
+Fixture: `crates/orna-cli/tests/fixtures/legacy-format1.bundle`, built by the
+`build_legacy_fixture` example in `orna-repository` (feature
 `legacy-fixture-writer`). Its SHA-256 is pinned by `BUNDLE_SHA256` in
-`crates/orna-cli-v1/tests/legacy_fixture_bundle.rs` and the bundle is listed in
+`crates/orna-cli/tests/legacy_fixture_bundle.rs` and the bundle is listed in
 `scripts/fixture-manifest.sha256`. The `legacy_fixture_bundle` target also has a
 `builder_regenerates_the_committed_bundle_byte_for_byte` test, which rebuilds
 the repository from the builder and compares it with a clone of the committed
@@ -225,10 +225,10 @@ shell (marker, identity, source record, compact tables, gitlink);
 The editable table's source files (`legacy-loose-contacts-main.orna`,
 `legacy-loose-contact-alice-smith.orna`, `legacy-loose-contact-bob-jones.orna`)
 live in this crate's fixture tree, next to the bundle, because a test fixture may
-not be included across crates (`crates/orna-syntax-v1/tests/fixture_audit.rs`),
+not be included across crates (`crates/orna-syntax/tests/fixture_audit.rs`),
 and the builder reads them from the directory the caller names. Regenerate with
-`cargo run -p orna-repository-v1 --example build_legacy_fixture --features
-legacy-fixture-writer -- <empty-root> <bundle-path> crates/orna-cli-v1/tests/fixtures`.
+`cargo run -p orna-repository --example build_legacy_fixture --features
+legacy-fixture-writer -- <empty-root> <bundle-path> crates/orna-cli/tests/fixtures`.
 
 Provenance: the fixture is produced by the test encoder (`encoder_version`
 `test-encoder-v1`). It shares the canonical OVB encoder, base64 helper, date-key

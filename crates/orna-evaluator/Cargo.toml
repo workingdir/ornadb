@@ -1,0 +1,42 @@
+[package]
+name = "orna-evaluator"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.95"
+license = "Apache-2.0"
+description = "Bounded deterministic evaluator for the Orna 1.0 expression subset"
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[features]
+default = ["project-repl", "system-host-bindings"]
+project-repl = ["dep:orna-project", "system-host-bindings"]
+system-host-bindings = ["dep:orna-sys", "dep:orna-repository"]
+browser-wasm = ["getrandom/wasm_js", "dep:uuid", "uuid/js"]
+
+[dependencies]
+num-bigint = "0.4.6"
+num-integer = "0.1.47"
+num-traits = "0.2.19"
+libm = "0.2.16"
+getrandom = "0.3.4"
+uuid = { version = "1.18.1", default-features = false, optional = true }
+icu_properties = "2.2.0"
+serde = "1.0"
+serde_json = { version = "1.0.151", features = ["arbitrary_precision", "raw_value"] }
+stacker = "0.1.25"
+orna-foundation = { path = "../orna-foundation" }
+orna-project = { path = "../orna-project", optional = true }
+orna-repository = { path = "../orna-repository", optional = true }
+orna-standard-sources = { path = "../orna-standard-sources" }
+orna-semantic = { path = "../orna-semantic" }
+orna-sys = { path = "../orna-sys", optional = true }
+orna-syntax = { path = "../orna-syntax" }
+orna-value = { path = "../orna-value" }
+sha2 = "0.10.9"
+unicode-normalization = "=0.1.24"
+unicode-case-mapping = "=1.0.0"
+
+[dev-dependencies]
+tempfile = "3.23.0"
