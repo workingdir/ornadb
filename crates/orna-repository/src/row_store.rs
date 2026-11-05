@@ -285,7 +285,7 @@ impl AdmittedRow {
     /// Blob carries is surfaced as-is, so the caller gets length, SHA-256 and
     /// annotation without the graph or any content read being touched. A row
     /// whose Blob fields moved to the shared overflow graph has no local field
-    /// tuple and reports [`RowStoreError::BlobMetadataRequiresGraphContext`]
+    /// tuple and reports `RowStoreError::BlobMetadataRequiresGraphContext`
     /// rather than a fabricated summary.
     pub fn blob_metadata(&self, field: usize) -> Result<Option<BlobMetadata>, RowStoreError> {
         let fields = decode_canonical_fields_of(
