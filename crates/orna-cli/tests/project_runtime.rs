@@ -4,11 +4,12 @@ use std::{
     process::{Command, Output, Stdio},
 };
 
-use orna_foundation::{OvbRaw, Value};
+use orna_foundation_v1::{CanonicalValue, OvbRaw, Value};
 use orna_repository::{Repository, inspect_metadata};
 use orna_runtime::{
     CheckpointKey, Component, ConsumerIdentity, Mutation, NoFault, RuntimeIdentity, RuntimeState,
 };
+use orna_value::Raw;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
@@ -267,7 +268,7 @@ fn sensors_checkpoint_key(database_id: [u8; 16]) -> CheckpointKey {
             function: checkpoint_component("sensors.ingest"),
             binding: checkpoint_component("arguments:[]"),
         },
-        source_format: checkpoint_component("orna-stream"),
+        source_format: checkpoint_component("orna-stream-v1"),
         source: checkpoint_component(list_stream_identity(
             "example:sensors:v1",
             &sensors_list_payloads(),
@@ -2114,7 +2115,7 @@ fn binary_checks_and_runs_an_import_from_the_pinned_standard_git_module() {
         module_commit
     );
     assert!(project.standard_runtime_modules().contains("std/math.orna"));
-    orna_semantic::Catalogue::authoritative_core()
+    orna_semantic_v1::Catalogue::authoritative_core()
         .with_standard_sources(
             project.standard_profile().unwrap(),
             project.standard_sources().iter().cloned(),
@@ -2143,6 +2144,64 @@ fn binary_checks_and_runs_an_import_from_the_pinned_standard_git_module() {
 }
 
 #[test]
+fn binary_repl_evaluates_a_pinned_query_window_operator_from_its_stats_import() {
+    let standard_sources = orna_evaluator::reference_standard_sources()
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let standard = [
+        (
+            "collection.orna",
+            standard_sources["std/collection.orna"].as_str(),
+        ),
+        ("query.orna", standard_sources["std/query.orna"].as_str()),
+        ("stats.orna", standard_sources["std/stats.orna"].as_str()),
+        (
+            "math.orna",
+            include_str!("fixtures/captured-standard-math.orna"),
+        ),
+    ];
+    let (directory, _module_commit) = captured_standard_project_with(
+        &standard,
+        &[(
+            "main.orna",
+            "use std.query;\npub fn answer(): [Int] = std.query.window_sum([2, 4], 2);\n",
+        )],
+    );
+
+    let repository = Repository::discover(directory.path()).expect("project repository");
+    let project = orna_project::ProjectLoader::default()
+        .load(&repository)
+        .expect("load pinned snapshot");
+    assert_eq!(
+        project.standard_attach_failure(),
+        None,
+        "the pinned snapshot must attach"
+    );
+    assert!(
+        project
+            .standard_runtime_modules()
+            .contains("std/stats.orna"),
+        "query's own stats import must join the runtime closure: {:?}",
+        project.standard_runtime_modules()
+    );
+
+    let mut session = orna_evaluator::AdmittedReplSession::from_loaded_project(
+        &project,
+        project.standard_sources().iter().cloned(),
+        orna_evaluator::Limits::default(),
+    )
+    .expect("admitted repl session");
+    assert_eq!(session.submit("use std.query;\n"), Ok(None));
+    assert_eq!(
+        session.submit("std.query.window_sum([2, 4], 2)"),
+        Ok(Some(
+            CanonicalValue::new(Raw::Array(vec![Raw::Int(6.into())]))
+                .expect("expected value is canonical")
+        ))
+    );
+}
+
+#[test]
 fn binary_check_resolves_a_pinned_standard_collection_closure_through_the_production_catalogue() {
     let (directory, _module_commit) = captured_standard_project_with(
         &pinned_list_closure(),
@@ -2165,19 +2224,19 @@ fn binary_check_resolves_a_pinned_standard_collection_closure_through_the_produc
     let catalogue = project
         .production_catalogue()
         .expect("production catalogue from the pinned standard profile");
-    let analysis = orna_semantic::analyze_with_providers(
+    let analysis = orna_semantic_v1::analyze_with_providers(
         project.modules(),
         &catalogue,
-        orna_semantic::SystemProviders::Production,
+        orna_semantic_v1::SystemProviders::Production,
     );
     assert!(
         analysis.is_ok(),
         "analysis through production catalogue failed"
     );
-    let core_only = orna_semantic::analyze_with_providers(
+    let core_only = orna_semantic_v1::analyze_with_providers(
         project.modules(),
-        &orna_semantic::Catalogue::authoritative_core(),
-        orna_semantic::SystemProviders::Production,
+        &orna_semantic_v1::Catalogue::authoritative_core(),
+        orna_semantic_v1::SystemProviders::Production,
     );
     assert!(
         !core_only.is_ok(),
