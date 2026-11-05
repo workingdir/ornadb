@@ -8,14 +8,14 @@ name: CLI Gate B
 # - on every push to main, once per commit (the group is keyed on the commit);
 # - on demand (workflow_dispatch; dispatches of one ref queue behind each other);
 # - on a pull request that carries the `gate-b` label. Add the label to a pull request
-#   whose change reaches the dependency closure of the orna-cli-v1 tests (28 workspace
+#   whose change reaches the dependency closure of the orna-cli tests (28 workspace
 #   crates: `cargo metadata --format-version 1` lists them; the data path is mostly
-#   orna-cli-v1, evaluator, repository, runtime, storage, sys, value, syntax, project,
+#   orna-cli, evaluator, repository, runtime, storage, sys, value, syntax, project,
 #   stream, foundation and the stdlib). A new commit cancels that pull request's older
 #   run.
 #
 # Why not on every pull request that touches a listed path: the old path list named
-# 7 of the 28 closure crates (a change to orna-syntax-v1 alone matched nothing), and each
+# 7 of the 28 closure crates (a change to orna-syntax alone matched nothing), and each
 # run holds a runner for one to two hours. At 22:30Z on 2026-10-23 ten Gate B runs were
 # in progress (eight for pull requests) and three were queued, which delayed every other
 # CI job, and two pull requests merged before their Gate B run finished. No branch
@@ -92,4 +92,4 @@ jobs:
           set -euo pipefail
           mkdir -p "$TMPDIR"
           df -h "$TMPDIR"
-          cargo test --locked -p orna-cli-v1 --test media_import_query gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata -- --nocapture --exact
+          cargo test --locked -p orna-cli --test media_import_query gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata -- --nocapture --exact

@@ -1,6 +1,6 @@
 %YAML 1.2
 ---
-# Generated from orna-syntax-v1; edit crates/orna-syntax-v1/src/editor.rs instead.
+# Generated from orna-syntax; edit crates/orna-syntax/src/editor.rs instead.
 name: Orna
 file_extensions: [orna]
 scope: source.orna

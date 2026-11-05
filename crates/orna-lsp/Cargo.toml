@@ -14,16 +14,16 @@ path = "src/main.rs"
 
 [dependencies]
 lsp-types = "0.97.0"
-orna-project-v1 = { path = "../orna-project-v1" }
-orna-repository-v1 = { path = "../orna-repository-v1" }
-orna-semantic-v1 = { path = "../orna-semantic-v1" }
+orna-project = { path = "../orna-project" }
+orna-repository = { path = "../orna-repository" }
+orna-semantic = { path = "../orna-semantic" }
 orna-standard-sources = { path = "../orna-standard-sources" }
-orna-syntax-v1 = { path = "../orna-syntax-v1" }
+orna-syntax = { path = "../orna-syntax" }
 serde_json = "1.0.151"
 url = "2.5.7"
 [dev-dependencies]
 tempfile = "3.23.0"
-orna-repository-v1 = { path = "../orna-repository-v1", features = ["legacy-fixture-writer"] }
+orna-repository = { path = "../orna-repository", features = ["legacy-fixture-writer"] }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 lsp-server = "0.10"
 

@@ -1685,7 +1685,7 @@ impl Error for TypeWitnessError {}
 impl ObjectTypeDefinition {
     /// Builds the bounded, canonical OVB-1 declaration witness for this type.
     pub fn type_declaration_witness(&self) -> Result<TypeDeclarationWitness, TypeWitnessError> {
-        use orna_value_v1::{Raw, Value, domain_digest};
+        use orna_value::{Raw, Value, domain_digest};
         let fields = self
             .fields
             .iter()
@@ -1742,8 +1742,8 @@ impl ObjectTypeDefinition {
 fn witness_type(
     field: FieldId,
     resolved: ResolvedType,
-) -> Result<orna_value_v1::Raw, TypeWitnessError> {
-    use orna_value_v1::Raw;
+) -> Result<orna_value::Raw, TypeWitnessError> {
+    use orna_value::Raw;
     Ok(match resolved {
         ResolvedType::Scalar(scalar) => {
             let name = match scalar {

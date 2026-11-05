@@ -16,10 +16,10 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use lsp_types::{Diagnostic, Uri};
-use orna_project_v1::{LoadedProject, ProjectLoadError, ProjectLoader};
-use orna_repository_v1::Repository;
-use orna_semantic_v1::{Catalogue, analyze_with_catalogue_located};
-use orna_syntax_v1::{Declaration, SyntaxSpan, SyntaxTree, parse_module};
+use orna_project::{LoadedProject, ProjectLoadError, ProjectLoader};
+use orna_repository::Repository;
+use orna_semantic::{Catalogue, analyze_with_catalogue_located};
+use orna_syntax::{Declaration, SyntaxSpan, SyntaxTree, parse_module};
 
 use crate::analysis;
 use crate::documents::PositionMapper;
@@ -174,7 +174,7 @@ pub(crate) fn check(project: &Project, open: &[OpenModule<'_>]) -> ProjectCheck 
                     .or_default()
                     .push(analysis::source_diagnostic(
                         mapper.range(&span),
-                        orna_semantic_v1::DIAG_IMPORT,
+                        orna_semantic::DIAG_IMPORT,
                         "imported module is unavailable",
                         &["use a captured standard dependency or remove the import"],
                     ));

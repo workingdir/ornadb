@@ -121,9 +121,7 @@ pub fn assert_code_action_contract(
     );
     let repaired = format!("{};{}", &source[..insertion], &source[insertion..]);
     assert!(
-        orna_syntax_v1::parse_module(&repaired)
-            .diagnostics
-            .is_empty(),
+        orna_syntax::parse_module(&repaired).diagnostics.is_empty(),
         "{editor} quickfix did not repair the syntax-v1 fixture"
     );
 

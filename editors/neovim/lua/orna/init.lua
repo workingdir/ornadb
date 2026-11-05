@@ -1,4 +1,4 @@
--- Generated from orna-syntax-v1 language metadata.
+-- Generated from orna-syntax language metadata.
 -- Server start contract: docs/editor-tooling.md ("One server command").
 local M = {}
 

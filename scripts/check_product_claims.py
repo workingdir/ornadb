@@ -57,7 +57,7 @@ CLAIMS = {
         "fixed-row-batching",
         fixed_row_batching_claim,
         "Fixed-row batching is not content-stable: ORP row pages close at content-defined boundary anchors, "
-        "with a maximum entry count as a backstop (`boundary_anchor` in `crates/orna-repository-v1/src/orp.rs`).",
+        "with a maximum entry count as a backstop (`boundary_anchor` in `crates/orna-repository/src/orp.rs`).",
     ),
     "prune-expire": Claim(
         "prune-expire",

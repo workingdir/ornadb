@@ -9,8 +9,8 @@ is absent), minus the exclusions below. Checked forms:
 
 Exclusions, all deliberate:
 
-- frozen fixtures under `crates/orna-conformance-v1/tests/fixtures/` and
-  `crates/orna-traceability-v1/tests/fixtures/` (their bytes are pinned by the
+- frozen fixtures under `crates/orna-conformance/tests/fixtures/` and
+  `crates/orna-traceability/tests/fixtures/` (their bytes are pinned by the
   fixture manifest and must not change; excluded from both checks);
 - the archived ADR snapshots under `docs/decisions/archive/` (historical
   records whose references were correct when archived; link check only);
@@ -46,8 +46,8 @@ BACKTICK_DOC = re.compile(r"`(docs/[^`\s]+\.md)`")
 SCHEME = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")
 BROKEN_TOKEN = "BROKEN"
 FIXTURES = (
-    "crates/orna-conformance-v1/tests/fixtures/",
-    "crates/orna-traceability-v1/tests/fixtures/",
+    "crates/orna-conformance/tests/fixtures/",
+    "crates/orna-traceability/tests/fixtures/",
 )
 LINK_EXCLUDED = FIXTURES + ("docs/decisions/archive/",)
 # Targets absent from this checkout that are named on purpose or predate this

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Gate A item A2: the shipped orna-storage-v1 crate must carry no retired row
+# Gate A item A2: the shipped orna-storage crate must carry no retired row
 # writer (ORNA-UPGRADE-003, one writer; source/40-upgrade-contract.md).
 #
 # The retired compact writer boundary lives behind the `compact-writer-fixtures`
@@ -24,7 +24,7 @@ set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
 
 TARGET="${CARGO_TARGET_DIR:-target}"
-RLIB="$TARGET/debug/liborna_storage_v1.rlib"
+RLIB="$TARGET/debug/liborna_storage.rlib"
 SYMBOLS=(
     apply_writer_input
     apply_writer_batch
@@ -57,7 +57,7 @@ scan() {
 
 
 # A build that fails silently leaves the caller with "missing rlib; build
-# orna-storage-v1 first", which names the wrong cause. Nightly run 41614410003
+# orna-storage first", which names the wrong cause. Nightly run 41614410003
 # failed this check as `command exited 2` with nothing else in the log, because
 # both attempts wrote to /dev/null.
 build() {
@@ -76,7 +76,7 @@ build() {
 echo "check retired-row-writers: with compact-writer-fixtures"
 # The library must be built before it can be scanned. The old order checked for
 # the rlib first and exited 2 on a clean runner, so the check never ran at all.
-build -p orna-storage-v1 --features compact-writer-fixtures || exit 2
+build -p orna-storage --features compact-writer-fixtures || exit 2
 if [ ! -f "$RLIB" ]; then
     echo "FAIL: the guarded build reported success but $RLIB is absent" >&2
     exit 2
@@ -88,7 +88,7 @@ fi
 echo "  total=$present (expected above 0)"
 
 echo "check retired-row-writers: default features"
-build -p orna-storage-v1 || exit 2
+build -p orna-storage || exit 2
 if ! absent=$(scan | tail -1); then
     echo "FAIL: could not scan $RLIB" >&2
     exit 1

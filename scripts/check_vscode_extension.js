@@ -2,7 +2,7 @@
 // Prove the generated VS Code extension's launch contract.
 //
 // `editors/vscode/extension.js` is generated, so the drift gate in
-// `crates/orna-syntax-v1/tests/editor_artifacts.rs` proves its bytes are the
+// `crates/orna-syntax/tests/editor_artifacts.rs` proves its bytes are the
 // emitter's bytes. That gate cannot see whether the client it renders still
 // starts the server, reports a missing command without failing activation, or
 // restarts on a setting change, so this script drives the generated file

@@ -1400,29 +1400,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
-name = "orna-application-v1"
+name = "orna-application"
 version = "1.0.0"
 dependencies = [
  "futures",
  "getrandom 0.3.4",
  "num-bigint 0.4.8",
- "orna-application-v1",
- "orna-evaluator-v1",
- "orna-foundation-v1",
- "orna-live-v1",
- "orna-project-v1",
- "orna-protocol-v1",
- "orna-repository-v1",
- "orna-runtime-v1",
- "orna-security-v1",
- "orna-semantic-v1",
- "orna-syntax-v1",
- "orna-value-v1",
+ "orna-application",
+ "orna-evaluator",
+ "orna-foundation",
+ "orna-live",
+ "orna-project",
+ "orna-protocol",
+ "orna-repository",
+ "orna-runtime",
+ "orna-security",
+ "orna-semantic",
+ "orna-syntax",
+ "orna-value",
  "sha2 0.10.9",
 ]
 
 [[package]]
-name = "orna-cli-v1"
+name = "orna-cli"
 version = "0.1.0"
 dependencies = [
  "bytes",
@@ -1430,22 +1430,22 @@ dependencies = [
  "getrandom 0.3.4",
  "libc",
  "libsql",
- "orna-application-v1",
- "orna-conformance-v1",
- "orna-evaluator-v1",
- "orna-foundation-v1",
- "orna-live-v1",
- "orna-project-v1",
- "orna-protocol-v1",
- "orna-repository-v1",
- "orna-runtime-v1",
- "orna-security-v1",
- "orna-semantic-v1",
- "orna-serving-v1",
- "orna-storage-v1",
- "orna-syntax-v1",
- "orna-sys-v1",
- "orna-value-v1",
+ "orna-application",
+ "orna-conformance",
+ "orna-evaluator",
+ "orna-foundation",
+ "orna-live",
+ "orna-project",
+ "orna-protocol",
+ "orna-repository",
+ "orna-runtime",
+ "orna-security",
+ "orna-semantic",
+ "orna-serving",
+ "orna-storage",
+ "orna-syntax",
+ "orna-sys",
+ "orna-value",
  "parquet",
  "rustix 0.38.44",
  "serde_json",
@@ -1455,29 +1455,29 @@ dependencies = [
 ]
 
 [[package]]
-name = "orna-conformance-v1"
+name = "orna-conformance"
 version = "1.0.0"
 dependencies = [
  "futures",
  "getrandom 0.3.4",
  "num-bigint 0.4.8",
  "orna-core",
- "orna-evaluator-v1",
- "orna-foundation-v1",
- "orna-live-v1",
- "orna-project-v1",
- "orna-protocol-v1",
- "orna-repository-v1",
- "orna-runtime-v1",
- "orna-security-v1",
- "orna-semantic-v1",
- "orna-serving-v1",
- "orna-storage-v1",
- "orna-stream-v1",
- "orna-syntax-v1",
- "orna-sys-v1",
- "orna-table-v1",
- "orna-value-v1",
+ "orna-evaluator",
+ "orna-foundation",
+ "orna-live",
+ "orna-project",
+ "orna-protocol",
+ "orna-repository",
+ "orna-runtime",
+ "orna-security",
+ "orna-semantic",
+ "orna-serving",
+ "orna-storage",
+ "orna-stream",
+ "orna-syntax",
+ "orna-sys",
+ "orna-table",
+ "orna-value",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -1490,8 +1490,8 @@ name = "orna-core"
 version = "1.0.0"
 dependencies = [
  "base64",
- "orna-syntax-v1",
- "orna-value-v1",
+ "orna-syntax",
+ "orna-value",
  "proptest",
  "serde",
  "serde_json",
@@ -1500,7 +1500,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "orna-evaluator-v1"
+name = "orna-evaluator"
 version = "1.0.0"
 dependencies = [
  "getrandom 0.3.4",
@@ -1509,14 +1509,14 @@ dependencies = [
  "num-bigint 0.4.8",
  "num-integer",
  "num-traits",
- "orna-foundation-v1",
- "orna-project-v1",
- "orna-repository-v1",
- "orna-semantic-v1",
+ "orna-foundation",
+ "orna-project",
+ "orna-repository",
+ "orna-semantic",
  "orna-standard-sources",
- "orna-syntax-v1",
- "orna-sys-v1",
- "orna-value-v1",
+ "orna-syntax",
+ "orna-sys",
+ "orna-value",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -1528,42 +1528,42 @@ dependencies = [
 ]
 
 [[package]]
-name = "orna-evolution-v1"
+name = "orna-evolution"
 version = "1.0.0"
 dependencies = [
- "orna-foundation-v1",
- "orna-syntax-v1",
+ "orna-foundation",
+ "orna-syntax",
  "serde_json",
 ]
 
 [[package]]
-name = "orna-foundation-v1"
+name = "orna-foundation"
 version = "1.0.0"
 dependencies = [
  "num-bigint 0.4.8",
- "orna-conformance-v1",
- "orna-repository-v1",
- "orna-syntax-v1",
- "orna-value-v1",
+ "orna-conformance",
+ "orna-repository",
+ "orna-syntax",
+ "orna-value",
  "serde",
  "serde_json",
 ]
 
 [[package]]
-name = "orna-live-v1"
+name = "orna-live"
 version = "1.0.0"
 dependencies = [
  "futures",
  "getrandom 0.3.4",
- "orna-foundation-v1",
- "orna-live-v1",
- "orna-protocol-v1",
- "orna-repository-v1",
- "orna-runtime-v1",
- "orna-security-v1",
- "orna-serving-v1",
- "orna-stream-v1",
- "orna-value-v1",
+ "orna-foundation",
+ "orna-live",
+ "orna-protocol",
+ "orna-repository",
+ "orna-runtime",
+ "orna-security",
+ "orna-serving",
+ "orna-stream",
+ "orna-value",
 ]
 
 [[package]]
@@ -1572,59 +1572,59 @@ version = "1.0.0"
 dependencies = [
  "lsp-server",
  "lsp-types",
- "orna-project-v1",
- "orna-repository-v1",
- "orna-semantic-v1",
+ "orna-project",
+ "orna-repository",
+ "orna-semantic",
  "orna-standard-sources",
- "orna-syntax-v1",
+ "orna-syntax",
  "serde_json",
  "tempfile",
  "url",
 ]
 
 [[package]]
-name = "orna-project-v1"
+name = "orna-project"
 version = "1.0.0"
 dependencies = [
  "num-bigint 0.4.8",
- "orna-foundation-v1",
- "orna-repository-v1",
- "orna-runtime-v1",
- "orna-semantic-v1",
- "orna-syntax-v1",
- "orna-value-v1",
+ "orna-foundation",
+ "orna-repository",
+ "orna-runtime",
+ "orna-semantic",
+ "orna-syntax",
+ "orna-value",
  "tempfile",
  "unicode-normalization",
 ]
 
 [[package]]
-name = "orna-protocol-v1"
+name = "orna-protocol"
 version = "1.0.0"
 dependencies = [
  "num-bigint 0.4.8",
  "num-traits",
- "orna-foundation-v1",
+ "orna-foundation",
  "sha2 0.10.9",
 ]
 
 [[package]]
-name = "orna-repository-v1"
+name = "orna-repository"
 version = "1.0.0"
 dependencies = [
  "bytes",
  "fs2",
  "libc",
  "num-bigint 0.4.8",
- "orna-conformance-v1",
- "orna-evaluator-v1",
- "orna-foundation-v1",
- "orna-project-v1",
- "orna-runtime-v1",
- "orna-semantic-v1",
- "orna-storage-v1",
- "orna-syntax-v1",
- "orna-sys-v1",
- "orna-value-v1",
+ "orna-conformance",
+ "orna-evaluator",
+ "orna-foundation",
+ "orna-project",
+ "orna-runtime",
+ "orna-semantic",
+ "orna-storage",
+ "orna-syntax",
+ "orna-sys",
+ "orna-value",
  "parquet",
  "rustix 0.38.44",
  "serde_json",
@@ -1636,19 +1636,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "orna-runtime-v1"
+name = "orna-runtime"
 version = "1.0.0"
 dependencies = [
  "ed25519-dalek",
  "libsql",
  "num-bigint 0.4.8",
- "orna-evaluator-v1",
- "orna-foundation-v1",
- "orna-repository-v1",
- "orna-stream-v1",
- "orna-syntax-v1",
- "orna-sys-v1",
- "orna-value-v1",
+ "orna-evaluator",
+ "orna-foundation",
+ "orna-repository",
+ "orna-stream",
+ "orna-syntax",
+ "orna-sys",
+ "orna-value",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
@@ -1657,7 +1657,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "orna-security-v1"
+name = "orna-security"
 version = "0.1.0"
 dependencies = [
  "serde",
@@ -1669,15 +1669,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "orna-semantic-v1"
+name = "orna-semantic"
 version = "1.0.0"
 dependencies = [
  "num-bigint 0.4.8",
  "num-traits",
- "orna-foundation-v1",
- "orna-syntax-v1",
- "orna-sys-v1",
- "orna-value-v1",
+ "orna-foundation",
+ "orna-syntax",
+ "orna-sys",
+ "orna-value",
  "serde_json",
  "sha2 0.10.9",
  "stacker",
@@ -1687,12 +1687,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "orna-serving-v1"
+name = "orna-serving"
 version = "1.0.0"
 dependencies = [
  "image",
- "orna-protocol-v1",
- "orna-value-v1",
+ "orna-protocol",
+ "orna-value",
 ]
 
 [[package]]
@@ -1700,18 +1700,18 @@ name = "orna-standard-sources"
 version = "1.0.0"
 
 [[package]]
-name = "orna-storage-v1"
+name = "orna-storage"
 version = "1.0.0"
 dependencies = [
  "base64",
  "bytes",
- "orna-evolution-v1",
- "orna-foundation-v1",
- "orna-repository-v1",
- "orna-runtime-v1",
- "orna-storage-v1",
- "orna-syntax-v1",
- "orna-value-v1",
+ "orna-evolution",
+ "orna-foundation",
+ "orna-repository",
+ "orna-runtime",
+ "orna-storage",
+ "orna-syntax",
+ "orna-value",
  "parquet",
  "sha2 0.10.9",
  "tempfile",
@@ -1719,17 +1719,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "orna-stream-v1"
+name = "orna-stream"
 version = "1.0.0"
 dependencies = [
- "orna-foundation-v1",
+ "orna-foundation",
 ]
 
 [[package]]
-name = "orna-syntax-v1"
+name = "orna-syntax"
 version = "1.0.0"
 dependencies = [
- "orna-foundation-v1",
+ "orna-foundation",
  "serde_json",
  "syntect",
  "unicode-ident",
@@ -1737,16 +1737,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "orna-sys-macros"
-version = "1.0.0"
-
-[[package]]
-name = "orna-sys-v1"
+name = "orna-sys"
 version = "1.1.0"
 dependencies = [
- "orna-foundation-v1",
- "orna-security-v1",
- "orna-syntax-v1",
+ "orna-foundation",
+ "orna-security",
+ "orna-syntax",
  "orna-sys-macros",
  "quote",
  "reqwest",
@@ -1760,25 +1756,29 @@ dependencies = [
 ]
 
 [[package]]
-name = "orna-table-v1"
+name = "orna-sys-macros"
+version = "1.0.0"
+
+[[package]]
+name = "orna-table"
 version = "1.0.0"
 dependencies = [
  "num-bigint 0.4.8",
 ]
 
 [[package]]
-name = "orna-traceability-v1"
+name = "orna-traceability"
 version = "1.0.0"
 dependencies = [
- "orna-conformance-v1",
- "orna-sys-v1",
+ "orna-conformance",
+ "orna-sys",
  "serde",
  "serde_json",
  "sha2 0.10.9",
 ]
 
 [[package]]
-name = "orna-value-v1"
+name = "orna-value"
 version = "1.0.0"
 dependencies = [
  "hex",
