@@ -5,7 +5,7 @@
 //! document text that the analysis stages need.
 
 use lsp_types::{Position, Range, Uri};
-use orna_syntax_v1::SyntaxSpan as SourceSpan;
+use orna_syntax::SyntaxSpan as SourceSpan;
 
 /// One open Orna source document.
 #[derive(Clone, Debug)]

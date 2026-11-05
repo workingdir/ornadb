@@ -1,6 +1,6 @@
 name: Live v1 tests
 
-# Every orna-live-v1 test target runs on each pull request and each push to main. The
+# Every orna-live test target runs on each pull request and each push to main. The
 # crate had no workflow, so its host tests (including the owner-lock and writer-lease
 # admission tests) were never gated on a pull request.
 
@@ -38,5 +38,5 @@ jobs:
         uses: dtolnay/rust-toolchain@1.95.0
 
       # --no-fail-fast runs every test target so one failing binary cannot hide another.
-      - name: Test the orna-live-v1 crate
-        run: cargo test --locked -p orna-live-v1 --no-fail-fast -- --nocapture
+      - name: Test the orna-live crate
+        run: cargo test --locked -p orna-live --no-fail-fast -- --nocapture

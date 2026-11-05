@@ -15,8 +15,8 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 
 use lsp_types::{Location, Uri};
-use orna_semantic_v1::StandardDependencyProfile;
-use orna_syntax_v1::{Declaration, SyntaxTree, UseTail, Visibility, lex, parse_module};
+use orna_semantic::StandardDependencyProfile;
+use orna_syntax::{Declaration, SyntaxTree, UseTail, Visibility, lex, parse_module};
 
 use crate::analysis::{EditorSymbol, EditorSymbolKind, symbol_for_item};
 use crate::documents::PositionMapper;

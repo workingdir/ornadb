@@ -16,7 +16,7 @@ const FLOAT_VECTORS: &str = include_str!("fixtures/float-vectors.json");
 
 #[test]
 fn checked_in_numeric_type_fixture_is_valid_source() {
-    let parsed = orna_syntax_v1::parse_module(NUMERIC_FIXTURE);
+    let parsed = orna_syntax::parse_module(NUMERIC_FIXTURE);
     assert!(
         parsed.is_ok(),
         "fixture diagnostics: {:?}",
@@ -55,7 +55,7 @@ fn reference_total_order_vectors_survive_runtime_float_construction() {
         let left = u64::from_str_radix(pair[0]["bits"].as_str().unwrap(), 16).unwrap();
         let right = u64::from_str_radix(pair[1]["bits"].as_str().unwrap(), 16).unwrap();
         assert_eq!(
-            orna_value_v1::float_total_cmp(left, right),
+            orna_value::float_total_cmp(left, right),
             std::cmp::Ordering::Less
         );
     }

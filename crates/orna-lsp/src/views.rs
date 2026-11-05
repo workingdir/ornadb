@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use lsp_types::Uri;
-use orna_project_v1::{LoadedProject, ProjectLoader};
+use orna_project::{LoadedProject, ProjectLoader};
 
 use crate::documents::Document;
 use crate::project::Project;

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use lsp_types::{CompletionItemKind, Diagnostic};
-use orna_syntax_v1::Keyword;
+use orna_syntax::Keyword;
 
 use super::{
     completion_at, declaration_symbols, definition, document_symbols, hover,
@@ -35,7 +35,7 @@ fn check(text: &str) -> Vec<Diagnostic> {
     let mapper = PositionMapper::new(&document.text);
     syntax_diagnostics(
         &document.uri,
-        &orna_syntax_v1::parse_module(&document.text),
+        &orna_syntax::parse_module(&document.text),
         &mapper,
     )
 }
@@ -43,17 +43,16 @@ fn check(text: &str) -> Vec<Diagnostic> {
 #[test]
 fn in_crate_fixtures_parse_with_the_frozen_1_0_frontend() {
     for source in [LEXICAL_SOURCE, EXPRESSIONS_SOURCE, CALL_SOURCE] {
-        let parsed = orna_syntax_v1::parse_module(source);
+        let parsed = orna_syntax::parse_module(source);
         assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
     }
 }
 
 #[test]
 fn nested_document_symbol_model_keeps_enum_variants_and_payload_fields() {
-    let parse = orna_syntax_v1::parse_module(DOCUMENT_SYMBOLS_SOURCE);
+    let parse = orna_syntax::parse_module(DOCUMENT_SYMBOLS_SOURCE);
     assert!(parse.diagnostics.is_empty(), "{:#?}", parse.diagnostics);
-    let orna_syntax_v1::Declaration::Enum { variants, .. } = &parse.value.items[0].declaration
-    else {
+    let orna_syntax::Declaration::Enum { variants, .. } = &parse.value.items[0].declaration else {
         panic!("first fixture declaration must be an enum")
     };
     assert_eq!(
@@ -366,8 +365,8 @@ const KEYWORD_COVERAGE_SOURCE: &str = include_str!("../../tests/fixtures/keyword
 fn every_lex_007_keyword_hovers_from_the_lexer_table() {
     let workspace = workspace(KEYWORD_COVERAGE_SOURCE);
     let mut hovered = Vec::new();
-    for token in orna_syntax_v1::lex(KEYWORD_COVERAGE_SOURCE).expect("keyword fixture lexes") {
-        let orna_syntax_v1::TokenKind::Keyword(keyword) = token.kind else {
+    for token in orna_syntax::lex(KEYWORD_COVERAGE_SOURCE).expect("keyword fixture lexes") {
+        let orna_syntax::TokenKind::Keyword(keyword) = token.kind else {
             continue;
         };
         let card = hover(&workspace, 0, token.span.start).expect("keyword hover");
@@ -390,8 +389,8 @@ fn keyword_completion_documentation_matches_the_keyword_hover_card() {
     let workspace = workspace(KEYWORD_COVERAGE_SOURCE);
     let completions = completion_at(&workspace, 0, None, None);
     let mut checked = Vec::new();
-    for token in orna_syntax_v1::lex(KEYWORD_COVERAGE_SOURCE).expect("keyword fixture lexes") {
-        let orna_syntax_v1::TokenKind::Keyword(keyword) = token.kind else {
+    for token in orna_syntax::lex(KEYWORD_COVERAGE_SOURCE).expect("keyword fixture lexes") {
+        let orna_syntax::TokenKind::Keyword(keyword) = token.kind else {
             continue;
         };
         let item = completions

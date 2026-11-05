@@ -1,7 +1,7 @@
 //! Syntax-aware LSP folding and selection ranges.
 
 use lsp_types::{FoldingRange, FoldingRangeKind, SelectionRange};
-use orna_syntax_v1::{
+use orna_syntax::{
     AssignmentTarget, Declaration, Expr, FieldInitializer, FunctionSignature, ImplMember, Item,
     Parameter, Pattern, ProtocolMember, RecordField, Statement, StringSegment,
     SyntaxSpan as SourceSpan, SyntaxTree, TableMember, TypeExpr, TypeMember, TypeRepresentation,
@@ -486,7 +486,7 @@ fn collect_type_member_spans(member: &TypeMember, spans: &mut Vec<SourceSpan>) {
 }
 
 fn collect_implementation_spans(
-    implementation: &orna_syntax_v1::Implementation,
+    implementation: &orna_syntax::Implementation,
     spans: &mut Vec<SourceSpan>,
 ) {
     push_span(&implementation.span, spans);

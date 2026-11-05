@@ -868,7 +868,7 @@ fn neovim_loads_generated_v1_syntax_and_queries_the_lsp_server() {
         .trim_end()
         .to_owned();
     assert!(
-        orna_syntax_v1::parse_module(&diagnostic_recovery)
+        orna_syntax::parse_module(&diagnostic_recovery)
             .diagnostics
             .is_empty()
     );
@@ -1950,7 +1950,7 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
         .trim_end()
         .to_owned();
     assert!(
-        orna_syntax_v1::parse_module(&diagnostic_recovery)
+        orna_syntax::parse_module(&diagnostic_recovery)
             .diagnostics
             .is_empty()
     );

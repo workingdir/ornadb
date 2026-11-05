@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use orna_syntax_v1::Keyword;
+use orna_syntax::Keyword;
 use serde_json::Value;
 
 pub fn expected_keywords() -> BTreeSet<String> {

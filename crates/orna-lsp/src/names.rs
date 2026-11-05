@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 
-use orna_syntax_v1::{
+use orna_syntax::{
     Argument, AssignmentTarget, CaseArm, ControlKind, Declaration, Expr, FieldInitializer,
     ImplMember, Implementation, Item, LiteralKind, Parameter, Pattern, RecordField, Statement,
     StringSegment, SyntaxSpan, SyntaxTree, TableMember, Token, TokenKind, TypeExpr, TypeMember,
@@ -176,7 +176,7 @@ impl NameIndex {
             public: false,
         };
         for item in &tree.items {
-            walker.public = matches!(item.visibility, orna_syntax_v1::Visibility::Public { .. });
+            walker.public = matches!(item.visibility, orna_syntax::Visibility::Public { .. });
             walker.item(item);
         }
         let Walker {
@@ -361,7 +361,7 @@ pub(crate) fn control_arms(kind: ControlKind, arms: &[CaseArm]) -> &[CaseArm] {
 
 /// The normalised key of an identifier as written.
 pub(crate) fn key_of(text: &str) -> Key {
-    orna_syntax_v1::lex(text)
+    orna_syntax::lex(text)
         .ok()
         .and_then(|tokens| {
             tokens.into_iter().find_map(|token| match token.kind {
@@ -456,7 +456,7 @@ impl Walker<'_> {
 
     fn declare_function(
         &mut self,
-        signature: &orna_syntax_v1::FunctionSignature,
+        signature: &orna_syntax::FunctionSignature,
         full: &SyntaxSpan,
         kind: DeclaredKind,
     ) {
@@ -587,11 +587,11 @@ impl Walker<'_> {
                 self.with_owner(protocol, |walker| {
                     for member in members {
                         match member {
-                            orna_syntax_v1::ProtocolMember::Function { signature, span } => {
+                            orna_syntax::ProtocolMember::Function { signature, span } => {
                                 walker.declare_function(signature, span, DeclaredKind::Method);
                                 walker.signature_types(signature);
                             }
-                            orna_syntax_v1::ProtocolMember::Static { name, ty, span } => {
+                            orna_syntax::ProtocolMember::Static { name, ty, span } => {
                                 walker.declare_typed(name, span, DeclaredKind::Static, Some(ty));
                                 walker.type_expr(ty);
                             }
@@ -743,7 +743,7 @@ impl Walker<'_> {
         }
     }
 
-    fn signature_types(&mut self, signature: &orna_syntax_v1::FunctionSignature) {
+    fn signature_types(&mut self, signature: &orna_syntax::FunctionSignature) {
         for generic in &signature.generics {
             for bound in &generic.bounds {
                 self.type_expr(bound);
@@ -1302,12 +1302,7 @@ impl Walker<'_> {
         }
     }
 
-    fn lambda(
-        &mut self,
-        parameters: &[orna_syntax_v1::LambdaParameter],
-        body: &Expr,
-        element: &Hint,
-    ) {
+    fn lambda(&mut self, parameters: &[orna_syntax::LambdaParameter], body: &Expr, element: &Hint) {
         let body_span = body.span();
         for parameter in parameters {
             let hint = match &parameter.annotation {
@@ -1505,7 +1500,7 @@ fn annotation_hint(walker: &Walker<'_>, ty: &TypeExpr) -> Hint {
 fn is_name_token(token: &Token) -> bool {
     matches!(
         token.kind,
-        TokenKind::Identifier { .. } | TokenKind::Keyword(orna_syntax_v1::Keyword::SelfValue)
+        TokenKind::Identifier { .. } | TokenKind::Keyword(orna_syntax::Keyword::SelfValue)
     )
 }
 

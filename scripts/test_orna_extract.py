@@ -5,7 +5,7 @@ registry against the vendored profile, the Gear chunk partition, Git object
 reads through ``git cat-file --batch`` (including re-hashing of a substituted
 object), tree parsing, and the command-line error paths. The end-to-end
 extraction of a real restored snapshot is covered by the Rust integration test
-crates/orna-cli-v1/tests/independent_extractor_cli.rs.
+crates/orna-cli/tests/independent_extractor_cli.rs.
 """
 
 from __future__ import annotations
@@ -55,7 +55,7 @@ from scripts.orna_extract import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-MEDIA_PROFILE = REPO_ROOT / "crates/orna-conformance-v1/tests/fixtures/reference/profiles/media-1.json"
+MEDIA_PROFILE = REPO_ROOT / "crates/orna-conformance/tests/fixtures/reference/profiles/media-1.json"
 U64 = (1 << 64) - 1
 
 IDENTITY = {
@@ -713,11 +713,11 @@ class IndependenceTests(unittest.TestCase):
     def test_the_guard_refuses_each_known_hole(self) -> None:
         holes = {
             "non-stdlib import": "import requests\n",
-            "orna import": "import orna_cli_v1\n",
+            "orna import": "import orna_cli\n",
             "relative import": "from . import sibling\n",
-            "dynamic import_module": "import importlib as il\nil.import_module('orna_cli_v1')\n",
-            "__import__ call": "__import__('orna_cli_v1')\n",
-            "exec of source": "exec('import orna_cli_v1')\n",
+            "dynamic import_module": "import importlib as il\nil.import_module('orna_cli')\n",
+            "__import__ call": "__import__('orna_cli')\n",
+            "exec of source": "exec('import orna_cli')\n",
             "eval by name": "f = eval\n",
             "ctypes import": "import ctypes\n",
             "os.system": "import os\nos.system('orna export x')\n",

@@ -1,0 +1,16 @@
+[package]
+name = "orna-syntax"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.95"
+license = "Apache-2.0"
+description = "Orna 1.0.0 lexer, syntax tree and parser"
+
+[dependencies]
+orna-foundation = { path = "../orna-foundation" }
+unicode-ident = "1.0.22"
+unicode-normalization = "0.1.24"
+
+[dev-dependencies]
+serde_json = "1.0"
+syntect = { version = "5.3.0", default-features = false, features = ["parsing", "regex-fancy", "yaml-load"] }
