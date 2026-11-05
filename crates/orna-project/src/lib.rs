@@ -1708,13 +1708,9 @@ impl StandardAttachError {
         let Self::InvalidBody(diagnostic) = self else {
             return None;
         };
-        Some(ProjectLoadError::InvalidStandardBody {
-            logical_path: diagnostic.logical_path.clone(),
-            line: diagnostic.line,
-            code: diagnostic.code.clone(),
-            message: diagnostic.message.clone(),
-            notes: diagnostic.notes.clone(),
-        })
+        Some(ProjectLoadError::InvalidStandardBody(Box::new(
+            diagnostic.clone(),
+        )))
     }
 }
 
@@ -2144,13 +2140,7 @@ pub enum ProjectLoadError {
     DuplicateModuleNamespace,
     ReservedNamespace,
     StandardSnapshotMismatch,
-    InvalidStandardBody {
-        logical_path: String,
-        line: usize,
-        code: String,
-        message: String,
-        notes: Vec<String>,
-    },
+    InvalidStandardBody(Box<StandardBodyDiagnostic>),
     InvalidTableSchema,
     InvalidSourceRow,
 }
@@ -2185,12 +2175,11 @@ impl fmt::Display for ProjectLoadError {
             Self::StandardSnapshotMismatch => {
                 "standard dependency profile does not match the committed std submodule pin"
             }
-            Self::InvalidStandardBody {
-                logical_path, line, ..
-            } => {
+            Self::InvalidStandardBody(diagnostic) => {
                 return write!(
                     formatter,
-                    "pinned standard module body at {logical_path}:{line} does not type check"
+                    "pinned standard module body at {}:{} does not type check",
+                    diagnostic.logical_path, diagnostic.line
                 );
             }
             Self::InvalidTableSchema => {
