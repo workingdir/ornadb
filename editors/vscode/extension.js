@@ -1,6 +1,6 @@
 "use strict";
 
-// Generated from orna-syntax-v1; edit crates/orna-syntax-v1/src/editor.rs instead.
+// Generated from orna-syntax; edit crates/orna-syntax/src/editor.rs instead.
 // Server start contract: docs/editor-tooling.md ("One server command").
 //
 // This extension starts `orna-lsp` and contributes no language logic of its

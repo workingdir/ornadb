@@ -1,0 +1,31 @@
+[package]
+name = "orna-runtime"
+version.workspace = true
+edition = "2024"
+rust-version = "1.95"
+license = "Apache-2.0"
+description = "Private, single-writer local runtime state for Orna 1.0"
+publish = false
+
+[features]
+crash-barriers = ["orna-repository/crash-barriers"]
+
+[dependencies]
+ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std"] }
+libsql = { version = "0.9.29", default-features = false, features = ["core"] }
+num-bigint = "0.4.6"
+orna-foundation = { path = "../orna-foundation" }
+orna-repository = { path = "../orna-repository" }
+orna-stream = { path = "../orna-stream" }
+orna-sys = { path = "../orna-sys" }
+orna-value = { path = "../orna-value" }
+sha2 = "0.10.9"
+tokio = { version = "1.48.0", features = ["macros", "rt", "sync"] }
+uuid = { version = "1.18.1", features = ["v4"] }
+
+[dev-dependencies]
+orna-evaluator = { path = "../orna-evaluator" }
+orna-syntax = { path = "../orna-syntax" }
+serde_json = "1.0.151"
+tempfile = "3.23.0"
+tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread", "time"] }

@@ -1,4 +1,4 @@
-// Generated from orna-syntax-v1 lexical rules; edit crates/orna-syntax-v1/src/editor.rs instead.
+// Generated from orna-syntax lexical rules; edit crates/orna-syntax/src/editor.rs instead.
 // A lexical highlighter: token classes only, not the orna.ebnf productions.
 module.exports = grammar({
   name: "orna",

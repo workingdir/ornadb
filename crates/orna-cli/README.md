@@ -1,0 +1,167 @@
+# orna-cli
+
+A developing CLI for Orna 1.1.0 (publication `final-2026-10-05`, repository
+writer format 3). The installed command is `orna`; Cargo builds it as the
+`orna` binary.
+
+## Command surface
+
+This binary currently accepts `init`, `add --row`, `mv`, `status`, `fetch`,
+`push`, `serve`, `mount`, `edit`, `unmount`, `diff`, `log`, `annotate`,
+`import`, `export`, `migrate copy`, `migrate abort`, `publish`, `commit`, `semantic-legend`,
+`history`, `query`, `check`, `invoke`, `explain`, `repl`, and `run`, plus help
+and version options. The available command groups and option forms are listed
+by `orna --help`; that list describes this bounded implementation, not the
+complete Orna 1.1.0 command set.
+
+The CLI reference also names `fmt`, `verify`, and `prune`, as
+well as Git-compatible operations that this binary does not yet implement.
+Their presence in the canonical list is not a claim that this binary supports
+them. The package remains explicit about the boundary rather than accepting
+placeholder commands without their command-specific behavior.
+
+The reference requires no separate `stream`, `checkpoint`, `failure`,
+`grants`, or extension-permission command hierarchies. Under `ORNA-CLI-002`,
+runtime, checkpoint, failure, and uncommon recovery details belong in typed
+`sys` values available to REPL code and optional `std.devtools` pages. Orna
+1.1.0 retires the storage preference and rewrite operations (`api/retired.json`),
+so there is no storage command family either.
+
+`ORNA-CLI-001` covers Git-compatible command naming, flags, and observable
+semantics; `ORNA-DIAG-002` covers extended diagnostic documentation through
+`explain`. See the frozen reference's `source/18-cli.md`, `source/16-administration.md`,
+`source/17-repl.md`, `source/19-repository.md`, `source/23-storage.md`, and
+`source/34-system-reference.md` for those boundaries. This package does not
+claim the unimplemented command surface as complete.
+
+`init [DIRECTORY]` initializes a local Git-backed database, using the current
+directory when no target is supplied. It creates missing repository metadata
+and an empty root module without staging files or creating a commit. Existing
+root source is preserved, and repeated initialization retains the database
+identity. Partial, malformed, or unsupported metadata is reported rather than
+overwritten. Git's configured defaults determine the initial branch.
+Use a positional directory for initialization, not `--db`.
+Creating a new database is currently supported on Linux.
+
+`migrate copy` prepares or recovers a journalled migration candidate in a
+separate directory from a local format-1 or format-2 worktree. For example:
+
+```text
+orna --db ./legacy migrate copy ./migrated --annotation-defaults 0 --no-persistent-consumers
+```
+
+`--annotation-defaults N` must be the count derived from decoded legacy
+annotation metadata. `--no-persistent-consumers` is required. Despite its
+name, it confirms that persistent consumer checkpoints are carried into the
+candidate, not reset. Each carried checkpoint must match a consumer identity
+correspondence recorded there before any row is imported, so a migrated
+stream resumes without resetting its consumer identity (ORNA-UPGRADE-008). A
+source holding live per-attempt stream state (leases, claims, failures,
+receipts) is refused and its state is left unchanged. The source repository,
+including its commit and dirty workspace, remains unchanged. This command
+prepares a journalled candidate only; it does not convert legacy rows into a
+format-3 store or activate a writable format-3 repository.
+
+`migrate abort DEST` discards the prepared format-3 copy in DEST. It verifies
+first that DEST is the copy this source prepared, so a directory the operator
+owns is never a discard target. The source repository is unchanged. Until the
+verified copy is renamed to a reserved sibling named `.orna-migration-abort-*`,
+a change to the source commit, index, or working tree since preparation makes
+the command refuse and remove nothing; restore the source or remove DEST
+manually. That rename is the commit point. A repeated `migrate abort DEST` then
+finishes the removal without rechecking the source, and exits 0 reporting
+nothing to discard once nothing remains. While the sibling exists,
+`migrate copy DEST` refuses to prepare or recover; repeat the abort first.
+
+`check` loads and checks reachable source modules from a local Git worktree.
+`invoke TARGET` executes a reachable zero-argument pure function. The optional
+`--db PATH` argument selects a local project explicitly.
+
+`repl` starts an ephemeral interactive session; `repl EXPRESSION` submits one
+expression. Results include a structural representation and type. Session
+bindings, pure function declarations, and imports remain available until EOF
+or `:quit`. `$_` retains the last successful expression result, including after
+a failed submission. Starting another session discards the previous state.
+Use `--db PATH repl` to import from an explicitly selected, checked pure project.
+
+For example:
+
+```text
+let n: Int = 21;
+fn twice(value: Int): Int = value + value;
+twice(n)
+$_
+:quit
+```
+
+## Workspace mounts
+
+On Linux, `orna mount DIR --cwd` mounts the current committed workspace at
+`DIR` through host FUSE. It requires a committed HEAD and allows edits to
+projected `data.orna` row documents. The mount validates a document before it
+changes the durable row, and supports editors that write a sibling temporary
+file, sync it, then rename it over `data.orna`. The command stays in the
+foreground until `orna unmount DIR` releases the kernel mount and view record.
+
+`orna edit --row /path/to/mount/Table/key` opens the row’s `data.orna` in
+`$EDITOR`. Its absolute row-directory path must be inside the active Orna FUSE
+mount; the edit is validated before the durable row changes.
+
+`orna mount DIR --at SELECTOR` starts a read-only host FUSE session pinned to
+one resolved commit. `orna mount status`
+reports attached views in human or `--json` form. Host FUSE mounts are supported
+on Linux only.
+
+`orna mount status` prints one line per attached view: `MOUNTPOINT snapshot S view V
+format F legacy L writable` or `... read-only`. Each unresolved draft of a writable
+mount follows its view line as `  unresolved draft PATH code CODE draft ID: DETAIL`,
+where `CODE` is the exact `sys.*` Orna cause (`-` when the draft has none, such as a
+backing I/O or unsynced write) and `ID` the retained draft id (`-` when no candidate
+was retained). The line form is this implementation's choice; the spec fixes only
+the codes and the draft ids (41-vfs.md:106). A writable mount whose drafts cannot be
+listed prints `  drafts could not be listed: REASON`. The daemon lists at most 64
+drafts within 32 KiB; when it has more, a `  note:` line gives the count it left out.
+A daemon that predates the code and draft fields (its `user.orna.unresolved-draft-fields`
+xattr is unserved, ENODATA) is listed from the two-column draft list instead: each draft
+keeps its path and detail, its `code` and `draft` columns print `-`, and a `  note:` line
+says so. Only a failure to read that list too is reported as `drafts could not be listed`.
+
+`orna mount status --json` emits one object per attached view with the keys
+`mountpoint`, `snapshot`, `view`, `format`, `legacy`, `writable`, `read_only`,
+`draft_source` (`"fields"`, or `"list"` for the fallback above, or `null` when no draft
+list was read), `drafts_truncated` and `drafts_omitted` (how many drafts the daemon did
+not list), `unresolved_drafts` (an array of `{"path","code","draft","detail"}` for each
+listed unresolved draft of a writable mount; `code` and `draft` are strings or `null`),
+and `draft_error` (a string when drafts could not be listed, else `null`). `read_only`
+is always the negation of `writable`.
+
+## Boundary
+
+Execution currently uses the bounded pure evaluator. Unsupported declarations
+or submitted operations report errors; they do not run effects. Preview uses
+a separate evaluation entrypoint that cannot change session state or perform
+external effects. Input, evaluation, and structural output have resource bounds.
+
+The interactive session does not yet implement the complete language or console
+command set, durable table execution, watches, or remote transport. Unsupported
+reference workflows report that execution is unavailable. Planner
+tests alone do not establish reference-database execution.
+Input is currently line-oriented. Submissions are checked against the session's
+types and imports before execution. A type error or execution failure leaves
+both the retained declarations and last successful result unchanged. Project
+imports expose public declarations; private implementation helpers remain
+available only inside their defining modules.
+
+Session close seals child admission, cancels only unfinished children owned by
+that root session, joins terminal cleanup, then closes transport. A failed
+cleanup keeps admission sealed and can be retried; repeated completed close is
+deterministic.
+
+## Checks
+
+```sh
+cargo fmt --check
+cargo test --locked
+cargo clippy --locked --all-targets -- -D warnings
+git diff --check -- crates/orna-cli
+```

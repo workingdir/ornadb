@@ -31,7 +31,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@1.95.0
 
-      # Every orna-conformance-v1 test target runs. Tests listed in
+      # Every orna-conformance test target runs. Tests listed in
       # scripts/conformance-known-red.txt are excluded from the run and then each one
       # must still fail when run alone: a new failure or a listed test that passes
       # both fail this job.

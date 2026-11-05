@@ -1,0 +1,678 @@
+//! Commits one captured media row through an admitted request, the same path
+//! the media import tests use. `insert_only` chooses an insert or a replace.
+//!
+//! `relation_id` is the captured table's admitted object identity. Production
+//! attaches it to every durable mutation from the admitted table identity, and
+//! publication projects rows into the native store by it, so a harness that
+//! omits it stages a row no store root can address.
+
+// Included by path from several integration targets, each of which uses the
+// part of the capture fixture it needs.
+#![allow(dead_code)]
+
+use std::{collections::BTreeMap, sync::Arc};
+
+use orna_conformance::transactional_loaded_project_candidate_validator;
+use orna_evaluator::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
+use orna_project::{
+    KeyComponentText, ObjectIdentityManifest, ObjectKind, ProjectLoader,
+    admit_source_row_with_owner_fields,
+};
+use orna_repository::Repository;
+use orna_runtime::{
+    NoFault, RequestIdentity, RequestState, RuntimeState, RuntimeTableIdentity, TableMutation,
+    TableObjectId, TerminalOutcome, WriterLease,
+    vfs::{VfsDurableSave, VfsSaveAdmission, VfsSaveCandidate, VfsTableRowReplacement},
+};
+use orna_storage::LoosePath;
+use orna_value::Format3Context;
+
+/// The production table schema identity (ORNA-VFS-019), shared with the mount.
+#[path = "../../src/table_schema.rs"]
+mod table_schema;
+pub use table_schema::committed_table_schema_identity;
+
+/// Projects one fixture row key with the VFS-1 key spelling the mount writes
+/// (profiles/vfs-1.md:44-56) and returns its canonical pair for admission.
+fn vfs_key_component(key: &str) -> (String, KeyComponentText) {
+    let canonical_encoding = orna_repository::TypedKey::Text(key.to_owned())
+        .canonical_bytes()
+        .expect("the fixture key has a canonical encoding");
+    let encoded = orna_runtime::vfs::project_key_component(key, &canonical_encoding);
+    (
+        encoded,
+        KeyComponentText {
+            text: key.to_owned(),
+            canonical_encoding,
+        },
+    )
+}
+
+/// One capture request: the repository, the runtime state and the rows it writes.
+#[allow(clippy::too_many_arguments)]
+/// Commits one captured media row and publishes it, so the row is durable in
+/// the store before the caller reads it.
+pub async fn commit_capture(
+    repository: &Repository,
+    state: &RuntimeState,
+    writer: WriterLease,
+    bindings: &mut SysHostBindingRegistry,
+    expression: &str,
+    key: &str,
+    ordinal: u8,
+    insert_only: bool,
+    relation_id: [u8; 16],
+) {
+    commit_capture_for_table(
+        repository,
+        state,
+        writer,
+        bindings,
+        expression,
+        "media",
+        key,
+        ordinal,
+        insert_only,
+        relation_id,
+    )
+    .await;
+}
+
+/// One capture request: the repository, the runtime state and the rows it writes.
+#[allow(clippy::too_many_arguments)]
+pub async fn commit_capture_for_table(
+    repository: &Repository,
+    state: &RuntimeState,
+    writer: WriterLease,
+    bindings: &mut SysHostBindingRegistry,
+    expression: &str,
+    table_name: &str,
+    key: &str,
+    ordinal: u8,
+    insert_only: bool,
+    relation_id: [u8; 16],
+) {
+    commit_capture_inner(
+        repository,
+        state,
+        writer,
+        bindings,
+        expression,
+        key,
+        ordinal,
+        insert_only,
+        relation_id,
+        table_name,
+        true,
+    )
+    .await;
+}
+
+/// One capture request: the repository, the runtime state and the rows it writes.
+#[allow(clippy::too_many_arguments)]
+/// Commits one captured media row and leaves the range pending, so a caller can
+/// publish it with the CLI verb exactly as a production run does.
+pub async fn commit_capture_pending(
+    repository: &Repository,
+    state: &RuntimeState,
+    writer: WriterLease,
+    bindings: &mut SysHostBindingRegistry,
+    expression: &str,
+    key: &str,
+    ordinal: u8,
+    insert_only: bool,
+    relation_id: [u8; 16],
+) {
+    commit_capture_inner(
+        repository,
+        state,
+        writer,
+        bindings,
+        expression,
+        key,
+        ordinal,
+        insert_only,
+        relation_id,
+        "media",
+        false,
+    )
+    .await;
+}
+
+/// One capture request: the repository, the runtime state and the rows it writes.
+#[allow(clippy::too_many_arguments)]
+async fn commit_capture_inner(
+    repository: &Repository,
+    state: &RuntimeState,
+    writer: WriterLease,
+    bindings: &mut SysHostBindingRegistry,
+    expression: &str,
+    key: &str,
+    ordinal: u8,
+    insert_only: bool,
+    relation_id: [u8; 16],
+    table_name: &str,
+    publish: bool,
+) {
+    let request_identity = RequestIdentity {
+        session_id: [ordinal; 16],
+        request_id: [ordinal + 1; 16],
+    };
+    let fingerprint = [ordinal + 2; 32];
+    let (_, admission) = state
+        .reserve_request_with_admission(request_identity, fingerprint)
+        .await
+        .unwrap();
+    state
+        .start_request_with_owner_and_admission(
+            request_identity,
+            fingerprint,
+            writer,
+            admission.expect("new request returns its admission capability"),
+        )
+        .await
+        .unwrap();
+    let context = state.begin_activation().await.unwrap();
+
+    let value = evaluate_expression_ovb2_with_effects(
+        expression,
+        &BTreeMap::default(),
+        Limits::default(),
+        bindings,
+    )
+    .unwrap();
+    let binding = bindings.accept_captured_blob_for_row(&value).unwrap();
+    let (id, key_bytes, row) = ([ordinal + 3; 16], key.as_bytes().to_vec(), Vec::new());
+    let mutation = if insert_only {
+        TableMutation::insert(id, table_name, key_bytes, row)
+    } else {
+        TableMutation::new(id, table_name, key_bytes, Some(row))
+    }
+    .unwrap()
+    .with_table_object_id(TableObjectId::new(relation_id))
+    .with_orp_blob_binding(binding)
+    .unwrap();
+    let committed = state
+        .commit_table_request_activation(
+            writer,
+            request_identity,
+            fingerprint,
+            &context,
+            &[mutation],
+            [ordinal + 4; 32],
+            TerminalOutcome::new(vec![ordinal + 5]).unwrap(),
+            &NoFault,
+            orna_runtime::ActivationEffectReport::declare(orna_runtime::DeclaredEffectSet::None),
+        )
+        .await
+        .unwrap();
+    assert_eq!(committed.request.state, RequestState::Completed);
+    if publish {
+        crate::format3::publish_media_row(repository, state, key, ordinal + 0x10).await;
+    }
+}
+/// Identity for a fixture ordinal wider than a byte, used by the scale probe
+/// (bead ornadb-w3f9). Each family gets its own leading byte and the ordinal
+/// is carried in the next two, so identities stay unique for any ordinal below
+/// 65536. This is a separate path so every existing fixture identity is
+/// untouched.
+fn wide_identity(ordinal: u16, family: u8) -> [u8; 16] {
+    let mut id = [family; 16];
+    id[1] = u8::try_from(ordinal & 0x00ff).expect("low byte of a 16-bit ordinal");
+    id[2] = u8::try_from(ordinal >> 8).expect("high byte of a 16-bit ordinal");
+    id
+}
+
+/// Digest-shaped identity for a wide ordinal, same scheme as `wide_identity`.
+fn wide_digest(ordinal: u16, family: u8) -> [u8; 32] {
+    let mut digest = [family; 32];
+    digest[1] = u8::try_from(ordinal & 0x00ff).expect("low byte of a 16-bit ordinal");
+    digest[2] = u8::try_from(ordinal >> 8).expect("high byte of a 16-bit ordinal");
+    digest
+}
+
+/// Admits one capture request with a wide ordinal, for row counts above the
+/// byte identities the older helpers use. Publishes nothing: the caller
+/// publishes the whole frozen range in one publication.
+#[allow(clippy::too_many_arguments)]
+pub async fn commit_capture_pending_wide(
+    repository: &Repository,
+    state: &RuntimeState,
+    writer: WriterLease,
+    bindings: &mut SysHostBindingRegistry,
+    expression: &str,
+    key: &str,
+    ordinal: u16,
+    insert_only: bool,
+    relation_id: [u8; 16],
+) {
+    let request_identity = RequestIdentity {
+        session_id: wide_identity(ordinal, 0xa0),
+        request_id: wide_identity(ordinal, 0xa1),
+    };
+    let fingerprint = wide_digest(ordinal, 0xa2);
+    let (_, admission) = state
+        .reserve_request_with_admission(request_identity, fingerprint)
+        .await
+        .unwrap();
+    state
+        .start_request_with_owner_and_admission(
+            request_identity,
+            fingerprint,
+            writer,
+            admission.expect("new request returns its admission capability"),
+        )
+        .await
+        .unwrap();
+    let context = state.begin_activation().await.unwrap();
+    let value = evaluate_expression_ovb2_with_effects(
+        expression,
+        &BTreeMap::default(),
+        Limits::default(),
+        bindings,
+    )
+    .unwrap();
+    let binding = bindings.accept_captured_blob_for_row(&value).unwrap();
+    let (id, key_bytes, row) = (
+        wide_identity(ordinal, 0xa3),
+        key.as_bytes().to_vec(),
+        Vec::new(),
+    );
+    let mutation = if insert_only {
+        TableMutation::insert(id, "media", key_bytes, row)
+    } else {
+        TableMutation::new(id, "media", key_bytes, Some(row))
+    }
+    .unwrap()
+    .with_table_object_id(TableObjectId::new(relation_id))
+    .with_orp_blob_binding(binding)
+    .unwrap();
+    let committed = state
+        .commit_table_request_activation(
+            writer,
+            request_identity,
+            fingerprint,
+            &context,
+            &[mutation],
+            wide_digest(ordinal, 0xa4),
+            TerminalOutcome::new(vec![
+                u8::try_from(ordinal & 0x00ff).expect("low byte of a 16-bit ordinal"),
+            ])
+            .unwrap(),
+            &NoFault,
+            orna_runtime::ActivationEffectReport::declare(orna_runtime::DeclaredEffectSet::None),
+        )
+        .await
+        .unwrap();
+    assert_eq!(committed.request.state, RequestState::Completed);
+    let _ = repository;
+}
+
+/// Source row id for a fixture ordinal. Ordinals below 256 keep the encoding
+/// every existing caller was written against: byte 0 is `1`, every other byte
+/// is the ordinal, so their ids are unchanged. Ordinal bits 8..14 sit above a
+/// marker bit in byte 0; ids from 256 never equal an id below 256.
+pub fn source_row_id_for_ordinal(ordinal: u16) -> [u8; 16] {
+    assert!(
+        ordinal < 0x8000,
+        "fixture ordinal {ordinal} exceeds the 15-bit source id encoding"
+    );
+    let mut id = [u8::try_from(ordinal & 0x00ff).expect("low byte of a 15-bit ordinal"); 16];
+    id[0] = 1 | (((ordinal >> 8) as u8) << 1);
+    id
+}
+
+/// One source row's named Blob captures and whether publication inserts or replaces it.
+///
+/// `source_row` is the row's complete source document. Format 3 keeps rows
+/// only in `.orna/store` (ORNA-REPO-004), so no committed file supplies it.
+#[derive(Clone, Copy)]
+pub struct SourceCaptureRow<'a> {
+    pub key: &'a str,
+    pub blob_fields: &'a [(&'a str, &'a str)],
+    pub source_row: &'a str,
+    pub ordinal: u16,
+    pub insert_only: bool,
+}
+
+/// Publishes every source row by its canonical mutation key and table path.
+pub async fn commit_source_captures(
+    repository: &Repository,
+    state: &RuntimeState,
+    writer: WriterLease,
+    bindings: &mut SysHostBindingRegistry,
+    relation_id: [u8; 16],
+    format_context: &Format3Context,
+    captures: &[SourceCaptureRow<'_>],
+) {
+    commit_source_captures_for_table(
+        repository,
+        state,
+        writer,
+        bindings,
+        relation_id,
+        format_context,
+        "Object",
+        captures,
+    )
+    .await;
+}
+
+/// One capture write: the repository, the state, the rows and the pins.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+/// Captures and commits complete source-owned rows for a source table.
+pub async fn commit_source_captures_for_table(
+    repository: &Repository,
+    state: &RuntimeState,
+    writer: WriterLease,
+    bindings: &mut SysHostBindingRegistry,
+    relation_id: [u8; 16],
+    format_context: &Format3Context,
+    table_name: &str,
+    captures: &[SourceCaptureRow<'_>],
+) {
+    assert!(!captures.is_empty());
+    let commit = repository.head().unwrap().unwrap();
+    let loader = ProjectLoader::default();
+    let project = loader
+        .load_committed_snapshot(repository, &commit)
+        .expect("load the committed source project");
+    let schema = loader
+        .resolve_committed_source_table_schema(repository, &commit, TableObjectId::new(relation_id))
+        .expect("resolve the table from its committed identity manifest");
+    assert_eq!(schema.declaration_name(), table_name);
+    assert_eq!(schema.table_object_id(), TableObjectId::new(relation_id));
+    let mut mutations = Vec::with_capacity(captures.len());
+    let mut paths_by_key = std::collections::BTreeMap::new();
+    let mut retained_sources = Vec::with_capacity(captures.len());
+    for capture in captures {
+        // Admission decodes each logical path component with the VFS-1 key
+        // projection (profiles/vfs-1.md:44-56), the same spelling the mount writes.
+        let (encoded_key, key_component) = vfs_key_component(capture.key);
+        let logical_path = format!("{table_name}/{encoded_key}.orna");
+        let row_source = capture.source_row;
+        let mut blob_fields = Vec::with_capacity(capture.blob_fields.len());
+        for (field_name, expression) in capture.blob_fields {
+            let value = evaluate_expression_ovb2_with_effects(
+                expression,
+                &BTreeMap::default(),
+                Limits::default(),
+                bindings,
+            )
+            .expect("capture the source payload");
+            let blob_binding = bindings
+                .accept_captured_blob_for_row(&value)
+                .expect("accept the captured Blob for this row");
+            blob_fields.push(((*field_name).to_owned(), blob_binding));
+        }
+        let source_row_id = source_row_id_for_ordinal(capture.ordinal);
+        let admitted = admit_source_row_with_owner_fields(
+            &project,
+            &logical_path,
+            row_source,
+            &schema,
+            format_context,
+            blob_fields,
+            vec![],
+            &[key_component],
+            source_row_id,
+        )
+        .unwrap_or_else(|error| {
+            panic!(
+                "admit source row ordinal {} ({row_source}): {error:?}",
+                capture.ordinal
+            )
+        });
+        let (source_mutation, source_bindings, resolved_schema) =
+            admitted.into_mutation_and_bindings();
+        assert_eq!(
+            resolved_schema.table_object_id(),
+            TableObjectId::new(relation_id)
+        );
+        assert_eq!(source_mutation.table(), table_name);
+        assert_eq!(
+            source_mutation.table_object_id(),
+            Some(TableObjectId::new(relation_id))
+        );
+        let mutation_id = source_mutation.id();
+        let mutation_table = source_mutation.table().to_owned();
+        let mutation_key = source_mutation.key().to_vec();
+        let mutation_value = source_mutation
+            .value()
+            .expect("admitted source row has a value")
+            .to_vec();
+        let mut mutation = if capture.insert_only {
+            TableMutation::insert(mutation_id, mutation_table, mutation_key, mutation_value)
+                .expect("the source row is a new store row")
+        } else {
+            TableMutation::new(
+                mutation_id,
+                mutation_table,
+                mutation_key,
+                Some(mutation_value),
+            )
+            .expect("the source row replaces an existing store row")
+        }
+        .with_table_object_id(TableObjectId::new(relation_id));
+        for binding in &source_bindings {
+            mutation = mutation
+                .with_protected_content_pin(binding.pin())
+                .expect("retain the admitted Blob pin on the mutation");
+        }
+        assert!(mutation.value().is_some_and(|value| !value.is_empty()));
+        // Storage names a loose row by its canonical key text (key-path-v1), so
+        // a special-character key keeps its own decoding. A key the storage
+        // codec cannot represent (over its component limit) keeps the projected
+        // alias name; that name is not decodable by storage (see the PR body).
+        let loose_path = LoosePath::for_key(table_name, &[capture.key.to_owned()])
+            .or_else(|_| LoosePath::for_key(table_name, std::slice::from_ref(&encoded_key)))
+            .expect("the committed source row has a managed path");
+        paths_by_key.insert(mutation.key().to_vec(), loose_path);
+        retained_sources.push(source_bindings);
+        mutations.push(mutation);
+    }
+    let ordinal = u8::try_from(captures[0].ordinal & 0x00ff).expect("low byte of the ordinal");
+    let mut request_id = [ordinal; 16];
+    request_id[0] = 0xA5;
+    let request_identity = RequestIdentity {
+        session_id: [0x91; 16],
+        request_id,
+    };
+    let mut fingerprint = [ordinal; 32];
+    fingerprint[0] = 0x5A;
+    let (_, admission) = state
+        .reserve_request_with_admission(request_identity, fingerprint)
+        .await
+        .unwrap();
+    state
+        .start_request_with_owner_and_admission(
+            request_identity,
+            fingerprint,
+            writer,
+            admission.expect("admission capability"),
+        )
+        .await
+        .unwrap();
+    let context = state.begin_activation().await.unwrap();
+    let committed = state
+        .commit_table_request_activation(
+            writer,
+            request_identity,
+            fingerprint,
+            &context,
+            &mutations,
+            [ordinal.wrapping_add(4); 32],
+            TerminalOutcome::new(vec![ordinal.wrapping_add(5)]).unwrap(),
+            &NoFault,
+            orna_runtime::ActivationEffectReport::declare(orna_runtime::DeclaredEffectSet::None),
+        )
+        .await
+        .unwrap();
+    assert_eq!(committed.request.state, RequestState::Completed);
+    crate::format3::publish_source_rows(
+        repository,
+        state,
+        &paths_by_key,
+        [ordinal.wrapping_add(6); 16],
+    )
+    .await;
+    drop(retained_sources);
+}
+
+/// One capture request: the repository, the runtime state and the rows it writes.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+/// Replaces one captured source row through the save admission the mount's
+/// durable save uses, and leaves it unpublished: the runtime holds the
+/// replacement while the repository head still commits the previous row.
+pub async fn commit_source_replacement_through_save_admission(
+    repository: &Repository,
+    state: &RuntimeState,
+    writer: WriterLease,
+    bindings: &mut SysHostBindingRegistry,
+    relation_id: [u8; 16],
+    format_context: &Format3Context,
+    table_name: &str,
+    capture: &SourceCaptureRow<'_>,
+) {
+    assert!(
+        !capture.insert_only,
+        "a save admission replaces an existing row"
+    );
+    let commit = repository.head().unwrap().unwrap();
+    let loader = ProjectLoader::default();
+    let project = loader
+        .load_committed_snapshot(repository, &commit)
+        .expect("load the committed source project");
+    let identities = ObjectIdentityManifest::read_committed(repository, &commit)
+        .expect("read the committed identity manifest");
+    let table_object_ids: Arc<BTreeMap<String, TableObjectId>> = Arc::new(
+        identities
+            .records()
+            .iter()
+            .filter(|identity| identity.kind() == ObjectKind::Table && !identity.is_retired())
+            .map(|identity| {
+                (
+                    identity.qualified_name().to_owned(),
+                    TableObjectId::new(*identity.id()),
+                )
+            })
+            .collect(),
+    );
+    let schema = loader
+        .resolve_committed_source_table_schema(repository, &commit, TableObjectId::new(relation_id))
+        .expect("resolve the table from its committed identity manifest");
+    assert_eq!(schema.declaration_name(), table_name);
+    assert_eq!(schema.table_object_id(), TableObjectId::new(relation_id));
+    let schema_identity =
+        committed_table_schema_identity(repository, TableObjectId::new(relation_id))
+            .expect("the committed table has a schema identity");
+    let table = RuntimeTableIdentity::new(table_name, TableObjectId::new(relation_id))
+        .expect("the captured table has a runtime identity");
+    let save = VfsDurableSave::new(
+        writer.owner_id,
+        schema_identity,
+        table,
+        capture.key.as_bytes().to_vec(),
+    );
+    let admission = VfsSaveAdmission::<()>::begin(state, save, &NoFault)
+        .await
+        .expect("begin the save admission for the captured row");
+    let coordinates = admission.coordinates();
+    let (encoded_key, key_component) = vfs_key_component(capture.key);
+    let logical_path = format!("{table_name}/{encoded_key}.orna");
+    let row_source = capture.source_row;
+    let mut blob_fields = Vec::with_capacity(capture.blob_fields.len());
+    for (field_name, expression) in capture.blob_fields {
+        let value = evaluate_expression_ovb2_with_effects(
+            expression,
+            &BTreeMap::default(),
+            Limits::default(),
+            bindings,
+        )
+        .expect("capture the source payload");
+        let blob_binding = bindings
+            .accept_captured_blob_for_row(&value)
+            .expect("accept the captured Blob for this row");
+        blob_fields.push(((*field_name).to_owned(), blob_binding));
+    }
+    let source_row_id = source_row_id_for_ordinal(capture.ordinal);
+    let admitted = admit_source_row_with_owner_fields(
+        &project,
+        &logical_path,
+        row_source,
+        &schema,
+        format_context,
+        blob_fields,
+        vec![],
+        &[key_component],
+        source_row_id,
+    )
+    .unwrap_or_else(|error| {
+        panic!(
+            "admit source row ordinal {} ({row_source}): {error:?}",
+            capture.ordinal
+        )
+    });
+    let (source_mutation, source_bindings, resolved_schema) = admitted.into_mutation_and_bindings();
+    assert_eq!(
+        resolved_schema.table_object_id(),
+        TableObjectId::new(relation_id)
+    );
+    assert_eq!(source_mutation.table(), table_name);
+    assert_eq!(
+        source_mutation.table_object_id(),
+        Some(TableObjectId::new(relation_id))
+    );
+    assert_eq!(source_mutation.key(), capture.key.as_bytes());
+    // Source-row admission creates insert-only mutations; this save writes the
+    // replacement over the stored row instead.
+    let replacement_value = source_mutation
+        .value()
+        .expect("admitted source row has a value")
+        .to_vec();
+    let mut mutation = TableMutation::new(
+        source_mutation.id(),
+        source_mutation.table().to_owned(),
+        coordinates.key().to_vec(),
+        Some(replacement_value),
+    )
+    .expect("the replacement is a valid table mutation")
+    .with_table_object_id(coordinates.table().object_id());
+    let mut pins = Vec::with_capacity(source_bindings.len());
+    for binding in source_bindings {
+        let (_, _, pin) = binding.into_parts();
+        mutation = mutation
+            .with_protected_content_pin(&pin)
+            .expect("retain the admitted Blob pin on the replacement");
+        pins.push(pin);
+    }
+    let content_transfers = pins
+        .iter()
+        .map(orna_repository::ProtectedContentPin::transfer_record)
+        .collect::<Vec<_>>();
+    let replacement_bytes = mutation
+        .value()
+        .expect("the replacement row has a value")
+        .to_vec();
+    let replacement =
+        VfsTableRowReplacement::from_admitted_mutation(coordinates.table().clone(), mutation, pins)
+            .expect("the admitted replacement is a valid table row");
+    let validator = transactional_loaded_project_candidate_validator(
+        &project,
+        &identities,
+        None,
+        Arc::clone(&table_object_ids),
+        Limits::default(),
+    )
+    .unwrap_or_else(|_| panic!("the committed project yields a candidate validator"));
+    let live_repository = repository.clone();
+    let live_table = coordinates.table().object_id();
+    let mut live_identity = table_schema::LiveTableSchemaIdentity::new(live_table);
+    let candidate = VfsSaveCandidate::new(replacement, validator)
+        .with_protected_content_transfers(replacement_bytes, content_transfers)
+        .with_live_schema_identity(move || live_identity.read(&live_repository));
+    admission
+        .commit(candidate)
+        .await
+        .expect("the replacement row commits through the save admission");
+}

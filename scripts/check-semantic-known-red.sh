@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Gate for the orna-semantic-v1 test suite against scripts/semantic-known-red.txt.
+# Gate for the orna-semantic test suite against scripts/semantic-known-red.txt.
 #
 # Each non-comment line of the list is:
 #   <test name><TAB><bead id><TAB><reason><TAB><expected failure substring>.
@@ -24,7 +24,7 @@ set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
 LIST=scripts/semantic-known-red.txt
 BEADS=scripts/semantic-known-red-beads.txt
-PKG=orna-semantic-v1
+PKG=orna-semantic
 CARGO=(cargo test --locked -p "$PKG")
 mode=check
 [ "${1:-}" = "--collect" ] && mode=collect

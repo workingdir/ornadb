@@ -1,6 +1,6 @@
 # Editor syntax support
 
-`orna-syntax-v1` is the source for editor keyword, scalar-type, delimiter,
+`orna-syntax` is the source for editor keyword, scalar-type, delimiter,
 operator, punctuation, and language metadata. The generated editor packages
 and LSP metadata describe the Orna 1.1.0 vocabulary and record that version as
 `languageVersion`.
@@ -40,7 +40,7 @@ activation, and a setting change restarting the client. With
 `npm install` in `editors/vscode`, `node scripts/check_vscode_extension.js
 --real` also constructs a client with the installed `vscode-languageclient`,
 which proves the generated launch options are the shape that version expects.
-Focused tests in `orna-syntax-v1` load `.orna` fixtures from that crate with
+Focused tests in `orna-syntax` load `.orna` fixtures from that crate with
 `include_str!`, validate the generated metadata, check for v1-only lexical
 classes, and prove byte stability and complete editor-tree coverage. The
 coverage test fails for a file under `editors/` that the generator does not
