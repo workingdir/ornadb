@@ -2192,7 +2192,7 @@ fn binary_check_and_commit_refuse_a_pinned_standard_module_with_a_type_incorrect
     assert!(
         matches!(
             error,
-            orna_project::ProjectLoadError::InvalidStandardBody { .. }
+            orna_project::ProjectLoadError::InvalidStandardBody(_)
         ),
         "{error:?}"
     );
