@@ -2615,6 +2615,9 @@ const UNDECIDED_ITEM_CODES: [&str; 4] = [
     DIAG_UNSUPPORTED,
 ];
 
+/// A diagnostic paired with the byte range of the item that carries it.
+type ItemDiagnosticSpan<'a> = (&'a Diagnostic, Range<usize>);
+
 /// Type-checks the bodies of one pinned standard dependency's own modules.
 ///
 /// [`Catalogue::from_standard_sources`] parses the bundle and derives its
@@ -2705,7 +2708,7 @@ pub fn check_standard_sources(
             (logical_path.clone(), spans)
         })
         .collect::<BTreeMap<_, _>>();
-    let mut by_item: BTreeMap<(String, usize), Vec<(&Diagnostic, Range<usize>)>> = BTreeMap::new();
+    let mut by_item: BTreeMap<(String, usize), Vec<ItemDiagnosticSpan<'_>>> = BTreeMap::new();
     for (diagnostic, origin) in analysis.diagnostics.iter().zip(origins) {
         let (Some(logical_path), Some(primary)) = (origin.logical_path, origin.primary) else {
             continue;

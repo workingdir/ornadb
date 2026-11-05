@@ -158,7 +158,7 @@ fn stage_store(
             // A pinned body the checker decided is wrong names its module and
             // line, so it reports as a source contract failure rather than an
             // unreadable staged candidate.
-            error @ orna_project::ProjectLoadError::InvalidStandardBody { .. } => {
+            error @ orna_project::ProjectLoadError::InvalidStandardBody(_) => {
                 project_load_diagnostic(error)
             }
             error => staging_error("staged source could not be loaded", format!("{error:?}")),
