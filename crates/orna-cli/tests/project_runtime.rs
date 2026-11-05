@@ -2143,6 +2143,89 @@ fn binary_checks_and_runs_an_import_from_the_pinned_standard_git_module() {
     assert!(run.stderr.is_empty());
 }
 
+/// A pinned standard snapshot is source the project loads, so its bodies reach
+/// the same resolution, inference and type checking as project source
+/// (ORNA-MODULE-003). The catalogue a project resolves `std` through derives
+/// declarations only, so before the loader checked the pinned closure this
+/// snapshot printed `project valid` — and `commit` published it — with a body
+/// that returns `Text` where the declared result is `Int`.
+#[test]
+fn binary_check_and_commit_refuse_a_pinned_standard_module_with_a_type_incorrect_body() {
+    let standard = [(
+        "math.orna",
+        "// the pinned dependency's body is on the next line\npub fn increment(value: Int): Int = \"text\";\n",
+    )];
+    let project = [(
+        "main.orna",
+        "use std.math.{increment};\npub fn answer(): Int = increment(41);\n",
+    )];
+
+    let (directory, _module_commit) = captured_standard_project_with(&standard, &project);
+    let check = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .current_dir(directory.path())
+        .args(["check"])
+        .output()
+        .expect("CLI check");
+    let stderr = String::from_utf8_lossy(&check.stderr);
+    assert!(
+        !check.status.success(),
+        "a type-incorrect pinned body must be refused; stdout: {:?}",
+        check.stdout
+    );
+    for expected in [
+        "error[E2101]",
+        "std/math.orna:2",
+        "ORNA-S021-TYPE",
+        "expected Int, found Text",
+    ] {
+        assert!(
+            stderr.contains(expected),
+            "the check diagnostic must carry `{expected}`: {stderr}"
+        );
+    }
+
+    let repository = Repository::discover(directory.path()).expect("project repository");
+    let error = orna_project::ProjectLoader::default()
+        .load(&repository)
+        .expect_err("the loader must not attach a type-incorrect pinned body");
+    assert!(
+        matches!(
+            error,
+            orna_project::ProjectLoadError::InvalidStandardBody(_)
+        ),
+        "{error:?}"
+    );
+
+    let (staged, _module_commit) = staged_standard_project_with(&standard, &project);
+    let commit = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "--db",
+            staged.path().to_str().expect("UTF-8 path"),
+            "commit",
+            "-m",
+            "pin a standard module with a type-incorrect body",
+        ])
+        .output()
+        .expect("CLI commit");
+    let stderr = String::from_utf8_lossy(&commit.stderr);
+    assert!(
+        !commit.status.success(),
+        "a type-incorrect pinned body must not be committed: {stderr}"
+    );
+    for expected in [
+        "error[E2101]",
+        "std/math.orna:2",
+        "expected Int, found Text",
+    ] {
+        assert!(
+            stderr.contains(expected),
+            "the commit diagnostic must carry `{expected}`: {stderr}"
+        );
+    }
+}
+
 #[test]
 fn binary_repl_evaluates_a_pinned_query_window_operator_from_its_stats_import() {
     let standard_sources = orna_evaluator::reference_standard_sources()

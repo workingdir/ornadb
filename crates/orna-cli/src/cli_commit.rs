@@ -19,8 +19,8 @@ use orna_repository::{
 
 use super::assertion_gate::{AssertionGate, GatedCommand, refusal_diagnostic};
 use super::{
-    Cow, Diagnostic, Endpoint, Exit, RuntimeState, local_project_path, runtime_identity,
-    semantic_catalogue,
+    Cow, Diagnostic, Endpoint, Exit, RuntimeState, local_project_path, project_load_diagnostic,
+    runtime_identity, semantic_catalogue,
 };
 
 fn usage() -> Diagnostic {
@@ -155,6 +155,12 @@ fn stage_store(
             orna_project::ProjectLoadError::FormatContext(
                 error @ FormatContextError::MixedFormats { .. },
             ) => mixed_formats(&error),
+            // A pinned body the checker decided is wrong names its module and
+            // line, so it reports as a source contract failure rather than an
+            // unreadable staged candidate.
+            error @ orna_project::ProjectLoadError::InvalidStandardBody(_) => {
+                project_load_diagnostic(error)
+            }
             error => staging_error("staged source could not be loaded", format!("{error:?}")),
         })?;
     let catalogue = semantic_catalogue(&project)?;
