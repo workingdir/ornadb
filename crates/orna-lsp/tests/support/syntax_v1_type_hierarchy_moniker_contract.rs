@@ -254,7 +254,7 @@ pub fn assert_contract(
         (local_use, "local parameter use"),
     ] {
         assert_eq!(
-            moniker["scheme"], "orna-syntax-v1",
+            moniker["scheme"], "orna-syntax",
             "{editor} {label} scheme differs"
         );
         assert_eq!(
@@ -286,7 +286,7 @@ fn assert_project_export(moniker: &Value, editor: &str, label: &str) {
 
 fn assert_project_moniker(moniker: &Value, editor: &str, label: &str) {
     assert_eq!(
-        moniker["scheme"], "orna-syntax-v1",
+        moniker["scheme"], "orna-syntax",
         "{editor} {label} scheme differs"
     );
     assert_eq!(

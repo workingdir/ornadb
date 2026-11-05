@@ -1,0 +1,49 @@
+[package]
+name = "orna-conformance"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.95"
+license = "Apache-2.0"
+publish = false
+
+[[bin]]
+name = "orna-conformance"
+path = "src/main.rs"
+
+[dependencies]
+futures = "0.3.31"
+getrandom = "0.3.4"
+orna-evaluator = { path = "../orna-evaluator" }
+orna-foundation = { path = "../orna-foundation" }
+orna-protocol = { path = "../orna-protocol" }
+orna-project = { path = "../orna-project" }
+orna-repository = { path = "../orna-repository" }
+orna-semantic = { path = "../orna-semantic" }
+orna-syntax = { path = "../orna-syntax" }
+orna-runtime = { path = "../orna-runtime" }
+orna-stream = { path = "../orna-stream" }
+orna-sys = { path = "../orna-sys" }
+orna-storage = { path = "../orna-storage", features = ["compact-writer-fixtures"] }
+orna-serving = { path = "../orna-serving" }
+orna-table = { path = "../orna-table" }
+orna-value = { path = "../orna-value" }
+num-bigint = "0.4.6"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+
+[dev-dependencies]
+orna-live = { path = "../orna-live" }
+orna-core = { path = "../orna-core" }
+orna-security = { path = "../orna-security" }
+orna-serving = { path = "../orna-serving" }
+tempfile = "3.23.0"
+tokio = { version = "1.48.0", features = [
+    "io-util",
+    "macros",
+    "net",
+    "rt",
+    "rt-multi-thread",
+    "sync",
+    "time",
+] }

@@ -232,7 +232,7 @@ impl Project {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, source).unwrap();
         }
-        orna_repository_v1::initialize_repository(&root).expect("orna init");
+        orna_repository::initialize_repository(&root).expect("orna init");
         Self { directory, root }
     }
 

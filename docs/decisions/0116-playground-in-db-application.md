@@ -164,7 +164,7 @@ No playground application, renderer, or browser adapter may maintain its own
 syntax, token, keyword, scalar-type, or operator inventory. Editor metadata
 consumed by the page comes from the checked-in generated artifacts under
 `editors/` (or the byte-identical artifact row in `std.devtools.Asset`),
-emitted and drift-checked by the existing `orna-syntax-v1` generator. A page
+emitted and drift-checked by the existing `orna-syntax` generator. A page
 may initially show plain source text; if it highlights source, it consumes
 those generated artifacts. The renderer must not add a second vocabulary or
 fallback keyword list.

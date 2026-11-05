@@ -48,8 +48,8 @@ These clauses do not assign the publication-object format or its consumer to
 - `crates/orna-compiler/src/relational.rs:1207-1234` calls the server-plan
   encoders. `crates/orna-client/src/lib.rs:2703-2721` dispatches executable
   client-plan decoding. These are plan artifacts, not PUB-1 objects.
-- `crates/orna-storage-v1/src/compact.rs:804-925` lowers the typed runtime
-  freeze into compact writer input. `crates/orna-repository-v1/src/compact.rs:3555-3622`
+- `crates/orna-storage/src/compact.rs:804-925` lowers the typed runtime
+  freeze into compact writer input. `crates/orna-repository/src/compact.rs:3555-3622`
   hashes compact segment bytes, adds canonical manifest files, builds the
   private commit, and verifies its manifest binding.
 

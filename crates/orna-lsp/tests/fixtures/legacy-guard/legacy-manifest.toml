@@ -1,2 +1,0 @@
-[dependencies]
-orna-syntax = { path = "../orna-syntax" }

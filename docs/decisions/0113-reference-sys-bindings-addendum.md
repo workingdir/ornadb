@@ -63,7 +63,7 @@ The build and focused CI proof share one artifact projection over the annotated 
 
 ## Follow-on proof note: generic keyword alias tail (issue #5639)
 
-The parity proof also pins the generated `sys.invoke<T>` declaration whose type-witness parameter is named `as` in the registry and emitted as `as_` for Orna grammar. Its small `.orna` golden is stored inside `orna-sys-v1/tests/fixtures/` and included at compile time. This closes the focused reserved-keyword/generic tail without reading fixtures from the external reference tree or changing generated artifact bytes.
+The parity proof also pins the generated `sys.invoke<T>` declaration whose type-witness parameter is named `as` in the registry and emitted as `as_` for Orna grammar. Its small `.orna` golden is stored inside `orna-sys/tests/fixtures/` and included at compile time. This closes the focused reserved-keyword/generic tail without reading fixtures from the external reference tree or changing generated artifact bytes.
 
 ## Follow-on proof note: generic start keyword alias (issue #5655)
 
