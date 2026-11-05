@@ -308,3 +308,87 @@ Open gaps (not proven by this fixture):
   accepts. This is an unresolved reader/spec ambiguity recorded for follow-up,
   not changed in this slice. Str bounds are OVB text bytes, not hex of raw UTF-8.
 - Byte-compatibility with 1.0.0 golden output: not verified.
+
+## Idempotent carry, deterministic staging and the migration kill matrix (bead 5il1.397)
+
+`orna migrate copy` prepares one explicit format-3 candidate from a legacy
+snapshot and publishes it as a disposable copy (Gate F,
+`implementation/ACCEPTANCE.md:61-68`; UPGRADE-3 items 3-7 in
+`source/40-upgrade-contract.md`). The slice adds three asserted properties and
+the process kills that back them.
+
+### Durable boundaries a migration crosses
+
+| # | Boundary | Where it becomes durable | How it is protected |
+| --- | --- | --- | --- |
+| B1 | source graph cloned into staging | `migration_copy.rs` `clone_source_graph` (`git clone --no-local`) | staging is a hidden sibling with a random name (`migration_staging_path`); nothing is published until B7; removed on a returned error |
+| B2 | submodule admin, worktree and index copied | `copy_submodule_admin`, `copy_working_tree`, `copy_index_blobs`, `copy_source_index` | same staging containment; the source is only read; the source commit/index/worktree are re-checked afterwards |
+| B3 | candidate commit object | `build_private_commit_at` into a private index (`GIT_INDEX_FILE`), then `refs/orna/migration-candidates/<sha>` | create-only `update-ref` with a verify fallback; still inside staging |
+| B4 | base index tree pin | `refs/orna/migration-indexes/<tree>` | create-only `update-ref` with a verify fallback |
+| B5 | publication journal | `Repository::write_publication_journal_locked`: temp file, `sync_all`, `rename`, runtime-directory `sync_all` | atomic replace under the coordination lock; a restart reads this instead of rebuilding |
+| B6 | staged bytes fsynced | `sync_tree(&staging)` | every file and directory in staging is fsynced before the rename |
+| B7 | staged copy published | `publish_directory_noreplace`: `renameat2(RENAME_NOREPLACE)` then parent-directory fsync | single atomic step: the destination either does not exist or is complete |
+| B8 | stream carry imported | `import_stream_carry`: one SQLite `IMMEDIATE` transaction over `stream_checkpoint`, `..._migration_bridge`, `..._migration_archive` | transactional; a restart re-imports and the import recognises the rows it already wrote |
+| B9 | discard rename | `publish_directory_noreplace(parent, destination, quarantine)` | the rename is the commit point; a restart finishes the removal |
+
+### Asserted properties
+
+1. **Idempotent carry.** A second `orna migrate copy` against the same
+   destination changes nothing: the same candidate commit and tree, the same
+   `.git/index` and journal bytes, the same carried rows, and byte-identical
+   standard output. The acknowledged checkpoint (version 2 of a three-item
+   stream) is present exactly once, every source history row is archived once,
+   and delivery resumes at item 3.
+2. **Deterministic staging.** Two independent migrations of one source commit
+   produce the same committed bytes. This needed a product change: the
+   migration commit was written with `git commit-tree` and therefore the wall
+   clock, so two runs a second apart recorded different commits for an
+   identical tree and message. The candidate is now written with
+   `Repository::build_private_commit_at` and the converted snapshot's committer
+   time, which keeps the commit a function of its tree, parent and message.
+3. **Migration kill matrix.** `crates/orna-cli/tests/migration_kill_matrix.rs`
+   (feature `crash-barriers`) SIGKILLs the real executable at each boundary
+   above — `migration-staging`, `migration-candidate`, `migration-journal`,
+   `migration-synced`, `migration-published`, `migration-carried`, and
+   `migration-discard-renamed` for `migrate abort` — restarts the same command,
+   and requires the recovered copy to equal an uninterrupted run byte for byte,
+   the source worktree/index/carry to be untouched (ORNA-UPGRADE-006), and the
+   acknowledged checkpoint to be carried exactly once.
+
+### What this slice changed
+
+Recovery admitted the journal's candidate only as a complete format-3 snapshot
+(`open_private_candidate_format_context`), so a candidate that still carries the
+legacy `.orna/storage` layout — every populated source — was refused as
+`MixedFormats` and the second run failed with `E2100`. Recovery now reads the
+candidate's own `database.orna`, requires the legacy `format.orna` marker to be
+gone, and continues to rely on `candidate_from_journal` and the journal's
+managed entries to pin the rest of the candidate tree. The whole-snapshot
+admission rule is unchanged: opening such a candidate as a reader still refuses
+it.
+
+### Not covered, and why
+
+- **UPGRADE-3.5 is not satisfied by the prepared copy.** The candidate keeps
+  `.orna/storage` and creates no `.orna/store`; it records `stage: prepared` and
+  the legacy row layout is only replaced by the store build. A candidate in
+  which "no old authoritative row folders remain" needs the store build, which
+  this copy step does not perform. The kill matrix therefore validates a
+  prepared copy, not a completed conversion.
+- **A source without a recorded database identity is not reproducible.**
+  `prepare_format3_migration_in` mints `DatabaseId::new_v4()` when the legacy
+  context records no identity, so two preparations of that input differ in
+  `database.orna` and in every runtime identity derived from it. Determinism is
+  asserted for a source that records its identity, as the golden bundle does.
+- **A pre-publication kill leaks its staging directory.** The staging name is a
+  random UUID and is not recorded anywhere, so no later run can tell an orphan
+  from another process's in-flight staging. The matrix asserts the leftover is a
+  private sibling that was never published, not that it is reclaimed.
+- **The boundary inside `write_publication_journal` is not separately killed.**
+  Its `rename` is the atomic step, it is exercised by the Gate D publication
+  matrix, and a kill before it leaves only a staging directory that is never
+  read.
+- **`.git/orna/state.db` bytes are compared by row, not by file.** SQLite page
+  layout and its header change counters are not part of the carry contract; the
+  matrix compares the checkpoint, bridge, archive and history rows exactly and
+  compares the committed git bytes byte for byte.

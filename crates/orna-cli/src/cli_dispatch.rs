@@ -1267,6 +1267,10 @@ fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnost
                 format!("{error:?}"),
             )
         })?;
+    // Boundary: the carry is committed in the destination runtime and the
+    // command has not yet reported it. A restart re-imports the same carry,
+    // which the import recognises as already present.
+    orna_repository::publication_crash_barrier("migration-carried");
     println!(
         "prepared or recovered format-3 migration copy: source_format={} source_commit={} candidate_commit={} destination={} carried_checkpoints={} carried_history={}",
         copy.source_format_number(),

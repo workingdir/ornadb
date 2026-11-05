@@ -269,11 +269,20 @@ pub fn prepare_format3_migration(
         )?;
         pin_migration_candidate(&repository, copy.candidate_journal.new_head())?;
         repository.write_publication_journal(&copy.candidate_journal)?;
+        // Boundary: the staged copy holds its journal, which is what a restart
+        // reads to validate the copy instead of rebuilding it.
+        crate::publication_crash_barrier("migration-journal");
         sync_tree(&staging)?;
+        // Boundary: every staged byte and directory entry is durable, and the
+        // copy is still private under its staging name.
+        crate::publication_crash_barrier("migration-synced");
         let parent = destination
             .parent()
             .ok_or(RepositoryError::LocalStateUnavailable)?;
         publish_copy_noreplace(parent, &staging, &destination)?;
+        // Boundary: the copy is installed under its final name. A restart finds
+        // it here and recovers it rather than building a second one.
+        crate::publication_crash_barrier("migration-published");
         copy.destination = destination;
         Ok(copy)
     })();
@@ -367,6 +376,9 @@ pub fn discard_prepared_format3_migration(
             let (continuity, annotation_defaults) = migration_coordinates(&journal)?;
             recover_prepared_copy(source, &destination, continuity, annotation_defaults)?;
             publish_copy_noreplace(parent, &destination, &quarantine)?;
+            // Boundary: the copy now exists only under the quarantine name. A
+            // restart sees no destination and finishes the removal.
+            crate::publication_crash_barrier("migration-discard-renamed");
             remove_quarantined_copy(parent, &quarantine)?;
             Ok(DiscardOutcome::Discarded)
         }
@@ -375,6 +387,7 @@ pub fn discard_prepared_format3_migration(
             // the commit point. The quarantine is not re-validated: a source
             // changed since then must not strand the removal.
             require_directory(&quarantine)?;
+            crate::publication_crash_barrier("migration-discard-renamed");
             remove_quarantined_copy(parent, &quarantine)?;
             Ok(DiscardOutcome::Discarded)
         }
@@ -497,6 +510,10 @@ fn prepare_format3_migration_in(
     {
         return Err(RepositoryError::PublicationRecoveryConflict);
     }
+    // Boundary: the staged graph, submodule administration, working tree and
+    // index are on disk, and the source still matches what they were copied
+    // from. Nothing is published yet and the staged copy has no candidate.
+    crate::publication_crash_barrier("migration-staging");
 
     configure_migration_commit_identity(&root)?;
     let copy = Repository::discover(&root)?;
@@ -517,7 +534,13 @@ fn prepare_format3_migration_in(
         annotation_defaults,
         &continuity,
     );
-    let candidate = copy.build_private_commit(
+    // A migration commit is a synthetic record of one explicit transition, so
+    // its time comes from the snapshot it converts rather than from this
+    // process. Two independent preparations of one source then build the same
+    // commit object, which is what lets a recovered copy be compared byte for
+    // byte with a fresh one.
+    let commit_time = source_commit_time(source, &source_commit)?;
+    let candidate = copy.build_private_commit_at(
         &source_commit,
         &[
             crate::ManagedFileChange::new(
@@ -531,7 +554,11 @@ fn prepare_format3_migration_in(
             ),
         ],
         &candidate_message(source_format, annotation_defaults, &continuity),
+        commit_time,
     )?;
+    // Boundary: the candidate commit object exists in the staged copy and is
+    // not yet pinned or journalled.
+    crate::publication_crash_barrier("migration-candidate");
     let runtime_intent_id = migration_runtime_intent_id(
         source_index_generation
             .tree()
@@ -830,15 +857,7 @@ fn recover_prepared_copy(
     )?;
     require_migration_candidate_pin(&repository, journal.new_head())?;
     let candidate = repository.candidate_from_journal(&journal)?;
-    let candidate_context = repository
-        .open_private_candidate_format_context(&candidate)
-        .map_err(|_| RepositoryError::InvalidFormatMigration)?;
-    let database_id = candidate_context
-        .database_id()
-        .ok_or(RepositoryError::InvalidFormatMigration)?;
-    if candidate_context.repository_format() != RepositoryFormat::Format3 {
-        return Err(RepositoryError::InvalidFormatMigration);
-    }
+    let database_id = candidate_database_id(&repository, &candidate)?;
     let expected_record = migration_record(
         source_format,
         &source_commit,
@@ -891,6 +910,60 @@ fn recover_prepared_copy(
     })
 }
 
+/// Reads one tracked file from a private candidate's exact tree, or `None` when
+/// that path is absent there.
+fn candidate_file(
+    repository: &Repository,
+    tree: &str,
+    path: &str,
+) -> Result<Option<Vec<u8>>, RepositoryError> {
+    let expression = format!("{tree}:{path}");
+    let mut exists = git_command(repository.worktree());
+    exists
+        .args(["cat-file", "-e", &expression])
+        .stderr(Stdio::null());
+    if !exists
+        .status()
+        .map_err(|_| RepositoryError::GitUnavailable)?
+        .success()
+    {
+        return Ok(None);
+    }
+    let mut blob = git_command(repository.worktree());
+    blob.args(["cat-file", "blob", &expression]);
+    let output = blob.output().map_err(|_| RepositoryError::GitUnavailable)?;
+    if !output.status.success() {
+        return Err(RepositoryError::GitOperationFailed);
+    }
+    Ok(Some(output.stdout))
+}
+
+/// The canonical format-3 database identity a private migration candidate
+/// records, with the legacy format marker required to be gone.
+///
+/// A prepared migration candidate is deliberately *transitional*: it carries the
+/// format-3 `database.orna` and drops `format.orna`, but it still holds the
+/// legacy row layout until the store build replaces it (UPGRADE-3.5,
+/// MIGRATION.md items 3-5), so it is not a complete format-3 snapshot. Admitting
+/// it as one would refuse it as `MixedFormats`, which is the right answer for a
+/// repository a reader might otherwise treat as new-format; recovery instead
+/// reads the two records that decide the format. The rest of the candidate is
+/// not taken on trust: `candidate_from_journal` has already compared this exact
+/// tree with the journal's managed entries.
+fn candidate_database_id(
+    repository: &Repository,
+    candidate: &crate::PrivateCommit,
+) -> Result<DatabaseId, RepositoryError> {
+    let tree = candidate.tree().as_str();
+    if candidate_file(repository, tree, LEGACY_FORMAT_PATH)?.is_some() {
+        return Err(RepositoryError::InvalidFormatMigration);
+    }
+    let database = candidate_file(repository, tree, ".orna/database.orna")?
+        .ok_or(RepositoryError::InvalidFormatMigration)?;
+    crate::init::format_context::parse_canonical_database(&database)
+        .map_err(|()| RepositoryError::InvalidFormatMigration)
+}
+
 fn sync_tree(root: &Path) -> Result<(), RepositoryError> {
     let metadata =
         fs::symlink_metadata(root).map_err(|_| RepositoryError::LocalStateUnavailable)?;
@@ -937,6 +1010,30 @@ fn configure_migration_commit_identity(root: &Path) -> Result<(), RepositoryErro
         }
     }
     Ok(())
+}
+
+/// The committer time of the legacy snapshot, in seconds since the Unix epoch.
+///
+/// The migration commit records one explicit transition of one snapshot. Taking
+/// its time from that snapshot, rather than from the process that converts it,
+/// makes the candidate commit object a function of the input alone: two
+/// independent preparations of the same source then build the same object.
+fn source_commit_time(source: &Repository, commit: &GitCommitRef) -> Result<i64, RepositoryError> {
+    let mut command = git_command(source.worktree());
+    command
+        .args(["log", "-1", "--format=%ct"])
+        .arg(commit.as_str());
+    let output = command
+        .output()
+        .map_err(|_| RepositoryError::GitUnavailable)?;
+    if !output.status.success() {
+        return Err(RepositoryError::GitOperationFailed);
+    }
+    let text =
+        std::str::from_utf8(&output.stdout).map_err(|_| RepositoryError::GitOperationFailed)?;
+    text.trim()
+        .parse::<i64>()
+        .map_err(|_| RepositoryError::GitOperationFailed)
 }
 
 /// The committed `format.orna` bytes of one legacy source, exactly as its
