@@ -11,6 +11,8 @@ use std::{
     time::Duration,
 };
 
+use tempfile::TempDir;
+
 #[path = "support/format3.rs"]
 mod format3;
 #[path = "support/media_commit.rs"]
@@ -20,7 +22,8 @@ mod media_commit;
 mod editor_mount;
 use editor_mount::{
     EditorMount, clear_retained_draft_store_filler, fill_retained_draft_store,
-    require_fuse_or_skip, retained_draft_records, retained_drafts, start_editor_mount,
+    repository_with_music_rows_and_modules, require_fuse_or_skip, retained_draft_records,
+    retained_drafts, spawn_mount_process, start_editor_mount,
 };
 
 const EINVAL: i32 = 22;
@@ -268,6 +271,150 @@ async fn rejected_sync_retains_recoverable_draft_listed_by_id() {
     assert_eq!(
         body, candidate,
         "the retained record body holds the exact rejected candidate bytes"
+    );
+}
+
+/// The `(draft id, detail)` columns of an unresolved-draft report line for
+/// `path` with `cause`, when a line names that pair.
+fn listed_draft(fields: &str, path: &str, cause: &str) -> Option<(String, String)> {
+    fields.lines().find_map(|line| {
+        let mut columns = line.split('\t');
+        let listed_path = columns.next()?;
+        let listed_cause = columns.next()?;
+        if listed_path != path || listed_cause != cause {
+            return None;
+        }
+        let id = columns.next()?.to_owned();
+        Some((id, columns.next().unwrap_or_default().to_owned()))
+    })
+}
+
+fn open_rw_at(path: &std::path::Path) -> File {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .unwrap_or_else(|error| panic!("open {} read-write: {error}", path.display()))
+}
+
+fn unresolved_fields_at(root: &std::path::Path) -> String {
+    let mut value = vec![0_u8; 16 * 1024];
+    let length = rustix::fs::getxattr(root, "user.orna.unresolved-draft-fields", &mut value[..])
+        .expect("read the unresolved draft fields");
+    String::from_utf8_lossy(&value[..length]).into_owned()
+}
+
+fn retain_drafts_at(root: &std::path::Path) -> rustix::io::Result<()> {
+    rustix::fs::setxattr(
+        root,
+        "user.orna.retain-drafts",
+        b"1",
+        rustix::fs::XattrFlags::empty(),
+    )
+}
+
+/// profiles/vfs-1.md:101-102: "Rejected candidates remain recoverable and quota
+/// accounted, with a unique diagnostic/draft ID in local state." Two rejected
+/// candidates carrying byte-identical documents but addressed through different
+/// projected paths keep two records with two distinct IDs, each ID resolving to
+/// exactly its own candidate, and retaining an already-kept candidate again keeps
+/// its first record and ID.
+#[tokio::test]
+async fn rejected_candidates_with_identical_bytes_retain_distinct_draft_ids() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let original = row("Original");
+    let (repository_directory, repository, _relation_id) = repository_with_music_rows_and_modules(
+        "pub table Music(id: Str) { title: Str, artist: Str, }\n",
+        &[],
+        &[("london", original.as_str()), ("paris", original.as_str())],
+    )
+    .await;
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    let mut mounted = spawn_mount_process(repository_directory.path(), &mountpoint);
+    let london = mountpoint.join("Music/london/data.orna");
+    let paris = mountpoint.join("Music/paris/data.orna");
+    mounted.await_path(&london);
+    mounted.await_path(&paris);
+
+    // The same invalid document on both rows: only the projected path differs, so
+    // an ID derived from the content alone would collide.
+    let candidate = invalid_row("Rejected on two rows");
+    let mut london_file = open_rw_at(&london);
+    replace_draft(&mut london_file, &candidate);
+    assert_errno(
+        london_file.sync_all(),
+        EINVAL,
+        "the london row draft fsync must fail with EINVAL",
+    );
+    let mut paris_file = open_rw_at(&paris);
+    replace_draft(&mut paris_file, &candidate);
+    assert_errno(
+        paris_file.sync_all(),
+        EINVAL,
+        "the paris row draft fsync must fail with EINVAL",
+    );
+
+    let fields = unresolved_fields_at(&mountpoint);
+    let (london_id, london_detail) = listed_draft(
+        &fields,
+        "Music/london/data.orna",
+        "sys.vfs.invalid_document",
+    )
+    .unwrap_or_else(|| panic!("the london candidate is listed: {fields:?}"));
+    let (paris_id, paris_detail) =
+        listed_draft(&fields, "Music/paris/data.orna", "sys.vfs.invalid_document")
+            .unwrap_or_else(|| panic!("the paris candidate is listed: {fields:?}"));
+    assert!(
+        !london_detail.trim().is_empty() && !paris_detail.trim().is_empty(),
+        "each rejected candidate carries a diagnostic: {fields:?}"
+    );
+    assert_ne!(
+        london_id, paris_id,
+        "identical candidate bytes on different paths carry distinct draft ids"
+    );
+
+    retain_drafts_at(&mountpoint).expect("retain the rejected candidates");
+    let records = retained_draft_records(&repository);
+    for (path, id) in [
+        ("Music/london/data.orna", &london_id),
+        ("Music/paris/data.orna", &paris_id),
+    ] {
+        let (_, record) = records
+            .iter()
+            .find(|(listed, _)| listed == id)
+            .unwrap_or_else(|| panic!("record {id} for {path} is retained: {records:?}"));
+        let (header, body) = record
+            .split_once("\n\n")
+            .unwrap_or_else(|| panic!("record {id} has a header: {record:?}"));
+        assert!(
+            header.contains(&format!("draft {id}\n")),
+            "record header names {id}: {header:?}"
+        );
+        assert!(
+            header.contains(&format!("path {path}\n")),
+            "record {id} names the projected path it was rejected from: {header:?}"
+        );
+        assert_eq!(
+            body, candidate,
+            "record {id} holds exactly the rejected candidate bytes"
+        );
+    }
+
+    // Retaining again keeps each candidate's first record and ID.
+    retain_drafts_at(&mountpoint).expect("re-retain the rejected candidates");
+    let mut retained: Vec<String> = retained_draft_records(&repository)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    retained.sort();
+    let mut expected = vec![london_id, paris_id];
+    expected.sort();
+    assert_eq!(
+        retained, expected,
+        "re-retention adds no record and keeps each first id"
     );
 }
 
