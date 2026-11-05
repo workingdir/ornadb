@@ -122,7 +122,7 @@ class FixtureManifestTests(unittest.TestCase):
         fixture_count = 0
 
         for suite in parity_suites:
-            test_path = f"crates/orna-sys-v1/tests/{suite}"
+            test_path = f"crates/orna-sys/tests/{suite}"
             source = (workspace / test_path).read_text(encoding="utf-8")
             fixture_names = include_pattern.findall(source)
             self.assertTrue(fixture_names, f"{test_path} includes crate-local fixtures")
@@ -130,7 +130,7 @@ class FixtureManifestTests(unittest.TestCase):
             for fixture_name in fixture_names:
                 fixture_count += 1
                 self.assertNotIn("..", Path(fixture_name).parts)
-                fixture_path = f"crates/orna-sys-v1/tests/fixtures/{fixture_name}"
+                fixture_path = f"crates/orna-sys/tests/fixtures/{fixture_name}"
                 fixture = workspace / fixture_path
                 self.assertTrue(fixture.is_file(), f"missing crate-local fixture: {fixture_path}")
                 digest = hashlib.sha256(fixture.read_bytes()).hexdigest()
@@ -149,7 +149,7 @@ class FixtureManifestTests(unittest.TestCase):
         manifest = (workspace / "scripts/fixture-manifest.sha256").read_text(
             encoding="utf-8"
         )
-        test_path = "crates/orna-evaluator-v1/tests/standard_snapshot_replay.rs"
+        test_path = "crates/orna-evaluator/tests/standard_snapshot_replay.rs"
         source = (workspace / test_path).read_text(encoding="utf-8")
         include_pattern = re.compile(r'include_str!\(\s*"([^"]+)"\s*\)')
         include_paths = include_pattern.findall(source)
@@ -175,7 +175,7 @@ class FixtureManifestTests(unittest.TestCase):
             "the snapshot replay proofs retain their core std snapshot inputs",
         )
         for fixture_name in sorted(fixture_names):
-            fixture_path = f"crates/orna-evaluator-v1/tests/fixtures/{fixture_name}"
+            fixture_path = f"crates/orna-evaluator/tests/fixtures/{fixture_name}"
             fixture = workspace / fixture_path
             self.assertTrue(fixture.is_file(), f"missing crate-local fixture: {fixture_path}")
             digest = hashlib.sha256(fixture.read_bytes()).hexdigest()
@@ -198,7 +198,7 @@ class FixtureManifestTests(unittest.TestCase):
         fixture_names = set()
 
         for suite, expected_include_count in suites.items():
-            test_path = f"crates/orna-evaluator-v1/tests/{suite}"
+            test_path = f"crates/orna-evaluator/tests/{suite}"
             source = (workspace / test_path).read_text(encoding="utf-8")
             include_paths = include_pattern.findall(source)
             self.assertEqual(
@@ -222,7 +222,7 @@ class FixtureManifestTests(unittest.TestCase):
             "hash and random snapshot proofs retain their full unique fixture set",
         )
         for fixture_name in sorted(fixture_names):
-            fixture_path = f"crates/orna-evaluator-v1/tests/fixtures/{fixture_name}"
+            fixture_path = f"crates/orna-evaluator/tests/fixtures/{fixture_name}"
             fixture = workspace / fixture_path
             self.assertTrue(fixture.is_file(), f"missing crate-local fixture: {fixture_path}")
             digest = hashlib.sha256(fixture.read_bytes()).hexdigest()
@@ -237,7 +237,7 @@ class FixtureManifestTests(unittest.TestCase):
         manifest = (workspace / "scripts/fixture-manifest.sha256").read_text(
             encoding="utf-8"
         )
-        test_path = "crates/orna-runtime-v1/tests/historical_snapshots.rs"
+        test_path = "crates/orna-runtime/tests/historical_snapshots.rs"
         source = (workspace / test_path).read_text(encoding="utf-8")
         include_pattern = re.compile(r'include_str!\(\s*"([^"\n]+)"\s*\)')
         include_paths = include_pattern.findall(source)
@@ -263,7 +263,7 @@ class FixtureManifestTests(unittest.TestCase):
             "historical snapshot behavior keeps its full unique fixture set",
         )
         for fixture_name in sorted(fixture_names):
-            fixture_path = f"crates/orna-runtime-v1/tests/fixtures/{fixture_name}"
+            fixture_path = f"crates/orna-runtime/tests/fixtures/{fixture_name}"
             fixture = workspace / fixture_path
             self.assertTrue(fixture.is_file(), f"missing crate-local fixture: {fixture_path}")
             digest = hashlib.sha256(fixture.read_bytes()).hexdigest()
@@ -286,7 +286,7 @@ class FixtureManifestTests(unittest.TestCase):
         fixture_paths = set()
 
         for suite, expected_fixture in suites.items():
-            test_path = f"crates/orna-runtime-v1/tests/{suite}"
+            test_path = f"crates/orna-runtime/tests/{suite}"
             source = (workspace / test_path).read_text(encoding="utf-8")
             include_paths = include_pattern.findall(source)
             self.assertEqual(
@@ -298,7 +298,7 @@ class FixtureManifestTests(unittest.TestCase):
                 relative_path = Path(include_path)
                 self.assertNotIn("..", relative_path.parts)
                 fixture_path = (
-                    f"crates/orna-runtime-v1/tests/fixtures/{relative_path.name}"
+                    f"crates/orna-runtime/tests/fixtures/{relative_path.name}"
                 )
                 fixture_paths.add(fixture_path)
 
@@ -318,7 +318,7 @@ class FixtureManifestTests(unittest.TestCase):
         manifest = (workspace / "scripts/fixture-manifest.sha256").read_text(
             encoding="utf-8"
         )
-        test_path = "crates/orna-runtime-v1/tests/checkpoints_conformance_audit.rs"
+        test_path = "crates/orna-runtime/tests/checkpoints_conformance_audit.rs"
         source = (workspace / test_path).read_text(encoding="utf-8")
         include_pattern = re.compile(r'include_str!\(\s*"([^"\n]+)"\s*\)')
         include_paths = include_pattern.findall(source)
@@ -329,7 +329,7 @@ class FixtureManifestTests(unittest.TestCase):
             f"{test_path} keeps its replay input local to the runtime crate",
         )
         fixture_path = (
-            "crates/orna-runtime-v1/tests/fixtures/checkpoint-audit-replay-handler.orna"
+            "crates/orna-runtime/tests/fixtures/checkpoint-audit-replay-handler.orna"
         )
         fixture = workspace / fixture_path
         self.assertTrue(fixture.is_file(), f"missing crate-local fixture: {fixture_path}")

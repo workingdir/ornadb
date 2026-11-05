@@ -1,0 +1,18 @@
+[package]
+name = "orna-foundation"
+version.workspace = true
+edition = "2024"
+rust-version = "1.95"
+license = "Apache-2.0"
+description = "Shared Orna 1.0 source, diagnostic, value, and repository contracts"
+
+[dependencies]
+num-bigint = "0.4.6"
+orna-value = { path = "../orna-value" }
+serde = "1.0"
+
+[dev-dependencies]
+orna-conformance = { path = "../orna-conformance" }
+orna-repository = { path = "../orna-repository" }
+orna-syntax = { path = "../orna-syntax" }
+serde_json = "1.0"

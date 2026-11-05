@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use lsp_types::{Range, SemanticToken, SemanticTokenModifier, SemanticTokenType};
-use orna_syntax_v1::{SyntaxSpan, editor};
+use orna_syntax::{SyntaxSpan, editor};
 
 use crate::analysis::EditorSymbolKind;
 use crate::documents::PositionMapper;
@@ -429,7 +429,7 @@ mod tests {
             pub fn label(s: Status): Str = case s { Status.draft: \"Draft\", Status.published: \"Published\", };\n\
             pub fn make(): Badge = Badge { text: \"x\" };\n\
             pub fn read(post: Post): Str = post.badge.text;\n";
-        let parse = orna_syntax_v1::parse_module(TEXT);
+        let parse = orna_syntax::parse_module(TEXT);
         assert!(parse.diagnostics.is_empty(), "{:#?}", parse.diagnostics);
         let classes = classes(TEXT);
 

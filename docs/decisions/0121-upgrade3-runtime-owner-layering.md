@@ -17,7 +17,7 @@ migration. It:
 
 * takes the coordination lock and writer lease that `orna publish` takes, with
   lease owner `invocation_owner_id()`
-  (`crates/orna-cli-v1/src/main.rs`);
+  (`crates/orna-cli/src/main.rs`);
 * calls `publish_legacy_format_migration` with the prepared publication journal,
   which carries the migration continuity record and the
   `MigrationAnnotationDefaults` coordinate;
@@ -26,24 +26,24 @@ migration. It:
 
 No daemon owns activation. If the process stops after the journal is durable,
 the publication journal is the recovery record, and `recover_publication`
-(`crates/orna-repository-v1/src/lib.rs`) finishes it. That function already runs
-from `orna commit` after review (`crates/orna-cli-v1/src/cli_commit.rs`) and from
-the storage crate's publication path (`crates/orna-storage-v1/src/lib.rs`).
-`orna upgrade` is refused in this build (`crates/orna-cli-v1/src/cli_args.rs`),
+(`crates/orna-repository/src/lib.rs`) finishes it. That function already runs
+from `orna commit` after review (`crates/orna-cli/src/cli_commit.rs`) and from
+the storage crate's publication path (`crates/orna-storage/src/lib.rs`).
+`orna upgrade` is refused in this build (`crates/orna-cli/src/cli_args.rs`),
 so the upgrade path reaches recovery only once that surface is enabled.
 
 ### Layering
 
 * Legacy row decoding and store-building orchestration live in
-  `orna-application-v1`. Its production dependencies already include
-  `orna-project-v1` and `orna-repository-v1`.
-* `migration_copy.rs` in `orna-repository-v1` receives already-decoded tables,
+  `orna-application`. Its production dependencies already include
+  `orna-project` and `orna-repository`.
+* `migration_copy.rs` in `orna-repository` receives already-decoded tables,
   rows and relations as input. It decodes no legacy row and calls no project or
   conformance code.
-* Row admission has no `orna-conformance-v1` edge from `orna-application-v1`.
-  It lives in `orna-evaluator-v1::row_admission`; see the addendum below.
-* `orna-repository-v1` gains no production dependency on `orna-project-v1` or
-  `orna-conformance-v1`. Both already depend on `orna-repository-v1` in
+* Row admission has no `orna-conformance` edge from `orna-application`.
+  It lives in `orna-evaluator::row_admission`; see the addendum below.
+* `orna-repository` gains no production dependency on `orna-project` or
+  `orna-conformance`. Both already depend on `orna-repository` in
   production, so such an edge would close a cycle.
 
 ### Annotation-default coordinate
@@ -65,7 +65,7 @@ prove unchanged annotated value identity.
 * Current state (not yet the target): the decoder is not wired into the migrate
   copy path. `migrate copy --annotation-defaults N` feeds the operator-declared
   count straight into `MigrationAnnotationDefaults::new`
-  (`crates/orna-cli-v1/src/cli_dispatch.rs`), so the flag is the coordinate
+  (`crates/orna-cli/src/cli_dispatch.rs`), so the flag is the coordinate
   today and no decoded-count assertion runs. `from_legacy_inventory` and
   `LegacyAnnotationInventory::annotation_defaults` are exercised only by tests.
   ORNA-UPGRADE-004 is therefore not met by production yet. Wiring the decoder
@@ -83,7 +83,7 @@ separately.
 
 * Compact rows are keyed by table UUID and encoded row key.
   `Repository::read_legacy_authoritative_tables`
-  (`crates/orna-repository-v1/src/compact.rs`) resolves them. For each key the
+  (`crates/orna-repository/src/compact.rs`) resolves them. For each key the
   mutation with the greatest generation wins, and a winning deletion leaves the
   key absent. Two mutations of one key at one generation fail closed with
   `InvalidCompactManifest`. Format-2 and format-3 commits are refused.
@@ -113,8 +113,8 @@ treats the decoded rows as the complete authoritative set.
 
 ## Consequences
 
-* The CLI help (`crates/orna-cli-v1/src/cli_help.rs`) and
-  `crates/orna-cli-v1/README.md` describe `--annotation-defaults` as the
+* The CLI help (`crates/orna-cli/src/cli_help.rs`) and
+  `crates/orna-cli/README.md` describe `--annotation-defaults` as the
   operator-supplied decoded count today. When the decoder lands (`ornadb-i6ma`),
   both change to describe an expected-count assertion.
 * Until the decoder lands, `annotation_defaults` records the operator-declared
@@ -130,12 +130,12 @@ treats the decoded rows as the complete authoritative set.
 ## Addendum: row admission boundary (ornadb-5il1.309)
 
 This addendum supersedes the Layering bullet that allowed
-`orna-application-v1` to depend on `orna-conformance-v1`. Nothing else in this
+`orna-application` to depend on `orna-conformance`. Nothing else in this
 ADR changes.
 
-* Loose-row admission rules live in `orna_evaluator_v1::row_admission`
-  (`preflight_row_sources`, `admit_row_sources`). `orna-application-v1` already
-  depends on `orna-evaluator-v1` in production, so it needs no new edge.
-* `orna-conformance-v1::row_admission` only adapts conformance project units
+* Loose-row admission rules live in `orna_evaluator::row_admission`
+  (`preflight_row_sources`, `admit_row_sources`). `orna-application` already
+  depends on `orna-evaluator` in production, so it needs no new edge.
+* `orna-conformance::row_admission` only adapts conformance project units
   onto that boundary, so the conformance corpus exercises the production code.
-* `orna-application-v1` gains no production dependency on `orna-conformance-v1`.
+* `orna-application` gains no production dependency on `orna-conformance`.

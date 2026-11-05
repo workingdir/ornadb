@@ -6,7 +6,7 @@
 //! line endings. Multiline strings and block comments remain untouched.
 
 use lsp_types::{FormattingOptions, Position, Range, TextEdit};
-use orna_syntax_v1::{Token, TokenKind, lex};
+use orna_syntax::{Token, TokenKind, lex};
 
 use crate::documents::PositionMapper;
 
@@ -227,8 +227,8 @@ fn multiline_literal_lines(source: &str, lines: &[SourceLine], tokens: &[Token])
     // Comments are trivia to the parser but are included in the public editor
     // token stream. Only multiline comments need protection; ordinary comment
     // indentation and trailing whitespace remain formatable.
-    for token in orna_syntax_v1::editor::highlight(source) {
-        if token.class == orna_syntax_v1::editor::TokenClass::Comment
+    for token in orna_syntax::editor::highlight(source) {
+        if token.class == orna_syntax::editor::TokenClass::Comment
             && source[token.range.clone()].contains('\n')
         {
             protect_span(lines, &mut protected, token.range.start, token.range.end);

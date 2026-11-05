@@ -9,7 +9,7 @@ use lsp_types::{
     Location, MarkupContent, MarkupKind, NumberOrString, ParameterInformation, ParameterLabel,
     SignatureHelp, SignatureInformation, SymbolKind, Uri,
 };
-use orna_syntax_v1::{
+use orna_syntax::{
     Argument, Declaration, Expr, ImportSegment, Item, Keyword, Parse, Pattern, Statement,
     SyntaxSpan as SourceSpan, SyntaxTree, Token, TokenKind, TypeExpr, lex,
 };
@@ -21,7 +21,7 @@ use crate::workspace::{FileAnalysis, Target, Workspace};
 
 pub type EditorParse = Parse<SyntaxTree>;
 
-/// orna-syntax-v1 carries no severity on its diagnostics; every parser error is
+/// orna-syntax carries no severity on its diagnostics; every parser error is
 /// a hard error, so the editor maps all of them to ERROR. Semantic analysis
 /// likewise only produces errors.
 const ERROR_SEVERITY: DiagnosticSeverity = DiagnosticSeverity::ERROR;
@@ -388,7 +388,7 @@ fn declaration_child_symbols(
         Declaration::Table { members, .. } => members
             .iter()
             .flat_map(|member| match member {
-                orna_syntax_v1::TableMember::Field { name, span, .. } => symbol_from_scope(
+                orna_syntax::TableMember::Field { name, span, .. } => symbol_from_scope(
                     name,
                     EditorSymbolKind::Field,
                     span,
@@ -402,16 +402,16 @@ fn declaration_child_symbols(
                 )
                 .into_iter()
                 .collect(),
-                orna_syntax_v1::TableMember::Implementation { implementation, .. } => {
+                orna_syntax::TableMember::Implementation { implementation, .. } => {
                     implementation_symbols(implementation, text, tokens)
                 }
-                orna_syntax_v1::TableMember::Assertion { .. } => Vec::new(),
+                orna_syntax::TableMember::Assertion { .. } => Vec::new(),
             })
             .collect(),
         Declaration::Protocol { members, .. } => members
             .iter()
             .filter_map(|member| match member {
-                orna_syntax_v1::ProtocolMember::Function { signature, span } => symbol_from_scope(
+                orna_syntax::ProtocolMember::Function { signature, span } => symbol_from_scope(
                     &signature.name,
                     EditorSymbolKind::Method,
                     span,
@@ -437,7 +437,7 @@ fn declaration_child_symbols(
                     text,
                     tokens,
                 ),
-                orna_syntax_v1::ProtocolMember::Static { name, span, .. } => symbol_from_scope(
+                orna_syntax::ProtocolMember::Static { name, span, .. } => symbol_from_scope(
                     name,
                     EditorSymbolKind::Constant,
                     span,
@@ -488,10 +488,10 @@ fn declaration_child_symbols(
             })
             .collect(),
         Declaration::Type { representation, .. } => match representation {
-            orna_syntax_v1::TypeRepresentation::Alias { refinements, .. } => {
+            orna_syntax::TypeRepresentation::Alias { refinements, .. } => {
                 type_member_symbols(refinements, text, tokens)
             }
-            orna_syntax_v1::TypeRepresentation::Nominal { members } => {
+            orna_syntax::TypeRepresentation::Nominal { members } => {
                 type_member_symbols(members, text, tokens)
             }
         },
@@ -502,14 +502,14 @@ fn declaration_child_symbols(
 }
 
 fn type_member_symbols(
-    members: &[orna_syntax_v1::TypeMember],
+    members: &[orna_syntax::TypeMember],
     text: &str,
     tokens: &[Token],
 ) -> Vec<EditorSymbol> {
     let mut children = members
         .iter()
         .flat_map(|member| match member {
-            orna_syntax_v1::TypeMember::Field { name, span, .. } => symbol_from_scope(
+            orna_syntax::TypeMember::Field { name, span, .. } => symbol_from_scope(
                 name,
                 EditorSymbolKind::Field,
                 span,
@@ -523,10 +523,10 @@ fn type_member_symbols(
             )
             .into_iter()
             .collect(),
-            orna_syntax_v1::TypeMember::Implementation { implementation, .. } => {
+            orna_syntax::TypeMember::Implementation { implementation, .. } => {
                 implementation_symbols(implementation, text, tokens)
             }
-            orna_syntax_v1::TypeMember::Assertion { .. } => Vec::new(),
+            orna_syntax::TypeMember::Assertion { .. } => Vec::new(),
         })
         .collect::<Vec<_>>();
     children.sort_by_key(|symbol| symbol.selection.start);
@@ -534,7 +534,7 @@ fn type_member_symbols(
 }
 
 fn implementation_symbols(
-    implementation: &orna_syntax_v1::Implementation,
+    implementation: &orna_syntax::Implementation,
     text: &str,
     tokens: &[Token],
 ) -> Vec<EditorSymbol> {
@@ -542,7 +542,7 @@ fn implementation_symbols(
         .members
         .iter()
         .filter_map(|member| match member {
-            orna_syntax_v1::ImplMember::Function {
+            orna_syntax::ImplMember::Function {
                 signature, span, ..
             } => symbol_from_scope(
                 &signature.name,
@@ -570,7 +570,7 @@ fn implementation_symbols(
                 text,
                 tokens,
             ),
-            orna_syntax_v1::ImplMember::Static { name, span, .. } => symbol_from_scope(
+            orna_syntax::ImplMember::Static { name, span, .. } => symbol_from_scope(
                 name,
                 EditorSymbolKind::Constant,
                 span,
@@ -929,13 +929,13 @@ pub(crate) fn callee_name_span(file: &FileAnalysis, callee: &Expr) -> Option<Sou
 /// members, field initializers, assertions and values.
 pub(crate) fn item_bodies(item: &Item) -> Vec<&Expr> {
     fn implementation<'a>(
-        implementation: &'a orna_syntax_v1::Implementation,
+        implementation: &'a orna_syntax::Implementation,
         bodies: &mut Vec<&'a Expr>,
     ) {
         for member in &implementation.members {
             match member {
-                orna_syntax_v1::ImplMember::Function { body, .. } => bodies.push(body),
-                orna_syntax_v1::ImplMember::Static { value, .. } => bodies.push(value),
+                orna_syntax::ImplMember::Function { body, .. } => bodies.push(body),
+                orna_syntax::ImplMember::Static { value, .. } => bodies.push(value),
             }
         }
     }
@@ -946,49 +946,49 @@ pub(crate) fn item_bodies(item: &Item) -> Vec<&Expr> {
         Declaration::Table { members, .. } => {
             for member in members {
                 match member {
-                    orna_syntax_v1::TableMember::Field {
+                    orna_syntax::TableMember::Field {
                         initializer:
                             Some(
-                                orna_syntax_v1::FieldInitializer::Default(value)
-                                | orna_syntax_v1::FieldInitializer::Computed(value),
+                                orna_syntax::FieldInitializer::Default(value)
+                                | orna_syntax::FieldInitializer::Computed(value),
                             ),
                         ..
                     }
-                    | orna_syntax_v1::TableMember::Assertion { value, .. } => bodies.push(value),
-                    orna_syntax_v1::TableMember::Implementation {
+                    | orna_syntax::TableMember::Assertion { value, .. } => bodies.push(value),
+                    orna_syntax::TableMember::Implementation {
                         implementation: inner,
                         ..
                     } => {
                         implementation(inner, &mut bodies);
                     }
-                    orna_syntax_v1::TableMember::Field { .. } => {}
+                    orna_syntax::TableMember::Field { .. } => {}
                 }
             }
         }
         Declaration::Type { representation, .. } => {
             let members = match representation {
-                orna_syntax_v1::TypeRepresentation::Alias { refinements, .. } => refinements,
-                orna_syntax_v1::TypeRepresentation::Nominal { members } => members,
+                orna_syntax::TypeRepresentation::Alias { refinements, .. } => refinements,
+                orna_syntax::TypeRepresentation::Nominal { members } => members,
             };
             for member in members {
                 match member {
-                    orna_syntax_v1::TypeMember::Field {
+                    orna_syntax::TypeMember::Field {
                         initializer: Some(value),
                         ..
                     }
-                    | orna_syntax_v1::TypeMember::Assertion { value, .. } => bodies.push(value),
-                    orna_syntax_v1::TypeMember::Implementation {
+                    | orna_syntax::TypeMember::Assertion { value, .. } => bodies.push(value),
+                    orna_syntax::TypeMember::Implementation {
                         implementation: inner,
                         ..
                     } => {
                         implementation(inner, &mut bodies);
                     }
-                    orna_syntax_v1::TypeMember::Field { .. } => {}
+                    orna_syntax::TypeMember::Field { .. } => {}
                 }
             }
         }
         Declaration::Unit {
-            definition: orna_syntax_v1::UnitDefinition::Derived { value, offset, .. },
+            definition: orna_syntax::UnitDefinition::Derived { value, offset, .. },
             ..
         } => {
             bodies.push(value);

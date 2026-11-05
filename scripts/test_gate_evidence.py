@@ -738,13 +738,13 @@ class ReviewFindingTests(unittest.TestCase):
     def test_cargo_command_skips_the_named_tests_exactly(self) -> None:
         # The per-PR run skips the Gate B test; the skip must reach cargo as an exact --skip.
         command = cargo_test_command(
-            "orna-cli-v1", "test:media_import_query", None,
+            "orna-cli", "test:media_import_query", None,
             ["gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata"],
         )
         self.assertEqual(
             command,
             [
-                "cargo", "test", "--locked", "-p", "orna-cli-v1", "--test", "media_import_query",
+                "cargo", "test", "--locked", "-p", "orna-cli", "--test", "media_import_query",
                 "--", "--exact", "--skip",
                 "gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata",
                 "--nocapture",
@@ -768,7 +768,7 @@ class ReviewFindingTests(unittest.TestCase):
         # Main moved Gate B to cli-gate-b.yml; the per-PR cli run must skip it and keep the recorder.
         root = Path(__file__).resolve().parent.parent / ".github" / "workflows"
         text = (root / "cli-tests.yml").read_text(encoding="utf-8")
-        cli_run = [line for line in text.splitlines() if "gate_evidence.py test -p orna-cli-v1 --timeout-minutes" in line]
+        cli_run = [line for line in text.splitlines() if "gate_evidence.py test -p orna-cli --timeout-minutes" in line]
         self.assertEqual(len(cli_run), 1, cli_run)
         self.assertIn("--exclude-target test:vfs_media_reader", cli_run[0])
         self.assertIn("--skip-test gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata", cli_run[0])
@@ -937,7 +937,7 @@ def option_values(words: list[str], option: str) -> list[str]:
 
 
 class RequiredFeatureTests(unittest.TestCase):
-    """CLI tests run 40027702260 failed: `test -p orna-cli-v1` ran publication_crash_matrix without crash-barriers."""
+    """CLI tests run 40027702260 failed: `test -p orna-cli` ran publication_crash_matrix without crash-barriers."""
 
     def run_test(self, *options: str) -> tuple[int, str, list[str]]:
         """Run `test -p orna-demo-v1` against the fake cargo; return the exit code, stderr and cargo calls."""
@@ -1002,7 +1002,7 @@ class RequiredFeatureTests(unittest.TestCase):
         package = {
             "features": {
                 "default": ["barriers"],
-                "barriers": ["crash-barriers", "orna-repository-v1/crash-barriers"],
+                "barriers": ["crash-barriers", "orna-repository/crash-barriers"],
                 "crash-barriers": ["dep:fault"],
                 "fault": ["dep:fault"],
                 "slow": [],
@@ -1029,7 +1029,7 @@ class RequiredFeatureTests(unittest.TestCase):
             for package in option_values(words, "-p")
         ]
 
-        self.assertIn(("orna-cli-v1", "test:publication_crash_matrix", "publication-crash-matrix"), claims)
+        self.assertIn(("orna-cli", "test:publication_crash_matrix", "publication-crash-matrix"), claims)
         for package, label, job in claims:
             manifest = tomllib.loads((root / "crates" / package / "Cargo.toml").read_text(encoding="utf-8"))
             required = {

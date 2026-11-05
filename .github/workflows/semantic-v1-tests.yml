@@ -30,7 +30,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@1.95.0
 
-      # Every orna-semantic-v1 test target runs. Tests listed in
+      # Every orna-semantic test target runs. Tests listed in
       # scripts/semantic-known-red.txt are excluded from the run and then each one
       # must still fail when run alone: a new failure or a listed test that passes
       # both fail this job.

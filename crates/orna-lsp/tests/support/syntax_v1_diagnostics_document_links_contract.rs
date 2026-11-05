@@ -23,7 +23,7 @@ pub fn assert_published_diagnostics(
 
 /// Checks the parser diagnostic fields and their mapped UTF-16 source range.
 pub fn assert_diagnostics(source: &str, response: &Value, editor: &str) {
-    let expected = orna_syntax_v1::parse_module(source);
+    let expected = orna_syntax::parse_module(source);
     let diagnostics = response
         .as_array()
         .unwrap_or_else(|| panic!("{editor} diagnostics are not an array: {response}"));
@@ -124,7 +124,7 @@ pub fn assert_no_document_links(response: &Value, editor: &str) {
     );
 }
 
-fn diagnostic_message(diagnostic: &orna_syntax_v1::SyntaxDiagnostic) -> String {
+fn diagnostic_message(diagnostic: &orna_syntax::SyntaxDiagnostic) -> String {
     let mut value = if !diagnostic.title.trim().is_empty() && diagnostic.title != diagnostic.message
     {
         format!("{}: {}", diagnostic.title, diagnostic.message)
