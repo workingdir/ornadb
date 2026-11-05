@@ -3212,7 +3212,7 @@ impl RuntimeActivationContext {
 
     /// Stable table identities admitted when this activation began. Commits
     /// that carry a mutation for one of these tables must present the same
-    /// identity; see [`validate_admitted_table_identities`].
+    /// identity; see `validate_admitted_table_identities`.
     pub fn table_object_ids(&self) -> &BTreeMap<String, TableObjectId> {
         &self.table_object_ids
     }

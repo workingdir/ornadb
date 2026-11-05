@@ -4,8 +4,9 @@
 //!
 //! Resolution and durable transaction ownership stay with the evaluator and
 //! runtime that own those concerns. The portable `sys` declaration schema is
-//! collected from annotated descriptor methods in [`system_api`]. The local supervisor below only
-//! provides a bounded execution and await seam for admitted work.
+//! collected from annotated descriptor methods in `system_api`. The local
+//! supervisor below only provides a bounded execution and await seam for
+//! admitted work.
 
 use std::{
     collections::BTreeMap,
