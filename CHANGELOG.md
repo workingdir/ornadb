@@ -5,6 +5,18 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- A conditional now unifies both value-producing branches with its declared or
+  contextual type instead of typing the second branch against the first
+  branch's spelling (ORNA-CFLOW-003, ORNA-INFER-001). `if value < 0 { null }
+  else { Some(value) }` therefore type-checks against a declared `Int?`, where
+  it previously reported `expected Null, found Optional<Int>`; with no
+  declared or contextual type the two branch types are joined, and `null`
+  joins `T?` as `T?` (ORNA-TYPE-001) exactly as return paths already did
+  (ORNA-FN-009). A branch that still disagrees is named against the declared
+  type, so `pub fn half(value: Int): Int = if value < 0 { null } else {
+  value }` now reads `expected Int, found Null` rather than the reverse, and a
+  branch that leaves the function through `return` or `break` no longer forces
+  the conditional's type to the unknown type.
 - A project's pinned `stdlib/std` snapshot now has its function bodies checked
   when the snapshot is attached, instead of being admitted on declarations
   alone (ORNA-MODULE-003). `orna check` and `orna commit` refuse a pinned
@@ -20,12 +32,13 @@ been published.
   `ORNA-S010-IMPORT`/`ORNA-S012-UNRESOLVED`/`ORNA-S020-ANNOTATION`/
   `ORNA-S022-UNSUPPORTED` diagnostic and a mismatch names both sides in
   closed primitive or `List`/`Relation`/`Range` labels. The shipped reference
-  library needs that boundary: analysed in full, it produces 1431 diagnostics
-  the slice cannot decide (unsupported forms, relative `use` paths inside the
-  pinned tree, `case` on parameter enums, conditional branches it types
-  against the first branch, and identity comparisons that report
-  `expected std.DURATION, found std.DURATION`). Rejecting those would refuse
-  snapshots that are valid today.
+  library needs that boundary: analysed in full before conditional branches
+  were unified with their declared type, it produced 1431 diagnostics the
+  slice cannot decide (unsupported forms, relative `use` paths inside the
+  pinned tree, `case` on parameter enums, and identity comparisons that report
+  `expected std.DURATION, found std.DURATION`). The conditional-branch
+  category is gone, so that total is now lower, but the undecidable forms
+  remain. Rejecting those would refuse snapshots that are valid today.
 - Every workspace crate drops the `-v1` name suffix that only distinguished it
   from superseded pre-`v1` code. The 21 affected crates are renamed on disk,
   in `Cargo.toml` package and dependency keys, in Rust module paths
