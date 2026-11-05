@@ -1936,7 +1936,7 @@ impl AdmissionCatalogue {
 
 impl TransactionalEvaluator {
     /// Creates an evaluator that admits transactions against the production
-    /// catalogue ([`AdmissionCatalogue::Production`]). The conformance harness
+    /// catalogue (`AdmissionCatalogue::Production`). The conformance harness
     /// opts into the fixture catalogue with [`Self::with_fixture_catalogue`].
     #[must_use]
     pub fn new(entry: impl Into<String>, limits: EvaluatorLimits) -> Self {

@@ -106,9 +106,8 @@ Related accepted decisions are linked explicitly:
 - [Work ADR 0090: Local principal and session authority](0090-local-principal-session-authority.md)
 
 The implementation references in this ADR describe existing seams or proposed
-seams only. In particular, a link to
-[`crates/orna-client/src/lib.rs`](../../crates/orna-client/src/lib.rs) does not
-mean that the `orna-client::vm` module, the capability broker, or signed
+seams only. In particular, a reference to `crates/orna-client/src/lib.rs` does
+not mean that the `orna-client::vm` module, the capability broker, or signed
 attestation already exists.
 
 ## Decision
