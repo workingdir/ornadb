@@ -12918,17 +12918,15 @@ fn infer_case_arm_body(
     }
     let body = infer(&arm.body, scope, local, diagnostics);
     effects.join(&body.effects);
-    // ORNA-CASE-004 joins reachable bodies. `null` is a member of `T?`
-    // (ORNA-TYPE-001), so a `null` body followed by an `Optional` body joins
-    // to that `Optional` type; the reverse order is already accepted by types_match.
-    let widens_null =
-        matches!(result.as_ref(), Some(Type::Null)) && matches!(body.ty, Type::Optional(_));
-    if widens_null {
-        *result = Some(body.ty);
-    } else if let Some(expected) = result.as_ref() {
-        require_same(expected, &body.ty, diagnostics);
-    } else {
-        *result = Some(body.ty);
+    // ORNA-CASE-004 joins reachable bodies with the same rule as `if` branches
+    // (ORNA-CFLOW-003), so `Int` with `Int?` in either order unifies to `Int?`.
+    match result.as_ref() {
+        None => *result = Some(body.ty),
+        Some(joined) => match join_conditional_branches(joined, &body.ty) {
+            Some(next) => *result = Some(next),
+            // A failed join reports once, naming the arm that does not fit.
+            None => require_same(joined, &body.ty, diagnostics),
+        },
     }
 }
 
