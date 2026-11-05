@@ -384,7 +384,7 @@ def build_executable(repository: Path, target: Path, source_date_epoch: int) -> 
         "--manifest-path",
         str(repository / "Cargo.toml"),
         "--package",
-        "orna-cli-v1",
+        "orna-cli",
         "--bin",
         "orna",
     ]

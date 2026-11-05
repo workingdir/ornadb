@@ -1,0 +1,45 @@
+[package]
+name = "orna-sys"
+version = "1.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MPL-2.0"
+description = "Final Orna 1.1.0 portable sys catalogue and bounded pre-effect admission"
+build = "build.rs"
+
+[features]
+default = []
+dev-sys-export = []
+
+[[bin]]
+name = "sys-api-export"
+path = "src/bin/sys-api-export.rs"
+required-features = ["dev-sys-export"]
+test = false
+bench = false
+
+[dependencies]
+orna-foundation = { path = "../orna-foundation" }
+orna-security = { path = "../orna-security" }
+orna-sys-macros = { path = "../orna-sys-macros" }
+serde = { version = "1.0.229", features = ["derive"] }
+sha2 = "0.10.9"
+serde_json = "1.0.151"
+uuid = { version = "1.26.0", features = ["v4"] }
+reqwest = { version = "0.12.7", default-features = false, features = ["blocking", "rustls-tls-webpki-roots"] }
+
+[build-dependencies]
+quote = "1.0.45"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
+syn = { version = "2.0.119", features = ["full", "visit"] }
+
+[dev-dependencies]
+quote = "1.0.45"
+orna-syntax = { path = "../orna-syntax" }
+syn = { version = "2.0.119", features = ["full", "visit"] }
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
+tempfile = "3.23.0"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "0.38.44", default-features = false, features = ["fs", "process", "std"] }

@@ -1,0 +1,63 @@
+[package]
+name = "orna-cli"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MPL-2.0"
+
+[[bin]]
+name = "orna"
+path = "src/main.rs"
+
+[features]
+crash-barriers = ["orna-repository/crash-barriers", "orna-runtime/crash-barriers"]
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+
+[dependencies]
+sha2 = "0.10"
+orna-application = { path = "../orna-application" }
+orna-conformance = { path = "../orna-conformance" }
+orna-evaluator = { path = "../orna-evaluator" }
+orna-foundation = { path = "../orna-foundation" }
+orna-live = { path = "../orna-live" }
+orna-protocol = { path = "../orna-protocol" }
+orna-project = { path = "../orna-project" }
+orna-repository = { path = "../orna-repository" }
+orna-runtime = { path = "../orna-runtime" }
+orna-security = { path = "../orna-security" }
+orna-semantic = { path = "../orna-semantic" }
+orna-serving = { path = "../orna-serving" }
+orna-storage = { path = "../orna-storage" }
+orna-syntax = { path = "../orna-syntax" }
+orna-sys = { path = "../orna-sys" }
+orna-value = { path = "../orna-value" }
+serde_json = "1.0.151"
+getrandom = "0.3.4"
+tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread", "signal", "time"] }
+tempfile = "3.23.0"
+[[test]]
+name = "publication_crash_matrix"
+path = "tests/publication_crash_matrix.rs"
+required-features = ["crash-barriers"]
+
+[dev-dependencies]
+bytes = "1.11.1"
+libsql = { version = "0.9.29", default-features = false, features = ["core"] }
+parquet = { version = "59.3.0", default-features = false, features = ["crc", "zstd"] }
+orna-application = { path = "../orna-application", features = ["test-support"] }
+# The format-1 fixture builder is test-only (`legacy-fixture-writer`);
+# `legacy_fixture_bundle` rebuilds the committed bundle from it, so the test
+# target needs the feature while the `orna` binary does not.
+orna-repository = { path = "../orna-repository", features = ["legacy-fixture-writer"] }
+[target.'cfg(target_os = "linux")'.dependencies]
+fuser = { version = "0.18.0", default-features = false }
+libc = "0.2"
+rustix = { version = "0.38.44", features = ["fs", "process"] }

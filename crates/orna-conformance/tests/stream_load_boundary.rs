@@ -1,0 +1,268 @@
+use orna_conformance::{DurableTransactionalEvaluator, SourceUnit, StageOutcome};
+use orna_evaluator::Limits;
+use orna_foundation::Value;
+use orna_project::ProjectLoader;
+use orna_repository::Repository;
+use orna_runtime::{RuntimeError, RuntimeIdentity, RuntimeState};
+use orna_semantic::{Catalogue, analyze_with_catalogue};
+use std::{fs, path::Path, process::Command};
+use tempfile::TempDir;
+
+fn git(path: &Path, arguments: &[&str]) {
+    assert!(
+        Command::new("git")
+            .args(arguments)
+            .current_dir(path)
+            .status()
+            .expect("git command")
+            .success()
+    );
+}
+
+fn repository() -> (TempDir, Repository) {
+    let directory = tempfile::tempdir().expect("temporary repository");
+    git(directory.path(), &["init", "--quiet"]);
+    git(
+        directory.path(),
+        &["config", "user.email", "kieran@drewett.dev"],
+    );
+    git(directory.path(), &["config", "user.name", "kierandrewett"]);
+    let repository = Repository::discover(directory.path()).expect("repository");
+    (directory, repository)
+}
+
+fn identity() -> RuntimeIdentity {
+    RuntimeIdentity {
+        database_id: [71; 16],
+        repository_id: [72; 16],
+    }
+}
+
+fn stream_source() -> SourceUnit {
+    SourceUnit {
+        fixture_id: "stream-load-boundary".into(),
+        source_id: "stream-load-boundary.orna".into(),
+        parse_as: "module_unit".into(),
+        source: include_str!("fixtures/stream-load-boundary.orna").into(),
+    }
+}
+
+#[tokio::test]
+async fn loading_and_semantic_admission_do_not_start_a_literal_stream() {
+    let (directory, repository) = repository();
+    let identity = identity();
+    let evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
+    let source = stream_source();
+    fs::write(directory.path().join("main.orna"), source.source.as_bytes()).expect("module source");
+    let state = RuntimeState::open(&repository, identity, [73; 32])
+        .await
+        .expect("runtime state");
+    let capture_before_load = state.capture().await.expect("initial capture");
+
+    let loaded = ProjectLoader::default()
+        .load(&repository)
+        .expect("stream module loads without execution");
+    assert_eq!(
+        loaded
+            .identities()
+            .iter()
+            .map(|module| module.logical_path())
+            .collect::<Vec<_>>(),
+        ["main.orna"]
+    );
+    let analysis = analyze_with_catalogue(loaded.modules(), &Catalogue::authoritative_fixture());
+    assert!(analysis.is_ok(), "{:?}", analysis.diagnostics);
+    assert_eq!(
+        evaluator.admit_list_stream_source(&source),
+        StageOutcome::Passed
+    );
+
+    assert_eq!(state.current_lease().await, Ok(None));
+    assert_eq!(state.capture().await, Ok(capture_before_load));
+    assert_eq!(state.latest_checkpoint().await, Ok(None));
+    assert!(state.pending().await.expect("load mutations").is_empty());
+    assert!(
+        state
+            .run_observations()
+            .await
+            .expect("load runs")
+            .is_empty()
+    );
+    assert!(
+        state
+            .stream_observations()
+            .await
+            .expect("load streams")
+            .is_empty()
+    );
+    assert!(
+        state
+            .committed_table_rows("Reading")
+            .await
+            .expect("load rows")
+            .is_empty()
+    );
+
+    // The primary handle owns the worktree owner lock, so a dispatch runtime
+    // would be Secondary and could not create writer lease [75] (ORNA-TURSO-005).
+    // Release the primary handle, let the runner open as the lock owner, then
+    // reopen the state for the post-dispatch observations.
+    drop(state);
+    assert!(matches!(
+        evaluator
+            .execute_source(&repository, identity, [75; 16], [73; 32], &source)
+            .await,
+        Ok(StageOutcome::Passed)
+    ));
+    let state = RuntimeState::open(&repository, identity, [73; 32])
+        .await
+        .expect("reopened runtime state");
+    assert_eq!(
+        state.latest_checkpoint().await.unwrap().unwrap().generation,
+        2
+    );
+    assert_eq!(state.pending().await.expect("run mutations").len(), 2);
+    for value in [1, 2] {
+        let key = Value::int(value.into()).encode().expect("encoded key");
+        assert!(
+            state
+                .committed_table_row("Reading", &key)
+                .await
+                .expect("stream row")
+                .is_some(),
+            "the explicit stream runner must invoke the callback for item {value}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn admitted_literal_stream_cannot_poll_or_invoke_its_callback_before_the_runner_owns_its_lease()
+ {
+    let (_directory, repository) = repository();
+    let identity = identity();
+    let evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
+    let source = stream_source();
+    let state = RuntimeState::open(&repository, identity, [73; 32])
+        .await
+        .expect("runtime state");
+
+    assert_eq!(state.current_lease().await, Ok(None));
+    assert_eq!(state.latest_checkpoint().await, Ok(None));
+    assert!(state.pending().await.expect("initial mutations").is_empty());
+    assert!(
+        state
+            .run_observations()
+            .await
+            .expect("initial runs")
+            .is_empty()
+    );
+    assert!(
+        state
+            .stream_observations()
+            .await
+            .expect("initial streams")
+            .is_empty()
+    );
+    assert!(
+        state
+            .committed_table_rows("Reading")
+            .await
+            .expect("initial rows")
+            .is_empty()
+    );
+
+    let blocker = state
+        .acquire_lease([74; 16])
+        .await
+        .expect("blocking writer lease");
+    let capture_before_admission = state.capture().await.expect("initial capture");
+    assert_eq!(state.current_lease().await, Ok(Some(blocker)));
+
+    // `execute_source` first admits this exact source, then routes its literal
+    // Stream.from_list pipeline into execute_list_stream_source. The foreign
+    // lease makes that real runner path stop before ListStreamSource polling or
+    // ListTableHandler callback execution.
+    assert!(matches!(
+        evaluator
+            .execute_source(&repository, identity, [75; 16], [73; 32], &source)
+            .await,
+        Err(RuntimeError::LeaseHeld)
+    ));
+
+    assert_eq!(state.current_lease().await, Ok(Some(blocker)));
+    assert_eq!(state.capture().await, Ok(capture_before_admission));
+    assert_eq!(state.latest_checkpoint().await, Ok(None));
+    assert!(state.pending().await.expect("blocked mutations").is_empty());
+    assert!(
+        state
+            .run_observations()
+            .await
+            .expect("blocked runs")
+            .is_empty()
+    );
+    assert!(
+        state
+            .stream_observations()
+            .await
+            .expect("blocked streams")
+            .is_empty()
+    );
+    assert!(
+        state
+            .committed_table_rows("Reading")
+            .await
+            .expect("blocked rows")
+            .is_empty(),
+        "the for_each insert callback must not run before the runner owns the lease"
+    );
+
+    // The runner must hold the runtime owner lock itself, so release this
+    // handle before it runs and reopen as the owner to read the lease.
+    drop(state);
+    assert!(matches!(
+        evaluator
+            .execute_source(&repository, identity, blocker.owner_id, [73; 32], &source)
+            .await,
+        Ok(StageOutcome::Passed)
+    ));
+
+    let state = RuntimeState::open_with_owner_id(&repository, identity, [73; 32], blocker.owner_id)
+        .await
+        .expect("reopen runtime state as lease owner");
+
+    assert_eq!(state.current_lease().await, Ok(Some(blocker)));
+    let checkpoint = state
+        .latest_checkpoint()
+        .await
+        .expect("runtime checkpoint")
+        .expect("two list-item activation commits");
+    assert_eq!(checkpoint.generation, 2);
+    assert_eq!(checkpoint.mutation_sequence, 2);
+    assert_eq!(state.pending().await.expect("stream mutations").len(), 2);
+    for value in [1, 2] {
+        let key = Value::int(value.into()).encode().expect("encoded key");
+        assert!(
+            state
+                .committed_table_row("Reading", &key)
+                .await
+                .expect("stream row")
+                .is_some(),
+            "the first runner-owned stream execution must invoke the callback for item {value}"
+        );
+    }
+    assert!(
+        state
+            .run_observations()
+            .await
+            .expect("final runs")
+            .is_empty()
+    );
+    assert!(
+        state
+            .stream_observations()
+            .await
+            .expect("final streams")
+            .is_empty(),
+        "the existing finite-list seam does not register sys.Stream observations"
+    );
+}

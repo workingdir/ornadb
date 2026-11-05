@@ -1,1 +1,1 @@
-# Known-red orna-semantic-v1 tests: name<TAB>bead<TAB>reason. Checked by scripts/check-semantic-known-red.sh.
+# Known-red orna-semantic tests: name<TAB>bead<TAB>reason. Checked by scripts/check-semantic-known-red.sh.

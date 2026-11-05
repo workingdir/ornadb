@@ -1,8 +1,8 @@
 # Compiler diagnostics plan
 
 > **Legacy plan.** This plan targets the legacy `orna-core` diagnostics
-> surface. It is not the current plan for `orna-cli-v1`; the diagnostic codes
-> and presenters in `crates/orna-cli-v1` are authoritative.
+> surface. It is not the current plan for `orna-cli`; the diagnostic codes
+> and presenters in `crates/orna-cli` are authoritative.
 
 ## Goal
 

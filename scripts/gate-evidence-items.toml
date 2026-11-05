@@ -50,7 +50,7 @@ gate = "A"
 id = "A2"
 title = "New format has exactly one writer"
 select = [
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:publish_format3_orp_only" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:publish_format3_orp_only" },
   { record = "claims-retired-row-writers", package = "workspace", target = "check:retired-row-writers" },
 ]
 limitations = [
@@ -62,8 +62,8 @@ gate = "A"
 id = "A3"
 title = "Unknown and mixed formats fail early"
 select = [
-  { record = "workspace-rest", package = "orna-repository-v1", target = "test:format_context", test = "fails_closed_on_unknown_mixed_malformed_and_unavailable_metadata" },
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:migration_copy_cli", test = "cli_migration_copy_rejects_mixed_worktree_metadata" },
+  { record = "workspace-rest", package = "orna-repository", target = "test:format_context", test = "fails_closed_on_unknown_mixed_malformed_and_unavailable_metadata" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:migration_copy_cli", test = "cli_migration_copy_rejects_mixed_worktree_metadata" },
 ]
 limitations = ["Real 1.0 records are rejected as malformed rather than read (ornadb-5il1.191)."]
 
@@ -72,8 +72,8 @@ gate = "A"
 id = "A4"
 title = "Old commits decode under old rules"
 select = [
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:legacy_fixture_bundle", test = "committed_legacy_format1_bundle_reads_and_admits_through_migrate_copy" },
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:legacy_fixture_bundle", test = "builder_regenerates_the_committed_bundle_byte_for_byte" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:legacy_fixture_bundle", test = "committed_legacy_format1_bundle_reads_and_admits_through_migrate_copy" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:legacy_fixture_bundle", test = "builder_regenerates_the_committed_bundle_byte_for_byte" },
 ]
 limitations = [
   "Key-only compact rows and 1.0.0 loose row units from a bundle built by the in-repo test encoder, not a 1.0.0 golden; key-bound min_key/max_key encoding is unresolved against the 1.0.0 key-schema text; stored columns and row values beyond the key-only record shape are not asserted; Blob rows are absent because the format-1 compact decoder admits no blob column (ornadb-5il1.192, ornadb-5il1.191).",
@@ -84,9 +84,9 @@ gate = "A"
 id = "A5"
 title = "Blob annotations, equality and legacy protocol rejection agree across schema, runtime, export and reflection"
 select = [
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:legacy_protocol_rejection" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:legacy_protocol_rejection" },
   { record = "workspace-sys", package = "orna-sys-v1", target = "test:sys_reflection_schema_conformance" },
-  { record = "workspace-evaluator", package = "orna-evaluator-v1", target = "test:evaluator_ovb2_boundary" },
+  { record = "workspace-evaluator", package = "orna-evaluator", target = "test:evaluator_ovb2_boundary" },
 ]
 limitations = [
   "Runtime and export report different rejection codes for the same value (ornadb-5il1.98, ornadb-5il1.100).",
@@ -96,13 +96,13 @@ limitations = [
 gate = "A"
 id = "A6"
 title = "MIME normalization and hints match profile vectors"
-select = [{ record = "workspace-rest", package = "orna-value-v1", target = "lib", prefix = "mime1::tests::" }]
+select = [{ record = "workspace-rest", package = "orna-value", target = "lib", prefix = "mime1::tests::" }]
 
 [[item]]
 gate = "A"
 id = "A7"
 title = "Required source and row identities survive ordinary rename and rekey"
-select = [{ record = "workspace-cli", package = "orna-cli-v1", target = "test:object_identity_mv" }]
+select = [{ record = "workspace-cli", package = "orna-cli", target = "test:object_identity_mv" }]
 limitations = [
   "Identities live in a tracked sidecar and loose row directories that the format-3 layout forbids, and no production path issues them into a fresh store (ornadb-5il1.117).",
 ]
@@ -117,7 +117,7 @@ gate = "B"
 id = "B1"
 title = "Two small media fixtures and one 10 GB high-entropy fixture import with bounded RSS and temporary storage"
 select = [
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:media_import_query", test = "gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:media_import_query", test = "gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata" },
 ]
 counters = ["^Gate B: "]
 limitations = [
@@ -129,7 +129,7 @@ gate = "B"
 id = "B2"
 title = "Record peak RSS, bytes read and written, network objects and elapsed time"
 select = [
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:media_import_query", test = "gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:media_import_query", test = "gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata" },
 ]
 counters = ["^Gate B: "]
 limitations = ["The test prints `remote Git objects=0` as a literal rather than a measurement (ornadb-5il1.8)."]
@@ -139,7 +139,7 @@ gate = "B"
 id = "B3"
 title = "Title, MIME and hint-only update, row lookup and summary read touch zero media-payload bytes; metadata counted separately"
 select = [
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:media_import_query", test = "gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:media_import_query", test = "gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata" },
 ]
 limitations = [
   "There is no title-only update, metadata bytes are not reported, and the zero-read checks cannot see the commit or publish path (ornadb-5il1.8).",
@@ -149,14 +149,14 @@ limitations = [
 gate = "B"
 id = "B4"
 title = "Seek and range reads verify bytes and report whole-object overfetch"
-select = [{ record = "workspace-rest", package = "orna-repository-v1", target = "lib", test = "range_reads_report_whole_chunk_overfetch_against_requested_bytes" }]
+select = [{ record = "workspace-rest", package = "orna-repository", target = "lib", test = "range_reads_report_whole_chunk_overfetch_against_requested_bytes" }]
 counters = ["^Gate B: range "]
 
 [[item]]
 gate = "B"
 id = "B5"
 title = "Full export verifies raw hashes"
-select = [{ record = "workspace-cli", package = "orna-cli-v1", target = "test:complete_copy_export" }]
+select = [{ record = "workspace-cli", package = "orna-cli", target = "test:complete_copy_export" }]
 limitations = [
   "The Blob's raw SHA-256 is not recomputed against its descriptor, and the 10 GiB row is never exported (ornadb-5il1.193).",
 ]
@@ -165,7 +165,7 @@ limitations = [
 gate = "B"
 id = "B6"
 title = "Binary edit rehash cost is measured rather than hidden"
-select = [{ record = "workspace-rest", package = "orna-repository-v1", target = "lib", test = "binary_save_and_metadata_save_report_rehash_cost" }]
+select = [{ record = "workspace-rest", package = "orna-repository", target = "lib", test = "binary_save_and_metadata_save_report_rehash_cost" }]
 counters = ["^Gate B: rehash "]
 
 # Gate C: indexed rows at scale.
@@ -175,8 +175,8 @@ gate = "C"
 id = "C1"
 title = "Ten and one million rows use ORP-1"
 select = [
-  { record = "workspace-rest", package = "orna-repository-v1", target = "test:row_store_scale", test = "orp1_production_writer_ten_rows" },
-  { record = "gate-c-million-rows", package = "orna-repository-v1", target = "test:row_store_scale", test = "orp1_row_store_one_million_rows" },
+  { record = "workspace-rest", package = "orna-repository", target = "test:row_store_scale", test = "orp1_production_writer_ten_rows" },
+  { record = "gate-c-million-rows", package = "orna-repository", target = "test:row_store_scale", test = "orp1_row_store_one_million_rows" },
 ]
 counters = ["^ORP-1 production_writer "]
 
@@ -185,10 +185,10 @@ gate = "C"
 id = "C2"
 title = "Indexed point and range queries, missing keys, unindexed scan and concurrent writes in cold and warm partial clones"
 select = [
-  { record = "workspace-rest", package = "orna-repository-v1", target = "test:row_store_scale", test = "orp1_row_store_ten_rows" },
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:partial_clone_publication_race" },
-  { record = "workspace-rest", package = "orna-repository-v1", target = "test:row_store_scale", test = "orp1_production_publication_race" },
-  { record = "gate-c-million-rows", package = "orna-repository-v1", target = "test:row_store_scale", test = "orp1_row_store_one_million_rows" },
+  { record = "workspace-rest", package = "orna-repository", target = "test:row_store_scale", test = "orp1_row_store_ten_rows" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:partial_clone_publication_race" },
+  { record = "workspace-rest", package = "orna-repository", target = "test:row_store_scale", test = "orp1_production_publication_race" },
+  { record = "gate-c-million-rows", package = "orna-repository", target = "test:row_store_scale", test = "orp1_row_store_one_million_rows" },
 ]
 limitations = [
   "Concurrent publication is raced three ways: two publishers on one local repository (orp1_production_publication_race), and a cold and a warm partial clone that each publish their own row and then race the push to a shared bare remote (partial_clone_publication_race). The clone race asserts one push wins, the remote branch reaches only the winner commit, a fresh product reader over the remote reads the winner row and not the loser row, and the losing clone keeps its own publication as a local commit after fetching the published snapshot. It does not merge the two publications: both rewrite one store file and the format has no merge rule for two publications of one store. Still not covered: exercise_concurrent_writes computes the row index on two threads without publishing, so it does not race two publications. That driver now runs nightly, because the ignored one-million-row case runs in the nightly gates job and C2 selects its record; what it does not do is publish concurrently, which the two race tests above cover on their own (ornadb-mmsa.13).",
@@ -199,9 +199,9 @@ gate = "C"
 id = "C3"
 title = "Report root and tree traffic, payload traffic, latency, allocations and indices"
 select = [
-  { record = "workspace-rest", package = "orna-repository-v1", target = "test:row_store_scale", test = "orp1_row_store_ten_rows" },
-  { record = "workspace-rest", package = "orna-repository-v1", target = "test:row_store_scale", test = "orp1_production_writer_ten_rows" },
-  { record = "gate-c-million-rows", package = "orna-repository-v1", target = "test:row_store_scale", test = "orp1_row_store_one_million_rows" },
+  { record = "workspace-rest", package = "orna-repository", target = "test:row_store_scale", test = "orp1_row_store_ten_rows" },
+  { record = "workspace-rest", package = "orna-repository", target = "test:row_store_scale", test = "orp1_production_writer_ten_rows" },
+  { record = "gate-c-million-rows", package = "orna-repository", target = "test:row_store_scale", test = "orp1_row_store_one_million_rows" },
 ]
 counters = ["^ORP-1 "]
 limitations = [
@@ -213,9 +213,9 @@ gate = "C"
 id = "C4"
 title = "Prepend, delete, rekey and large-row cases measure index churn separately from media reuse"
 select = [
-  { record = "workspace-rest", package = "orna-repository-v1", target = "test:row_store_scale", test = "orp1_row_store_ten_rows" },
-  { record = "workspace-rest", package = "orna-repository-v1", target = "test:row_store_scale", test = "orp1_index_churn_multi_page" },
-  { record = "gate-c-million-rows", package = "orna-repository-v1", target = "test:row_store_scale", test = "orp1_row_store_one_million_rows" },
+  { record = "workspace-rest", package = "orna-repository", target = "test:row_store_scale", test = "orp1_row_store_ten_rows" },
+  { record = "workspace-rest", package = "orna-repository", target = "test:row_store_scale", test = "orp1_index_churn_multi_page" },
+  { record = "gate-c-million-rows", package = "orna-repository", target = "test:row_store_scale", test = "orp1_row_store_one_million_rows" },
 ]
 counters = ["^ORP-1 index_churn "]
 limitations = [
@@ -227,7 +227,7 @@ gate = "C"
 id = "C5"
 title = "Malformed overlapping ranges, broken counts, giant fanout and wrong schema domains fail"
 select = [
-  { record = "workspace-rest", package = "orna-repository-v1", target = "test:row_store_scale", test = "orp1_malformed_graphs_report_specific_diagnostics" },
+  { record = "workspace-rest", package = "orna-repository", target = "test:row_store_scale", test = "orp1_malformed_graphs_report_specific_diagnostics" },
 ]
 
 [[item]]
@@ -243,9 +243,9 @@ gate = "D"
 id = "D1"
 title = "Fault injection or SIGKILL at each capture, pack install, pin, row commit, private candidate, ref CAS, index reconcile and tail cleanup boundary"
 select = [
-  { record = "gate-d-crash-matrix", package = "orna-cli-v1", target = "test:publication_crash_matrix", test = "cli_publication_reopens_after_process_kill_at_each_reachable_boundary" },
-  { record = "gate-d-crash-matrix", package = "orna-cli-v1", target = "test:publication_crash_matrix", test = "capture_and_row_commit_recover_after_process_kill" },
-  { record = "workspace-rest", package = "orna-runtime-v1", target = "test:durable_crash_recovery" },
+  { record = "gate-d-crash-matrix", package = "orna-cli", target = "test:publication_crash_matrix", test = "cli_publication_reopens_after_process_kill_at_each_reachable_boundary" },
+  { record = "gate-d-crash-matrix", package = "orna-cli", target = "test:publication_crash_matrix", test = "capture_and_row_commit_recover_after_process_kill" },
+  { record = "workspace-rest", package = "orna-runtime", target = "test:durable_crash_recovery" },
 ]
 counters = ["recovery_publish_exit="]
 
@@ -254,10 +254,10 @@ gate = "D"
 id = "D2"
 title = "After restart no acknowledged row lacks bytes, no action repeats, no later tail is consumed, no unrelated staged or unstaged file is lost and no abandoned owner keeps write permission"
 select = [
-  { record = "gate-d-crash-matrix", package = "orna-cli-v1", target = "test:publication_crash_matrix", test = "recovery_consumes_only_frozen_range_and_preserves_unrelated_work" },
-  { record = "gate-d-crash-matrix", package = "orna-cli-v1", target = "test:publication_crash_matrix", test = "cli_publication_reopens_after_process_kill_at_each_reachable_boundary" },
-  { record = "gate-d-crash-matrix", package = "orna-cli-v1", target = "test:publication_crash_matrix", test = "capture_and_row_commit_recover_after_process_kill" },
-  { record = "workspace-rest", package = "orna-runtime-v1", target = "test:owner_fence_gate_d" },
+  { record = "gate-d-crash-matrix", package = "orna-cli", target = "test:publication_crash_matrix", test = "recovery_consumes_only_frozen_range_and_preserves_unrelated_work" },
+  { record = "gate-d-crash-matrix", package = "orna-cli", target = "test:publication_crash_matrix", test = "cli_publication_reopens_after_process_kill_at_each_reachable_boundary" },
+  { record = "gate-d-crash-matrix", package = "orna-cli", target = "test:publication_crash_matrix", test = "capture_and_row_commit_recover_after_process_kill" },
+  { record = "workspace-rest", package = "orna-runtime", target = "test:owner_fence_gate_d" },
 ]
 limitations = [
   "Owner fencing is shown only after the test calls takeover_lease itself; live writers are not fenced (ornadb-5il1.127, ornadb-5il1.58).",
@@ -268,8 +268,8 @@ gate = "D"
 id = "D3"
 title = "Exercise coordinated GC/repack and captured external edits"
 select = [
-  { record = "gate-d-crash-matrix", package = "orna-cli-v1", target = "test:publication_crash_matrix", test = "coordinated_gc_prune_keeps_pinned_objects_and_removes_unreferenced_ones" },
-  { record = "gate-d-crash-matrix", package = "orna-cli-v1", target = "test:publication_crash_matrix", test = "format3_publication_recovers_when_gc_prunes_candidate_before_publish" },
+  { record = "gate-d-crash-matrix", package = "orna-cli", target = "test:publication_crash_matrix", test = "coordinated_gc_prune_keeps_pinned_objects_and_removes_unreferenced_ones" },
+  { record = "gate-d-crash-matrix", package = "orna-cli", target = "test:publication_crash_matrix", test = "format3_publication_recovers_when_gc_prunes_candidate_before_publish" },
 ]
 limitations = ["No Orna-coordinated maintenance operation exists; the tests run git gc directly (ornadb-5il1.58, ornadb-20ac)."]
 
@@ -284,9 +284,9 @@ gate = "D"
 id = "D5"
 title = "Recovery of uncertain external effects never fabricates proven rollback"
 select = [
-  { record = "workspace-rest", package = "orna-runtime-v1", target = "lib", test = "external_effect_marker_keeps_fault_recovery_uncertain" },
-  { record = "workspace-rest", package = "orna-runtime-v1", target = "lib", test = "legacy_running_request_recovers_as_uncertain_after_takeover" },
-  { record = "workspace-rest", package = "orna-runtime-v1", target = "lib", test = "recovery_retains_uncertainty_and_clears_old_owner_evidence" },
+  { record = "workspace-rest", package = "orna-runtime", target = "lib", test = "external_effect_marker_keeps_fault_recovery_uncertain" },
+  { record = "workspace-rest", package = "orna-runtime", target = "lib", test = "legacy_running_request_recovers_as_uncertain_after_takeover" },
+  { record = "workspace-rest", package = "orna-runtime", target = "lib", test = "recovery_retains_uncertainty_and_clears_old_owner_evidence" },
 ]
 limitations = ["Library tests only; no process-kill test covers uncertain effects (ornadb-5il1.59)."]
 
@@ -296,7 +296,7 @@ limitations = ["Library tests only; no process-kill test covers uncertain effect
 gate = "E"
 id = "E1"
 title = "Supported in-place and temp/rename editors run; editor, kernel and libfuse versions and save settings are recorded"
-select = [{ record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_editor_compat" }]
+select = [{ record = "workspace-cli", package = "orna-cli", target = "test:vfs_editor_compat" }]
 limitations = [
   "Save settings are fixed in the test; editor, kernel and libfuse versions come from the workspace-cli record's tool versions (ornadb-5il1.9).",
 ]
@@ -306,10 +306,10 @@ gate = "E"
 id = "E2"
 title = "Media player plus binary export and replacement"
 select = [
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_integration", test = "cwd_mount_replace_content_updates_blob_descriptor_and_preserves_row_identity" },
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_integration", test = "cwd_mount_wav_blob_row_plays_through_seek_reads_and_exports_byte_for_byte" },
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:edit_cli" },
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_media_reader" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_integration", test = "cwd_mount_replace_content_updates_blob_descriptor_and_preserves_row_identity" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_integration", test = "cwd_mount_wav_blob_row_plays_through_seek_reads_and_exports_byte_for_byte" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:edit_cli" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_media_reader" },
 ]
 limitations = ["The mpv leg runs only where mpv is installed; CI installs it and sets ORNA_REQUIRE_MEDIA_PLAYER=1, which makes a missing mpv a failure. One player is exercised, not a player matrix (ornadb-5il1.62)."]
 
@@ -318,11 +318,11 @@ gate = "E"
 id = "E3"
 title = "Invalid rows and refinements reject without partial state; the detailed diagnostic and rejected draft remain"
 select = [
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_sync_semantics", test = "fsync_acknowledges_valid_draft_and_rejects_invalid_draft" },
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_sync_semantics", test = "rejected_sync_retains_recoverable_draft_listed_by_id" },
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_editor_compat", test = "speculative_source_writes_validate_on_sync_and_reject_stale_generation" },
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_sessions", test = "sigterm_retains_unresolved_drafts_instead_of_discarding_them" },
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_sync_semantics", test = "rejected_candidates_with_identical_bytes_retain_distinct_draft_ids" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_sync_semantics", test = "fsync_acknowledges_valid_draft_and_rejects_invalid_draft" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_sync_semantics", test = "rejected_sync_retains_recoverable_draft_listed_by_id" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_editor_compat", test = "speculative_source_writes_validate_on_sync_and_reject_stale_generation" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_sessions", test = "sigterm_retains_unresolved_drafts_instead_of_discarding_them" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_sync_semantics", test = "rejected_candidates_with_identical_bytes_retain_distinct_draft_ids" },
 ]
 limitations = ["The rejected candidate is kept by the unmount-time retain request, and the tests assert the listed draft id names a retained record holding the exact candidate bytes (profiles/vfs-1.md:101-102). rejected_candidates_with_identical_bytes_retain_distinct_draft_ids covers the unique-ID clause on two rows whose rejected documents are byte-identical: the ids differ, each record's header names its own projected path, and a second retain keeps each first record. The SIGTERM selector shows unresolved drafts are retained in general, not that the rejected candidate specifically is. The orna edit --row draft admission and report path is not covered by this item (ornadb-5il1.140)."]
 
@@ -331,8 +331,8 @@ gate = "E"
 id = "E4"
 title = "fsync/fdatasync, repeated flush, dup/fork, temp sync/rename, writes after sync, zero truncation, sparse holes, quota exhaustion and close-error ignorance"
 select = [
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_sync_semantics" },
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_truncate_sparse" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_sync_semantics" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_truncate_sparse" },
 ]
 limitations = ["fork is simulated with an inherited handle and close(2) errors are not observed (ornadb-5il1.60, ornadb-5il1.61)."]
 
@@ -341,8 +341,8 @@ gate = "E"
 id = "E5"
 title = "Concurrent REPL changes against captured file-write baselines and strong orna edit read baselines"
 select = [
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_integration", test = "cwd_mount_save_after_another_writer_advances_head_is_stale" },
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:edit_cli" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_integration", test = "cwd_mount_save_after_another_writer_advances_head_is_stale" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:edit_cli" },
 ]
 limitations = ["No live REPL runs alongside a mount, and the workspace mount is not the CWD (ornadb-5il1.64)."]
 
@@ -350,7 +350,7 @@ limitations = ["No live REPL runs alongside a mount, and the workspace mount is 
 gate = "E"
 id = "E6"
 title = "Demonstrate blind replacement's limitation"
-select = [{ record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_isolation", test = "blind_replacement_after_late_temp_overwrites_owner_change_while_orna_edit_refuses" }]
+select = [{ record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_isolation", test = "blind_replacement_after_late_temp_overwrites_owner_change_while_orna_edit_refuses" }]
 limitations = ["The test pins the blind replacement as current behaviour; it demonstrates the limitation and is not a protection. The protected path is orna edit (profiles/vfs-1.md:118-119). The orna edit refusal is asserted as E2000 with the stale detail and the retained-draft help line. [INFERENCE] from reading fuse_mount.rs:3893: the spec cause sys.vfs.stale_edit (Orna-1.1.0.md:8674) is not in this command's output or in the mount's unresolved-draft fields for this path; the test does not assert that absence."]
 
 [[item]]
@@ -358,10 +358,10 @@ gate = "E"
 id = "E7"
 title = "Open reads remain on old content after replacement"
 select = [
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_isolation", test = "read_handle_opened_before_temp_rename_keeps_old_bytes" },
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_isolation", test = "reader_opened_before_owner_write_keeps_old_bytes" },
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_integration", test = "cwd_mount_open_blob_handle_keeps_captured_generation_across_replacement" },
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_isolation", test = "three_opens_across_two_replacements_each_keep_their_own_version" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_isolation", test = "read_handle_opened_before_temp_rename_keeps_old_bytes" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_isolation", test = "reader_opened_before_owner_write_keeps_old_bytes" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_integration", test = "cwd_mount_open_blob_handle_keeps_captured_generation_across_replacement" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_isolation", test = "three_opens_across_two_replacements_each_keep_their_own_version" },
 ]
 limitations = ["Covers rename-over and owner-write replacement through the mount; other replacement shapes have no selector for this item. three_opens_across_two_replacements_each_keep_their_own_version asserts the per-open version rule (profiles/vfs-1.md:126-127): three opens across two replacements each read their own bytes and fstat size, under three distinct inodes."]
 
@@ -370,24 +370,24 @@ gate = "E"
 id = "E8"
 title = "Schema changes, renamed MIME suffix, key and namespace collisions, long and composite keys (empty keys: test ignored, ornadb-5il1.462.1), nested collections, large Str, multi-file source edits, permissions and unsupported operations"
 select = [
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_integration", test = "cwd_mount_save_after_head_renames_table_keeps_pinned_declaration" },
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_unsupported_ops" },
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_editor_compat", test = "editor_mount_rejects_unsupported_links_devices_and_shared_mmap" },
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_projection_features", test = "reserved_key_components_escape_first_byte" },
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_projection_features", test = "reserved_spelling_beyond_vfs_1_text_is_conservative" },
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_composite_key_mount", test = "composite_key_components_project_as_nested_directories" },
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_projection_features", test = "profile_nested_collection_directories_follow_the_module_path" },
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_projection_features", test = "nested_record_and_list_fields_project_as_pinned_directories" },
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_projection_features", test = "long_key_over_200_encoded_bytes_projects_as_sha256_key_alias" },
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_projection_features", test = "key_over_300_characters_is_admitted_and_projects_as_alias" },
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_projection_features", test = "large_str_projects_as_txt_and_utf8_write_replaces_the_str" },
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_projection_features", test = "large_str_bound_is_exclusive_at_64_kib" },
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_cases", test = "multi_file_source_edit_requires_grouped_validation" },
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_cases", test = "vfs_020_source_module_group_is_admitted_together_or_not_at_all" },
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_editor_compat", test = "editor_mount_refuses_chmod_and_chown_with_eperm" },
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_integration", test = "cwd_mount_chmod_of_document_fails_eperm_without_row_change" },
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_integration", test = "cwd_mount_blob_compatible_suffix_rename_keeps_bytes" },
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_integration", test = "cwd_mount_blob_suffix_round_trip_keeps_bytes" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_integration", test = "cwd_mount_save_after_head_renames_table_keeps_pinned_declaration" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_unsupported_ops" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_editor_compat", test = "editor_mount_rejects_unsupported_links_devices_and_shared_mmap" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_projection_features", test = "reserved_key_components_escape_first_byte" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_projection_features", test = "reserved_spelling_beyond_vfs_1_text_is_conservative" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_composite_key_mount", test = "composite_key_components_project_as_nested_directories" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_projection_features", test = "profile_nested_collection_directories_follow_the_module_path" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_projection_features", test = "nested_record_and_list_fields_project_as_pinned_directories" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_projection_features", test = "long_key_over_200_encoded_bytes_projects_as_sha256_key_alias" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_projection_features", test = "key_over_300_characters_is_admitted_and_projects_as_alias" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_projection_features", test = "large_str_projects_as_txt_and_utf8_write_replaces_the_str" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_projection_features", test = "large_str_bound_is_exclusive_at_64_kib" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_cases", test = "multi_file_source_edit_requires_grouped_validation" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_cases", test = "vfs_020_source_module_group_is_admitted_together_or_not_at_all" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_editor_compat", test = "editor_mount_refuses_chmod_and_chown_with_eperm" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_integration", test = "cwd_mount_chmod_of_document_fails_eperm_without_row_change" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_integration", test = "cwd_mount_blob_compatible_suffix_rename_keeps_bytes" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_integration", test = "cwd_mount_blob_suffix_round_trip_keeps_bytes" },
 ]
 limitations = ["Only the selectors above are claimed. Reserved-name escapes beyond the literal profiles/vfs-1.md:46 text are a conservative, spec-silent selector, not a spec requirement. The renamed MIME suffix clause is carried by the two Blob suffix-rename selectors: a compatible suffix moves only the descriptor's suffix hint and keeps the bytes, an incompatible one is refused with EPERM, and a suffix round trip keeps the bytes. Not covered: empty keys (test ignored: vfs_projection_features 'empty text key cannot be stored', ornadb-5il1.462.1); namespace collisions have no selector; schema change is covered only for a head table rename; the composite-key selector is one fixture; grouped source edits do not assert no-evaluation during speculative writes (ORNA-VFS-020 proper, ornadb-9npn) (ornadb-5il1.63)."]
 
@@ -396,10 +396,10 @@ gate = "E"
 id = "E9"
 title = "Kernel caching does not leak private drafts into another handle or generation"
 select = [
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_isolation", test = "unsynced_draft_is_invisible_to_second_open_and_after_child_exec_and_sigkill_remount" },
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_isolation", test = "repeated_observer_reads_never_show_private_draft_and_read_handles_pin_generation" },
-  { record = "workspace-cli", package = "orna-cli-v1", target = "bin:orna", test = "editor_open_flags_bypass_kernel_cache_without_writeback_capability" },
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_isolation", test = "read_only_text_opens_share_no_cached_pages_across_generations" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_isolation", test = "unsynced_draft_is_invisible_to_second_open_and_after_child_exec_and_sigkill_remount" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_isolation", test = "repeated_observer_reads_never_show_private_draft_and_read_handles_pin_generation" },
+  { record = "workspace-cli", package = "orna-cli", target = "bin:orna", test = "editor_open_flags_bypass_kernel_cache_without_writeback_capability" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_isolation", test = "read_only_text_opens_share_no_cached_pages_across_generations" },
 ]
 limitations = ["Mount-level selectors above are claimed. read_only_text_opens_share_no_cached_pages_across_generations carries the page-cache clause of profiles/vfs-1.md:129-130: a projected Str over the 64 KiB bound is a Text node whose read-only opens reply with FopenFlags::empty(), so the kernel caches its pages; a same-length replacement must be published under a fresh inode, and the superseded inode's handle keeps the generation it captured. The row document itself is not a page-cached case: every document open requests FOPEN_DIRECT_IO (EDITABLE_OPEN_FLAGS), so the reused document inode cannot share pages across generations. The bin:orna selector is a constant check of the editable open flags and init capabilities (fuse_mount.rs), not an observation of kernel caching through a mount; it is named here, not counted as mount-level evidence (ornadb-5il1.64)."]
 
@@ -408,11 +408,11 @@ gate = "E"
 id = "E10"
 title = "Unmount and restart retain only what was acknowledged or explicitly retained as a draft"
 select = [
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_truncate_sparse", test = "quota_rejected_write_is_not_retained_across_unmount_restart" },
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_editor_compat", test = "fsynced_temporary_scratch_survives_mount_restart" },
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_editor_compat", test = "unlinked_fsynced_temporary_scratch_is_gone_after_mount_restart" },
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_sessions", test = "unmount_and_remount_recover_after_sigkill" },
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_sessions", test = "sigterm_retains_unresolved_drafts_instead_of_discarding_them" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_truncate_sparse", test = "quota_rejected_write_is_not_retained_across_unmount_restart" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_editor_compat", test = "fsynced_temporary_scratch_survives_mount_restart" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_editor_compat", test = "unlinked_fsynced_temporary_scratch_is_gone_after_mount_restart" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_sessions", test = "unmount_and_remount_recover_after_sigkill" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_sessions", test = "sigterm_retains_unresolved_drafts_instead_of_discarding_them" },
 ]
 
 # Gate F: history, migration and complete copies.
@@ -422,8 +422,8 @@ gate = "F"
 id = "F1"
 title = "Migrate a populated format-1/2 workspace with dirty index, source and submodule work in a disposable copy"
 select = [
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:migration_copy_cli" },
-  { record = "workspace-rest", package = "orna-repository-v1", target = "test:migration_copy", test = "populated_format2_dirty_workspace_is_preserved_in_copy" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:migration_copy_cli" },
+  { record = "workspace-rest", package = "orna-repository", target = "test:migration_copy", test = "populated_format2_dirty_workspace_is_preserved_in_copy" },
 ]
 limitations = [
   "The fixture has no rows and uses an invented format marker, and real 1.0 records are rejected (ornadb-5il1.191, ornadb-5il1.184, ornadb-5il1.193).",
@@ -434,9 +434,9 @@ gate = "F"
 id = "F2"
 title = "Preserve old commit decoding and byte identity; report annotation defaults as a new semantic coordinate"
 select = [
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:migration_copy_cli" },
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:legacy_fixture_bundle", test = "committed_legacy_format1_bundle_reads_and_admits_through_migrate_copy" },
-  { record = "workspace-rest", package = "orna-repository-v1", target = "test:migration_copy", test = "populated_format2_dirty_workspace_is_preserved_in_copy" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:migration_copy_cli" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:legacy_fixture_bundle", test = "committed_legacy_format1_bundle_reads_and_admits_through_migrate_copy" },
+  { record = "workspace-rest", package = "orna-repository", target = "test:migration_copy", test = "populated_format2_dirty_workspace_is_preserved_in_copy" },
 ]
 limitations = [
   "A library call decodes a format-1 compact commit and its loose rows from the committed bundle, but no user command does, the user still supplies the annotation-default count, and no legacy Blob row exists to derive it from because the format-1 compact decoder admits no blob column (ornadb-5il1.184, ornadb-5il1.192, ornadb-5il1.398).",
@@ -447,8 +447,8 @@ gate = "F"
 id = "F3"
 title = "Resume a migrated stream without resetting its consumer or checkpoint identity"
 select = [
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:migration_stream_resume" },
-  { record = "workspace-rest", package = "orna-repository-v1", target = "test:git_repository", test = "interrupted_legacy_migration_recovers_without_resetting_the_recorded_consumer_identity" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:migration_stream_resume" },
+  { record = "workspace-rest", package = "orna-repository", target = "test:git_repository", test = "interrupted_legacy_migration_recovers_without_resetting_the_recorded_consumer_identity" },
 ]
 limitations = ["The stream resumes inside a copy that was never activated, and checkpoints are carried without their unpublished rows (ornadb-5il1.56)."]
 
@@ -456,7 +456,7 @@ limitations = ["The stream resumes inside a copy that was never activated, and c
 gate = "F"
 id = "F4"
 title = "Reopen new and old mounts simultaneously"
-select = [{ record = "workspace-cli", package = "orna-cli-v1", target = "test:mount_readonly_view" }]
+select = [{ record = "workspace-cli", package = "orna-cli", target = "test:mount_readonly_view" }]
 limitations = ["No row is read through either mount (ornadb-5il1.192, ornadb-5il1.193)."]
 
 [[item]]
@@ -464,7 +464,7 @@ gate = "F"
 id = "F5"
 title = "With original remotes disabled, rebuild both snapshots from a complete superproject and dependency export with an independent extractor"
 select = [
-  { record = "workspace-rest", package = "orna-repository-v1", target = "test:complete_copy", test = "complete_copy_reconstructs_both_snapshots_offline_with_an_independent_extractor" },
+  { record = "workspace-rest", package = "orna-repository", target = "test:complete_copy", test = "complete_copy_reconstructs_both_snapshots_offline_with_an_independent_extractor" },
 ]
 limitations = [
   "Both snapshots are format-3 commits whose store is a text file, and the extractor checks Git object IDs only (ornadb-5il1.193, ornadb-5il1.192).",

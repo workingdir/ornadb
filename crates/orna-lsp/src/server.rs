@@ -49,8 +49,8 @@ use lsp_types::{
     TypeHierarchyPrepareParams, TypeHierarchySubtypesParams, TypeHierarchySupertypesParams,
     UnchangedDocumentDiagnosticReport, Uri, WorkspaceEdit,
 };
-use orna_project_v1::{ObjectIdentityManifest, ObjectIdentityRename, ObjectKind, ProjectLoader};
-use orna_repository_v1::{Repository, RepositoryFormat};
+use orna_project::{ObjectIdentityManifest, ObjectIdentityRename, ObjectKind, ProjectLoader};
+use orna_repository::{Repository, RepositoryFormat};
 
 /// Transport threads for the server's standard input and output streams.
 ///
@@ -774,7 +774,7 @@ fn matches_missing_semicolon_diagnostic(diagnostic: &Diagnostic) -> bool {
 
 fn missing_semicolon_position(
     document: &Document,
-    tokens: &[orna_syntax_v1::Token],
+    tokens: &[orna_syntax::Token],
     parse: &analysis::EditorParse,
     diagnostic: &Diagnostic,
     mapper: &PositionMapper<'_>,
@@ -783,17 +783,16 @@ fn missing_semicolon_position(
     let previous = tokens
         .iter()
         .filter(|token| {
-            !matches!(&token.kind, orna_syntax_v1::TokenKind::Eof)
-                && token.span.end <= diagnostic_byte
+            !matches!(&token.kind, orna_syntax::TokenKind::Eof) && token.span.end <= diagnostic_byte
         })
         .max_by_key(|token| token.span.end)?;
-    if matches!(&previous.kind, orna_syntax_v1::TokenKind::Punct(";")) {
+    if matches!(&previous.kind, orna_syntax::TokenKind::Punct(";")) {
         return None;
     }
 
     let mut repaired_source = document.text.clone();
     repaired_source.insert(previous.span.end, ';');
-    let repaired_parse = orna_syntax_v1::parse_module(&repaired_source);
+    let repaired_parse = orna_syntax::parse_module(&repaired_source);
     let diagnostic_count = |parse: &analysis::EditorParse| {
         parse
             .diagnostics
@@ -1408,7 +1407,7 @@ fn check_counts(
         .map(|(logical_path, text)| crate::project::OpenModule {
             logical_path,
             text,
-            has_syntax_errors: !orna_syntax_v1::parse_module(text).diagnostics.is_empty(),
+            has_syntax_errors: !orna_syntax::parse_module(text).diagnostics.is_empty(),
         })
         .collect::<Vec<_>>();
     let mut counts = std::collections::BTreeMap::new();
@@ -2148,7 +2147,7 @@ mod analysis_cache_tests {
 #[cfg(test)]
 mod rename_request_tests {
     use super::*;
-    use orna_syntax_v1::Keyword;
+    use orna_syntax::Keyword;
 
     const EXPRESSIONS_SOURCE: &str = include_str!("../tests/fixtures/expressions-v1.orna");
     const RENAME_TARGET_SOURCE: &str =
@@ -2257,7 +2256,7 @@ mod rename_request_tests {
         let renamed = apply_text_edits(IDENTITY_SOURCE, &file_edits).unwrap();
         assert_eq!(renamed, IDENTITY_SOURCE.replace("total", "sum"));
 
-        let parse = orna_syntax_v1::parse_module(&renamed);
+        let parse = orna_syntax::parse_module(&renamed);
         assert!(parse.diagnostics.is_empty());
         let symbols = analysis::declaration_symbols(&parse, &renamed);
         assert!(symbols.iter().any(|symbol| symbol.name == "sum"));
@@ -2285,7 +2284,7 @@ mod rename_request_tests {
 #[cfg(test)]
 mod persisted_object_rename_tests {
     use super::*;
-    use orna_semantic_v1::ModuleInput;
+    use orna_semantic::ModuleInput;
     use std::{
         fs,
         path::{Path, PathBuf},
@@ -2358,7 +2357,7 @@ mod persisted_object_rename_tests {
     /// identity inventory staged.
     fn format3_committed(source: &str) -> (tempfile::TempDir, Repository, PathBuf) {
         let directory = tempfile::tempdir().unwrap();
-        let repository = orna_repository_v1::initialize_repository(directory.path())
+        let repository = orna_repository::initialize_repository(directory.path())
             .unwrap()
             .into_repository();
         let source_path = directory.path().join("main.orna");
@@ -2757,7 +2756,7 @@ mod persisted_object_rename_tests {
     #[test]
     fn legacy_format_rename_warns_that_identity_is_not_carried() {
         let directory = tempfile::tempdir().unwrap();
-        orna_repository_v1::write_legacy_format1_fixture(directory.path());
+        orna_repository::write_legacy_format1_fixture(directory.path());
         let source_path = directory.path().join("main.orna");
         let source = "pub table Media(id: Str) { payload: Blob, }\n";
         let uri = file_uri(&source_path);

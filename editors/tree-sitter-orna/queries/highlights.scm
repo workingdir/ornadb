@@ -1,4 +1,4 @@
-; Generated from the orna-syntax-v1 lexical classes.
+; Generated from the orna-syntax lexical classes.
 (keyword) @keyword
 (identifier) @variable
 (number) @number

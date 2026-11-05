@@ -1,0 +1,2049 @@
+//! Bounded, logical traceability for the published Orna 1.1.0 reference bundle.
+//! The report intentionally contains identifiers and statuses, never source bodies or host paths.
+
+pub mod citation_ratchet;
+
+use orna_conformance::{
+    EngineWitnesses, EvidenceStatus, ImplementationEvidenceAggregate,
+    ImplementationEvidenceOverlay, ImplementationEvidenceSource, ScenarioExecutionWitnesses, Stage,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::{Component, Path},
+};
+
+const VERSION: &str = "1.1.0";
+const NORMATIVE_PAYLOAD_COUNT: usize = 58;
+/// The only named algorithm results the 1.1.0 model register records twice; each
+/// pair is byte-identical in the vendored `evidence/model-results.json`.
+const EXACT_DUPLICATE_MODEL_RESULTS: [&str; 2] =
+    ["golden MIME audio/mpeg", "golden MIME application/gzip"];
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceError(String);
+impl std::fmt::Display for TraceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+impl std::error::Error for TraceError {}
+type Result<T> = std::result::Result<T, TraceError>;
+fn err(message: impl Into<String>) -> TraceError {
+    TraceError(message.into())
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct Report {
+    pub format: String,
+    pub specification_version: String,
+    pub publication_digests: BTreeMap<String, String>,
+    pub normative_payloads: Vec<NormativePayloadTrace>,
+    pub requirements: Vec<RequirementTrace>,
+    pub named_algorithms: Vec<InventoryEntry>,
+    pub schema_profile_members: Vec<InventoryEntry>,
+    pub fixture_classes: Vec<FixtureClass>,
+    pub behavioral_scenarios: Vec<ScenarioTrace>,
+    /// Reviewed production-unit evidence. This remains distinct from both
+    /// engine and scenario execution witnesses.
+    pub bounded_production_evidence: Vec<BoundedProductionEvidence>,
+}
+/// A release-payload disposition. This inventory does not establish execution;
+/// missing implementation and test references remain explicit coverage gaps.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct NormativePayloadTrace {
+    pub logical_id: String,
+    pub requirement_ids: Vec<String>,
+    pub implementation_refs: Vec<String>,
+    pub test_refs: Vec<String>,
+    pub status: Status,
+}
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct RequirementTrace {
+    pub requirement_id: String,
+    pub chapter: String,
+    pub status: Status,
+    pub boundaries: Vec<Boundary>,
+}
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct Boundary {
+    pub kind: String,
+    pub logical_id: String,
+    pub implementation_ref: Option<String>,
+    pub test_ref: Option<String>,
+    pub status: Status,
+}
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct InventoryEntry {
+    pub logical_id: String,
+    pub status: Status,
+}
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct FixtureClass {
+    pub kind: String,
+    pub count: usize,
+    pub status: Status,
+}
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct ScenarioTrace {
+    pub scenario_id: String,
+    pub requirements: Vec<String>,
+    pub status: Status,
+}
+/// A publication-pinned bounded production-unit observation. Its status is
+/// always partial: it never claims that an Orna engine executed a fixture.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct BoundedProductionEvidence {
+    pub requirement_id: String,
+    pub source: ImplementationEvidenceSource,
+    pub subject: String,
+    pub command: String,
+    pub result: String,
+    pub observed_status: EvidenceStatus,
+    pub implementation_ref: String,
+    pub test_ref: String,
+    pub status: Status,
+}
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone, Copy)]
+#[serde(rename_all = "kebab-case")]
+pub enum Status {
+    Executed,
+    PartiallyExecuted,
+    SpecifiedModelOnly,
+    JustifiedGap,
+}
+
+#[derive(Deserialize)]
+struct Release {
+    version: String,
+    counts: ReleaseCounts,
+    normative_payload_sha256: BTreeMap<String, String>,
+}
+#[derive(Deserialize)]
+struct ReleaseCounts {
+    requirements: usize,
+    scenario_oracles: usize,
+}
+#[derive(Deserialize)]
+struct Requirement {
+    id: String,
+    chapter: String,
+    source: String,
+}
+#[derive(Deserialize)]
+struct EvidenceFile {
+    requirements: Vec<Evidence>,
+}
+#[derive(Deserialize)]
+struct Evidence {
+    requirement: String,
+    implementation_result: String,
+    tests: Vec<Test>,
+}
+#[derive(Deserialize)]
+struct Test {
+    kind: String,
+    status: String,
+    #[serde(default)]
+    fixture: Option<String>,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    subject: Option<String>,
+}
+#[derive(Deserialize)]
+struct Manifest {
+    version: String,
+    counts: Counts,
+    fixtures: Vec<Fixture>,
+}
+#[derive(Deserialize)]
+struct Counts {
+    valid: usize,
+    invalid: usize,
+    project: usize,
+    total: usize,
+}
+#[derive(Deserialize)]
+struct Fixture {
+    id: String,
+    kind: String,
+    path: String,
+    parse_as: String,
+    #[serde(default)]
+    expect: BTreeMap<String, String>,
+    #[serde(default)]
+    failing_phase: Option<String>,
+    #[serde(default)]
+    diagnostic: Option<String>,
+    #[serde(default)]
+    expected_diagnostic: Option<String>,
+    #[serde(default)]
+    evidence_level: Option<String>,
+}
+impl Fixture {
+    fn is_bounded_syntax(&self) -> bool {
+        self.evidence_level
+            .as_deref()
+            .is_some_and(|level| level.starts_with("Bounded syntax only"))
+    }
+}
+#[derive(Deserialize)]
+struct InvalidMetadata {
+    version: String,
+    count: usize,
+    fixtures: Vec<InvalidFixture>,
+}
+#[derive(Deserialize)]
+struct InvalidFixture {
+    path: String,
+    failing_phase: String,
+    diagnostic: String,
+    message_contains: String,
+}
+#[derive(Deserialize)]
+struct ExpectedDiagnostic {
+    version: String,
+    fixture: String,
+    failing_phase: String,
+    primary_diagnostic: String,
+    message_contains: String,
+    status: String,
+}
+#[allow(clippy::struct_field_names)]
+#[derive(Deserialize)]
+struct Scenarios {
+    version: String,
+    count: usize,
+    scenarios: Vec<Scenario>,
+}
+#[derive(Deserialize)]
+struct Scenario {
+    id: String,
+    requirements: Vec<String>,
+    /// Present on every 1.1.0 scenario oracle.
+    implementation_status: Option<String>,
+    /// Present on the 149 scenarios that declare an evidence level; absent on the
+    /// 130 gate-matrix oracles, which are scoped by `implementation_status` alone.
+    #[serde(default)]
+    evidence_level: Option<String>,
+}
+#[derive(Deserialize)]
+struct Models {
+    results: Vec<Model>,
+}
+#[derive(Deserialize)]
+struct Model {
+    name: String,
+    passed: bool,
+}
+
+/// Generate the frozen traceability report without implementation execution
+/// witnesses.
+///
+/// # Errors
+///
+/// Returns an error when the reference bundle or its publication digests are
+/// invalid.
+pub fn generate(root: impl AsRef<Path>) -> Result<Report> {
+    generate_inner(root.as_ref(), None, None, None)
+}
+
+/// Generate the frozen report with an execution register produced by the
+/// conformance harness. The register is accepted only when it carries the
+/// exact publication digest inventory loaded from the same reference root.
+///
+/// # Errors
+///
+/// Returns an error when the reference bundle, its digests, or the witness
+/// register is invalid.
+pub fn generate_with_engine_witnesses(
+    root: impl AsRef<Path>,
+    witnesses: &EngineWitnesses,
+) -> Result<Report> {
+    generate_inner(root.as_ref(), Some(witnesses), None, None)
+}
+
+/// Generate the frozen report with implementation-scenario execution
+/// witnesses. These are recorded as distinct runtime boundaries and never as
+/// Orna-engine execution.
+///
+/// # Errors
+///
+/// Returns an error when the reference bundle, its digests, or the witness
+/// register is invalid.
+pub fn generate_with_scenario_execution_witnesses(
+    root: impl AsRef<Path>,
+    witnesses: &ScenarioExecutionWitnesses,
+) -> Result<Report> {
+    generate_inner(root.as_ref(), None, Some(witnesses), None)
+}
+
+/// Generate the frozen report with publication-pinned bounded production-unit
+/// evidence. This records only partial implementation evidence: it cannot
+/// create engine witnesses or promote a requirement to [`Status::Executed`].
+///
+/// # Errors
+///
+/// Returns an error when the reference bundle, its digests, or the overlay is
+/// invalid, duplicated, unknown, or pinned to a different publication.
+pub fn generate_with_implementation_evidence_overlay(
+    root: impl AsRef<Path>,
+    overlay: &ImplementationEvidenceOverlay,
+) -> Result<Report> {
+    generate_inner(root.as_ref(), None, None, Some(overlay))
+}
+
+fn generate_inner(
+    root: &Path,
+    engine_witnesses: Option<&EngineWitnesses>,
+    scenario_execution_witnesses: Option<&ScenarioExecutionWitnesses>,
+    implementation_evidence_overlay: Option<&ImplementationEvidenceOverlay>,
+) -> Result<Report> {
+    let release: Release = read_json(root, "release.json")?;
+    if release.version != VERSION
+        || release.normative_payload_sha256.len() != NORMATIVE_PAYLOAD_COUNT
+    {
+        return Err(err("release version or digest inventory is invalid"));
+    }
+    verify_digests(root, &release.normative_payload_sha256)?;
+    let requirements: Vec<Requirement> = read_json(root, "tests/requirements.json")?;
+    let evidence: EvidenceFile = read_json(root, "tests/requirement-evidence.json")?;
+    let manifest: Manifest = read_json(root, "tests/conformance-manifest.json")?;
+    if release.version != manifest.version {
+        return Err(err(
+            "release version disagrees with the conformance manifest",
+        ));
+    }
+    let invalid: InvalidMetadata = read_json(root, "tests/invalid-metadata.json")?;
+    let scenarios: Scenarios = read_json(root, "tests/scenarios.json")?;
+    let models: Models = read_json(root, "evidence/model-results.json")?;
+    validate(
+        root,
+        &requirements,
+        &evidence,
+        &manifest,
+        &invalid,
+        &scenarios,
+        &models,
+    )?;
+    if release.counts.requirements == 0
+        || release.counts.scenario_oracles == 0
+        || release.counts.requirements != requirements.len()
+        || release.counts.scenario_oracles != scenarios.scenarios.len()
+        || manifest.counts.valid == 0
+        || manifest.counts.invalid == 0
+        || manifest.counts.project == 0
+    {
+        return Err(err("release counts disagree with the reference artefacts"));
+    }
+    let evidence_by_id = evidence
+        .requirements
+        .iter()
+        .map(|item| (item.requirement.as_str(), item))
+        .collect::<BTreeMap<_, _>>();
+    let requirement_traces = requirements
+        .iter()
+        .map(|requirement| {
+            let entry = evidence_by_id[requirement.id.as_str()];
+            let boundaries = entry
+                .tests
+                .iter()
+                .map(|test| Boundary {
+                    kind: test.kind.clone(),
+                    logical_id: logical_test_id(test, &requirement.id),
+                    implementation_ref: None,
+                    test_ref: None,
+                    status: test_status(test, &entry.implementation_result),
+                })
+                .collect::<Vec<_>>();
+            RequirementTrace {
+                requirement_id: requirement.id.clone(),
+                chapter: requirement.chapter.clone(),
+                status: aggregate(&boundaries.iter().map(|b| b.status).collect::<Vec<_>>()),
+                boundaries,
+            }
+        })
+        .collect();
+    let mut report = Report {
+        format: "orna.traceability.v1".into(),
+        specification_version: release.version.clone(),
+        normative_payloads: normative_payloads(&release.normative_payload_sha256, &requirements)?,
+        publication_digests: release.normative_payload_sha256,
+        requirements: requirement_traces,
+        named_algorithms: {
+            let mut seen = BTreeSet::new();
+            models
+                .results
+                .into_iter()
+                .filter(|model| seen.insert(model.name.clone()))
+                .map(|model| InventoryEntry {
+                    logical_id: model.name,
+                    status: Status::SpecifiedModelOnly,
+                })
+                .collect()
+        },
+        schema_profile_members: schema_profile_members(root)?,
+        fixture_classes: fixture_classes(&manifest),
+        behavioral_scenarios: scenarios
+            .scenarios
+            .iter()
+            .map(|scenario| {
+                let status = if scenario
+                    .requirements
+                    .iter()
+                    .any(|id| !evidence_by_id.contains_key(id.as_str()))
+                {
+                    Status::JustifiedGap
+                } else {
+                    scenario_status(scenario)?
+                };
+                Ok(ScenarioTrace {
+                    scenario_id: scenario.id.clone(),
+                    requirements: scenario.requirements.clone(),
+                    status,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
+        bounded_production_evidence: Vec::new(),
+    };
+    if let Some(witnesses) = engine_witnesses {
+        apply_engine_witnesses(&mut report, witnesses, &manifest, &evidence)?;
+    }
+    if let Some(witnesses) = scenario_execution_witnesses {
+        apply_scenario_execution_witnesses(&mut report, witnesses, &scenarios)?;
+    }
+    if let Some(overlay) = implementation_evidence_overlay {
+        apply_implementation_evidence_overlay(&mut report, overlay)?;
+    }
+    Ok(report)
+}
+
+fn apply_implementation_evidence_overlay(
+    report: &mut Report,
+    overlay: &ImplementationEvidenceOverlay,
+) -> Result<()> {
+    if report.publication_digests != *overlay.publication_digests() {
+        return Err(err(
+            "implementation evidence publication digests do not match report",
+        ));
+    }
+    if overlay.aggregate() != ImplementationEvidenceAggregate::PartiallyExecuted {
+        return Err(err("implementation evidence overlay has invalid aggregate"));
+    }
+    let mut requirements = report
+        .requirements
+        .iter_mut()
+        .map(|requirement| (requirement.requirement_id.clone(), requirement))
+        .collect::<BTreeMap<_, _>>();
+    let mut seen = BTreeSet::new();
+    for evidence in overlay.evidence() {
+        if evidence.source() != &ImplementationEvidenceSource::ProductionUnit {
+            return Err(err(
+                "non-production evidence cannot enter traceability report",
+            ));
+        }
+        if !matches!(
+            evidence.observed_status(),
+            EvidenceStatus::Passed | EvidenceStatus::Failed
+        ) {
+            return Err(err(
+                "implementation evidence status must be passed or failed",
+            ));
+        }
+        validate_overlay_reference(evidence.implementation_ref(), "implementation")?;
+        validate_overlay_reference(evidence.test_ref(), "test")?;
+        validate_overlay_text(evidence.subject(), "subject")?;
+        validate_overlay_text(evidence.command(), "command")?;
+        validate_overlay_text(evidence.result(), "result")?;
+        if !seen.insert((
+            evidence.requirement_id(),
+            evidence.implementation_ref(),
+            evidence.test_ref(),
+        )) {
+            return Err(err("duplicate implementation evidence binding"));
+        }
+        let requirement = requirements
+            .get_mut(evidence.requirement_id())
+            .ok_or_else(|| {
+                err(format!(
+                    "implementation evidence names unknown requirement: {}",
+                    evidence.requirement_id()
+                ))
+            })?;
+        let boundary = Boundary {
+            kind: "bounded-production-evidence".into(),
+            logical_id: format!("{}:{}", evidence.implementation_ref(), evidence.test_ref()),
+            implementation_ref: Some(evidence.implementation_ref().into()),
+            test_ref: Some(evidence.test_ref().into()),
+            status: Status::PartiallyExecuted,
+        };
+        requirement.boundaries.push(boundary);
+        requirement.status = aggregate(
+            &requirement
+                .boundaries
+                .iter()
+                .map(|boundary| boundary.status)
+                .collect::<Vec<_>>(),
+        );
+        report
+            .bounded_production_evidence
+            .push(BoundedProductionEvidence {
+                requirement_id: evidence.requirement_id().into(),
+                source: evidence.source().clone(),
+                subject: evidence.subject().into(),
+                command: evidence.command().into(),
+                result: evidence.result().into(),
+                observed_status: evidence.observed_status().clone(),
+                implementation_ref: evidence.implementation_ref().into(),
+                test_ref: evidence.test_ref().into(),
+                status: Status::PartiallyExecuted,
+            });
+    }
+    Ok(())
+}
+
+fn validate_overlay_reference(reference: &str, kind: &str) -> Result<()> {
+    let Some((path, symbol)) = reference.split_once("::") else {
+        return Err(err(format!(
+            "invalid repository-relative {kind} evidence reference"
+        )));
+    };
+    let valid_path = !path.is_empty()
+        && !path.starts_with('/')
+        && !path.starts_with('~')
+        && !path.contains(':')
+        && !path.contains('\\')
+        && !path.chars().any(char::is_control)
+        && path.split('/').all(|segment| {
+            !segment.is_empty()
+                && segment != "."
+                && segment != ".."
+                && segment.chars().all(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
+                })
+        });
+    let valid_symbol = !symbol.is_empty()
+        && !symbol.chars().any(char::is_control)
+        && symbol.split("::").all(|segment| {
+            let mut characters = segment.chars();
+            matches!(characters.next(), Some(character) if character.is_ascii_alphabetic() || character == '_')
+                && characters.all(|character| character.is_ascii_alphanumeric() || character == '_')
+        });
+    if !valid_path || !valid_symbol {
+        return Err(err(format!(
+            "invalid repository-relative {kind} evidence reference"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_overlay_text(value: &str, kind: &str) -> Result<()> {
+    if value.is_empty() || value.chars().any(char::is_control) {
+        return Err(err(format!("invalid implementation evidence {kind}")));
+    }
+    Ok(())
+}
+
+fn apply_engine_witnesses(
+    report: &mut Report,
+    witnesses: &EngineWitnesses,
+    manifest: &Manifest,
+    evidence: &EvidenceFile,
+) -> Result<()> {
+    if report.publication_digests != *witnesses.publication_digests() {
+        return Err(err(
+            "engine witness publication digests do not match report",
+        ));
+    }
+    let fixtures = manifest
+        .fixtures
+        .iter()
+        .map(|fixture| (fixture.id.as_str(), fixture))
+        .collect::<BTreeMap<_, _>>();
+    let evidence_by_requirement = evidence
+        .requirements
+        .iter()
+        .map(|item| (item.requirement.as_str(), item))
+        .collect::<BTreeMap<_, _>>();
+    let mut requirements = report
+        .requirements
+        .iter_mut()
+        .map(|requirement| (requirement.requirement_id.clone(), requirement))
+        .collect::<BTreeMap<_, _>>();
+    let mut seen = BTreeSet::new();
+    for witness in witnesses.witnesses() {
+        let declared_evidence = evidence_by_requirement
+            .get(witness.requirement_id())
+            .ok_or_else(|| {
+                err(format!(
+                    "engine witness requirement evidence is missing: {}",
+                    witness.requirement_id()
+                ))
+            })?;
+        if !declared_evidence.tests.iter().any(|test| {
+            test.fixture.as_deref() == Some(witness.fixture_id())
+                && test.path.as_deref() == Some(witness.fixture_path())
+        }) {
+            return Err(err(format!(
+                "engine witness requirement evidence does not declare fixture: {}",
+                witness.fixture_id()
+            )));
+        }
+        let fixture = fixtures.get(witness.fixture_id()).ok_or_else(|| {
+            err(format!(
+                "engine witness names unknown fixture: {}",
+                witness.fixture_id()
+            ))
+        })?;
+        if fixture.path != witness.fixture_path() {
+            return Err(err(format!(
+                "engine witness fixture path mismatch: {}",
+                witness.fixture_id()
+            )));
+        }
+        let stage = stage_name(witness.stage());
+        if fixture
+            .expect
+            .get(stage)
+            .is_none_or(|expected| expected == "not-run")
+        {
+            return Err(err(format!(
+                "engine witness stage is outside fixture expectation: {}:{}",
+                witness.fixture_id(),
+                stage
+            )));
+        }
+        if witness.implementation_ref().is_empty() || witness.test_ref().is_empty() {
+            return Err(err("engine witness lacks implementation or test reference"));
+        }
+        if matches!(
+            witness.observed_status(),
+            orna_conformance::EvidenceStatus::Skipped | orna_conformance::EvidenceStatus::Specified
+        ) {
+            return Err(err("engine witness has non-executed status"));
+        }
+        let key = (witness.requirement_id(), witness.fixture_id(), stage);
+        if !seen.insert(key) {
+            return Err(err("duplicate engine witness binding"));
+        }
+        let requirement = requirements
+            .get_mut(witness.requirement_id())
+            .ok_or_else(|| {
+                err(format!(
+                    "engine witness names unknown requirement: {}",
+                    witness.requirement_id()
+                ))
+            })?;
+        requirement.boundaries.push(Boundary {
+            kind: "engine-witness".into(),
+            logical_id: format!("{}:{stage}", witness.fixture_id()),
+            implementation_ref: Some(witness.implementation_ref().into()),
+            test_ref: Some(witness.test_ref().into()),
+            status: Status::Executed,
+        });
+        requirement.status = aggregate(
+            &requirement
+                .boundaries
+                .iter()
+                .map(|boundary| boundary.status)
+                .collect::<Vec<_>>(),
+        );
+    }
+    Ok(())
+}
+
+fn apply_scenario_execution_witnesses(
+    report: &mut Report,
+    witnesses: &ScenarioExecutionWitnesses,
+    scenarios: &Scenarios,
+) -> Result<()> {
+    if report.publication_digests != *witnesses.publication_digests() {
+        return Err(err(
+            "scenario execution witness publication digests do not match report",
+        ));
+    }
+    let scenarios = scenarios
+        .scenarios
+        .iter()
+        .map(|scenario| (scenario.id.as_str(), scenario))
+        .collect::<BTreeMap<_, _>>();
+    let mut requirements = report
+        .requirements
+        .iter_mut()
+        .map(|requirement| (requirement.requirement_id.clone(), requirement))
+        .collect::<BTreeMap<_, _>>();
+    let mut seen = BTreeSet::new();
+    for witness in witnesses.witnesses() {
+        let scenario = scenarios.get(witness.scenario_id()).ok_or_else(|| {
+            err(format!(
+                "scenario execution witness names unknown scenario: {}",
+                witness.scenario_id()
+            ))
+        })?;
+        if scenario.evidence_level.as_deref()
+            != Some("implementation scenario, not executed by an Orna engine")
+            || !scenario
+                .requirements
+                .iter()
+                .any(|id| id == witness.requirement_id())
+        {
+            return Err(err(format!(
+                "scenario execution witness requirement mismatch: {}",
+                witness.scenario_id()
+            )));
+        }
+        if witness.implementation_ref().is_empty() || witness.test_ref().is_empty() {
+            return Err(err(
+                "scenario execution witness lacks implementation or test reference",
+            ));
+        }
+        if witness.observed_status() != &orna_conformance::EvidenceStatus::Passed {
+            return Err(err("scenario execution witness has non-passing status"));
+        }
+        let key = (witness.requirement_id(), witness.scenario_id());
+        if !seen.insert(key) {
+            return Err(err("duplicate scenario execution witness binding"));
+        }
+        let requirement = requirements
+            .get_mut(witness.requirement_id())
+            .ok_or_else(|| {
+                err(format!(
+                    "scenario execution witness names unknown requirement: {}",
+                    witness.requirement_id()
+                ))
+            })?;
+        requirement.boundaries.push(Boundary {
+            kind: "implementation-scenario-witness".into(),
+            logical_id: witness.scenario_id().into(),
+            implementation_ref: Some(witness.implementation_ref().into()),
+            test_ref: Some(witness.test_ref().into()),
+            // A bounded implementation scenario is concrete evidence, but it
+            // is expressly not execution by an Orna engine. Keep that
+            // distinction machine-readable at the boundary itself.
+            status: Status::PartiallyExecuted,
+        });
+        requirement.status = aggregate(
+            &requirement
+                .boundaries
+                .iter()
+                .map(|boundary| boundary.status)
+                .collect::<Vec<_>>(),
+        );
+    }
+    Ok(())
+}
+
+fn stage_name(stage: &Stage) -> &'static str {
+    match stage {
+        Stage::Parse => "parse",
+        Stage::Resolve => "resolve",
+        Stage::Typecheck => "typecheck",
+        Stage::Evaluate => "evaluate",
+        Stage::RowValidation => "row-validation",
+    }
+}
+
+fn validate(
+    root: &Path,
+    requirements: &[Requirement],
+    evidence: &EvidenceFile,
+    manifest: &Manifest,
+    invalid: &InvalidMetadata,
+    scenarios: &Scenarios,
+    models: &Models,
+) -> Result<()> {
+    if requirements.len() != 947 || !unique(requirements.iter().map(|r| r.id.as_str())) {
+        return Err(err(
+            "requirements must contain exactly 947 unique identifiers",
+        ));
+    }
+    if requirements
+        .iter()
+        .any(|r| r.chapter.is_empty() || r.source.is_empty())
+    {
+        return Err(err(
+            "requirements contain an empty chapter or source identifier",
+        ));
+    }
+    if evidence.requirements.len() != 947
+        || !unique(evidence.requirements.iter().map(|e| e.requirement.as_str()))
+    {
+        return Err(err(
+            "requirement evidence must contain exactly 947 unique identifiers",
+        ));
+    }
+    let ids = requirements
+        .iter()
+        .map(|r| r.id.as_str())
+        .collect::<BTreeSet<_>>();
+    for item in &evidence.requirements {
+        if !ids.contains(item.requirement.as_str()) || item.tests.is_empty() {
+            return Err(err(
+                "requirement evidence has a broken link or empty test list",
+            ));
+        }
+        for test in &item.tests {
+            if test.kind.is_empty()
+                || test.status.is_empty()
+                || test
+                    .fixture
+                    .as_deref()
+                    .or(test.path.as_deref())
+                    .or(test.subject.as_deref())
+                    .is_none()
+            {
+                return Err(err(
+                    "requirement evidence contains an incomplete test entry",
+                ));
+            }
+        }
+    }
+    let fixture_counts = manifest
+        .fixtures
+        .iter()
+        .fold(BTreeMap::new(), |mut counts, fixture| {
+            *counts.entry(fixture.kind.as_str()).or_insert(0usize) += 1;
+            counts
+        });
+    if manifest.counts.total != manifest.fixtures.len()
+        || manifest.counts.valid != fixture_counts.get("valid").copied().unwrap_or(0)
+        || manifest.counts.invalid != fixture_counts.get("invalid").copied().unwrap_or(0)
+        || manifest.counts.project != fixture_counts.get("project").copied().unwrap_or(0)
+        || !unique(manifest.fixtures.iter().map(|f| f.id.as_str()))
+        || !unique(manifest.fixtures.iter().map(|f| f.path.as_str()))
+    {
+        return Err(err(
+            "conformance manifest counts or fixture identities are invalid",
+        ));
+    }
+    for fixture in &manifest.fixtures {
+        safe_logical(&fixture.path)?;
+        if fixture.parse_as.is_empty()
+            || !matches!(fixture.kind.as_str(), "valid" | "invalid" | "project")
+            || !root.join(&fixture.path).exists()
+            || fixture
+                .expected_diagnostic
+                .as_deref()
+                .is_some_and(|path| safe_logical(path).is_err() || !root.join(path).is_file())
+            || fixture.expect.iter().any(|(stage, result)| {
+                !matches!(
+                    stage.as_str(),
+                    "parse" | "resolve" | "typecheck" | "evaluate" | "load_rows"
+                ) || !matches!(result.as_str(), "pass" | "fail" | "not-run")
+            })
+        {
+            return Err(err(format!(
+                "conformance manifest fixture is invalid: {}",
+                fixture.id
+            )));
+        }
+        match fixture.kind.as_str() {
+            "valid"
+                if fixture.failing_phase.is_some()
+                    || fixture.diagnostic.is_some()
+                    || fixture.expected_diagnostic.is_some() =>
+            {
+                return Err(err(format!(
+                    "valid fixture has failure metadata: {}",
+                    fixture.id
+                )));
+            }
+            // Bounded-syntax fixtures (evidence_level "Bounded syntax only": final/main,
+            // final/data, final/database) await separate semantic admission for final
+            // row/header contexts, so they may omit resolve and typecheck. Any value they
+            // do state must still be pass.
+            "valid"
+                if fixture.expect.get("parse").map(String::as_str) != Some("pass")
+                    || ["resolve", "typecheck"].into_iter().any(|phase| {
+                        let expected = fixture.expect.get(phase).map(String::as_str);
+                        expected != Some("pass")
+                            && !(fixture.is_bounded_syntax() && expected.is_none())
+                    }) =>
+            {
+                return Err(err(format!(
+                    "valid fixture lacks required pass expectations: {}",
+                    fixture.id
+                )));
+            }
+            "invalid"
+                if fixture.failing_phase.is_none()
+                    || fixture.diagnostic.is_none()
+                    || fixture.expected_diagnostic.is_none() =>
+            {
+                return Err(err(format!(
+                    "invalid fixture lacks failure metadata: {}",
+                    fixture.id
+                )));
+            }
+            "project"
+                if fixture.parse_as != "database_project"
+                    || fixture.failing_phase.is_some()
+                    || fixture.diagnostic.is_some()
+                    || fixture.expected_diagnostic.is_some()
+                    || fixture.expect.get("parse").map(String::as_str) != Some("pass")
+                    || fixture.expect.get("resolve").map(String::as_str) != Some("pass")
+                    || fixture.expect.get("typecheck").map(String::as_str) != Some("pass")
+                    || fixture.expect.get("load_rows").map(String::as_str) != Some("pass") =>
+            {
+                return Err(err(format!(
+                    "project fixture schema is invalid: {}",
+                    fixture.id
+                )));
+            }
+            _ => {}
+        }
+    }
+    let fixture_paths = manifest
+        .fixtures
+        .iter()
+        .map(|f| f.path.as_str())
+        .collect::<BTreeSet<_>>();
+    let invalid_paths = manifest
+        .fixtures
+        .iter()
+        .filter(|fixture| fixture.kind == "invalid")
+        .map(|fixture| fixture.path.as_str())
+        .collect::<BTreeSet<_>>();
+    let metadata_paths = invalid
+        .fixtures
+        .iter()
+        .map(|fixture| fixture.path.as_str())
+        .collect::<BTreeSet<_>>();
+    if invalid.version != manifest.version
+        || invalid.count != invalid.fixtures.len()
+        || invalid.count != manifest.counts.invalid
+        || metadata_paths.len() != invalid.fixtures.len()
+        || metadata_paths != invalid_paths
+    {
+        return Err(err("invalid fixture metadata count is invalid"));
+    }
+    for item in &invalid.fixtures {
+        if !fixture_paths.contains(item.path.as_str())
+            || item.failing_phase.is_empty()
+            || item.diagnostic.is_empty()
+            || item.message_contains.is_empty()
+        {
+            return Err(err(
+                "invalid fixture metadata has a broken link or empty field",
+            ));
+        }
+    }
+    for fixture in manifest
+        .fixtures
+        .iter()
+        .filter(|fixture| fixture.kind == "invalid")
+    {
+        let metadata = invalid
+            .fixtures
+            .iter()
+            .find(|item| item.path == fixture.path)
+            .ok_or_else(|| err(format!("invalid metadata is missing: {}", fixture.id)))?;
+        let expected_path = fixture
+            .expected_diagnostic
+            .as_deref()
+            .ok_or_else(|| err(format!("expected diagnostic is missing: {}", fixture.id)))?;
+        let expected: ExpectedDiagnostic = read_json(root, expected_path)?;
+        if expected.version != manifest.version
+            || expected.fixture != fixture.path
+            || expected.failing_phase != metadata.failing_phase
+            || expected.failing_phase != fixture.failing_phase.as_deref().unwrap_or_default()
+            || expected.primary_diagnostic != metadata.diagnostic
+            || expected.primary_diagnostic != fixture.diagnostic.as_deref().unwrap_or_default()
+            || expected.message_contains != metadata.message_contains
+            || expected.status != "expected-not-executed"
+        {
+            return Err(err(format!(
+                "invalid fixture metadata disagrees with its expected diagnostic: {}",
+                fixture.id
+            )));
+        }
+    }
+    if scenarios.version != manifest.version
+        || scenarios.count != scenarios.scenarios.len()
+        || !unique(scenarios.scenarios.iter().map(|s| s.id.as_str()))
+    {
+        return Err(err("scenario count or identifiers are invalid"));
+    }
+    for scenario in &scenarios.scenarios {
+        if scenario.requirements.is_empty()
+            || scenario
+                .implementation_status
+                .as_deref()
+                .is_none_or(str::is_empty)
+            || scenario
+                .evidence_level
+                .as_deref()
+                .is_some_and(str::is_empty)
+        {
+            return Err(err(
+                "scenario lacks requirement links, implementation_status, or a non-empty evidence level",
+            ));
+        }
+    }
+    let mut result_counts = BTreeMap::new();
+    for model in &models.results {
+        if model.name.is_empty() || !model.passed {
+            return Err(err("named algorithm result is empty or not passing"));
+        }
+        *result_counts.entry(model.name.as_str()).or_insert(0usize) += 1;
+    }
+    if models.results.is_empty()
+        || result_counts.iter().any(|(name, count)| {
+            *count > 1 && (!EXACT_DUPLICATE_MODEL_RESULTS.contains(name) || *count != 2)
+        })
+    {
+        return Err(err("named algorithm inventory is invalid"));
+    }
+    Ok(())
+}
+
+/// Scenario status for implementation-scenario oracles. A scenario with an
+/// evidence level is classified by it; a scenario without one must be
+/// `not-executed` and is a justified gap. Anything else is rejected.
+fn scenario_status(scenario: &Scenario) -> Result<Status> {
+    let implementation_status = scenario.implementation_status.as_deref().ok_or_else(|| {
+        err(format!(
+            "scenario lacks implementation_status: {}",
+            scenario.id
+        ))
+    })?;
+    match scenario.evidence_level.as_deref() {
+        Some(level) => Ok(status_from_level(level)),
+        None if implementation_status == "not-executed" => Ok(Status::JustifiedGap),
+        None => Err(err(format!(
+            "scenario has no evidence_level and is not not-executed: {}",
+            scenario.id
+        ))),
+    }
+}
+fn normative_payloads(
+    digests: &BTreeMap<String, String>,
+    requirements: &[Requirement],
+) -> Result<Vec<NormativePayloadTrace>> {
+    let requirements_by_source = requirements.iter().fold(
+        BTreeMap::<&str, Vec<&Requirement>>::new(),
+        |mut grouped, requirement| {
+            grouped
+                .entry(requirement.source.as_str())
+                .or_default()
+                .push(requirement);
+            grouped
+        },
+    );
+    let mut payloads = Vec::with_capacity(digests.len());
+    for logical_id in digests.keys() {
+        let linked = requirements_by_source
+            .get(logical_id.as_str())
+            .cloned()
+            .unwrap_or_default();
+        let requirement_ids = linked
+            .iter()
+            .map(|requirement| requirement.id.clone())
+            .collect::<Vec<_>>();
+        let payload = NormativePayloadTrace {
+            logical_id: logical_id.clone(),
+            requirement_ids,
+            implementation_refs: Vec::new(),
+            test_refs: Vec::new(),
+            status: Status::JustifiedGap,
+        };
+        validate_payload(&payload)?;
+        payloads.push(payload);
+    }
+    if payloads.is_empty() {
+        return Err(err("normative payload report is incomplete"));
+    }
+    if payloads.len() != NORMATIVE_PAYLOAD_COUNT {
+        return Err(err("normative payload report is incomplete"));
+    }
+    Ok(payloads)
+}
+fn validate_payload(payload: &NormativePayloadTrace) -> Result<()> {
+    if payload.logical_id.is_empty() {
+        return Err(err("normative payload lacks a logical identifier"));
+    }
+    Ok(())
+}
+fn schema_profile_members(root: &Path) -> Result<Vec<InventoryEntry>> {
+    let sys = load_sys_api()?;
+    let live: Value = read_json(root, "profiles/live-messages.json")?;
+    let session: Value = read_json(root, "profiles/session.schema.json")?;
+    let mut ids = BTreeSet::new();
+    for key in [
+        "functions",
+        "relations",
+        "value_types",
+        "enums",
+        "singletons",
+        "opaque_identifiers",
+    ] {
+        named_object_members(&sys, key, "sys", &mut ids)?;
+    }
+    for key in ["messages", "definitions"] {
+        named_object_members(&live, key, "live", &mut ids)?;
+    }
+    named_object_members(&session, "$defs", "session", &mut ids)?;
+    if ids.is_empty() {
+        return Err(err("schema and profile member inventory is empty"));
+    }
+    Ok(ids
+        .into_iter()
+        .map(|logical_id| InventoryEntry {
+            logical_id,
+            status: Status::SpecifiedModelOnly,
+        })
+        .collect())
+}
+
+fn load_sys_api() -> Result<Value> {
+    serde_json::from_str(&orna_sys::system_api_json())
+        .map_err(|error| err(format!("parse embedded sys API artifact: {error}")))
+}
+fn named_object_members(
+    value: &Value,
+    key: &str,
+    prefix: &str,
+    output: &mut BTreeSet<String>,
+) -> Result<()> {
+    let group = value.get(key).ok_or_else(|| {
+        err(format!(
+            "schema/profile member group is missing: {prefix}.{key}"
+        ))
+    })?;
+    match group {
+        Value::Object(object) if !object.is_empty() => {
+            output.extend(object.keys().map(|name| format!("{prefix}.{key}.{name}")));
+        }
+        Value::Array(items) if !items.is_empty() => {
+            for item in items {
+                let name = item
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .or_else(|| item.as_str())
+                    .filter(|name| !name.is_empty())
+                    .ok_or_else(|| {
+                        err(format!(
+                            "schema/profile member lacks a name: {prefix}.{key}"
+                        ))
+                    })?;
+                output.insert(format!("{prefix}.{key}.{name}"));
+            }
+        }
+        _ => {
+            return Err(err(format!(
+                "schema/profile member group is empty: {prefix}.{key}"
+            )));
+        }
+    }
+    Ok(())
+}
+fn fixture_classes(manifest: &Manifest) -> Vec<FixtureClass> {
+    let mut counts = BTreeMap::new();
+    for fixture in &manifest.fixtures {
+        *counts.entry(fixture.kind.clone()).or_insert(0) += 1;
+    }
+    counts
+        .into_iter()
+        .map(|(kind, count)| FixtureClass {
+            kind,
+            count,
+            status: Status::JustifiedGap,
+        })
+        .collect()
+}
+fn test_status(test: &Test, implementation_result: &str) -> Status {
+    let value = format!("{} {}", test.status, implementation_result).to_ascii_lowercase();
+    if value.contains("model") || value.contains("specified") {
+        Status::SpecifiedModelOnly
+    } else {
+        Status::JustifiedGap
+    }
+}
+fn status_from_level(level: &str) -> Status {
+    if level.to_ascii_lowercase().contains("not executed")
+        || level.to_ascii_lowercase().contains("planned")
+    {
+        Status::JustifiedGap
+    } else {
+        Status::SpecifiedModelOnly
+    }
+}
+fn aggregate(statuses: &[Status]) -> Status {
+    if statuses.is_empty() {
+        Status::JustifiedGap
+    } else if statuses.iter().all(|status| *status == Status::Executed) {
+        Status::Executed
+    } else if statuses
+        .iter()
+        .all(|status| *status == Status::SpecifiedModelOnly)
+    {
+        Status::SpecifiedModelOnly
+    } else if statuses
+        .iter()
+        .any(|status| matches!(status, Status::Executed | Status::PartiallyExecuted))
+    {
+        Status::PartiallyExecuted
+    } else {
+        Status::JustifiedGap
+    }
+}
+fn logical_test_id(test: &Test, fallback: &str) -> String {
+    test.fixture
+        .clone()
+        .or_else(|| test.path.clone())
+        .or_else(|| test.subject.clone())
+        .unwrap_or_else(|| fallback.into())
+}
+fn unique<'a>(mut items: impl Iterator<Item = &'a str>) -> bool {
+    let mut set = BTreeSet::new();
+    items.all(|item| !item.is_empty() && set.insert(item))
+}
+fn read_json<T: for<'de> Deserialize<'de>>(root: &Path, logical: &str) -> Result<T> {
+    safe_logical(logical)?;
+    let body = fs::read_to_string(root.join(logical))
+        .map_err(|_| err(format!("cannot read required logical member: {logical}")))?;
+    serde_json::from_str(&body)
+        .map_err(|_| err(format!("invalid JSON in logical member: {logical}")))
+}
+fn safe_logical(logical: &str) -> Result<()> {
+    let path = Path::new(logical);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|part| matches!(part, Component::ParentDir))
+    {
+        Err(err("unsafe logical member identifier"))
+    } else {
+        Ok(())
+    }
+}
+fn verify_digests(root: &Path, digests: &BTreeMap<String, String>) -> Result<()> {
+    for (logical, expected) in digests {
+        safe_logical(logical)?;
+        if expected.len() != 64 || !expected.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(err(format!("invalid publication digest: {logical}")));
+        }
+        let bytes = fs::read(root.join(logical))
+            .map_err(|_| err(format!("missing published member: {logical}")))?;
+        if format!("{:x}", Sha256::digest(bytes)) != *expected {
+            return Err(err(format!("publication digest mismatch: {logical}")));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+    fn corpus() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/reference")
+    }
+    fn copy_corpus() -> std::path::PathBuf {
+        let target = std::env::temp_dir().join(format!(
+            "orna-traceability-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        copy_dir(&corpus(), &target);
+        target
+    }
+    fn copy_dir(from: &Path, to: &Path) {
+        fs::create_dir_all(to).expect("mkdir");
+        for entry in fs::read_dir(from).expect("read") {
+            let entry = entry.expect("entry");
+            let out = to.join(entry.file_name());
+            if entry.file_type().expect("type").is_dir() {
+                copy_dir(&entry.path(), &out);
+            } else {
+                fs::copy(entry.path(), out).expect("copy");
+            }
+        }
+    }
+    #[test]
+    fn covers_all_947_requirements() {
+        let report = generate(corpus()).expect("valid corpus");
+        assert_eq!(report.requirements.len(), 947);
+        assert!(
+            report
+                .requirements
+                .iter()
+                .all(|item| !item.boundaries.is_empty())
+        );
+    }
+    #[test]
+    fn covers_every_normative_release_payload() {
+        let report = generate(corpus()).expect("valid corpus");
+        let release: Release = read_json(&corpus(), "release.json").expect("vendored release");
+        assert_eq!(
+            report.normative_payloads.len(),
+            release.normative_payload_sha256.len()
+        );
+        assert_eq!(
+            report
+                .normative_payloads
+                .iter()
+                .map(|payload| payload.logical_id.as_str())
+                .collect::<BTreeSet<_>>(),
+            report
+                .publication_digests
+                .keys()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>()
+        );
+        assert!(report.normative_payloads.iter().all(|payload| {
+            payload.status == Status::JustifiedGap
+                && payload.implementation_refs.is_empty()
+                && payload.test_refs.is_empty()
+        }));
+    }
+    #[test]
+    fn workspace_without_checked_in_api_uses_embedded_sys_registry() {
+        let root = std::env::temp_dir().join(format!(
+            "orna-traceability-no-api-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create workspace without api folder");
+        let api = load_sys_api().expect("use embedded generated sys API");
+        fs::remove_dir_all(&root).expect("remove temporary workspace");
+        assert_eq!(api["functions"].as_array().unwrap().len(), 82);
+    }
+    #[test]
+    fn model_and_skipped_entries_never_pass() {
+        let report = generate(corpus()).expect("valid corpus");
+        assert!(
+            report
+                .requirements
+                .iter()
+                .all(|item| item.status != Status::Executed)
+        );
+        assert!(
+            report
+                .named_algorithms
+                .iter()
+                .all(|item| item.status == Status::SpecifiedModelOnly)
+        );
+        assert!(
+            report
+                .fixture_classes
+                .iter()
+                .all(|item| item.status == Status::JustifiedGap)
+        );
+    }
+    #[test]
+    fn repl_and_transaction_implementation_scenarios_remain_gaps_without_engine_evidence() {
+        let report = generate(corpus()).expect("valid corpus");
+        for (scenario_id, requirements) in [
+            ("REPL-001", &["ORNA-REPL-003"][..]),
+            ("REPL-002", &["ORNA-REPL-003"][..]),
+            (
+                "TXN-001",
+                &["ORNA-TXN-001", "ORNA-TXN-002", "ORNA-TXN-003"][..],
+            ),
+            ("TXN-002", &["ORNA-TXN-001"][..]),
+        ] {
+            let scenario = report
+                .behavioral_scenarios
+                .iter()
+                .find(|scenario| scenario.scenario_id == scenario_id)
+                .expect("published scenario");
+            assert_eq!(scenario.requirements, requirements, "{scenario_id}");
+            assert_eq!(scenario.status, Status::JustifiedGap, "{scenario_id}");
+        }
+    }
+    #[test]
+    fn canonical_repl_requirements_remain_explicit_non_executed_gaps() {
+        let report = generate(corpus()).expect("valid corpus");
+        for requirement_id in [
+            "ORNA-REPL-001",
+            "ORNA-REPL-002",
+            "ORNA-REPL-003",
+            "ORNA-REPL-004",
+            "ORNA-REPL-005",
+            "ORNA-REPL-006",
+        ] {
+            let requirement = report
+                .requirements
+                .iter()
+                .find(|requirement| requirement.requirement_id == requirement_id)
+                .expect("published REPL requirement");
+            assert_eq!(requirement.chapter, "repl", "{requirement_id}");
+            assert_eq!(requirement.status, Status::JustifiedGap, "{requirement_id}");
+            assert!(
+                requirement
+                    .boundaries
+                    .iter()
+                    .all(|boundary| boundary.status != Status::Executed),
+                "{requirement_id} must not claim engine execution"
+            );
+        }
+    }
+    #[test]
+    fn canonical_run_requirements_remain_explicit_non_executed_gaps() {
+        let report = generate(corpus()).expect("valid corpus");
+        for requirement_id in ["ORNA-RUN-001", "ORNA-RUN-002", "ORNA-RUN-003"] {
+            let requirement = report
+                .requirements
+                .iter()
+                .find(|requirement| requirement.requirement_id == requirement_id)
+                .expect("published run requirement");
+            assert_eq!(requirement.chapter, "expressions", "{requirement_id}");
+            assert_eq!(requirement.status, Status::JustifiedGap, "{requirement_id}");
+            assert!(
+                requirement.boundaries.iter().all(|boundary| {
+                    boundary.kind != "engine-witness" && boundary.status != Status::Executed
+                }),
+                "{requirement_id} must not claim Orna-engine execution"
+            );
+        }
+    }
+    #[test]
+    fn aggregate_requires_all_applicable_boundaries_to_execute() {
+        let cases = [
+            ("empty", vec![], Status::JustifiedGap),
+            (
+                "all executed",
+                vec![Status::Executed, Status::Executed],
+                Status::Executed,
+            ),
+            (
+                "all gaps",
+                vec![Status::JustifiedGap, Status::JustifiedGap],
+                Status::JustifiedGap,
+            ),
+            (
+                "all model",
+                vec![Status::SpecifiedModelOnly, Status::SpecifiedModelOnly],
+                Status::SpecifiedModelOnly,
+            ),
+            (
+                "model and gap without execution",
+                vec![Status::SpecifiedModelOnly, Status::JustifiedGap],
+                Status::JustifiedGap,
+            ),
+            (
+                "gap and model without execution",
+                vec![Status::JustifiedGap, Status::SpecifiedModelOnly],
+                Status::JustifiedGap,
+            ),
+            (
+                "partial execution and gap",
+                vec![Status::PartiallyExecuted, Status::JustifiedGap],
+                Status::PartiallyExecuted,
+            ),
+            (
+                "executed and model",
+                vec![Status::Executed, Status::SpecifiedModelOnly],
+                Status::PartiallyExecuted,
+            ),
+            (
+                "executed and gap",
+                vec![Status::Executed, Status::JustifiedGap],
+                Status::PartiallyExecuted,
+            ),
+        ];
+        for (name, statuses, expected) in cases {
+            assert_eq!(aggregate(&statuses), expected, "{name}");
+        }
+    }
+    #[test]
+    fn output_is_logical_only() {
+        let report = generate(corpus()).expect("valid corpus");
+        let json = serde_json::to_string(&report).expect("serialize");
+        assert!(!json.contains(&corpus().display().to_string()));
+        assert!(!json.contains("\"text\""));
+        assert!(!json.contains("\"statement\""));
+    }
+    #[test]
+    fn rejects_valid_fixture_without_successful_phase_expectations() {
+        const FIXTURE_PATH: &str = "examples/valid/minimal-root.orna";
+        const REQUIRED_PHASES: [&str; 3] = ["parse", "resolve", "typecheck"];
+        let authoritative = corpus();
+        assert!(authoritative.join(FIXTURE_PATH).is_file());
+        generate(&authoritative).expect("authoritative unmodified reference bundle");
+
+        let root = copy_corpus();
+        let authoritative_fixture = fs::read(authoritative.join(FIXTURE_PATH)).expect("fixture");
+        assert_eq!(
+            fs::read(root.join(FIXTURE_PATH)).expect("copied fixture"),
+            authoritative_fixture
+        );
+        generate(&root).expect("unmodified copied reference bundle");
+
+        let manifest = root.join("tests/conformance-manifest.json");
+        let original_manifest = fs::read_to_string(&manifest).expect("copied manifest");
+        for phase in REQUIRED_PHASES {
+            for failing_expectation in [false, true] {
+                let mut value: Value =
+                    serde_json::from_str(&original_manifest).expect("manifest JSON");
+                let fixture = value["fixtures"]
+                    .as_array_mut()
+                    .expect("fixture list")
+                    .iter_mut()
+                    .find(|fixture| fixture["path"].as_str() == Some(FIXTURE_PATH))
+                    .expect("valid fixture");
+                assert_eq!(fixture["kind"].as_str(), Some("valid"));
+                let fixture_id = fixture["id"].as_str().expect("fixture id").to_owned();
+                let expectations = fixture["expect"].as_object_mut().expect("expectations");
+                if failing_expectation {
+                    expectations.insert(phase.to_owned(), Value::from("fail"));
+                } else {
+                    assert_eq!(
+                        expectations.remove(phase).as_ref().and_then(Value::as_str),
+                        Some("pass")
+                    );
+                }
+                fs::write(
+                    &manifest,
+                    serde_json::to_vec(&value).expect("serialize manifest"),
+                )
+                .expect("write copied manifest");
+                let error = generate(&root).expect_err("invalid valid-fixture expectation");
+                assert!(
+                    error.to_string().contains(&format!(
+                        "valid fixture lacks required pass expectations: {fixture_id}"
+                    )),
+                    "{phase} rejection should come from expectation validation, got: {error}"
+                );
+            }
+        }
+        fs::remove_dir_all(root).expect("remove copied bundle");
+    }
+
+    #[test]
+    fn rejects_broken_links_and_counts() {
+        let root = copy_corpus();
+        let evidence = root.join("tests/requirement-evidence.json");
+        let changed = fs::read_to_string(&evidence).expect("read").replacen(
+            "ORNA-CONF-001",
+            "MISSING-REQUIREMENT",
+            1,
+        );
+        fs::write(&evidence, changed).expect("write");
+        assert!(generate(&root).is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn rejects_requirement_without_recorded_evidence_obligation() {
+        let root = copy_corpus();
+        let evidence_path = root.join("tests/requirement-evidence.json");
+        let mut evidence: Value =
+            serde_json::from_slice(&fs::read(&evidence_path).expect("read evidence"))
+                .expect("valid evidence JSON");
+        evidence["requirements"][0]["tests"] = Value::Array(Vec::new());
+        fs::write(
+            &evidence_path,
+            serde_json::to_vec(&evidence).expect("serialize evidence"),
+        )
+        .expect("write evidence without obligation");
+
+        let error = generate(&root).expect_err("empty evidence obligation must reject bundle");
+        assert!(
+            error.to_string().contains("broken link or empty test list"),
+            "unexpected validation error: {error}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn rejects_manifest_count_drift() {
+        let root = copy_corpus();
+        let manifest = root.join("tests/conformance-manifest.json");
+        let mut value: Value =
+            serde_json::from_str(&fs::read_to_string(&manifest).expect("manifest")).expect("json");
+        value["counts"]["valid"] = Value::from(85);
+        fs::write(&manifest, serde_json::to_vec(&value).expect("json")).expect("write");
+        assert!(generate(&root).is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn rejects_invalid_metadata_drift() {
+        let root = copy_corpus();
+        let metadata = root.join("tests/invalid-metadata.json");
+        let changed = fs::read_to_string(&metadata).expect("metadata").replacen(
+            "\"diagnostic\": \"E5002\"",
+            "\"diagnostic\": \"E9999\"",
+            1,
+        );
+        fs::write(&metadata, changed).expect("write");
+        assert!(generate(&root).is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn rejects_omitted_normative_payload() {
+        let root = copy_corpus();
+        let release = root.join("release.json");
+        let mut value: Value =
+            serde_json::from_str(&fs::read_to_string(&release).expect("release")).expect("json");
+        value["normative_payload_sha256"]
+            .as_object_mut()
+            .expect("digest inventory")
+            .remove("profiles/live-protocol.md");
+        fs::write(&release, serde_json::to_vec(&value).expect("json")).expect("write");
+        assert!(generate(&root).is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn frozen_evidence_cannot_promote_fake_execution_references() {
+        let root = copy_corpus();
+        let evidence = root.join("tests/requirement-evidence.json");
+        let mut value: Value =
+            serde_json::from_str(&fs::read_to_string(&evidence).expect("evidence")).expect("json");
+        let entry = &mut value["requirements"][0];
+        entry["implementation_result"] = Value::String("executed".into());
+        entry["implementation_ref"] = Value::String("crates/orna-runtime/src/lib.rs".into());
+        entry["tests"][0]["status"] = Value::String("unexecuted".into());
+        entry["tests"][0]["evidence_ref"] =
+            Value::String("crates/orna-runtime/tests/conformance.rs".into());
+        fs::write(&evidence, serde_json::to_vec(&value).expect("json")).expect("write");
+        let report = generate(&root).expect("frozen evidence remains a gap");
+        assert_eq!(report.requirements[0].status, Status::JustifiedGap);
+        assert!(
+            report
+                .requirements
+                .iter()
+                .all(|requirement| requirement.status != Status::Executed)
+        );
+        assert!(
+            report
+                .normative_payloads
+                .iter()
+                .all(|payload| payload.status == Status::JustifiedGap)
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn transport_requirements_remain_justified_gaps_without_execution_register() {
+        let report = generate(corpus()).expect("valid corpus");
+        for requirement_id in ["ORNA-PROTO-001", "ORNA-WIRE-005", "ORNA-WIRE-011"] {
+            let requirement = report
+                .requirements
+                .iter()
+                .find(|item| item.requirement_id == requirement_id)
+                .expect("transport requirement");
+            assert_eq!(requirement.status, Status::JustifiedGap);
+            assert!(
+                requirement
+                    .boundaries
+                    .iter()
+                    .all(|boundary| boundary.status != Status::Executed)
+            );
+        }
+    }
+
+    #[test]
+    fn transaction_transport_and_live_families_remain_non_executed() {
+        let report = generate(corpus()).expect("valid corpus");
+        let families: &[(&str, &[&str])] = &[
+            (
+                "execution",
+                &[
+                    "ORNA-TXN-001",
+                    "ORNA-TXN-002",
+                    "ORNA-TXN-003",
+                    "ORNA-TXN-004",
+                    "ORNA-TXN-005",
+                    "ORNA-TXN-006",
+                    "ORNA-TXN-007",
+                    "ORNA-TXN-008",
+                ],
+            ),
+            (
+                "protocol",
+                &[
+                    "ORNA-PROTO-001",
+                    "ORNA-PROTO-002",
+                    "ORNA-PROTO-003",
+                    "ORNA-PROTO-004",
+                ],
+            ),
+            (
+                "pages",
+                &[
+                    "ORNA-LIVE-001",
+                    "ORNA-LIVE-002",
+                    "ORNA-LIVE-003",
+                    "ORNA-LIVE-004",
+                ],
+            ),
+        ];
+
+        for &(chapter, requirement_ids) in families {
+            for &requirement_id in requirement_ids {
+                let requirement = report
+                    .requirements
+                    .iter()
+                    .find(|item| item.requirement_id == requirement_id)
+                    .expect("published boundary requirement");
+                assert_eq!(requirement.chapter, chapter, "{requirement_id}");
+                assert_eq!(requirement.status, Status::JustifiedGap, "{requirement_id}");
+                assert!(
+                    requirement.boundaries.iter().all(|boundary| {
+                        boundary.kind != "engine-witness" && boundary.status != Status::Executed
+                    }),
+                    "{requirement_id} must not claim Orna-engine execution"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn digest_bound_engine_witnesses_add_only_explicit_executed_boundaries() {
+        // A fixture-stage witness is accepted only when the evidence register
+        // declares that exact fixture and path. Keep the frozen reference
+        // unchanged and make this test's positive case explicit in a copy.
+        let root = copy_corpus();
+        let evidence_path = root.join("tests/requirement-evidence.json");
+        let mut evidence: Value =
+            serde_json::from_slice(&fs::read(&evidence_path).expect("copied requirement evidence"))
+                .expect("valid copied requirement evidence");
+        let requirement = evidence["requirements"]
+            .as_array_mut()
+            .expect("requirement evidence array")
+            .iter_mut()
+            .find(|entry| entry["requirement"] == "ORNA-SOURCE-001")
+            .expect("source requirement evidence");
+        requirement["tests"][0]["fixture"] = Value::String("valid/minimal-root.orna".into());
+        requirement["tests"][0]["path"] = Value::String("examples/valid/minimal-root.orna".into());
+        fs::write(
+            evidence_path,
+            serde_json::to_vec(&evidence).expect("serialize copied requirement evidence"),
+        )
+        .expect("write explicit fixture declaration to copied evidence");
+        let harness = orna_conformance::Harness::new(
+            orna_conformance::Corpus::load(&root).expect("conformance corpus loads"),
+        );
+        let mut adapter =
+            orna_conformance::RuntimeAdapter::new(orna_conformance::BoundedEvaluator::default());
+        let conformance_report = harness.run(&mut adapter);
+        let binding = orna_conformance::FixtureStageBinding {
+            requirement_id: "ORNA-SOURCE-001".into(),
+            fixture_id: "valid/minimal-root.orna".into(),
+            fixture_path: "examples/valid/minimal-root.orna".into(),
+            stage: Stage::Parse,
+            implementation_ref: "crates/orna-conformance/src/lib.rs::Harness::engine_witnesses"
+                .into(),
+            test_ref:
+                "crates/orna-traceability/src/lib.rs::engine_witnesses_add_an_executed_boundary"
+                    .into(),
+        };
+        let witnesses = harness
+            .engine_witnesses(&conformance_report, std::slice::from_ref(&binding))
+            .expect("conformance report produces a witness");
+        let report = generate_with_engine_witnesses(&root, &witnesses)
+            .expect("digest-bound witness is accepted");
+        let requirement = report
+            .requirements
+            .iter()
+            .find(|requirement| requirement.requirement_id == "ORNA-SOURCE-001")
+            .expect("witnessed requirement");
+        assert_eq!(requirement.status, Status::PartiallyExecuted);
+        assert!(requirement.boundaries.iter().any(|boundary| {
+            boundary.kind == "engine-witness"
+                && boundary.status == Status::Executed
+                && boundary.implementation_ref.as_deref()
+                    == Some("crates/orna-conformance/src/lib.rs::Harness::engine_witnesses")
+        }));
+
+        let mut mismatched_report = conformance_report;
+        mismatched_report
+            .publication_digests
+            .insert("release.json".into(), "0".repeat(64));
+        let mismatched = harness
+            .engine_witnesses(&mismatched_report, std::slice::from_ref(&binding))
+            .expect("witness can carry the observed report digest inventory");
+        assert!(generate_with_engine_witnesses(&root, &mismatched).is_err());
+        fs::remove_dir_all(root).expect("remove copied corpus");
+    }
+    #[test]
+    fn digest_bound_scenario_witnesses_remain_distinct_from_engine_execution() {
+        let root = corpus();
+        let harness = orna_conformance::Harness::new(
+            orna_conformance::Corpus::load(&root).expect("conformance corpus loads"),
+        )
+        .with_claim(orna_conformance::ImplementationClaim {
+            implementation_id: "orna-conformance".into(),
+            profile: "bounded-expression-runtime".into(),
+            command: "orna-conformance --profile bounded-expression-runtime".into(),
+            environment: std::collections::BTreeMap::new(),
+            executed_scenario_contracts: vec!["LET-REBIND-091".into()],
+        });
+        let mut adapter =
+            orna_conformance::RuntimeAdapter::new(orna_conformance::BoundedEvaluator::default());
+        let conformance_report = harness.run(&mut adapter);
+        let binding = orna_conformance::ScenarioExecutionBinding {
+            requirement_id: "ORNA-VALUE-006".into(),
+            scenario_id: "LET-REBIND-091".into(),
+            implementation_ref: "crates/orna-conformance/src/main.rs::let_rebinding_contract".into(),
+            test_ref: "crates/orna-conformance/src/main.rs::tests::digest_bound_scenario_witnesses_remain_distinct_from_engine_execution".into(),
+        };
+        let mut malformed = binding.clone();
+        malformed.implementation_ref = "/tmp/not-a-repository-reference".into();
+        let error = harness
+            .scenario_execution_witnesses(&conformance_report, &[malformed])
+            .expect_err("scenario evidence must use repository-qualified references");
+        assert_eq!(
+            error,
+            "invalid repository-relative implementation reference"
+        );
+        let witnesses = harness
+            .scenario_execution_witnesses(&conformance_report, std::slice::from_ref(&binding))
+            .expect("declared passed scenario becomes a digest-bound witness");
+        let report = generate_with_scenario_execution_witnesses(&root, &witnesses)
+            .expect("digest-bound scenario witness is accepted");
+        let requirement = report
+            .requirements
+            .iter()
+            .find(|requirement| requirement.requirement_id == "ORNA-VALUE-006")
+            .expect("witnessed requirement");
+        assert_eq!(requirement.status, Status::PartiallyExecuted);
+        assert!(requirement.boundaries.iter().any(|boundary| {
+            boundary.kind == "implementation-scenario-witness"
+                && boundary.logical_id == "LET-REBIND-091"
+                && boundary.status == Status::PartiallyExecuted
+        }));
+        assert!(
+            requirement
+                .boundaries
+                .iter()
+                .all(|boundary| boundary.kind != "engine-witness")
+        );
+        let scenario = report
+            .behavioral_scenarios
+            .iter()
+            .find(|scenario| scenario.scenario_id == "LET-REBIND-091")
+            .expect("published scenario");
+        assert_eq!(scenario.status, Status::JustifiedGap);
+    }
+
+    #[test]
+    fn digest_bound_cflow_witness_preserves_non_engine_gap() {
+        let root = corpus();
+        let harness = orna_conformance::Harness::new(
+            orna_conformance::Corpus::load(&root).expect("conformance corpus loads"),
+        )
+        .with_claim(orna_conformance::ImplementationClaim {
+            implementation_id: "orna-conformance".into(),
+            profile: "bounded-expression-runtime".into(),
+            command: "orna-conformance --profile bounded-expression-runtime".into(),
+            environment: std::collections::BTreeMap::new(),
+            executed_scenario_contracts: vec!["CFLOW-001".into()],
+        });
+        let mut adapter =
+            orna_conformance::RuntimeAdapter::new(orna_conformance::BoundedEvaluator::default());
+        let conformance_report = harness.run(&mut adapter);
+        let binding = orna_conformance::ScenarioExecutionBinding {
+            requirement_id: "ORNA-CFLOW-001".into(),
+            scenario_id: "CFLOW-001".into(),
+            implementation_ref:
+                "crates/orna-conformance/src/semantic_adapter.rs::BoundedEvaluator::run_control_flow"
+                    .into(),
+            test_ref:
+                "crates/orna-conformance/tests/runtime_scenarios.rs::control_flow_executes_the_frozen_contract_in_independent_evaluators"
+                    .into(),
+        };
+        let witnesses = harness
+            .scenario_execution_witnesses(&conformance_report, std::slice::from_ref(&binding))
+            .expect("passed CFLOW-001 becomes a digest-bound scenario witness");
+        let report = generate_with_scenario_execution_witnesses(&root, &witnesses)
+            .expect("digest-bound CFLOW-001 witness is accepted");
+        let requirement = report
+            .requirements
+            .iter()
+            .find(|requirement| requirement.requirement_id == "ORNA-CFLOW-001")
+            .expect("witnessed control-flow requirement");
+        assert_eq!(requirement.status, Status::PartiallyExecuted);
+        assert!(requirement.boundaries.iter().any(|boundary| {
+            boundary.kind == "implementation-scenario-witness"
+                && boundary.logical_id == "CFLOW-001"
+                && boundary.status == Status::PartiallyExecuted
+        }));
+        assert!(
+            requirement
+                .boundaries
+                .iter()
+                .all(|boundary| boundary.kind != "engine-witness")
+        );
+        let scenario = report
+            .behavioral_scenarios
+            .iter()
+            .find(|scenario| scenario.scenario_id == "CFLOW-001")
+            .expect("published control-flow scenario");
+        assert_eq!(scenario.status, Status::JustifiedGap);
+    }
+
+    #[test]
+    fn scenario_witnesses_reject_requirements_not_declared_by_the_scenario() {
+        let root = corpus();
+        let harness = orna_conformance::Harness::new(
+            orna_conformance::Corpus::load(&root).expect("conformance corpus loads"),
+        )
+        .with_claim(orna_conformance::ImplementationClaim {
+            implementation_id: "orna-conformance".into(),
+            profile: "bounded-expression-runtime".into(),
+            command: "orna-conformance --profile bounded-expression-runtime".into(),
+            environment: std::collections::BTreeMap::new(),
+            executed_scenario_contracts: vec!["LET-REBIND-091".into()],
+        });
+        let mut adapter =
+            orna_conformance::RuntimeAdapter::new(orna_conformance::BoundedEvaluator::default());
+        let conformance_report = harness.run(&mut adapter);
+        let binding = orna_conformance::ScenarioExecutionBinding {
+            requirement_id: "ORNA-EVIDENCE-001".into(),
+            scenario_id: "LET-REBIND-091".into(),
+            implementation_ref: "crates/orna-conformance/src/main.rs::let_rebinding_contract".into(),
+            test_ref: "crates/orna-conformance/src/main.rs::tests::digest_bound_scenario_witnesses_remain_distinct_from_engine_execution".into(),
+        };
+
+        let error = harness
+            .scenario_execution_witnesses(&conformance_report, &[binding])
+            .expect_err("unrelated requirement cannot acquire scenario evidence");
+        assert_eq!(error, "scenario requirement mismatch: LET-REBIND-091");
+
+        let report = generate(&root).expect("unbound report remains valid");
+        let requirement = report
+            .requirements
+            .iter()
+            .find(|requirement| requirement.requirement_id == "ORNA-EVIDENCE-001")
+            .expect("published requirement");
+        assert_eq!(requirement.status, Status::JustifiedGap);
+        let scenario = report
+            .behavioral_scenarios
+            .iter()
+            .find(|scenario| scenario.scenario_id == "LET-REBIND-091")
+            .expect("published scenario");
+        assert_eq!(scenario.status, Status::JustifiedGap);
+    }
+    fn date_range_overlay(corpus: orna_conformance::Corpus) -> ImplementationEvidenceOverlay {
+        let publication_digests = corpus.publication_digests.clone();
+        let harness = orna_conformance::Harness::new(corpus);
+        harness
+            .implementation_evidence_overlay(&[orna_conformance::ImplementationEvidenceBinding {
+                requirement_id: "ORNA-RANGE-001".into(),
+                publication_digests,
+                implementation_ref: "crates/orna-evaluator/src/lib.rs::Value::Range".into(),
+                test_ref: "crates/orna-evaluator/tests/evaluator.rs::date_ranges_are_canonical_membership_values_with_optional_bounds".into(),
+                source: ImplementationEvidenceSource::ProductionUnit,
+                subject: "date range canonical encoding and membership".into(),
+                command: "cargo test -p orna-evaluator --test evaluator date_ranges_are_canonical_membership_values_with_optional_bounds".into(),
+                result: "1 passed; 0 failed".into(),
+                observed_status: EvidenceStatus::Passed,
+            }])
+            .expect("Date range evidence is accepted")
+    }
+    #[test]
+    fn date_overlay_is_a_distinct_partial_machine_readable_collection() {
+        let root = corpus();
+        let evidence_path = root.join("tests/requirement-evidence.json");
+        let frozen_evidence = fs::read(&evidence_path).expect("frozen evidence reads");
+        let overlay = date_range_overlay(
+            orna_conformance::Corpus::load(&root).expect("conformance corpus loads"),
+        );
+
+        let report = generate_with_implementation_evidence_overlay(&root, &overlay)
+            .expect("Date overlay is accepted");
+        assert_eq!(report.bounded_production_evidence.len(), 1);
+        assert_eq!(
+            report.bounded_production_evidence[0].requirement_id,
+            "ORNA-RANGE-001"
+        );
+        assert_eq!(
+            report.bounded_production_evidence[0].source,
+            ImplementationEvidenceSource::ProductionUnit
+        );
+        assert_eq!(
+            report.bounded_production_evidence[0].status,
+            Status::PartiallyExecuted
+        );
+        assert_eq!(
+            report.bounded_production_evidence[0].observed_status,
+            EvidenceStatus::Passed
+        );
+        let requirement = report
+            .requirements
+            .iter()
+            .find(|requirement| requirement.requirement_id == "ORNA-RANGE-001")
+            .expect("range requirement");
+        assert_eq!(requirement.status, Status::PartiallyExecuted);
+        assert!(requirement.boundaries.iter().any(|boundary| {
+            boundary.kind == "bounded-production-evidence"
+                && boundary.status == Status::PartiallyExecuted
+                && boundary.implementation_ref.as_deref()
+                    == Some("crates/orna-evaluator/src/lib.rs::Value::Range")
+        }));
+        let serialized = serde_json::to_value(&report).expect("report serializes");
+        assert_eq!(
+            serialized["bounded_production_evidence"][0]["source"],
+            serde_json::json!("production-unit")
+        );
+        assert_eq!(
+            serialized["bounded_production_evidence"][0]["status"],
+            serde_json::json!("partially-executed")
+        );
+        assert_eq!(
+            fs::read(evidence_path).expect("frozen evidence remains readable"),
+            frozen_evidence
+        );
+    }
+    #[test]
+    fn implementation_overlay_refuses_a_mismatched_publication_inventory() {
+        let root = corpus();
+        let mut corpus = orna_conformance::Corpus::load(&root).expect("conformance corpus loads");
+        let digest = corpus
+            .publication_digests
+            .values_mut()
+            .next()
+            .expect("publication inventory is populated");
+        digest.replace_range(..1, if digest.starts_with('0') { "1" } else { "0" });
+        let overlay = date_range_overlay(corpus);
+
+        assert!(generate_with_implementation_evidence_overlay(&root, &overlay).is_err());
+    }
+    #[test]
+    fn implementation_overlay_never_creates_engine_witnesses_or_executed_statuses() {
+        let root = corpus();
+        let overlay = date_range_overlay(
+            orna_conformance::Corpus::load(&root).expect("conformance corpus loads"),
+        );
+        let report = generate_with_implementation_evidence_overlay(&root, &overlay)
+            .expect("Date overlay is accepted");
+
+        assert!(
+            report
+                .bounded_production_evidence
+                .iter()
+                .all(|evidence| evidence.status == Status::PartiallyExecuted)
+        );
+        assert!(
+            report
+                .requirements
+                .iter()
+                .all(|requirement| requirement.status != Status::Executed)
+        );
+        let range = report
+            .requirements
+            .iter()
+            .find(|requirement| requirement.requirement_id == "ORNA-RANGE-001")
+            .expect("range requirement");
+        assert!(range.boundaries.iter().all(|boundary| {
+            boundary.kind != "engine-witness" && boundary.status != Status::Executed
+        }));
+    }
+    #[test]
+    fn reproducible() {
+        assert_eq!(
+            generate(corpus()).expect("one"),
+            generate(corpus()).expect("two")
+        );
+    }
+}

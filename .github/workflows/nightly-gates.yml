@@ -5,7 +5,7 @@ name: Nightly gates
 # "Evidence record per gate"):
 # - `cargo test --workspace --no-fail-fast`, split into four runners by package
 #   for disk and time. The four shards cover every workspace package except
-#   orna-live-v1 and orna-conformance-v1, which live-v1-tests.yml and
+#   orna-live and orna-conformance, which live-v1-tests.yml and
 #   conformance-v1-tests.yml gate on every pull request.
 # - The Gate D crash matrix (feature crash-barriers). Gate B's 10 GiB import is
 #   not run here; it lives in cli-gate-b.yml.
@@ -91,7 +91,7 @@ jobs:
       matrix:
         include:
           - shard: cli
-            packages: -p orna-cli-v1
+            packages: -p orna-cli
             # Gate E evidence needs the editor, kernel, libfuse and media player versions.
             # ORNA_REQUIRE_MEDIA_PLAYER makes the mpv leg of vfs_media_reader fail when mpv is absent.
             recorder: >-
@@ -101,16 +101,16 @@ jobs:
               --tool-version 'emacs --version' --tool-version 'vi --version'
               --tool-version 'vim --version' --tool-version 'mpv --version'
           - shard: evaluator
-            packages: -p orna-evaluator-v1
+            packages: -p orna-evaluator
             recorder: ""
           - shard: sys
-            packages: -p orna-sys-v1
+            packages: -p orna-sys
             recorder: ""
           - shard: rest
             packages: >-
-              --workspace --exclude orna-cli-v1 --exclude orna-evaluator-v1
-              --exclude orna-sys-v1 --exclude orna-conformance-v1
-              --exclude orna-live-v1
+              --workspace --exclude orna-cli --exclude orna-evaluator
+              --exclude orna-sys --exclude orna-conformance
+              --exclude orna-live
             recorder: ""
     steps:
       - name: Check out the tested revision
@@ -178,7 +178,7 @@ jobs:
           --title "Gate D: SIGKILL at each publication boundary"
           --out "$RUNNER_TEMP/gate-evidence"
           --timeout-minutes 130
-          -- cargo test --locked --no-fail-fast -p orna-cli-v1 --features crash-barriers
+          -- cargo test --locked --no-fail-fast -p orna-cli --features crash-barriers
           --test publication_crash_matrix
 
       - name: Upload the evidence record and log
@@ -266,7 +266,7 @@ jobs:
           --timeout-minutes 330
           --input-env ORNA_ORP1_MILLION_ROWS
           --input-env ORNA_ORP1_SCALE_ROWS
-          -- cargo test --locked -p orna-repository-v1 --test row_store_scale
+          -- cargo test --locked -p orna-repository --test row_store_scale
           -- --ignored --exact orp1_row_store_one_million_rows
 
       - name: Upload the evidence record and log

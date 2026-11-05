@@ -1,0 +1,12 @@
+[package]
+name = "orna-serving"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MPL-2.0"
+description = "Bounded, fail-closed serving session state for Orna 1.0"
+
+[dependencies]
+orna-protocol = { path = "../orna-protocol" }
+orna-value = { path = "../orna-value" }
+image = { version = "=0.25.9", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
