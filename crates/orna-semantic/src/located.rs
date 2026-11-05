@@ -53,6 +53,7 @@ pub fn analyze_with_catalogue_located(
         catalogue,
         false,
         crate::SystemProviders::DeclaredSurface,
+        crate::SourceAdmission::Project,
         &mut recorder,
     );
     let origins = recorder.align(&analysis.diagnostics);
@@ -79,6 +80,13 @@ impl OriginRecorder {
             attributed: 0,
             emitted: Vec::new(),
             paths: BTreeMap::new(),
+        }
+    }
+
+    pub(crate) fn enabled() -> Self {
+        Self {
+            enabled: true,
+            ..Self::disabled()
         }
     }
 
@@ -146,7 +154,7 @@ impl OriginRecorder {
     /// reorders diagnostics with a stable sort, so diagnostics that compare
     /// equal keep their emission order; matching each final diagnostic to the
     /// earliest unused equal emission therefore restores its origin.
-    fn align(self, diagnostics: &[Diagnostic]) -> Vec<DiagnosticOrigin> {
+    pub(crate) fn align(self, diagnostics: &[Diagnostic]) -> Vec<DiagnosticOrigin> {
         let mut pending: HashMap<(&str, &str), VecDeque<usize>> = HashMap::new();
         for (index, (diagnostic, _)) in self.emitted.iter().enumerate() {
             pending

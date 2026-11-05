@@ -240,6 +240,29 @@ fn project_load_diagnostic(error: orna_project::ProjectLoadError) -> Diagnostic 
             "reduce the committed tree's entry count, nesting depth or path length, then run check again",
         );
     }
+    if let orna_project::ProjectLoadError::InvalidStandardBody {
+        logical_path,
+        line,
+        code,
+        message,
+        notes,
+    } = &error
+    {
+        let detail = if notes.is_empty() {
+            format!("{code}: {message} ({logical_path}:{line})")
+        } else {
+            format!(
+                "{code}: {message}: {} ({logical_path}:{line})",
+                notes.join("; ")
+            )
+        };
+        return Diagnostic::target_with_detail(
+            "E2101",
+            "pinned standard module failed type checking",
+            "fix the pinned standard module or pin a corrected standard snapshot, then retry",
+            detail,
+        );
+    }
     let invalid_unit = match &error {
         orna_project::ProjectLoadError::InvalidModule {
             logical_path,
