@@ -116,3 +116,48 @@ pub fn mismatched(value: Int?) = case value {
         .count();
     assert_eq!(type_diagnostics, 1, "{:?}", analysis.diagnostics);
 }
+
+#[test]
+fn diverging_case_arm_contributes_no_type() {
+    let analysis = analysis(
+        r#"
+pub fn guarded(value: Int?) = case value {
+    null: {
+        return 0;
+    },
+    Some(n): n,
+};
+"#,
+    );
+
+    assert_eq!(
+        diagnostics(&analysis),
+        Vec::<(&str, &str)>::new(),
+        "{:?}",
+        analysis.diagnostics
+    );
+    assert_eq!(result_type(&analysis, "guarded"), &Type::Int);
+}
+
+#[test]
+fn null_first_arm_joins_with_int_arm_to_optional() {
+    let analysis = analysis(
+        r#"
+pub fn null_first(value: Int?) = case value {
+    Some(_): null,
+    null: 0,
+};
+"#,
+    );
+
+    assert_eq!(
+        diagnostics(&analysis),
+        Vec::<(&str, &str)>::new(),
+        "{:?}",
+        analysis.diagnostics
+    );
+    assert_eq!(
+        result_type(&analysis, "null_first"),
+        &Type::Optional(Box::new(Type::Int))
+    );
+}
