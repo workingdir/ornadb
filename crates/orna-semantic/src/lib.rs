@@ -8201,27 +8201,57 @@ fn infer_return_statement(
     returned
 }
 
+/// Joins the two value types a control-flow expression can produce
+/// (ORNA-CFLOW-003 for `if` branches, ORNA-FN-009 for return paths).
+///
+/// `Bottom` contributes nothing: a branch that leaves through `return`,
+/// `break` or `continue` never supplies a value. `null` is a member of `T?`
+/// (ORNA-TYPE-001), so it joins an ordinary value as that value's optional.
+/// Any other disagreement has no single static type and the caller reports it.
+fn join_flow_types(left: &Type, right: &Type) -> Option<Type> {
+    Some(match (left, right) {
+        (Type::Error, _) | (_, Type::Error) => Type::Error,
+        (Type::Bottom, right) => (*right).clone(),
+        (left, Type::Bottom) => (*left).clone(),
+        (left, right) if left == right => left.clone(),
+        (Type::Null, Type::Optional(inner)) | (Type::Optional(inner), Type::Null) => {
+            Type::Optional((*inner).clone())
+        }
+        (Type::Optional(inner), right) if types_match(inner, right) => {
+            Type::Optional((*inner).clone())
+        }
+        (left, Type::Optional(inner)) if types_match(inner, left) => {
+            Type::Optional((*inner).clone())
+        }
+        (Type::Null, right) if *right != Type::Unit => Type::Optional(Box::new((*right).clone())),
+        (left, Type::Null) if *left != Type::Unit => Type::Optional(Box::new((*left).clone())),
+        _ => return None,
+    })
+}
+
+/// Joins two `if` branch types (ORNA-CFLOW-003). A pair that already fits its
+/// sibling under [`types_match`] keeps the spelling this slice accepted
+/// before, so the only widened forms are `null` with `T?` (ORNA-TYPE-001) and
+/// an ordinary value with its optional.
+fn join_conditional_branches(left: &Type, right: &Type) -> Option<Type> {
+    if types_match(left, right) {
+        return Some(left.clone());
+    }
+    if types_match(right, left) {
+        return Some(right.clone());
+    }
+    join_flow_types(left, right)
+}
+
 /// Joins an unannotated function's tail with its return paths (ORNA-FN-009).
-/// `Bottom` contributes nothing and `null` joins an ordinary value as its
-/// optional; any other disagreement has no single static result type.
+/// Each path joins through [`join_flow_types`]; a path that cannot join has no
+/// single static result type and is reported.
 fn join_return_paths(tail: Type, returned: Vec<Type>, diagnostics: &mut Vec<Diagnostic>) -> Type {
     let mut joined = tail;
     for path in returned {
-        joined = match (joined, path) {
-            (Type::Error, _) | (_, Type::Error) => Type::Error,
-            (Type::Bottom, path) => path,
-            (joined, Type::Bottom) => joined,
-            (joined, path) if joined == path => joined,
-            (Type::Null, Type::Optional(inner)) | (Type::Optional(inner), Type::Null) => {
-                Type::Optional(inner)
-            }
-            (Type::Optional(inner), path) if types_match(&inner, &path) => Type::Optional(inner),
-            (joined, Type::Optional(inner)) if types_match(&inner, &joined) => {
-                Type::Optional(inner)
-            }
-            (Type::Null, path) if path != Type::Unit => Type::Optional(Box::new(path)),
-            (joined, Type::Null) if joined != Type::Unit => Type::Optional(Box::new(joined)),
-            (joined, path) => {
+        match join_flow_types(&joined, &path) {
+            Some(next) => joined = next,
+            None => {
                 diagnostics.push(diag(
                     DIAG_TYPE,
                     format!(
@@ -8230,9 +8260,9 @@ fn join_return_paths(tail: Type, returned: Vec<Type>, diagnostics: &mut Vec<Diag
                         diagnostic_type_name(&path),
                     ),
                 ));
-                Type::Error
+                joined = Type::Error;
             }
-        };
+        }
     }
     joined
 }
@@ -9576,6 +9606,28 @@ fn infer_contextual(
             ty: Type::Float,
             effects: EffectSummary::default(),
         };
+    }
+    if let Expr::Control {
+        kind: ControlKind::If,
+        binding,
+        condition,
+        body,
+        arms,
+        alternate,
+        ..
+    } = expr
+    {
+        return infer_if(
+            binding.as_ref(),
+            condition.as_deref(),
+            body.as_deref(),
+            arms,
+            alternate.as_deref(),
+            Some(expected),
+            scope,
+            local,
+            diagnostics,
+        );
     }
     infer(expr, scope, local, diagnostics)
 }
@@ -10981,6 +11033,7 @@ fn infer_node(
             body.as_deref(),
             arms,
             alternate.as_deref(),
+            None,
             scope,
             local,
             diagnostics,
@@ -12308,6 +12361,7 @@ fn infer_if(
     body: Option<&Expr>,
     arms: &[orna_syntax::CaseArm],
     alternate: Option<&Expr>,
+    expected: Option<&Type>,
     scope: &Scope,
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
@@ -12335,7 +12389,15 @@ fn infer_if(
             effects: condition.effects,
         };
     };
-    let body = infer(body, scope, local, diagnostics);
+    // A declared or contextual type is the conditional's own unification
+    // target (ORNA-CFLOW-003), so each value-producing branch is checked
+    // against it rather than against its sibling's spelling. `null` fits `T?`
+    // there because `null` is a member of the optional (ORNA-TYPE-001).
+    let contextual = expected.filter(|expected| !matches!(expected, Type::Error));
+    let body = match contextual {
+        Some(expected) => infer_contextual(body, expected, scope, local, diagnostics),
+        None => infer(body, scope, local, diagnostics),
+    };
 
     let Some(alternate) = alternate else {
         let mut effects = condition.effects;
@@ -12356,19 +12418,43 @@ fn infer_if(
             effects,
         };
     };
-    let alternate = infer(alternate, scope, local, diagnostics);
+    let alternate = match contextual {
+        Some(expected) => infer_contextual(alternate, expected, scope, local, diagnostics),
+        None => infer(alternate, scope, local, diagnostics),
+    };
     let mut effects = condition.effects;
     effects.join(&body.effects);
     effects.join(&alternate.effects);
-    require_same(&body.ty, &alternate.ty, diagnostics);
-    Inferred {
-        ty: if body.ty == alternate.ty {
-            body.ty
-        } else {
-            Type::Error
+    let ty = match contextual {
+        Some(expected) => {
+            if body.ty == alternate.ty {
+                // Both branches spell one type: report it once rather than
+                // once per branch.
+                require_same(expected, &body.ty, diagnostics);
+            } else {
+                // Distinct spellings can each fit the target on their own
+                // terms, which is what lets `null` and `Some(value)` both fit
+                // `Int?` (ORNA-TYPE-001), so check them separately and name
+                // the branch that does not fit.
+                require_same(expected, &body.ty, diagnostics);
+                require_same(expected, &alternate.ty, diagnostics);
+            }
+            expected.clone()
+        }
+        None => match join_conditional_branches(&body.ty, &alternate.ty) {
+            Some(joined) => joined,
+            None => {
+                diagnostics.push(type_mismatch(
+                    DIAG_TYPE,
+                    "static types are incompatible",
+                    &body.ty,
+                    &alternate.ty,
+                ));
+                Type::Error
+            }
         },
-        effects,
-    }
+    };
+    Inferred { ty, effects }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -28478,10 +28564,13 @@ mod tests {
     }
 
     #[test]
-    fn pinned_standard_body_the_slice_cannot_decide_stays_admitted() {
-        // The conditional below is valid Orna, but this slice types the second
-        // branch against the first branch's `null`, so the mismatch it reports
-        // is not evidence about the pinned source.
+    fn pinned_standard_body_with_a_conditional_optional_is_admitted() {
+        // The conditional below is valid Orna: both branches unify with the
+        // declared `Int?` (ORNA-CFLOW-003, ORNA-TYPE-001). Once this slice
+        // typed the second branch against the first branch's `null` and
+        // reported a mismatch that described the checker rather than the
+        // pinned source; the pinned bundle is admitted here because its body
+        // really is well typed.
         let check = check_bundle(vec![(
             String::from("std/probe.orna"),
             String::from(
