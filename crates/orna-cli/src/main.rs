@@ -240,20 +240,20 @@ fn project_load_diagnostic(error: orna_project::ProjectLoadError) -> Diagnostic 
             "reduce the committed tree's entry count, nesting depth or path length, then run check again",
         );
     }
-    if let orna_project::ProjectLoadError::InvalidStandardBody {
-        logical_path,
-        line,
-        code,
-        message,
-        notes,
-    } = &error
-    {
-        let detail = if notes.is_empty() {
-            format!("{code}: {message} ({logical_path}:{line})")
+    if let orna_project::ProjectLoadError::InvalidStandardBody(diagnostic) = &error {
+        let detail = if diagnostic.notes.is_empty() {
+            format!(
+                "{}: {} ({}:{})",
+                diagnostic.code, diagnostic.message, diagnostic.logical_path, diagnostic.line
+            )
         } else {
             format!(
-                "{code}: {message}: {} ({logical_path}:{line})",
-                notes.join("; ")
+                "{}: {}: {} ({}:{})",
+                diagnostic.code,
+                diagnostic.message,
+                diagnostic.notes.join("; "),
+                diagnostic.logical_path,
+                diagnostic.line
             )
         };
         return Diagnostic::target_with_detail(
