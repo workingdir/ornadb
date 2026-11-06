@@ -202,6 +202,10 @@ pub enum LegacyReadError {
     /// authoritative row for it (UPGRADE-3 step 3). The read refuses rather
     /// than choosing one.
     DuplicateRowKey { table: String, key: String },
+    /// One relation holds rows in both the compact and the loose source. The
+    /// specification gives no precedence between them, so the read refuses
+    /// rather than merging or choosing (ADR 0121 D4).
+    CrossSourceConflict { relation: String },
 }
 
 impl std::fmt::Display for LegacyReadError {
@@ -237,6 +241,10 @@ impl std::fmt::Display for LegacyReadError {
                 formatter,
                 "table {table} holds more than one authoritative row for key {key:?}"
             ),
+            Self::CrossSourceConflict { relation } => write!(
+                formatter,
+                "relation {relation} holds rows in both its compact and its loose source; no precedence between them is specified"
+            ),
         }
     }
 }
@@ -260,6 +268,32 @@ pub fn read_legacy_table_rows(
             read_compact_table_rows(repository, commit, *relation)
         }
         LegacyTableAddress::TablePath(path) => read_loose_table_rows(repository, commit, path),
+    }
+}
+
+/// Chooses the one legacy source that answers a relation (UPGRADE-3 step 3;
+/// ADR 0121 D4).
+///
+/// `relation` is the relation identity both candidate sources resolve to in the
+/// caller's mapping: a compact table's storage table id, or the declared id of
+/// the editable table its loose row units belong to. The specification names no
+/// precedence between a compact and a loose source of one relation, and the
+/// decoder merges neither. A relation that holds at least one row in each
+/// source therefore fails closed with [`LegacyReadError::CrossSourceConflict`]
+/// rather than preferring one of them. A source with no rows does not carry the
+/// relation. Different relations never meet here, so their keys never collide.
+pub fn single_legacy_source<'a>(
+    relation: &str,
+    compact: Option<&'a LegacyTableRows>,
+    loose: Option<&'a LegacyTableRows>,
+) -> Result<Option<&'a LegacyTableRows>, LegacyReadError> {
+    let carried = |rows: Option<&'a LegacyTableRows>| rows.filter(|rows| !rows.rows().is_empty());
+    match (carried(compact), carried(loose)) {
+        (Some(_), Some(_)) => Err(LegacyReadError::CrossSourceConflict {
+            relation: relation.to_owned(),
+        }),
+        (Some(rows), None) | (None, Some(rows)) => Ok(Some(rows)),
+        (None, None) => Ok(None),
     }
 }
 
@@ -740,5 +774,111 @@ mod legacy_rows {
                 TypedKey::Text("bob".to_owned()),
             ],
         );
+    }
+
+    /// One loose row for key `alice`, decoded through the loose path.
+    fn loose_alice() -> super::LegacyTableRows {
+        let body = b"{\n    name: \"Alice Smith\",\n}\n".to_vec();
+        decode_loose_rows(
+            "contacts/Contact",
+            vec![(
+                LooseRowUnit {
+                    path: "contacts/Contact/alice.orna".to_owned(),
+                    key_path: vec!["alice.orna".to_owned()],
+                },
+                body,
+            )],
+        )
+        .expect("one loose row decodes")
+    }
+
+    /// A relation whose rows sit in both sources has no specified precedence, so
+    /// the choice fails closed and names the relation.
+    #[test]
+    fn relation_held_by_both_sources_fails_closed() {
+        let (_directory, repository, commit) = golden_repository();
+        let compact = read_legacy_table_rows(
+            &repository,
+            &commit,
+            &LegacyTableAddress::Relation(compact_table(1)),
+        )
+        .expect("the Int table decodes");
+        let loose = loose_alice();
+        let error = super::single_legacy_source("relation-1", Some(&compact), Some(&loose))
+            .expect_err("both sources carry the relation");
+        match error {
+            LegacyReadError::CrossSourceConflict { relation } => {
+                assert_eq!(relation, "relation-1");
+            }
+            other => panic!("expected CrossSourceConflict, got {other}"),
+        }
+    }
+
+    /// A source with no rows does not carry the relation, so the other source
+    /// answers alone, and a relation neither source carries answers nothing.
+    #[test]
+    fn relation_carried_by_one_source_answers_from_it() {
+        let (_directory, repository, commit) = golden_repository();
+        let compact = read_legacy_table_rows(
+            &repository,
+            &commit,
+            &LegacyTableAddress::Relation(compact_table(1)),
+        )
+        .expect("the Int table decodes");
+        let loose = loose_alice();
+        let no_rows = one_row_per_key("contacts/Contact".to_owned(), Vec::new())
+            .expect("an empty key set is distinct");
+        let empty_loose = super::LegacyTableRows {
+            source: LegacyRowSource::LooseRowUnit,
+            rows: no_rows,
+        };
+
+        let answer = super::single_legacy_source("relation-1", Some(&compact), Some(&empty_loose))
+            .expect("the empty loose source does not conflict");
+        assert_eq!(answer, Some(&compact));
+
+        let answer = super::single_legacy_source("relation-1", None, Some(&loose))
+            .expect("a loose source alone answers");
+        assert_eq!(answer, Some(&loose));
+
+        let answer = super::single_legacy_source("relation-1", None, None)
+            .expect("no source is not a conflict");
+        assert_eq!(answer, None);
+    }
+
+    /// Every golden relation resolves to exactly one source. The compact tables
+    /// and the editable `contacts/Contact` table are distinct relations, so no
+    /// key of one meets a key of the other.
+    #[test]
+    fn golden_bundle_relations_each_resolve_to_one_source() {
+        let (_directory, repository, commit) = golden_repository();
+        let ints = read_legacy_table_rows(
+            &repository,
+            &commit,
+            &LegacyTableAddress::Relation(compact_table(1)),
+        )
+        .expect("the Int table decodes");
+        let loose = read_legacy_table_rows(
+            &repository,
+            &commit,
+            &LegacyTableAddress::TablePath("contacts/Contact".to_owned()),
+        )
+        .expect("the loose table decodes");
+
+        let compact_answer =
+            super::single_legacy_source("018f0000000071000000000000000001", Some(&ints), None)
+                .expect("the compact relation resolves")
+                .expect("the compact relation has rows");
+        assert!(matches!(compact_answer.source(), LegacyRowSource::Compact));
+        assert_eq!(compact_answer.rows().len(), 4);
+
+        let loose_answer = super::single_legacy_source("contacts/Contact", None, Some(&loose))
+            .expect("the loose relation resolves")
+            .expect("the loose relation has rows");
+        assert!(matches!(
+            loose_answer.source(),
+            LegacyRowSource::LooseRowUnit
+        ));
+        assert_eq!(loose_answer.rows().len(), 2);
     }
 }
