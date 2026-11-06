@@ -152,7 +152,10 @@ fn assert_copy_refuses_corrupted_sidecar(
     commit_corrupted_sidecar(&source, mutate);
 
     let head = git_text(&source, &["rev-parse", "HEAD"]);
-    let status = git(&source, &["status", "--porcelain=v2", "--untracked-files=all"]);
+    let status = git(
+        &source,
+        &["status", "--porcelain=v2", "--untracked-files=all"],
+    );
     let destination = parent.path().join("migrated");
     let git_trace = parent.path().join("git-trace.log");
 
@@ -171,7 +174,10 @@ fn assert_copy_refuses_corrupted_sidecar(
     );
     assert_eq!(git_text(&source, &["rev-parse", "HEAD"]), head, "{label}");
     assert_eq!(
-        git(&source, &["status", "--porcelain=v2", "--untracked-files=all"]),
+        git(
+            &source,
+            &["status", "--porcelain=v2", "--untracked-files=all"]
+        ),
         status,
         "{label}"
     );
@@ -181,17 +187,13 @@ fn assert_copy_refuses_corrupted_sidecar(
 /// no unretired Table identity to resolve to.
 #[test]
 fn migrate_copy_refuses_a_sidecar_missing_a_compact_table_identity() {
-    assert_copy_refuses_corrupted_sidecar(
-        "missing",
-        CORRESPONDENCE_REFUSAL,
-        |entries, table| {
-            let index = entries
-                .iter()
-                .position(|entry| is_table_entry(entry, table))
-                .expect("the bundle sidecar has a Table identity");
-            entries.remove(index);
-        },
-    );
+    assert_copy_refuses_corrupted_sidecar("missing", CORRESPONDENCE_REFUSAL, |entries, table| {
+        let index = entries
+            .iter()
+            .position(|entry| is_table_entry(entry, table))
+            .expect("the bundle sidecar has a Table identity");
+        entries.remove(index);
+    });
 }
 
 /// The sidecar repeats one Table identity's storage id. The sidecar decoder
@@ -199,16 +201,12 @@ fn migrate_copy_refuses_a_sidecar_missing_a_compact_table_identity() {
 /// unreadable and never reaches the correspondence check.
 #[test]
 fn migrate_copy_refuses_a_sidecar_repeating_a_table_storage_id() {
-    assert_copy_refuses_corrupted_sidecar(
-        "duplicate",
-        UNREADABLE_REFUSAL,
-        |entries, table| {
-            let duplicate = entries
-                .iter()
-                .find(|entry| is_table_entry(entry, table))
-                .expect("the bundle sidecar has a Table identity")
-                .clone();
-            entries.push(duplicate);
-        },
-    );
+    assert_copy_refuses_corrupted_sidecar("duplicate", UNREADABLE_REFUSAL, |entries, table| {
+        let duplicate = entries
+            .iter()
+            .find(|entry| is_table_entry(entry, table))
+            .expect("the bundle sidecar has a Table identity")
+            .clone();
+        entries.push(duplicate);
+    });
 }
