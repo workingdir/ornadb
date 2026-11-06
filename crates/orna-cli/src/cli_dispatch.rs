@@ -1174,6 +1174,18 @@ fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnost
             format!("{error:?}"),
         )
     })?;
+    // A source whose runtime holds unpublished mutations has rows the copy would
+    // not receive, while its stream checkpoints may already cover them. Refuse
+    // before any destination is created so the source keeps its tail (ORNA-UPGRADE-006).
+    let unpublished_count = crate::source_unpublished_mutation_count(&repository)?;
+    if unpublished_count != 0 {
+        return Err(Diagnostic::target_with_detail(
+            "E2100",
+            "migration source holds unpublished runtime mutations",
+            "make the source's unpublished runtime mutations durable where its HEAD allows a publish, or discard them, then retry; no copy was prepared and the source is unchanged",
+            format!("unpublished_mutations={unpublished_count}"),
+        ));
+    }
     // Persistent stream checkpoints are carried into the prepared destination
     // under the identity correspondence recorded there before any row is
     // imported. Live per-attempt stream state is not carried: a source holding
