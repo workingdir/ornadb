@@ -5357,9 +5357,18 @@ impl Repository {
         for entry in journal.entries() {
             let target = self.managed_target(&entry.path)?;
             let current = self.read_managed_file(&target)?;
-            if current.as_deref() != entry.expected() && current.as_deref() != entry.next() {
-                return Err(RepositoryError::ManagedContentConflict);
+            if current.as_deref() == entry.expected() || current.as_deref() == entry.next() {
+                continue;
             }
+            // A retired legacy file the migration deletes must still hold the
+            // committed bytes it was read from. A local edit to it is not an
+            // unrelated change the migration may replace, so it is named.
+            if permit_legacy_migration && entry.next().is_none() {
+                return Err(RepositoryError::LegacyPathChanged(
+                    entry.path().as_path().display().to_string(),
+                ));
+            }
+            return Err(RepositoryError::ManagedContentConflict);
         }
         self.reconcile_store_worktree_transition(expected_index, candidate, false)?;
         self.write_publication_journal_locked(journal)?;
@@ -11024,6 +11033,9 @@ pub enum RepositoryError {
     /// (`sys.admin.assertion_failed`).
     InvalidCommitCandidate,
     ManagedContentConflict,
+    /// A legacy file the migration retires changed after capture. The file
+    /// holds local edits that the migration would otherwise delete.
+    LegacyPathChanged(String),
     /// Recovery found a pathname or private quarantine state that changed
     /// while it was being reconciled. The unexpected bytes remain on disk.
     PublicationRecoveryConflict,
@@ -11115,6 +11127,9 @@ impl fmt::Display for RepositoryError {
             }
             Self::ManagedContentConflict => {
                 f.write_str("managed worktree content changed since capture")
+            }
+            Self::LegacyPathChanged(path) => {
+                write!(f, "legacy file {path} changed since capture; it is not retired")
             }
             Self::PublicationRecoveryConflict => {
                 f.write_str("publication recovery found unexpected local state")
