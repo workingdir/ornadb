@@ -109,6 +109,7 @@ pub const LEGACY_OBJECT_IDENTITY_SIDECAR_PATH: &str = ".orna/object-identities.c
 
 const STORE_PATH: &str = ".orna/store";
 const DATABASE_RECORD_PATH: &str = ".orna/database.orna";
+const ORNA_DIR: &str = ".orna";
 const STAGED_CANDIDATE_MESSAGE: &str = "orna: staged candidate";
 
 /// Stable relation UUID of the sealed explicit-rekey log (ORNA-EVOL-007,
@@ -202,6 +203,13 @@ pub enum RelationAdmissionError {
     /// The expected `HEAD` already holds a `.orna/store`. A fresh store built
     /// over it would drop the relations that store holds, so it is refused.
     HeadStoreExists,
+    /// A change writes a file under `.orna/` other than the database record,
+    /// or the candidate tree keeps one (ORNA-META-001). `path` names it.
+    UnexpectedOrnaPath {
+        path: String,
+    },
+    /// A change deletes `.orna/database.orna`, or the candidate tree has none.
+    DatabaseRecordDeleted,
     /// A table's hidden allocator ref could not be read.
     Allocator(AllocatorError),
     /// A rekey log record is not a valid system relation entry.
@@ -285,6 +293,12 @@ impl std::fmt::Display for RelationAdmissionError {
             Self::HeadStoreExists => formatter.write_str(
                 "the expected HEAD already holds a .orna/store; a fresh store would drop its relations",
             ),
+            Self::UnexpectedOrnaPath { path } => write!(
+                formatter,
+                "{path} is not part of the tracked .orna/ metadata; only database.orna and store are allowed"
+            ),
+            Self::DatabaseRecordDeleted => formatter
+                .write_str("the candidate would delete or lack .orna/database.orna"),
             Self::Allocator(error) => write!(formatter, "{error}"),
             Self::InvalidRekeyLog => formatter.write_str("an object rekey log record is invalid"),
             Self::SourceNotStaged { path } => write!(
@@ -1654,8 +1668,12 @@ impl Repository {
     ///
     /// `expected_head` must hold no `.orna/store`: a fresh store built over one
     /// would drop its relations. A change may not write under `.orna/store`,
-    /// and a change to `.orna/database.orna` must record `database_id`. The
-    /// candidate is read back through the store reader before it is returned.
+    /// and may write no `.orna/` entry except `.orna/database.orna`; deleting
+    /// that record is refused (ORNA-META-001). A change to `.orna/database.orna`
+    /// must record `database_id`. The candidate tree's `.orna/` must hold
+    /// exactly `database.orna` and `store`, so a legacy file the caller left
+    /// in the tree is refused. The candidate is read back through the store
+    /// reader before it is returned.
     /// A refusal writes no ref; objects it wrote before the refusal stay
     /// unreachable.
     pub fn build_private_commit_with_relations(
@@ -1671,6 +1689,10 @@ impl Repository {
             identities,
             watermarks,
         } = content;
+        // Checked before the candidate lock. The lock re-checks only that HEAD
+        // still equals `expected_head` (StaleHead). A commit's tree is
+        // immutable, so the store-absence answer for `expected_head` holds
+        // under the lock too.
         if self.tree_store_root(expected_head.as_str())?.is_some() {
             return Err(RelationAdmissionError::HeadStoreExists);
         }
@@ -1679,9 +1701,10 @@ impl Repository {
             if path.starts_with(STORE_PATH) {
                 return Err(RepositoryError::UnsafeManagedPath.into());
             }
-            if path == Path::new(DATABASE_RECORD_PATH)
-                && let Some(bytes) = change.bytes()
-            {
+            if path == Path::new(DATABASE_RECORD_PATH) {
+                let Some(bytes) = change.bytes() else {
+                    return Err(RelationAdmissionError::DatabaseRecordDeleted);
+                };
                 let recorded = crate::init::format_context::parse_canonical_database(bytes)
                     .map_err(|()| {
                         RelationAdmissionError::Format(FormatContextError::MetadataInvalid)
@@ -1691,6 +1714,10 @@ impl Repository {
                         FormatContextError::MetadataInvalid,
                     ));
                 }
+            } else if path.starts_with(ORNA_DIR) && change.bytes().is_some() {
+                return Err(RelationAdmissionError::UnexpectedOrnaPath {
+                    path: path.display().to_string(),
+                });
             }
         }
 
@@ -1723,6 +1750,7 @@ impl Repository {
                 None,
             )
             .map_err(RelationAdmissionError::Repository)?;
+        self.check_orna_entries(candidate.tree())?;
         let format = self.open_private_candidate_format_context(&candidate)?;
         if format.repository_format() != RepositoryFormat::Format3 {
             return Err(RelationAdmissionError::NotFormat3);
@@ -1733,6 +1761,41 @@ impl Repository {
             ));
         }
         Ok(candidate)
+    }
+
+    /// Refuses a candidate tree whose `.orna/` holds anything but
+    /// `database.orna` and `store` (ORNA-META-001). A legacy file the caller
+    /// left in the tree trips this check, and so does a tree without the
+    /// database record.
+    fn check_orna_entries(&self, tree: &IndexTreeRef) -> Result<(), RelationAdmissionError> {
+        let mut command = self.command();
+        command.args([
+            "ls-tree",
+            "-z",
+            "--name-only",
+            "--full-tree",
+            tree.as_str(),
+            "--",
+            ".orna/",
+        ]);
+        let output = self.run(command)?.stdout;
+        let mut database_present = false;
+        for entry in output
+            .split(|byte| *byte == 0)
+            .filter(|entry| !entry.is_empty())
+        {
+            let path = String::from_utf8_lossy(entry).into_owned();
+            if path == DATABASE_RECORD_PATH {
+                database_present = true;
+            } else if path != STORE_PATH {
+                return Err(RelationAdmissionError::UnexpectedOrnaPath { path });
+            }
+        }
+        if database_present {
+            Ok(())
+        } else {
+            Err(RelationAdmissionError::DatabaseRecordDeleted)
+        }
     }
 
     /// The `.orna/store` tree named by a tree-ish, when it has one.
@@ -4168,7 +4231,111 @@ mod tests {
             DatabaseId::new_v4(),
         )
         .expect_err("a store for another database identity");
-        assert!(matches!(error, RelationAdmissionError::Format(_)));
+        assert!(matches!(
+            error,
+            RelationAdmissionError::Format(FormatContextError::MetadataInvalid)
+        ));
+    }
+
+    #[test]
+    fn a_head_that_already_holds_a_store_is_refused() {
+        let (directory, repository) = initialized_repository();
+        let root = directory.path();
+        let (head, database_id, database) = committed_base(root, &repository);
+        let first = build_music_candidate(
+            &repository,
+            &head,
+            &migration_changes(database.clone()),
+            music_rows(false),
+            database_id,
+        )
+        .expect("build the first candidate");
+        // Move HEAD onto the candidate, so the head now holds its store.
+        git(root, &["update-ref", "HEAD", first.commit().as_str()]);
+
+        let error = build_music_candidate(
+            &repository,
+            first.commit(),
+            &migration_changes(database),
+            music_rows(false),
+            database_id,
+        )
+        .expect_err("a head that already holds a store");
+        assert!(matches!(error, RelationAdmissionError::HeadStoreExists));
+    }
+
+    #[test]
+    fn a_change_may_not_write_an_orna_file_other_than_the_database_record() {
+        let (directory, repository) = initialized_repository();
+        let root = directory.path();
+        let (head, database_id, database) = committed_base(root, &repository);
+        let mut changes = migration_changes(database);
+        changes.push(crate::ManagedFileChange::new(
+            crate::ManagedPath::new(".orna/migration.json").expect("managed path"),
+            Some(b"{}".to_vec()),
+        ));
+
+        let error =
+            build_music_candidate(&repository, &head, &changes, music_rows(false), database_id)
+                .expect_err("a write to an unlisted .orna file");
+        assert!(matches!(
+            error,
+            RelationAdmissionError::UnexpectedOrnaPath { ref path }
+                if path.as_str() == ".orna/migration.json"
+        ));
+    }
+
+    #[test]
+    fn a_legacy_orna_file_left_in_the_tree_is_refused() {
+        let (directory, repository) = initialized_repository();
+        let root = directory.path();
+        let (_, database_id, database) = committed_base(root, &repository);
+        // The base tracks a legacy format record that the caller never deletes.
+        fs::write(root.join(".orna/format.orna"), b"legacy format record")
+            .expect("write legacy format record");
+        git(root, &["add", ".orna/format.orna"]);
+        git(root, &["commit", "--quiet", "--amend", "--no-edit"]);
+        let head = repository.head().unwrap().expect("amended HEAD");
+        assert_eq!(
+            git(
+                root,
+                &["ls-tree", "--name-only", head.as_str(), ".orna/format.orna"]
+            ),
+            ".orna/format.orna\n"
+        );
+        // Only the database record is rewritten; the legacy format record stays.
+        let changes = vec![crate::ManagedFileChange::new(
+            crate::ManagedPath::new(".orna/database.orna").expect("managed path"),
+            Some(database),
+        )];
+
+        let error =
+            build_music_candidate(&repository, &head, &changes, music_rows(false), database_id)
+                .expect_err("a legacy format record left in the tree");
+        assert!(matches!(
+            error,
+            RelationAdmissionError::UnexpectedOrnaPath { ref path }
+                if path.as_str() == ".orna/format.orna"
+        ));
+    }
+
+    #[test]
+    fn deleting_the_database_record_is_refused() {
+        let (directory, repository) = initialized_repository();
+        let root = directory.path();
+        let (head, database_id, _database) = committed_base(root, &repository);
+        let changes = vec![crate::ManagedFileChange::new(
+            crate::ManagedPath::new(".orna/database.orna").expect("managed path"),
+            None,
+        )];
+
+        let error =
+            build_music_candidate(&repository, &head, &changes, music_rows(false), database_id)
+                .expect_err("a deletion of the database record");
+        assert!(matches!(
+            error,
+            RelationAdmissionError::DatabaseRecordDeleted
+        ));
     }
 
     fn review(repository: &Repository) -> crate::ReviewedCandidateReview {
