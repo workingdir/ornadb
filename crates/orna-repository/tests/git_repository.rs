@@ -6285,7 +6285,7 @@ fn disposable_migration_copy_preserves_legacy_bytes_and_reports_its_coordinates(
             &repo,
             &destination,
             continuity.clone(),
-            defaults,
+            Some(defaults),
             &no_store,
         )
         .unwrap();
@@ -6473,7 +6473,7 @@ fn disposable_migration_copy_preserves_legacy_bytes_and_reports_its_coordinates(
             &repo,
             &directory.path().join("migrated-after-ignored-change"),
             continuity.clone(),
-            defaults,
+            Some(defaults),
             &no_store,
         )
         .unwrap();
@@ -6567,7 +6567,7 @@ fn disposable_migration_copy_preserves_legacy_bytes_and_reports_its_coordinates(
                 &repo,
                 &destination,
                 MigrationContinuityRecord::new(Vec::new()).unwrap(),
-                MigrationAnnotationDefaults::new(0).unwrap(),
+                Some(MigrationAnnotationDefaults::new(0).unwrap()),
                 &no_store,
             ),
             Err(RepositoryError::PublicationRecoveryConflict)

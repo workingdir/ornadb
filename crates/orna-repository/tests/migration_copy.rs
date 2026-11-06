@@ -175,7 +175,7 @@ fn populated_format1_dirty_workspace_is_preserved_in_copy() {
         &repository,
         &destination,
         MigrationContinuityRecord::new(Vec::new()).unwrap(),
-        defaults,
+        Some(defaults),
         &no_store,
     )
     .unwrap();
@@ -437,7 +437,7 @@ fn populated_format2_dirty_workspace_is_preserved_in_copy() {
         &repository,
         &destination,
         continuity.clone(),
-        defaults,
+        Some(defaults),
         &no_store,
     )
     .unwrap();
@@ -607,7 +607,7 @@ fn populated_format2_dirty_workspace_is_preserved_in_copy() {
         &repository,
         &destination,
         continuity.clone(),
-        defaults,
+        Some(defaults),
         &no_store,
     )
     .unwrap();
@@ -640,7 +640,7 @@ fn populated_format2_dirty_workspace_is_preserved_in_copy() {
             &repository,
             &destination,
             continuity,
-            defaults,
+            Some(defaults),
             &no_store
         )
         .is_err()
@@ -813,7 +813,7 @@ fn pre_change_prepared_copy_is_refused_and_discardable() {
         &repository,
         &destination,
         continuity.clone(),
-        defaults,
+        Some(defaults),
         &no_store,
     )
     .unwrap();
@@ -825,7 +825,7 @@ fn pre_change_prepared_copy_is_refused_and_discardable() {
         &repository,
         &destination,
         continuity.clone(),
-        defaults,
+        Some(defaults),
         &no_store,
     )
     .expect_err("the pre-change copy is refused by preparation");
@@ -853,7 +853,7 @@ fn pre_change_prepared_copy_is_refused_and_discardable() {
         &repository,
         &destination,
         continuity,
-        defaults,
+        Some(defaults),
         &no_store,
     )
     .unwrap();
@@ -912,7 +912,7 @@ fn source_edited_after_the_store_is_built_is_refused_before_pinning() {
         &repository,
         &destination,
         MigrationContinuityRecord::new(Vec::new()).unwrap(),
-        MigrationAnnotationDefaults::new(1).unwrap(),
+        Some(MigrationAnnotationDefaults::new(1).unwrap()),
         &edit_source_after_store,
     )
     .expect_err("a source edited after the store is built is refused");

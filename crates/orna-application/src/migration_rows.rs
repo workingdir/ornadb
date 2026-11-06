@@ -164,6 +164,20 @@ impl MigrationRowInput {
         &self.blobs
     }
 
+    /// The number of Blob values the decoded legacy rows carry. Each one takes
+    /// the UPGRADE-004 default annotation (octet-stream, no suffix), so this is
+    /// the annotation-default count the migration reports. It counts values,
+    /// not rows, and reads no payload byte.
+    #[must_use]
+    pub fn annotation_default_count(&self) -> usize {
+        self.relations
+            .iter()
+            .flat_map(|relation| relation.rows.iter())
+            .flat_map(|row| row.fields.iter())
+            .filter(|field| matches!(field, StoredField::Blob { .. }))
+            .count()
+    }
+
     /// Consumes the input into staged relations carrying their encoded rows,
     /// and returns with them the stored tuples each relation must carry. The
     /// migration gate checks the candidate's rows against that expectation.
