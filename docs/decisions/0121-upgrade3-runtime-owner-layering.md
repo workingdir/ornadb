@@ -59,9 +59,10 @@ prove unchanged annotated value identity.
   `MigrationAnnotationDefaults::from_legacy_inventory` already reports
   `payload_inspected() == false`.
 * Target design: the decoded count is the coordinate `annotation_defaults`,
-  recorded in `.orna/migration.json` (`MIGRATION_RECORD`) and in the publication
-  journal. `--annotation-defaults N` then becomes an expected-count assertion
-  that refuses before any copy is created.
+  recorded in the publication journal (`migration_annotation_defaults`) and in
+  the `Orna-Migration` commit trailer. No `.orna/migration.json` is written
+  (ORNA-META-001). `--annotation-defaults N` then becomes an expected-count
+  assertion that refuses before any copy is created.
 * Current state (not yet the target): the decoder is not wired into the migrate
   copy path. `migrate copy --annotation-defaults N` feeds the operator-declared
   count straight into `MigrationAnnotationDefaults::new`
