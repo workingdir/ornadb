@@ -13,8 +13,9 @@
 //! written.
 //!
 //! Live or per-attempt stream state (leases, claims, failures, receipts,
-//! controls, pause state, reset audit, bootstrap pins) is not carried. A source
-//! holding such rows is refused rather than reset silently.
+//! bootstrap pins, pending pause requests) is not carried. A source holding such
+//! rows is refused rather than reset silently. Stream control (running or
+//! paused) and the pause reason are carried verbatim.
 
 use std::collections::{BTreeSet, HashSet};
 use std::fs;
@@ -32,14 +33,12 @@ use crate::{RuntimeError, RuntimeState, migration_copy_runtime_identity};
 const NON_CARRIABLE_TABLES: &[&str] = &[
     "stream_checkpoint_bootstrap",
     "stream_checkpoint_reset_audit",
-    "stream_control",
     "stream_failure",
     "stream_failure_assertion_detail",
     "stream_failure_payload",
     "stream_failure_payload_legacy",
     "stream_lease",
     "stream_pause_pending",
-    "stream_pause_reason",
     "stream_provider_effect_receipt",
     "stream_provider_failure",
     "stream_replay_claim",
@@ -49,6 +48,9 @@ const NON_CARRIABLE_TABLES: &[&str] = &[
 const INSERT_CHECKPOINT: &str = "INSERT INTO stream_checkpoint (key_id, consumer_principal, consumer_root, consumer_function, consumer_binding, source_format, source, partition_format, partition, position_format, version, committed_position, next_fence) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)";
 const INSERT_BRIDGE: &str = "INSERT INTO stream_checkpoint_migration_bridge (key_id, origin_version, origin_position, source_generation, source_generation_digest) VALUES (?1, ?2, ?3, ?4, ?5)";
 const INSERT_ARCHIVE: &str = "INSERT INTO stream_checkpoint_migration_archive (key_id, version, committed_position, snapshot, generation_digest, transition) VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
+const INSERT_CONTROL: &str = "INSERT INTO stream_control (key_id, status) VALUES (?1, ?2)";
+const INSERT_PAUSE_REASON: &str =
+    "INSERT INTO stream_pause_reason (key_id, reason) VALUES (?1, ?2)";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CheckpointRow {
@@ -86,12 +88,26 @@ struct BridgeRow {
     source_generation_digest: Vec<u8>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ControlRow {
+    key_id: String,
+    status: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PauseReasonRow {
+    key_id: String,
+    reason: String,
+}
+
 /// Exact stream checkpoint state read from a source repository for carry.
 #[derive(Clone, Debug, Eq, PartialEq, Default)]
 pub struct StreamCarry {
     checkpoints: Vec<CheckpointRow>,
     bridges: Vec<BridgeRow>,
     history: Vec<HistoryRow>,
+    controls: Vec<ControlRow>,
+    pause_reasons: Vec<PauseReasonRow>,
 }
 
 /// Why a source's stream state could not be carried.
@@ -242,10 +258,26 @@ pub async fn read_stream_carry(source: &Repository) -> Result<StreamCarry, Strea
             })
             .collect()
     };
+    let controls = if tables.contains("stream_control") {
+        read_controls(&connection)
+            .await
+            .map_err(StreamCarryError::Runtime)?
+    } else {
+        Vec::new()
+    };
+    let pause_reasons = if tables.contains("stream_pause_reason") {
+        read_pause_reasons(&connection)
+            .await
+            .map_err(StreamCarryError::Runtime)?
+    } else {
+        Vec::new()
+    };
     Ok(StreamCarry {
         checkpoints,
         bridges,
         history,
+        controls,
+        pause_reasons,
     })
 }
 
@@ -322,6 +354,21 @@ pub async fn import_stream_carry(
                     row.source_generation,
                     row.source_generation_digest.as_slice()
                 ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+    }
+    for row in &carry.controls {
+        transaction
+            .execute(INSERT_CONTROL, params![row.key_id.as_str(), row.status])
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+    }
+    for row in &carry.pause_reasons {
+        transaction
+            .execute(
+                INSERT_PAUSE_REASON,
+                params![row.key_id.as_str(), row.reason.as_str()],
             )
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -469,6 +516,8 @@ async fn read_carry_target(connection: &Connection) -> Result<StreamCarry, Runti
         checkpoints: read_checkpoints(connection).await?,
         bridges: read_bridges(connection).await?,
         history: read_history(connection, "stream_checkpoint_migration_archive").await?,
+        controls: read_controls(connection).await?,
+        pause_reasons: read_pause_reasons(connection).await?,
     })
 }
 
@@ -495,4 +544,48 @@ async fn read_bridges(connection: &Connection) -> Result<Vec<BridgeRow>, Runtime
         });
     }
     Ok(bridges)
+}
+
+async fn read_controls(connection: &Connection) -> Result<Vec<ControlRow>, RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT key_id, status FROM stream_control ORDER BY key_id",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let mut controls = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    {
+        controls.push(ControlRow {
+            key_id: row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            status: row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        });
+    }
+    Ok(controls)
+}
+
+async fn read_pause_reasons(connection: &Connection) -> Result<Vec<PauseReasonRow>, RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT key_id, reason FROM stream_pause_reason ORDER BY key_id",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let mut reasons = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    {
+        reasons.push(PauseReasonRow {
+            key_id: row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            reason: row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        });
+    }
+    Ok(reasons)
 }
