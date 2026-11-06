@@ -114,13 +114,12 @@ treats the decoded rows as the complete authoritative set.
 
 ## Consequences
 
-* The CLI help (`crates/orna-cli/src/cli_help.rs`) and
-  `crates/orna-cli/README.md` describe `--annotation-defaults` as the
-  operator-supplied decoded count today. When the decoder lands (`ornadb-i6ma`),
-  both change to describe an expected-count assertion.
-* Until the decoder lands, `annotation_defaults` records the operator-declared
-  count that `migrate copy --annotation-defaults N` takes today, with no
-  assertion against decoded rows.
+* `migrate copy` derives the annotation-default count from the decoded legacy
+  rows. `--annotation-defaults N` is an optional assertion: a mismatch with the
+  decoded Blob count refuses with E2100 and prepares no candidate. When omitted,
+  the decoded count is recorded in the journal (ornadb-5il1.314).
+* The persistent-consumer flag (`--no-persistent-consumers`) is unchanged here;
+  deriving that count is owned by ornadb-5il1.317.
 * Once the `upgrade` surface is enabled, `orna upgrade --to-format 3` holds the
   publish lock and writer lease for the whole protected transition, and a
   concurrent `orna publish` contends for the same lease.
