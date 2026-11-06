@@ -6501,7 +6501,7 @@ fn disposable_migration_copy_preserves_legacy_bytes_and_reports_its_coordinates(
         assert!(journal.runtime_intent_id().is_some());
         // The journal names every path the migration changes, so a resume
         // replays the transition rather than re-deciding it.
-        assert_eq!(journal.entries().len(), 3);
+        assert_eq!(journal.entries().len(), 2);
         assert_eq!(
             journal
                 .entries()
@@ -6511,8 +6511,7 @@ fn disposable_migration_copy_preserves_legacy_bytes_and_reports_its_coordinates(
                 .collect::<Vec<_>>(),
             vec![
                 ".orna/database.orna".to_owned(),
-                ".orna/format.orna".to_owned(),
-                ".orna/migration.json".to_owned()
+                ".orna/format.orna".to_owned()
             ]
         );
         // The candidate installs the canonical database record and retires the
