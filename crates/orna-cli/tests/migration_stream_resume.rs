@@ -12,8 +12,9 @@ use orna_repository::{Repository, RepositoryFormat};
 use orna_runtime::{
     CheckpointKey, Component, ConsumerIdentity, ListStreamSource, RuntimeError, RuntimeIdentity,
     RuntimeState, StreamCheckpoint, StreamHandler, StreamHandlerResult, StreamItem,
-    StreamMutationBatch, WriterLease, import_stream_carry, migration_copy_runtime_identity,
-    read_stream_carry, repository_runtime_identity, runtime_identity_for_database_id,
+    StreamMutationBatch, StreamStep, WriterLease, import_stream_carry,
+    migration_copy_runtime_identity, read_stream_carry, repository_runtime_identity,
+    runtime_identity_for_database_id,
 };
 use tempfile::TempDir;
 
@@ -133,7 +134,7 @@ fn runtime() -> tokio::runtime::Runtime {
 }
 
 /// Gives the legacy source a durable persistent consumer that has committed two of three items.
-/// When `pause` is set, the source also holds a paused stream, which is non-carriable state.
+/// When `pause` is set, the source also holds a paused stream, whose control row is carried.
 fn give_source_a_persistent_consumer(root: &Path, pause: bool) -> StreamCheckpoint {
     runtime().block_on(async {
         let repository = Repository::discover(root).unwrap();
@@ -162,7 +163,7 @@ fn give_source_a_persistent_consumer(root: &Path, pause: bool) -> StreamCheckpoi
             state
                 .pause_stream(writer, key.clone())
                 .await
-                .expect("pausing the stream writes non-carriable stream_control state");
+                .expect("pausing the stream writes stream_control state");
         }
         state.stream_checkpoint(&key).await.unwrap()
     })
@@ -236,6 +237,48 @@ fn deliver_from_activated_head(root: &Path) -> Vec<Vec<u8>> {
     deliver_resumed(root, repository_runtime_identity)
 }
 
+/// Resumes the source's paused stream, leaving a running `stream_control` row behind.
+fn resume_source_stream(root: &Path) {
+    runtime().block_on(async {
+        let repository = Repository::discover(root).unwrap();
+        let (identity, digest) = source_runtime_identity(root);
+        let state = RuntimeState::open(&repository, identity, digest)
+            .await
+            .expect("open source runtime");
+        let writer = state.acquire_lease([46; 16]).await.unwrap();
+        state
+            .resume_stream(writer, checkpoint_key())
+            .await
+            .expect("resuming the paused stream");
+    });
+}
+
+/// Runs one delivery step from the destination's carried checkpoint and returns
+/// the step, whether it committed, paused or was rejected.
+fn step_from_destination(root: &Path) -> StreamStep {
+    runtime().block_on(async {
+        let repository = Repository::discover(root).unwrap();
+        let (identity, digest) = migration_copy_runtime_identity(&repository).unwrap();
+        let state = RuntimeState::open(&repository, identity, digest)
+            .await
+            .expect("open destination runtime");
+        let writer = state.acquire_lease([47; 16]).await.unwrap();
+        let key = checkpoint_key();
+        let mut source = ListStreamSource::new(
+            key.clone(),
+            vec![b"1".to_vec(), b"2".to_vec(), b"3".to_vec()],
+        );
+        let mut handler = CommitEach {
+            seen: Vec::new(),
+            next_digest: state.capture().await.unwrap().generation_digest(),
+        };
+        state
+            .run_stream_once(writer, &key, &mut source, &mut handler)
+            .await
+            .expect("delivery step runs")
+    })
+}
+
 #[test]
 fn migration_carries_persistent_stream_checkpoint_and_resumes_delivery() {
     let parent = TempDir::new().unwrap();
@@ -260,14 +303,87 @@ fn migration_carries_persistent_stream_checkpoint_and_resumes_delivery() {
     assert_eq!(deliver_from_destination(&destination), vec![b"3".to_vec()]);
 }
 
+/// A paused stream is carried as paused: the destination's first delivery step
+/// reports `Paused` and advances nothing.
 #[test]
-fn migration_refuses_non_carriable_stream_state_and_keeps_checkpoint() {
+fn migration_carries_paused_stream_control_and_keeps_delivery_paused() {
     let parent = TempDir::new().unwrap();
     let source = parent.path().join("source");
     fs::create_dir(&source).unwrap();
     dirty_legacy_source(&source);
     let before = give_source_a_persistent_consumer(&source, true);
     assert_eq!(before.version, 2);
+    let destination = parent.path().join("migrated");
+
+    let output = run_copy(&source, &destination);
+
+    assert!(
+        output.status.success(),
+        "a paused stream is carriable stream state: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("carried_checkpoints=1"));
+    match step_from_destination(&destination) {
+        StreamStep::Paused { checkpoint } => {
+            assert_eq!(checkpoint.version, before.version);
+            assert_eq!(checkpoint.committed, before.committed);
+        }
+        other => panic!("a carried paused stream must stay paused, got {other:?}"),
+    }
+}
+
+/// A pause followed by a resume leaves a running `stream_control` row. The row
+/// is carried, so the copy migrates and delivery resumes.
+#[test]
+fn migration_carries_resumed_stream_and_resumes_delivery() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    dirty_legacy_source(&source);
+    give_source_a_persistent_consumer(&source, true);
+    resume_source_stream(&source);
+    let destination = parent.path().join("migrated");
+
+    let output = run_copy(&source, &destination);
+
+    assert!(
+        output.status.success(),
+        "a resumed stream must migrate: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(deliver_from_destination(&destination), vec![b"3".to_vec()]);
+}
+
+/// Live stream state that a carry cannot resume refuses the migration and
+/// leaves the source checkpoint untouched.
+#[test]
+fn migration_refuses_non_carriable_stream_state_and_keeps_checkpoint() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    dirty_legacy_source(&source);
+    let before = give_source_a_persistent_consumer(&source, false);
+    assert_eq!(before.version, 2);
+    runtime().block_on(async {
+        let repository = Repository::discover(&source).unwrap();
+        let database = libsql::Builder::new_local(repository.runtime_paths().state_db())
+            .build()
+            .await
+            .unwrap();
+        let connection = database.connect().unwrap();
+        let mut rows = connection
+            .query("SELECT key_id FROM stream_checkpoint", ())
+            .await
+            .unwrap();
+        let key_id: String = rows.next().await.unwrap().unwrap().get(0).unwrap();
+        connection
+            .execute(
+                "INSERT INTO stream_pause_pending (key_id) VALUES (?1)",
+                libsql::params![key_id],
+            )
+            .await
+            .unwrap();
+    });
     let destination = parent.path().join("migrated");
 
     let output = run_copy(&source, &destination);
