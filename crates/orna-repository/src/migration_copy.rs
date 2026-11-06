@@ -19,15 +19,13 @@
 //!
 //! The conversion itself stays a separate step, and the boundary is explicit
 //! rather than implied. `prepare_format3_migration` migrates content and binds
-//! the migration journal — which is what makes the transition identifiable and
-//! resumable — but the repository has no legacy-rows-to-store-root converter,
-//! so the candidate it binds carries metadata only. A publication must also
-//! resolve a valid `.orna/store` root (MIGRATION.md steps 4 to 6), and
-//! `validate_store_root` is what refuses a candidate that has none. Until that
-//! converter exists, the returned journal describes a migration whose store
-//! conversion is still outstanding; it never claims an admission that the
-//! publication boundary would reject.
+//! the migration journal, which is what makes the transition identifiable and
+//! resumable. The caller supplies the migration store (the admitted relations,
+//! identities, watermarks and retired legacy paths) for the database; the
+//! candidate is built from that store, so the candidate commit carries a
+//! `.orna/store` root and publication never sees a store-less candidate.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -40,11 +38,43 @@ use crate::init::format_context::{
     FORMAT_CONTEXT_MAX_METADATA_BYTES, LEGACY_FORMAT_PATH, RepositoryFormatContext,
     canonical_database_bytes,
 };
+use crate::native_graph::NativeOid;
+use crate::relation_admission::{
+    AllocatorWatermarks, RelationAdmissionError, RelationCandidateContent, StagedRelation,
+    StoredObjectIdentity,
+};
 use crate::{
     DatabaseId, GitCommitRef, IndexGeneration, LegacyAnnotationCandidate,
     MigrationAnnotationDefaults, MigrationContinuityRecord, PublicationJournal,
     PublicationJournalEntry, Repository, RepositoryError, RepositoryFormat,
 };
+use crate::{ManagedFileChange, ManagedPath, PrivateCommit};
+
+/// One legacy `.orna` file the migration candidate deletes: the path and the
+/// exact bytes the source commit records there. The candidate is refused unless
+/// the source holds those bytes, so a retirement names what it removes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RetiredLegacyPath {
+    pub path: String,
+    pub committed: Vec<u8>,
+}
+
+/// The store content a migration candidate admits: the relations and identities
+/// of its fresh `.orna/store`, the allocator watermarks, and the legacy `.orna`
+/// files it retires. The caller builds it from the source snapshot; the
+/// repository admits exactly what it is handed.
+#[derive(Clone, Debug, Default)]
+pub struct MigrationStore {
+    pub relations: Vec<StagedRelation>,
+    pub identities: Vec<StoredObjectIdentity>,
+    pub watermarks: AllocatorWatermarks,
+    pub retired: Vec<RetiredLegacyPath>,
+}
+
+/// Supplies the [`MigrationStore`] of a migration once its database identity is
+/// known.
+pub type MigrationStoreSource<'a> =
+    &'a dyn Fn(DatabaseId) -> Result<MigrationStore, RepositoryError>;
 
 /// The one frozen content format an unannotated legacy row transitions to
 /// during an explicit migration. UPGRADE-004 fixes this coordinate.
@@ -253,6 +283,7 @@ pub fn prepare_format3_migration(
     destination: &Path,
     continuity: MigrationContinuityRecord,
     annotation_defaults: MigrationAnnotationDefaults,
+    store_for: MigrationStoreSource<'_>,
 ) -> Result<MigratedCopy, RepositoryError> {
     let destination = canonical_destination(destination)?;
     let source_root = source
@@ -272,13 +303,25 @@ pub fn prepare_format3_migration(
         .to_path_buf();
     reclaim_dead_staging(&parent, &destination)?;
     if path_exists(&destination)? {
-        return recover_prepared_copy(source, &destination, continuity, annotation_defaults, false);
+        return recover_prepared_copy(
+            source,
+            &destination,
+            continuity,
+            annotation_defaults,
+            false,
+            Some(store_for),
+        );
     }
 
     let claim = claim_staging(&parent)?;
     let result = (|| {
-        let mut copy =
-            prepare_format3_migration_in(source, &claim.staging, continuity, annotation_defaults)?;
+        let mut copy = prepare_format3_migration_in(
+            source,
+            &claim.staging,
+            continuity,
+            annotation_defaults,
+            store_for,
+        )?;
         let repository = Repository::discover(&claim.staging)?;
         pin_migration_index(
             &repository,
@@ -394,7 +437,14 @@ pub fn discard_prepared_format3_migration(
             let (continuity, annotation_defaults) = migration_coordinates(&journal)?;
             // Discard removes a copy whatever its era; only preparation and
             // publication refuse the pre-change shape.
-            recover_prepared_copy(source, &destination, continuity, annotation_defaults, true)?;
+            recover_prepared_copy(
+                source,
+                &destination,
+                continuity,
+                annotation_defaults,
+                true,
+                None,
+            )?;
             publish_copy_noreplace(parent, &destination, &quarantine)?;
             // Boundary: the copy now exists only under the quarantine name. A
             // restart sees no destination and finishes the removal.
@@ -495,6 +545,7 @@ fn prepare_format3_migration_in(
     destination: &Path,
     continuity: MigrationContinuityRecord,
     annotation_defaults: MigrationAnnotationDefaults,
+    store_for: MigrationStoreSource<'_>,
 ) -> Result<MigratedCopy, RepositoryError> {
     let context = source
         .open_format_context()
@@ -564,16 +615,18 @@ fn prepare_format3_migration_in(
     // commit object, which is what lets a recovered copy be compared byte for
     // byte with a fresh one.
     let commit_time = source_commit_time(source, &source_commit)?;
-    let candidate = copy.build_private_commit_at(
+    let message = candidate_message(source_format, annotation_defaults, &continuity);
+    let store = store_for(database_id)?;
+    require_retired_paths(source, &source_commit, &store.retired)?;
+    // Boundary: the migration store is admitted for this database, and no
+    // candidate has been built from it yet.
+    crate::publication_crash_barrier("migration-store");
+    let (candidate, store_root) = build_migration_candidate(
+        &copy,
         &source_commit,
-        &[
-            crate::ManagedFileChange::new(
-                crate::ManagedPath::new(".orna/database.orna")?,
-                Some(database_bytes.clone()),
-            ),
-            crate::ManagedFileChange::new(crate::ManagedPath::new(LEGACY_FORMAT_PATH)?, None),
-        ],
-        &candidate_message(source_format, annotation_defaults, &continuity),
+        database_id,
+        &store,
+        &message,
         commit_time,
     )?;
     // Boundary: the candidate commit object exists in the staged copy and is
@@ -595,21 +648,11 @@ fn prepare_format3_migration_in(
             .cloned()
             .ok_or(RepositoryError::InvalidFormatMigration)?,
         runtime_intent_id,
-        vec![
-            PublicationJournalEntry::new(
-                crate::ManagedPath::new(".orna/database.orna")?,
-                None,
-                Some(database_bytes),
-            ),
-            PublicationJournalEntry::new(
-                crate::ManagedPath::new(LEGACY_FORMAT_PATH)?,
-                Some(committed_legacy_format(&context)?),
-                None,
-            ),
-        ],
+        migration_entries(&database_bytes, &committed_legacy_format(&context)?, &store)?,
     )?
     .with_migration_continuity(continuity.clone())?
-    .with_migration_annotation_defaults(annotation_defaults)?;
+    .with_migration_annotation_defaults(annotation_defaults)?
+    .with_store_root(&store_root)?;
 
     Ok(MigratedCopy {
         source_root,
@@ -982,6 +1025,7 @@ fn recover_prepared_copy(
     continuity: MigrationContinuityRecord,
     annotation_defaults: MigrationAnnotationDefaults,
     allow_legacy: bool,
+    store_for: Option<MigrationStoreSource<'_>>,
 ) -> Result<MigratedCopy, RepositoryError> {
     let source_context = source
         .open_format_context()
@@ -1037,7 +1081,7 @@ fn recover_prepared_copy(
     require_migration_candidate_pin(&repository, journal.new_head())?;
     let candidate = repository.candidate_from_journal(&journal)?;
     let database_id = candidate_database_id(&repository, &candidate)?;
-    let expected_entries = vec![
+    let expected_entries = [
         PublicationJournalEntry::new(
             crate::ManagedPath::new(".orna/database.orna")?,
             None,
@@ -1049,21 +1093,61 @@ fn recover_prepared_copy(
             None,
         ),
     ];
+    let entries = journal.entries();
     let entries_match = if legacy_copy {
         // A pre-change copy journals the migration record. Discard is the only
         // caller that accepts one, and it binds that record by path and shape:
         // the bytes were written by the older writer and are not re-derived.
-        let entries = journal.entries();
         entries.len() == 3
             && entries[..2] == expected_entries[..]
             && entries[2].path() == &crate::ManagedPath::new(MIGRATION_RECORD)?
             && entries[2].expected().is_none()
             && entries[2].next().is_some()
+    } else if store_for.is_some() {
+        // The store-bound branch below re-derives every entry and compares.
+        true
     } else {
-        journal.entries() == expected_entries
+        // Discard binds the two coordinate entries exactly, then accepts each
+        // retired legacy file as a deletion of its committed bytes.
+        entries.len() >= 2
+            && entries[..2] == expected_entries[..]
+            && entries[2..]
+                .iter()
+                .all(|entry| entry.expected().is_some() && entry.next().is_none())
     };
     if !entries_match {
         return Err(RepositoryError::InvalidFormatMigration);
+    }
+    if let Some(store_for) = store_for {
+        // The recovered candidate must be exactly what a fresh preparation of
+        // this source builds: same store, same entries, same commit object.
+        let store = store_for(database_id)?;
+        require_retired_paths(source, &source_commit, &store.retired)?;
+        let database_bytes = canonical_database_bytes(&database_id);
+        let expected = migration_entries(
+            &database_bytes,
+            &committed_legacy_format(&source_context)?,
+            &store,
+        )?;
+        if journal.entries() != expected {
+            return Err(RepositoryError::InvalidFormatMigration);
+        }
+        let commit_time = source_commit_time(source, &source_commit)?;
+        let message = candidate_message(source_format, annotation_defaults, &continuity);
+        let (rebuilt, store_root) = build_migration_candidate(
+            &repository,
+            &source_commit,
+            database_id,
+            &store,
+            &message,
+            commit_time,
+        )?;
+        let store_root_hex = store_root.to_hex();
+        if rebuilt.commit() != journal.new_head()
+            || journal.store_root().map(|root| root.as_str()) != Some(store_root_hex.as_str())
+        {
+            return Err(RepositoryError::PublicationRecoveryConflict);
+        }
     }
     let (working_tree_identity, working_tree_entries) = working_tree_identity(&repository)?;
     if working_tree_identity != source_working_tree_identity
@@ -1142,6 +1226,128 @@ fn candidate_database_id(
         .ok_or(RepositoryError::InvalidFormatMigration)?;
     crate::init::format_context::parse_canonical_database(&database)
         .map_err(|()| RepositoryError::InvalidFormatMigration)
+}
+
+/// The tree changes a migration candidate makes: the format-3 database record
+/// written, the legacy format marker deleted, and each retired legacy file
+/// deleted.
+fn migration_changes(
+    database_bytes: &[u8],
+    store: &MigrationStore,
+) -> Result<Vec<ManagedFileChange>, RepositoryError> {
+    let mut changes = vec![
+        ManagedFileChange::new(
+            ManagedPath::new(".orna/database.orna")?,
+            Some(database_bytes.to_vec()),
+        ),
+        ManagedFileChange::new(ManagedPath::new(LEGACY_FORMAT_PATH)?, None),
+    ];
+    for retired in &store.retired {
+        changes.push(ManagedFileChange::new(
+            ManagedPath::new(&retired.path)?,
+            None,
+        ));
+    }
+    Ok(changes)
+}
+
+/// The journal entries a migration candidate records for the same changes, each
+/// with the exact bytes the source commits (or the new bytes it writes).
+fn migration_entries(
+    database_bytes: &[u8],
+    committed_format: &[u8],
+    store: &MigrationStore,
+) -> Result<Vec<PublicationJournalEntry>, RepositoryError> {
+    let mut entries = vec![
+        PublicationJournalEntry::new(
+            ManagedPath::new(".orna/database.orna")?,
+            None,
+            Some(database_bytes.to_vec()),
+        ),
+        PublicationJournalEntry::new(
+            ManagedPath::new(LEGACY_FORMAT_PATH)?,
+            Some(committed_format.to_vec()),
+            None,
+        ),
+    ];
+    for retired in &store.retired {
+        entries.push(PublicationJournalEntry::new(
+            ManagedPath::new(&retired.path)?,
+            Some(retired.committed.clone()),
+            None,
+        ));
+    }
+    Ok(entries)
+}
+
+/// Builds the migration candidate commit from the store the caller supplied,
+/// and returns it with the `.orna/store` root it admitted.
+fn build_migration_candidate(
+    repository: &Repository,
+    source_commit: &GitCommitRef,
+    database_id: DatabaseId,
+    store: &MigrationStore,
+    message: &str,
+    commit_time: i64,
+) -> Result<(PrivateCommit, NativeOid), RepositoryError> {
+    let database_bytes = canonical_database_bytes(&database_id);
+    let changes = migration_changes(&database_bytes, store)?;
+    let candidate = repository
+        .build_private_commit_with_relations_at(
+            source_commit,
+            &changes,
+            RelationCandidateContent {
+                relations: &store.relations,
+                identities: &store.identities,
+                watermarks: &store.watermarks,
+            },
+            database_id,
+            message,
+            commit_time,
+        )
+        .map_err(admission_error)?;
+    let store_root = repository
+        .tree_store_root(candidate.tree().as_str())
+        .map_err(admission_error)?
+        .ok_or(RepositoryError::InvalidFormatMigration)?;
+    Ok((candidate, store_root))
+}
+
+/// Refuses a store whose retired paths are not legacy `.orna` files the source
+/// commit records with exactly the named bytes.
+fn require_retired_paths(
+    source: &Repository,
+    source_commit: &GitCommitRef,
+    retired: &[RetiredLegacyPath],
+) -> Result<(), RepositoryError> {
+    let mut seen = BTreeSet::new();
+    for entry in retired {
+        let path = entry.path.as_str();
+        let reserved = path == ".orna/database.orna"
+            || path == LEGACY_FORMAT_PATH
+            || path == ".orna/store"
+            || path.starts_with(".orna/store/");
+        if !path.starts_with(".orna/") || reserved || !seen.insert(path) {
+            return Err(RepositoryError::InvalidFormatMigration);
+        }
+        if candidate_file(source, source_commit.as_str(), path)?.as_deref()
+            != Some(entry.committed.as_slice())
+        {
+            return Err(RepositoryError::InvalidFormatMigration);
+        }
+    }
+    Ok(())
+}
+
+/// Maps a relation admission refusal to the repository error a migration
+/// reports. The refusal's own display names the row, so no raw dump is kept.
+fn admission_error(error: RelationAdmissionError) -> RepositoryError {
+    match error {
+        RelationAdmissionError::Repository(error) => error,
+        RelationAdmissionError::Graph(error) => RepositoryError::Graph(error),
+        RelationAdmissionError::Format(error) => RepositoryError::FormatContext(error),
+        other => RepositoryError::MigrationStoreRefused(other.to_string()),
+    }
 }
 
 fn sync_tree(root: &Path) -> Result<(), RepositoryError> {
