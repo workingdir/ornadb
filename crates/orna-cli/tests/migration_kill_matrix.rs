@@ -35,6 +35,21 @@
 //! | `migration-carried` | carry committed in the destination runtime; not yet reported |
 //! | `migration-discard-renamed` | `migrate abort` renamed the copy to its quarantine |
 //!
+//! Activation (`upgrade --to-format 3 DEST --yes-activate`) crosses its own
+//! barriers, killed with the same harness; each row names the journal stage the
+//! parked copy holds. Abort is allowed while the copy's ref is still the old
+//! head, and refused with `E2100` once it has moved to the candidate.
+//!
+//! | Marker | Journal stage | Ref |
+//! | --- | --- | --- |
+//! | `upgrade-activating` | `Prepared` | old head |
+//! | `index-lock` | `Prepared` | old head |
+//! | `ref-cas-pre-journal` | `Prepared` | candidate |
+//! | `store-worktree` | `RefAdvanced` | candidate |
+//! | `index-install` | `RefAdvanced` | candidate |
+//! | `worktree` | `IndexReconciled` | candidate |
+//! | `upgrade-published` | `WorktreeReconciled` | candidate |
+//!
 //! Not asserted here, and why:
 //!
 //! - The publication journal's own `rename` in `write_publication_journal` is
@@ -63,7 +78,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use orna_repository::Repository;
+use orna_repository::{PublicationJournalStage, Repository};
 use orna_runtime::{
     CheckpointKey, Component, ConsumerIdentity, ListStreamSource, RuntimeIdentity, RuntimeState,
     StreamCheckpoint, StreamHandler, StreamHandlerResult, StreamItem, StreamMutationBatch,
@@ -547,11 +562,11 @@ impl ChildGuard {
     }
 }
 
-/// Runs `migrate {arguments}` until it parks at `boundary`, returning the
+/// Runs `orna --db SOURCE {words}` until it parks at `boundary`, returning the
 /// parked child for the caller to kill or keep alive.
-fn park_at(
+fn park_command_at(
     source: &Path,
-    arguments: &[&std::ffi::OsStr],
+    words: &[&std::ffi::OsStr],
     boundary: &str,
     crash_dir: &Path,
 ) -> ChildGuard {
@@ -562,7 +577,7 @@ fn park_at(
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env(CRASH_AT, boundary)
         .env(CRASH_DIR, crash_dir)
-        .args(["--db", source.to_str().unwrap(), "migrate"]);
+        .args(["--db", source.to_str().unwrap()]);
     for name in [
         "GIT_DIR",
         "GIT_WORK_TREE",
@@ -572,8 +587,8 @@ fn park_at(
     ] {
         command.env_remove(name);
     }
-    command.args(arguments);
-    let mut child = ChildGuard(command.spawn().expect("migration child starts"));
+    command.args(words);
+    let mut child = ChildGuard(command.spawn().expect("orna child starts"));
     let deadline = Instant::now() + Duration::from_mins(1);
     while !marker.exists() && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(10));
@@ -589,6 +604,19 @@ fn park_at(
         "the child parked at a different boundary"
     );
     child
+}
+
+/// Runs `migrate {arguments}` until it parks at `boundary`, returning the
+/// parked child for the caller to kill or keep alive.
+fn park_at(
+    source: &Path,
+    arguments: &[&std::ffi::OsStr],
+    boundary: &str,
+    crash_dir: &Path,
+) -> ChildGuard {
+    let mut words = vec![std::ffi::OsStr::new("migrate")];
+    words.extend_from_slice(arguments);
+    park_command_at(source, &words, boundary, crash_dir)
 }
 
 /// Runs `migrate {arguments}` until it parks at `boundary` and kills it there,
@@ -1190,4 +1218,288 @@ fn migration_abort_kill_after_the_quarantine_rename_finishes_the_discard() {
         reference_copy,
         "a rebuilt copy equals the one the discard removed"
     );
+}
+
+/// The `upgrade --to-format 3 DEST --yes-activate` boundaries, in the order
+/// activation crosses them.
+const ACTIVATION_BOUNDARIES: [&str; 7] = [
+    "upgrade-activating",
+    "index-lock",
+    "ref-cas-pre-journal",
+    "store-worktree",
+    "index-install",
+    "worktree",
+    "upgrade-published",
+];
+/// Activation boundaries past the moment the copy's ref moves to the candidate.
+/// Abort is refused at each of these, and only a roll-forward may finish them.
+const ADVANCED_BOUNDARIES: [&str; 5] = [
+    "ref-cas-pre-journal",
+    "store-worktree",
+    "index-install",
+    "worktree",
+    "upgrade-published",
+];
+
+/// The journal stage each activation boundary leaves on disk.
+fn activation_stage(boundary: &str) -> PublicationJournalStage {
+    match boundary {
+        "upgrade-activating" | "index-lock" | "ref-cas-pre-journal" => {
+            PublicationJournalStage::Prepared
+        }
+        "store-worktree" | "index-install" => PublicationJournalStage::RefAdvanced,
+        "worktree" => PublicationJournalStage::IndexReconciled,
+        "upgrade-published" => PublicationJournalStage::WorktreeReconciled,
+        other => panic!("{other} is not an activation boundary"),
+    }
+}
+
+/// Everything a source must keep unchanged across a killed or refused copy,
+/// activation or abort (ORNA-UPGRADE-006).
+#[derive(Debug, Eq, PartialEq)]
+struct SourceState {
+    head: String,
+    worktree: Vec<(String, String)>,
+    index: Option<String>,
+    carry: CarryRows,
+}
+
+fn source_state(root: &Path) -> SourceState {
+    SourceState {
+        head: git(root, &["rev-parse", "HEAD"]),
+        worktree: worktree_manifest(root),
+        index: read_sha256(&root.join(".git/index")),
+        carry: source_carry(root),
+    }
+}
+
+fn run_upgrade(source: &Path, destination: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_orna"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .args([
+            "--db",
+            source.to_str().unwrap(),
+            "upgrade",
+            "--to-format",
+            "3",
+        ])
+        .arg(destination)
+        .arg("--yes-activate")
+        .output()
+        .expect("upgrade command starts")
+}
+
+/// Prepares a copy of `pristine` in `case`, then kills `upgrade --yes-activate`
+/// at `boundary`. Returns the source and the parked copy.
+fn park_activation(case: &Path, pristine: &Path, boundary: &str) -> (PathBuf, PathBuf) {
+    let source = case.join("source");
+    duplicate(pristine, &source);
+    let destination = case.join("migrated");
+    let prepared = run_copy(&source, &destination);
+    assert!(
+        prepared.status.success(),
+        "prepared migration: {}",
+        String::from_utf8_lossy(&prepared.stderr)
+    );
+    let crash = case.join("crash");
+    fs::create_dir(&crash).unwrap();
+    let words = [
+        std::ffi::OsStr::new("upgrade"),
+        std::ffi::OsStr::new("--to-format"),
+        std::ffi::OsStr::new("3"),
+        destination.as_os_str(),
+        std::ffi::OsStr::new("--yes-activate"),
+    ];
+    let mut child = park_command_at(&source, &words, boundary, &crash);
+    child.kill_and_reap();
+    (source, destination)
+}
+
+/// Asserts the parked copy holds the journal stage and head its boundary
+/// leaves, and that the source is untouched.
+fn assert_parked_activation(
+    source: &Path,
+    destination: &Path,
+    boundary: &str,
+    source_head: &str,
+    pristine: &SourceState,
+) {
+    let journal = Repository::discover(destination)
+        .unwrap()
+        .read_publication_journal()
+        .unwrap()
+        .unwrap_or_else(|| panic!("{boundary}: the parked copy keeps its journal"));
+    assert_eq!(
+        journal.stage(),
+        activation_stage(boundary),
+        "{boundary}: the journal stage"
+    );
+    let head = git(destination, &["rev-parse", "HEAD"]);
+    if ADVANCED_BOUNDARIES.contains(&boundary) {
+        assert_eq!(
+            head,
+            journal.new_head().as_str(),
+            "{boundary}: the ref has moved to the candidate"
+        );
+    } else {
+        assert_eq!(head, source_head, "{boundary}: the ref has not moved");
+    }
+    assert_eq!(
+        &source_state(source),
+        pristine,
+        "{boundary}: a killed activation leaves the source untouched"
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn upgrade_kill_at_each_activation_boundary_rolls_forward_or_refuses_abort() {
+    let parent = TempDir::new().unwrap();
+    let pristine = pristine_source(parent.path());
+    let source_head = git(&pristine, &["rev-parse", "HEAD"]);
+    let pristine_state = source_state(&pristine);
+
+    // The reference: a prepared copy activated without interruption.
+    let reference_source = parent.path().join("reference-source");
+    duplicate(&pristine, &reference_source);
+    let reference_destination = parent.path().join("reference-destination");
+    let prepared = run_copy(&reference_source, &reference_destination);
+    assert!(
+        prepared.status.success(),
+        "reference preparation: {}",
+        String::from_utf8_lossy(&prepared.stderr)
+    );
+    let prepared_copy = committed_copy(&reference_destination);
+    let reference_candidate = candidate_record(&reference_destination).commit;
+    let activation = run_upgrade(&reference_source, &reference_destination);
+    assert!(
+        activation.status.success(),
+        "reference activation: {}",
+        String::from_utf8_lossy(&activation.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&activation.stdout).contains("activated format-3 migration copy"),
+        "the reference reports an activation"
+    );
+    let activated_copy = committed_copy(&reference_destination);
+    assert_eq!(activated_copy.head, reference_candidate);
+    assert_ne!(activated_copy, prepared_copy);
+    assert!(
+        Repository::discover(&reference_destination)
+            .unwrap()
+            .read_publication_journal()
+            .unwrap()
+            .is_none(),
+        "a finished activation leaves no journal"
+    );
+    let reference_carry = destination_carry(&reference_destination);
+
+    for boundary in ACTIVATION_BOUNDARIES {
+        let advanced = ADVANCED_BOUNDARIES.contains(&boundary);
+
+        // Roll forward: restart the activation from the parked copy.
+        let case = TempDir::new().unwrap();
+        let (source, destination) = park_activation(case.path(), &pristine, boundary);
+        assert_parked_activation(
+            &source,
+            &destination,
+            boundary,
+            &source_head,
+            &pristine_state,
+        );
+        let restarted = run_upgrade(&source, &destination);
+        assert!(
+            restarted.status.success(),
+            "{boundary} restart: {}",
+            String::from_utf8_lossy(&restarted.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&restarted.stdout)
+                .contains("activated format-3 migration copy"),
+            "{boundary}: the restart completes the activation"
+        );
+        assert_eq!(
+            committed_copy(&destination),
+            activated_copy,
+            "{boundary}: the rolled-forward copy must equal the reference byte for byte"
+        );
+        assert_eq!(
+            destination_carry(&destination),
+            reference_carry,
+            "{boundary}: no carried row may be lost or duplicated"
+        );
+        assert_eq!(source_state(&source), pristine_state, "{boundary}");
+        let rerun = run_upgrade(&source, &destination);
+        assert!(rerun.status.success(), "{boundary} rerun");
+        assert!(
+            String::from_utf8_lossy(&rerun.stdout).contains("already activated"),
+            "{boundary}: a rerun reports the finished activation"
+        );
+        assert_eq!(
+            committed_copy(&destination),
+            activated_copy,
+            "{boundary}: a rerun changes no committed byte"
+        );
+
+        // Abort: refused once the ref has moved, otherwise discards the copy.
+        let case = TempDir::new().unwrap();
+        let (source, destination) = park_activation(case.path(), &pristine, boundary);
+        let parked = committed_copy(&destination);
+        let aborted = run_abort(&source, &destination);
+        if advanced {
+            let stderr = String::from_utf8_lossy(&aborted.stderr);
+            assert_eq!(aborted.status.code(), Some(1), "{boundary}: {stderr}");
+            assert!(stderr.contains("E2100"), "{boundary}: {stderr}");
+            assert!(
+                stderr.contains("has begun activation"),
+                "{boundary}: the refusal names the activation: {stderr}"
+            );
+            assert_eq!(
+                committed_copy(&destination),
+                parked,
+                "{boundary}: a refused abort changes no byte of the copy"
+            );
+            assert_eq!(source_state(&source), pristine_state, "{boundary}");
+            let finished = run_upgrade(&source, &destination);
+            assert!(
+                finished.status.success(),
+                "{boundary}: activation after a refused abort: {}",
+                String::from_utf8_lossy(&finished.stderr)
+            );
+            assert_eq!(
+                committed_copy(&destination),
+                activated_copy,
+                "{boundary}: the copy rolls forward to the reference"
+            );
+        } else {
+            assert!(
+                aborted.status.success(),
+                "{boundary} abort: {}",
+                String::from_utf8_lossy(&aborted.stderr)
+            );
+            assert!(
+                String::from_utf8_lossy(&aborted.stdout).contains("discarded prepared"),
+                "{boundary}: the abort discards the prepared copy"
+            );
+            assert!(!destination.exists(), "{boundary}: the copy is removed");
+            assert!(
+                staging_siblings(&destination).is_empty(),
+                "{boundary}: no staging directory survives the discard"
+            );
+            assert_eq!(source_state(&source), pristine_state, "{boundary}");
+            // The discarded copy rebuilds to the exact old snapshot.
+            let rebuilt = run_copy(&source, &destination);
+            assert!(
+                rebuilt.status.success(),
+                "{boundary} rebuild: {}",
+                String::from_utf8_lossy(&rebuilt.stderr)
+            );
+            assert_eq!(
+                committed_copy(&destination),
+                prepared_copy,
+                "{boundary}: the rebuilt copy is the old snapshot, byte for byte"
+            );
+        }
+    }
 }
