@@ -638,8 +638,6 @@ fn cli_migration_copy_prepares_a_populated_format_two_source() {
             .as_str()
             .to_owned()
     };
-    // Store ref identities are per-preparation, so the two candidates are
-    // checked for their shared shape rather than an identical tree.
     for destination in [&first, &second] {
         let candidate = candidate_head(destination);
         assert_eq!(
@@ -651,6 +649,25 @@ fn cli_migration_copy_prepares_a_populated_format_two_source() {
             ".orna/database.orna\n.orna/store\n"
         );
     }
+    // Every identity a migration mints is derived from the database and the
+    // source, so two preparations of one source produce the same store and the
+    // same candidate tree. Commit times differ, so only trees are compared.
+    let store_tree = |destination: &Path| {
+        let candidate = candidate_head(destination);
+        git_output(
+            destination,
+            &["rev-parse", &format!("{candidate}:.orna/store")],
+        )
+    };
+    assert_eq!(store_tree(&first), store_tree(&second));
+    let candidate_tree = |destination: &Path| {
+        let candidate = candidate_head(destination);
+        git_output(
+            destination,
+            &["rev-parse", &format!("{candidate}^{{tree}}")],
+        )
+    };
+    assert_eq!(candidate_tree(&first), candidate_tree(&second));
     assert_eq!(
         git_output(
             &source,
