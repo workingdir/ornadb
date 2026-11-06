@@ -468,6 +468,17 @@ impl StoredObjectIdentity {
         .map_err(|_| RelationAdmissionError::InvalidIdentity)
     }
 
+    /// The identity's inventory row as the sealed identity relation stores it:
+    /// its tag-37 key and its decoded stored fields. The migration gate reads
+    /// the candidate's inventory against these.
+    pub fn inventory_row(&self) -> Result<(TypedKey, Raw), RelationAdmissionError> {
+        let key = self.row_key()?;
+        let fields = self.row_fields()?;
+        let raw = decode_canonical_storage_value(&fields)
+            .map_err(|_| RelationAdmissionError::InvalidIdentity)?;
+        Ok((key, raw))
+    }
+
     fn from_row(key: &TypedKey, fields: &[u8]) -> Result<Self, RelationAdmissionError> {
         let TypedKey::Value(key) = key else {
             return Err(RelationAdmissionError::InvalidIdentity);
