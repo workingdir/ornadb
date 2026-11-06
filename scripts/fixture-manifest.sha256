@@ -159,7 +159,8 @@ e279a7bfc9c04cf067704ccc6adfdda5b4bf8a958d7f9f1db63065377a7c18ce  crates/orna-cl
 edebe27ffe38efc1c684f09ac77b659027e8dce9c3445004059112d2519adee1  crates/orna-cli/tests/fixtures/iterator-contracts.orna
 fca574faa6a1e60824a2099b023b7da5efa2bb1fa9c40a14a13681d93211e5ab  crates/orna-cli/tests/fixtures/legacy-bare-module-state.sqlite3
 092852be93fa4cbea616c1168b707d6bc07c6bbf6dd3d492dd22cd0b643000b8  crates/orna-cli/tests/fixtures/legacy-bare-module.bundle
-227ef80cfafde552886f835d4c261552672e3de98751938c541d95d6bb3a0338  crates/orna-cli/tests/fixtures/legacy-format1.bundle
+921a32f9689450d91208e01e262b3270ecda5e9cff76d0e56d5ebe6e03469118  crates/orna-cli/tests/fixtures/legacy-format1.bundle
+0822ba1f5612c777becb156144419643d352b426515928c66f1fa3f9970c6fc6  crates/orna-cli/tests/fixtures/legacy-golden-main.orna
 e9d2eb3c9624d42620dbb3614802f8f1ed1fd8e1d69560929ee6919c858a43ca  crates/orna-cli/tests/fixtures/legacy-loose-contact-alice-smith.orna
 458164a9d9c8128232454860e5ffef74e2cab246ae7517d99accfb6b26b674fa  crates/orna-cli/tests/fixtures/legacy-loose-contact-bob-jones.orna
 30c7dd6ebc4264b5b24ba43b49fc4c018e788b76e712f09f4e1bec6c06a72951  crates/orna-cli/tests/fixtures/legacy-loose-contacts-main.orna

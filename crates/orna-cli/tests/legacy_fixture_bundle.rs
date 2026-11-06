@@ -46,7 +46,7 @@ const BUNDLE: &str = "tests/fixtures/legacy-format1.bundle";
 /// SHA-256 of `BUNDLE`. Regenerate with the `build_legacy_fixture` example
 /// (`<empty-root> <bundle-path> tests/fixtures`) and
 /// `python3 scripts/check_fixture_manifest.py --update` when the builder changes.
-const BUNDLE_SHA256: &str = "227ef80cfafde552886f835d4c261552672e3de98751938c541d95d6bb3a0338";
+const BUNDLE_SHA256: &str = "921a32f9689450d91208e01e262b3270ecda5e9cff76d0e56d5ebe6e03469118";
 /// The 1.0.0 format marker, including its trailing LF. 1.0.0 `19-repository.md`
 /// keeps it a legacy-format input, and it is the record the relabel guard reads,
 /// so its exact bytes are part of the fixture contract.
