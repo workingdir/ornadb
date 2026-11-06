@@ -1,4 +1,3 @@
-//! Builds the committed legacy format-1 compact golden repository.
 //!
 //! Compiled only under the `legacy-fixture-writer` feature; production builds
 //! never contain it (ORNA-UPGRADE-003).
@@ -48,7 +47,11 @@
 //!   are present and 1.0.0 `40-upgrade-contract.md` ORNA-UPGRADE-001 still
 //!   dispatches the reader by the recorded format;
 //! - the database identity record `.orna/database.orna`;
-//! - a source record `main.orna`;
+//! - a source record `main.orna`. The golden (`write_legacy_format1_golden_fixture`)
+//!   declares its compact tables in that module (`GOLDEN_MODULE_FILE`), and it
+//!   writes the legacy identity sidecar `.orna/object-identities.cbor` naming each
+//!   compact table by its storage id (`COMPACT_TABLE_NAMES`), so a migration sees
+//!   a faithful legacy project. The shell has neither;
 //! - key-only compact tables for `Int` (INT64), `Str` (BYTE_ARRAY STRING,
 //!   `utf8`) and `Date` (INT32 DATE), plus one `Int`-keyed table whose stored
 //!   value column is an unannotated `BYTE_ARRAY` `Blob` (1.0.0
@@ -127,6 +130,23 @@ const BLOB_TABLE_NUMBER: u64 = 5;
 /// the whole stored value. They are deliberately not valid UTF-8 and include an
 /// empty payload, so a decoder that decodes text or drops empty values fails.
 const BLOB_PAYLOADS: [&[u8]; 2] = [&[0x00, 0xff, 0x80, b'o', b'r', b'n', b'a'], &[]];
+/// The golden's root module, which declares the compact tables named by
+/// `COMPACT_TABLE_NAMES`. Read from the caller's fixture directory.
+const GOLDEN_MODULE_FILE: &str = "legacy-golden-main.orna";
+/// Repository-relative legacy identity sidecar. Version 1 stores each entry as
+/// `[kind code, qualified name, id, retired]`, with `Table` code 1.
+const IDENTITY_SIDECAR_PATH: &str = ".orna/object-identities.cbor";
+const IDENTITY_SIDECAR_VERSION: u64 = 1;
+const IDENTITY_KIND_TABLE: u64 = 1;
+/// The declared name of each compact table in `GOLDEN_MODULE_FILE`. The
+/// golden's sidecar names these tables; the loose table is not a storage-id
+/// table and has no sidecar entry.
+const COMPACT_TABLE_NAMES: [(u64, &str); 4] = [
+    (1, "Counter"),
+    (2, "Label"),
+    (3, "Day"),
+    (BLOB_TABLE_NUMBER, "Asset"),
+];
 /// Table namespace and name, which the loose row path repeats
 /// (`contacts/Contact/<key component>.orna`, 1.0.0 `07-tables.md:374-380`).
 const LOOSE_NAMESPACE: &str = "contacts";
@@ -436,11 +456,15 @@ fn write_repository(root: &Path, loose_sources: Option<&Path>) {
     git(root, &["config", "commit.gpgsign", "false"]);
     git(root, &["config", "core.autocrlf", "false"]);
     git(root, &["config", "core.eol", "lf"]);
-    fs::write(
-        root.join("main.orna"),
-        include_str!("../../tests/fixtures/git-repository-main.orna"),
-    )
-    .unwrap();
+    // The golden declares its tables in its root module and records their
+    // identities in the sidecar; the shell has neither.
+    let main = match loose_sources {
+        Some(sources) => read_loose_source(sources, GOLDEN_MODULE_FILE),
+        None => include_str!("../../tests/fixtures/git-repository-main.orna")
+            .as_bytes()
+            .to_vec(),
+    };
+    fs::write(root.join("main.orna"), main).unwrap();
     fs::write(root.join("ordinary.txt"), "base\n").unwrap();
     fs::create_dir_all(root.join(".orna")).unwrap();
     fs::write(root.join(".orna/format.orna"), FORMAT_1).unwrap();
@@ -449,6 +473,9 @@ fn write_repository(root: &Path, loose_sources: Option<&Path>) {
         include_str!("../../tests/fixtures/format-context/database-sidecar.orna"),
     )
     .unwrap();
+    if loose_sources.is_some() {
+        fs::write(root.join(IDENTITY_SIDECAR_PATH), identity_sidecar()).unwrap();
+    }
     git(root, &["add", "."]);
     git(root, &["commit", "-m", "initial"]);
 
@@ -468,6 +495,28 @@ fn write_repository(root: &Path, loose_sources: Option<&Path>) {
     }
 
     record_gitlink(root);
+}
+
+/// The version-1 identity sidecar naming each compact table by its storage id.
+fn identity_sidecar() -> Vec<u8> {
+    let entries = COMPACT_TABLE_NAMES
+        .iter()
+        .map(|(number, name)| {
+            OvbRaw::Array(vec![
+                OvbRaw::Int(IDENTITY_KIND_TABLE.into()),
+                OvbRaw::Text((*name).to_owned()),
+                OvbRaw::Bytes(table_id(*number).as_bytes().to_vec()),
+                OvbRaw::Bool(false),
+            ])
+        })
+        .collect();
+    CanonicalValue::new(OvbRaw::Array(vec![
+        OvbRaw::Int(IDENTITY_SIDECAR_VERSION.into()),
+        OvbRaw::Array(entries),
+    ]))
+    .expect("identity sidecar")
+    .encode()
+    .expect("identity sidecar encoding")
 }
 
 /// Records the gitlink pin as the last commit. The pinned commit is the current
