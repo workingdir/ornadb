@@ -667,17 +667,11 @@ fn initialize_populated_format_two_source(root: &Path) {
     git_output(root, &["config", "user.name", "kierandrewett"]);
     git_output(root, &["config", "user.email", "kieran@drewett.dev"]);
     git_output(root, &["config", "commit.gpgsign", "false"]);
-    fs::write(
-        root.join("main.orna"),
-        include_str!("fixtures/legacy-format2-loose-main.orna"),
-    )
-    .unwrap();
+    const MAIN: &str = "pub table Contact(id: Str) {\n    name: Str,\n    avatar: Blob,\n}\n";
+    const ALICE: &str = "{\n    name: \"Alice Smith\",\n    avatar: \"aGVsbG8=\",\n}\n";
+    fs::write(root.join("main.orna"), MAIN).unwrap();
     fs::create_dir_all(root.join("contacts/Contact")).unwrap();
-    fs::write(
-        root.join("contacts/Contact/alice-smith.orna"),
-        include_str!("fixtures/legacy-format2-contact-alice-smith.orna"),
-    )
-    .unwrap();
+    fs::write(root.join("contacts/Contact/alice-smith.orna"), ALICE).unwrap();
     fs::create_dir_all(root.join(".orna")).unwrap();
     fs::write(
         root.join(".orna/format.orna"),
