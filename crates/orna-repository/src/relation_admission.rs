@@ -1754,6 +1754,48 @@ impl Repository {
         database_id: DatabaseId,
         message: &str,
     ) -> Result<PrivateCommit, RelationAdmissionError> {
+        self.build_private_commit_with_relations_inner(
+            expected_head,
+            changes,
+            content,
+            database_id,
+            message,
+            None,
+        )
+    }
+
+    /// Same candidate as [`Self::build_private_commit_with_relations`], with
+    /// the commit time named explicitly. A caller that must reproduce the same
+    /// commit object from the same inputs (the migration prepare) names the
+    /// time, so the object is a function of its content alone.
+    pub fn build_private_commit_with_relations_at(
+        &self,
+        expected_head: &GitCommitRef,
+        changes: &[crate::ManagedFileChange],
+        content: RelationCandidateContent<'_>,
+        database_id: DatabaseId,
+        message: &str,
+        timestamp: i64,
+    ) -> Result<PrivateCommit, RelationAdmissionError> {
+        self.build_private_commit_with_relations_inner(
+            expected_head,
+            changes,
+            content,
+            database_id,
+            message,
+            Some(timestamp),
+        )
+    }
+
+    fn build_private_commit_with_relations_inner(
+        &self,
+        expected_head: &GitCommitRef,
+        changes: &[crate::ManagedFileChange],
+        content: RelationCandidateContent<'_>,
+        database_id: DatabaseId,
+        message: &str,
+        commit_time: Option<i64>,
+    ) -> Result<PrivateCommit, RelationAdmissionError> {
         let RelationCandidateContent {
             relations,
             identities,
@@ -1817,7 +1859,7 @@ impl Repository {
                 changes,
                 Some(StoreBinding::Decoded(&store_root)),
                 message,
-                None,
+                commit_time,
             )
             .map_err(RelationAdmissionError::Repository)?;
         self.check_orna_entries(candidate.tree())?;
@@ -1869,7 +1911,10 @@ impl Repository {
     }
 
     /// The `.orna/store` tree named by a tree-ish, when it has one.
-    fn tree_store_root(&self, treeish: &str) -> Result<Option<NativeOid>, RelationAdmissionError> {
+    pub(crate) fn tree_store_root(
+        &self,
+        treeish: &str,
+    ) -> Result<Option<NativeOid>, RelationAdmissionError> {
         let mut command = self.command();
         command.args(["ls-tree", "-z", "--full-tree", treeish, "--", STORE_PATH]);
         let output = self.run(command)?.stdout;

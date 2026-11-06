@@ -1174,6 +1174,14 @@ fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnost
             format!("{error:?}"),
         )
     })?;
+    // A format-2 source has no row decoder, so it is refused here, before the
+    // staging copy is created and nothing is left behind.
+    let source_format = repository
+        .open_format_context()
+        .map_err(migration_source_admission_diagnostic)?;
+    if source_format.repository_format() == orna_repository::RepositoryFormat::Legacy2 {
+        return Err(format_two_refusal());
+    }
     // A source whose runtime holds unpublished mutations has rows the copy would
     // not receive, while its stream checkpoints may already cover them. Refuse
     // before any destination is created so the source keeps its tail (ORNA-UPGRADE-006).
@@ -1231,6 +1239,23 @@ fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnost
         &std::path::PathBuf::from(destination),
         continuity,
         annotation_defaults,
+        &|staged: &orna_repository::Repository,
+          database: orna_repository::DatabaseId|
+         -> Result<
+            orna_repository::migration_copy::MigrationStore,
+            orna_repository::RepositoryError,
+        > {
+            let store = orna_application::build_migration_store(staged, database)?;
+            // The store was built from a source that could still move. A source
+            // that gained unpublished runtime mutations in that window keeps its
+            // tail: refuse before the candidate is built or pinned.
+            let unpublished = crate::source_unpublished_mutation_count(&repository)
+                .map_err(|_| orna_repository::RepositoryError::PublicationRecoveryConflict)?;
+            if unpublished != 0 {
+                return Err(orna_repository::RepositoryError::PublicationRecoveryConflict);
+            }
+            Ok(store)
+        },
     )
     .map_err(|error| match error {
         orna_repository::RepositoryError::FormatContext(context) => {
@@ -1241,6 +1266,7 @@ fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnost
             "prepared migration copy predates the migration-record removal",
             "discard it with `orna migrate abort DEST`, then run `orna migrate copy` again",
         ),
+        orna_repository::RepositoryError::Format2RowConversionUnimplemented => format_two_refusal(),
         other => Diagnostic::target_with_detail(
             "E2100",
             "migration copy could not be prepared or recovered",
@@ -1556,4 +1582,14 @@ mod mv_tests {
         ));
         assert_eq!(fs::read(&source).unwrap(), b"concurrent");
     }
+}
+
+/// The refusal for a format-2 source: no row decoder exists, so no format-3
+/// copy can be prepared from it (MIGRATION.md:3).
+fn format_two_refusal() -> Diagnostic {
+    Diagnostic::target(
+        "E2100",
+        "format-2 row conversion is not implemented; a format-2 source cannot be migrated (MIGRATION.md:3)",
+        "no format-2 migration is available until the format-2 row decoder is implemented",
+    )
 }
