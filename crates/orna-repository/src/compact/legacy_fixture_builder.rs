@@ -50,7 +50,8 @@
 //! - a source record `main.orna`. The golden (`write_legacy_format1_golden_fixture`)
 //!   declares its compact tables in that module (`GOLDEN_MODULE_FILE`), and it
 //!   writes the legacy identity sidecar `.orna/object-identities.cbor` naming each
-//!   compact table by its storage id (`COMPACT_TABLE_NAMES`), so a migration sees
+//!   compact table by its storage id and its key column (and the Blob column) by
+//!   field id (`COMPACT_TABLE_NAMES`, `identity_sidecar`), so a migration sees
 //!   a faithful legacy project. The shell has neither;
 //! - key-only compact tables for `Int` (INT64), `Str` (BYTE_ARRAY STRING,
 //!   `utf8`) and `Date` (INT32 DATE), plus one `Int`-keyed table whose stored
@@ -138,6 +139,7 @@ const GOLDEN_MODULE_FILE: &str = "legacy-golden-main.orna";
 const IDENTITY_SIDECAR_PATH: &str = ".orna/object-identities.cbor";
 const IDENTITY_SIDECAR_VERSION: u64 = 1;
 const IDENTITY_KIND_TABLE: u64 = 1;
+const IDENTITY_KIND_FIELD: u64 = 2;
 /// The declared name of each compact table in `GOLDEN_MODULE_FILE`. The
 /// golden's sidecar names these tables; the loose table is not a storage-id
 /// table and has no sidecar entry.
@@ -497,9 +499,14 @@ fn write_repository(root: &Path, loose_sources: Option<&Path>) {
     record_gitlink(root);
 }
 
-/// The version-1 identity sidecar naming each compact table by its storage id.
+/// The version-1 identity sidecar naming each compact table by its storage id
+/// and each of its stored columns by the field id the compact layout uses. Every
+/// compact table's key column is `<Table>.id` (`field_id`); the Blob table also
+/// names its value column `Asset.payload` (`value_field_id`). The manifest
+/// requires a field record for every declared field (`object_identity.rs`,
+/// `source_table_schema`), so a migration can match the legacy column ids.
 fn identity_sidecar() -> Vec<u8> {
-    let entries = COMPACT_TABLE_NAMES
+    let mut entries: Vec<OvbRaw> = COMPACT_TABLE_NAMES
         .iter()
         .map(|(number, name)| {
             OvbRaw::Array(vec![
@@ -510,6 +517,22 @@ fn identity_sidecar() -> Vec<u8> {
             ])
         })
         .collect();
+    for (number, name) in COMPACT_TABLE_NAMES {
+        entries.push(OvbRaw::Array(vec![
+            OvbRaw::Int(IDENTITY_KIND_FIELD.into()),
+            OvbRaw::Text(format!("{name}.id")),
+            OvbRaw::Bytes(field_id(number).as_bytes().to_vec()),
+            OvbRaw::Bool(false),
+        ]));
+        if number == BLOB_TABLE_NUMBER {
+            entries.push(OvbRaw::Array(vec![
+                OvbRaw::Int(IDENTITY_KIND_FIELD.into()),
+                OvbRaw::Text(format!("{name}.payload")),
+                OvbRaw::Bytes(value_field_id(number).as_bytes().to_vec()),
+                OvbRaw::Bool(false),
+            ]));
+        }
+    }
     CanonicalValue::new(OvbRaw::Array(vec![
         OvbRaw::Int(IDENTITY_SIDECAR_VERSION.into()),
         OvbRaw::Array(entries),
