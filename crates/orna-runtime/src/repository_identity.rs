@@ -2,7 +2,7 @@
 //! Every caller that opens a repository's `state.db` (the CLI, tests, and the
 //! migration carry) uses this derivation so identities cannot drift.
 
-use orna_repository::{Repository, inspect_metadata_for_runtime};
+use orna_repository::{Repository, inspect_legacy_source_metadata, inspect_metadata_for_runtime};
 
 use crate::{RuntimeError, RuntimeIdentity};
 
@@ -31,22 +31,23 @@ pub fn repository_runtime_identity(
 /// Derives the identity of a migration source's own runtime, so its unpublished
 /// tail can be counted before a copy is prepared from it. Unlike
 /// [`repository_runtime_identity`] it admits a legacy read-only `HEAD`: a source
-/// being migrated is legacy by definition. It names the identity from the
-/// database id the source's admitted format context records; it does not admit
-/// the source for any write. An unknown `HEAD` format is still refused with
-/// [`RuntimeError::UnknownHeadFormat`], and a source without a recorded
-/// database id is refused with [`RuntimeError::InvalidIdentity`].
+/// being migrated is legacy by definition. The identity is keyed by the
+/// worktree `database.orna`, the same record the runtime keys its tail by, not
+/// by the committed `HEAD` snapshot. It does not admit the source for any write.
+/// An unknown `HEAD` format is still refused with
+/// [`RuntimeError::UnknownHeadFormat`]; a source with no worktree database
+/// identity is refused with [`RuntimeError::InvalidIdentity`].
 pub fn migration_source_runtime_identity(
     repository: &Repository,
 ) -> Result<(RuntimeIdentity, [u8; 32]), RuntimeError> {
     repository
         .require_known_head_format()
         .map_err(RuntimeError::UnknownHeadFormat)?;
-    let context = repository
-        .open_format_context()
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    let database_id = context.database_id().ok_or(RuntimeError::InvalidIdentity)?;
-    Ok(runtime_identity_for_database_id(*database_id.as_bytes()))
+    let metadata =
+        inspect_legacy_source_metadata(repository).map_err(|_| RuntimeError::StorageUnavailable)?;
+    Ok(runtime_identity_for_database_id(
+        *metadata.database_id().as_bytes(),
+    ))
 }
 
 /// Derives the identity for the migration's own checkpoint carry into a
