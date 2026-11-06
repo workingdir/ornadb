@@ -102,9 +102,7 @@ pub(crate) fn build_store_with_expectation(
             .read_compact_manifest_inventory(&commit)?
             .is_empty()
         {
-            return Err(refused(
-                "the format-2 source holds compact-storage-v2 tables, which have no decoder",
-            ));
+            return Err(RepositoryError::Format2CompactUnimplemented);
         }
         Vec::new()
     } else {
