@@ -1419,6 +1419,7 @@ dependencies = [
  "orna-syntax",
  "orna-value",
  "sha2 0.10.9",
+ "tempfile",
 ]
 
 [[package]]
