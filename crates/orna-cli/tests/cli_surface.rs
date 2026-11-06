@@ -35,7 +35,7 @@ fn git_succeeds(repository: &std::path::Path, arguments: &[&str]) {
 fn unavailable_workflow_commands_are_usage_refusals_before_any_repository_opens() {
     let directory = tempdir().expect("temporary directory");
     for command in [
-        "switch", "merge", "reset", "pull", "stash", "fmt", "verify", "prune", "upgrade", "restore",
+        "switch", "merge", "reset", "pull", "stash", "fmt", "verify", "prune", "restore",
     ] {
         let output = orna(directory.path(), &[command]);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -52,6 +52,15 @@ fn unavailable_workflow_commands_are_usage_refusals_before_any_repository_opens(
 fn checkout_without_a_target_is_a_usage_error_before_any_repository_opens() {
     let directory = tempdir().expect("temporary directory");
     let output = orna(directory.path(), &["checkout"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("E1001"), "{stderr}");
+}
+
+#[test]
+fn upgrade_without_a_destination_is_a_usage_error_before_any_repository_opens() {
+    let directory = tempdir().expect("temporary directory");
+    let output = orna(directory.path(), &["upgrade", "--to-format", "3"]);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(2), "{stderr}");
     assert!(stderr.contains("E1001"), "{stderr}");

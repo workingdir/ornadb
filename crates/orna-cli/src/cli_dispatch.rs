@@ -153,6 +153,7 @@ pub(super) fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
             arguments,
         ),
         Command::Migrate(ref arguments) => run_migrate(&parsed.endpoint, arguments),
+        Command::Upgrade(arguments) => run_upgrade(&parsed.endpoint, &arguments),
         Command::Publish(ref arguments) => cli_publish::run(&parsed.endpoint, arguments),
         Command::Commit(ref arguments) => cli_commit::run(&parsed.endpoint, arguments),
         Command::Annotate(arguments) => cli_annotate::run(&arguments),
@@ -1374,13 +1375,18 @@ fn run_migrate_abort<'a>(
         &repository,
         &destination,
     )
-    .map_err(|error| {
-        Diagnostic::target_with_detail(
+    .map_err(|error| match error {
+        orna_repository::RepositoryError::MigrationCopyAdvanced => Diagnostic::target(
+            "E2100",
+            "migration copy has begun activation and cannot be discarded",
+            "finish activation with `orna upgrade --to-format 3 DEST --yes-activate`; nothing was removed",
+        ),
+        other => Diagnostic::target_with_detail(
             "E2100",
             "migration copy could not be discarded",
             "verify that DEST is the prepared copy of this source; the source worktree is unchanged",
-            format!("{error:?}"),
-        )
+            format!("{other:?}"),
+        ),
     })?;
     match outcome {
         orna_repository::migration_copy::DiscardOutcome::Discarded => println!(
@@ -1391,8 +1397,147 @@ fn run_migrate_abort<'a>(
             "nothing to discard: no prepared format-3 migration copy at destination={}",
             destination.display()
         ),
+        orna_repository::migration_copy::DiscardOutcome::AlreadyActivated => println!(
+            "nothing discarded: destination is an activated format-3 repository, destination={}",
+            destination.display()
+        ),
     }
     Ok(())
+}
+
+/// `orna upgrade --to-format 3 DEST --yes-activate`: activates the prepared
+/// format-3 copy at DEST by publishing its candidate and completing the runtime
+/// intent. Without `--yes-activate` nothing is changed.
+fn run_upgrade(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnostic> {
+    let destination = parse_upgrade_arguments(arguments)?;
+    let source = std::path::Path::new(local_project_path(endpoint)?);
+    let repository = orna_repository::Repository::discover(source).map_err(|error| {
+        Diagnostic::target_with_detail(
+            "E2100",
+            "upgrade source could not be opened",
+            "run the command from the local format-1 or format-2 worktree that the copy was prepared from",
+            format!("{error:?}"),
+        )
+    })?;
+    let destination = std::path::PathBuf::from(destination);
+    let candidate =
+        orna_repository::migration_copy::prepared_candidate(&destination).map_err(|error| {
+            Diagnostic::target_with_detail(
+                "E2100",
+                "prepared migration copy could not be read for activation",
+                "verify that DEST is the prepared copy of this source; nothing was published",
+                format!("{error:?}"),
+            )
+        })?;
+    let store_for = |staged: &orna_repository::Repository,
+                     database: orna_repository::DatabaseId| {
+        activation_store(&repository, staged, database)
+    };
+    let outcome = orna_repository::migration_copy::activate_prepared_format3_migration(
+        &repository,
+        &destination,
+        &candidate,
+        crate::invocation_owner_id(),
+        &store_for,
+    )
+    .map_err(|error| {
+        Diagnostic::target_with_detail(
+            "E2100",
+            "prepared migration copy could not be activated",
+            "verify that DEST is the prepared copy of this source and re-run `orna upgrade --to-format 3 DEST --yes-activate` to resume; the source worktree is unchanged",
+            format!("{error:?}"),
+        )
+    })?;
+    match outcome {
+        orna_repository::migration_copy::ActivationOutcome::Activated => println!(
+            "activated format-3 migration copy: destination={}",
+            destination.display()
+        ),
+        orna_repository::migration_copy::ActivationOutcome::AlreadyActivated => println!(
+            "already activated format-3 migration copy: destination={}",
+            destination.display()
+        ),
+    }
+    Ok(())
+}
+
+/// Parses `upgrade --to-format 3 DEST --yes-activate` and returns DEST. Every
+/// refusal happens before the repository is opened, so nothing is changed.
+fn parse_upgrade_arguments(arguments: &[String]) -> Result<&str, Diagnostic> {
+    let mut words = arguments.iter().map(String::as_str);
+    let mut format_three = false;
+    let mut confirmed = false;
+    let mut destination = None;
+    while let Some(word) = words.next() {
+        match word {
+            "--to-format" if !format_three => {
+                let format = words.next().ok_or_else(|| {
+                    Diagnostic::usage(
+                        "E1001",
+                        "`--to-format` needs a format",
+                        "supply `--to-format 3` after `upgrade`",
+                    )
+                })?;
+                if format != "3" {
+                    return Err(Diagnostic::usage(
+                        "E1002",
+                        "unsupported `--to-format` target",
+                        "only `--to-format 3` is supported; nothing was changed",
+                    ));
+                }
+                format_three = true;
+            }
+            "--yes-activate" if !confirmed => confirmed = true,
+            _ if destination.is_none() && !word.starts_with("--") => destination = Some(word),
+            _ => {
+                return Err(Diagnostic::usage(
+                    "E1002",
+                    "unsupported `upgrade` arguments",
+                    "use `upgrade --to-format 3 DEST --yes-activate`; nothing was changed",
+                ));
+            }
+        }
+    }
+    let Some(destination) = destination else {
+        return Err(Diagnostic::usage(
+            "E1001",
+            "`upgrade` needs a destination",
+            "supply DEST, the prepared copy from `orna migrate copy DEST`",
+        ));
+    };
+    if !format_three {
+        return Err(Diagnostic::usage(
+            "E1001",
+            "`upgrade` needs `--to-format 3`",
+            "supply `--to-format 3` before DEST; nothing was changed",
+        ));
+    }
+    if !confirmed {
+        return Err(Diagnostic::usage(
+            "E1002",
+            "`upgrade` activates the prepared copy only with `--yes-activate`",
+            "re-run with `--yes-activate` to publish the prepared candidate into DEST; nothing was changed",
+        ));
+    }
+    Ok(destination)
+}
+
+/// The store a prepared copy must match: exactly what a fresh preparation of
+/// `source` builds. The source may move after preparation, so this runs on
+/// every re-derivation and refuses, before the copy's ref moves, while the
+/// source holds unpublished runtime mutations.
+fn activation_store(
+    source: &orna_repository::Repository,
+    staged: &orna_repository::Repository,
+    database: orna_repository::DatabaseId,
+) -> Result<orna_repository::migration_copy::MigrationStore, orna_repository::RepositoryError> {
+    let store = orna_application::build_migration_store(staged, database)?;
+    let unpublished = crate::source_unpublished_mutation_count(source)
+        .map_err(|_| orna_repository::RepositoryError::PublicationRecoveryConflict)?;
+    if unpublished != 0 {
+        return Err(orna_repository::RepositoryError::PublicationRecoveryConflict);
+    }
+    Ok(store)
 }
 
 fn run_status_short_with_runtime_summary(
