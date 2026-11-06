@@ -627,6 +627,16 @@ pub(super) fn describe_storage_failure(
                     .to_owned(),
             );
         }
+        E::LegacyPathChanged { path } => {
+            return Diagnostic::target_with_detail(
+                "E2300",
+                title,
+                MANAGED_EDIT_HELP,
+                format!(
+                    "legacy file {path} was edited after capture; the migration retires it, so the edit is kept on disk and HEAD was not changed"
+                ),
+            );
+        }
         E::RecoveryIndexConflict => {
             "index and worktree match neither recorded state; resolve the conflict before retrying"
                 .to_owned()
