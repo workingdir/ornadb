@@ -663,12 +663,12 @@ fn cli_migration_copy_prepares_a_populated_format_two_source() {
 /// loose row unit carrying an inline ORR-2 Blob, the format-2 record and the
 /// legacy sidecar.
 fn initialize_populated_format_two_source(root: &Path) {
+    const MAIN: &str = "pub table Contact(id: Str) {\n    name: Str,\n    avatar: Blob,\n}\n";
+    const ALICE: &str = "{\n    name: \"Alice Smith\",\n    avatar: \"aGVsbG8=\",\n}\n";
     git_output(root, &["init", "-b", "main"]);
     git_output(root, &["config", "user.name", "kierandrewett"]);
     git_output(root, &["config", "user.email", "kieran@drewett.dev"]);
     git_output(root, &["config", "commit.gpgsign", "false"]);
-    const MAIN: &str = "pub table Contact(id: Str) {\n    name: Str,\n    avatar: Blob,\n}\n";
-    const ALICE: &str = "{\n    name: \"Alice Smith\",\n    avatar: \"aGVsbG8=\",\n}\n";
     fs::write(root.join("main.orna"), MAIN).unwrap();
     fs::create_dir_all(root.join("contacts/Contact")).unwrap();
     fs::write(root.join("contacts/Contact/alice-smith.orna"), ALICE).unwrap();
