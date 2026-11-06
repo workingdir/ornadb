@@ -76,7 +76,7 @@ mod legacy_store;
 pub use legacy_store::{
     LegacyField, LegacyFieldName, LegacyReadError, LegacyRow, LegacyRowRevision, LegacyRowSource,
     LegacyTableAddress, LegacyTableRows, legacy_loose_row_path, read_legacy_row_revisions,
-    read_legacy_table_rows,
+    read_legacy_table_rows, single_legacy_source,
 };
 
 const DIGEST_DOMAIN: &[u8] = b"ORNA-ACTIVATION-DIGEST\0";
