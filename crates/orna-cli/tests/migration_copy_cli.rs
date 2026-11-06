@@ -1127,3 +1127,60 @@ fn migration_refuses_a_source_with_unpublished_rows_and_changes_nothing() {
     }
     assert_eq!(pending_mutation_count(&source), 1);
 }
+
+/// A live runtime owner holds the worktree owner lock and its WAL sidecars.
+/// The refusal probe runs in another process: it must not take the lock, must
+/// not remove those sidecars, and must still refuse the unpublished tail.
+#[test]
+fn migration_refusal_leaves_a_live_owners_sidecars_intact() {
+    let parent = TempDir::new().unwrap();
+    let git_trace = parent.path().join("git-trace.log");
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    initialize_legacy_source(&source);
+    append_unpublished_mutation(&source);
+
+    // Keep a runtime open for the whole probe: it owns the lock and the sidecars.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let live = runtime.block_on(async {
+        let repository = Repository::discover(&source).unwrap();
+        let (identity, digest) =
+            orna_runtime::migration_source_runtime_identity(&repository).unwrap();
+        RuntimeState::open(&repository, identity, digest)
+            .await
+            .unwrap()
+    });
+    let state_db = Repository::discover(&source)
+        .unwrap()
+        .runtime_paths()
+        .state_db();
+    let sidecars_before = state_files(&state_db);
+    assert!(
+        sidecars_before[1].is_some() && sidecars_before[2].is_some(),
+        "the live owner holds its WAL and shared-memory sidecars"
+    );
+
+    let destination = parent.path().join("refused");
+    let refused = run_copy(&source, &destination, "0", &git_trace);
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        !refused.status.success(),
+        "a live source with a tail is refused"
+    );
+    assert!(
+        stderr.contains("unpublished_mutations=1"),
+        "the refusal names the count: {stderr}"
+    );
+    assert!(!destination.exists());
+    assert_eq!(
+        state_files(&state_db),
+        sidecars_before,
+        "a live owner's state.db and sidecars are left byte-identical"
+    );
+
+    drop(live);
+    drop(runtime);
+}

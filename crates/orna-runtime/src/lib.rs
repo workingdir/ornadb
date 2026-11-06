@@ -11964,20 +11964,25 @@ impl RuntimeState {
     }
 
     /// Counts the unpublished tail of the runtime at `repository` without
-    /// writing to it. Unlike [`RuntimeState::open`], this neither creates
-    /// `state.db`, takes the owner lock, nor runs schema setup: the database is
-    /// opened read-only. A repository with no `state.db` has an empty tail.
-    /// The count is keyed by table, not by runtime identity, so it needs no
-    /// identity derivation.
+    /// writing to its database. Unlike [`RuntimeState::open`], this neither
+    /// creates `state.db` nor runs schema setup: the database is opened
+    /// read-only. A repository with no `state.db` has an empty tail. The count
+    /// is keyed by table, not by runtime identity, so it needs no identity.
+    ///
+    /// The probe takes the runtime owner lock without blocking. Only while it
+    /// holds that lock may it remove the `-wal`/`-shm` sidecars it created: a
+    /// live owner using those sidecars holds the lock, so they are then left
+    /// intact. A busy lock still counts read-only and removes nothing.
     pub async fn read_pending_count(repository: &Repository) -> Result<usize, RuntimeError> {
         let state_db = repository.runtime_paths().state_db();
         if !state_db.exists() {
             return Ok(0);
         }
-        // A read-only connection to a WAL database materialises a `-wal` and a
-        // `-shm` the source did not have. Both are rebuildable from `state.db`
-        // and hold no committed data, so the probe removes the ones it created
-        // and leaves the source as it was found.
+        let owner_lock = match repository.acquire_runtime_owner_lock(process_owner_id()) {
+            Ok(lock) => Some(lock),
+            Err(RepositoryError::RepositoryBusy) => None,
+            Err(_) => return Err(RuntimeError::StorageUnavailable),
+        };
         let sidecars = ["-wal", "-shm"].map(|suffix| {
             let mut path = state_db.clone().into_os_string();
             path.push(suffix);
@@ -11996,11 +12001,14 @@ impl RuntimeState {
             Self::count_pending(&connection).await
         }
         .await;
-        for (path, existed) in sidecars.iter().zip(existed) {
-            if !existed {
-                let _ = std::fs::remove_file(path);
+        if owner_lock.is_some() {
+            for (path, existed) in sidecars.iter().zip(existed) {
+                if !existed {
+                    let _ = std::fs::remove_file(path);
+                }
             }
         }
+        drop(owner_lock);
         count
     }
 
