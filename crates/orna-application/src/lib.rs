@@ -81,6 +81,7 @@ pub use legacy_store::{
 };
 pub use migration_rows::{LegacyTable, MigrationRowError, MigrationRowInput, migration_row_input};
 mod migration_store;
+mod upgrade_gate;
 pub use migration_store::build_migration_store;
 
 const DIGEST_DOMAIN: &[u8] = b"ORNA-ACTIVATION-DIGEST\0";
