@@ -173,6 +173,19 @@ pub enum RelationAdmissionError {
     UncommittedRelationRows {
         relation_id: [u8; 16],
     },
+    /// A staged row's key or stored fields do not fit the table's schema, so
+    /// nothing is written.
+    InvalidStagedRow {
+        relation_id: [u8; 16],
+    },
+    /// Two staged rows carry the same key.
+    DuplicateStagedRow {
+        relation_id: [u8; 16],
+    },
+    /// A committed relation keeps its rows, so staging cannot replace them.
+    StagedRowsOnCommittedRelation {
+        relation_id: [u8; 16],
+    },
     /// One relation was supplied twice, or a table used the system relation's
     /// identity.
     DuplicateRelation {
@@ -238,6 +251,21 @@ impl std::fmt::Display for RelationAdmissionError {
             Self::UncommittedRelationRows { relation_id } => write!(
                 formatter,
                 "relation {} has staged rows but was never committed; commit its table unchanged first or unstage the rows",
+                Uuid::from_bytes(*relation_id)
+            ),
+            Self::InvalidStagedRow { relation_id } => write!(
+                formatter,
+                "relation {} has a staged row its schema refuses",
+                Uuid::from_bytes(*relation_id)
+            ),
+            Self::DuplicateStagedRow { relation_id } => write!(
+                formatter,
+                "relation {} stages one key more than once",
+                Uuid::from_bytes(*relation_id)
+            ),
+            Self::StagedRowsOnCommittedRelation { relation_id } => write!(
+                formatter,
+                "relation {} is committed, so its rows cannot be restaged; commit it unchanged or unstage the rows",
                 Uuid::from_bytes(*relation_id)
             ),
             Self::DuplicateRelation { relation_id } => write!(
@@ -819,6 +847,7 @@ pub struct StagedRelation {
     descriptor: SchemaDescriptor,
     automatic_key: bool,
     introductions: BTreeMap<[u8; 16], Raw>,
+    rows: Vec<(TypedKey, Vec<u8>)>,
 }
 
 impl StagedRelation {
@@ -828,6 +857,7 @@ impl StagedRelation {
             descriptor,
             automatic_key: false,
             introductions: BTreeMap::new(),
+            rows: Vec::new(),
         }
     }
 
@@ -847,6 +877,18 @@ impl StagedRelation {
     #[must_use]
     pub fn with_introductions(mut self, introductions: BTreeMap<[u8; 16], Raw>) -> Self {
         self.introductions = introductions;
+        self
+    }
+
+    /// The canonical stored rows this staging admits into the table's
+    /// primary map: each typed key with its canonical stored-field tuple
+    /// (store-format-3 section 5; ORNA-ROW-001). Each row is validated
+    /// against the closed descriptor and written in logical key order, one
+    /// row per key. Staging never rewrites the rows of a relation a commit
+    /// already holds, so such a relation refuses rows.
+    #[must_use]
+    pub fn with_rows(mut self, rows: Vec<(TypedKey, Vec<u8>)>) -> Self {
+        self.rows = rows;
         self
     }
 
@@ -1842,9 +1884,11 @@ struct AdmittedRelations {
 /// node. A committed relation keeps its rows and evolves when its descriptor
 /// changes (ORNA-EVOL-002), reading them from `evolution_source`; it cannot
 /// be unstaged. Any other relation is admitted by this commit: a new one, or
-/// one only an earlier staging created, gets its schema node and one empty
-/// leaf, and an uncommitted relation the staged source no longer declares is
-/// dropped; either is refused when the relation holds rows. When a committed
+/// one only an earlier staging created, gets its schema node and its staged
+/// rows (none unless the table declares rows), and an uncommitted relation
+/// the staged source no longer declares is dropped; either is refused when
+/// the relation holds rows. Staged rows are validated before anything is
+/// written, so a refused row leaves the store unchanged. When a committed
 /// relation's table retires it leaves the store with its rows (ORNA-OBJECT-004).
 fn admit_relations(
     writer: &mut NodeWriter<'_>,
@@ -1870,7 +1914,11 @@ fn admit_relations(
         }
     };
     let mut removed = Vec::new();
-    for relation in relations {
+    let staged_rows = relations
+        .iter()
+        .map(|relation| staged_row_entries(relation, committed))
+        .collect::<Result<Vec<_>, _>>()?;
+    for (relation, rows) in relations.iter().zip(staged_rows) {
         let relation_id = relation.relation_id;
         if is_system_relation(&relation_id) || !staged.insert(relation_id) {
             return Err(RelationAdmissionError::DuplicateRelation { relation_id });
@@ -1881,7 +1929,13 @@ fn admit_relations(
             return Err(RelationAdmissionError::CommittedRelationUnstaged { relation_id });
         }
         match existing {
-            Some(existing) if existing.schema_oid == schema_oid => {}
+            Some(existing)
+                if existing.schema_oid == schema_oid && committed.contains_key(&relation_id) => {}
+            Some(existing) if existing.schema_oid == schema_oid => {
+                let entry =
+                    write_staged_relation(writer, relation_id, schema_oid, &schema_digest, &rows)?;
+                entries.insert(relation_id, entry);
+            }
             Some(existing) if committed.contains_key(&relation_id) => {
                 allow(relation_id)?;
                 let source = evolution_source.ok_or(RelationAdmissionError::InvalidStoreEntry)?;
@@ -1904,21 +1958,9 @@ fn admit_relations(
                 return Err(RelationAdmissionError::UncommittedRelationRows { relation_id });
             }
             _ => {
-                let primary_root = NativeGraphContext::build_canonical_ordered_map(
-                    &rows_domain(&relation_id, &schema_digest),
-                    &[],
-                    &mut |node| writer.node(node),
-                )?;
-                entries.insert(
-                    relation_id,
-                    StoreRelationEntry {
-                        relation_id,
-                        schema_oid,
-                        primary_root,
-                        secondary_root: None,
-                        row_count: 0,
-                    },
-                );
+                let entry =
+                    write_staged_relation(writer, relation_id, schema_oid, &schema_digest, &rows)?;
+                entries.insert(relation_id, entry);
                 created.push(relation_id);
             }
         }
@@ -2085,16 +2127,7 @@ fn write_sealed_relation(
     invalid: fn() -> RelationAdmissionError,
 ) -> Result<StoreRelationEntry, RelationAdmissionError> {
     let (schema_oid, schema_digest) = write_schema_node(writer, descriptor)?;
-    let mut entries = Vec::with_capacity(rows.len());
-    for (key, fields) in rows {
-        let key_bytes = key.canonical_bytes().map_err(|_| invalid())?;
-        descriptor
-            .validate_stored_row(relation_id, &key_bytes, &fields)
-            .map_err(|_| invalid())?;
-        let value = RowValue::decode_canonical_fields(fields).map_err(|_| invalid())?;
-        entries.push(RowEntry::new(key, value));
-    }
-    entries.sort_by(|left, right| left.key().cmp(right.key()));
+    let entries = sealed_row_entries(relation_id, descriptor, rows, invalid)?;
     let primary_root = NativeGraphContext::build_canonical_ordered_map(
         &rows_domain(&relation_id, &schema_digest),
         &entries,
@@ -2106,6 +2139,82 @@ fn write_sealed_relation(
         primary_root,
         secondary_root: None,
         row_count: entries.len() as u64,
+    })
+}
+
+/// Validates `rows` against the sealed `descriptor` and returns them as row
+/// entries in logical key order.
+fn sealed_row_entries(
+    relation_id: [u8; 16],
+    descriptor: &SchemaDescriptor,
+    rows: Vec<(TypedKey, Vec<u8>)>,
+    invalid: impl Fn() -> RelationAdmissionError,
+) -> Result<Vec<RowEntry>, RelationAdmissionError> {
+    let mut entries = Vec::with_capacity(rows.len());
+    for (key, fields) in rows {
+        let key_bytes = key.canonical_bytes().map_err(|_| invalid())?;
+        descriptor
+            .validate_stored_row(relation_id, &key_bytes, &fields)
+            .map_err(|_| invalid())?;
+        let value = RowValue::decode_canonical_fields(fields).map_err(|_| invalid())?;
+        entries.push(RowEntry::new(key, value));
+    }
+    entries.sort_by(|left, right| left.key().cmp(right.key()));
+    Ok(entries)
+}
+
+/// The validated rows a staged relation admits, in logical key order, one per
+/// key. A committed relation keeps its rows, so it refuses staged rows.
+/// Staged rows are checked structurally only (`validate_stored_row`). The
+/// context-bound check (`validate_stored_row_in_context`) needs a
+/// `Format3Context`, which staging does not hold, so a Blob or table
+/// reference is not bound to the database of its containing snapshot here.
+fn staged_row_entries(
+    relation: &StagedRelation,
+    committed: &BTreeMap<[u8; 16], NativeOid>,
+) -> Result<Vec<RowEntry>, RelationAdmissionError> {
+    let relation_id = relation.relation_id;
+    if relation.rows.is_empty() {
+        return Ok(Vec::new());
+    }
+    if committed.contains_key(&relation_id) {
+        return Err(RelationAdmissionError::StagedRowsOnCommittedRelation { relation_id });
+    }
+    let entries = sealed_row_entries(
+        relation_id,
+        &relation.descriptor,
+        relation.rows.clone(),
+        || RelationAdmissionError::InvalidStagedRow { relation_id },
+    )?;
+    if entries
+        .windows(2)
+        .any(|pair| pair[0].key() == pair[1].key())
+    {
+        return Err(RelationAdmissionError::DuplicateStagedRow { relation_id });
+    }
+    Ok(entries)
+}
+
+/// Writes the primary map of a staged relation holding `rows` under its
+/// schema node.
+fn write_staged_relation(
+    writer: &mut NodeWriter<'_>,
+    relation_id: [u8; 16],
+    schema_oid: NativeOid,
+    schema_digest: &[u8; 32],
+    rows: &[RowEntry],
+) -> Result<StoreRelationEntry, RelationAdmissionError> {
+    let primary_root = NativeGraphContext::build_canonical_ordered_map(
+        &rows_domain(&relation_id, schema_digest),
+        rows,
+        &mut |node| writer.node(node),
+    )?;
+    Ok(StoreRelationEntry {
+        relation_id,
+        schema_oid,
+        primary_root,
+        secondary_root: None,
+        row_count: rows.len() as u64,
     })
 }
 
@@ -2908,6 +3017,279 @@ mod tests {
                 CommittedRelationChanges::Allowed,
             )
             .unwrap()
+    }
+
+    /// The canonical stored fields of one `Str` title: a one-element CBOR
+    /// array holding the text (store-format-3 section 5).
+    fn title_fields(title: &str) -> Vec<u8> {
+        assert!(title.len() < 24, "test titles keep one-byte CBOR headers");
+        let mut fields = vec![0x81, 0x60 | title.len() as u8];
+        fields.extend_from_slice(title.as_bytes());
+        fields
+    }
+
+    /// Two rows in deliberately unsorted input order.
+    fn music_rows(reversed: bool) -> Vec<(crate::row_store::TypedKey, Vec<u8>)> {
+        let mut rows = vec![
+            (
+                crate::row_store::TypedKey::Text("b".to_owned()),
+                title_fields("Beta"),
+            ),
+            (
+                crate::row_store::TypedKey::Text("a".to_owned()),
+                title_fields("Alpha"),
+            ),
+        ];
+        if reversed {
+            rows.reverse();
+        }
+        rows
+    }
+
+    /// Stages the `music` relation with `rows` and the store identities.
+    fn stage_rows(
+        repository: &Repository,
+        rows: Vec<(crate::row_store::TypedKey, Vec<u8>)>,
+    ) -> Result<StoreAdmission, RelationAdmissionError> {
+        stage_typed_rows(repository, "Str", rows)
+    }
+
+    /// Stages the `music` relation whose `title` has the primitive `title_type`.
+    fn stage_typed_rows(
+        repository: &Repository,
+        title_type: &str,
+        rows: Vec<(crate::row_store::TypedKey, Vec<u8>)>,
+    ) -> Result<StoreAdmission, RelationAdmissionError> {
+        let music = relation(1);
+        let staged = repository.capture_staged_candidate()?;
+        repository.stage_store_admission(
+            &staged,
+            &[StagedRelation::new(music, table_descriptor(music, title_type)).with_rows(rows)],
+            &identities_for(&[music]),
+            CommittedRelationChanges::Allowed,
+        )
+    }
+
+    /// The committed `music` row count and its rows in key order.
+    fn committed_music(
+        repository: &Repository,
+    ) -> (Option<u64>, Vec<(crate::row_store::TypedKey, Vec<u8>)>) {
+        let head = repository.head().unwrap().expect("committed HEAD");
+        let format = repository
+            .open_pinned_format_context(head.as_str())
+            .unwrap();
+        let rows = format
+            .load_row_map(relation(1))
+            .expect("the relation resolves");
+        let graph = format
+            .open_native_graph(&rows)
+            .expect("issue the relation graph");
+        let scope = graph.open_read_scope().unwrap();
+        (
+            rows.version().row_count(),
+            graph.committed_rows_with_fields(&scope).unwrap(),
+        )
+    }
+
+    #[test]
+    fn staged_rows_are_written_in_key_order_and_read_back() {
+        let (directory, repository) = initialized_repository();
+        let root = directory.path();
+        let music = relation(1);
+        let admission = stage_rows(&repository, music_rows(false)).expect("admit the rows");
+        assert!(admission.changed());
+        git(root, &["commit", "--quiet", "-m", "rows"]);
+
+        let head = repository.head().unwrap().expect("committed HEAD");
+        let format = repository
+            .open_pinned_format_context(head.as_str())
+            .unwrap();
+        let rows = format
+            .load_row_map(music)
+            .expect("the admitted relation resolves");
+        assert_eq!(rows.version().row_count(), Some(2));
+        let graph = format
+            .open_native_graph(&rows)
+            .expect("issue the relation graph");
+        let scope = graph.open_read_scope().unwrap();
+        assert_eq!(
+            graph.committed_rows_with_fields(&scope).unwrap(),
+            vec![
+                (
+                    crate::row_store::TypedKey::Text("a".to_owned()),
+                    title_fields("Alpha")
+                ),
+                (
+                    crate::row_store::TypedKey::Text("b".to_owned()),
+                    title_fields("Beta")
+                ),
+            ]
+        );
+        assert_eq!(git(root, &["status", "--porcelain"]), "");
+    }
+
+    #[test]
+    fn staged_rows_restage_to_the_same_store_root_in_any_input_order() {
+        let (_directory, repository) = initialized_repository();
+        let first = stage_rows(&repository, music_rows(false))
+            .expect("admit the rows")
+            .store_root()
+            .clone();
+        // The second run restages over the first run's uncommitted rows and
+        // supplies them in the opposite order.
+        let second = stage_rows(&repository, music_rows(true))
+            .expect("admit the reversed rows")
+            .store_root()
+            .clone();
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn refused_rows_leave_the_store_unchanged() {
+        let (_directory, repository) = initialized_repository();
+        let music = relation(1);
+        stage_rows(&repository, music_rows(false)).expect("admit the rows");
+        let store_before = repository
+            .capture_staged_candidate()
+            .unwrap()
+            .store_root()
+            .cloned();
+        assert!(store_before.is_some());
+
+        // A title that is an integer is not a `Str` value the schema admits.
+        let mut mistyped = music_rows(false);
+        mistyped.push((
+            crate::row_store::TypedKey::Text("c".to_owned()),
+            vec![0x81, 0x01],
+        ));
+        let error = stage_rows(&repository, mistyped).expect_err("a row the schema refuses");
+        assert!(matches!(
+            error,
+            RelationAdmissionError::InvalidStagedRow { relation_id } if relation_id == music
+        ));
+        assert_eq!(
+            repository
+                .capture_staged_candidate()
+                .unwrap()
+                .store_root()
+                .cloned(),
+            store_before
+        );
+
+        // Two rows with the same key are refused as one unit.
+        let mut duplicated = music_rows(false);
+        duplicated.push((
+            crate::row_store::TypedKey::Text("a".to_owned()),
+            title_fields("Again"),
+        ));
+        let error = stage_rows(&repository, duplicated).expect_err("a duplicate key");
+        assert!(matches!(
+            error,
+            RelationAdmissionError::DuplicateStagedRow { relation_id } if relation_id == music
+        ));
+        assert_eq!(
+            repository
+                .capture_staged_candidate()
+                .unwrap()
+                .store_root()
+                .cloned(),
+            store_before
+        );
+    }
+
+    #[test]
+    fn restaging_without_rows_drops_the_uncommitted_rows() {
+        let (_directory, repository) = initialized_repository();
+        let empty = stage_rows(&repository, Vec::new())
+            .expect("admit the empty relation")
+            .store_root()
+            .clone();
+        stage_rows(&repository, music_rows(false)).expect("admit the rows");
+        let restaged = stage_rows(&repository, Vec::new())
+            .expect("restage without rows")
+            .store_root()
+            .clone();
+        // The restage matches a fresh empty stage, not the two rows it replaces.
+        assert_eq!(restaged, empty);
+    }
+
+    #[test]
+    fn staging_rows_into_a_committed_relation_is_refused() {
+        let (directory, repository) = initialized_repository();
+        let root = directory.path();
+        stage_rows(&repository, music_rows(false)).expect("admit the rows");
+        git(root, &["commit", "--quiet", "-m", "rows"]);
+
+        let error = stage_rows(&repository, music_rows(false))
+            .expect_err("committed relations keep their rows");
+        assert!(matches!(
+            error,
+            RelationAdmissionError::StagedRowsOnCommittedRelation { relation_id }
+                if relation_id == relation(1)
+        ));
+        assert_eq!(git(root, &["status", "--porcelain"]), "");
+    }
+
+    /// Two fresh repositories given the same rows commit the same rows. Their
+    /// store roots differ only because the root binds each database id.
+    #[test]
+    fn fresh_repositories_admit_the_same_rows() {
+        let mut outcomes = Vec::new();
+        for _ in 0..2 {
+            let (directory, repository) = initialized_repository();
+            let root = directory.path();
+            let store_root = stage_rows(&repository, music_rows(false))
+                .expect("admit the rows")
+                .store_root()
+                .clone();
+            git(root, &["commit", "--quiet", "-m", "rows"]);
+            outcomes.push((store_root, committed_music(&repository)));
+        }
+        assert_ne!(outcomes[0].0, outcomes[1].0);
+        assert_eq!(outcomes[0].1, outcomes[1].1);
+        assert_eq!(outcomes[0].1.0, Some(2));
+    }
+
+    #[test]
+    fn staged_blob_column_admits_structural_blob_references_only() {
+        use orna_value::{ROV3_BLOB_TAG, encode_canonical_storage_value};
+        let (directory, repository) = initialized_repository();
+        let root = directory.path();
+        let key = |id: &str| crate::row_store::TypedKey::Text(id.to_owned());
+        // A Blob column holds a ROV-3 reference; raw bytes and text are not Blob values.
+        let encode_row = |value: Raw| {
+            encode_canonical_storage_value(&Raw::Array(vec![value])).expect("encode the row")
+        };
+        for refused in [Raw::Text("Alpha".to_owned()), Raw::Bytes(vec![1, 2, 3])] {
+            let error =
+                stage_typed_rows(&repository, "Blob", vec![(key("a"), encode_row(refused))])
+                    .expect_err("a non-reference value in a Blob column");
+            assert!(matches!(
+                error,
+                RelationAdmissionError::InvalidStagedRow { relation_id } if relation_id == relation(1)
+            ));
+        }
+        // A ROV-3 Blob reference is a Tree dependency of the row node: its oid
+        // names a git tree, so the staged node graph lists the empty tree.
+        let content = b"image bytes";
+        let oid = hex_decode(&crate::test_support::git_with_input(root, &["mktree"], ""))
+            .expect("a hex tree id");
+        let reference = Raw::Tag(
+            ROV3_BLOB_TAG,
+            Box::new(Raw::Array(vec![
+                Raw::Int((content.len() as u64).into()),
+                Raw::Bytes(Sha256::digest(content).to_vec()),
+                Raw::Text("image/png".to_owned()),
+                Raw::Null,
+                Raw::Bytes(oid),
+            ])),
+        );
+        let fields = encode_row(reference);
+        // Structural admission only. The reference's descriptor is not a stored
+        // BlobDescriptor, so context binding is not checked on this path; a
+        // committed read of such a row fails with GraphContextInvalid (defect, not fixed here).
+        stage_typed_rows(&repository, "Blob", vec![(key("a"), fields)])
+            .expect("admit the structurally valid Blob reference row");
     }
 
     #[test]
