@@ -10975,6 +10975,13 @@ pub enum RepositoryError {
     /// copies prepared before ORNA-META-001 carried. It cannot be prepared,
     /// recovered, or published; discarding it is the only remedy.
     LegacyMigrationCopy,
+    /// The declared annotation-default count is not the count the decoded
+    /// legacy rows carry (ORNA-UPGRADE-004). The migration refuses before any
+    /// copy is installed.
+    MigrationAnnotationDefaultsMismatch {
+        declared: u32,
+        decoded: u32,
+    },
     InvalidCompactManifest,
     UnsafeManagedPath,
     NoManagedPaths,
@@ -11056,6 +11063,10 @@ impl fmt::Display for RepositoryError {
             Self::InvalidFormatMigration => {
                 f.write_str("invalid or unsupported repository format migration")
             }
+            Self::MigrationAnnotationDefaultsMismatch { declared, decoded } => write!(
+                f,
+                "declared annotation defaults {declared} do not match the {decoded} Blob values the legacy rows carry"
+            ),
             Self::LegacyMigrationCopy => f.write_str(
                 "prepared migration copy carries the retired migration record; discard it and prepare again",
             ),
