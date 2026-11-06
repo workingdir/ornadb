@@ -104,3 +104,21 @@ pub fn build_format3_store_relations(
         table_names,
     })
 }
+
+#[cfg(test)]
+impl StagedRelations {
+    /// Declared relations with their source table names, for tests of the row
+    /// mapping.
+    pub(crate) fn for_tests(
+        relations: Vec<StagedRelation>,
+        table_names: Vec<([u8; 16], &str)>,
+    ) -> Self {
+        Self {
+            relations,
+            table_names: table_names
+                .into_iter()
+                .map(|(id, name)| (id, name.to_owned()))
+                .collect(),
+        }
+    }
+}
