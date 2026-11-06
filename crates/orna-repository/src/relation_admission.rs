@@ -346,9 +346,11 @@ impl From<AllocatorError> for RelationAdmissionError {
 
 /// The blob descriptor objects a migration wrote, keyed by content identity
 /// (BLOB-001). A descriptor names content by length and SHA-256 and roots its
-/// byte index; identical content always yields the same descriptor object, so
-/// writing the same migration twice yields the same descriptors.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+/// byte index. For one object-hash algorithm, identical content always yields
+/// the same descriptor object, so writing the same migration twice yields the
+/// same descriptors; the object IDs differ between SHA-1 and SHA-256.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "legacy-fixture-writer"), derive(Default))]
 pub struct MigrationBlobDescriptors {
     descriptors: BTreeMap<ContentIdentity, NativeOid>,
 }
@@ -367,21 +369,32 @@ impl Repository {
     /// Content is addressed by its identity alone; media type and suffix live
     /// in the row, not here.
     ///
-    /// Each payload must hash to its identity, otherwise
-    /// `MigrationBlobMismatch` is returned and no descriptor is returned.
-    /// Objects are written loose through the same barrier relation admission
-    /// uses; no ref moves, so objects the caller later abandons stay
-    /// unreachable.
+    /// Every payload is checked against its identity before any object is
+    /// written: a mismatch returns `MigrationBlobMismatch`, writes nothing and
+    /// returns no descriptor. Objects are written loose through the same
+    /// barrier relation admission uses; no ref moves. Byte indexes and
+    /// descriptor nodes are unreferenced until a candidate commit names them.
+    /// An abandoned set stays unreferenced and Git reclaims it once it is older
+    /// than `gc.pruneExpire` (Git's default is two weeks, by mtime); Orna's
+    /// production code never runs `git gc` or prune itself.
+    ///
+    /// Resource bound: every payload is held in memory until this call
+    /// returns, so peak memory is bounded by the sum of the legacy Blob
+    /// payloads in one migration. Streaming them from the legacy store is a
+    /// follow-up (UPGRADE-004).
     pub fn write_migration_blobs(
         &self,
         blobs: &BTreeMap<ContentIdentity, Vec<u8>>,
     ) -> Result<MigrationBlobDescriptors, RelationAdmissionError> {
+        if blobs
+            .iter()
+            .any(|(identity, bytes)| crate::blob_store::digest_bytes(bytes) != *identity)
+        {
+            return Err(RelationAdmissionError::MigrationBlobMismatch);
+        }
         let mut writer = NodeWriter::new(self)?;
         let mut descriptors = BTreeMap::new();
         for (identity, bytes) in blobs {
-            if crate::blob_store::digest_bytes(bytes) != *identity {
-                return Err(RelationAdmissionError::MigrationBlobMismatch);
-            }
             let byte_root = write_byte_index(&mut writer, bytes)?;
             let oid = writer.node(&NodeData::BlobDescriptor {
                 length: identity.length(),
@@ -3961,6 +3974,101 @@ mod tests {
             let mut writer = NodeWriter::new(&repository).unwrap();
             assert_eq!(write_byte_index(&mut writer, &content).unwrap(), byte_root);
         }
+    }
+
+    /// The number of loose objects `git count-objects` reports for `root`.
+    fn loose_object_count(root: &Path) -> u64 {
+        git(root, &["count-objects", "-v"])
+            .lines()
+            .find_map(|line| line.strip_prefix("count: "))
+            .and_then(|count| count.trim().parse().ok())
+            .expect("count-objects reports the loose object count")
+    }
+
+    /// The canonical node a descriptor object names, read through the
+    /// envelope's `data` blob the way the capture test reads it.
+    fn descriptor_node(root: &Path, oid: &NativeOid) -> NodeData {
+        let listing = git(root, &["cat-file", "-p", &oid.to_hex()]);
+        let data = listing
+            .lines()
+            .find_map(|line| line.strip_suffix("\tdata"))
+            .and_then(|header| header.rsplit(' ').next())
+            .expect("descriptor envelope names its data blob")
+            .to_owned();
+        let bytes = std::process::Command::new("git")
+            .current_dir(root)
+            .args(["cat-file", "blob", &data])
+            .output()
+            .expect("read the descriptor data")
+            .stdout;
+        NodeData::decode_canonical(&bytes, GitHashAlgorithm::Sha1).expect("the descriptor decodes")
+    }
+
+    /// An empty migration blob writes the null byte root that
+    /// `BlobDescriptor::empty()` names: zero length, the empty SHA-256 and no
+    /// byte index.
+    #[test]
+    fn empty_migration_blob_has_the_null_byte_root() {
+        let (directory, repository) = initialized_repository();
+        let empty = crate::blob_store::digest_bytes(&[]);
+        let descriptors = repository
+            .write_migration_blobs(&BTreeMap::from([(empty, Vec::new())]))
+            .expect("the empty blob writes");
+        let oid = descriptors
+            .descriptor(&empty)
+            .expect("the empty descriptor was written");
+        let NodeData::BlobDescriptor {
+            length,
+            raw_sha256,
+            byte_root,
+        } = descriptor_node(directory.path(), oid)
+        else {
+            panic!("the written node is a blob descriptor");
+        };
+        let expected = crate::blob_store::BlobDescriptor::empty();
+        assert_eq!(length, 0);
+        assert_eq!(raw_sha256, empty.sha256());
+        assert_eq!(byte_root.as_ref(), expected.byte_root());
+        assert!(byte_root.is_none());
+    }
+
+    /// A payload that does not hash to its identity is refused before any
+    /// object is written, even when another payload in the set is valid.
+    #[test]
+    fn mismatched_migration_blob_writes_nothing() {
+        let (directory, repository) = initialized_repository();
+        let good = varied_bytes(64);
+        let blobs = BTreeMap::from([
+            (crate::blob_store::digest_bytes(&good), good),
+            (crate::blob_store::digest_bytes(&[1, 2, 3]), vec![9, 9, 9]),
+        ]);
+        let before = loose_object_count(directory.path());
+        let Err(error) = repository.write_migration_blobs(&blobs) else {
+            panic!("the mismatched payload is refused");
+        };
+        assert!(matches!(
+            error,
+            RelationAdmissionError::MigrationBlobMismatch
+        ));
+        assert_eq!(loose_object_count(directory.path()), before);
+    }
+
+    /// Writing an already-written blob set again yields the same descriptor
+    /// objects and adds no loose object.
+    #[test]
+    fn rewriting_written_migration_blobs_is_a_no_op() {
+        let (directory, repository) = initialized_repository();
+        let content = varied_bytes(4096);
+        let blobs = BTreeMap::from([(crate::blob_store::digest_bytes(&content), content)]);
+        let first = repository
+            .write_migration_blobs(&blobs)
+            .expect("the blobs write");
+        let after_first = loose_object_count(directory.path());
+        let second = repository
+            .write_migration_blobs(&blobs)
+            .expect("the blobs rewrite");
+        assert_eq!(second, first);
+        assert_eq!(loose_object_count(directory.path()), after_first);
     }
 
     #[test]
