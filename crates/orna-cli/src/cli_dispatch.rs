@@ -1096,7 +1096,7 @@ fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnost
         Diagnostic::usage(
             "E1002",
             "unsupported `migrate` arguments",
-            "use `migrate copy DEST --annotation-defaults N --no-persistent-consumers` or `migrate abort DEST`",
+            "use `migrate copy DEST [--annotation-defaults N] --no-persistent-consumers` or `migrate abort DEST`",
         )
     };
     let mut arguments = arguments.iter().map(String::as_str);
@@ -1147,13 +1147,8 @@ fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnost
             "supply `--no-persistent-consumers` to acknowledge that persistent consumer checkpoints are carried under recorded identity correspondence",
         ));
     }
-    let annotation_defaults = annotation_defaults.ok_or_else(|| {
-        Diagnostic::usage(
-            "E1001",
-            "`migrate copy` needs an annotation-default count",
-            "supply `--annotation-defaults N` from decoded legacy metadata",
-        )
-    })?;
+    // A declared count is an assertion against the count the decoded legacy rows
+    // carry; an omitted one is the decoded count itself (ORNA-UPGRADE-004).
     let source = std::path::Path::new(local_project_path(endpoint)?);
     let repository = orna_repository::Repository::discover(source).map_err(|error| {
         Diagnostic::target_with_detail(
@@ -1163,17 +1158,17 @@ fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnost
             format!("{error:?}"),
         )
     })?;
-    let annotation_defaults = orna_repository::MigrationAnnotationDefaults::new(
-        annotation_defaults,
-    )
-    .map_err(|error| {
-        Diagnostic::target_with_detail(
-            "E2100",
-            "migration annotation metadata was invalid",
-            "supply the count derived from decoded legacy metadata",
-            format!("{error:?}"),
-        )
-    })?;
+    let declared_annotation_defaults = annotation_defaults
+        .map(orna_repository::MigrationAnnotationDefaults::new)
+        .transpose()
+        .map_err(|error| {
+            Diagnostic::target_with_detail(
+                "E2100",
+                "migration annotation metadata was invalid",
+                "supply the count derived from decoded legacy metadata, or omit the flag",
+                format!("{error:?}"),
+            )
+        })?;
     // A format-2 source has no row decoder, so it is refused here, before the
     // staging copy is created and nothing is left behind.
     let source_format = repository
@@ -1238,7 +1233,7 @@ fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnost
         &repository,
         &std::path::PathBuf::from(destination),
         continuity,
-        annotation_defaults,
+        declared_annotation_defaults,
         &|staged: &orna_repository::Repository,
           database: orna_repository::DatabaseId|
          -> Result<
@@ -1246,6 +1241,19 @@ fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnost
             orna_repository::RepositoryError,
         > {
             let store = orna_application::build_migration_store(staged, database)?;
+            // The declared count is an assertion: it must equal the Blob values the
+            // decoded rows carry. A mismatch refuses before any candidate is built.
+            if let Some(declared) = declared_annotation_defaults {
+                let decoded = store.annotation_default_entries;
+                if declared.entry_count() != decoded {
+                    return Err(
+                        orna_repository::RepositoryError::MigrationAnnotationDefaultsMismatch {
+                            declared: declared.entry_count(),
+                            decoded,
+                        },
+                    );
+                }
+            }
             // The store was built from a source that could still move. A source
             // that gained unpublished runtime mutations in that window keeps its
             // tail: refuse before the candidate is built or pinned.
@@ -1267,6 +1275,14 @@ fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnost
             "discard it with `orna migrate abort DEST`, then run `orna migrate copy` again",
         ),
         orna_repository::RepositoryError::Format2RowConversionUnimplemented => format_two_refusal(),
+        orna_repository::RepositoryError::MigrationAnnotationDefaultsMismatch { declared, decoded } => {
+            Diagnostic::target_with_detail(
+                "E2100",
+                "declared annotation defaults do not match the decoded legacy rows",
+                "remove `--annotation-defaults` to use the decoded count, or pass the decoded Blob count; no copy was prepared and the source is unchanged",
+                format!("declared={declared} decoded={decoded}"),
+            )
+        }
         other => Diagnostic::target_with_detail(
             "E2100",
             "migration copy could not be prepared or recovered",

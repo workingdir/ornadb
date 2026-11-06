@@ -69,6 +69,10 @@ pub struct MigrationStore {
     pub identities: Vec<StoredObjectIdentity>,
     pub watermarks: AllocatorWatermarks,
     pub retired: Vec<RetiredLegacyPath>,
+    /// The number of legacy Blob values the store's rows carry. Each takes the
+    /// UPGRADE-004 default annotation, so this is the count a migration derives
+    /// when the operator declares none, and the count a declared one must equal.
+    pub annotation_default_entries: u32,
 }
 
 /// Supplies the [`MigrationStore`] of a migration once its database identity is
@@ -273,16 +277,16 @@ impl MigratedCopy {
 /// marker only when it can take that lock. A copy without a marker is never
 /// reclaimed.
 ///
-/// `continuity` and `annotation_defaults` are the coordinates the conversion
-/// established. Neither is inferred here: a format-1/2 commit this module can
-/// read records no row inventory, so the annotation default is a declared
-/// input and [`LegacyAnnotationInventory`] is where a caller with a legacy
-/// decoder derives it.
+/// `continuity` is the coordinate the conversion established. The annotation
+/// default is derived from the decoded rows that `store_for` builds
+/// ([`MigrationStore::annotation_default_entries`]). A declared
+/// `annotation_defaults` is recorded as given, and the caller asserts it
+/// against that decoded count; `None` records the decoded count.
 pub fn prepare_format3_migration(
     source: &Repository,
     destination: &Path,
     continuity: MigrationContinuityRecord,
-    annotation_defaults: MigrationAnnotationDefaults,
+    annotation_defaults: Option<MigrationAnnotationDefaults>,
     store_for: MigrationStoreSource<'_>,
 ) -> Result<MigratedCopy, RepositoryError> {
     let destination = canonical_destination(destination)?;
@@ -441,7 +445,7 @@ pub fn discard_prepared_format3_migration(
                 source,
                 &destination,
                 continuity,
-                annotation_defaults,
+                Some(annotation_defaults),
                 true,
                 None,
             )?;
@@ -544,7 +548,7 @@ fn prepare_format3_migration_in(
     source: &Repository,
     destination: &Path,
     continuity: MigrationContinuityRecord,
-    annotation_defaults: MigrationAnnotationDefaults,
+    declared_annotation_defaults: Option<MigrationAnnotationDefaults>,
     store_for: MigrationStoreSource<'_>,
 ) -> Result<MigratedCopy, RepositoryError> {
     let context = source
@@ -553,7 +557,7 @@ fn prepare_format3_migration_in(
     if context.supports_writes() {
         return Err(RepositoryError::InvalidFormatMigration);
     }
-    if annotation_defaults.payload_inspected() {
+    if declared_annotation_defaults.is_some_and(|declared| declared.payload_inspected()) {
         return Err(RepositoryError::InvalidFormatMigration);
     }
     let source_format = context.repository_format();
@@ -600,6 +604,13 @@ fn prepare_format3_migration_in(
     }
     let database_id = context.database_id().unwrap_or_else(DatabaseId::new_v4);
     let database_bytes = canonical_database_bytes(&database_id);
+    // The store is built from the staged copy's decoded rows, so the annotation
+    // coordinate below is derived from them, not trusted from the operator.
+    let store = store_for(&copy, database_id)?;
+    let annotation_defaults = match declared_annotation_defaults {
+        Some(declared) => declared,
+        None => MigrationAnnotationDefaults::new(store.annotation_default_entries)?,
+    };
     // ORNA-META-001: the record is not a tracked file. Its bytes still feed the
     // runtime intent, so the identity covers the same coordinates; provenance
     // lives in the journal (continuity, annotation defaults) and in the
@@ -618,7 +629,6 @@ fn prepare_format3_migration_in(
     // byte with a fresh one.
     let commit_time = source_commit_time(source, &source_commit)?;
     let message = candidate_message(source_format, annotation_defaults, &continuity);
-    let store = store_for(&copy, database_id)?;
     require_retired_paths(source, &source_commit, &store.retired)?;
     // The store was built while the source was still free to move. The source
     // must match what the candidate records before any candidate is built or
@@ -1031,7 +1041,7 @@ fn recover_prepared_copy(
     source: &Repository,
     destination: &Path,
     continuity: MigrationContinuityRecord,
-    annotation_defaults: MigrationAnnotationDefaults,
+    declared_annotation_defaults: Option<MigrationAnnotationDefaults>,
     allow_legacy: bool,
     store_for: Option<MigrationStoreSource<'_>>,
 ) -> Result<MigratedCopy, RepositoryError> {
@@ -1043,7 +1053,7 @@ fn recover_prepared_copy(
             source_context.repository_format(),
             RepositoryFormat::Legacy1 | RepositoryFormat::Legacy2
         )
-        || annotation_defaults.payload_inspected()
+        || declared_annotation_defaults.is_some_and(|declared| declared.payload_inspected())
     {
         return Err(RepositoryError::InvalidFormatMigration);
     }
@@ -1068,6 +1078,14 @@ fn recover_prepared_copy(
     if legacy_copy && !allow_legacy {
         return Err(RepositoryError::LegacyMigrationCopy);
     }
+    // An undeclared coordinate is the one the journal recorded when it was
+    // prepared; the store check below re-derives it from the rebuilt rows.
+    let annotation_defaults = match declared_annotation_defaults {
+        Some(declared) => declared,
+        None => journal
+            .migration_annotation_defaults()
+            .ok_or(RepositoryError::PublicationRecoveryConflict)?,
+    };
     if journal.stage() != crate::PublicationJournalStage::Prepared
         || journal.runtime_intent_id().is_none()
         || journal.old_head() != &source_commit
