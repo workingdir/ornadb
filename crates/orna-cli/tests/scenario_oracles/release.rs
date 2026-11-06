@@ -54,7 +54,11 @@ const BLOB_OPERATIONS: &str = "the evaluator dispatches no Blob operation beyond
 const SERVING_ENTRY: &str = "`orna serve` answers with its own native page and never runs the project's `serve()` entry, so no source-hosted application runs";
 const NO_CLONE: &str =
     "there is no `orna clone`, so no second, partial or mirror clone of a database can be made";
-const NO_UPGRADE: &str = "there is no `orna upgrade`, so no format-1/2 history can be opened through an upgrade candidate";
+const ONE_STEP_UPGRADE: &str = "there is no one-step `orna upgrade --to-format 3`: the command refuses without a destination, and the implemented path is `migrate copy DEST` followed by `upgrade --to-format 3 DEST --yes-activate`";
+const UPGRADE_2_CANDIDATE: &str = "`orna upgrade --to-format 2` is refused as an unsupported target, so no format-2 upgrade candidate can be built or reviewed";
+const ANNOTATION_DEFAULTS_FLAG: &str = "`migrate copy --annotation-defaults N` asserts the decoded Blob count and, when omitted, records the decoded count rather than explicit octet-stream and no-suffix defaults";
+const CONSUMER_CARRY_FLAG: &str = "`migrate copy --no-persistent-consumers` acknowledges that consumer checkpoints are carried, not reset, instead of requiring an explicit validated migration map";
+const STORAGE_PREFERENCE_RETIRED: &str = "storage-preference operations are retired, so `orna help` documents no storage option and no storage choice can be driven to check that a legacy layout is not selected; the atomic source/API change needs a legacy-source executor the harness lacks";
 const TYPED_KEYS: &str = "the CLI names rows only by text or bytes: an Int-keyed row cannot be found with `orna query --key`";
 const STORAGE_METADATA: &str = "storage metadata and work counters are unobservable: `sys.Storage` does not evaluate in the project REPL";
 const CHECKOUT: &str = "`orna checkout` to a different commit is refused while drafts are pending or a changed path has uncommitted changes: pending drafts are not carried forward (CHECKOUT-3 step 4) and no checkout journal is written";
@@ -110,7 +114,12 @@ pub fn entries() -> Vec<Entry> {
             EXPORT_COPIES_TAMPERED_STORE,
             row_012_blocker,
         ),
-        Entry::gap("FINAL-ROW-013", "ornadb-5il1.184", NO_UPGRADE, no_upgrade),
+        Entry::gap(
+            "FINAL-ROW-013",
+            "ornadb-5il1.184",
+            ONE_STEP_UPGRADE,
+            one_step_upgrade_absent,
+        ),
         Entry::gap(
             "FINAL-ROW-014",
             "ornadb-5il1.123",
@@ -471,50 +480,50 @@ pub fn entries() -> Vec<Entry> {
         Entry::gap(
             "FINAL-UPGRADE-001",
             "ornadb-5il1.184",
-            NO_UPGRADE,
-            no_upgrade,
+            ONE_STEP_UPGRADE,
+            one_step_upgrade_absent,
         ),
         Entry::gap(
             "FINAL-UPGRADE-002",
             "ornadb-5il1.184",
-            NO_UPGRADE,
-            no_upgrade,
+            ONE_STEP_UPGRADE,
+            one_step_upgrade_absent,
         ),
         Entry::gap(
             "FINAL-UPGRADE-003",
             "ornadb-5il1.184",
-            NO_UPGRADE,
-            no_upgrade,
+            ONE_STEP_UPGRADE,
+            one_step_upgrade_absent,
         ),
         Entry::gap(
             "FINAL-UPGRADE-004",
             "ornadb-5il1.184",
-            NO_UPGRADE,
-            no_upgrade,
+            ANNOTATION_DEFAULTS_FLAG,
+            annotation_defaults_flag_remains,
         ),
         Entry::gap(
             "FINAL-UPGRADE-005",
             "ornadb-5il1.184",
-            NO_UPGRADE,
-            no_upgrade,
+            ANNOTATION_DEFAULTS_FLAG,
+            annotation_defaults_flag_remains,
         ),
         Entry::gap(
             "FINAL-UPGRADE-006",
             "ornadb-5il1.184",
-            NO_UPGRADE,
-            no_upgrade,
+            ONE_STEP_UPGRADE,
+            one_step_upgrade_absent,
         ),
         Entry::gap(
             "FINAL-UPGRADE-007",
             "ornadb-5il1.184",
-            NO_UPGRADE,
-            no_upgrade,
+            STORAGE_PREFERENCE_RETIRED,
+            storage_preference_absent,
         ),
         Entry::gap(
             "FINAL-UPGRADE-008",
             "ornadb-mmsa.29.5",
-            NO_UPGRADE,
-            no_upgrade,
+            CONSUMER_CARRY_FLAG,
+            consumer_carry_flag_remains,
         ),
         Entry::gap(
             "FINAL-UPGRADE-009",
@@ -813,9 +822,24 @@ pub fn entries() -> Vec<Entry> {
             LIVE_WATCH,
             watches_receive_no_update,
         ),
-        Entry::gap("V110-UPGRADE-01", "ornadb-5il1.184", NO_UPGRADE, no_upgrade),
-        Entry::gap("V110-UPGRADE-02", "ornadb-5il1.184", NO_UPGRADE, no_upgrade),
-        Entry::gap("V110-UPGRADE-03", "ornadb-5il1.184", NO_UPGRADE, no_upgrade),
+        Entry::gap(
+            "V110-UPGRADE-01",
+            "ornadb-5il1.184",
+            ONE_STEP_UPGRADE,
+            one_step_upgrade_absent,
+        ),
+        Entry::gap(
+            "V110-UPGRADE-02",
+            "ornadb-5il1.184",
+            UPGRADE_2_CANDIDATE,
+            upgrade_2_candidate_absent,
+        ),
+        Entry::gap(
+            "V110-UPGRADE-03",
+            "ornadb-5il1.184",
+            ONE_STEP_UPGRADE,
+            one_step_upgrade_absent,
+        ),
     ]
 }
 
@@ -2214,8 +2238,62 @@ fn no_clone(db: &mut Db) -> Probe {
     unknown_command(db, &["clone", ".", "copy"])
 }
 
-fn no_upgrade(db: &mut Db) -> Probe {
-    unknown_command(db, &["upgrade", "--to-format", "3"])
+fn one_step_upgrade_absent(db: &mut Db) -> Probe {
+    let run = db.orna(&["upgrade", "--to-format", "3"])?;
+    ensure!(
+        run.code == Some(2) && run.output().contains("`upgrade` needs a destination"),
+        "`orna upgrade --to-format 3` now runs without a destination: {}",
+        run.diagnostic()
+    );
+    Ok(format!("orna upgrade --to-format 3: {}", run.diagnostic()))
+}
+
+fn upgrade_2_candidate_absent(db: &mut Db) -> Probe {
+    let run = db.orna(&["upgrade", "--to-format", "2", "candidate", "--yes-activate"])?;
+    ensure!(
+        run.code == Some(2) && run.output().contains("unsupported `--to-format` target"),
+        "`orna upgrade --to-format 2` is now accepted: {}",
+        run.diagnostic()
+    );
+    Ok(format!(
+        "orna upgrade --to-format 2 candidate --yes-activate: {}",
+        run.diagnostic()
+    ))
+}
+
+fn annotation_defaults_flag_remains(db: &mut Db) -> Probe {
+    help_documents(
+        db,
+        "--annotation-defaults N asserts the Blob count of the decoded rows",
+    )
+}
+
+fn consumer_carry_flag_remains(db: &mut Db) -> Probe {
+    help_documents(
+        db,
+        "--no-persistent-consumers confirms that consumer checkpoints are carried, not reset",
+    )
+}
+
+/// The blocker reproduces while `orna help` still documents `text`.
+fn help_documents(db: &mut Db, text: &str) -> Probe {
+    let run = db.orna(&["help"])?.ok()?;
+    ensure!(
+        run.output().contains(text),
+        "`orna help` no longer documents `{text}`: {}",
+        run.diagnostic()
+    );
+    Ok(format!("orna help documents `{text}`"))
+}
+
+fn storage_preference_absent(db: &mut Db) -> Probe {
+    let run = db.orna(&["help"])?.ok()?;
+    ensure!(
+        !run.output().to_lowercase().contains("storage"),
+        "`orna help` now documents a storage option: {}",
+        run.diagnostic()
+    );
+    Ok("orna help documents no storage option".to_string())
 }
 
 /// The different-commit checkout is refused as the blocker: pending drafts are not

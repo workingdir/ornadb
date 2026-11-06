@@ -399,6 +399,9 @@ pub enum DiscardOutcome {
     Discarded,
     /// Neither the destination nor its quarantine exists; nothing changed.
     NothingToDiscard,
+    /// The destination is an activated format-3 repository. An earlier
+    /// activation finished, so the copy is kept and nothing changed.
+    AlreadyActivated,
 }
 
 /// The reserved sibling a prepared copy is renamed to before it is removed.
@@ -441,6 +444,12 @@ fn quarantine_for(destination: &Path) -> Result<PathBuf, RepositoryError> {
 /// `destination` is absent and only the quarantine's removal remains. Running
 /// the discard again finishes an interrupted removal, and reports
 /// [`DiscardOutcome::NothingToDiscard`] once nothing is left.
+///
+/// A journal past the prepared stage means activation has begun. Only rolling
+/// it forward is safe, so such a copy is refused with
+/// [`RepositoryError::MigrationCopyAdvanced`]. A repository with no journal
+/// that is already an activated format-3 store is kept and reported as
+/// [`DiscardOutcome::AlreadyActivated`].
 pub fn discard_prepared_format3_migration(
     source: &Repository,
     destination: &Path,
@@ -470,8 +479,22 @@ pub fn discard_prepared_format3_migration(
         (true, true) => Err(RepositoryError::PublicationRecoveryConflict),
         (true, false) => {
             require_directory(&destination)?;
-            let journal =
-                copy_journal(&destination)?.ok_or(RepositoryError::PublicationRecoveryConflict)?;
+            let Some(journal) = copy_journal(&destination)? else {
+                // A finished activation leaves no journal behind. Discard keeps
+                // such a repository rather than removing it.
+                let activated = match owned_copy_repository(&destination)? {
+                    Some(copy) => is_activated_format3_copy(&copy)?,
+                    None => false,
+                };
+                return if activated {
+                    Ok(DiscardOutcome::AlreadyActivated)
+                } else {
+                    Err(RepositoryError::PublicationRecoveryConflict)
+                };
+            };
+            if journal.stage() != crate::PublicationJournalStage::Prepared {
+                return Err(RepositoryError::MigrationCopyAdvanced);
+            }
             let (continuity, annotation_defaults) = migration_coordinates(&journal)?;
             // Discard removes a copy whatever its era; only preparation and
             // publication refuse the pre-change shape.
@@ -500,6 +523,162 @@ pub fn discard_prepared_format3_migration(
             Ok(DiscardOutcome::Discarded)
         }
     }
+}
+
+/// The candidate a prepared copy at `destination` publishes: the new head its
+/// publication journal records, or the copy's head once no journal remains.
+pub fn prepared_candidate(destination: &Path) -> Result<GitCommitRef, RepositoryError> {
+    let destination = canonical_destination(destination)?;
+    require_directory(&destination)?;
+    let copy =
+        owned_copy_repository(&destination)?.ok_or(RepositoryError::PublicationRecoveryConflict)?;
+    match copy.read_publication_journal()? {
+        Some(journal) => Ok(journal.new_head().clone()),
+        None => copy.head()?.ok_or(RepositoryError::UnbornHead),
+    }
+}
+
+/// What [`activate_prepared_format3_migration`] did to the copy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActivationOutcome {
+    /// The confirmed candidate was published into the copy and its runtime
+    /// intent completed. The copy is now the activated format-3 repository.
+    Activated,
+    /// An earlier activation completed: the copy holds the confirmed candidate
+    /// as its head and no publication journal remains.
+    AlreadyActivated,
+}
+
+/// Activates the prepared format-3 copy at `destination` by publishing the
+/// candidate `confirmed` names through the copy's own PUB-3 journal (UPGRADE-3
+/// steps 7 and 8). `confirmed` must be the journal's new head; anything else is
+/// refused before the copy changes.
+///
+/// A prepared copy is re-derived from `source` through `store_for` before its
+/// ref moves. Once the ref has advanced, activation only rolls forward: it
+/// resumes the journal to completion and never rewinds the copy.
+pub fn activate_prepared_format3_migration(
+    source: &Repository,
+    destination: &Path,
+    confirmed: &GitCommitRef,
+    owner_id: [u8; 16],
+    store_for: MigrationStoreSource<'_>,
+) -> Result<ActivationOutcome, RepositoryError> {
+    let destination = canonical_destination(destination)?;
+    let source_root = source
+        .worktree()
+        .canonicalize()
+        .map_err(|_| RepositoryError::NotAWorktree)?;
+    if destination == source_root
+        || destination.starts_with(&source_root)
+        || source_root.starts_with(&destination)
+    {
+        return Err(RepositoryError::InvalidSelector);
+    }
+    require_directory(&destination)?;
+    let copy =
+        owned_copy_repository(&destination)?.ok_or(RepositoryError::PublicationRecoveryConflict)?;
+    let _owner_lock = copy.acquire_runtime_owner_lock(owner_id)?;
+    let Some(mut journal) = copy.read_publication_journal()? else {
+        require_activated_copy(&copy, confirmed)?;
+        return Ok(ActivationOutcome::AlreadyActivated);
+    };
+    let intent = journal
+        .runtime_intent_id()
+        .ok_or(RepositoryError::PublicationRecoveryConflict)?;
+    if journal.new_head() != confirmed {
+        return Err(RepositoryError::PublicationRecoveryConflict);
+    }
+    if journal.stage() == crate::PublicationJournalStage::Prepared
+        && copy.head()?.as_ref() == Some(journal.old_head())
+    {
+        let (continuity, annotation_defaults) = migration_coordinates(&journal)?;
+        recover_prepared_copy(
+            source,
+            &destination,
+            continuity,
+            Some(annotation_defaults),
+            false,
+            Some(store_for),
+        )?;
+        let base_tree = journal
+            .base_index_tree()
+            .cloned()
+            .ok_or(RepositoryError::InvalidPublicationJournal)?;
+        let candidate = copy.candidate_from_journal(&journal)?;
+        let expected = IndexGeneration {
+            head: Some(journal.old_head().clone()),
+            tree: Some(base_tree),
+        };
+        // Boundary: the prepared copy is verified and its ref has not moved.
+        crate::publication_crash_barrier("upgrade-activating");
+        copy.publish_legacy_format_migration(&expected, &candidate, &mut journal)?;
+    } else {
+        match copy.recover_publication() {
+            Ok(_) | Err(RepositoryError::RuntimeCompletionRequired) => {}
+            Err(error) => return Err(error),
+        }
+        let Some(resumed) = copy.read_publication_journal()? else {
+            require_activated_copy(&copy, confirmed)?;
+            return Ok(ActivationOutcome::Activated);
+        };
+        if resumed.new_head() != confirmed {
+            return Err(RepositoryError::PublicationRecoveryConflict);
+        }
+        journal = resumed;
+    }
+    match journal.stage() {
+        crate::PublicationJournalStage::WorktreeReconciled => {
+            // Boundary: the candidate is reconciled; the runtime intent is not
+            // yet consumed.
+            crate::publication_crash_barrier("upgrade-published");
+            let (continuity, annotation_defaults) = migration_coordinates(&journal)?;
+            let source_format = source
+                .open_format_context()
+                .map_err(RepositoryError::FormatContext)?
+                .repository_format();
+            let message = candidate_message(source_format, annotation_defaults, &continuity);
+            let intent_hex = hex(&intent);
+            let commit = confirmed.as_str();
+            let message_digest_hex = hex(Sha256::digest(message.as_bytes()).as_slice());
+            let record = format!("{intent_hex}\n{message_digest_hex}\n{commit}");
+            let result_path = copy
+                .runtime_paths()
+                .root()
+                .join(format!("reviewed-result-{intent_hex}"));
+            copy.complete_reviewed_publication(intent, &result_path, &record, &mut journal)?;
+        }
+        crate::PublicationJournalStage::RuntimeCompleted
+        | crate::PublicationJournalStage::Complete => {
+            copy.recover_publication()?;
+        }
+        _ => return Err(RepositoryError::RuntimeCompletionRequired),
+    }
+    require_activated_copy(&copy, confirmed)?;
+    Ok(ActivationOutcome::Activated)
+}
+
+fn require_activated_copy(
+    copy: &Repository,
+    confirmed: &GitCommitRef,
+) -> Result<(), RepositoryError> {
+    if copy.read_publication_journal()?.is_some()
+        || copy.head()?.as_ref() != Some(confirmed)
+        || !is_activated_format3_copy(copy)?
+    {
+        return Err(RepositoryError::PublicationRecoveryConflict);
+    }
+    Ok(())
+}
+
+/// Whether `copy` holds a valid format-3 store. Callers establish separately
+/// that no publication journal remains.
+fn is_activated_format3_copy(copy: &Repository) -> Result<bool, RepositoryError> {
+    let context = copy
+        .open_format_context()
+        .map_err(RepositoryError::FormatContext)?;
+    Ok(context.repository_format() == RepositoryFormat::Format3
+        && context.validate_store_root().is_ok())
 }
 
 /// Installs `staging` as `destination` without replacing anything there. A
@@ -638,6 +817,7 @@ fn prepare_format3_migration_in(
     }
     let database_id = context.database_id().unwrap_or_else(DatabaseId::new_v4);
     let database_bytes = canonical_database_bytes(&database_id);
+    let committed_database = committed_database_bytes(&context)?;
     // The store is built from the staged copy's decoded rows, so the annotation
     // coordinate below is derived from them, not trusted from the operator.
     let store = store_for(&copy, database_id)?;
@@ -700,7 +880,12 @@ fn prepare_format3_migration_in(
             .cloned()
             .ok_or(RepositoryError::InvalidFormatMigration)?,
         runtime_intent_id,
-        migration_entries(&database_bytes, &committed_legacy_format(&context)?, &store)?,
+        migration_entries(
+            committed_database.as_deref(),
+            &database_bytes,
+            &committed_legacy_format(&context)?,
+            &store,
+        )?,
     )?
     .with_migration_continuity(continuity.clone())?
     .with_migration_annotation_defaults(annotation_defaults)?
@@ -737,19 +922,8 @@ fn require_legacy_worktree_metadata_matches(
 
     let database_path = source.worktree().join(".orna/database.orna");
     let worktree_database = read_regular_metadata_file(&database_path)?;
-    match context.database_id() {
-        Some(_) => {
-            let committed_database = context
-                .read_committed_file(".orna/database.orna", FORMAT_CONTEXT_MAX_METADATA_BYTES)
-                .map_err(|_| RepositoryError::InvalidFormatMigration)?;
-            if worktree_database.as_deref() != Some(committed_database.as_slice()) {
-                return Err(RepositoryError::InvalidFormatMigration);
-            }
-        }
-        None if worktree_database.is_some() => {
-            return Err(RepositoryError::InvalidFormatMigration);
-        }
-        None => {}
+    if worktree_database != committed_database_bytes(context)? {
+        return Err(RepositoryError::InvalidFormatMigration);
     }
     Ok(())
 }
@@ -1141,10 +1315,11 @@ fn recover_prepared_copy(
     require_migration_candidate_pin(&repository, journal.new_head())?;
     let candidate = repository.candidate_from_journal(&journal)?;
     let database_id = candidate_database_id(&repository, &candidate)?;
+    let committed_database = committed_database_bytes(&source_context)?;
     let expected_entries = [
         PublicationJournalEntry::new(
             crate::ManagedPath::new(".orna/database.orna")?,
-            None,
+            committed_database.clone(),
             Some(canonical_database_bytes(&database_id)),
         ),
         PublicationJournalEntry::new(
@@ -1185,6 +1360,7 @@ fn recover_prepared_copy(
         require_retired_paths(source, &source_commit, &store.retired)?;
         let database_bytes = canonical_database_bytes(&database_id);
         let expected = migration_entries(
+            committed_database.as_deref(),
             &database_bytes,
             &committed_legacy_format(&source_context)?,
             &store,
@@ -1314,6 +1490,7 @@ fn migration_changes(
 /// The journal entries a migration candidate records for the same changes, each
 /// with the exact bytes the source commits (or the new bytes it writes).
 fn migration_entries(
+    committed_database: Option<&[u8]>,
     database_bytes: &[u8],
     committed_format: &[u8],
     store: &MigrationStore,
@@ -1321,7 +1498,7 @@ fn migration_entries(
     let mut entries = vec![
         PublicationJournalEntry::new(
             ManagedPath::new(".orna/database.orna")?,
-            None,
+            committed_database.map(<[u8]>::to_vec),
             Some(database_bytes.to_vec()),
         ),
         PublicationJournalEntry::new(
@@ -1500,6 +1677,21 @@ fn committed_legacy_format(context: &RepositoryFormatContext) -> Result<Vec<u8>,
     context
         .read_committed_file(LEGACY_FORMAT_PATH, FORMAT_CONTEXT_MAX_METADATA_BYTES)
         .map_err(|_| RepositoryError::InvalidFormatMigration)
+}
+
+/// The committed `.orna/database.orna` bytes a migration replaces. A source
+/// that tracks a legacy sidecar names those bytes as the path's expected
+/// content; a source that tracks none expects the path absent.
+fn committed_database_bytes(
+    context: &RepositoryFormatContext,
+) -> Result<Option<Vec<u8>>, RepositoryError> {
+    match context.database_id() {
+        Some(_) => context
+            .read_committed_file(".orna/database.orna", FORMAT_CONTEXT_MAX_METADATA_BYTES)
+            .map(Some)
+            .map_err(|_| RepositoryError::InvalidFormatMigration),
+        None => Ok(None),
+    }
 }
 
 /// Names the migration transition in the candidate's own message.
