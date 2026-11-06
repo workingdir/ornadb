@@ -247,6 +247,29 @@ pub fn inspect_metadata_for_runtime(
     }
 }
 
+/// Reads the worktree database identity that keys a legacy migration source's
+/// tail, the same record `inspect_metadata_for_runtime` reads for a migration
+/// candidate. A legacy `format.orna` is accepted here because the source is
+/// read only to be counted and copied, never written; the identity is still
+/// taken from `database.orna`, so it follows the worktree metadata rather than
+/// the committed `HEAD` snapshot. A source with no `database.orna` is refused.
+pub fn inspect_legacy_source_metadata(
+    repository: &Repository,
+) -> Result<RepositoryMetadata, RepositoryInitError> {
+    match inspect_metadata_unlocked(repository) {
+        Err(RepositoryInitError::MetadataUnsupported) => {
+            let database = read_regular_file(&metadata_root(repository).join(DATABASE_FILE))?
+                .ok_or(RepositoryInitError::MetadataIncomplete)?;
+            let database_id = format_context::parse_any_database_id(&database)
+                .map_err(|_| RepositoryInitError::MetadataMalformed)?;
+            Ok(RepositoryMetadata { database_id })
+        }
+        Ok(Some(metadata)) => Ok(metadata),
+        Ok(None) => Err(RepositoryInitError::MetadataIncomplete),
+        Err(error) => Err(error),
+    }
+}
+
 fn initialize_git(target: &Path) -> Result<(), RepositoryInitError> {
     let mut command = Command::new("git");
     if let Some(initial_branch) = configured_initial_branch() {
