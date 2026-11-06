@@ -198,6 +198,10 @@ pub enum LegacyReadError {
     /// A row's key path component is escaped (`~`) or a long alias (`~key-`),
     /// which needs the typed key decoder this reader does not carry.
     UnreadableKeyPath(String),
+    /// Two rows of one table name the same key, so the table has no single
+    /// authoritative row for it (UPGRADE-3 step 3). The read refuses rather
+    /// than choosing one.
+    DuplicateRowKey { table: String, key: String },
 }
 
 impl std::fmt::Display for LegacyReadError {
@@ -228,6 +232,10 @@ impl std::fmt::Display for LegacyReadError {
             Self::UnreadableKeyPath(path) => write!(
                 formatter,
                 "row unit {path:?} addresses its key with an escaped or aliased path component"
+            ),
+            Self::DuplicateRowKey { table, key } => write!(
+                formatter,
+                "table {table} holds more than one authoritative row for key {key:?}"
             ),
         }
     }
@@ -265,7 +273,7 @@ fn read_compact_table_rows(
     let Some(table) = tables.iter().find(|table| table.table() == wanted) else {
         return Err(LegacyReadError::UnknownRelation(relation));
     };
-    let mut rows = table
+    let rows = table
         .rows()
         .iter()
         .map(|row| {
@@ -276,7 +284,7 @@ fn read_compact_table_rows(
             })
         })
         .collect::<Result<Vec<_>, LegacyReadError>>()?;
-    rows.sort_by(|left, right| left.key.cmp(&right.key));
+    let rows = one_row_per_key(wanted.simple().to_string(), rows)?;
     Ok(LegacyTableRows {
         source: LegacyRowSource::Compact,
         rows,
@@ -408,11 +416,35 @@ fn read_loose_table_rows(
             .collect();
         rows.push(LegacyRow { key, fields });
     }
-    rows.sort_by(|left, right| left.key.cmp(&right.key));
+    let rows = one_row_per_key(table_path.to_owned(), rows)?;
     Ok(LegacyTableRows {
         source: LegacyRowSource::LooseRowUnit,
         rows,
     })
+}
+
+/// Decodes one table's rows into exactly one authoritative row per key
+/// (UPGRADE-3 step 3, `reference/Orna-1.1.0/source/40-upgrade-contract.md`).
+///
+/// The rows are put in key order. Two rows that name one key fail closed with
+/// [`LegacyReadError::DuplicateRowKey`] rather than one being chosen: the
+/// compact source already folds its generations and deletions in the
+/// repository reader, so a repeated key there or in one loose table is
+/// corruption, and no precedence rule between rows of one source is specified.
+/// This step reads no source and writes nothing.
+fn one_row_per_key(
+    table: String,
+    mut rows: Vec<LegacyRow>,
+) -> Result<Vec<LegacyRow>, LegacyReadError> {
+    rows.sort_by(|left, right| left.key.cmp(&right.key));
+    if let Some(pair) = rows.windows(2).find(|pair| pair[0].key == pair[1].key) {
+        let key = pair[0]
+            .key
+            .component_text()
+            .unwrap_or_else(|| format!("{:?}", pair[0].key));
+        return Err(LegacyReadError::DuplicateRowKey { table, key });
+    }
+    Ok(rows)
 }
 
 /// The key one loose row unit names, reconstructed from its path components
@@ -492,4 +524,150 @@ pub fn read_legacy_row_revisions(
             Ok(LegacyRowRevision { snapshot, present })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{path::Path, process::Command};
+
+    use orna_repository::{Repository, TypedKey, Uuid};
+    use tempfile::TempDir;
+
+    use super::{
+        LegacyReadError, LegacyRow, LegacyRowSource, LegacyTableAddress, one_row_per_key,
+        read_legacy_table_rows,
+    };
+
+    /// The golden format-1 bundle the CLI legacy tests read
+    /// (`crates/orna-cli/tests/fixtures/legacy-format1.bundle`).
+    const BUNDLE: &str = "../orna-cli/tests/fixtures/legacy-format1.bundle";
+
+    /// The fixture's compact table ids: `Uuid::from_u64_pair(0x018f_0000_0000_7100, n)`.
+    /// Table 1 holds Int keys 1..=4, table 2 holds Str keys, table 3 holds Date keys.
+    fn compact_table(number: u64) -> [u8; 16] {
+        *Uuid::from_u64_pair(0x018f_0000_0000_7100, number).as_bytes()
+    }
+
+    /// Clones the golden bundle into a fresh directory and opens it.
+    fn golden_repository() -> (TempDir, Repository, orna_repository::GitCommitRef) {
+        let directory = TempDir::new().expect("a temporary directory");
+        let clone = Command::new("git")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .arg("clone")
+            .arg("--quiet")
+            .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join(BUNDLE))
+            .arg(directory.path())
+            .output()
+            .expect("the git clone process starts");
+        assert!(
+            clone.status.success(),
+            "git clone bundle: {}",
+            String::from_utf8_lossy(&clone.stderr)
+        );
+        let repository = Repository::discover(directory.path()).expect("the clone opens");
+        let commit = repository
+            .head()
+            .expect("the clone reads HEAD")
+            .expect("the bundle has a commit");
+        (directory, repository, commit)
+    }
+
+    fn row(key: TypedKey) -> LegacyRow {
+        LegacyRow {
+            key,
+            fields: Vec::new(),
+        }
+    }
+
+    fn keys(rows: &[LegacyRow]) -> Vec<TypedKey> {
+        rows.iter().map(|row| row.key().clone()).collect()
+    }
+
+    #[test]
+    fn golden_bundle_decodes_exactly_one_row_per_key() {
+        let (_directory, repository, commit) = golden_repository();
+
+        // Compact table 1: Int keys 1..=4, one row each.
+        let ints = read_legacy_table_rows(
+            &repository,
+            &commit,
+            &LegacyTableAddress::Relation(compact_table(1)),
+        )
+        .expect("the Int table decodes");
+        assert!(matches!(ints.source(), LegacyRowSource::Compact));
+        assert_eq!(
+            keys(ints.rows()),
+            vec![
+                TypedKey::Int(1),
+                TypedKey::Int(2),
+                TypedKey::Int(3),
+                TypedKey::Int(4),
+            ],
+        );
+
+        // Compact tables 2 (Str) and 3 (Date) each hold strictly increasing keys.
+        for number in [2, 3] {
+            let table = read_legacy_table_rows(
+                &repository,
+                &commit,
+                &LegacyTableAddress::Relation(compact_table(number)),
+            )
+            .expect("a compact table decodes");
+            let decoded = keys(table.rows());
+            assert!(!decoded.is_empty(), "table {number} holds rows");
+            assert!(
+                decoded.windows(2).all(|pair| pair[0] < pair[1]),
+                "table {number} keys are strictly increasing, so no key repeats",
+            );
+        }
+
+        // The editable table is read from its loose row units, one per key.
+        let loose = read_legacy_table_rows(
+            &repository,
+            &commit,
+            &LegacyTableAddress::TablePath("contacts/Contact".to_owned()),
+        )
+        .expect("the loose table decodes");
+        assert!(matches!(loose.source(), LegacyRowSource::LooseRowUnit));
+        assert_eq!(loose.rows().len(), 2);
+        let decoded = keys(loose.rows());
+        assert!(decoded.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
+    fn one_row_per_key_keeps_distinct_keys_in_key_order() {
+        let rows = one_row_per_key(
+            "t".to_owned(),
+            vec![
+                row(TypedKey::Int(3)),
+                row(TypedKey::Int(1)),
+                row(TypedKey::Int(2)),
+            ],
+        )
+        .expect("distinct keys decode");
+        assert_eq!(
+            keys(&rows),
+            vec![TypedKey::Int(1), TypedKey::Int(2), TypedKey::Int(3)],
+        );
+    }
+
+    #[test]
+    fn duplicate_key_in_one_table_fails_closed_naming_table_and_key() {
+        let error = one_row_per_key(
+            "contacts/Contact".to_owned(),
+            vec![
+                row(TypedKey::Int(2)),
+                row(TypedKey::Int(1)),
+                row(TypedKey::Int(2)),
+            ],
+        )
+        .expect_err("a repeated key has no single authoritative row");
+        match error {
+            LegacyReadError::DuplicateRowKey { table, key } => {
+                assert_eq!(table, "contacts/Contact");
+                assert_eq!(key, "2");
+            }
+            other => panic!("expected DuplicateRowKey, got {other}"),
+        }
+    }
 }
