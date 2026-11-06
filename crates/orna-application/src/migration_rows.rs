@@ -1228,4 +1228,98 @@ mod tests {
             "two runs yield identical identities, descriptors and rows"
         );
     }
+
+    /// An empty legacy Blob admits through repository admission: the private
+    /// candidate reads back zero bytes through the descriptor written for the
+    /// empty content, which names the null byte root.
+    #[test]
+    fn empty_blob_round_trips_through_repository_admission() {
+        let (directory, repository, commit) = golden();
+        configure_identity(directory.path());
+        let rows = LegacyTableRows::loose_for_tests(vec![LegacyRow::for_tests(
+            TypedKey::Text("alice".to_owned()),
+            vec![
+                declared_field("name", text("Alice Smith")),
+                declared_field("emails", Raw::Array(Vec::new())),
+                declared_field("avatar", Raw::Bytes(Vec::new())),
+            ],
+        )]);
+        let address = LegacyTableAddress::TablePath(PATH.to_owned());
+        let input = migration_row_input(&blob_declared(), &[LegacyTable::new(&address, &rows)])
+            .expect("the empty Blob maps");
+        let empty = blob_identity(&[]).expect("the empty blob identity");
+        assert_eq!(input.blobs().get(&empty).map(Vec::as_slice), Some(&[][..]));
+        let descriptors = write_blobs(&repository, &input);
+        let relations = input
+            .into_staged_relations(&descriptors)
+            .expect("the empty blob row stages");
+        let identities = [StoredObjectIdentity::new(TABLE, 1, "Contact", false)];
+        let candidate = admit(
+            &repository,
+            directory.path(),
+            &commit,
+            &relations,
+            &identities,
+        );
+
+        let format = repository
+            .open_private_candidate_format_context(&candidate)
+            .expect("the candidate opens");
+        let row_map = format
+            .load_row_map(TABLE)
+            .expect("the Contact row map loads");
+        let graph = format
+            .open_native_graph(&row_map)
+            .expect("the native graph opens");
+        let scope = graph.open_read_scope().expect("a read scope opens");
+        let admitted = graph
+            .lookup_row(&TypedKey::Text("alice".to_owned()), &scope)
+            .expect("the admitted row reads")
+            .expect("the legacy row is admitted");
+        let empty_descriptor = descriptors
+            .descriptor(&empty)
+            .expect("the empty descriptor was written");
+        let stored = graph
+            .read_stored_blob_value(&admitted, empty_descriptor, &scope)
+            .expect("the stored empty blob reads");
+        let read = graph
+            .read_blob_range(stored.reference(), 0..0, &scope)
+            .expect("the empty blob bytes read");
+        assert!(read.bytes().is_empty());
+    }
+
+    /// A Blob nested inside a List fails closed with a typed row error: the
+    /// nested bytes are not lowered to a blob reference, so nothing is written
+    /// for them.
+    #[test]
+    fn nested_blob_fails_closed() {
+        const PHOTOS: [u8; 16] = [0x76; 16];
+        let blob_node = Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Blob".to_owned())]);
+        let photos = Raw::Array(vec![
+            tagged(PHOTOS),
+            Raw::Text("photos".to_owned()),
+            Raw::Array(vec![Raw::Int(1.into()), blob_node]),
+            Raw::Int(1.into()),
+            Raw::Array(vec![Raw::Int(0.into())]),
+        ]);
+        let nested = StagedRelations::for_tests(
+            vec![StagedRelation::new(TABLE, descriptor_with(vec![photos]))],
+            vec![(TABLE, PATH)],
+        );
+        let rows = LegacyTableRows::loose_for_tests(vec![LegacyRow::for_tests(
+            TypedKey::Text("alice".to_owned()),
+            vec![
+                declared_field("name", text("Alice Smith")),
+                declared_field("emails", Raw::Array(Vec::new())),
+                declared_field("photos", Raw::Array(vec![Raw::Bytes(vec![1, 2, 3])])),
+            ],
+        )]);
+        let Err(error) = map_contacts(&nested, &rows) else {
+            panic!("a Blob nested in a List is refused");
+        };
+        assert!(matches!(
+            error,
+            MigrationRowError::InvalidRow { ref relation, .. } if relation == PATH
+        ));
+    }
 }
