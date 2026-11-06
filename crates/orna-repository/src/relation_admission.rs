@@ -994,6 +994,13 @@ impl StagedRelation {
     pub const fn automatic_key(&self) -> bool {
         self.automatic_key
     }
+
+    /// The canonical stored tuples this staging admits, in logical key order:
+    /// each typed key with its encoded stored-field tuple.
+    #[must_use]
+    pub fn rows(&self) -> &[(TypedKey, Vec<u8>)] {
+        &self.rows
+    }
 }
 
 /// Whether a staging may change the relations the staged store already
