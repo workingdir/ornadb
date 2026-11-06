@@ -38,17 +38,17 @@
 //!
 //! - The publication journal's own `rename` in `write_publication_journal` is
 //!   not a separate boundary. It is atomic in `orna-repository`, covered by the
-//!   Gate D publication matrix, and a kill before it leaves a staging directory
-//!   that the next attempt never reads.
+//!   Gate D publication matrix, and a kill before it leaves the staging directory
+//!   and its owner marker, which the next attempt reclaims.
 //! - A source with no recorded `.orna/database.orna` identity is not covered.
 //!   `prepare_format3_migration_in` mints a fresh random identity for it
 //!   (`DatabaseId::new_v4`), so two preparations of that input cannot produce
 //!   the same bytes; determinism here is a property of a source that records
 //!   its identity, which the golden bundle does.
 //! - A kill before publication leaves one `.orna-migration-copy-<uuid>` staging
-//!   directory behind, and no later run reclaims it (its name is random and
-//!   unowned). The matrix asserts the leftover is a sibling staging directory
-//!   that was never published, not that it is cleaned up.
+//!   directory and its `<staging>.owner` marker behind. The marker's lock dies
+//!   with the process, so the next run reclaims the pair. The matrix asserts the
+//!   leftover is exactly that owned pair, and that a restart leaves neither.
 
 // The runtime's stream API returns large futures; each test awaits one at a
 // time, so boxing them here would only move the state to the heap.
@@ -544,9 +544,14 @@ impl ChildGuard {
     }
 }
 
-/// Runs `migrate {arguments}` until it parks at `boundary` and kills it there,
-/// returning once the process is reaped.
-fn kill_at(source: &Path, arguments: &[&std::ffi::OsStr], boundary: &str, crash_dir: &Path) {
+/// Runs `migrate {arguments}` until it parks at `boundary`, returning the
+/// parked child for the caller to kill or keep alive.
+fn park_at(
+    source: &Path,
+    arguments: &[&std::ffi::OsStr],
+    boundary: &str,
+    crash_dir: &Path,
+) -> ChildGuard {
     let marker = crash_dir.join(MARKER_FILE);
     let mut command = Command::new(env!("CARGO_BIN_EXE_orna"));
     command
@@ -580,11 +585,19 @@ fn kill_at(source: &Path, arguments: &[&std::ffi::OsStr], boundary: &str, crash_
         boundary,
         "the child parked at a different boundary"
     );
+    child
+}
+
+/// Runs `migrate {arguments}` until it parks at `boundary` and kills it there,
+/// returning once the process is reaped.
+fn kill_at(source: &Path, arguments: &[&std::ffi::OsStr], boundary: &str, crash_dir: &Path) {
+    let mut child = park_at(source, arguments, boundary, crash_dir);
     child.kill_and_reap();
 }
 
-/// The sibling directories a migration may stage into, next to `destination`.
-fn staging_siblings(destination: &Path) -> Vec<PathBuf> {
+/// The `.orna-migration-copy-` entries beside `destination` whose names `keep`
+/// accepts.
+fn migration_siblings(destination: &Path, keep: impl Fn(&str) -> bool) -> Vec<PathBuf> {
     let parent = destination.parent().unwrap();
     let mut siblings = fs::read_dir(parent)
         .unwrap()
@@ -592,11 +605,36 @@ fn staging_siblings(destination: &Path) -> Vec<PathBuf> {
         .filter(|path| {
             path.file_name()
                 .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with(".orna-migration-copy-"))
+                .is_some_and(|name| name.starts_with(".orna-migration-copy-") && keep(name))
         })
         .collect::<Vec<_>>();
     siblings.sort();
     siblings
+}
+
+/// The sibling directories a migration may stage into, next to `destination`.
+fn staging_siblings(destination: &Path) -> Vec<PathBuf> {
+    migration_siblings(destination, |name| !is_owner_marker(name))
+}
+
+/// Whether `name` is an owner marker, judged by its extension.
+fn is_owner_marker(name: &str) -> bool {
+    Path::new(name)
+        .extension()
+        .is_some_and(|extension| extension == "owner")
+}
+
+/// The owner markers beside `destination`: one for each staging directory a
+/// migration holds or left behind.
+fn owner_markers(destination: &Path) -> Vec<PathBuf> {
+    migration_siblings(destination, is_owner_marker)
+}
+
+/// The owner marker that names `staging`, which is `<staging>.owner`.
+fn owner_of(staging: &Path) -> PathBuf {
+    let mut name = staging.file_name().unwrap().to_os_string();
+    name.push(".owner");
+    staging.with_file_name(name)
 }
 
 /// Asserts the copy opens and still holds the prepared migration record.
@@ -909,15 +947,19 @@ fn migration_kill_at_each_boundary_recovers_the_same_copy() {
                 "{boundary}: no carried row may exist before the import"
             );
         }
-        // A pre-publication kill leaves exactly one staging sibling that was
-        // never renamed into place; a later run does not reclaim it (its name is
-        // random and unowned), so the assertion is that it is a private sibling
-        // directory, never the destination.
+        // A pre-publication kill leaves one staging sibling that was never
+        // renamed into place, and the owner marker that names it. The marker is
+        // what lets the next run reclaim the pair; a published copy holds neither.
         let staged = staging_siblings(&destination);
+        let owners = owner_markers(&destination);
         if published {
             assert!(
                 staged.is_empty(),
                 "{boundary}: the rename consumed the staging directory"
+            );
+            assert!(
+                owners.is_empty(),
+                "{boundary}: a published copy holds no owner marker"
             );
         } else {
             assert_eq!(
@@ -929,6 +971,11 @@ fn migration_kill_at_each_boundary_recovers_the_same_copy() {
             assert!(
                 staged[0].is_dir(),
                 "{boundary}: the leftover is a directory"
+            );
+            assert_eq!(
+                owners,
+                vec![owner_of(&staged[0])],
+                "{boundary}: the leftover names its owner marker"
             );
         }
 
@@ -971,7 +1018,90 @@ fn migration_kill_at_each_boundary_recovers_the_same_copy() {
             2,
             "{boundary}: the acknowledged checkpoint version survives"
         );
+        assert!(
+            staging_siblings(&destination).is_empty(),
+            "{boundary}: the restart reclaims the killed run's staging directory"
+        );
+        assert!(
+            owner_markers(&destination).is_empty(),
+            "{boundary}: the restart reclaims the killed run's owner marker"
+        );
     }
+}
+
+#[test]
+fn migration_copy_does_not_reclaim_a_live_migrations_staging() {
+    let parent = TempDir::new().unwrap();
+    let pristine = pristine_source(parent.path());
+    let source_head = git(&pristine, &["rev-parse", "HEAD"]);
+    // Both migrations share one parent, so each reclaim scan sees the other.
+    let case = parent.path().join("case");
+    fs::create_dir(&case).unwrap();
+    let crash = case.join("crash");
+    fs::create_dir(&crash).unwrap();
+
+    let live_source = case.join("live-source");
+    duplicate(&pristine, &live_source);
+    let live = case.join("live");
+    let arguments = [
+        std::ffi::OsStr::new("copy"),
+        live.as_os_str(),
+        std::ffi::OsStr::new("--annotation-defaults"),
+        std::ffi::OsStr::new("0"),
+        std::ffi::OsStr::new("--no-persistent-consumers"),
+    ];
+    // Parked once the staged copy is synced and before it is published: the
+    // migration is alive, so its staging directory and owner marker are live.
+    let mut parked = park_at(&live_source, &arguments, "migration-synced", &crash);
+    let staged = staging_siblings(&live);
+    assert_eq!(
+        staged.len(),
+        1,
+        "the parked migration holds its staging directory"
+    );
+    let owner = owner_of(&staged[0]);
+    assert!(
+        owner.is_file(),
+        "the parked migration holds its owner marker"
+    );
+
+    // A second migration in the same parent reclaims nothing a live owner holds.
+    let other_source = case.join("other-source");
+    duplicate(&pristine, &other_source);
+    let other = case.join("other");
+    let other_run = run_copy(&other_source, &other);
+    assert!(
+        other_run.status.success(),
+        "the second migration: {}",
+        String::from_utf8_lossy(&other_run.stderr)
+    );
+    assert_eq!(
+        staging_siblings(&live),
+        staged,
+        "a live migration's staging directory survives another migration"
+    );
+    assert!(
+        owner.is_file(),
+        "a live migration's owner marker survives another migration"
+    );
+
+    // Once the parked migration is dead, the next run reclaims what it left.
+    parked.kill_and_reap();
+    let restarted = run_copy(&live_source, &live);
+    assert!(
+        restarted.status.success(),
+        "restart: {}",
+        String::from_utf8_lossy(&restarted.stderr)
+    );
+    assert!(
+        staging_siblings(&live).is_empty(),
+        "the restart reclaims the killed migration's staging directory"
+    );
+    assert!(
+        owner_markers(&live).is_empty(),
+        "the restart reclaims the killed migration's owner marker"
+    );
+    assert_prepared_copy_opens(&live, &source_head);
 }
 
 #[test]
