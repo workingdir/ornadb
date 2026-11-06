@@ -26,8 +26,9 @@ impl StagedRelations {
         &self.relations
     }
 
-    /// The source table name behind `relation_id`, for relations that came
-    /// from a declared table.
+    /// The table's key path behind `relation_id`, for relations that came from
+    /// a declared table: its namespace segments and name joined by `/`, the
+    /// form a legacy editable table's directory takes (`contacts/Contact`).
     #[must_use]
     pub fn table_name(&self, relation_id: &[u8; 16]) -> Option<&str> {
         self.table_names.get(relation_id).map(String::as_str)
@@ -88,7 +89,12 @@ pub fn build_format3_store_relations(
                     table: name.clone(),
                     error,
                 })?;
-            table_names.insert(*table.table_object_id(), name.clone());
+            let key_path = if namespace.0.is_empty() {
+                name.clone()
+            } else {
+                format!("{}/{name}", namespace.0.join("/"))
+            };
+            table_names.insert(*table.table_object_id(), key_path);
             let relation =
                 StagedRelation::new(*table.table_object_id(), table.descriptor().clone())
                     .with_introductions(project.constant_default_stored_values(&table));
