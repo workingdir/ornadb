@@ -9,7 +9,9 @@
 
 use orna_project::{ObjectIdentityManifest, ProjectLoader};
 use orna_repository::migration_copy::{MigrationStore, RetiredLegacyPath};
-use orna_repository::{CommittedTreeEntryKind, DatabaseId, Repository, RepositoryError};
+use orna_repository::{
+    CommittedTreeEntryKind, DatabaseId, Repository, RepositoryError, RepositoryFormat,
+};
 
 use crate::format3_store::build_format3_store_relations;
 use crate::legacy_store::{
@@ -43,6 +45,12 @@ pub fn build_migration_store(
     let commit = repository
         .head()?
         .ok_or_else(|| refused("the source has no committed head"))?;
+    let format = repository
+        .open_format_context_at_selector(commit.as_str())
+        .map_err(RepositoryError::FormatContext)?;
+    if format.repository_format() == RepositoryFormat::Legacy2 {
+        return Err(RepositoryError::Format2RowConversionUnimplemented);
+    }
     let project = ProjectLoader::default()
         .load_committed_snapshot(repository, &commit)
         .map_err(|error| refused(format!("the source does not load: {error:?}")))?;
