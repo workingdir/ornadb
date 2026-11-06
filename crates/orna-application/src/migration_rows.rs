@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use num_bigint::BigInt;
 use orna_project::StoredSchema;
 use orna_repository::relation_admission::{MigrationBlobDescriptors, StagedRelation};
-use orna_repository::{ContentIdentity, TypedKey};
+use orna_repository::{ContentIdentity, NativeOid, TypedKey};
 use orna_value::{ROV3_BLOB_TAG, Raw, encode_canonical_storage_value};
 use sha2::{Digest, Sha256};
 
@@ -21,6 +21,18 @@ use crate::legacy_store::{
     LegacyFieldName, LegacyReadError, LegacyTableAddress, LegacyTableRows, row_key_text,
     single_legacy_source,
 };
+
+/// The stored field tuple of every row of a relation, with the blob references
+/// those tuples carry.
+type StoredRows = (Vec<(TypedKey, Raw)>, Vec<ExpectedBlob>);
+
+/// The staged relations of a migration, the stored tuples each must carry, and
+/// the payload of every blob those tuples reference.
+type StagedWithExpectation = (
+    Vec<StagedRelation>,
+    Vec<ExpectedRelation>,
+    BTreeMap<ContentIdentity, Vec<u8>>,
+);
 
 /// One legacy table the copy reads, with the address it was read from.
 #[derive(Clone, Copy, Debug)]
@@ -59,41 +71,47 @@ impl MigrationRelation {
         &self,
         descriptors: &MigrationBlobDescriptors,
     ) -> Result<Vec<(TypedKey, Vec<u8>)>, MigrationRowError> {
-        let stored = self.stored_rows(descriptors)?;
+        let (stored, _) = self.stored_rows(descriptors)?;
         self.encode_stored(&stored)
     }
 
     /// The stored field tuple of every row, in the key order the legacy reader
-    /// returned, with each blob reference completed by its descriptor.
+    /// returned, with each blob reference completed by its descriptor. Also
+    /// returns each blob reference, so the gate can read the candidate's bytes.
     fn stored_rows(
         &self,
         descriptors: &MigrationBlobDescriptors,
-    ) -> Result<Vec<(TypedKey, Raw)>, MigrationRowError> {
-        self.rows
-            .iter()
-            .map(|row| -> Result<(TypedKey, Raw), MigrationRowError> {
-                let mut stored = Vec::with_capacity(row.fields.len());
-                for field in &row.fields {
-                    stored.push(match field {
-                        StoredField::Value(raw) => raw.clone(),
-                        StoredField::Blob { identity, lowered } => {
-                            let descriptor = descriptors.descriptor(identity).ok_or_else(|| {
-                                MigrationRowError::BlobNotWritten {
-                                    relation: self.name.clone(),
-                                    key: row.key_text.clone(),
-                                }
-                            })?;
-                            replace_subtree(
-                                lowered,
-                                &blob_tuple(identity, &[]),
-                                &blob_tuple(identity, descriptor.as_bytes()),
-                            )
-                        }
-                    });
-                }
-                Ok((row.key.clone(), Raw::Array(stored)))
-            })
-            .collect()
+    ) -> Result<StoredRows, MigrationRowError> {
+        let mut stored_rows = Vec::with_capacity(self.rows.len());
+        let mut blobs = Vec::new();
+        for row in &self.rows {
+            let mut stored = Vec::with_capacity(row.fields.len());
+            for field in &row.fields {
+                stored.push(match field {
+                    StoredField::Value(raw) => raw.clone(),
+                    StoredField::Blob { identity, lowered } => {
+                        let descriptor = descriptors.descriptor(identity).ok_or_else(|| {
+                            MigrationRowError::BlobNotWritten {
+                                relation: self.name.clone(),
+                                key: row.key_text.clone(),
+                            }
+                        })?;
+                        blobs.push(ExpectedBlob {
+                            row: row.key.clone(),
+                            identity: *identity,
+                            descriptor: descriptor.clone(),
+                        });
+                        replace_subtree(
+                            lowered,
+                            &blob_tuple(identity, &[]),
+                            &blob_tuple(identity, descriptor.as_bytes()),
+                        )
+                    }
+                });
+            }
+            stored_rows.push((row.key.clone(), Raw::Array(stored)));
+        }
+        Ok((stored_rows, blobs))
     }
 
     /// Encodes each stored field tuple to the canonical bytes the row writer
@@ -179,35 +197,49 @@ impl MigrationRowInput {
     }
 
     /// Consumes the input into staged relations carrying their encoded rows,
-    /// and returns with them the stored tuples each relation must carry. The
-    /// migration gate checks the candidate's rows against that expectation.
+    /// and returns with them the stored tuples each relation must carry, and the
+    /// payload of every blob those tuples reference. The migration gate checks
+    /// the candidate against that expectation.
     pub(crate) fn into_staged_relations_with_expectation(
         self,
         descriptors: &MigrationBlobDescriptors,
-    ) -> Result<(Vec<StagedRelation>, Vec<ExpectedRelation>), MigrationRowError> {
-        let mut staged = Vec::with_capacity(self.relations.len());
-        let mut expected = Vec::with_capacity(self.relations.len());
-        for migration in self.relations {
+    ) -> Result<StagedWithExpectation, MigrationRowError> {
+        let Self { relations, blobs } = self;
+        let mut staged = Vec::with_capacity(relations.len());
+        let mut expected = Vec::with_capacity(relations.len());
+        for migration in relations {
             let relation_id = *migration.relation_id();
-            let stored = migration.stored_rows(descriptors)?;
+            let (stored, blob_refs) = migration.stored_rows(descriptors)?;
             let encoded = migration.encode_stored(&stored)?;
             expected.push(ExpectedRelation {
                 relation_id,
                 rows: stored,
+                blobs: blob_refs,
             });
             staged.push(migration.relation.with_rows(encoded));
         }
-        Ok((staged, expected))
+        Ok((staged, expected, blobs))
     }
 }
 
-/// One declared relation's expected content: its id, and the stored field tuple
-/// of every legacy row in key order, with each blob reference completed by its
-/// descriptor. The migration gate checks the candidate against it.
+/// One declared relation's expected content: its id, the stored field tuple of
+/// every legacy row in key order (each blob reference completed by its
+/// descriptor), and the blob references those rows hold. The migration gate
+/// checks the candidate against it.
 #[derive(Debug)]
 pub(crate) struct ExpectedRelation {
     pub(crate) relation_id: [u8; 16],
     pub(crate) rows: Vec<(TypedKey, Raw)>,
+    pub(crate) blobs: Vec<ExpectedBlob>,
+}
+
+/// One Blob value an expected row holds: the row it sits in, the content
+/// identity its legacy payload hashes to, and the descriptor written for it.
+#[derive(Debug)]
+pub(crate) struct ExpectedBlob {
+    pub(crate) row: TypedKey,
+    pub(crate) identity: ContentIdentity,
+    pub(crate) descriptor: NativeOid,
 }
 
 /// Why a legacy snapshot does not map onto the declared schema.
@@ -1138,7 +1170,7 @@ mod tests {
         let expected: Vec<(TypedKey, Vec<u8>)> = input.relations()[0]
             .encoded_rows(&descriptors)
             .expect("the golden contacts encode");
-        let (relations, _) = input
+        let (relations, _, _) = input
             .into_staged_relations_with_expectation(&descriptors)
             .expect("the golden contacts stage");
 
@@ -1198,7 +1230,7 @@ mod tests {
             encoded_keys, legacy_keys,
             "the admitted keys are the legacy keys"
         );
-        let (relations, _) = input
+        let (relations, _, _) = input
             .into_staged_relations_with_expectation(&descriptors)
             .expect("the golden blob rows stage");
         let identities = [StoredObjectIdentity::new(id, 1, "BlobTable", false)];
@@ -1305,7 +1337,7 @@ mod tests {
         let empty = blob_identity(&[]).expect("the empty blob identity");
         assert_eq!(input.blobs().get(&empty).map(Vec::as_slice), Some(&[][..]));
         let descriptors = write_blobs(&repository, &input);
-        let (relations, _) = input
+        let (relations, _, _) = input
             .into_staged_relations_with_expectation(&descriptors)
             .expect("the empty blob row stages");
         let identities = [StoredObjectIdentity::new(TABLE, 1, "Contact", false)];
