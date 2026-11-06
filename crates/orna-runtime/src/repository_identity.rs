@@ -28,6 +28,27 @@ pub fn repository_runtime_identity(
     migration_metadata_identity(repository)
 }
 
+/// Derives the identity of a migration source's own runtime, so its unpublished
+/// tail can be counted before a copy is prepared from it. Unlike
+/// [`repository_runtime_identity`] it admits a legacy read-only `HEAD`: a source
+/// being migrated is legacy by definition. It names the identity from the
+/// database id the source's admitted format context records; it does not admit
+/// the source for any write. An unknown `HEAD` format is still refused with
+/// [`RuntimeError::UnknownHeadFormat`], and a source without a recorded
+/// database id is refused with [`RuntimeError::InvalidIdentity`].
+pub fn migration_source_runtime_identity(
+    repository: &Repository,
+) -> Result<(RuntimeIdentity, [u8; 32]), RuntimeError> {
+    repository
+        .require_known_head_format()
+        .map_err(RuntimeError::UnknownHeadFormat)?;
+    let context = repository
+        .open_format_context()
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let database_id = context.database_id().ok_or(RuntimeError::InvalidIdentity)?;
+    Ok(runtime_identity_for_database_id(*database_id.as_bytes()))
+}
+
 /// Derives the identity for the migration's own checkpoint carry into a
 /// prepared copy. This is the only sanctioned entry for migration carry: it
 /// is the sole caller that admits a prepared copy whose `HEAD` is still

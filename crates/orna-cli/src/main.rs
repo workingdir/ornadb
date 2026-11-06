@@ -1119,10 +1119,25 @@ fn run_status_json(endpoint: &Endpoint) -> Result<(), Diagnostic> {
 fn unpublished_mutation_count(
     repository: &orna_repository::Repository,
 ) -> Result<usize, Diagnostic> {
+    unpublished_mutation_count_under(repository, runtime_identity)
+}
+
+/// The runtime identity derivation a migration-source count reads under.
+type MigrationIdentity =
+    fn(&orna_repository::Repository) -> Result<(RuntimeIdentity, [u8; 32]), Diagnostic>;
+
+/// Counts the pending runtime mutations of `repository` under the identity that
+/// `identity` derives for it. Migration copy passes the migration-carry identity
+/// so a legacy source with a read-only `HEAD` is counted; every other caller uses
+/// [`unpublished_mutation_count`].
+fn unpublished_mutation_count_under(
+    repository: &orna_repository::Repository,
+    identity: MigrationIdentity,
+) -> Result<usize, Diagnostic> {
     if !repository.runtime_paths().state_db().exists() {
         return Ok(0);
     }
-    let (identity, initial_digest) = runtime_identity(repository)?;
+    let (identity, initial_digest) = identity(repository)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
