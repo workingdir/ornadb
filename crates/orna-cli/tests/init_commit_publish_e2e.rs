@@ -460,10 +460,10 @@ fn assert_mixed_metadata_refused(refused: &Output, entry: &str) {
 /// that tracks anything else there, naming the entry with format admission's
 /// mixed-format code (ORNA-REPO-CONTEXT-004; Gate A, "unknown/mixed formats
 /// fail early"). On an unborn branch a stray entry is refused when the staged
-/// candidate is captured, and `.orna/migration.json`, which reading a
-/// snapshot still tolerates while `orna migrate copy` writes it, by the commit
-/// gate. Neither refusal creates the branch, and the first commit without them
-/// tracks only the metadata and the store.
+/// candidate is captured, and `.orna/migration.json`, which the commit gate
+/// refuses because migration coordinates live in the publication journal and
+/// the commit trailer (ORNA-META-001). Neither refusal creates the branch, and
+/// the first commit without them tracks only the metadata and the store.
 #[test]
 fn first_commit_refuses_extra_metadata_entries() {
     let directory = TempDir::new().expect("create the test directory");
