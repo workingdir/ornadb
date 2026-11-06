@@ -86,6 +86,9 @@ pub enum MigrationRowError {
     UnmappableTable { table: String },
     /// A declared relation has no legacy table to supply its rows.
     RelationWithoutTable { relation: String },
+    /// The declared relation takes its key from an automatic counter, which
+    /// the copy cannot admit from legacy keys yet.
+    AutomaticKeyUnsupported { relation: String },
     /// Two legacy tables of the same kind answer one relation.
     DuplicateSource { relation: String },
     /// The legacy reader refused the relation's sources (for example a
@@ -119,6 +122,10 @@ impl std::fmt::Display for MigrationRowError {
                     "declared relation {relation} has no legacy table"
                 )
             }
+            Self::AutomaticKeyUnsupported { relation } => write!(
+                formatter,
+                "declared relation {relation} has an automatic key, which the copy does not admit"
+            ),
             Self::DuplicateSource { relation } => {
                 write!(
                     formatter,
@@ -217,6 +224,9 @@ pub fn migration_row_input(
     for relation in declared.relations() {
         let id = *relation.relation_id();
         let name = relation_name(declared, &id);
+        if relation.automatic_key() {
+            return Err(MigrationRowError::AutomaticKeyUnsupported { relation: name });
+        }
         let Some(source) = sources.get(&id) else {
             return Err(MigrationRowError::RelationWithoutTable { relation: name });
         };
@@ -315,7 +325,8 @@ mod tests {
     use super::{LegacyTable, MigrationRowError, migration_row_input};
     use crate::format3_store::StagedRelations;
     use crate::legacy_store::{
-        LegacyField, LegacyFieldName, LegacyRow, LegacyTableAddress, LegacyTableRows,
+        LegacyField, LegacyFieldName, LegacyReadError, LegacyRow, LegacyTableAddress,
+        LegacyTableRows,
     };
 
     const TABLE: [u8; 16] = [0x71; 16];
@@ -331,6 +342,11 @@ mod tests {
     /// The descriptor of `contacts/Contact`: a `Str` key `id` and stored
     /// `name: Str`, `emails: List<Str>`, in the shape the schema builder writes.
     fn descriptor() -> SchemaDescriptor {
+        descriptor_with(Vec::new())
+    }
+
+    /// The contacts descriptor with `extra` stored fields appended.
+    fn descriptor_with(extra: Vec<Raw>) -> SchemaDescriptor {
         let field = |id: [u8; 16], name: &str, node: Raw, role: i64| {
             Raw::Array(vec![
                 tagged(id),
@@ -348,15 +364,37 @@ mod tests {
             (Raw::Int(2.into()), Raw::Array(vec![tagged(KEY_FIELD)])),
             (
                 Raw::Int(3.into()),
-                Raw::Array(vec![
-                    field(KEY_FIELD, "id", str_node(), 0),
-                    field(NAME_FIELD, "name", str_node(), 1),
-                    field(EMAILS_FIELD, "emails", list_node, 1),
-                ]),
+                Raw::Array(
+                    [
+                        field(KEY_FIELD, "id", str_node(), 0),
+                        field(NAME_FIELD, "name", str_node(), 1),
+                        field(EMAILS_FIELD, "emails", list_node, 1),
+                    ]
+                    .into_iter()
+                    .chain(extra)
+                    .collect(),
+                ),
             ),
             (Raw::Int(4.into()), Raw::Array(Vec::new())),
         ]))
         .expect("the contacts descriptor is valid")
+    }
+
+    /// The contacts descriptor extended with an unannotated Blob `avatar`.
+    fn blob_declared() -> StagedRelations {
+        const AVATAR: [u8; 16] = [0x75; 16];
+        let blob_node = Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Blob".to_owned())]);
+        let avatar = Raw::Array(vec![
+            tagged(AVATAR),
+            Raw::Text("avatar".to_owned()),
+            blob_node,
+            Raw::Int(1.into()),
+            Raw::Array(vec![Raw::Int(0.into())]),
+        ]);
+        StagedRelations::for_tests(
+            vec![StagedRelation::new(TABLE, descriptor_with(vec![avatar]))],
+            vec![(TABLE, PATH)],
+        )
     }
 
     fn declared() -> StagedRelations {
@@ -486,6 +524,64 @@ mod tests {
         assert!(matches!(
             error,
             MigrationRowError::UnknownField { ref field, .. } if field == "nickname"
+        ));
+    }
+
+    /// A compact and an editable source for one relation are a cross-source
+    /// conflict, refused through the whole mapping.
+    #[test]
+    fn cross_source_conflict_fails_closed() {
+        let rows = contacts();
+        let loose = LegacyTableAddress::TablePath(PATH.to_owned());
+        let compact = LegacyTableAddress::Relation(TABLE);
+        let compact_rows = contacts();
+        let error = migration_row_input(
+            &declared(),
+            &[
+                LegacyTable::new(&loose, &rows),
+                LegacyTable::new(&compact, &compact_rows),
+            ],
+        )
+        .expect_err("two sources for one relation conflict");
+        assert!(matches!(
+            error,
+            MigrationRowError::Source(LegacyReadError::CrossSourceConflict { .. })
+        ));
+    }
+
+    /// A relation with an automatic key fails closed.
+    #[test]
+    fn automatic_key_relation_fails_closed() {
+        let declared = StagedRelations::for_tests(
+            vec![StagedRelation::new(TABLE, descriptor()).with_automatic_key()],
+            vec![(TABLE, PATH)],
+        );
+        let error = map_contacts(&declared, &contacts())
+            .expect_err("automatic keys are not admitted from legacy rows");
+        assert!(matches!(
+            error,
+            MigrationRowError::AutomaticKeyUnsupported { ref relation } if relation == PATH
+        ));
+    }
+
+    /// A stored Blob field admits only a ROV3 blob reference. Legacy raw bytes
+    /// are not a reference and cannot be made one without the blob store, so
+    /// they fail closed with a typed row error instead of being admitted.
+    #[test]
+    fn legacy_blob_bytes_fail_closed() {
+        let rows = LegacyTableRows::loose_for_tests(vec![LegacyRow::for_tests(
+            TypedKey::Text("alice".to_owned()),
+            vec![
+                declared_field("name", text("Alice Smith")),
+                declared_field("emails", Raw::Array(Vec::new())),
+                declared_field("avatar", Raw::Bytes(vec![1, 2, 3])),
+            ],
+        )]);
+        let error = map_contacts(&blob_declared(), &rows)
+            .expect_err("raw Blob bytes are not a stored blob reference");
+        assert!(matches!(
+            error,
+            MigrationRowError::InvalidRow { ref reason, .. } if reason.contains("avatar")
         ));
     }
 }
