@@ -1119,25 +1119,10 @@ fn run_status_json(endpoint: &Endpoint) -> Result<(), Diagnostic> {
 fn unpublished_mutation_count(
     repository: &orna_repository::Repository,
 ) -> Result<usize, Diagnostic> {
-    unpublished_mutation_count_under(repository, runtime_identity)
-}
-
-/// The runtime identity derivation a migration-source count reads under.
-type MigrationIdentity =
-    fn(&orna_repository::Repository) -> Result<(RuntimeIdentity, [u8; 32]), Diagnostic>;
-
-/// Counts the pending runtime mutations of `repository` under the identity that
-/// `identity` derives for it. Migration copy passes the migration-carry identity
-/// so a legacy source with a read-only `HEAD` is counted; every other caller uses
-/// [`unpublished_mutation_count`].
-fn unpublished_mutation_count_under(
-    repository: &orna_repository::Repository,
-    identity: MigrationIdentity,
-) -> Result<usize, Diagnostic> {
     if !repository.runtime_paths().state_db().exists() {
         return Ok(0);
     }
-    let (identity, initial_digest) = identity(repository)?;
+    let (identity, initial_digest) = runtime_identity(repository)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1181,6 +1166,34 @@ fn unpublished_mutation_count_under(
                 "E2200",
                 "local runtime publication status could not be read",
                 "retry `status` after checking the local runtime state",
+            )
+        })
+}
+
+/// Counts the unpublished tail of a migration source without writing to it.
+/// The count is read through a read-only handle to `state.db`: no runtime is
+/// opened, no owner lock is taken and no schema is created or migrated, so a
+/// source that refuses a copy is left byte-identical.
+fn source_unpublished_mutation_count(
+    repository: &orna_repository::Repository,
+) -> Result<usize, Diagnostic> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2200",
+                "local runtime publication status could not be read",
+                "retry `migrate copy` after checking the source runtime state",
+            )
+        })?;
+    runtime
+        .block_on(orna_runtime::RuntimeState::read_pending_count(repository))
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2200",
+                "local runtime publication status could not be read",
+                "retry `migrate copy` after checking the source runtime state",
             )
         })
 }

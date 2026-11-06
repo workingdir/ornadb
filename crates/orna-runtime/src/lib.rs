@@ -11960,8 +11960,52 @@ impl RuntimeState {
     /// This summary query avoids loading mutation payloads when a caller only
     /// needs to report whether and how much local state remains unpublished.
     pub async fn pending_count(&self) -> Result<usize, RuntimeError> {
-        let mut rows = self
-            .connection
+        Self::count_pending(&self.connection).await
+    }
+
+    /// Counts the unpublished tail of the runtime at `repository` without
+    /// writing to it. Unlike [`RuntimeState::open`], this neither creates
+    /// `state.db`, takes the owner lock, nor runs schema setup: the database is
+    /// opened read-only. A repository with no `state.db` has an empty tail.
+    /// The count is keyed by table, not by runtime identity, so it needs no
+    /// identity derivation.
+    pub async fn read_pending_count(repository: &Repository) -> Result<usize, RuntimeError> {
+        let state_db = repository.runtime_paths().state_db();
+        if !state_db.exists() {
+            return Ok(0);
+        }
+        // A read-only connection to a WAL database materialises a `-wal` and a
+        // `-shm` the source did not have. Both are rebuildable from `state.db`
+        // and hold no committed data, so the probe removes the ones it created
+        // and leaves the source as it was found.
+        let sidecars = ["-wal", "-shm"].map(|suffix| {
+            let mut path = state_db.clone().into_os_string();
+            path.push(suffix);
+            std::path::PathBuf::from(path)
+        });
+        let existed = sidecars.clone().map(|path| path.exists());
+        let count = async {
+            let database = libsql::Builder::new_local(&state_db)
+                .flags(libsql::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .build()
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            let connection = database
+                .connect()
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            Self::count_pending(&connection).await
+        }
+        .await;
+        for (path, existed) in sidecars.iter().zip(existed) {
+            if !existed {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+        count
+    }
+
+    async fn count_pending(connection: &libsql::Connection) -> Result<usize, RuntimeError> {
+        let mut rows = connection
             .query("SELECT COUNT(*) FROM pending_mutation", ())
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;

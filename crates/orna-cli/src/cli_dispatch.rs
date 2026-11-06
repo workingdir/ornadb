@@ -1090,21 +1090,6 @@ fn migration_source_admission_diagnostic(error: orna_repository::FormatContextEr
     }
 }
 
-/// The runtime identity of a migration source. A legacy source's `HEAD` is
-/// read-only, so the ordinary runtime identity refuses it; the source identity
-/// is the sanctioned one for reading its tail before a copy.
-fn migration_copy_source_identity(
-    repository: &orna_repository::Repository,
-) -> Result<(orna_runtime::RuntimeIdentity, [u8; 32]), Diagnostic> {
-    orna_runtime::migration_source_runtime_identity(repository).map_err(|_| {
-        Diagnostic::target(
-            "E2100",
-            "migration source runtime identity could not be read",
-            "verify the source worktree and retry `migrate copy`",
-        )
-    })
-}
-
 #[allow(clippy::too_many_lines)]
 fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnostic> {
     let usage = || {
@@ -1192,13 +1177,12 @@ fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnost
     // A source whose runtime holds unpublished mutations has rows the copy would
     // not receive, while its stream checkpoints may already cover them. Refuse
     // before any destination is created so the source keeps its tail (ORNA-UPGRADE-006).
-    let unpublished_count =
-        crate::unpublished_mutation_count_under(&repository, migration_copy_source_identity)?;
+    let unpublished_count = crate::source_unpublished_mutation_count(&repository)?;
     if unpublished_count != 0 {
         return Err(Diagnostic::target_with_detail(
             "E2100",
             "migration source holds unpublished runtime mutations",
-            "publish or discard the source's unpublished mutations, then retry; no copy was prepared and the source is unchanged",
+            "make the source's unpublished runtime mutations durable where its HEAD allows a publish, or discard them, then retry; no copy was prepared and the source is unchanged",
             format!("unpublished_mutations={unpublished_count}"),
         ));
     }
