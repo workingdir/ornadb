@@ -478,25 +478,18 @@ fn cli_migration_copy_names_unparseable_committed_format_record() {
 }
 
 /// ORNA-UPGRADE-001, ORNA-UPGRADE-002, ORNA-META-002: a source whose
-/// `format.orna` holds a record a legacy writer actually produced migrates
-/// like any other legacy source. `OrnaDB` 1.0's `orna init` wrote the format-1
-/// record. The format-2 record is the closed record of the previous 1.1.0
-/// draft. The journal names the committed record bytes as the file the
-/// migration removes. The legacy source stays read-only, and only the
-/// prepared copy admits a runtime, so `migrate copy` can carry checkpoints
-/// into it.
+/// `format.orna` holds the format-1 record `OrnaDB` 1.0's `orna init` wrote
+/// migrates like any other legacy source. The journal names the committed
+/// record bytes as the file the migration removes. The legacy source stays
+/// read-only, and only the prepared copy admits a runtime, so `migrate copy`
+/// can carry checkpoints into it. The format-2 record is refused by name in
+/// `cli_migration_copy_refuses_format_two_source_by_name` (MIGRATION.md:3).
 #[test]
 fn cli_migration_copy_prepares_a_candidate_from_recorded_legacy_metadata() {
-    for (format_record, format) in [
-        (
-            include_str!("fixtures/format-context/format-1-ornadb-1.0.orna"),
-            1,
-        ),
-        (
-            include_str!("fixtures/format-context/format-2-draft-1.1.0.orna"),
-            2,
-        ),
-    ] {
+    for (format_record, format) in [(
+        include_str!("fixtures/format-context/format-1-ornadb-1.0.orna"),
+        1,
+    )] {
         let parent = TempDir::new().unwrap();
         let source = parent.path().join("source");
         fs::create_dir(&source).unwrap();
@@ -578,6 +571,44 @@ fn cli_migration_copy_prepares_a_candidate_from_recorded_legacy_metadata() {
             Some(journal)
         );
     }
+}
+
+/// ORNA-UPGRADE-003, MIGRATION.md:3, UPGRADE-3 step 3: a format-2 source is
+/// refused by name. Its row layout has no production decoder, and replacing
+/// its header would present draft data as format 3. The refusal names the
+/// missing conversion and writes neither a destination nor source state.
+#[test]
+fn cli_migration_copy_refuses_format_two_source_by_name() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    initialize_legacy_source_with_format(
+        &source,
+        include_str!("fixtures/format-context/format-2-draft-1.1.0.orna"),
+    );
+    let source_status = git_output(
+        &source,
+        &["status", "--porcelain=v2", "--untracked-files=all"],
+    );
+    let destination = parent.path().join("migrated");
+    let git_trace = parent.path().join("git-trace.log");
+
+    let output = run_copy(&source, &destination, "0", &git_trace);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("format-2 row conversion is not implemented"),
+        "{stderr}"
+    );
+    assert!(!destination.exists(), "{stderr}");
+    assert_eq!(
+        git_output(
+            &source,
+            &["status", "--porcelain=v2", "--untracked-files=all"]
+        ),
+        source_status
+    );
 }
 
 #[test]

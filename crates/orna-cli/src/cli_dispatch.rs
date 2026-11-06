@@ -1247,6 +1247,11 @@ fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnost
             "prepared migration copy predates the migration-record removal",
             "discard it with `orna migrate abort DEST`, then run `orna migrate copy` again",
         ),
+        orna_repository::RepositoryError::Format2RowConversionUnimplemented => Diagnostic::target(
+            "E2100",
+            "format-2 row conversion is not implemented; a format-2 source cannot be migrated (MIGRATION.md:3)",
+            "no format-2 migration is available until the format-2 row decoder is implemented",
+        ),
         other => Diagnostic::target_with_detail(
             "E2100",
             "migration copy could not be prepared or recovered",
