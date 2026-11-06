@@ -5,6 +5,12 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- The `migrate copy` staging-reclaim tests
+  `killed_migration_staging_is_reclaimed_with_its_owner` and
+  `installed_staging_owner_marker_is_reclaimed_alone` no longer fail
+  intermittently under parallel test runs. They retry the reclaim until the
+  dead owner marker is gone, bounded at 60 seconds (ornadb-5il1.475). The
+  change is test-only; product code is unchanged.
 - Partial (ornadb-5il1.311, UPGRADE-3 slice S2; ORP-1 row admission): a staged relation carries its admitted rows (`StagedRelation::with_rows`), and the format-3 store writer writes them into the relation's primary map in logical key order, one row per key. Restaging an uncommitted relation replaces its rows, so restaging with no rows yields the same store root as a fresh empty stage. Every row is validated against the closed descriptor before any node is written; a row refused as `InvalidStagedRow` or a duplicate key (`DuplicateStagedRow`) is refused before any write, so the store root is unchanged for these pre-write refusals. That guarantee covers only those refusals, not every error path. Staging rows for an already-committed relation is refused (`StagedRowsOnCommittedRelation`). Validation on this path is structural (`validate_stored_row`): a Blob or table-reference column is not bound to the database of its containing snapshot here, because staging holds no `Format3Context`, so that binding is not checked by this slice. A structurally valid Blob reference whose descriptor is not a stored BlobDescriptor is admitted, and a committed read of that row then fails with `GraphContextInvalid` (known defect, not fixed here). Not claimed: the production store builder in `orna-application` does not yet source rows, and the rest of UPGRADE-3 is not done.
 - The legacy row decoder now checks one authoritative row per key within each
   source (ornadb-5il1.310, ORNA-UPGRADE-3 step 3). A compact table or a loose
