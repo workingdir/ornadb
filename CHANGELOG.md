@@ -5,6 +5,12 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- The `migrate copy` staging-reclaim tests
+  `killed_migration_staging_is_reclaimed_with_its_owner` and
+  `installed_staging_owner_marker_is_reclaimed_alone` no longer fail
+  intermittently under parallel test runs. They retry the reclaim until the
+  dead owner marker is gone, bounded at 60 seconds (ornadb-5il1.475). The
+  change is test-only; product code is unchanged.
 - `migrate copy` refuses a source with an unpublished tail without writing to the source runtime; the pending-count probe is read-only and removes only the WAL/SHM sidecars it created. The refusal names the publish step only when the source HEAD is writable.
 - `orna migrate copy` now refuses a legacy source whose runtime tail holds
   unpublished mutations (ornadb-5il1.244). Such a copy would resume past rows
