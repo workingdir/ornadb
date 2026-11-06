@@ -4486,7 +4486,7 @@ impl Repository {
         Ok(())
     }
 
-    fn reclaim_abandoned_publication_index_lock(
+    pub(crate) fn reclaim_abandoned_publication_index_lock(
         &self,
         journal: &PublicationJournal,
     ) -> Result<(), RepositoryError> {
@@ -5320,6 +5320,10 @@ impl Repository {
         let base_index = self.capture_index_for_expected(expected_index, &index)?;
         self.adopt_publication_pins_locked(journal)?;
         let lock_binding = journal.lock_binding()?;
+        // A publisher killed after taking Git's lock leaves an Orna-marked lock bound
+        // to this journal. Reclaim exactly that lock, and only once its owner is
+        // proven dead; a live or differently bound lock still refuses below.
+        GitIndexLock::reclaim_abandoned(index.with_extension("lock"), lock_binding)?;
         // Own Git's writer lock before persisting a prepared intent so lock contention
         // cannot strand a timestamped journal that blocks a fresh retry. This closes the
         // post-ref/pre-index race where an ordinary Git writer could publish
