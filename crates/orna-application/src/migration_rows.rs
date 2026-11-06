@@ -16,7 +16,8 @@ use orna_value::{Raw, encode_canonical_storage_value};
 
 use crate::format3_store::StagedRelations;
 use crate::legacy_store::{
-    LegacyFieldName, LegacyReadError, LegacyTableAddress, LegacyTableRows, single_legacy_source,
+    LegacyFieldName, LegacyReadError, LegacyTableAddress, LegacyTableRows, row_key_text,
+    single_legacy_source,
 };
 
 /// One legacy table the copy reads, with the address it was read from.
@@ -107,7 +108,10 @@ pub enum MigrationRowError {
         reason: String,
     },
     /// The canonical stored tuple could not be encoded.
-    Encode { relation: String },
+    Encode {
+        relation: String,
+        cause: orna_value::Error,
+    },
 }
 
 impl std::fmt::Display for MigrationRowError {
@@ -156,8 +160,11 @@ impl std::fmt::Display for MigrationRowError {
                 formatter,
                 "row {key} of relation {relation} does not lower: {reason}"
             ),
-            Self::Encode { relation } => {
-                write!(formatter, "relation {relation} row cannot be encoded")
+            Self::Encode { relation, cause } => {
+                write!(
+                    formatter,
+                    "relation {relation} row cannot be encoded: {cause}"
+                )
             }
         }
     }
@@ -291,14 +298,16 @@ fn encode_rows(
                 .lower_stored_fields(&values)
                 .map_err(|error| MigrationRowError::InvalidRow {
                     relation: name.to_owned(),
-                    key: format!("{:?}", row.key()),
+                    key: row_key_text(row.key()),
                     reason: error.to_string(),
                 })?;
-        let tuple = encode_canonical_storage_value(&Raw::Array(stored_fields)).map_err(|_| {
-            MigrationRowError::Encode {
-                relation: name.to_owned(),
-            }
-        })?;
+        let tuple =
+            encode_canonical_storage_value(&Raw::Array(stored_fields)).map_err(|cause| {
+                MigrationRowError::Encode {
+                    relation: name.to_owned(),
+                    cause,
+                }
+            })?;
         encoded.push((row.key().clone(), tuple));
     }
     Ok(encoded)
@@ -330,7 +339,14 @@ mod tests {
     };
     use std::{path::Path, process::Command};
 
-    use orna_repository::{GitCommitRef, Repository, Uuid, golden_compact_schemas};
+    use orna_project::StoredSchema;
+    use orna_repository::relation_admission::{
+        AllocatorWatermarks, RelationCandidateContent, StoredObjectIdentity,
+    };
+    use orna_repository::{
+        GitCommitRef, KeyRange, ManagedFileChange, ManagedPath, Repository, Uuid,
+        golden_compact_schemas,
+    };
     use tempfile::TempDir;
 
     use crate::legacy_store::read_legacy_table_rows;
@@ -634,8 +650,54 @@ mod tests {
         StagedRelations::for_tests(relations, Vec::new())
     }
 
+    /// The stored tuple a legacy row lowers to: its role-1 field values in
+    /// descriptor order, read from the legacy row by stored field.
+    fn stored_values(relation: &StagedRelation, row: &LegacyRow) -> Raw {
+        let schema = StoredSchema::new(relation.descriptor()).expect("the descriptor reads");
+        Raw::Array(
+            schema
+                .fields()
+                .iter()
+                .filter(|stored| stored.role() == 1)
+                .map(|stored| {
+                    row.fields()
+                        .iter()
+                        .find(|field| match field.name() {
+                            LegacyFieldName::Declared(name) => name == stored.name(),
+                            LegacyFieldName::ObjectId(id) => id == stored.id(),
+                        })
+                        .unwrap_or_else(|| panic!("the row has field {}", stored.name()))
+                        .value()
+                        .clone()
+                })
+                .collect(),
+        )
+    }
+
+    /// Each admitted tuple decodes to the legacy row's stored values, is their
+    /// canonical encoding, and carries the legacy reader's key.
+    fn assert_rows_match_legacy(
+        relation: &StagedRelation,
+        admitted: &[(TypedKey, Vec<u8>)],
+        legacy: &LegacyTableRows,
+    ) {
+        assert_eq!(admitted.len(), legacy.rows().len());
+        for ((key, tuple), row) in admitted.iter().zip(legacy.rows()) {
+            assert_eq!(key, row.key(), "the admitted key is the legacy key");
+            let values = stored_values(relation, row);
+            assert_eq!(
+                decode_canonical_storage_value(tuple).expect("the tuple decodes"),
+                values
+            );
+            assert_eq!(
+                tuple,
+                &encode_canonical_storage_value(&values).expect("the values encode")
+            );
+        }
+    }
+
     #[test]
-    fn golden_compact_tables_keep_the_legacy_reader_keys() {
+    fn golden_compact_tables_keep_the_legacy_keys_and_values() {
         let (_directory, repository, commit) = golden();
         for number in [1_u64, 2, 3] {
             let id = golden_table(number);
@@ -650,31 +712,154 @@ mod tests {
                 .iter()
                 .find(|relation| relation.relation_id() == &id)
                 .expect("the declared table is in the input");
-            let mapped: Vec<TypedKey> =
-                relation.rows().iter().map(|(key, _)| key.clone()).collect();
-            let expected: Vec<TypedKey> =
-                legacy.rows().iter().map(|row| row.key().clone()).collect();
-            assert_eq!(mapped, expected, "table {number} keeps the legacy keys");
+            assert_rows_match_legacy(&declared.relations()[0], relation.rows(), &legacy);
         }
     }
 
     #[test]
-    fn golden_loose_contacts_keep_the_legacy_reader_keys() {
+    fn golden_loose_contacts_keep_the_legacy_keys_and_values() {
         let (_directory, repository, commit) = golden();
         let address = LegacyTableAddress::TablePath(PATH.to_owned());
         let legacy = read_legacy_table_rows(&repository, &commit, &address)
             .expect("the legacy loose table decodes");
-        let input = migration_row_input(&declared(), &[LegacyTable::new(&address, &legacy)])
+        assert_eq!(legacy.rows().len(), 2, "the golden holds two contacts");
+        let declared = declared();
+        let input = migration_row_input(&declared, &[LegacyTable::new(&address, &legacy)])
             .expect("the golden contacts map onto the declared Contact table");
         let relation = input
             .relations()
             .iter()
             .find(|relation| relation.relation_id() == &TABLE)
             .expect("the declared Contact table is in the input");
-        let mapped: Vec<TypedKey> = relation.rows().iter().map(|(key, _)| key.clone()).collect();
-        let expected: Vec<TypedKey> = legacy.rows().iter().map(|row| row.key().clone()).collect();
-        assert_eq!(legacy.rows().len(), 2, "the golden holds two contacts");
-        assert_eq!(mapped, expected, "contacts keep the legacy keys");
+        assert_rows_match_legacy(&declared.relations()[0], relation.rows(), &legacy);
+    }
+
+    /// Sets the commit identity the candidate's commit objects need in the
+    /// cloned bundle.
+    fn configure_identity(root: &Path) {
+        for (key, value) in [
+            ("user.name", "Migration Test"),
+            ("user.email", "migration@example.invalid"),
+            ("commit.gpgsign", "false"),
+        ] {
+            let status = Command::new("git")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .arg("-C")
+                .arg(root)
+                .args(["config", key, value])
+                .status()
+                .expect("the git config process starts");
+            assert!(status.success(), "git config {key}");
+        }
+    }
+    /// Deletes every legacy `.orna` file other than the format-3 database
+    /// record: the 1.0.0 storage files the migrated candidate does not carry.
+    fn legacy_orna_removals(root: &Path) -> Vec<ManagedFileChange> {
+        fn collect(root: &Path, dir: &Path, out: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).expect("the golden .orna directory reads") {
+                let path = entry.expect("a directory entry").path();
+                if path.is_dir() {
+                    collect(root, &path, out);
+                    continue;
+                }
+                let relative = path
+                    .strip_prefix(root)
+                    .expect("the entry is under the root")
+                    .to_str()
+                    .expect("the golden paths are UTF-8")
+                    .to_owned();
+                if relative != ".orna/database.orna" && relative != ".orna/format.orna" {
+                    out.push(relative);
+                }
+            }
+        }
+        let mut paths = Vec::new();
+        collect(root, &root.join(".orna"), &mut paths);
+        paths.sort();
+        paths
+            .into_iter()
+            .map(|path| {
+                ManagedFileChange::new(ManagedPath::new(&path).expect("managed path"), None)
+            })
+            .collect()
+    }
+
+    /// A loose Contact admitted through the repository candidate path reads
+    /// back through the ordinary committed reader with the legacy key and the
+    /// stored tuple the copy derived.
+    #[test]
+    fn loose_contacts_round_trip_through_repository_admission() {
+        let (directory, repository, commit) = golden();
+        configure_identity(directory.path());
+        let address = LegacyTableAddress::TablePath(PATH.to_owned());
+        let legacy = read_legacy_table_rows(&repository, &commit, &address)
+            .expect("the legacy loose table decodes");
+        let declared_set = declared();
+        let input = migration_row_input(&declared_set, &[LegacyTable::new(&address, &legacy)])
+            .expect("the golden contacts map onto the declared Contact table");
+        let expected: Vec<(TypedKey, Vec<u8>)> = input.relations()[0].rows().to_vec();
+        let relations = input.into_staged_relations();
+
+        let identities = [StoredObjectIdentity::new(TABLE, 1, "Contact", false)];
+        let watermarks = AllocatorWatermarks::new();
+        // The legacy golden records no database identity in format 3, so the
+        // candidate names a fixed test identity and writes the format-3 record
+        // that carries it.
+        let database_id = repository
+            .open_pinned_format_context(commit.as_str())
+            .expect("the golden commit opens")
+            .require_database_id()
+            .unwrap_or_else(|_| {
+                "0f4c1f2e-8a3b-4c5d-9e6f-7a8b9c0d1e2f"
+                    .parse()
+                    .expect("the test identity parses")
+            });
+        let database =
+            format!("{{\n    repository_format: 3,\n    database_id: \"{database_id}\",\n}}\n")
+                .into_bytes();
+        let mut changes = vec![
+            ManagedFileChange::new(
+                ManagedPath::new(".orna/database.orna").expect("managed path"),
+                Some(database),
+            ),
+            ManagedFileChange::new(
+                ManagedPath::new(".orna/format.orna").expect("managed path"),
+                None,
+            ),
+        ];
+        changes.extend(legacy_orna_removals(directory.path()));
+        let candidate = repository
+            .build_private_commit_with_relations(
+                &commit,
+                &changes,
+                RelationCandidateContent {
+                    relations: &relations,
+                    identities: &identities,
+                    watermarks: &watermarks,
+                },
+                database_id,
+                "migration candidate",
+            )
+            .expect("the candidate admits the migrated rows");
+
+        let format = repository
+            .open_private_candidate_format_context(&candidate)
+            .expect("the candidate opens");
+        let row_map = format
+            .load_row_map(TABLE)
+            .expect("the Contact row map loads");
+        let graph = format
+            .open_native_graph(&row_map)
+            .expect("the native graph opens");
+        let scope = graph.open_read_scope().expect("a read scope opens");
+        let rows = graph
+            .range_rows(&KeyRange::new(None, None, 16).expect("key range"), &scope)
+            .expect("the committed rows read");
+        assert_eq!(rows.len(), expected.len());
+        for (row, (key, tuple)) in rows.iter().zip(&expected) {
+            assert_eq!(row.key(), key);
+            assert_eq!(row.value().encoded_fields(), Some(tuple.as_slice()));
+        }
     }
 
     #[test]
