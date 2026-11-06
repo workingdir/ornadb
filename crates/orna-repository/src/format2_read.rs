@@ -7,8 +7,10 @@
 //! is the Blob-field read API for those fields: it pins one selector, admits
 //! only a repository-format-2 commit, decodes the field, resolves the root
 //! through the repository's object reader, and verifies it with the OGB-1
-//! verifier before returning any bytes. It is NOT yet called from a production
-//! row read path; the follow-up beads are cross-linked from ornadb-nne7.
+//! verifier before returning any bytes. Its only
+//! production caller is the migration copy, through `read_format2_orr_blob`
+//! (`build_store_with_expectation`); the format-2 runtime row read path does not
+//! call it.
 //!
 //! Format-1 and format-3 commits are refused here. The format-2 record is
 //! read-only: nothing in this module writes to the object database.
