@@ -1120,3 +1120,129 @@ fn migration_refuses_in_flight_failure_and_names_it() {
         assert_eq!(failure_table_rows(&source), failure_before);
     }
 }
+
+/// Inserts one provider effect receipt into the source's runtime state. Status 2 carries a
+/// receipt payload; every other status carries none, matching the table's CHECK.
+fn seed_receipt(root: &Path, identity: &[u8], status: i64, receipt: Option<&[u8]>) {
+    const INSERT_RECEIPT_FIXTURE: &str = "INSERT INTO stream_provider_effect_receipt (effect_identity, request_digest, idempotency_key, lease_fence, attempts_in_fence, total_attempts, status, receipt) VALUES (?1, ?2, ?3, 1, 1, 1, ?4, ?5)";
+    runtime().block_on(async {
+        let database = state_database(root).await;
+        let connection = database.connect().unwrap();
+        let receipt = receipt.map_or(libsql::Value::Null, |bytes| {
+            libsql::Value::Blob(bytes.to_vec())
+        });
+        connection
+            .execute(
+                INSERT_RECEIPT_FIXTURE,
+                libsql::params![
+                    identity.to_vec(),
+                    vec![7_u8; 32],
+                    vec![8_u8; 32],
+                    status,
+                    receipt
+                ],
+            )
+            .await
+            .unwrap();
+    });
+}
+
+/// Every row of the provider effect receipt table, read without opening the runtime.
+fn stream_receipt_rows(root: &Path) -> Vec<Vec<libsql::Value>> {
+    runtime().block_on(async {
+        let database = state_database(root).await;
+        let connection = database.connect().unwrap();
+        let mut rows = connection
+            .query(
+                "SELECT * FROM stream_provider_effect_receipt ORDER BY effect_identity",
+                (),
+            )
+            .await
+            .unwrap();
+        let mut values = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            let width = row.column_count();
+            values.push(
+                (0..width)
+                    .map(|index| row.get_value(index).unwrap())
+                    .collect(),
+            );
+        }
+        values
+    })
+}
+
+/// Settled delivery receipts (statuses 2, 3 and 4) are carried verbatim: the activated copy
+/// holds the same rows, and the checkpoint is carried unchanged.
+#[test]
+fn migration_carries_settled_receipts_verbatim() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    dirty_legacy_source(&source);
+    let before = give_source_a_persistent_consumer(&source, false);
+    seed_receipt(&source, b"receipt-delivered", 2, Some(b"delivered-receipt"));
+    seed_receipt(&source, b"receipt-abandoned", 3, None);
+    seed_receipt(&source, b"receipt-terminal", 4, None);
+    let expected = stream_receipt_rows(&source);
+    assert_eq!(
+        expected.len(),
+        3,
+        "all three settled receipts must be seeded"
+    );
+    let destination = parent.path().join("migrated");
+
+    let prepared = run_copy(&source, &destination);
+    assert!(
+        prepared.status.success(),
+        "migrate copy: {}",
+        String::from_utf8_lossy(&prepared.stderr)
+    );
+    let activated = run_upgrade(&source, &destination);
+    assert!(
+        activated.status.success(),
+        "upgrade --yes-activate: {}",
+        String::from_utf8_lossy(&activated.stderr)
+    );
+
+    assert_eq!(stream_receipt_rows(&destination), expected);
+    let carried = activated_checkpoint(&destination);
+    assert_eq!(carried.version, before.version);
+    assert_eq!(carried.committed, before.committed);
+}
+
+/// A receipt in `Pending` (status 1) names an effect claim that is not carried. The carry
+/// refuses it by name (`stream_provider_effect_receipt`), prepares no copy, and leaves the
+/// checkpoint and receipt rows unchanged.
+#[test]
+fn migration_refuses_in_flight_receipt_and_names_it() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    dirty_legacy_source(&source);
+    give_source_a_persistent_consumer(&source, false);
+    let checkpoint_before = stream_checkpoint_rows(&source);
+    seed_receipt(&source, b"receipt-in-flight", 1, None);
+    let receipts_before = stream_receipt_rows(&source);
+    let destination = parent.path().join("migrated");
+
+    let output = run_copy_with_debug(&source, &destination);
+
+    assert!(
+        !output.status.success(),
+        "in-flight receipt must not be dropped: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("E2100"), "{stderr}");
+    assert!(
+        stderr.contains("tables=stream_provider_effect_receipt"),
+        "{stderr}"
+    );
+    assert!(
+        !destination.exists(),
+        "no migration copy may be prepared while a receipt is in flight"
+    );
+    assert_eq!(stream_checkpoint_rows(&source), checkpoint_before);
+    assert_eq!(stream_receipt_rows(&source), receipts_before);
+}
