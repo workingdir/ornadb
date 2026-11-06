@@ -5,6 +5,11 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- The legacy row decoder now enforces one authoritative row per key
+  (ornadb-5il1.310, ORNA-UPGRADE-3 step 3). A compact or loose table that names
+  the same key twice fails closed with `LegacyReadError::DuplicateRowKey`,
+  naming the table and key, rather than choosing one row. Decoding reads the
+  source only and writes nothing.
 - A killed `orna migrate copy` no longer leaks its staging directory for good
   (ornadb-zors). Each staging copy now pairs with an owner marker,
   `<staging>.owner`, that the running preparation holds under an exclusive
