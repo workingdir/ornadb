@@ -623,7 +623,8 @@ fn cli_migration_copy_prepares_a_populated_format_two_source() {
     );
 
     let second = parent.path().join("second");
-    let output = run_copy(&source, &second, "0", &git_trace);
+    let second_trace = parent.path().join("git-trace-second.log");
+    let output = run_copy(&source, &second, "0", &second_trace);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "{stderr}");
 

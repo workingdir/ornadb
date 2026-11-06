@@ -1521,9 +1521,50 @@ mod tests {
             &[LegacyTable::new(&address, &rows)],
             Some(reader_ref),
         );
-        assert!(matches!(
-            result,
-            Err(MigrationRowError::InvalidRow { .. })
-        ));
+        assert!(matches!(result, Err(MigrationRowError::InvalidRow { .. })));
+    }
+
+    /// A format-2 storage record `{ blob, length }` is read through the reader
+    /// and lowers to a Blob reference whose identity is the content's SHA-256,
+    /// with the read bytes stored once. The reader receives the exact record
+    /// text, and the decoded length matches the record's length.
+    #[test]
+    fn format_two_storage_record_lowers_through_the_reader() {
+        use super::{Format2BlobReader, migration_row_input_with_format2_blobs};
+        let rows = LegacyTableRows::loose_for_tests(vec![LegacyRow::for_tests(
+            TypedKey::Text("alice".to_owned()),
+            vec![
+                declared_field("name", text("Alice Smith")),
+                declared_field("emails", Raw::Array(Vec::new())),
+                declared_field(
+                    "avatar",
+                    Raw::Map(vec![
+                        (
+                            Raw::Text("blob".to_owned()),
+                            Raw::Text("sha256:ba7816bf".to_owned()),
+                        ),
+                        (Raw::Text("length".to_owned()), Raw::Int(3.into())),
+                    ]),
+                ),
+            ],
+        )]);
+        let address = LegacyTableAddress::TablePath(PATH.to_owned());
+        let reader = |field: &str| -> Result<Vec<u8>, String> {
+            assert_eq!(field, "{ blob: \"sha256:ba7816bf\", length: 3 }");
+            Ok(b"abc".to_vec())
+        };
+        let reader_ref: Format2BlobReader<'_> = &reader;
+        let input = migration_row_input_with_format2_blobs(
+            &blob_declared(),
+            &[LegacyTable::new(&address, &rows)],
+            Some(reader_ref),
+        )
+        .expect("the storage record lowers through the reader");
+        let identity = blob_identity(b"abc").unwrap();
+        assert_eq!(
+            input.blobs().get(&identity).map(Vec::as_slice),
+            Some(&b"abc"[..])
+        );
+        assert_eq!(input.blobs().len(), 1);
     }
 }
