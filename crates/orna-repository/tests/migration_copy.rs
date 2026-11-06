@@ -6,9 +6,26 @@ use std::{fs, path::Path, process::Command};
 use orna_repository::{
     LegacyAnnotationCandidate, ManagedPath, MigrationAnnotationDefaults, MigrationContinuityRecord,
     PublicationJournal, PublicationJournalEntry, Repository, RepositoryError,
-    migration_copy::{self, DiscardOutcome, LegacyAnnotationInventory},
+    migration_copy::{self, DiscardOutcome, LegacyAnnotationInventory, MigrationStore},
 };
 use tempfile::TempDir;
+
+/// The migration store of a source that has no legacy rows to convert: no
+/// relations, no identities, zero watermarks and no retired legacy paths.
+fn no_store(_: orna_repository::DatabaseId) -> Result<MigrationStore, RepositoryError> {
+    Ok(MigrationStore::default())
+}
+
+/// Asserts a format-3 candidate tracks the database record and the admitted
+/// `.orna/store` tree, and nothing else under `.orna/`.
+fn assert_candidate_tracked_paths(listing: &str) {
+    let mut paths = listing.lines();
+    assert_eq!(paths.next(), Some(".orna/database.orna"), "{listing}");
+    assert!(
+        paths.all(|path| path.starts_with(".orna/store/")),
+        "{listing}"
+    );
+}
 
 fn git_output(directory: &Path, arguments: &[&str]) -> Vec<u8> {
     let output = Command::new("git")
@@ -167,6 +184,7 @@ fn populated_format1_dirty_workspace_is_preserved_in_copy() {
         &destination,
         MigrationContinuityRecord::new(Vec::new()).unwrap(),
         defaults,
+        &no_store,
     )
     .unwrap();
     assert_eq!(copy.database_id(), source_database_id);
@@ -428,6 +446,7 @@ fn populated_format2_dirty_workspace_is_preserved_in_copy() {
         &destination,
         continuity.clone(),
         defaults,
+        &no_store,
     )
     .unwrap();
     let migrated = Repository::discover(copy.destination()).unwrap();
@@ -504,13 +523,10 @@ fn populated_format2_dirty_workspace_is_preserved_in_copy() {
     // journal carries continuity and annotation defaults, and the commit
     // trailer names the source format.
     let candidate = copy.candidate_journal().new_head().as_str().to_owned();
-    assert_eq!(
-        git_text(
-            copy.destination(),
-            &["ls-tree", "--name-only", "-r", &candidate, "--", ".orna"]
-        ),
-        ".orna/database.orna"
-    );
+    assert_candidate_tracked_paths(&git_text(
+        copy.destination(),
+        &["ls-tree", "--name-only", "-r", &candidate, "--", ".orna"],
+    ));
     let message = git_text(
         copy.destination(),
         &["log", "-1", "--format=%B", &candidate],
@@ -597,6 +613,7 @@ fn populated_format2_dirty_workspace_is_preserved_in_copy() {
         &destination,
         continuity.clone(),
         defaults,
+        &no_store,
     )
     .unwrap();
     assert_eq!(
@@ -624,8 +641,14 @@ fn populated_format2_dirty_workspace_is_preserved_in_copy() {
     )
     .unwrap();
     assert!(
-        migration_copy::prepare_format3_migration(&repository, &destination, continuity, defaults,)
-            .is_err()
+        migration_copy::prepare_format3_migration(
+            &repository,
+            &destination,
+            continuity,
+            defaults,
+            &no_store
+        )
+        .is_err()
     );
     assert_eq!(
         git_output(
@@ -796,6 +819,7 @@ fn pre_change_prepared_copy_is_refused_and_discardable() {
         &destination,
         continuity.clone(),
         defaults,
+        &no_store,
     )
     .unwrap();
     make_pre_change_copy(&destination);
@@ -807,6 +831,7 @@ fn pre_change_prepared_copy_is_refused_and_discardable() {
         &destination,
         continuity.clone(),
         defaults,
+        &no_store,
     )
     .expect_err("the pre-change copy is refused by preparation");
     assert!(matches!(refused, RepositoryError::LegacyMigrationCopy));
@@ -829,21 +854,23 @@ fn pre_change_prepared_copy_is_refused_and_discardable() {
         ),
         source_status
     );
-    let rerun =
-        migration_copy::prepare_format3_migration(&repository, &destination, continuity, defaults)
-            .unwrap();
-    assert_eq!(
-        git_text(
-            &destination,
-            &[
-                "ls-tree",
-                "--name-only",
-                "-r",
-                rerun.candidate_journal().new_head().as_str(),
-                "--",
-                ".orna",
-            ]
-        ),
-        ".orna/database.orna"
-    );
+    let rerun = migration_copy::prepare_format3_migration(
+        &repository,
+        &destination,
+        continuity,
+        defaults,
+        &no_store,
+    )
+    .unwrap();
+    assert_candidate_tracked_paths(&git_text(
+        &destination,
+        &[
+            "ls-tree",
+            "--name-only",
+            "-r",
+            rerun.candidate_journal().new_head().as_str(),
+            "--",
+            ".orna",
+        ],
+    ));
 }

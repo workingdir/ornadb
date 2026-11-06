@@ -11017,6 +11017,9 @@ pub enum RepositoryError {
     /// A committed source tree exceeds the walk-size or depth limit before
     /// its entries are expanded.
     SourceTreeLimit,
+    /// The migration store could not admit a legacy relation; the message
+    /// names the refused row so callers can report it without a raw dump.
+    MigrationStoreRefused(String),
 }
 
 impl fmt::Display for RepositoryError {
@@ -11105,6 +11108,9 @@ impl fmt::Display for RepositoryError {
                 f.write_str("atomic Git index replacement is unsupported on this platform")
             }
             Self::SourceTreeLimit => f.write_str("source tree exceeds the walk limit"),
+            Self::MigrationStoreRefused(detail) => {
+                write!(f, "migration store refused a legacy row: {detail}")
+            }
         }
     }
 }
