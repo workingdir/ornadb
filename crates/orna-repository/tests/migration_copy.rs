@@ -19,17 +19,6 @@ fn no_store(
     Ok(MigrationStore::default())
 }
 
-/// Asserts a format-3 candidate tracks the database record and the admitted
-/// `.orna/store` tree, and nothing else under `.orna/`.
-fn assert_candidate_tracked_paths(listing: &str) {
-    let mut paths = listing.lines();
-    assert_eq!(paths.next(), Some(".orna/database.orna"), "{listing}");
-    assert!(
-        paths.all(|path| path.starts_with(".orna/store/")),
-        "{listing}"
-    );
-}
-
 fn git_output(directory: &Path, arguments: &[&str]) -> Vec<u8> {
     let output = Command::new("git")
         .current_dir(directory)
@@ -521,15 +510,18 @@ fn populated_format2_dirty_workspace_is_preserved_in_copy() {
         ),
         committed_format_bytes
     );
-    // ORNA-META-001: the candidate tracks only the format-3 database record
-    // under `.orna/`. The migration coordinates are not a tracked file: the
-    // journal carries continuity and annotation defaults, and the commit
-    // trailer names the source format.
+    // ORNA-META-001: the candidate tracks the format-3 database record and the
+    // store root beside it under `.orna/`. The migration coordinates are not a
+    // tracked file: the journal carries continuity and annotation defaults, and
+    // the commit trailer names the source format.
     let candidate = copy.candidate_journal().new_head().as_str().to_owned();
-    assert_candidate_tracked_paths(&git_text(
-        copy.destination(),
-        &["ls-tree", "--name-only", "-r", &candidate, "--", ".orna"],
-    ));
+    assert_eq!(
+        git_text(
+            copy.destination(),
+            &["ls-tree", "--name-only", &candidate, "--", ".orna/"]
+        ),
+        ".orna/database.orna\n.orna/store"
+    );
     let message = git_text(
         copy.destination(),
         &["log", "-1", "--format=%B", &candidate],
@@ -865,15 +857,73 @@ fn pre_change_prepared_copy_is_refused_and_discardable() {
         &no_store,
     )
     .unwrap();
-    assert_candidate_tracked_paths(&git_text(
+    assert_eq!(
+        git_text(
+            &destination,
+            &[
+                "ls-tree",
+                "--name-only",
+                rerun.candidate_journal().new_head().as_str(),
+                "--",
+                ".orna/",
+            ]
+        ),
+        ".orna/database.orna\n.orna/store"
+    );
+}
+
+#[test]
+fn source_edited_after_the_store_is_built_is_refused_before_pinning() {
+    let source = TempDir::new().unwrap();
+    init_repository(source.path());
+    fs::write(
+        source.path().join("main.orna"),
+        include_str!("fixtures/git-repository-main.orna"),
+    )
+    .unwrap();
+    fs::write(source.path().join("tracked.txt"), b"committed bytes\n").unwrap();
+    fs::create_dir_all(source.path().join(".orna")).unwrap();
+    fs::write(
+        source.path().join(".orna/format.orna"),
+        include_str!("fixtures/format-context/format-1-ornadb-1.0.orna"),
+    )
+    .unwrap();
+    fs::write(
+        source.path().join(".orna/database.orna"),
+        include_str!("fixtures/format-context/database-sidecar.orna"),
+    )
+    .unwrap();
+    git_output(source.path(), &["add", "."]);
+    git_output(source.path(), &["commit", "-m", "format-1 source"]);
+    let repository = Repository::discover(source.path()).unwrap();
+    let source_head = git_text(source.path(), &["rev-parse", "HEAD"]);
+    let parent = TempDir::new().unwrap();
+    let destination = parent.path().join("migrated");
+    let tracked = source.path().join("tracked.txt");
+    // The store is built while the source is still free to move; the source is
+    // edited between the store build and the pin.
+    let edit_source_after_store = |_: &Repository,
+                                   _: orna_repository::DatabaseId|
+     -> Result<MigrationStore, RepositoryError> {
+        fs::write(&tracked, b"edited after the store was built\n").unwrap();
+        Ok(MigrationStore::default())
+    };
+    let error = migration_copy::prepare_format3_migration(
+        &repository,
         &destination,
-        &[
-            "ls-tree",
-            "--name-only",
-            "-r",
-            rerun.candidate_journal().new_head().as_str(),
-            "--",
-            ".orna",
-        ],
+        MigrationContinuityRecord::new(Vec::new()).unwrap(),
+        MigrationAnnotationDefaults::new(1).unwrap(),
+        &edit_source_after_store,
+    )
+    .expect_err("a source edited after the store is built is refused");
+    assert!(matches!(
+        error,
+        RepositoryError::PublicationRecoveryConflict
     ));
+    assert!(!destination.exists());
+    assert_eq!(git_text(source.path(), &["rev-parse", "HEAD"]), source_head);
+    assert_eq!(
+        fs::read(&tracked).unwrap(),
+        b"edited after the store was built\n"
+    );
 }
