@@ -387,11 +387,26 @@ fn read_loose_table_rows(
 ) -> Result<LegacyTableRows, LegacyReadError> {
     let mut total_bytes = 0usize;
     let budget = ProjectLimits::default().max_source_bytes;
-    let mut rows = Vec::new();
+    let mut sources = Vec::new();
     for unit in loose_row_units(repository, commit, table_path)? {
         let maximum = budget.saturating_sub(total_bytes);
         let bytes = repository.read_committed_file(commit, &unit.path, maximum)?;
         total_bytes += bytes.len();
+        sources.push((unit, bytes));
+    }
+    decode_loose_rows(table_path, sources)
+}
+
+/// Decodes committed loose row units, each with its committed bytes, into one
+/// table's rows (ORNA-ROW-001..005). It reads no source: the caller supplies
+/// every unit's path, key path and bytes, so the parse, lowering, key
+/// reconstruction and the one-row-per-key check are one pure path.
+fn decode_loose_rows(
+    table_path: &str,
+    sources: Vec<(LooseRowUnit, Vec<u8>)>,
+) -> Result<LegacyTableRows, LegacyReadError> {
+    let mut rows = Vec::new();
+    for (unit, bytes) in sources {
         let source = String::from_utf8(bytes)
             .map_err(|_| LegacyReadError::UndecodableRowUnit(unit.path.clone()))?;
         let parsed = parse_row(&source);
@@ -527,15 +542,15 @@ pub fn read_legacy_row_revisions(
 }
 
 #[cfg(test)]
-mod tests {
+mod legacy_rows {
     use std::{path::Path, process::Command};
 
     use orna_repository::{Repository, TypedKey, Uuid};
     use tempfile::TempDir;
 
     use super::{
-        LegacyReadError, LegacyRow, LegacyRowSource, LegacyTableAddress, one_row_per_key,
-        read_legacy_table_rows,
+        LegacyReadError, LegacyRow, LegacyRowSource, LegacyTableAddress, LooseRowUnit,
+        decode_loose_rows, one_row_per_key, read_legacy_table_rows,
     };
 
     /// The golden format-1 bundle the CLI legacy tests read
@@ -669,5 +684,61 @@ mod tests {
             }
             other => panic!("expected DuplicateRowKey, got {other}"),
         }
+    }
+
+    /// Two committed loose row units that decode to one key are refused by the
+    /// same decode path `read_loose_table_rows` runs after reading each unit
+    /// (`decode_loose_rows`). Git trees cannot hold two entries at one path, so
+    /// the two units differ only in their logical path, as a repeated key does.
+    #[test]
+    fn loose_units_decoding_to_one_key_fail_closed() {
+        let body =
+            b"{\n    name: \"Alice Smith\",\n    emails: [\"alice@example.com\"],\n}\n".to_vec();
+        let unit = |path: &str| LooseRowUnit {
+            path: path.to_owned(),
+            key_path: vec!["alice.orna".to_owned()],
+        };
+        let error = decode_loose_rows(
+            "contacts/Contact",
+            vec![
+                (unit("contacts/Contact/alice.orna"), body.clone()),
+                (unit("contacts/Contact/alice-copy.orna"), body),
+            ],
+        )
+        .expect_err("two units naming one key have no single authoritative row");
+        match error {
+            LegacyReadError::DuplicateRowKey { table, key } => {
+                assert_eq!(table, "contacts/Contact");
+                assert_eq!(key, "alice");
+            }
+            other => panic!("expected DuplicateRowKey, got {other}"),
+        }
+    }
+
+    /// Distinct loose units decode to one row each in key order, through the
+    /// same path, so the duplicate check is not over-broad.
+    #[test]
+    fn loose_units_with_distinct_keys_decode_in_key_order() {
+        let body = b"{\n    name: \"Alice Smith\",\n}\n".to_vec();
+        let unit = |path: &str, key: &str| LooseRowUnit {
+            path: path.to_owned(),
+            key_path: vec![format!("{key}.orna")],
+        };
+        let decoded = decode_loose_rows(
+            "contacts/Contact",
+            vec![
+                (unit("contacts/Contact/bob.orna", "bob"), body.clone()),
+                (unit("contacts/Contact/alice.orna", "alice"), body),
+            ],
+        )
+        .expect("distinct loose keys decode");
+        assert!(matches!(decoded.source(), LegacyRowSource::LooseRowUnit));
+        assert_eq!(
+            keys(decoded.rows()),
+            vec![
+                TypedKey::Text("alice".to_owned()),
+                TypedKey::Text("bob".to_owned()),
+            ],
+        );
     }
 }
