@@ -4,8 +4,9 @@ mod test_support;
 use std::{fs, path::Path, process::Command};
 
 use orna_repository::{
-    LegacyAnnotationCandidate, MigrationAnnotationDefaults, MigrationContinuityRecord, Repository,
-    migration_copy::{self, LegacyAnnotationInventory},
+    LegacyAnnotationCandidate, ManagedPath, MigrationAnnotationDefaults, MigrationContinuityRecord,
+    PublicationJournal, PublicationJournalEntry, Repository, RepositoryError,
+    migration_copy::{self, DiscardOutcome, LegacyAnnotationInventory},
 };
 use tempfile::TempDir;
 
@@ -498,22 +499,35 @@ fn populated_format2_dirty_workspace_is_preserved_in_copy() {
         ),
         committed_format_bytes
     );
-    let migration_record = git_output(
-        copy.destination(),
-        &[
-            "show",
-            &format!(
-                "{}:.orna/migration.json",
-                copy.candidate_journal().new_head().as_str()
-            ),
-        ],
+    // ORNA-META-001: the candidate tracks only the format-3 database record
+    // under `.orna/`. The migration coordinates are not a tracked file: the
+    // journal carries continuity and annotation defaults, and the commit
+    // trailer names the source format.
+    let candidate = copy.candidate_journal().new_head().as_str().to_owned();
+    assert_eq!(
+        git_text(
+            copy.destination(),
+            &["ls-tree", "--name-only", "-r", &candidate, "--", ".orna"]
+        ),
+        ".orna/database.orna"
     );
-    let migration_record = String::from_utf8(migration_record).unwrap();
-    assert!(migration_record.contains("source_format: 2"));
-    assert!(migration_record.contains("annotation_default_format: \"MIME-1\""));
-    assert!(migration_record.contains("annotation_default_entries: 1"));
-    assert!(migration_record.contains("payload_inspected: false"));
-    assert!(migration_record.contains("continuity_predecessors: 0"));
+    let message = git_text(
+        copy.destination(),
+        &["log", "-1", "--format=%B", &candidate],
+    );
+    assert!(message.contains("Orna-Migration: format-2-to-3"));
+    assert!(message.contains("1 rows take the MIME-1 default annotation"));
+    assert_eq!(
+        copy.candidate_journal()
+            .entries()
+            .iter()
+            .map(|entry| entry.path().as_path().to_str().unwrap().to_owned())
+            .collect::<Vec<_>>(),
+        vec![
+            ".orna/database.orna".to_owned(),
+            ".orna/format.orna".to_owned()
+        ]
+    );
     let copy_submodule = copy.destination().join("dependencies/example");
     assert_eq!(
         git_output(&copy_submodule, &["show", ":dependency.txt"]),
@@ -619,5 +633,217 @@ fn populated_format2_dirty_workspace_is_preserved_in_copy() {
             &["status", "--porcelain=v2", "--untracked-files=all"]
         ),
         source_status
+    );
+}
+
+const MIGRATION_RECORD_PATH: &str = ".orna/migration.json";
+
+fn git_with_index(directory: &Path, index: &Path, arguments: &[&str]) -> String {
+    let output = Command::new("git")
+        .current_dir(directory)
+        .env("GIT_INDEX_FILE", index)
+        .args(arguments)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {arguments:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+/// Rebuilds a freshly prepared copy into the shape a copy prepared before
+/// ORNA-META-001 had: the candidate commit tracks `.orna/migration.json`, the
+/// journal lists that file as a third entry, and the candidate pin follows the
+/// rebuilt commit. The parent, index pin, continuity, and annotation defaults
+/// stay the copy's own.
+fn make_pre_change_copy(destination: &Path) {
+    let repository = Repository::discover(destination).unwrap();
+    let journal = repository.read_publication_journal().unwrap().unwrap();
+    let old_head = journal.old_head().clone();
+    let current_candidate = journal.new_head().clone();
+
+    let scratch = TempDir::new().unwrap();
+    let record = scratch.path().join("migration.json");
+    let record_bytes = b"{\"source_format\": 2}\n".to_vec();
+    fs::write(&record, &record_bytes).unwrap();
+    let blob = git_text(
+        destination,
+        &["hash-object", "-w", record.to_str().unwrap()],
+    );
+    let index = scratch.path().join("index");
+    let tree = git_text(
+        destination,
+        &[
+            "rev-parse",
+            &format!("{}^{{tree}}", current_candidate.as_str()),
+        ],
+    );
+    git_with_index(destination, &index, &["read-tree", &tree]);
+    git_with_index(
+        destination,
+        &index,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("100644,{blob},{MIGRATION_RECORD_PATH}"),
+        ],
+    );
+    let legacy_tree = git_with_index(destination, &index, &["write-tree"]);
+    let legacy_commit = git_text(
+        destination,
+        &[
+            "-c",
+            "user.name=orna",
+            "-c",
+            "user.email=orna@example.invalid",
+            "commit-tree",
+            &legacy_tree,
+            "-p",
+            old_head.as_str(),
+            "-m",
+            "legacy migration candidate",
+        ],
+    );
+    git_text(
+        destination,
+        &[
+            "update-ref",
+            &format!("refs/orna/migration-candidates/{legacy_commit}"),
+            legacy_commit.as_str(),
+        ],
+    );
+    let legacy = repository.resolve_snapshot(&legacy_commit).unwrap();
+
+    let mut entries = journal.entries().to_vec();
+    entries.push(PublicationJournalEntry::new(
+        ManagedPath::new(MIGRATION_RECORD_PATH).unwrap(),
+        None,
+        Some(record_bytes),
+    ));
+    let rebuilt = PublicationJournal::new_with_runtime_intent(
+        old_head,
+        legacy.clone(),
+        journal.base_index_tree().unwrap().clone(),
+        journal.runtime_intent_id().unwrap(),
+        entries,
+    )
+    .unwrap()
+    .with_migration_continuity(journal.migration_continuity().unwrap().clone())
+    .unwrap()
+    .with_migration_annotation_defaults(journal.migration_annotation_defaults().unwrap())
+    .unwrap();
+    repository.write_publication_journal(&rebuilt).unwrap();
+    git_text(
+        destination,
+        &[
+            "update-ref",
+            "-d",
+            &format!(
+                "refs/orna/migration-candidates/{}",
+                current_candidate.as_str()
+            ),
+        ],
+    );
+}
+
+#[test]
+fn pre_change_prepared_copy_is_refused_and_discardable() {
+    let source = TempDir::new().unwrap();
+    init_repository(source.path());
+    fs::write(
+        source.path().join("main.orna"),
+        include_str!("fixtures/git-repository-main.orna"),
+    )
+    .unwrap();
+    fs::write(
+        source.path().join("tracked.txt"),
+        b"format-2 committed bytes\n",
+    )
+    .unwrap();
+    fs::create_dir_all(source.path().join(".orna")).unwrap();
+    fs::write(
+        source.path().join(".orna/format.orna"),
+        include_str!("fixtures/format-context/format-2-draft-1.1.0.orna"),
+    )
+    .unwrap();
+    fs::write(
+        source.path().join(".orna/database.orna"),
+        include_str!("fixtures/format-context/database-sidecar.orna"),
+    )
+    .unwrap();
+    git_output(source.path(), &["add", "."]);
+    git_output(source.path(), &["commit", "-m", "format-2 source"]);
+    let repository = Repository::discover(source.path()).unwrap();
+    let source_status = git_output(
+        source.path(),
+        &["status", "--porcelain=v2", "--untracked-files=all"],
+    );
+    let defaults = LegacyAnnotationInventory::Present(vec![LegacyAnnotationCandidate::new(
+        b"unlabeled-source-row".to_vec(),
+        None,
+        None,
+    )])
+    .annotation_defaults()
+    .unwrap();
+    let continuity = MigrationContinuityRecord::new(Vec::new()).unwrap();
+    let parent = TempDir::new().unwrap();
+    let destination = parent.path().join("migrated");
+    migration_copy::prepare_format3_migration(
+        &repository,
+        &destination,
+        continuity.clone(),
+        defaults,
+    )
+    .unwrap();
+    make_pre_change_copy(&destination);
+
+    // A restarted preparation meets the old-shape copy: it is refused with a
+    // typed error rather than rebuilt or silently accepted.
+    let refused = migration_copy::prepare_format3_migration(
+        &repository,
+        &destination,
+        continuity.clone(),
+        defaults,
+    )
+    .expect_err("the pre-change copy is refused by preparation");
+    assert!(matches!(refused, RepositoryError::LegacyMigrationCopy));
+    let copy_repository = Repository::discover(&destination).unwrap();
+    let recovery = copy_repository
+        .recover_publication()
+        .expect_err("publication recovery refuses the pre-change copy");
+    assert!(matches!(recovery, RepositoryError::LegacyMigrationCopy));
+
+    // Discard still removes the copy, after which a fresh preparation builds
+    // the format-3 candidate without the tracked migration record.
+    let outcome =
+        migration_copy::discard_prepared_format3_migration(&repository, &destination).unwrap();
+    assert!(matches!(outcome, DiscardOutcome::Discarded));
+    assert!(!destination.exists());
+    assert_eq!(
+        git_output(
+            source.path(),
+            &["status", "--porcelain=v2", "--untracked-files=all"]
+        ),
+        source_status
+    );
+    let rerun =
+        migration_copy::prepare_format3_migration(&repository, &destination, continuity, defaults)
+            .unwrap();
+    assert_eq!(
+        git_text(
+            &destination,
+            &[
+                "ls-tree",
+                "--name-only",
+                "-r",
+                rerun.candidate_journal().new_head().as_str(),
+                "--",
+                ".orna",
+            ]
+        ),
+        ".orna/database.orna"
     );
 }
