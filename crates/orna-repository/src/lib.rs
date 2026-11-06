@@ -4711,6 +4711,21 @@ impl Repository {
     ) -> Result<GitCommitRef, RepositoryError> {
         self.commit_reviewed_candidate_with_stage_hook(review, message, gate, |_| {})
     }
+
+    /// Records the reviewed result of a publication whose batch reached
+    /// `WorktreeReconciled`, then marks its runtime intent consumed. Reviewed
+    /// publication and migration activation both complete through this path.
+    pub(crate) fn complete_reviewed_publication(
+        &self,
+        runtime_intent_id: [u8; 16],
+        result_path: &Path,
+        record: &str,
+        journal: &mut PublicationJournal,
+    ) -> Result<(), RepositoryError> {
+        fs::write(result_path, record).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        self.mark_runtime_complete(runtime_intent_id, journal)
+    }
+
     fn resume_reviewed_candidate_publication(
         &self,
         review: &ReviewedCandidateReview,
@@ -4747,9 +4762,12 @@ impl Repository {
         let record = format!("{intent_hex}\n{message_digest_hex}\n{}", commit.as_str());
         match journal.stage() {
             PublicationJournalStage::WorktreeReconciled => {
-                fs::write(result_path, &record)
-                    .map_err(|_| RepositoryError::LocalStateUnavailable)?;
-                self.mark_runtime_complete(runtime_intent_id, &mut journal)?;
+                self.complete_reviewed_publication(
+                    runtime_intent_id,
+                    result_path,
+                    &record,
+                    &mut journal,
+                )?;
             }
             PublicationJournalStage::RuntimeCompleted | PublicationJournalStage::Complete => {
                 fs::write(result_path, &record)
@@ -10975,6 +10993,10 @@ pub enum RepositoryError {
     /// copies prepared before ORNA-META-001 carried. It cannot be prepared,
     /// recovered, or published; discarding it is the only remedy.
     LegacyMigrationCopy,
+    /// The prepared migration copy's publication journal has moved past the
+    /// prepared stage. Activation began, so the copy is rolled forward by
+    /// activation rather than discarded or aborted.
+    MigrationCopyAdvanced,
     /// The declared annotation-default count is not the count the decoded
     /// legacy rows carry (ORNA-UPGRADE-004). The migration refuses before any
     /// copy is installed.
@@ -11068,6 +11090,9 @@ impl fmt::Display for RepositoryError {
             ),
             Self::LegacyMigrationCopy => f.write_str(
                 "prepared migration copy carries the retired migration record; discard it and prepare again",
+            ),
+            Self::MigrationCopyAdvanced => f.write_str(
+                "prepared migration copy has begun activation; activate it instead of discarding it",
             ),
             Self::InvalidCompactManifest => f.write_str("invalid compact storage manifest"),
             Self::UnsafeManagedPath => f.write_str("unsafe managed path"),
