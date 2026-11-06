@@ -403,6 +403,74 @@ fn migration_refuses_non_carriable_stream_state_and_keeps_checkpoint() {
     assert_eq!(after.committed, before.committed);
 }
 
+/// A live consumer lease is per-attempt state. The carry refuses it by name
+/// (`stream_lease`), copies nothing, and leaves the source checkpoint unchanged.
+#[test]
+fn migration_refuses_live_consumer_lease_and_names_it() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    dirty_legacy_source(&source);
+    let before = give_source_a_persistent_consumer(&source, false);
+    assert_eq!(before.version, 2);
+    runtime().block_on(async {
+        let repository = Repository::discover(&source).unwrap();
+        let database = libsql::Builder::new_local(repository.runtime_paths().state_db())
+            .build()
+            .await
+            .unwrap();
+        let connection = database.connect().unwrap();
+        let mut rows = connection
+            .query("SELECT key_id FROM stream_checkpoint", ())
+            .await
+            .unwrap();
+        let key_id: String = rows.next().await.unwrap().unwrap().get(0).unwrap();
+        connection
+            .execute(
+                "INSERT INTO stream_lease
+                 (key_id, delivery_position, successor_position, fence, purpose)
+                 VALUES (?1, 'forged-delivery', 'forged-successor', 3, 1)",
+                libsql::params![key_id],
+            )
+            .await
+            .unwrap();
+    });
+    let destination = parent.path().join("migrated");
+
+    // `--debug` is what prints the refusal's `tables=` detail on stderr.
+    let output = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "--debug",
+            "--db",
+            source.to_str().unwrap(),
+            "migrate",
+            "copy",
+            destination.to_str().unwrap(),
+            "--annotation-defaults",
+            "0",
+            "--no-persistent-consumers",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "a live consumer lease must not be dropped: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("E2100"), "{stderr}");
+    assert!(stderr.contains("tables=stream_lease"), "{stderr}");
+    assert!(
+        !destination.exists(),
+        "no migration copy may be prepared while a lease is live"
+    );
+    let after = checkpoint_after_reopen(&source);
+    assert_eq!(after.version, before.version);
+    assert_eq!(after.committed, before.committed);
+}
+
 #[test]
 fn stream_carry_import_without_recorded_continuity_writes_nothing() {
     let parent = TempDir::new().unwrap();
