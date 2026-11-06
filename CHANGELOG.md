@@ -5,6 +5,12 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- A killed `orna migrate copy` no longer leaks its staging directory for good
+  (ornadb-zors). Each staging copy now pairs with an owner marker,
+  `<staging>.owner`, that the running preparation holds under an exclusive
+  lock. The next preparation reclaims a pair whose lock it can take and leaves
+  a live migration's copy untouched. Staging copies from earlier builds have no
+  marker and are not reclaimed.
 - Fixed broken rustdoc intra-doc links that failed `RUSTDOCFLAGS="-D warnings"
   cargo doc` (private items linked from public docs in `orna-sys`,
   `orna-conformance`, `orna-repository`, `orna-runtime`, `orna-live`) and the

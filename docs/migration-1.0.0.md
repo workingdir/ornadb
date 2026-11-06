@@ -354,6 +354,10 @@ the process kills that back them.
    and requires the recovered copy to equal an uninterrupted run byte for byte,
    the source worktree/index/carry to be untouched (ORNA-UPGRADE-006), and the
    acknowledged checkpoint to be carried exactly once.
+   A killed run before publication leaves exactly its staging directory and the
+   owner marker that names it; a published copy leaves neither. The restart
+   reclaims both, and a second migration beside a live one never reclaims the
+   live pair (`migration_copy_does_not_reclaim_a_live_migrations_staging`).
 
 ### What this slice changed
 
@@ -366,6 +370,15 @@ gone, and continues to rely on `candidate_from_journal` and the journal's
 managed entries to pin the rest of the candidate tree. The whole-snapshot
 admission rule is unchanged: opening such a candidate as a reader still refuses
 it.
+
+Preparation now claims its staging copy before it builds it. `claim_staging`
+creates `<staging>.owner` and holds an exclusive lock on it until the copy is
+installed or abandoned. `retire` drops the marker once the copy is installed;
+`abandon` removes the copy, then its marker, on a returned error. Before it
+claims, every preparation runs `reclaim_dead_staging`, which removes each staging
+copy and marker pair whose marker it can lock. A pair that a live preparation
+holds is never removed, and a destination is never reclaimed even when its name
+looks like a staging name.
 
 ### Not covered, and why
 
@@ -388,6 +401,13 @@ it.
   Its `rename` is the atomic step, it is exercised by the Gate D publication
   matrix, and a kill before it leaves only a staging directory that is never
   read.
+- **Staging leak reclaimed since ornadb-zors.** The bullet above describes the
+  state before ornadb-zors. Each staging copy now pairs with an owner marker,
+  `<staging>.owner`, that its preparation holds under an exclusive lock, and a
+  later preparation reclaims a pair whose lock it can take. Staging copies from
+  earlier builds have no marker, so they are never reclaimed (residual risk; the
+  rule that cleanup MUST NOT infer orphanhood from one absent in-memory handle is
+  ORNA-CAP-004).
 - **`.git/orna/state.db` bytes are compared by row, not by file.** SQLite page
   layout and its header change counters are not part of the carry contract; the
   matrix compares the checkpoint, bridge, archive and history rows exactly and
