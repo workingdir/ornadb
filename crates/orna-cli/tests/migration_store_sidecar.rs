@@ -63,7 +63,7 @@ fn run_copy(source: &Path, destination: &Path, git_trace: &Path) -> std::process
             "copy",
             destination.to_str().unwrap(),
             "--annotation-defaults",
-            "0",
+            "2",
             "--no-persistent-consumers",
         ])
         .output()

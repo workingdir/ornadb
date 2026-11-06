@@ -507,7 +507,7 @@ fn run_copy(source: &Path, destination: &Path) -> Output {
     let mut command = cli_command(source);
     command
         .arg(destination)
-        .args(["--annotation-defaults", "0", "--no-persistent-consumers"])
+        .args(["--annotation-defaults", "2", "--no-persistent-consumers"])
         .output()
         .expect("migration command starts")
 }
@@ -929,7 +929,7 @@ fn migration_kill_at_each_boundary_recovers_the_same_copy() {
             std::ffi::OsStr::new("copy"),
             destination.as_os_str(),
             std::ffi::OsStr::new("--annotation-defaults"),
-            std::ffi::OsStr::new("0"),
+            std::ffi::OsStr::new("2"),
             std::ffi::OsStr::new("--no-persistent-consumers"),
         ];
         kill_at(&source, &arguments, boundary, &crash);
@@ -1075,7 +1075,7 @@ fn migration_copy_does_not_reclaim_a_live_migrations_staging() {
         std::ffi::OsStr::new("copy"),
         live.as_os_str(),
         std::ffi::OsStr::new("--annotation-defaults"),
-        std::ffi::OsStr::new("0"),
+        std::ffi::OsStr::new("2"),
         std::ffi::OsStr::new("--no-persistent-consumers"),
     ];
     // Parked once the staged copy is synced and before it is published: the

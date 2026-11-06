@@ -316,7 +316,7 @@ fn committed_legacy_format1_bundle_reads_and_admits_through_migrate_copy() {
             "copy",
             destination.to_str().unwrap(),
             "--annotation-defaults",
-            "0",
+            "2",
             "--no-persistent-consumers",
         ])
         .output()

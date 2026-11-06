@@ -134,6 +134,8 @@ pub fn build_migration_store(
         .collect();
     let input =
         migration_row_input(&declared, &tables).map_err(|error| refused(format!("{error}")))?;
+    let annotation_default_entries = u32::try_from(input.annotation_default_count())
+        .map_err(|_| refused("the legacy Blob count exceeds the migration coordinate"))?;
     let descriptors = repository
         .write_migration_blobs(input.blobs())
         .map_err(|error| refused(format!("{error}")))?;
@@ -167,6 +169,7 @@ pub fn build_migration_store(
         relations,
         identities: identities.to_stored(),
         retired,
+        annotation_default_entries,
         ..MigrationStore::default()
     })
 }
