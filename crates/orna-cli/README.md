@@ -50,8 +50,11 @@ separate directory from a local format-1 or format-2 worktree. For example:
 orna --db ./legacy migrate copy ./migrated --annotation-defaults 0 --no-persistent-consumers
 ```
 
-`--annotation-defaults N` must be the count derived from decoded legacy
-annotation metadata. `--no-persistent-consumers` is required. Despite its
+`--annotation-defaults N` is optional. When given, it is an assertion that
+must equal the number of Blob values the decoded legacy rows carry; a mismatch
+refuses with E2100, names both counts, and creates no candidate. When omitted,
+the decoded count is used and recorded in the migration journal.
+`--no-persistent-consumers` is required. Despite its
 name, it confirms that persistent consumer checkpoints are carried into the
 candidate, not reset. Each carried checkpoint must match a consumer identity
 correspondence recorded there before any row is imported, so a migrated
