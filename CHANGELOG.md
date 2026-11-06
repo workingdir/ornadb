@@ -11,11 +11,7 @@ been published.
   table that names the same key twice fails closed with
   `LegacyReadError::DuplicateRowKey`, naming the table and key, rather than
   choosing one row. Decoding reads the source only and writes nothing.
-- Cross-source precedence is not decided here. ADR 0121 D4 defers it to
-  ornadb-5il1.313 (S4), which decides the rule before the copy consumes these
-  rows. Legacy-row admission through `admit_project_rows` is tracked separately
-  under ornadb-5il1.473. ornadb-5il1.310 (S1) is not complete until that
-  admission path is wired.
+- Partial (ornadb-5il1.313, UPGRADE-3 slice S4; cross-source precedence): `single_legacy_source` chooses the one legacy source that answers a relation. The specification gives no precedence between a compact and a loose source of one relation, so a relation holding at least one row in each fails closed with `LegacyReadError::CrossSourceConflict` naming the relation. A source with no rows does not carry the relation. This slice does not yet build the candidate `.orna/store`, remove the legacy folders or `.orna/format.orna`, or change the migration record; those remain under ornadb-5il1.313. Legacy-row admission through `admit_project_rows` is tracked separately under ornadb-5il1.473, so ornadb-5il1.310 (S1) is not complete until that admission path is wired.
 - `migrate copy` refuses a source with an unpublished tail without writing to the source runtime; the pending-count probe is read-only and removes only the WAL/SHM sidecars it created. The refusal names the publish step only when the source HEAD is writable.
 - `orna migrate copy` now refuses a legacy source whose runtime tail holds
   unpublished mutations (ornadb-5il1.244). Such a copy would resume past rows
