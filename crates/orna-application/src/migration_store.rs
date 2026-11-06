@@ -82,8 +82,12 @@ pub(crate) fn build_store_with_expectation(
     }
     let previous = ObjectIdentityManifest::read_committed_if_present(repository, &commit)
         .map_err(|error| refused(format!("the object identities are unreadable: {error:?}")))?;
-    let identities = ObjectIdentityManifest::reconcile(project.modules(), previous.as_ref())
-        .map_err(|error| refused(format!("the object identities do not reconcile: {error:?}")))?;
+    let identities = ObjectIdentityManifest::reconcile_for_migration(
+        project.modules(),
+        previous.as_ref(),
+        *database.as_bytes(),
+    )
+    .map_err(|error| refused(format!("the object identities do not reconcile: {error:?}")))?;
     let declared =
         build_format3_store_relations(&project, &analysis, &identities, *database.as_bytes())
             .map_err(|error| {
