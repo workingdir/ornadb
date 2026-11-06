@@ -15,7 +15,9 @@
 //! Live or per-attempt stream state (leases, claims, failures, receipts,
 //! bootstrap pins, pending pause requests) is not carried. A source holding such
 //! rows is refused rather than reset silently. Stream control (running or
-//! paused) and the pause reason are carried verbatim.
+//! paused), the pause reason and the checkpoint reset audit are carried
+//! verbatim. The reset audit is durable history: each row keeps its sequence,
+//! old and new typed positions and reason, so historical reads stay exact.
 
 use std::collections::{BTreeSet, HashSet};
 use std::fs;
@@ -32,7 +34,6 @@ use crate::{RuntimeError, RuntimeState, migration_copy_runtime_identity};
 /// Stream tables whose rows a migration does not carry.
 const NON_CARRIABLE_TABLES: &[&str] = &[
     "stream_checkpoint_bootstrap",
-    "stream_checkpoint_reset_audit",
     "stream_failure",
     "stream_failure_assertion_detail",
     "stream_failure_payload",
@@ -51,6 +52,7 @@ const INSERT_ARCHIVE: &str = "INSERT INTO stream_checkpoint_migration_archive (k
 const INSERT_CONTROL: &str = "INSERT INTO stream_control (key_id, status) VALUES (?1, ?2)";
 const INSERT_PAUSE_REASON: &str =
     "INSERT INTO stream_pause_reason (key_id, reason) VALUES (?1, ?2)";
+const INSERT_RESET_AUDIT: &str = "INSERT INTO stream_checkpoint_reset_audit (sequence, key_id, observed_generation, old_version, old_position, new_version, new_position, reason, redacted) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CheckpointRow {
@@ -100,6 +102,19 @@ struct PauseReasonRow {
     reason: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ResetAuditRow {
+    sequence: i64,
+    key_id: String,
+    observed_generation: i64,
+    old_version: i64,
+    old_position: Option<String>,
+    new_version: i64,
+    new_position: String,
+    reason: String,
+    redacted: i64,
+}
+
 /// Exact stream checkpoint state read from a source repository for carry.
 #[derive(Clone, Debug, Eq, PartialEq, Default)]
 pub struct StreamCarry {
@@ -108,6 +123,7 @@ pub struct StreamCarry {
     history: Vec<HistoryRow>,
     controls: Vec<ControlRow>,
     pause_reasons: Vec<PauseReasonRow>,
+    reset_audits: Vec<ResetAuditRow>,
 }
 
 /// Why a source's stream state could not be carried.
@@ -272,12 +288,20 @@ pub async fn read_stream_carry(source: &Repository) -> Result<StreamCarry, Strea
     } else {
         Vec::new()
     };
+    let reset_audits = if tables.contains("stream_checkpoint_reset_audit") {
+        read_reset_audits(&connection)
+            .await
+            .map_err(StreamCarryError::Runtime)?
+    } else {
+        Vec::new()
+    };
     Ok(StreamCarry {
         checkpoints,
         bridges,
         history,
         controls,
         pause_reasons,
+        reset_audits,
     })
 }
 
@@ -384,6 +408,25 @@ pub async fn import_stream_carry(
                     row.snapshot.as_slice(),
                     row.generation_digest.as_slice(),
                     row.transition
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+    }
+    for row in &carry.reset_audits {
+        transaction
+            .execute(
+                INSERT_RESET_AUDIT,
+                params![
+                    row.sequence,
+                    row.key_id.as_str(),
+                    row.observed_generation,
+                    row.old_version,
+                    row.old_position.as_deref(),
+                    row.new_version,
+                    row.new_position.as_str(),
+                    row.reason.as_str(),
+                    row.redacted
                 ],
             )
             .await
@@ -518,6 +561,7 @@ async fn read_carry_target(connection: &Connection) -> Result<StreamCarry, Runti
         history: read_history(connection, "stream_checkpoint_migration_archive").await?,
         controls: read_controls(connection).await?,
         pause_reasons: read_pause_reasons(connection).await?,
+        reset_audits: read_reset_audits(connection).await?,
     })
 }
 
@@ -588,4 +632,33 @@ async fn read_pause_reasons(connection: &Connection) -> Result<Vec<PauseReasonRo
         });
     }
     Ok(reasons)
+}
+
+async fn read_reset_audits(connection: &Connection) -> Result<Vec<ResetAuditRow>, RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT sequence, key_id, observed_generation, old_version, old_position, new_version, new_position, reason, redacted FROM stream_checkpoint_reset_audit ORDER BY sequence",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let mut audits = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    {
+        audits.push(ResetAuditRow {
+            sequence: row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            key_id: row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            observed_generation: row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            old_version: row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            old_position: row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            new_version: row.get(5).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            new_position: row.get(6).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            reason: row.get(7).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            redacted: row.get(8).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        });
+    }
+    Ok(audits)
 }
