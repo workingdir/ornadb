@@ -549,6 +549,28 @@ impl ObjectIdentityManifest {
         previous: Option<&Self>,
         renames: &[ObjectIdentityRename],
     ) -> Result<Self, ObjectIdentityError> {
+        Self::reconcile_minting(modules, previous, renames, None)
+    }
+
+    /// Migration-path reconciliation: identical to `reconcile`, except that new
+    /// identities are derived from `database_id`, the object kind and the
+    /// qualified name instead of drawn at random. A format-2 source has no
+    /// legacy sidecar or committed inventory, so random UUIDs would make two
+    /// preparations of one source produce different stores.
+    pub fn reconcile_for_migration(
+        modules: &[ModuleInput],
+        previous: Option<&Self>,
+        database_id: [u8; 16],
+    ) -> Result<Self, ObjectIdentityError> {
+        Self::reconcile_minting(modules, previous, &[], Some(database_id))
+    }
+
+    fn reconcile_minting(
+        modules: &[ModuleInput],
+        previous: Option<&Self>,
+        renames: &[ObjectIdentityRename],
+        derive_from: Option<[u8; 16]>,
+    ) -> Result<Self, ObjectIdentityError> {
         let active = source_identity_keys(modules)?
             .into_iter()
             .collect::<BTreeSet<_>>();
@@ -569,12 +591,17 @@ impl ObjectIdentityManifest {
             }) {
                 continue;
             }
-            let id = loop {
-                let candidate = *Uuid::new_v4().as_bytes();
-
-                if used_ids.insert(candidate) {
-                    break candidate;
+            let id = match derive_from {
+                Some(database_id) => {
+                    derived_identity(database_id, kind, &qualified_name, &mut used_ids)?
                 }
+                None => loop {
+                    let candidate = *Uuid::new_v4().as_bytes();
+
+                    if used_ids.insert(candidate) {
+                        break candidate;
+                    }
+                },
             };
             records.push(ObjectIdentity {
                 kind,
@@ -2397,6 +2424,37 @@ fn apply_explicit_renames(
         }
     }
     Ok(())
+}
+
+/// The identity a migration derives for a new object: SHA-256 over the
+/// database id, the object's kind ordinal and qualified name, and a counter
+/// that advances past identities already in use. One source therefore always
+/// yields the same identities for the same database.
+fn derived_identity(
+    database_id: [u8; 16],
+    kind: ObjectKind,
+    qualified_name: &str,
+    used: &mut HashSet<[u8; 16]>,
+) -> Result<[u8; 16], ObjectIdentityError> {
+    let mut attempt: u32 = 0;
+    loop {
+        let payload = Raw::Array(vec![
+            Raw::Bytes(database_id.to_vec()),
+            Raw::Bytes(kind.spec_ordinal().to_be_bytes().to_vec()),
+            Raw::Text(qualified_name.to_owned()),
+            Raw::Bytes(attempt.to_be_bytes().to_vec()),
+        ]);
+        let digest = domain_digest("orna.object-identity.migration.v1", &payload)
+            .map_err(|_| ObjectIdentityError::InvalidEncoding)?;
+        let mut id = [0; 16];
+        id.copy_from_slice(&digest[..16]);
+        if used.insert(id) {
+            return Ok(id);
+        }
+        attempt = attempt
+            .checked_add(1)
+            .ok_or(ObjectIdentityError::IdentityCollision)?;
+    }
 }
 
 fn source_identity_keys(
@@ -4464,5 +4522,41 @@ pub table Invoice(id: Str) {
             ObjectIdentityManifest::read_index(&repository).unwrap(),
             Some(next)
         );
+    }
+
+    #[test]
+    fn migration_identities_are_derived_from_the_database_and_source() {
+        let source = ModuleInput::new(
+            "main.orna",
+            "pub table Contact(id: Str) {\n    name: Str,\n}\n",
+        );
+        let database = [7u8; 16];
+        let first = ObjectIdentityManifest::reconcile_for_migration(
+            std::slice::from_ref(&source),
+            None,
+            database,
+        )
+        .unwrap();
+        let second = ObjectIdentityManifest::reconcile_for_migration(
+            std::slice::from_ref(&source),
+            None,
+            database,
+        )
+        .unwrap();
+        assert_eq!(first, second);
+        // The same source under another database gets other identities.
+        let other = ObjectIdentityManifest::reconcile_for_migration(
+            std::slice::from_ref(&source),
+            None,
+            [8u8; 16],
+        )
+        .unwrap();
+        assert_ne!(first, other);
+        // Random minting, by contrast, differs between runs.
+        let random =
+            ObjectIdentityManifest::reconcile(std::slice::from_ref(&source), None).unwrap();
+        let random_again =
+            ObjectIdentityManifest::reconcile(std::slice::from_ref(&source), None).unwrap();
+        assert_ne!(random, random_again);
     }
 }
