@@ -5,6 +5,7 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- `migrate copy` refuses a source with an unpublished tail without writing to the source runtime; the pending-count probe is read-only and removes only the WAL/SHM sidecars it created. The refusal names the publish step only when the source HEAD is writable.
 - `orna migrate copy` now refuses a legacy source whose runtime tail holds
   unpublished mutations (ornadb-5il1.244). Such a copy would resume past rows
   the destination never received. The refusal names the count, creates no

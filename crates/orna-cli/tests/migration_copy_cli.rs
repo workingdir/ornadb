@@ -1014,8 +1014,25 @@ fn pending_mutation_count(source: &Path) -> i64 {
         })
 }
 
+/// The bytes of a state database and its WAL and shared-memory sidecars, each
+/// `None` when the file is absent. Comparing these proves a refusal wrote
+/// nothing to the source runtime, including the sidecars `SQLite` creates on open.
+fn state_files(state_db: &Path) -> Vec<Option<Vec<u8>>> {
+    ["", "-wal", "-shm"]
+        .into_iter()
+        .map(|suffix| {
+            let path = std::path::PathBuf::from(format!("{}{suffix}", state_db.display()));
+            match fs::read(&path) {
+                Ok(bytes) => Some(bytes),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => panic!("read {}: {error}", path.display()),
+            }
+        })
+        .collect()
+}
+
 /// Appends one real unpublished mutation to the legacy source through the
-/// runtime, under the same migration-carry identity the copy reads with.
+/// runtime, under the worktree-keyed source identity the runtime keys its tail by.
 fn append_unpublished_mutation(source: &Path) {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -1078,7 +1095,7 @@ fn migration_refuses_a_source_with_unpublished_rows_and_changes_nothing() {
         &["status", "--porcelain=v2", "--untracked-files=all"],
     );
     let refs_before = git_output(&source, &["for-each-ref"]);
-    let state_bytes_before = fs::read(&state_db).unwrap();
+    let state_files_before = state_files(&state_db);
 
     let destination = parent.path().join("refused");
     let refused = run_copy(&source, &destination, "0", &git_trace);
@@ -1102,6 +1119,11 @@ fn migration_refuses_a_source_with_unpublished_rows_and_changes_nothing() {
         status_before
     );
     assert_eq!(git_output(&source, &["for-each-ref"]), refs_before);
-    assert_eq!(fs::read(&state_db).unwrap(), state_bytes_before);
+    for (name, (after, before)) in ["state.db", "state.db-wal", "state.db-shm"]
+        .into_iter()
+        .zip(state_files(&state_db).iter().zip(state_files_before.iter()))
+    {
+        assert_eq!(after, before, "{name} changed when the copy was refused");
+    }
     assert_eq!(pending_mutation_count(&source), 1);
 }
