@@ -556,6 +556,18 @@ fn cli_migration_copy_prepares_a_candidate_from_recorded_legacy_metadata() {
     assert_eq!(refusal.format(), format);
     assert_eq!(refusal.code(), "ORNA-REPO-CONTEXT-015");
     assert_eq!(migrated.require_migration_carry_head_format(), Ok(()));
+    // With a non-empty migration store, the candidate tracks the sidecar and the
+    // store root beside it (ORNA-REPO-004). The no-store candidate also tracks
+    // the store root, which the migration_copy tests assert exactly.
+    let candidate = journal.new_head().as_str().to_owned();
+    assert_eq!(
+        String::from_utf8(git_output(
+            &destination,
+            &["ls-tree", "--name-only", &candidate, "--", ".orna/"],
+        ))
+        .unwrap(),
+        ".orna/database.orna\n.orna/store\n"
+    );
 
     let retry = run_copy(&source, &destination, "0", &git_trace);
     assert!(
