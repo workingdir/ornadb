@@ -735,7 +735,7 @@ class ReviewFindingTests(unittest.TestCase):
             text = (root / name).read_text(encoding="utf-8")
             self.assertIn("apt_opts=(-o Acquire::Retries=3", text, name)
             self.assertIn('apt-get "${apt_opts[@]}" update', text, name)
-            self.assertIn('apt-get "${apt_opts[@]}" install -y --download-only', text, name)
+            self.assertIn('apt-get "${apt_opts[@]}" install -y --download-only --no-install-recommends', text, name)
             self.assertNotIn("sudo apt-get -o Acquire::Retries=3", text, name)
             self.assertNotIn("sudo apt-get update\n", text, name)
 

@@ -84,8 +84,8 @@ jobs:
           }
           apt_opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=60 -o Acquire::https::Timeout=60)
           retry 2 sudo timeout -k 10 60 apt-get "${apt_opts[@]}" update
-          retry 3 sudo timeout -k 10 150 apt-get "${apt_opts[@]}" install -y --download-only emacs-nox mpv vim
-          sudo apt-get install -y emacs-nox mpv vim
+          retry 3 sudo timeout -k 10 150 apt-get "${apt_opts[@]}" install -y --download-only --no-install-recommends emacs-nox mpv vim
+          sudo apt-get install -y --no-install-recommends emacs-nox mpv vim
 
       # The 10 GiB Gate B streaming test takes about an hour on its own (3611 s of a
       # 69 minute job in run 39996328261) and runs in cli-gate-b.yml instead.
