@@ -33,6 +33,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use fs2::FileExt;
 use sha2::{Digest, Sha256};
 
 use crate::init::format_context::{
@@ -56,6 +57,14 @@ pub const MIGRATION_MARKER_TRAILER: &str = "Orna-Migration";
 
 /// The copy-local record of the coordinates a prepared migration carries.
 pub const MIGRATION_RECORD: &str = ".orna/migration.json";
+
+/// The filename prefix of the private copy a preparation builds beside its
+/// destination before installing it.
+const STAGING_PREFIX: &str = ".orna-migration-copy-";
+
+/// The suffix of the owner marker that pairs a staging copy with the lock its
+/// preparation holds on it.
+const OWNER_SUFFIX: &str = ".owner";
 
 /// The legacy annotation metadata of one source snapshot, as decoded from the
 /// source's own recorded objects without reading a payload byte.
@@ -228,6 +237,12 @@ impl MigratedCopy {
 /// Its journal and Git refs are synced before installation, pinning the
 /// candidate commit and staged-index objects for restart recovery.
 ///
+/// A preparation killed before installation leaves its private copy and an
+/// owner marker in the directory that holds `destination`. The marker stays
+/// locked while the preparation runs, so a later call reclaims a copy and its
+/// marker only when it can take that lock. A copy without a marker is never
+/// reclaimed.
+///
 /// `continuity` and `annotation_defaults` are the coordinates the conversion
 /// established. Neither is inferred here: a format-1/2 commit this module can
 /// read records no row inventory, so the annotation default is a declared
@@ -251,15 +266,20 @@ pub fn prepare_format3_migration(
         // A pending abort owns the reserved quarantine name; finish it first.
         return Err(RepositoryError::PublicationRecoveryConflict);
     }
+    let parent = destination
+        .parent()
+        .ok_or(RepositoryError::LocalStateUnavailable)?
+        .to_path_buf();
+    reclaim_dead_staging(&parent, &destination)?;
     if path_exists(&destination)? {
         return recover_prepared_copy(source, &destination, continuity, annotation_defaults);
     }
 
-    let staging = migration_staging_path(&destination)?;
+    let claim = claim_staging(&parent)?;
     let result = (|| {
         let mut copy =
-            prepare_format3_migration_in(source, &staging, continuity, annotation_defaults)?;
-        let repository = Repository::discover(&staging)?;
+            prepare_format3_migration_in(source, &claim.staging, continuity, annotation_defaults)?;
+        let repository = Repository::discover(&claim.staging)?;
         pin_migration_index(
             &repository,
             copy.source_index_generation
@@ -272,14 +292,12 @@ pub fn prepare_format3_migration(
         // Boundary: the staged copy holds its journal, which is what a restart
         // reads to validate the copy instead of rebuilding it.
         crate::publication_crash_barrier("migration-journal");
-        sync_tree(&staging)?;
+        sync_tree(&claim.staging)?;
         // Boundary: every staged byte and directory entry is durable, and the
         // copy is still private under its staging name.
         crate::publication_crash_barrier("migration-synced");
-        let parent = destination
-            .parent()
-            .ok_or(RepositoryError::LocalStateUnavailable)?;
-        publish_copy_noreplace(parent, &staging, &destination)?;
+        publish_copy_noreplace(&parent, &claim.staging, &destination)?;
+        claim.retire()?;
         // Boundary: the copy is installed under its final name. A restart finds
         // it here and recovers it rather than building a second one.
         crate::publication_crash_barrier("migration-published");
@@ -287,7 +305,7 @@ pub fn prepare_format3_migration(
         Ok(copy)
     })();
     if result.is_err() {
-        let _ = fs::remove_dir_all(&staging);
+        claim.abandon();
     }
     result
 }
@@ -680,11 +698,158 @@ fn canonical_destination(destination: &Path) -> Result<PathBuf, RepositoryError>
     Ok(parent.join(name))
 }
 
-fn migration_staging_path(destination: &Path) -> Result<PathBuf, RepositoryError> {
-    let parent = destination
-        .parent()
-        .ok_or(RepositoryError::LocalStateUnavailable)?;
-    Ok(parent.join(format!(".orna-migration-copy-{}", crate::Uuid::new_v4())))
+/// The exclusive claim one preparation holds on its private staging copy.
+///
+/// The copy and its `<copy>.owner` marker are paired from creation until the
+/// copy is installed (`retire`) or discarded (`abandon`). The marker stays
+/// locked while this value lives, so a later preparation that can take the lock
+/// knows that the owner has died.
+struct StagingClaim {
+    staging: PathBuf,
+    owner: PathBuf,
+    _lock: fs::File,
+}
+
+impl StagingClaim {
+    /// Drops the marker once the copy is installed under its final name, so the
+    /// installed destination is never paired with a staging claim.
+    fn retire(&self) -> Result<(), RepositoryError> {
+        fs::remove_file(&self.owner).map_err(|_| RepositoryError::LocalStateUnavailable)
+    }
+
+    /// Removes the copy, then its marker. A marker is kept when its copy could
+    /// not be removed, so the pair stays reclaimable.
+    fn abandon(&self) {
+        if remove_staging_if_present(&self.staging).is_ok() {
+            let _ = fs::remove_file(&self.owner);
+        }
+    }
+}
+
+/// Names a private staging copy under `parent` and locks its owner marker. The
+/// copy itself is created later, by the preparation that holds the claim.
+fn claim_staging(parent: &Path) -> Result<StagingClaim, RepositoryError> {
+    let staging = parent.join(format!("{STAGING_PREFIX}{}", crate::Uuid::new_v4()));
+    let mut owner_name = staging.as_os_str().to_owned();
+    owner_name.push(OWNER_SUFFIX);
+    let owner = PathBuf::from(owner_name);
+    let lock = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&owner)
+        .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+    lock.try_lock_exclusive()
+        .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+    // A reclaimer that ran between create and lock may already have removed it.
+    if !is_regular_file(&owner)? {
+        return Err(RepositoryError::LocalStateUnavailable);
+    }
+    Ok(StagingClaim {
+        staging,
+        owner,
+        _lock: lock,
+    })
+}
+
+/// Removes a staging copy if one exists; a missing copy is already removed.
+fn remove_staging_if_present(staging: &Path) -> Result<(), RepositoryError> {
+    match fs::remove_dir_all(staging) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(RepositoryError::LocalStateUnavailable),
+    }
+}
+
+/// The staging name that an owner marker's file name pairs with, when the name
+/// is one this module writes: a canonical lowercase UUID, which is how
+/// `Uuid::new_v4` renders it. Other spellings of the same UUID are not reclaimed.
+fn staged_name_of_owner(name: &str) -> Option<&str> {
+    let staged = name.strip_suffix(OWNER_SUFFIX)?;
+    let uuid = staged.strip_prefix(STAGING_PREFIX)?;
+    let parsed = crate::Uuid::parse_str(uuid).ok()?;
+    (parsed.to_string() == uuid).then_some(staged)
+}
+
+/// Reclaims each staging copy beside `parent` whose owner marker no live
+/// preparation holds. A name equal to `destination` is never reclaimed, even
+/// when it looks like a staging name.
+fn reclaim_dead_staging(parent: &Path, destination: &Path) -> Result<(), RepositoryError> {
+    let entries = fs::read_dir(parent).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+    for entry in entries {
+        let entry = entry.map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        let file_name = entry.file_name();
+        let Some(staged) = file_name.to_str().and_then(staged_name_of_owner) else {
+            continue;
+        };
+        let staging = parent.join(staged);
+        if staging.as_path() == destination {
+            continue;
+        }
+        reclaim_owner(&entry.path(), &staging)?;
+    }
+    Ok(())
+}
+
+/// Removes an owner marker and the staging copy it pairs with, but only when no
+/// live preparation holds the marker's lock.
+fn reclaim_owner(owner: &Path, staging: &Path) -> Result<(), RepositoryError> {
+    let Some(marker) = open_owner_marker(owner)? else {
+        return Ok(());
+    };
+    match marker.try_lock_exclusive() {
+        Ok(()) => {}
+        // A live preparation holds its claim, so its pair is not ours to remove.
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+            ) =>
+        {
+            return Ok(());
+        }
+        Err(_) => return Err(RepositoryError::LocalStateUnavailable),
+    }
+    // The marker may have been retired between the open and the lock.
+    if !is_regular_file(owner)? {
+        return Ok(());
+    }
+    remove_staging_if_present(staging)?;
+    match fs::remove_file(owner) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(RepositoryError::LocalStateUnavailable),
+    }
+}
+
+/// Opens an owner marker for locking and returns it only when it is a regular
+/// file. A symbolic link is an error, and a FIFO is never waited on.
+fn open_owner_marker(owner: &Path) -> Result<Option<fs::File>, RepositoryError> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let marker = match options.open(owner) {
+        Ok(marker) => marker,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(RepositoryError::LocalStateUnavailable),
+    };
+    let is_file = marker
+        .metadata()
+        .map_err(|_| RepositoryError::LocalStateUnavailable)?
+        .is_file();
+    Ok(is_file.then_some(marker))
+}
+
+/// Whether `path` is a regular file, judged without following a symbolic link.
+fn is_regular_file(path: &Path) -> Result<bool, RepositoryError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(metadata.is_file()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err(RepositoryError::LocalStateUnavailable),
+    }
 }
 
 fn path_exists(path: &Path) -> Result<bool, RepositoryError> {
@@ -1772,7 +1937,10 @@ fn hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{migration_index_ref, pin_migration_index, require_migration_index_pin};
+    use super::{
+        OWNER_SUFFIX, STAGING_PREFIX, claim_staging, migration_index_ref, pin_migration_index,
+        reclaim_dead_staging, require_migration_index_pin,
+    };
     use crate::Repository;
     use std::process::Command;
 
@@ -1844,6 +2012,94 @@ mod tests {
         std::fs::create_dir(&destination).unwrap();
         git(&destination, &["init", "-q"]);
         assert!(super::copy_index_blobs(&plain, &destination).is_err());
+    }
+
+    #[test]
+    fn killed_migration_staging_is_reclaimed_with_its_owner() {
+        let parent = tempfile::TempDir::new().unwrap();
+        let destination = parent.path().join("destination");
+        let claim = claim_staging(parent.path()).unwrap();
+        let (staging, owner) = (claim.staging.clone(), claim.owner.clone());
+        std::fs::create_dir(&staging).unwrap();
+        std::fs::write(staging.join("partial"), b"copy").unwrap();
+        // Dropping the claim releases its lock as process death does; both remain.
+        drop(claim);
+
+        reclaim_dead_staging(parent.path(), &destination).unwrap();
+        assert!(!staging.exists());
+        assert!(!owner.exists());
+    }
+
+    #[test]
+    fn live_migration_staging_survives_reclaim_until_abandoned() {
+        let parent = tempfile::TempDir::new().unwrap();
+        let destination = parent.path().join("destination");
+        let claim = claim_staging(parent.path()).unwrap();
+        std::fs::create_dir(&claim.staging).unwrap();
+
+        reclaim_dead_staging(parent.path(), &destination).unwrap();
+        assert!(claim.staging.is_dir());
+        assert!(claim.owner.is_file());
+
+        claim.abandon();
+        assert!(!claim.staging.exists());
+        assert!(!claim.owner.exists());
+    }
+
+    #[test]
+    fn installed_staging_owner_marker_is_reclaimed_alone() {
+        let parent = tempfile::TempDir::new().unwrap();
+        let destination = parent.path().join("destination");
+        let claim = claim_staging(parent.path()).unwrap();
+        let owner = claim.owner.clone();
+        // The copy was renamed to its destination before its marker was retired.
+        std::fs::create_dir(&destination).unwrap();
+        drop(claim);
+
+        reclaim_dead_staging(parent.path(), &destination).unwrap();
+        assert!(!owner.exists());
+        assert!(destination.is_dir());
+    }
+
+    #[test]
+    fn reclaim_never_removes_a_destination_named_like_staging() {
+        let parent = tempfile::TempDir::new().unwrap();
+        let name = format!("{STAGING_PREFIX}{}", crate::Uuid::new_v4());
+        let destination = parent.path().join(&name);
+        std::fs::create_dir(&destination).unwrap();
+        std::fs::write(destination.join("user-data"), b"keep").unwrap();
+        std::fs::write(parent.path().join(format!("{name}{OWNER_SUFFIX}")), b"").unwrap();
+
+        reclaim_dead_staging(parent.path(), &destination).unwrap();
+        assert!(destination.join("user-data").is_file());
+    }
+
+    #[test]
+    fn unowned_migration_staging_is_never_reclaimed() {
+        let parent = tempfile::TempDir::new().unwrap();
+        let destination = parent.path().join("destination");
+        let staging = parent
+            .path()
+            .join(format!("{STAGING_PREFIX}{}", crate::Uuid::new_v4()));
+        std::fs::create_dir(&staging).unwrap();
+
+        reclaim_dead_staging(parent.path(), &destination).unwrap();
+        assert!(staging.is_dir());
+    }
+
+    #[test]
+    fn owner_markers_not_named_by_this_module_are_never_reclaimed() {
+        let parent = tempfile::TempDir::new().unwrap();
+        let destination = parent.path().join("destination");
+        // The same UUID, spelled in a form `claim_staging` never writes.
+        let spelled = crate::Uuid::new_v4().to_string().to_uppercase();
+        let name = format!("{STAGING_PREFIX}{spelled}");
+        let staging = parent.path().join(&name);
+        std::fs::create_dir(&staging).unwrap();
+        std::fs::write(parent.path().join(format!("{name}{OWNER_SUFFIX}")), b"").unwrap();
+
+        reclaim_dead_staging(parent.path(), &destination).unwrap();
+        assert!(staging.is_dir());
     }
 }
 
