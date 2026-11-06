@@ -1958,6 +1958,34 @@ mod tests {
         );
     }
 
+    /// Drops a claim as process death would, then reclaims until its owner marker
+    /// is gone. The marker's flock is released only when every descriptor for it
+    /// is closed, and a child forked by a concurrent test holds a duplicate of the
+    /// claim's descriptor until that child execs. A reclaim during that window sees
+    /// the lock held and skips, which is the fail-safe outcome; a later reclaim
+    /// removes the pair. The wait is bounded, so a real leak still fails.
+    fn die_and_reclaim(
+        claim: super::StagingClaim,
+        parent: &std::path::Path,
+        destination: &std::path::Path,
+    ) {
+        let owner = claim.owner.clone();
+        drop(claim);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            reclaim_dead_staging(parent, destination).unwrap();
+            if !owner.exists() {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "dead owner {} stayed locked for 60s",
+                owner.display()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
     #[test]
     fn migration_index_pins_do_not_fall_through_a_corrupt_child_head() {
         let parent = tempfile::TempDir::new().unwrap();
@@ -2022,10 +2050,8 @@ mod tests {
         let (staging, owner) = (claim.staging.clone(), claim.owner.clone());
         std::fs::create_dir(&staging).unwrap();
         std::fs::write(staging.join("partial"), b"copy").unwrap();
-        // Dropping the claim releases its lock as process death does; both remain.
-        drop(claim);
-
-        reclaim_dead_staging(parent.path(), &destination).unwrap();
+        // Both remain until the dead claim is reclaimed.
+        die_and_reclaim(claim, parent.path(), &destination);
         assert!(!staging.exists());
         assert!(!owner.exists());
     }
@@ -2054,9 +2080,7 @@ mod tests {
         let owner = claim.owner.clone();
         // The copy was renamed to its destination before its marker was retired.
         std::fs::create_dir(&destination).unwrap();
-        drop(claim);
-
-        reclaim_dead_staging(parent.path(), &destination).unwrap();
+        die_and_reclaim(claim, parent.path(), &destination);
         assert!(!owner.exists());
         assert!(destination.is_dir());
     }
