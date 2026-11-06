@@ -13,9 +13,9 @@
 //! written.
 //!
 //! Live or per-attempt stream state (leases, claims, failures, receipts,
-//! bootstrap pins, pending pause requests) is not carried. A source holding such
-//! rows is refused rather than reset silently. Stream control (running or
-//! paused) and the pause reason are carried verbatim.
+//! pending pause requests) is not carried. A source holding such rows is
+//! refused rather than reset silently. Stream control (running or paused), the
+//! pause reason and the checkpoint bootstrap pin are carried verbatim.
 
 use std::collections::{BTreeSet, HashSet};
 use std::fs;
@@ -31,7 +31,6 @@ use crate::{RuntimeError, RuntimeState, migration_copy_runtime_identity};
 
 /// Stream tables whose rows a migration does not carry.
 const NON_CARRIABLE_TABLES: &[&str] = &[
-    "stream_checkpoint_bootstrap",
     "stream_checkpoint_reset_audit",
     "stream_failure",
     "stream_failure_assertion_detail",
@@ -51,6 +50,8 @@ const INSERT_ARCHIVE: &str = "INSERT INTO stream_checkpoint_migration_archive (k
 const INSERT_CONTROL: &str = "INSERT INTO stream_control (key_id, status) VALUES (?1, ?2)";
 const INSERT_PAUSE_REASON: &str =
     "INSERT INTO stream_pause_reason (key_id, reason) VALUES (?1, ?2)";
+const INSERT_BOOTSTRAP: &str =
+    "INSERT INTO stream_checkpoint_bootstrap (key_id, selected_commit) VALUES (?1, ?2)";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CheckpointRow {
@@ -100,6 +101,12 @@ struct PauseReasonRow {
     reason: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BootstrapRow {
+    key_id: String,
+    selected_commit: String,
+}
+
 /// Exact stream checkpoint state read from a source repository for carry.
 #[derive(Clone, Debug, Eq, PartialEq, Default)]
 pub struct StreamCarry {
@@ -108,6 +115,7 @@ pub struct StreamCarry {
     history: Vec<HistoryRow>,
     controls: Vec<ControlRow>,
     pause_reasons: Vec<PauseReasonRow>,
+    bootstraps: Vec<BootstrapRow>,
 }
 
 /// Why a source's stream state could not be carried.
@@ -272,12 +280,20 @@ pub async fn read_stream_carry(source: &Repository) -> Result<StreamCarry, Strea
     } else {
         Vec::new()
     };
+    let bootstraps = if tables.contains("stream_checkpoint_bootstrap") {
+        read_bootstraps(&connection)
+            .await
+            .map_err(StreamCarryError::Runtime)?
+    } else {
+        Vec::new()
+    };
     Ok(StreamCarry {
         checkpoints,
         bridges,
         history,
         controls,
         pause_reasons,
+        bootstraps,
     })
 }
 
@@ -369,6 +385,15 @@ pub async fn import_stream_carry(
             .execute(
                 INSERT_PAUSE_REASON,
                 params![row.key_id.as_str(), row.reason.as_str()],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+    }
+    for row in &carry.bootstraps {
+        transaction
+            .execute(
+                INSERT_BOOTSTRAP,
+                params![row.key_id.as_str(), row.selected_commit.as_str()],
             )
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -518,6 +543,7 @@ async fn read_carry_target(connection: &Connection) -> Result<StreamCarry, Runti
         history: read_history(connection, "stream_checkpoint_migration_archive").await?,
         controls: read_controls(connection).await?,
         pause_reasons: read_pause_reasons(connection).await?,
+        bootstraps: read_bootstraps(connection).await?,
     })
 }
 
@@ -588,4 +614,26 @@ async fn read_pause_reasons(connection: &Connection) -> Result<Vec<PauseReasonRo
         });
     }
     Ok(reasons)
+}
+
+async fn read_bootstraps(connection: &Connection) -> Result<Vec<BootstrapRow>, RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT key_id, selected_commit FROM stream_checkpoint_bootstrap ORDER BY key_id",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let mut bootstraps = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    {
+        bootstraps.push(BootstrapRow {
+            key_id: row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            selected_commit: row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        });
+    }
+    Ok(bootstraps)
 }

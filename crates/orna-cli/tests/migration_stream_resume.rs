@@ -766,3 +766,132 @@ fn activated_migration_copy_resumes_carried_checkpoint_without_reset() {
         source_status
     );
 }
+
+/// The checkpoint snapshot fixture the runtime's own bootstrap tests use. Its watermark
+/// names the consumer returned by `snapshot_key`.
+const CHECKPOINT_SNAPSHOT: &[u8] =
+    include_bytes!("../../orna-runtime/tests/fixtures/checkpoint_snapshot_v1.orna");
+
+fn snapshot_key() -> CheckpointKey {
+    CheckpointKey {
+        consumer: ConsumerIdentity {
+            principal: Component::new("urn:consumer:ledger").unwrap(),
+            root: Component::new("app.root").unwrap(),
+            function: Component::new("processor.consume").unwrap(),
+            binding: Component::new("input.orders").unwrap(),
+        },
+        source_format: Component::new("kafka/v1").unwrap(),
+        source: Component::new("orders/primary").unwrap(),
+        partition_format: Component::new("kafka-partition/v1").unwrap(),
+        partition: Some(Component::new("tenant:west/17").unwrap()),
+        position_format: Component::new("offset/utf8").unwrap(),
+    }
+}
+
+/// Commits the snapshot fixture as the source's HEAD, then bootstraps the snapshot
+/// consumer from that commit. Returns the seeded checkpoint and the selected commit.
+fn bootstrap_source_from_snapshot(root: &Path) -> (StreamCheckpoint, String) {
+    let directory = root.join(".orna/checkpoints");
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(directory.join("selected.orna"), CHECKPOINT_SNAPSHOT).unwrap();
+    git_output(root, &["add", "-f", "--", ".orna/checkpoints"]);
+    git_output(
+        root,
+        &[
+            "commit",
+            "-m",
+            "checkpoint snapshot",
+            "--",
+            ".orna/checkpoints",
+        ],
+    );
+    runtime().block_on(async {
+        let repository = Repository::discover(root).unwrap();
+        let (identity, digest) = source_runtime_identity(root);
+        let state = RuntimeState::open(&repository, identity, digest)
+            .await
+            .expect("open source runtime");
+        let writer: WriterLease = state.acquire_lease([45; 16]).await.unwrap();
+        let selected = repository.head().unwrap().expect("snapshot commit");
+        let seeded = state
+            .bootstrap_stream_from_selected_snapshot(
+                writer,
+                &repository,
+                &selected,
+                &snapshot_key(),
+            )
+            .await
+            .expect("bootstrap from the selected snapshot");
+        (seeded, selected.as_str().to_owned())
+    })
+}
+
+/// The snapshot consumer's checkpoint in an activated copy, read through its format-3 HEAD.
+fn activated_snapshot_checkpoint(root: &Path) -> StreamCheckpoint {
+    runtime().block_on(async {
+        let repository = Repository::discover(root).unwrap();
+        let (identity, digest) = repository_runtime_identity(&repository).unwrap();
+        let state = RuntimeState::open(&repository, identity, digest)
+            .await
+            .expect("open activated runtime");
+        state.stream_checkpoint(&snapshot_key()).await.unwrap()
+    })
+}
+
+/// The selected commits pinned by `stream_checkpoint_bootstrap` in an activated copy.
+fn activated_bootstrap_pins(root: &Path) -> Vec<String> {
+    runtime().block_on(async {
+        let repository = Repository::discover(root).unwrap();
+        let database = libsql::Builder::new_local(repository.runtime_paths().state_db())
+            .build()
+            .await
+            .unwrap();
+        let connection = database.connect().unwrap();
+        let mut rows = connection
+            .query(
+                "SELECT selected_commit FROM stream_checkpoint_bootstrap ORDER BY key_id",
+                (),
+            )
+            .await
+            .unwrap();
+        let mut pins = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            pins.push(row.get::<String>(0).unwrap());
+        }
+        pins
+    })
+}
+
+/// A checkpoint bootstrap pin is carried verbatim. The activated copy keeps the snapshot
+/// consumer at the selected version and the pin names the source HEAD the snapshot was
+/// read from.
+#[test]
+fn migration_carries_checkpoint_bootstrap_pin_and_keeps_snapshot_checkpoint() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    dirty_legacy_source(&source);
+    let (seeded, selected) = bootstrap_source_from_snapshot(&source);
+    assert_eq!(seeded.version, 42);
+    let source_head = String::from_utf8(git_output(&source, &["rev-parse", "HEAD"])).unwrap();
+    assert_eq!(selected, source_head.trim());
+    let destination = parent.path().join("migrated");
+    let prepared = run_copy(&source, &destination);
+    assert!(
+        prepared.status.success(),
+        "migrate copy: {}",
+        String::from_utf8_lossy(&prepared.stderr)
+    );
+
+    let activated = run_upgrade(&source, &destination);
+    assert!(
+        activated.status.success(),
+        "upgrade --yes-activate: {}",
+        String::from_utf8_lossy(&activated.stderr)
+    );
+
+    assert_eq!(activated_bootstrap_pins(&destination), vec![selected]);
+    let carried = activated_snapshot_checkpoint(&destination);
+    assert_eq!(carried.version, seeded.version);
+    assert_eq!(carried.committed, seeded.committed);
+}
