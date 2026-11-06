@@ -1266,6 +1266,11 @@ fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnost
             "prepared migration copy predates the migration-record removal",
             "discard it with `orna migrate abort DEST`, then run `orna migrate copy` again",
         ),
+        orna_repository::RepositoryError::Format2CompactUnimplemented => Diagnostic::target(
+            "E2100",
+            "format-2 source holds compact-storage-v2 tables, which have no decoder yet",
+            "see MIGRATION.md and bead ornadb-5il1.486; no copy was prepared and the source is unchanged",
+        ),
         orna_repository::RepositoryError::MigrationAnnotationDefaultsMismatch { declared, decoded } => {
             Diagnostic::target_with_detail(
                 "E2100",

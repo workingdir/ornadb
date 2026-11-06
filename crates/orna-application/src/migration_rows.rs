@@ -521,7 +521,13 @@ fn lower_row_fields(
         };
         let value: &Raw = value;
         let blob_bytes = match (value, format2_blobs) {
-            (Raw::Bytes(bytes), _) if field.is_blob() => Some(bytes.clone()),
+            (Raw::Bytes(_), Some(_)) if field.is_blob() => {
+                return Err(invalid(
+                    "a format-2 Blob slot holds raw bytes; the format-2 draft admits only ORR-2 text or a storage record"
+                        .to_owned(),
+                ));
+            }
+            (Raw::Bytes(bytes), None) if field.is_blob() => Some(bytes.clone()),
             (_, Some(read)) if field.is_blob() => match orr2_slot_text(value) {
                 Some(text) => Some(read(&text).map_err(&invalid)?),
                 None => None,
@@ -1490,5 +1496,34 @@ mod tests {
         ]);
         assert_eq!(orr2_slot_text(&reversed), None);
         assert_eq!(orr2_slot_text(&Raw::Int(5.into())), None);
+    }
+
+    /// Under format 2 a Blob slot admits only ORR-2 text or a storage record.
+    /// Raw bytes are refused before the blob reader runs or any blob is staged.
+    #[test]
+    fn format_two_blob_slot_refuses_raw_bytes() {
+        use super::{Format2BlobReader, migration_row_input_with_format2_blobs};
+        let rows = LegacyTableRows::loose_for_tests(vec![LegacyRow::for_tests(
+            TypedKey::Text("alice".to_owned()),
+            vec![
+                declared_field("name", text("Alice Smith")),
+                declared_field("emails", Raw::Array(Vec::new())),
+                declared_field("avatar", Raw::Bytes(b"hello".to_vec())),
+            ],
+        )]);
+        let address = LegacyTableAddress::TablePath(PATH.to_owned());
+        let reader = |_: &str| -> Result<Vec<u8>, String> {
+            panic!("the blob reader must not run for raw bytes")
+        };
+        let reader_ref: Format2BlobReader<'_> = &reader;
+        let result = migration_row_input_with_format2_blobs(
+            &blob_declared(),
+            &[LegacyTable::new(&address, &rows)],
+            Some(reader_ref),
+        );
+        assert!(matches!(
+            result,
+            Err(MigrationRowError::InvalidRow { .. })
+        ));
     }
 }
