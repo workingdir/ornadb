@@ -1148,8 +1148,6 @@ fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnost
             "supply `--no-persistent-consumers` to acknowledge that persistent consumer checkpoints are carried under recorded identity correspondence",
         ));
     }
-    // A declared count is an assertion against the count the decoded legacy rows
-    // carry; an omitted one is the decoded count itself (ORNA-UPGRADE-004).
     let source = std::path::Path::new(local_project_path(endpoint)?);
     let repository = orna_repository::Repository::discover(source).map_err(|error| {
         Diagnostic::target_with_detail(
@@ -1159,6 +1157,47 @@ fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnost
             format!("{error:?}"),
         )
     })?;
+    let prepared = prepare_migration_copy(
+        &repository,
+        std::path::Path::new(destination),
+        annotation_defaults,
+    )?;
+    print_prepared_copy(&prepared);
+    Ok(())
+}
+
+fn print_prepared_copy(prepared: &PreparedMigrationCopy) {
+    let copy = &prepared.copy;
+    println!(
+        "prepared or recovered format-3 migration copy: source_format={} source_commit={} candidate_commit={} destination={} carried_checkpoints={} carried_history={}",
+        copy.source_format_number(),
+        copy.source_commit().as_str(),
+        copy.candidate_journal().new_head().as_str(),
+        copy.destination().display(),
+        prepared.checkpoints,
+        prepared.history,
+    );
+}
+
+/// A prepared or recovered format-3 migration copy and the stream state carried
+/// into it. The one-step upgrade publishes `copy` once its candidate is confirmed.
+struct PreparedMigrationCopy {
+    copy: orna_repository::migration_copy::MigratedCopy,
+    checkpoints: usize,
+    history: usize,
+}
+
+/// Prepares (or recovers) the format-3 migration copy of `repository` at
+/// `destination`, carrying its persistent stream checkpoints. Nothing is
+/// published here; activation is a separate step.
+// A declared count is an assertion against the count the decoded legacy rows
+// carry; an omitted one is the decoded count itself (ORNA-UPGRADE-004).
+#[allow(clippy::too_many_lines)]
+fn prepare_migration_copy(
+    repository: &orna_repository::Repository,
+    destination: &std::path::Path,
+    annotation_defaults: Option<u32>,
+) -> Result<PreparedMigrationCopy, Diagnostic> {
     let declared_annotation_defaults = annotation_defaults
         .map(orna_repository::MigrationAnnotationDefaults::new)
         .transpose()
@@ -1173,7 +1212,7 @@ fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnost
     // A source whose runtime holds unpublished mutations has rows the copy would
     // not receive, while its stream checkpoints may already cover them. Refuse
     // before any destination is created so the source keeps its tail (ORNA-UPGRADE-006).
-    let unpublished_count = crate::source_unpublished_mutation_count(&repository)?;
+    let unpublished_count = crate::source_unpublished_mutation_count(repository)?;
     if unpublished_count != 0 {
         return Err(Diagnostic::target_with_detail(
             "E2100",
@@ -1197,20 +1236,20 @@ fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnost
             )
         })?;
     let carry = source_runtime
-        .block_on(orna_runtime::read_stream_carry(&repository))
+        .block_on(orna_runtime::read_stream_carry(repository))
         .map_err(|error| match error {
             orna_runtime::StreamCarryError::NotCarriable(tables) => {
                 Diagnostic::target_with_detail(
                     "E2100",
-                    "migration source holds live stream state that is not carried",
-                    "release or drain the source's live stream state; no copy was prepared and the source is unchanged",
-                    format!("tables={}", tables.join(", ")),
+                    "migration source holds live per-attempt stream state",
+                    "let the live stream attempts finish or be cancelled, then retry; no copy was prepared and the source is unchanged",
+                    format!("tables={tables:?}"),
                 )
             }
             orna_runtime::StreamCarryError::Runtime(error) => Diagnostic::target_with_detail(
                 "E2100",
-                "migration source runtime state could not be inspected",
-                "repair the source runtime state; no copy was prepared",
+                "migration source stream state could not be read",
+                "retry `migrate copy` once the source runtime can be read; no copy was prepared",
                 format!("{error:?}"),
             ),
         })?;
@@ -1223,8 +1262,8 @@ fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnost
         )
     })?;
     let copy = orna_repository::migration_copy::prepare_format3_migration(
-        &repository,
-        &std::path::PathBuf::from(destination),
+        repository,
+        destination,
         continuity,
         declared_annotation_defaults,
         &|staged: &orna_repository::Repository,
@@ -1250,7 +1289,7 @@ fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnost
             // The store was built from a source that could still move. A source
             // that gained unpublished runtime mutations in that window keeps its
             // tail: refuse before the candidate is built or pinned.
-            let unpublished = crate::source_unpublished_mutation_count(&repository)
+            let unpublished = crate::source_unpublished_mutation_count(repository)
                 .map_err(|_| orna_repository::RepositoryError::PublicationRecoveryConflict)?;
             if unpublished != 0 {
                 return Err(orna_repository::RepositoryError::PublicationRecoveryConflict);
@@ -1327,16 +1366,11 @@ fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnost
     // command has not yet reported it. A restart re-imports the same carry,
     // which the import recognises as already present.
     orna_repository::publication_crash_barrier("migration-carried");
-    println!(
-        "prepared or recovered format-3 migration copy: source_format={} source_commit={} candidate_commit={} destination={} carried_checkpoints={} carried_history={}",
-        copy.source_format_number(),
-        copy.source_commit().as_str(),
-        copy.candidate_journal().new_head().as_str(),
-        copy.destination().display(),
-        carry.checkpoint_count(),
-        carry.history_count(),
-    );
-    Ok(())
+    Ok(PreparedMigrationCopy {
+        copy,
+        checkpoints: carry.checkpoint_count(),
+        history: carry.history_count(),
+    })
 }
 
 fn run_migrate_abort<'a>(
@@ -1401,11 +1435,31 @@ fn run_migrate_abort<'a>(
     Ok(())
 }
 
-/// `orna upgrade --to-format 3 DEST --yes-activate`: activates the prepared
-/// format-3 copy at DEST by publishing its candidate and completing the runtime
-/// intent. Without `--yes-activate` nothing is changed.
+/// `orna upgrade --to-format 3`, in two forms.
+///
+/// Without DEST, the one-step form prepares the candidate in a disposable copy
+/// beside the worktree, prints its review, and publishes it only after explicit
+/// confirmation of that candidate. Publication swaps the activated copy in for
+/// the worktree path and leaves the old snapshot at the copy's path.
+///
+/// With DEST and `--yes-activate`, the two-step form publishes a copy that
+/// `orna migrate copy DEST` already prepared. The source is never changed.
 fn run_upgrade(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnostic> {
-    let destination = parse_upgrade_arguments(arguments)?;
+    let arguments = parse_upgrade_arguments(arguments)?;
+    match arguments.destination {
+        Some(destination) => run_upgrade_prepared(endpoint, destination, arguments.confirm),
+        None => run_upgrade_in_place(endpoint, &arguments),
+    }
+}
+
+/// `orna upgrade --to-format 3 DEST --yes-activate [--confirm ID]`: activates the
+/// prepared format-3 copy at DEST by publishing its candidate. Without a matching
+/// `--confirm` the candidate id is still printed and a warning is written.
+fn run_upgrade_prepared(
+    endpoint: &Endpoint,
+    destination: &str,
+    confirm: Option<&str>,
+) -> Result<(), Diagnostic> {
     let source = std::path::Path::new(local_project_path(endpoint)?);
     let repository = orna_repository::Repository::discover(source).map_err(|error| {
         Diagnostic::target_with_detail(
@@ -1425,26 +1479,28 @@ fn run_upgrade(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnost
                 format!("{error:?}"),
             )
         })?;
-    let store_for = |staged: &orna_repository::Repository,
-                     database: orna_repository::DatabaseId| {
-        activation_store(&repository, staged, database)
-    };
-    let outcome = orna_repository::migration_copy::activate_prepared_format3_migration(
-        &repository,
-        &destination,
-        &candidate,
-        crate::invocation_owner_id(),
-        &store_for,
-    )
-    .map_err(|error| {
-        Diagnostic::target_with_detail(
-            "E2100",
-            "prepared migration copy could not be activated",
-            "verify that DEST is the prepared copy of this source and re-run `orna upgrade --to-format 3 DEST --yes-activate` to resume; the source worktree is unchanged",
-            format!("{error:?}"),
-        )
-    })?;
-    match outcome {
+    match confirm {
+        Some(id) if id != candidate.as_str() => {
+            return Err(Diagnostic::target_with_detail(
+                "E2100",
+                "confirmation names a different candidate than the prepared copy",
+                "re-run with the candidate_commit printed by the review; nothing was published",
+                format!("confirmed={id} candidate={}", candidate.as_str()),
+            ));
+        }
+        Some(_) => {}
+        None => eprintln!(
+            "warning: publishing candidate_commit={} without `--confirm {}`; a confirmed run binds activation to the reviewed candidate",
+            candidate.as_str(),
+            candidate.as_str(),
+        ),
+    }
+    eprintln!(
+        "reviewed prepared candidate: candidate_commit={} destination={}",
+        candidate.as_str(),
+        destination.display()
+    );
+    match activate_prepared(&repository, &destination, &candidate)? {
         orna_repository::migration_copy::ActivationOutcome::Activated => println!(
             "activated format-3 migration copy: destination={}",
             destination.display()
@@ -1457,12 +1513,172 @@ fn run_upgrade(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnost
     Ok(())
 }
 
-/// Parses `upgrade --to-format 3 DEST --yes-activate` and returns DEST. Every
-/// refusal happens before the repository is opened, so nothing is changed.
-fn parse_upgrade_arguments(arguments: &[String]) -> Result<&str, Diagnostic> {
+/// Publishes `candidate` at `destination`. Both forms of `orna upgrade` share it.
+fn activate_prepared(
+    repository: &orna_repository::Repository,
+    destination: &std::path::Path,
+    candidate: &orna_repository::GitCommitRef,
+) -> Result<orna_repository::migration_copy::ActivationOutcome, Diagnostic> {
+    let store_for = |staged: &orna_repository::Repository,
+                     database: orna_repository::DatabaseId| {
+        activation_store(repository, staged, database)
+    };
+    orna_repository::migration_copy::activate_prepared_format3_migration(
+        repository,
+        destination,
+        candidate,
+        crate::invocation_owner_id(),
+        &store_for,
+    )
+    .map_err(|error| {
+        Diagnostic::target_with_detail(
+            "E2100",
+            "prepared migration copy could not be activated",
+            "verify that DEST is the prepared copy of this source and re-run the same upgrade to resume; the source worktree is unchanged",
+            format!("{error:?}"),
+        )
+    })
+}
+
+/// `orna upgrade --to-format 3 [--annotation-defaults N] --no-persistent-consumers
+/// [--confirm ID]`: the one-step form. It prepares the candidate in a sibling
+/// `<worktree>-format3-candidate` copy, reviews it, and publishes it in place only
+/// after the candidate is confirmed. A refused confirmation keeps the prepared copy
+/// (abort it with `orna migrate abort`) and leaves the worktree untouched.
+fn run_upgrade_in_place(
+    endpoint: &Endpoint,
+    arguments: &UpgradeArguments<'_>,
+) -> Result<(), Diagnostic> {
+    let source = std::path::Path::new(local_project_path(endpoint)?);
+    let repository = orna_repository::Repository::discover(source).map_err(|error| {
+        Diagnostic::target_with_detail(
+            "E2100",
+            "upgrade source could not be opened",
+            "run the command from the local format-1 or format-2 worktree to upgrade",
+            format!("{error:?}"),
+        )
+    })?;
+    let root = repository.worktree().canonicalize().map_err(|_| {
+        Diagnostic::target(
+            "E2100",
+            "upgrade source worktree could not be resolved",
+            "run the command from the local format-1 or format-2 worktree to upgrade",
+        )
+    })?;
+    let git_metadata = std::fs::symlink_metadata(root.join(".git")).map_err(|_| {
+        Diagnostic::target(
+            "E2100",
+            "upgrade source has no Git directory",
+            "run the command from a standalone worktree whose `.git` is a directory; nothing was changed",
+        )
+    })?;
+    if !git_metadata.is_dir() {
+        return Err(Diagnostic::target(
+            "E2100",
+            "in-place upgrade needs a standalone worktree",
+            "run it from the worktree whose `.git` is a directory; a linked worktree is refused and nothing was changed",
+        ));
+    }
+    let (Some(parent), Some(name)) = (root.parent(), root.file_name()) else {
+        return Err(Diagnostic::target(
+            "E2100",
+            "upgrade source worktree has no parent directory",
+            "move the worktree under a directory the candidate copy can be created in; nothing was changed",
+        ));
+    };
+    let destination = parent.join(format!("{}-format3-candidate", name.to_string_lossy()));
+    let prepared =
+        prepare_migration_copy(&repository, &destination, arguments.annotation_defaults)?;
+    print_prepared_copy(&prepared);
+    let candidate = prepared.copy.candidate_journal().new_head().clone();
+    println!(
+        "review: publication replaces worktree={} with the activated candidate; the old snapshot stays at destination={} as the rollback copy",
+        root.display(),
+        destination.display()
+    );
+    println!(
+        "review: abort before publication with `orna migrate abort {}`; the worktree is unchanged until then",
+        destination.display()
+    );
+    match arguments.confirm {
+        Some(id) if id != candidate.as_str() => {
+            return Err(Diagnostic::target_with_detail(
+                "E2100",
+                "confirmation names a different candidate than the reviewed one",
+                "re-run with the candidate_commit printed above; the worktree is unchanged and the prepared copy is kept",
+                format!("confirmed={id} candidate={}", candidate.as_str()),
+            ));
+        }
+        Some(_) => {}
+        None if confirm_interactively(candidate.as_str())? => {}
+        None => {
+            return Err(Diagnostic::target_with_detail(
+                "E2100",
+                "publication was not confirmed",
+                "re-run with `--confirm <candidate_commit>` shown above, or confirm at an interactive terminal; the worktree is unchanged and the prepared copy is kept",
+                format!("candidate={}", candidate.as_str()),
+            ));
+        }
+    }
+    activate_prepared(&repository, &destination, &candidate)?;
+    orna_repository::migration_copy::exchange_activated_copy(&repository, &prepared.copy)
+        .map_err(|error| {
+            Diagnostic::target_with_detail(
+                "E2100",
+                "activated candidate could not be published in place",
+                "the worktree is unchanged because the exchange is atomic; the activated copy is kept at destination and the same command may be re-run",
+                format!("{error:?}"),
+            )
+        })?;
+    println!(
+        "published format-3 repository in place: worktree={} candidate_commit={} rollback_snapshot={}",
+        root.display(),
+        candidate.as_str(),
+        destination.display()
+    );
+    Ok(())
+}
+
+/// Asks for the candidate commit id on a terminal and reports whether it was
+/// typed exactly. Without a terminal on both stdin and stderr nothing is asked.
+fn confirm_interactively(candidate: &str) -> Result<bool, Diagnostic> {
+    use std::io::{BufRead, IsTerminal, Write};
+    if !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
+        return Ok(false);
+    }
+    let prompt_failed = || {
+        Diagnostic::target(
+            "E2100",
+            "confirmation prompt could not be read",
+            "re-run with `--confirm <candidate_commit>`; nothing was changed",
+        )
+    };
+    eprint!("Type the candidate_commit above to publish in place, or press Enter to abort: ");
+    std::io::stderr().flush().map_err(|_| prompt_failed())?;
+    let mut line = String::new();
+    std::io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .map_err(|_| prompt_failed())?;
+    Ok(line.trim() == candidate)
+}
+
+/// The parsed `orna upgrade --to-format 3` arguments.
+struct UpgradeArguments<'a> {
+    destination: Option<&'a str>,
+    confirm: Option<&'a str>,
+    annotation_defaults: Option<u32>,
+}
+
+/// Parses both forms of `orna upgrade --to-format 3`. Every refusal happens
+/// before the repository is opened, so nothing is changed.
+fn parse_upgrade_arguments(arguments: &[String]) -> Result<UpgradeArguments<'_>, Diagnostic> {
     let mut words = arguments.iter().map(String::as_str);
     let mut format_three = false;
-    let mut confirmed = false;
+    let mut yes_activate = false;
+    let mut no_persistent_consumers = false;
+    let mut confirm = None;
+    let mut annotation_defaults = None;
     let mut destination = None;
     while let Some(word) = words.next() {
         match word {
@@ -1483,39 +1699,106 @@ fn parse_upgrade_arguments(arguments: &[String]) -> Result<&str, Diagnostic> {
                 }
                 format_three = true;
             }
-            "--yes-activate" if !confirmed => confirmed = true,
+            "--yes-activate" if !yes_activate => yes_activate = true,
+            "--no-persistent-consumers" if !no_persistent_consumers => {
+                no_persistent_consumers = true;
+            }
+            "--confirm" if confirm.is_none() => {
+                confirm = Some(words.next().ok_or_else(|| {
+                    Diagnostic::usage(
+                        "E1001",
+                        "`--confirm` needs a candidate commit id",
+                        "supply the candidate_commit printed by the review after `--confirm`",
+                    )
+                })?);
+            }
+            "--annotation-defaults" if annotation_defaults.is_none() => {
+                let value = words.next().ok_or_else(|| {
+                    Diagnostic::usage(
+                        "E1001",
+                        "`--annotation-defaults` needs a count",
+                        "supply the legacy metadata entry count after `--annotation-defaults`",
+                    )
+                })?;
+                annotation_defaults = Some(value.parse::<u32>().map_err(|_| {
+                    Diagnostic::usage(
+                        "E1002",
+                        "invalid `--annotation-defaults` count",
+                        "supply a nonnegative integer",
+                    )
+                })?);
+            }
             _ if destination.is_none() && !word.starts_with("--") => destination = Some(word),
             _ => {
                 return Err(Diagnostic::usage(
                     "E1002",
                     "unsupported `upgrade` arguments",
-                    "use `upgrade --to-format 3 DEST --yes-activate`; nothing was changed",
+                    "use `upgrade --to-format 3 [--annotation-defaults N] --no-persistent-consumers [--confirm ID]`, or `upgrade --to-format 3 DEST --yes-activate [--confirm ID]`; nothing was changed",
                 ));
             }
         }
     }
-    let Some(destination) = destination else {
-        return Err(Diagnostic::usage(
-            "E1001",
-            "`upgrade` needs a destination",
-            "supply DEST, the prepared copy from `orna migrate copy DEST`",
-        ));
-    };
     if !format_three {
         return Err(Diagnostic::usage(
             "E1001",
             "`upgrade` needs `--to-format 3`",
-            "supply `--to-format 3` before DEST; nothing was changed",
+            "supply `--to-format 3` after `upgrade`; nothing was changed",
         ));
     }
-    if !confirmed {
-        return Err(Diagnostic::usage(
-            "E1002",
-            "`upgrade` activates the prepared copy only with `--yes-activate`",
-            "re-run with `--yes-activate` to publish the prepared candidate into DEST; nothing was changed",
-        ));
+    check_upgrade_form(
+        destination,
+        yes_activate,
+        annotation_defaults,
+        no_persistent_consumers,
+    )?;
+    Ok(UpgradeArguments {
+        destination,
+        confirm,
+        annotation_defaults,
+    })
+}
+
+/// Refuses an `upgrade --to-format 3` argument shape that belongs to neither
+/// form. Runs after the arguments are parsed and before the repository is
+/// opened, so a refusal changes nothing.
+fn check_upgrade_form(
+    destination: Option<&str>,
+    yes_activate: bool,
+    annotation_defaults: Option<u32>,
+    no_persistent_consumers: bool,
+) -> Result<(), Diagnostic> {
+    if destination.is_some() {
+        if !yes_activate {
+            return Err(Diagnostic::usage(
+                "E1002",
+                "`upgrade` activates the prepared copy only with `--yes-activate`",
+                "re-run with `--yes-activate` to publish the prepared candidate into DEST; nothing was changed",
+            ));
+        }
+        if annotation_defaults.is_some() || no_persistent_consumers {
+            return Err(Diagnostic::usage(
+                "E1002",
+                "`--annotation-defaults` and `--no-persistent-consumers` belong to the preparation",
+                "the prepared copy already records them; pass them to `orna migrate copy DEST` or to the one-step `orna upgrade --to-format 3`; nothing was changed",
+            ));
+        }
+    } else {
+        if yes_activate {
+            return Err(Diagnostic::usage(
+                "E1002",
+                "`--yes-activate` needs a DEST",
+                "the one-step form publishes after `--confirm` or an interactive confirmation; nothing was changed",
+            ));
+        }
+        if !no_persistent_consumers {
+            return Err(Diagnostic::usage(
+                "E1001",
+                "`upgrade --to-format 3` needs an explicit consumer-continuity choice",
+                "supply `--no-persistent-consumers` to acknowledge that persistent consumer checkpoints are carried under recorded identity correspondence",
+            ));
+        }
     }
-    Ok(destination)
+    Ok(())
 }
 
 /// The store a prepared copy must match: exactly what a fresh preparation of
