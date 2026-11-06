@@ -11027,11 +11027,6 @@ pub enum RepositoryError {
     /// The migration store could not admit a legacy relation; the message
     /// names the refused row so callers can report it without a raw dump.
     MigrationStoreRefused(String),
-    /// The source is format 2, whose row layout has no production decoder.
-    /// Migration refuses it rather than replacing its header, because the
-    /// previous authoring draft's data is not format 3 (MIGRATION.md:3;
-    /// UPGRADE-3 step 3).
-    Format2RowConversionUnimplemented,
 }
 
 impl fmt::Display for RepositoryError {
@@ -11127,9 +11122,6 @@ impl fmt::Display for RepositoryError {
             Self::MigrationStoreRefused(detail) => {
                 write!(f, "migration store refused a legacy row: {detail}")
             }
-            Self::Format2RowConversionUnimplemented => f.write_str(
-                "format-2 row conversion is not implemented: a format-2 source cannot be migrated (MIGRATION.md:3; UPGRADE-3 step 3)",
-            ),
         }
     }
 }

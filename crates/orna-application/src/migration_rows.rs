@@ -359,6 +359,21 @@ pub fn migration_row_input(
     declared: &StagedRelations,
     legacy: &[LegacyTable<'_>],
 ) -> Result<MigrationRowInput, MigrationRowError> {
+    migration_row_input_with_format2_blobs(declared, legacy, None)
+}
+
+/// Reads a format-2 Blob slot's ORR-2 text to its bytes; supplied by the
+/// repository, which owns the object store that holds storage records.
+pub type Format2BlobReader<'a> = &'a dyn Fn(&str) -> Result<Vec<u8>, String>;
+
+/// Builds the migration row input like [`migration_row_input`]. With
+/// `format2_blobs`, Blob slots of format-2 rows hold ORR-2 text that is read
+/// through the reader; without it, a Blob slot must hold raw bytes.
+pub fn migration_row_input_with_format2_blobs(
+    declared: &StagedRelations,
+    legacy: &[LegacyTable<'_>],
+    format2_blobs: Option<Format2BlobReader<'_>>,
+) -> Result<MigrationRowInput, MigrationRowError> {
     let mut sources = BTreeMap::<[u8; 16], Sources<'_>>::new();
     let mut blobs = BTreeMap::<ContentIdentity, Vec<u8>>::new();
     for table in legacy {
@@ -410,7 +425,7 @@ pub fn migration_row_input(
         let chosen = single_legacy_source(&name, source.compact, source.loose)
             .map_err(MigrationRowError::Source)?;
         let rows = match chosen {
-            Some(rows) => lower_rows(relation, &name, rows, &mut blobs)?,
+            Some(rows) => lower_rows(relation, &name, rows, &mut blobs, format2_blobs)?,
             None => Vec::new(),
         };
         relations.push(MigrationRelation {
@@ -430,6 +445,7 @@ fn lower_rows(
     name: &str,
     rows: &LegacyTableRows,
     blobs: &mut BTreeMap<ContentIdentity, Vec<u8>>,
+    format2_blobs: Option<Format2BlobReader<'_>>,
 ) -> Result<Vec<MigrationRow>, MigrationRowError> {
     let descriptor = relation.descriptor();
     let schema =
@@ -468,7 +484,7 @@ fn lower_rows(
             values.insert(stored.name(), field.value());
         }
         let key_text = row_key_text(row.key());
-        let fields = lower_row_fields(&schema, name, &key_text, &values, blobs)?;
+        let fields = lower_row_fields(&schema, name, &key_text, &values, blobs, format2_blobs)?;
         lowered.push(MigrationRow {
             key: row.key().clone(),
             key_text,
@@ -480,13 +496,15 @@ fn lower_rows(
 
 /// Lowers one row's stored fields. A `Blob` value is recorded in `blobs` and
 /// lowered against a provisional blob reference; every other value is lowered
-/// to its final stored form here.
+/// to its final stored form here. With `format2_blobs`, a Blob slot whose value
+/// is ORR-2 text (inline padded Base64 or a storage record) is read through it.
 fn lower_row_fields(
     schema: &StoredSchema<'_>,
     relation: &str,
     key: &str,
     values: &BTreeMap<&str, &Raw>,
     blobs: &mut BTreeMap<ContentIdentity, Vec<u8>>,
+    format2_blobs: Option<Format2BlobReader<'_>>,
 ) -> Result<Vec<StoredField>, MigrationRowError> {
     let invalid = |reason: String| MigrationRowError::InvalidRow {
         relation: relation.to_owned(),
@@ -501,17 +519,26 @@ fn lower_row_fields(
                 field.name()
             )));
         };
-        let stored = match value {
-            Raw::Bytes(bytes) if field.is_blob() => {
-                let identity = blob_identity(bytes).map_err(&invalid)?;
-                blobs.entry(identity).or_insert_with(|| bytes.clone());
+        let value: &Raw = value;
+        let blob_bytes = match (value, format2_blobs) {
+            (Raw::Bytes(bytes), _) if field.is_blob() => Some(bytes.clone()),
+            (_, Some(read)) if field.is_blob() => match orr2_slot_text(value) {
+                Some(text) => Some(read(&text).map_err(&invalid)?),
+                None => None,
+            },
+            _ => None,
+        };
+        let stored = match blob_bytes {
+            Some(bytes) => {
+                let identity = blob_identity(&bytes).map_err(&invalid)?;
+                blobs.entry(identity).or_insert(bytes);
                 let provisional = blob_tuple(&identity, &[]);
                 let lowered = schema
                     .lower_field(field, &provisional)
                     .map_err(|error| invalid(error.to_string()))?;
                 StoredField::Blob { identity, lowered }
             }
-            _ => StoredField::Value(
+            None => StoredField::Value(
                 schema
                     .lower_field(field, value)
                     .map_err(|error| invalid(error.to_string()))?,
@@ -520,6 +547,28 @@ fn lower_row_fields(
         fields.push(stored);
     }
     Ok(fields)
+}
+
+/// The ORR-2 text of a format-2 Blob slot: the inline string, or the storage
+/// record `{ blob: "sha256:<hex>", length: <n> }` in its canonical field order.
+/// Any other shape is not ORR-2 text and is lowered as an ordinary value, which
+/// fails closed for a Blob field.
+fn orr2_slot_text(value: &Raw) -> Option<String> {
+    match value {
+        Raw::Text(text) => Some(text.clone()),
+        Raw::Map(entries) => {
+            let [
+                (Raw::Text(first), Raw::Text(digest)),
+                (Raw::Text(second), Raw::Int(length)),
+            ] = entries.as_slice()
+            else {
+                return None;
+            };
+            (first == "blob" && second == "length")
+                .then(|| format!("{{ blob: \"{digest}\", length: {length} }}"))
+        }
+        _ => None,
+    }
 }
 
 /// The content identity of blob bytes, computed the way the repository
@@ -1408,5 +1457,38 @@ mod tests {
             error,
             MigrationRowError::InvalidRow { ref relation, .. } if relation == PATH
         ));
+    }
+
+    /// A format-2 Blob slot holds ORR-2 text: an inline string passes through,
+    /// and the storage record `{ blob, length }` renders in canonical field
+    /// order. Any other shape is not ORR-2 text and fails closed.
+    #[test]
+    fn orr2_slot_text_renders_inline_and_storage_record_forms() {
+        use super::orr2_slot_text;
+
+        assert_eq!(
+            orr2_slot_text(&Raw::Text("aGVsbG8=".to_owned())),
+            Some("aGVsbG8=".to_owned())
+        );
+        let record = Raw::Map(vec![
+            (
+                Raw::Text("blob".to_owned()),
+                Raw::Text("sha256:ab".to_owned()),
+            ),
+            (Raw::Text("length".to_owned()), Raw::Int(5.into())),
+        ]);
+        assert_eq!(
+            orr2_slot_text(&record),
+            Some("{ blob: \"sha256:ab\", length: 5 }".to_owned())
+        );
+        let reversed = Raw::Map(vec![
+            (Raw::Text("length".to_owned()), Raw::Int(5.into())),
+            (
+                Raw::Text("blob".to_owned()),
+                Raw::Text("sha256:ab".to_owned()),
+            ),
+        ]);
+        assert_eq!(orr2_slot_text(&reversed), None);
+        assert_eq!(orr2_slot_text(&Raw::Int(5.into())), None);
     }
 }
