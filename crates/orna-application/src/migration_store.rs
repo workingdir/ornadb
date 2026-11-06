@@ -81,6 +81,29 @@ pub fn build_migration_store(
         .iter()
         .map(|table| LegacyTableAddress::Relation(*table.table().as_bytes()))
         .collect();
+    // Each compact table's storage id must name exactly one unretired Table
+    // identity in the legacy sidecar, and that table must be declared. The
+    // reconciled identities reuse these ids, so a missing or duplicate id is a
+    // typed refusal rather than a fresh identity.
+    let compact_ids: Vec<[u8; 16]> = compact
+        .iter()
+        .map(|table| *table.table().as_bytes())
+        .collect();
+    if !compact_ids.is_empty() {
+        let sidecar = previous
+            .as_ref()
+            .ok_or_else(|| refused("a compact table has no legacy object identity sidecar"))?;
+        let names = sidecar.legacy_table_names(&compact_ids).map_err(|error| {
+            refused(format!(
+                "the compact tables do not correspond to the legacy identities: {error:?}"
+            ))
+        })?;
+        for id in names.keys() {
+            if declared.table_name(id).is_none() {
+                return Err(refused("a compact table has no declared relation"));
+            }
+        }
+    }
     for relation in declared.relations() {
         let id = relation.relation_id();
         if addresses

@@ -27,6 +27,7 @@
 //! | Marker | Where it parks |
 //! | --- | --- |
 //! | `migration-staging` | staged graph, worktree and index written; source re-checked |
+//! | `migration-store` | migration store admitted for the database; source re-checked; no candidate yet |
 //! | `migration-candidate` | candidate commit object built; nothing pinned or journalled |
 //! | `migration-journal` | staged copy holds its prepared publication journal |
 //! | `migration-synced` | every staged byte fsynced; copy still under its staging name |
@@ -76,8 +77,9 @@ const CRASH_AT: &str = "ORNA_TEST_PUBLICATION_CRASH_AT";
 const CRASH_DIR: &str = "ORNA_TEST_PUBLICATION_CRASH_DIR";
 const MARKER_FILE: &str = "publication-crash-marker";
 /// The `migrate copy` boundaries this matrix kills at, in command order.
-const COPY_BOUNDARIES: [&str; 6] = [
+const COPY_BOUNDARIES: [&str; 7] = [
     "migration-staging",
+    "migration-store",
     "migration-candidate",
     "migration-journal",
     "migration-synced",
