@@ -272,7 +272,7 @@ pub fn prepare_format3_migration(
         .to_path_buf();
     reclaim_dead_staging(&parent, &destination)?;
     if path_exists(&destination)? {
-        return recover_prepared_copy(source, &destination, continuity, annotation_defaults);
+        return recover_prepared_copy(source, &destination, continuity, annotation_defaults, false);
     }
 
     let claim = claim_staging(&parent)?;
@@ -392,7 +392,9 @@ pub fn discard_prepared_format3_migration(
             let journal =
                 copy_journal(&destination)?.ok_or(RepositoryError::PublicationRecoveryConflict)?;
             let (continuity, annotation_defaults) = migration_coordinates(&journal)?;
-            recover_prepared_copy(source, &destination, continuity, annotation_defaults)?;
+            // Discard removes a copy whatever its era; only preparation and
+            // publication refuse the pre-change shape.
+            recover_prepared_copy(source, &destination, continuity, annotation_defaults, true)?;
             publish_copy_noreplace(parent, &destination, &quarantine)?;
             // Boundary: the copy now exists only under the quarantine name. A
             // restart sees no destination and finishes the removal.
@@ -545,6 +547,10 @@ fn prepare_format3_migration_in(
     }
     let database_id = context.database_id().unwrap_or_else(DatabaseId::new_v4);
     let database_bytes = canonical_database_bytes(&database_id);
+    // ORNA-META-001: the record is not a tracked file. Its bytes still feed the
+    // runtime intent, so the identity covers the same coordinates; provenance
+    // lives in the journal (continuity, annotation defaults) and in the
+    // commit's `Orna-Migration` trailer.
     let record = migration_record(
         source_format,
         &source_commit,
@@ -566,10 +572,6 @@ fn prepare_format3_migration_in(
                 Some(database_bytes.clone()),
             ),
             crate::ManagedFileChange::new(crate::ManagedPath::new(LEGACY_FORMAT_PATH)?, None),
-            crate::ManagedFileChange::new(
-                crate::ManagedPath::new(MIGRATION_RECORD)?,
-                Some(record.clone()),
-            ),
         ],
         &candidate_message(source_format, annotation_defaults, &continuity),
         commit_time,
@@ -603,11 +605,6 @@ fn prepare_format3_migration_in(
                 crate::ManagedPath::new(LEGACY_FORMAT_PATH)?,
                 Some(committed_legacy_format(&context)?),
                 None,
-            ),
-            PublicationJournalEntry::new(
-                crate::ManagedPath::new(MIGRATION_RECORD)?,
-                None,
-                Some(record),
             ),
         ],
     )?
@@ -967,11 +964,24 @@ fn require_migration_candidate_pin(
     Ok(())
 }
 
+/// Whether a publication journal records `.orna/migration.json`, the tracked
+/// record that copies prepared before ORNA-META-001 carried.
+pub(crate) fn journal_lists_migration_record(
+    journal: &PublicationJournal,
+) -> Result<bool, RepositoryError> {
+    let record = crate::ManagedPath::new(MIGRATION_RECORD)?;
+    Ok(journal
+        .entries()
+        .iter()
+        .any(|entry| entry.path() == &record))
+}
+
 fn recover_prepared_copy(
     source: &Repository,
     destination: &Path,
     continuity: MigrationContinuityRecord,
     annotation_defaults: MigrationAnnotationDefaults,
+    allow_legacy: bool,
 ) -> Result<MigratedCopy, RepositoryError> {
     let source_context = source
         .open_format_context()
@@ -1002,6 +1012,10 @@ fn recover_prepared_copy(
     let journal = repository
         .read_publication_journal()?
         .ok_or(RepositoryError::PublicationRecoveryConflict)?;
+    let legacy_copy = journal_lists_migration_record(&journal)?;
+    if legacy_copy && !allow_legacy {
+        return Err(RepositoryError::LegacyMigrationCopy);
+    }
     if journal.stage() != crate::PublicationJournalStage::Prepared
         || journal.runtime_intent_id().is_none()
         || journal.old_head() != &source_commit
@@ -1023,13 +1037,6 @@ fn recover_prepared_copy(
     require_migration_candidate_pin(&repository, journal.new_head())?;
     let candidate = repository.candidate_from_journal(&journal)?;
     let database_id = candidate_database_id(&repository, &candidate)?;
-    let expected_record = migration_record(
-        source_format,
-        &source_commit,
-        &source_tree_identity,
-        annotation_defaults,
-        &continuity,
-    );
     let expected_entries = vec![
         PublicationJournalEntry::new(
             crate::ManagedPath::new(".orna/database.orna")?,
@@ -1041,13 +1048,21 @@ fn recover_prepared_copy(
             Some(committed_legacy_format(&source_context)?),
             None,
         ),
-        PublicationJournalEntry::new(
-            crate::ManagedPath::new(MIGRATION_RECORD)?,
-            None,
-            Some(expected_record),
-        ),
     ];
-    if journal.entries() != expected_entries {
+    let entries_match = if legacy_copy {
+        // A pre-change copy journals the migration record. Discard is the only
+        // caller that accepts one, and it binds that record by path and shape:
+        // the bytes were written by the older writer and are not re-derived.
+        let entries = journal.entries();
+        entries.len() == 3
+            && entries[..2] == expected_entries[..]
+            && entries[2].path() == &crate::ManagedPath::new(MIGRATION_RECORD)?
+            && entries[2].expected().is_none()
+            && entries[2].next().is_some()
+    } else {
+        journal.entries() == expected_entries
+    };
+    if !entries_match {
         return Err(RepositoryError::InvalidFormatMigration);
     }
     let (working_tree_identity, working_tree_entries) = working_tree_identity(&repository)?;
