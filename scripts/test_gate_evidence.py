@@ -732,7 +732,8 @@ class ReviewFindingTests(unittest.TestCase):
         for line in calls:
             self.assertIn("--timeout-minutes", line)
         source = (root / "source-audits.yml").read_text(encoding="utf-8")
-        self.assertIn("sudo apt-get -o Acquire::Retries=3", source)
+        self.assertIn("apt_opts=(-o Acquire::Retries=3", source)
+        self.assertIn('apt-get "${apt_opts[@]}" update', source)
         self.assertNotIn("sudo apt-get update\n", source)
 
     def test_cargo_command_skips_the_named_tests_exactly(self) -> None:
