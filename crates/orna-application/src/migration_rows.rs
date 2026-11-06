@@ -328,6 +328,12 @@ mod tests {
         LegacyField, LegacyFieldName, LegacyReadError, LegacyRow, LegacyTableAddress,
         LegacyTableRows,
     };
+    use std::{path::Path, process::Command};
+
+    use orna_repository::{GitCommitRef, Repository, Uuid, golden_compact_schemas};
+    use tempfile::TempDir;
+
+    use crate::legacy_store::read_legacy_table_rows;
 
     const TABLE: [u8; 16] = [0x71; 16];
     const KEY_FIELD: [u8; 16] = [0x72; 16];
@@ -583,5 +589,105 @@ mod tests {
             error,
             MigrationRowError::InvalidRow { ref reason, .. } if reason.contains("avatar")
         ));
+    }
+
+    /// The golden bundle the CLI legacy tests read.
+    const GOLDEN_BUNDLE: &str = "../orna-cli/tests/fixtures/legacy-format1.bundle";
+
+    /// Clones the golden bundle and returns its repository and HEAD commit.
+    fn golden() -> (TempDir, Repository, GitCommitRef) {
+        let directory = TempDir::new().expect("a temporary directory");
+        let clone = Command::new("git")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .arg("clone")
+            .arg("--quiet")
+            .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join(GOLDEN_BUNDLE))
+            .arg(directory.path())
+            .output()
+            .expect("the git clone process starts");
+        assert!(
+            clone.status.success(),
+            "git clone bundle: {}",
+            String::from_utf8_lossy(&clone.stderr)
+        );
+        let repository = Repository::discover(directory.path()).expect("the clone opens");
+        let commit = repository
+            .head()
+            .expect("the clone reads HEAD")
+            .expect("the bundle has a commit");
+        (directory, repository, commit)
+    }
+
+    /// The golden compact table `number`'s storage id, as the builder names it.
+    fn golden_table(number: u64) -> [u8; 16] {
+        *Uuid::from_u64_pair(0x018f_0000_0000_7100, number).as_bytes()
+    }
+
+    /// A declared set holding the golden compact tables `numbers`, with the
+    /// schemas the builder publishes.
+    fn golden_compact_declared(numbers: &[u64]) -> StagedRelations {
+        let relations = golden_compact_schemas()
+            .into_iter()
+            .filter(|(number, _, _)| numbers.contains(number))
+            .map(|(_, id, schema)| StagedRelation::new(id, schema))
+            .collect();
+        StagedRelations::for_tests(relations, Vec::new())
+    }
+
+    #[test]
+    fn golden_compact_tables_keep_the_legacy_reader_keys() {
+        let (_directory, repository, commit) = golden();
+        for number in [1_u64, 2, 3] {
+            let id = golden_table(number);
+            let address = LegacyTableAddress::Relation(id);
+            let legacy = read_legacy_table_rows(&repository, &commit, &address)
+                .expect("the legacy compact table decodes");
+            let declared = golden_compact_declared(&[number]);
+            let input = migration_row_input(&declared, &[LegacyTable::new(&address, &legacy)])
+                .expect("the golden compact table maps onto its declared schema");
+            let relation = input
+                .relations()
+                .iter()
+                .find(|relation| relation.relation_id() == &id)
+                .expect("the declared table is in the input");
+            let mapped: Vec<TypedKey> =
+                relation.rows().iter().map(|(key, _)| key.clone()).collect();
+            let expected: Vec<TypedKey> =
+                legacy.rows().iter().map(|row| row.key().clone()).collect();
+            assert_eq!(mapped, expected, "table {number} keeps the legacy keys");
+        }
+    }
+
+    #[test]
+    fn golden_loose_contacts_keep_the_legacy_reader_keys() {
+        let (_directory, repository, commit) = golden();
+        let address = LegacyTableAddress::TablePath(PATH.to_owned());
+        let legacy = read_legacy_table_rows(&repository, &commit, &address)
+            .expect("the legacy loose table decodes");
+        let input = migration_row_input(&declared(), &[LegacyTable::new(&address, &legacy)])
+            .expect("the golden contacts map onto the declared Contact table");
+        let relation = input
+            .relations()
+            .iter()
+            .find(|relation| relation.relation_id() == &TABLE)
+            .expect("the declared Contact table is in the input");
+        let mapped: Vec<TypedKey> = relation.rows().iter().map(|(key, _)| key.clone()).collect();
+        let expected: Vec<TypedKey> = legacy.rows().iter().map(|row| row.key().clone()).collect();
+        assert_eq!(legacy.rows().len(), 2, "the golden holds two contacts");
+        assert_eq!(mapped, expected, "contacts keep the legacy keys");
+    }
+
+    #[test]
+    fn golden_blob_table_fails_closed_as_invalid_row() {
+        let (_directory, repository, commit) = golden();
+        let address = LegacyTableAddress::Relation(golden_table(5));
+        let legacy = read_legacy_table_rows(&repository, &commit, &address)
+            .expect("the legacy blob table decodes");
+        let error = migration_row_input(
+            &golden_compact_declared(&[5]),
+            &[LegacyTable::new(&address, &legacy)],
+        )
+        .expect_err("raw Blob bytes are not a stored blob reference");
+        assert!(matches!(error, MigrationRowError::InvalidRow { .. }));
     }
 }
