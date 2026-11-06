@@ -69,31 +69,6 @@ fn run(directory: &Path, arguments: &[&str]) -> Output {
         .expect("CLI process starts")
 }
 
-/// `orna migrate copy` of a format-2 source is refused by name and writes no
-/// destination. Its row layout has no production decoder, and MIGRATION.md:3
-/// forbids presenting its data as format 3, so no prepared copy exists to
-/// publish into or to read runtime identity from.
-fn assert_format_two_copy_refused(source: &Path, destination: &Path) {
-    let copy = run(
-        source,
-        &[
-            "migrate",
-            "copy",
-            destination.to_str().unwrap(),
-            "--annotation-defaults",
-            "0",
-            "--no-persistent-consumers",
-        ],
-    );
-    let stderr = String::from_utf8_lossy(&copy.stderr);
-    assert!(!copy.status.success(), "{stderr}");
-    assert!(
-        stderr.contains("format-2 row conversion is not implemented"),
-        "{stderr}"
-    );
-    assert!(!destination.exists(), "{stderr}");
-}
-
 fn text(bytes: Vec<u8>) -> String {
     String::from_utf8(bytes).expect("Git output is UTF-8")
 }
@@ -303,16 +278,12 @@ fn runtime_writes_are_refused_on_a_legacy_head() {
 /// the journal, Git state and runtime state files are left as they were.
 #[test]
 fn publish_in_a_prepared_migration_copy_names_the_unactivated_candidate() {
-    for (format_record, format) in LEGACY_FORMAT_RECORDS {
+    for (format_record, _) in LEGACY_FORMAT_RECORDS {
         let parent = TempDir::new().expect("temporary parent");
         let source = parent.path().join("source");
         fs::create_dir(&source).unwrap();
         commit_legacy_snapshot(&source, format_record);
         let destination = parent.path().join("migrated");
-        if format == 2 {
-            assert_format_two_copy_refused(&source, &destination);
-            continue;
-        }
         let copy = run(
             &source,
             &[
@@ -371,16 +342,12 @@ fn publish_in_a_prepared_migration_copy_names_the_unactivated_candidate() {
 /// journal and runtime state files as they were.
 #[test]
 fn prepared_copy_runtime_identity_admits_only_the_carry_and_leaves_state_unchanged() {
-    for (format_record, format) in LEGACY_FORMAT_RECORDS {
+    for (format_record, _) in LEGACY_FORMAT_RECORDS {
         let parent = TempDir::new().expect("temporary parent");
         let source = parent.path().join("source");
         fs::create_dir(&source).unwrap();
         commit_legacy_snapshot(&source, format_record);
         let destination = parent.path().join("migrated");
-        if format == 2 {
-            assert_format_two_copy_refused(&source, &destination);
-            continue;
-        }
         let copy = run(
             &source,
             &[

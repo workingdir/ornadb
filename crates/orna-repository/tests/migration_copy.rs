@@ -872,6 +872,83 @@ fn pre_change_prepared_copy_is_refused_and_discardable() {
     );
 }
 
+/// A typed store refusal during preparation (the format-2 compact refusal) leaves
+/// no destination and no staging entry, and the source worktree and HEAD are
+/// unchanged. The staging claim removes its private copy when preparation fails.
+#[test]
+fn store_refusal_creates_no_destination_and_keeps_the_source() {
+    let source = TempDir::new().unwrap();
+    init_repository(source.path());
+    fs::write(
+        source.path().join("main.orna"),
+        include_str!("fixtures/git-repository-main.orna"),
+    )
+    .unwrap();
+    fs::create_dir_all(source.path().join(".orna")).unwrap();
+    fs::write(
+        source.path().join(".orna/format.orna"),
+        include_str!("fixtures/format-context/format-2-draft-1.1.0.orna"),
+    )
+    .unwrap();
+    fs::write(
+        source.path().join(".orna/database.orna"),
+        include_str!("fixtures/format-context/database-sidecar.orna"),
+    )
+    .unwrap();
+    git_output(source.path(), &["add", "."]);
+    git_output(source.path(), &["commit", "-m", "format-2 source"]);
+    let repository = Repository::discover(source.path()).unwrap();
+    let source_head = git_output(source.path(), &["rev-parse", "HEAD"]);
+    let source_status = git_output(
+        source.path(),
+        &["status", "--porcelain=v2", "--untracked-files=all"],
+    );
+    let defaults = LegacyAnnotationInventory::Present(vec![LegacyAnnotationCandidate::new(
+        b"unlabeled-source-row".to_vec(),
+        None,
+        None,
+    )])
+    .annotation_defaults()
+    .unwrap();
+    let continuity = MigrationContinuityRecord::new(Vec::new()).unwrap();
+    let refuse = |_: &Repository,
+                  _: orna_repository::DatabaseId|
+     -> Result<MigrationStore, RepositoryError> {
+        Err(RepositoryError::Format2CompactUnimplemented)
+    };
+    let parent = TempDir::new().unwrap();
+    let destination = parent.path().join("migrated");
+    let refused = migration_copy::prepare_format3_migration(
+        &repository,
+        &destination,
+        continuity,
+        Some(defaults),
+        &refuse,
+    )
+    .expect_err("the store refusal stops preparation");
+    assert!(matches!(
+        refused,
+        RepositoryError::Format2CompactUnimplemented
+    ));
+    assert!(!destination.exists(), "no destination is created");
+    assert_eq!(
+        fs::read_dir(parent.path()).unwrap().count(),
+        0,
+        "no staging entry is left beside the destination"
+    );
+    assert_eq!(
+        git_output(source.path(), &["rev-parse", "HEAD"]),
+        source_head
+    );
+    assert_eq!(
+        git_output(
+            source.path(),
+            &["status", "--porcelain=v2", "--untracked-files=all"]
+        ),
+        source_status
+    );
+}
+
 #[test]
 fn source_edited_after_the_store_is_built_is_refused_before_pinning() {
     let source = TempDir::new().unwrap();
