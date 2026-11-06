@@ -33,3 +33,4 @@ orna-security = { path = "../orna-security" }
 [dev-dependencies]
 futures = "0.3.31"
 orna-application = { path = ".", features = ["test-support"] }
+tempfile = "3.23.0"
