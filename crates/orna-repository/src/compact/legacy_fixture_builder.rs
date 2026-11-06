@@ -409,6 +409,23 @@ pub fn write_legacy_format1_golden_fixture(root: &Path, loose_sources: &Path) {
     write_repository(root, Some(loose_sources));
 }
 
+/// The declared schemas of the golden's compact tables, as `(table number, table
+/// id, schema)` in table-number order. These are the schemas `publish_table`
+/// writes, so a reader built from them sees the committed fields. Table
+/// `BLOB_TABLE_NUMBER` stores a `Blob` value column; the others are key-only.
+pub fn golden_compact_schemas() -> Vec<(u64, [u8; 16], SchemaDescriptor)> {
+    fixture_tables()
+        .into_iter()
+        .map(|(number, segments)| {
+            let key_type = segments[0].key.type_name();
+            let blob_field = segments[0].blob.is_some().then(|| value_field_id(number));
+            let table = table_id(number);
+            let schema = table_schema(table, field_id(number), key_type, blob_field);
+            (number, *table.as_bytes(), schema)
+        })
+        .collect()
+}
+
 fn write_repository(root: &Path, loose_sources: Option<&Path>) {
     // Pin everything a host could otherwise decide: the object format (a
     // runner may default `init.defaultObjectFormat` to sha256), the line-ending
