@@ -1236,6 +1236,11 @@ fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnost
         orna_repository::RepositoryError::FormatContext(context) => {
             migration_source_admission_diagnostic(context)
         }
+        orna_repository::RepositoryError::LegacyMigrationCopy => Diagnostic::target(
+            "E2100",
+            "prepared migration copy predates the migration-record removal",
+            "discard it with `orna migrate abort DEST`, then run `orna migrate copy` again",
+        ),
         other => Diagnostic::target_with_detail(
             "E2100",
             "migration copy could not be prepared or recovered",
