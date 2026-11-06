@@ -936,7 +936,10 @@ fn store_refusal_creates_no_destination_and_keeps_the_source() {
         0,
         "no staging entry is left beside the destination"
     );
-    assert_eq!(git_output(source.path(), &["rev-parse", "HEAD"]), source_head);
+    assert_eq!(
+        git_output(source.path(), &["rev-parse", "HEAD"]),
+        source_head
+    );
     assert_eq!(
         git_output(
             source.path(),
