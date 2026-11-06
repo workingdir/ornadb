@@ -1,5 +1,3 @@
-module main;
-
 pub table Counter(id: Int) {}
 
 pub table Label(id: Str) {}
