@@ -1,6 +1,8 @@
 use std::{fs, path::Path, process::Command};
 
 use orna_repository::Repository;
+use orna_runtime::{Mutation, NoFault, RuntimeState};
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 fn git_output(directory: &Path, arguments: &[&str]) -> Vec<u8> {
@@ -985,4 +987,221 @@ fn cli_migration_copy_refuses_while_a_discard_quarantine_is_pending() {
         String::from_utf8_lossy(&discarded.stderr)
     );
     assert!(!quarantine.exists());
+}
+
+/// The source's pending runtime mutations, read straight from its state database.
+/// A source that never opened its runtime has no state database and an empty tail.
+fn pending_mutation_count(source: &Path) -> i64 {
+    let state_db = Repository::discover(source)
+        .unwrap()
+        .runtime_paths()
+        .state_db();
+    if !state_db.exists() {
+        return 0;
+    }
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let database = libsql::Builder::new_local(&state_db).build().await.unwrap();
+            let connection = database.connect().unwrap();
+            let mut rows = connection
+                .query("SELECT COUNT(*) FROM pending_mutation", ())
+                .await
+                .unwrap();
+            rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
+        })
+}
+
+/// The bytes of a state database and its WAL and shared-memory sidecars, each
+/// `None` when the file is absent. Comparing these proves a refusal wrote
+/// nothing to the source runtime, including the sidecars `SQLite` creates on open.
+fn state_files(state_db: &Path) -> Vec<Option<Vec<u8>>> {
+    ["", "-wal", "-shm"]
+        .into_iter()
+        .map(|suffix| {
+            let path = std::path::PathBuf::from(format!("{}{suffix}", state_db.display()));
+            match fs::read(&path) {
+                Ok(bytes) => Some(bytes),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => panic!("read {}: {error}", path.display()),
+            }
+        })
+        .collect()
+}
+
+/// The bytes of the runtime owner state file, or `None` when it is absent.
+/// The owner-lock probe rewrites this file, so a refusal must restore it.
+fn owner_state_file(source: &Path) -> Option<Vec<u8>> {
+    let path = Repository::discover(source)
+        .unwrap()
+        .runtime_paths()
+        .locks()
+        .join("runtime-owner.state");
+    match fs::read(&path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => panic!("read {}: {error}", path.display()),
+    }
+}
+
+/// Appends one real unpublished mutation to the legacy source through the
+/// runtime, under the worktree-keyed source identity the runtime keys its tail by.
+fn append_unpublished_mutation(source: &Path) {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let repository = Repository::discover(source).unwrap();
+            let (identity, digest) =
+                orna_runtime::migration_source_runtime_identity(&repository).unwrap();
+            let state = RuntimeState::open(&repository, identity, digest)
+                .await
+                .unwrap();
+            let lease = state.acquire_lease([45; 16]).await.unwrap();
+            let capture = state.capture().await.unwrap();
+            let payload = b"unpublished legacy-source row".to_vec();
+            let mutation = Mutation {
+                id: [1; 16],
+                digest: Sha256::digest(&payload).into(),
+                payload,
+            };
+            state
+                .commit(lease, &capture, &mutation, [2; 32], &NoFault)
+                .await
+                .unwrap();
+        });
+}
+
+#[test]
+fn migration_refuses_a_source_with_unpublished_rows_and_changes_nothing() {
+    let parent = TempDir::new().unwrap();
+    let git_trace = parent.path().join("git-trace.log");
+
+    // An empty tail still migrates.
+    let empty = parent.path().join("empty");
+    fs::create_dir(&empty).unwrap();
+    initialize_legacy_source(&empty);
+    assert_eq!(pending_mutation_count(&empty), 0);
+    let empty_destination = parent.path().join("empty-migrated");
+    let migrated = run_copy(&empty, &empty_destination, "0", &git_trace);
+    assert!(
+        migrated.status.success(),
+        "migration copy of an empty tail: {}",
+        String::from_utf8_lossy(&migrated.stderr)
+    );
+    assert!(empty_destination.is_dir());
+
+    // A source with an unpublished mutation is refused and left as it was.
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    initialize_legacy_source(&source);
+    append_unpublished_mutation(&source);
+    assert_eq!(pending_mutation_count(&source), 1);
+    let state_db = Repository::discover(&source)
+        .unwrap()
+        .runtime_paths()
+        .state_db();
+    let head_before = git_output(&source, &["rev-parse", "HEAD"]);
+    let status_before = git_output(
+        &source,
+        &["status", "--porcelain=v2", "--untracked-files=all"],
+    );
+    let refs_before = git_output(&source, &["for-each-ref"]);
+    let state_files_before = state_files(&state_db);
+    let owner_state_before = owner_state_file(&source);
+
+    let destination = parent.path().join("refused");
+    let refused = run_copy(&source, &destination, "0", &git_trace);
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(!refused.status.success(), "a source with a tail is refused");
+    assert!(
+        stderr.contains("unpublished_mutations=1"),
+        "the refusal names the count: {stderr}"
+    );
+    assert!(
+        !destination.exists(),
+        "no destination is created for a refused source"
+    );
+
+    assert_eq!(git_output(&source, &["rev-parse", "HEAD"]), head_before);
+    assert_eq!(
+        git_output(
+            &source,
+            &["status", "--porcelain=v2", "--untracked-files=all"]
+        ),
+        status_before
+    );
+    assert_eq!(git_output(&source, &["for-each-ref"]), refs_before);
+    for (name, (after, before)) in ["state.db", "state.db-wal", "state.db-shm"]
+        .into_iter()
+        .zip(state_files(&state_db).iter().zip(state_files_before.iter()))
+    {
+        assert_eq!(after, before, "{name} changed when the copy was refused");
+    }
+    assert_eq!(pending_mutation_count(&source), 1);
+    assert_eq!(
+        owner_state_file(&source),
+        owner_state_before,
+        "runtime-owner.state changed when the copy was refused"
+    );
+}
+
+/// A live runtime owner holds the worktree owner lock and its WAL sidecars.
+/// The refusal probe runs in another process: it must not take the lock, must
+/// not remove those sidecars, and must still refuse the unpublished tail.
+#[test]
+fn migration_refusal_leaves_a_live_owners_sidecars_intact() {
+    let parent = TempDir::new().unwrap();
+    let git_trace = parent.path().join("git-trace.log");
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    initialize_legacy_source(&source);
+    append_unpublished_mutation(&source);
+
+    // Keep a runtime open for the whole probe: it owns the lock and the sidecars.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let live = runtime.block_on(async {
+        let repository = Repository::discover(&source).unwrap();
+        let (identity, digest) =
+            orna_runtime::migration_source_runtime_identity(&repository).unwrap();
+        RuntimeState::open(&repository, identity, digest)
+            .await
+            .unwrap()
+    });
+    let state_db = Repository::discover(&source)
+        .unwrap()
+        .runtime_paths()
+        .state_db();
+    let sidecars_before = state_files(&state_db);
+    assert!(
+        sidecars_before[1].is_some() && sidecars_before[2].is_some(),
+        "the live owner holds its WAL and shared-memory sidecars"
+    );
+
+    let destination = parent.path().join("refused");
+    let refused = run_copy(&source, &destination, "0", &git_trace);
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        !refused.status.success(),
+        "a live source with a tail is refused"
+    );
+    assert!(
+        stderr.contains("unpublished_mutations=1"),
+        "the refusal names the count: {stderr}"
+    );
+    assert!(!destination.exists());
+    assert_eq!(
+        state_files(&state_db),
+        sidecars_before,
+        "a live owner's state.db and sidecars are left byte-identical"
+    );
+
+    drop(live);
+    drop(runtime);
 }
