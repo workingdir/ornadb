@@ -1,4 +1,0 @@
-pub table Contact(id: Str) {
-    name: Str,
-    avatar: Blob,
-}
