@@ -12,7 +12,10 @@ use tempfile::TempDir;
 
 /// The migration store of a source that has no legacy rows to convert: no
 /// relations, no identities, zero watermarks and no retired legacy paths.
-fn no_store(_: orna_repository::DatabaseId) -> Result<MigrationStore, RepositoryError> {
+fn no_store(
+    _: &Repository,
+    _: orna_repository::DatabaseId,
+) -> Result<MigrationStore, RepositoryError> {
     Ok(MigrationStore::default())
 }
 

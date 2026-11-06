@@ -6578,6 +6578,7 @@ fn disposable_migration_copy_preserves_legacy_bytes_and_reports_its_coordinates(
 /// The migration store of a source that has no legacy rows to convert: no
 /// relations, no identities, zero watermarks and no retired legacy paths.
 fn no_store(
+    _: &Repository,
     _: orna_repository::DatabaseId,
 ) -> Result<orna_repository::migration_copy::MigrationStore, RepositoryError> {
     Ok(orna_repository::migration_copy::MigrationStore::default())

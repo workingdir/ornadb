@@ -578,6 +578,17 @@ pub fn read_legacy_row_revisions(
         .collect()
 }
 
+impl LegacyTableRows {
+    /// The rows of a declared editable table the legacy snapshot holds no
+    /// directory for: it is committed with zero rows.
+    pub(crate) fn absent_loose() -> Self {
+        Self {
+            source: LegacyRowSource::LooseRowUnit,
+            rows: Vec::new(),
+        }
+    }
+}
+
 #[cfg(test)]
 impl LegacyTableRows {
     /// A loose table of `rows` for tests of the row mapping.
