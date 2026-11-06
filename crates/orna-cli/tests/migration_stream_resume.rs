@@ -8,12 +8,12 @@
 
 use std::{fs, path::Path, process::Command};
 
-use orna_repository::Repository;
+use orna_repository::{Repository, RepositoryFormat};
 use orna_runtime::{
     CheckpointKey, Component, ConsumerIdentity, ListStreamSource, RuntimeError, RuntimeIdentity,
     RuntimeState, StreamCheckpoint, StreamHandler, StreamHandlerResult, StreamItem,
     StreamMutationBatch, WriterLease, import_stream_carry, migration_copy_runtime_identity,
-    read_stream_carry, runtime_identity_for_database_id,
+    read_stream_carry, repository_runtime_identity, runtime_identity_for_database_id,
 };
 use tempfile::TempDir;
 
@@ -196,11 +196,15 @@ fn run_copy(source: &Path, destination: &Path) -> std::process::Output {
         .unwrap()
 }
 
-/// Delivers the remaining items from the destination's carried checkpoint.
-fn deliver_from_destination(root: &Path) -> Vec<Vec<u8>> {
+/// Derives the runtime identity and digest a copy is opened by.
+type DeriveIdentity = fn(&Repository) -> Result<(RuntimeIdentity, [u8; 32]), RuntimeError>;
+
+/// Delivers the remaining items from a copy's carried checkpoint, opened by the
+/// runtime identity that `derive_identity` returns for the copy's current HEAD.
+fn deliver_resumed(root: &Path, derive_identity: DeriveIdentity) -> Vec<Vec<u8>> {
     runtime().block_on(async {
         let repository = Repository::discover(root).unwrap();
-        let (identity, digest) = migration_copy_runtime_identity(&repository).unwrap();
+        let (identity, digest) = derive_identity(&repository).unwrap();
         let state = RuntimeState::open(&repository, identity, digest)
             .await
             .expect("open destination runtime");
@@ -220,6 +224,16 @@ fn deliver_from_destination(root: &Path) -> Vec<Vec<u8>> {
             .expect("resumed delivery commits");
         handler.seen
     })
+}
+
+/// Delivers the remaining items from the destination's carried checkpoint before activation.
+fn deliver_from_destination(root: &Path) -> Vec<Vec<u8>> {
+    deliver_resumed(root, migration_copy_runtime_identity)
+}
+
+/// Delivers the remaining items from the activated format-3 HEAD, by its format-3 identity.
+fn deliver_from_activated_head(root: &Path) -> Vec<Vec<u8>> {
+    deliver_resumed(root, repository_runtime_identity)
 }
 
 #[test]
@@ -455,4 +469,116 @@ fn migration_copy_retry_after_carry_recovers() {
         String::from_utf8_lossy(&retry.stderr)
     );
     assert_eq!(deliver_from_destination(&destination), vec![b"3".to_vec()]);
+}
+
+/// `orna upgrade --to-format 3 DEST --yes-activate` publishes a prepared copy.
+fn run_upgrade(source: &Path, destination: &Path) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_orna"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "--db",
+            source.to_str().unwrap(),
+            "upgrade",
+            "--to-format",
+            "3",
+            destination.to_str().unwrap(),
+            "--yes-activate",
+        ])
+        .output()
+        .unwrap()
+}
+
+/// The checkpoint stored in an activated copy, read through its format-3 HEAD identity.
+fn activated_checkpoint(root: &Path) -> StreamCheckpoint {
+    runtime().block_on(async {
+        let repository = Repository::discover(root).unwrap();
+        let (identity, digest) = repository_runtime_identity(&repository).unwrap();
+        let state = RuntimeState::open(&repository, identity, digest)
+            .await
+            .expect("open activated runtime");
+        state.stream_checkpoint(&checkpoint_key()).await.unwrap()
+    })
+}
+
+/// The number of predecessor bridges recorded in an activated copy's runtime state.
+fn activated_bridge_count(root: &Path) -> i64 {
+    runtime().block_on(async {
+        let repository = Repository::discover(root).unwrap();
+        let database = libsql::Builder::new_local(repository.runtime_paths().state_db())
+            .build()
+            .await
+            .unwrap();
+        let connection = database.connect().unwrap();
+        let mut rows = connection
+            .query(
+                "SELECT COUNT(*) FROM stream_checkpoint_migration_bridge",
+                (),
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().expect("a count row");
+        row.get::<i64>(0).unwrap()
+    })
+}
+
+/// Activation publishes the prepared copy. The carried checkpoint and its predecessor
+/// bridge stay in the activated format-3 runtime, delivery resumes after version 2
+/// without a reset, and the source is left unchanged.
+#[test]
+fn activated_migration_copy_resumes_carried_checkpoint_without_reset() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    dirty_legacy_source(&source);
+    let before = give_source_a_persistent_consumer(&source, false);
+    assert_eq!(before.version, 2);
+    let destination = parent.path().join("migrated");
+    let prepared = run_copy(&source, &destination);
+    assert!(
+        prepared.status.success(),
+        "migrate copy: {}",
+        String::from_utf8_lossy(&prepared.stderr)
+    );
+    let source_head = git_output(&source, &["rev-parse", "HEAD"]);
+    let source_status = git_output(&source, &["status", "--porcelain"]);
+
+    let activated = run_upgrade(&source, &destination);
+    assert!(
+        activated.status.success(),
+        "upgrade --yes-activate: {}",
+        String::from_utf8_lossy(&activated.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&activated.stdout).starts_with("activated format-3 migration copy")
+    );
+    assert_eq!(
+        Repository::discover(&destination)
+            .unwrap()
+            .open_format_context()
+            .unwrap()
+            .repository_format(),
+        RepositoryFormat::Format3
+    );
+
+    let carried = activated_checkpoint(&destination);
+    assert_eq!(carried.version, before.version);
+    assert_eq!(carried.committed, before.committed);
+    assert_eq!(
+        activated_bridge_count(&destination),
+        1,
+        "the predecessor bridge survives activation"
+    );
+
+    assert_eq!(
+        deliver_from_activated_head(&destination),
+        vec![b"3".to_vec()]
+    );
+    let source_after = checkpoint_after_reopen(&source);
+    assert_eq!(source_after.version, before.version);
+    assert_eq!(source_after.committed, before.committed);
+    assert_eq!(git_output(&source, &["rev-parse", "HEAD"]), source_head);
+    assert_eq!(
+        git_output(&source, &["status", "--porcelain"]),
+        source_status
+    );
 }
