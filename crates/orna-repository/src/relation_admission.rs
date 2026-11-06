@@ -1931,7 +1931,6 @@ fn admit_relations(
         match existing {
             Some(existing)
                 if existing.schema_oid == schema_oid && committed.contains_key(&relation_id) => {}
-            Some(existing) if existing.schema_oid == schema_oid && rows.is_empty() => {}
             Some(existing) if existing.schema_oid == schema_oid => {
                 let entry =
                     write_staged_relation(writer, relation_id, schema_oid, &schema_digest, &rows)?;
@@ -2166,6 +2165,10 @@ fn sealed_row_entries(
 
 /// The validated rows a staged relation admits, in logical key order, one per
 /// key. A committed relation keeps its rows, so it refuses staged rows.
+/// Staged rows are checked structurally only (`validate_stored_row`). The
+/// context-bound check (`validate_stored_row_in_context`) needs a
+/// `Format3Context`, which staging does not hold, so a Blob or table
+/// reference is not bound to the database of its containing snapshot here.
 fn staged_row_entries(
     relation: &StagedRelation,
     committed: &BTreeMap<[u8; 16], NativeOid>,
@@ -3048,13 +3051,43 @@ mod tests {
         repository: &Repository,
         rows: Vec<(crate::row_store::TypedKey, Vec<u8>)>,
     ) -> Result<StoreAdmission, RelationAdmissionError> {
+        stage_typed_rows(repository, "Str", rows)
+    }
+
+    /// Stages the `music` relation whose `title` has the primitive `title_type`.
+    fn stage_typed_rows(
+        repository: &Repository,
+        title_type: &str,
+        rows: Vec<(crate::row_store::TypedKey, Vec<u8>)>,
+    ) -> Result<StoreAdmission, RelationAdmissionError> {
         let music = relation(1);
         let staged = repository.capture_staged_candidate()?;
         repository.stage_store_admission(
             &staged,
-            &[StagedRelation::new(music, table_descriptor(music, "Str")).with_rows(rows)],
+            &[StagedRelation::new(music, table_descriptor(music, title_type)).with_rows(rows)],
             &identities_for(&[music]),
             CommittedRelationChanges::Allowed,
+        )
+    }
+
+    /// The committed `music` row count and its rows in key order.
+    fn committed_music(
+        repository: &Repository,
+    ) -> (Option<u64>, Vec<(crate::row_store::TypedKey, Vec<u8>)>) {
+        let head = repository.head().unwrap().expect("committed HEAD");
+        let format = repository
+            .open_pinned_format_context(head.as_str())
+            .unwrap();
+        let rows = format
+            .load_row_map(relation(1))
+            .expect("the relation resolves");
+        let graph = format
+            .open_native_graph(&rows)
+            .expect("issue the relation graph");
+        let scope = graph.open_read_scope().unwrap();
+        (
+            rows.version().row_count(),
+            graph.committed_rows_with_fields(&scope).unwrap(),
         )
     }
 
@@ -3162,6 +3195,101 @@ mod tests {
                 .cloned(),
             store_before
         );
+    }
+
+    #[test]
+    fn restaging_without_rows_drops_the_uncommitted_rows() {
+        let (_directory, repository) = initialized_repository();
+        let empty = stage_rows(&repository, Vec::new())
+            .expect("admit the empty relation")
+            .store_root()
+            .clone();
+        stage_rows(&repository, music_rows(false)).expect("admit the rows");
+        let restaged = stage_rows(&repository, Vec::new())
+            .expect("restage without rows")
+            .store_root()
+            .clone();
+        // The restage matches a fresh empty stage, not the two rows it replaces.
+        assert_eq!(restaged, empty);
+    }
+
+    #[test]
+    fn staging_rows_into_a_committed_relation_is_refused() {
+        let (directory, repository) = initialized_repository();
+        let root = directory.path();
+        stage_rows(&repository, music_rows(false)).expect("admit the rows");
+        git(root, &["commit", "--quiet", "-m", "rows"]);
+
+        let error = stage_rows(&repository, music_rows(false))
+            .expect_err("committed relations keep their rows");
+        assert!(matches!(
+            error,
+            RelationAdmissionError::StagedRowsOnCommittedRelation { relation_id }
+                if relation_id == relation(1)
+        ));
+        assert_eq!(git(root, &["status", "--porcelain"]), "");
+    }
+
+    /// Two fresh repositories given the same rows commit the same rows. Their
+    /// store roots differ only because the root binds each database id.
+    #[test]
+    fn fresh_repositories_admit_the_same_rows() {
+        let mut outcomes = Vec::new();
+        for _ in 0..2 {
+            let (directory, repository) = initialized_repository();
+            let root = directory.path();
+            let store_root = stage_rows(&repository, music_rows(false))
+                .expect("admit the rows")
+                .store_root()
+                .clone();
+            git(root, &["commit", "--quiet", "-m", "rows"]);
+            outcomes.push((store_root, committed_music(&repository)));
+        }
+        assert_ne!(outcomes[0].0, outcomes[1].0);
+        assert_eq!(outcomes[0].1, outcomes[1].1);
+        assert_eq!(outcomes[0].1.0, Some(2));
+    }
+
+    #[test]
+    fn staged_blob_column_admits_structural_blob_references_only() {
+        use orna_value::{ROV3_BLOB_TAG, encode_canonical_storage_value};
+        let (directory, repository) = initialized_repository();
+        let root = directory.path();
+        let key = |id: &str| crate::row_store::TypedKey::Text(id.to_owned());
+        // A Blob column holds a ROV-3 reference; raw bytes and text are not Blob values.
+        let encode_row = |value: Raw| {
+            encode_canonical_storage_value(&Raw::Array(vec![value])).expect("encode the row")
+        };
+        for refused in [Raw::Text("Alpha".to_owned()), Raw::Bytes(vec![1, 2, 3])] {
+            let error =
+                stage_typed_rows(&repository, "Blob", vec![(key("a"), encode_row(refused))])
+                    .expect_err("a non-reference value in a Blob column");
+            assert!(matches!(
+                error,
+                RelationAdmissionError::InvalidStagedRow { relation_id } if relation_id == relation(1)
+            ));
+        }
+        // A ROV-3 Blob reference is a Tree dependency of the row node: its oid
+        // names a git tree, so the staged node graph lists the empty tree.
+        let content = b"image bytes";
+        let oid = hex_decode(&crate::test_support::git_with_input(root, &["mktree"], ""))
+            .expect("a hex tree id");
+        let reference = Raw::Tag(
+            ROV3_BLOB_TAG,
+            Box::new(Raw::Array(vec![
+                Raw::Int((content.len() as u64).into()),
+                Raw::Bytes(Sha256::digest(content).to_vec()),
+                Raw::Text("image/png".to_owned()),
+                Raw::Null,
+                Raw::Bytes(oid),
+            ])),
+        );
+        let fields = encode_row(reference);
+        // Structural admission only. The reference's descriptor is not a stored
+        // BlobDescriptor, so context binding is not checked on this path; a
+        // committed read of such a row fails with GraphContextInvalid (defect, not fixed here).
+        stage_typed_rows(&repository, "Blob", vec![(key("a"), fields)])
+            .expect("admit the structurally valid Blob reference row");
     }
 
     #[test]
