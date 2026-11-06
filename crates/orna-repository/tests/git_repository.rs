@@ -6286,6 +6286,7 @@ fn disposable_migration_copy_preserves_legacy_bytes_and_reports_its_coordinates(
             &destination,
             continuity.clone(),
             defaults,
+            &no_store,
         )
         .unwrap();
 
@@ -6473,6 +6474,7 @@ fn disposable_migration_copy_preserves_legacy_bytes_and_reports_its_coordinates(
             &directory.path().join("migrated-after-ignored-change"),
             continuity.clone(),
             defaults,
+            &no_store,
         )
         .unwrap();
         assert_ne!(
@@ -6566,11 +6568,21 @@ fn disposable_migration_copy_preserves_legacy_bytes_and_reports_its_coordinates(
                 &destination,
                 MigrationContinuityRecord::new(Vec::new()).unwrap(),
                 MigrationAnnotationDefaults::new(0).unwrap(),
+                &no_store,
             ),
             Err(RepositoryError::PublicationRecoveryConflict)
         ));
     }
 }
+
+/// The migration store of a source that has no legacy rows to convert: no
+/// relations, no identities, zero watermarks and no retired legacy paths.
+fn no_store(
+    _: orna_repository::DatabaseId,
+) -> Result<orna_repository::migration_copy::MigrationStore, RepositoryError> {
+    Ok(orna_repository::migration_copy::MigrationStore::default())
+}
+
 fn only_mount_record(repository: &Repository) -> PathBuf {
     fs::read_dir(repository.runtime_paths().root().join("mounts"))
         .unwrap()
