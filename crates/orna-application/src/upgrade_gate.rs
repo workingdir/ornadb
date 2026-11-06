@@ -158,13 +158,22 @@ fn check_relation(
     for (key, expected) in &relation.rows {
         match actual.get(key) {
             Some(value) if value == expected => {}
-            Some(_) => return Err(format!("relation {label} carries a changed row value")),
-            None => return Err(format!("relation {label} is missing a legacy row")),
+            Some(_) => {
+                return Err(format!(
+                    "relation {label} carries a changed value for row {key:?}"
+                ));
+            }
+            None => return Err(format!("relation {label} is missing legacy row {key:?}")),
         }
     }
-    if actual.len() != relation.rows.len() {
+    let expected: BTreeMap<&TypedKey, &Raw> = relation
+        .rows
+        .iter()
+        .map(|(key, value)| (key, value))
+        .collect();
+    if let Some(key) = actual.keys().find(|key| !expected.contains_key(key)) {
         return Err(format!(
-            "relation {label} carries a row the legacy snapshot does not hold"
+            "relation {label} carries row {key:?}, which the legacy snapshot does not hold"
         ));
     }
     Ok(())
@@ -179,30 +188,32 @@ fn verify_blob(
     blob: &ExpectedBlob,
     payloads: &BTreeMap<ContentIdentity, Vec<u8>>,
 ) -> Result<(), String> {
+    let at = format!("relation {label} row {:?}", blob.row);
     let payload = payloads
         .get(&blob.identity)
-        .ok_or_else(|| format!("relation {label} expects a blob the migration did not stage"))?;
+        .ok_or_else(|| format!("{at} expects a blob the migration did not stage"))?;
     let row = graph
         .lookup_row(&blob.row, scope)
-        .map_err(|error| format!("relation {label} blob row could not be read: {error}"))?
-        .ok_or_else(|| format!("relation {label} is missing a row holding a blob"))?;
+        .map_err(|error| format!("{at} could not be read: {error}"))?
+        .ok_or_else(|| format!("{at} is missing"))?;
     let stored = graph
         .read_stored_blob_value(&row, &blob.descriptor, scope)
-        .map_err(|error| format!("relation {label} blob could not be read: {error}"))?;
+        .map_err(|error| format!("{at} blob could not be read: {error}"))?;
     let reference = stored.reference();
     if reference.content_identity() != blob.identity {
-        return Err(format!(
-            "relation {label} holds a blob with a changed content identity"
-        ));
+        return Err(format!("{at} holds a blob with a changed content identity"));
     }
+    // A zero-length blob has no bytes to compare. Reading its descriptor already
+    // requires the canonical empty descriptor (ORNA-OGB-003), and the identity
+    // comparison above binds the row to exactly that empty content.
     let length = blob.identity.length();
     if length > 0 {
         let range = graph
             .read_blob_range(reference, 0..length, scope)
-            .map_err(|error| format!("relation {label} blob bytes could not be read: {error}"))?;
+            .map_err(|error| format!("{at} blob bytes could not be read: {error}"))?;
         if range.bytes() != payload.as_slice() {
             return Err(format!(
-                "relation {label} holds blob bytes that differ from the legacy payload"
+                "{at} holds blob bytes that differ from the legacy payload"
             ));
         }
     }
