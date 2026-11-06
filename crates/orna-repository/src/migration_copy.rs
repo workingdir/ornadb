@@ -1368,9 +1368,16 @@ fn build_migration_candidate(
         .tree_store_root(candidate.tree().as_str())
         .map_err(admission_error)?
         .ok_or(RepositoryError::InvalidFormatMigration)?;
-    if let Some(gate) = &store.candidate_gate {
-        gate.check(repository, &candidate)
-            .map_err(RepositoryError::MigrationStoreRefused)?;
+    match &store.candidate_gate {
+        Some(gate) => gate
+            .check(repository, &candidate)
+            .map_err(RepositoryError::MigrationStoreRefused)?,
+        None if !store.relations.is_empty() => {
+            return Err(RepositoryError::MigrationStoreRefused(
+                "a migration with declared relations has no candidate gate".to_owned(),
+            ));
+        }
+        None => {}
     }
     Ok((candidate, store_root))
 }
