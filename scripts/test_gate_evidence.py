@@ -731,10 +731,13 @@ class ReviewFindingTests(unittest.TestCase):
         self.assertTrue(calls)
         for line in calls:
             self.assertIn("--timeout-minutes", line)
-        source = (root / "source-audits.yml").read_text(encoding="utf-8")
-        self.assertIn("apt_opts=(-o Acquire::Retries=3", source)
-        self.assertIn('apt-get "${apt_opts[@]}" update', source)
-        self.assertNotIn("sudo apt-get update\n", source)
+        for name in ("source-audits.yml", "cli-tests.yml", "nightly-gates.yml"):
+            text = (root / name).read_text(encoding="utf-8")
+            self.assertIn("apt_opts=(-o Acquire::Retries=3", text, name)
+            self.assertIn('apt-get "${apt_opts[@]}" update', text, name)
+            self.assertIn('apt-get "${apt_opts[@]}" install -y --download-only', text, name)
+            self.assertNotIn("sudo apt-get -o Acquire::Retries=3", text, name)
+            self.assertNotIn("sudo apt-get update\n", text, name)
 
     def test_cargo_command_skips_the_named_tests_exactly(self) -> None:
         # The per-PR run skips the Gate B test; the skip must reach cargo as an exact --skip.
