@@ -1419,6 +1419,10 @@ fn upgrade_kill_at_each_activation_boundary_rolls_forward_or_refuses_abort() {
                 .contains("activated format-3 migration copy"),
             "{boundary}: the restart completes the activation"
         );
+        assert!(
+            !destination.join(".git/index.lock").exists(),
+            "{boundary}: a successful restart leaves no index.lock"
+        );
         assert_eq!(
             committed_copy(&destination),
             activated_copy,
@@ -1502,4 +1506,42 @@ fn upgrade_kill_at_each_activation_boundary_rolls_forward_or_refuses_abort() {
             );
         }
     }
+}
+
+/// A Prepared copy whose ref an ordinary git writer moved is refused by discard
+/// before it touches the copy, its index lock or its publication journal.
+#[test]
+fn discard_refuses_a_prepared_copy_whose_ref_an_ordinary_writer_moved() {
+    let parent = TempDir::new().unwrap();
+    let pristine = pristine_source(parent.path());
+    let pristine_state = source_state(&pristine);
+    let case = TempDir::new().unwrap();
+    let (source, destination) = park_activation(case.path(), &pristine, "index-lock");
+    let lock = destination.join(".git/index.lock");
+    let journal = destination.join(".git/orna/publication-journal.bin");
+    assert!(lock.is_file(), "the parked copy holds its index lock");
+    assert!(journal.is_file(), "the parked copy keeps its journal");
+    let candidate = candidate_record(&destination).commit;
+    git(&destination, &["update-ref", "HEAD", candidate.as_str()]);
+    let moved = committed_copy(&destination);
+    let lock_bytes = fs::read(&lock).unwrap();
+    let journal_bytes = fs::read(&journal).unwrap();
+
+    let aborted = run_abort(&source, &destination);
+    let stderr = String::from_utf8_lossy(&aborted.stderr);
+    assert_eq!(aborted.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("E2100"), "{stderr}");
+    assert!(stderr.contains("has begun activation"), "{stderr}");
+    assert_eq!(committed_copy(&destination), moved, "the copy is unchanged");
+    assert_eq!(
+        fs::read(&lock).unwrap(),
+        lock_bytes,
+        "the index lock is kept"
+    );
+    assert_eq!(
+        fs::read(&journal).unwrap(),
+        journal_bytes,
+        "the publication journal is kept"
+    );
+    assert_eq!(source_state(&source), pristine_state);
 }
