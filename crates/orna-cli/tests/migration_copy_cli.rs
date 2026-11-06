@@ -1031,6 +1031,21 @@ fn state_files(state_db: &Path) -> Vec<Option<Vec<u8>>> {
         .collect()
 }
 
+/// The bytes of the runtime owner state file, or `None` when it is absent.
+/// The owner-lock probe rewrites this file, so a refusal must restore it.
+fn owner_state_file(source: &Path) -> Option<Vec<u8>> {
+    let path = Repository::discover(source)
+        .unwrap()
+        .runtime_paths()
+        .locks()
+        .join("runtime-owner.state");
+    match fs::read(&path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => panic!("read {}: {error}", path.display()),
+    }
+}
+
 /// Appends one real unpublished mutation to the legacy source through the
 /// runtime, under the worktree-keyed source identity the runtime keys its tail by.
 fn append_unpublished_mutation(source: &Path) {
@@ -1096,6 +1111,7 @@ fn migration_refuses_a_source_with_unpublished_rows_and_changes_nothing() {
     );
     let refs_before = git_output(&source, &["for-each-ref"]);
     let state_files_before = state_files(&state_db);
+    let owner_state_before = owner_state_file(&source);
 
     let destination = parent.path().join("refused");
     let refused = run_copy(&source, &destination, "0", &git_trace);
@@ -1126,6 +1142,11 @@ fn migration_refuses_a_source_with_unpublished_rows_and_changes_nothing() {
         assert_eq!(after, before, "{name} changed when the copy was refused");
     }
     assert_eq!(pending_mutation_count(&source), 1);
+    assert_eq!(
+        owner_state_file(&source),
+        owner_state_before,
+        "runtime-owner.state changed when the copy was refused"
+    );
 }
 
 /// A live runtime owner holds the worktree owner lock and its WAL sidecars.
