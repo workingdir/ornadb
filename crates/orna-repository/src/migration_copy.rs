@@ -30,6 +30,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 
 use fs2::FileExt;
 use sha2::{Digest, Sha256};
@@ -69,6 +70,37 @@ pub struct MigrationStore {
     pub identities: Vec<StoredObjectIdentity>,
     pub watermarks: AllocatorWatermarks,
     pub retired: Vec<RetiredLegacyPath>,
+    /// The check the admitted candidate must pass before the migration is
+    /// accepted. `None` accepts without a semantic check; the store builder that
+    /// reads the legacy snapshot always installs one.
+    pub candidate_gate: Option<CandidateGate>,
+}
+
+/// The check a [`CandidateGate`] runs over the admitted migration candidate.
+type CandidateCheck = dyn Fn(&Repository, &PrivateCommit) -> Result<(), String>;
+
+/// A check over the admitted migration candidate, supplied with its store. The
+/// migration refuses the candidate with the check's message when it fails.
+#[derive(Clone)]
+pub struct CandidateGate(Arc<CandidateCheck>);
+
+impl CandidateGate {
+    /// Wraps `check`, which receives the repository and the admitted candidate.
+    pub fn new(
+        check: impl Fn(&Repository, &PrivateCommit) -> Result<(), String> + 'static,
+    ) -> Self {
+        Self(Arc::new(check))
+    }
+
+    fn check(&self, repository: &Repository, candidate: &PrivateCommit) -> Result<(), String> {
+        (self.0)(repository, candidate)
+    }
+}
+
+impl std::fmt::Debug for CandidateGate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("CandidateGate")
+    }
 }
 
 /// Supplies the [`MigrationStore`] of a migration once its database identity is
@@ -1318,6 +1350,10 @@ fn build_migration_candidate(
         .tree_store_root(candidate.tree().as_str())
         .map_err(admission_error)?
         .ok_or(RepositoryError::InvalidFormatMigration)?;
+    if let Some(gate) = &store.candidate_gate {
+        gate.check(repository, &candidate)
+            .map_err(RepositoryError::MigrationStoreRefused)?;
+    }
     Ok((candidate, store_root))
 }
 

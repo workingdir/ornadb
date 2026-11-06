@@ -8,7 +8,7 @@
 //! declared table's legacy rows are read from the same snapshot.
 
 use orna_project::{ObjectIdentityManifest, ProjectLoadMode, ProjectLoader};
-use orna_repository::migration_copy::{MigrationStore, RetiredLegacyPath};
+use orna_repository::migration_copy::{CandidateGate, MigrationStore, RetiredLegacyPath};
 use orna_repository::{
     CommittedTreeEntryKind, DatabaseId, Repository, RepositoryError, RepositoryFormat,
 };
@@ -18,6 +18,7 @@ use crate::legacy_store::{
     LegacyReadError, LegacyTableAddress, LegacyTableRows, read_legacy_table_rows,
 };
 use crate::migration_rows::{LegacyTable, migration_row_input};
+use crate::upgrade_gate::verify_candidate;
 
 /// The largest committed `.orna` file a migration retires. It matches the
 /// bound on a compact storage file, the largest legacy file a source holds.
@@ -137,8 +138,8 @@ pub fn build_migration_store(
     let descriptors = repository
         .write_migration_blobs(input.blobs())
         .map_err(|error| refused(format!("{error}")))?;
-    let relations = input
-        .into_staged_relations(&descriptors)
+    let (relations, expected) = input
+        .into_staged_relations_with_expectation(&descriptors)
         .map_err(|error| refused(format!("{error}")))?;
 
     let mut retired = Vec::new();
@@ -167,6 +168,9 @@ pub fn build_migration_store(
         relations,
         identities: identities.to_stored(),
         retired,
+        candidate_gate: Some(CandidateGate::new(move |repository, candidate| {
+            verify_candidate(repository, candidate, &expected)
+        })),
         ..MigrationStore::default()
     })
 }
