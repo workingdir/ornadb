@@ -8,7 +8,8 @@ writer format 3). The installed command is `orna`; Cargo builds it as the
 
 This binary currently accepts `init`, `add --row`, `mv`, `status`, `fetch`,
 `push`, `serve`, `mount`, `edit`, `unmount`, `diff`, `log`, `annotate`,
-`import`, `export`, `migrate copy`, `migrate abort`, `publish`, `commit`, `semantic-legend`,
+`import`, `export`, `migrate copy`, `migrate abort`, `upgrade`, `publish`,
+`commit`, `semantic-legend`,
 `history`, `query`, `check`, `invoke`, `explain`, `repl`, and `run`, plus help
 and version options. The available command groups and option forms are listed
 by `orna --help`; that list describes this bounded implementation, not the
@@ -62,8 +63,9 @@ stream resumes without resetting its consumer identity (ORNA-UPGRADE-008). A
 source holding live per-attempt stream state (leases, claims, failures,
 receipts) is refused and its state is left unchanged. The source repository,
 including its commit and dirty workspace, remains unchanged. This command
-prepares a journalled candidate only; it does not convert legacy rows into a
-format-3 store or activate a writable format-3 repository.
+prepares a journalled candidate only; it does not activate a writable format-3
+repository. `orna upgrade --to-format 3 DEST --yes-activate` activates the
+prepared copy, as described below.
 
 `migrate abort DEST` discards the prepared format-3 copy in DEST. It verifies
 first that DEST is the copy this source prepared, so a directory the operator
@@ -75,6 +77,27 @@ manually. That rename is the commit point. A repeated `migrate abort DEST` then
 finishes the removal without rechecking the source, and exits 0 reporting
 nothing to discard once nothing remains. While the sibling exists,
 `migrate copy DEST` refuses to prepare or recover; repeat the abort first.
+
+`migrate abort DEST` also refuses a copy whose activation has begun. Once
+`orna upgrade` has moved the copy's publication journal past the prepared
+stage, abort exits 1 with E2100, names the upgrade command, and removes
+nothing. If the copy's ref has moved while its journal still reads prepared,
+abort refuses with E2100 and removes nothing, without that hint. A copy that
+is already an activated format-3 repository is kept and reported as nothing
+discarded.
+
+`upgrade --to-format 3 DEST --yes-activate` activates the copy that
+`migrate copy DEST` prepared. Activation re-derives the candidate from the
+source before the copy's ref moves, publishes it through the copy's
+publication journal, and completes the runtime intent that the publication
+recorded. Without `--yes-activate` the command refuses with a usage error
+(E1002, exit 2) and changes nothing; a missing DEST or a missing
+`--to-format 3` is refused with E1001 (exit 2). While the copy is still
+prepared, activation refuses with E2100, before the copy's ref moves, if the
+source holds unpublished runtime mutations. Once the ref has moved, activation
+only rolls forward: re-running the same command resumes it, and a copy that is
+already activated reports `already activated`. This command does not prepare a
+copy, so run `migrate copy DEST` first.
 
 `check` loads and checks reachable source modules from a local Git worktree.
 `invoke TARGET` executes a reachable zero-argument pure function. The optional
