@@ -73,11 +73,13 @@ pub use repl_transaction::{ReplEvaluationFailure, ReplTransactionScope};
 mod format3_store;
 pub use format3_store::{Format3TableSchemaError, StagedRelations, build_format3_store_relations};
 mod legacy_store;
+mod migration_rows;
 pub use legacy_store::{
     LegacyField, LegacyFieldName, LegacyReadError, LegacyRow, LegacyRowRevision, LegacyRowSource,
     LegacyTableAddress, LegacyTableRows, legacy_loose_row_path, read_legacy_row_revisions,
     read_legacy_table_rows, single_legacy_source,
 };
+pub use migration_rows::{LegacyTable, MigrationRowError, MigrationRowInput, migration_row_input};
 
 const DIGEST_DOMAIN: &[u8] = b"ORNA-ACTIVATION-DIGEST\0";
 const TABLE_ID_DIGEST_DOMAIN: &[u8] = b"ORNA-ACTIVATION-DIGEST-TABLE-IDENTITIES\0";

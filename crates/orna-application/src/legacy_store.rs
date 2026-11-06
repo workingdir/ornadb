@@ -487,13 +487,16 @@ fn one_row_per_key(
 ) -> Result<Vec<LegacyRow>, LegacyReadError> {
     rows.sort_by(|left, right| left.key.cmp(&right.key));
     if let Some(pair) = rows.windows(2).find(|pair| pair[0].key == pair[1].key) {
-        let key = pair[0]
-            .key
-            .component_text()
-            .unwrap_or_else(|| format!("{:?}", pair[0].key));
+        let key = row_key_text(&pair[0].key);
         return Err(LegacyReadError::DuplicateRowKey { table, key });
     }
     Ok(rows)
+}
+
+/// Renders a row key for diagnostics: its text when it has one, its debug form
+/// otherwise.
+pub(crate) fn row_key_text(key: &TypedKey) -> String {
+    key.component_text().unwrap_or_else(|| format!("{key:?}"))
 }
 
 /// The key one loose row unit names, reconstructed from its path components
@@ -573,6 +576,33 @@ pub fn read_legacy_row_revisions(
             Ok(LegacyRowRevision { snapshot, present })
         })
         .collect()
+}
+
+#[cfg(test)]
+impl LegacyTableRows {
+    /// A loose table of `rows` for tests of the row mapping.
+    pub(crate) fn loose_for_tests(rows: Vec<LegacyRow>) -> Self {
+        Self {
+            source: LegacyRowSource::LooseRowUnit,
+            rows,
+        }
+    }
+}
+
+#[cfg(test)]
+impl LegacyRow {
+    /// A row of `key` storing `fields` in order, for tests of the row mapping.
+    pub(crate) fn for_tests(key: TypedKey, fields: Vec<LegacyField>) -> Self {
+        Self { key, fields }
+    }
+}
+
+#[cfg(test)]
+impl LegacyField {
+    /// A field named `name` holding `value`, for tests of the row mapping.
+    pub(crate) fn for_tests(name: LegacyFieldName, value: Raw) -> Self {
+        Self { name, value }
+    }
 }
 
 #[cfg(test)]
