@@ -17,8 +17,14 @@
 //! is refused rather than reset silently. Failure records that are not in flight
 //! are carried verbatim with their payload, assertion-detail, legacy and provider
 //! companion rows. Settled provider effect receipts (statuses 2, 3 and 4) are
-//! carried verbatim. Stream control (running or paused), the pause reason and the
-//! checkpoint bootstrap pin are carried verbatim.
+//! carried verbatim. Stream control (running or paused), the pause reason, the
+//! checkpoint bootstrap pin and the checkpoint reset audit are carried verbatim.
+//! The reset audit is durable history: each row keeps its sequence, old and new
+//! typed positions and reason, so historical reads stay exact. Run and stream
+//! observations (`sys_run_observation`, `sys_stream_observation`) are carried
+//! verbatim, runs before streams, because a stream references its run. A source
+//! holding a live run (Starting or Running) is refused: its terminal state is not
+//! yet known. `live` is never stored; it is derived at read time.
 
 use std::collections::{BTreeSet, HashSet};
 use std::fs;
@@ -34,7 +40,6 @@ use crate::{RuntimeError, RuntimeState, migration_copy_runtime_identity};
 
 /// Stream tables whose rows a migration does not carry.
 const NON_CARRIABLE_TABLES: &[&str] = &[
-    "stream_checkpoint_reset_audit",
     "stream_lease",
     "stream_pause_pending",
     "stream_replay_claim",
@@ -49,6 +54,12 @@ const INSERT_PAUSE_REASON: &str =
     "INSERT INTO stream_pause_reason (key_id, reason) VALUES (?1, ?2)";
 const INSERT_BOOTSTRAP: &str =
     "INSERT INTO stream_checkpoint_bootstrap (key_id, selected_commit) VALUES (?1, ?2)";
+const INSERT_RESET_AUDIT: &str = "INSERT INTO stream_checkpoint_reset_audit (sequence, key_id, observed_generation, old_version, old_position, new_version, new_position, reason, redacted) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)";
+/// `sys_run_observation` status codes for a run that has not reached a terminal state.
+const RUN_STATUS_STARTING: i64 = 1;
+const RUN_STATUS_RUNNING: i64 = 2;
+const INSERT_RUN: &str = "INSERT INTO sys_run_observation (run_id, session_id, request_id, consumer_identity, function_name, source_identity, invocation_id, snapshot, generation_digest, runtime_id, runtime_generation, started_ms, ended_ms, observed_ms, status, checkpoint_count, diagnostic_code, diagnostic_class) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)";
+const INSERT_STREAM: &str = "INSERT INTO sys_stream_observation (stream_id, run_id, checkpoint_key_id, producer, consumer_name, consumer_identity, source_identity, partition, status, items_seen, items_committed, items_failed, checkpoint_version, last_failure_identity, last_item_ms, diagnostic_code, diagnostic_class, observed_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)";
 
 const INSERT_FAILURE: &str = "INSERT INTO stream_failure (identity_id, key_id, consumer_principal, consumer_root, consumer_function, consumer_binding, source_format, source, partition_format, partition, position_format, delivery_position, successor_position, version, attempts, status, diagnostic_code, diagnostic_class) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)";
 const INSERT_FAILURE_PAYLOAD: &str = "INSERT INTO stream_failure_payload (identity_id, payload, payload_reference, payload_digest, retention) VALUES (?1, ?2, ?3, ?4, ?5)";
@@ -110,6 +121,63 @@ struct PauseReasonRow {
 struct BootstrapRow {
     key_id: String,
     selected_commit: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ResetAuditRow {
+    sequence: i64,
+    key_id: String,
+    observed_generation: i64,
+    old_version: i64,
+    old_position: Option<String>,
+    new_version: i64,
+    new_position: String,
+    reason: String,
+    redacted: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RunRow {
+    run_id: Vec<u8>,
+    session_id: Vec<u8>,
+    request_id: Vec<u8>,
+    consumer_identity: String,
+    function_name: String,
+    source_identity: Option<String>,
+    invocation_id: Vec<u8>,
+    snapshot: Vec<u8>,
+    generation_digest: Vec<u8>,
+    runtime_id: Vec<u8>,
+    runtime_generation: i64,
+    started_ms: i64,
+    ended_ms: Option<i64>,
+    observed_ms: i64,
+    status: i64,
+    checkpoint_count: i64,
+    diagnostic_code: Option<i64>,
+    diagnostic_class: Option<i64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct StreamRow {
+    stream_id: Vec<u8>,
+    run_id: Vec<u8>,
+    checkpoint_key_id: String,
+    producer: String,
+    consumer_name: Option<String>,
+    consumer_identity: String,
+    source_identity: String,
+    partition: Option<String>,
+    status: i64,
+    items_seen: i64,
+    items_committed: i64,
+    items_failed: i64,
+    checkpoint_version: Option<i64>,
+    last_failure_identity: Option<String>,
+    last_item_ms: Option<i64>,
+    diagnostic_code: Option<i64>,
+    diagnostic_class: Option<i64>,
+    observed_ms: i64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -207,6 +275,9 @@ pub struct StreamCarry {
     controls: Vec<ControlRow>,
     pause_reasons: Vec<PauseReasonRow>,
     bootstraps: Vec<BootstrapRow>,
+    reset_audits: Vec<ResetAuditRow>,
+    runs: Vec<RunRow>,
+    streams: Vec<StreamRow>,
     failures: FailureCarry,
     receipts: Vec<ReceiptRow>,
 }
@@ -396,6 +467,33 @@ pub async fn read_stream_carry(source: &Repository) -> Result<StreamCarry, Strea
     } else {
         Vec::new()
     };
+    let reset_audits = if tables.contains("stream_checkpoint_reset_audit") {
+        read_reset_audits(&connection)
+            .await
+            .map_err(StreamCarryError::Runtime)?
+    } else {
+        Vec::new()
+    };
+    let runs = if tables.contains("sys_run_observation") {
+        read_run_rows(&connection)
+            .await
+            .map_err(StreamCarryError::Runtime)?
+    } else {
+        Vec::new()
+    };
+    if runs
+        .iter()
+        .any(|run| run.status == RUN_STATUS_STARTING || run.status == RUN_STATUS_RUNNING)
+    {
+        return Err(StreamCarryError::NotCarriable(vec!["sys_run_observation"]));
+    }
+    let streams = if tables.contains("sys_stream_observation") {
+        read_stream_rows(&connection)
+            .await
+            .map_err(StreamCarryError::Runtime)?
+    } else {
+        Vec::new()
+    };
     Ok(StreamCarry {
         checkpoints,
         bridges,
@@ -403,6 +501,9 @@ pub async fn read_stream_carry(source: &Repository) -> Result<StreamCarry, Strea
         controls,
         pause_reasons,
         bootstraps,
+        reset_audits,
+        runs,
+        streams,
         failures: read_failure_carry(&connection)
             .await
             .map_err(StreamCarryError::Runtime)?,
@@ -526,6 +627,81 @@ pub async fn import_stream_carry(
                     row.snapshot.as_slice(),
                     row.generation_digest.as_slice(),
                     row.transition
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+    }
+    for row in &carry.reset_audits {
+        transaction
+            .execute(
+                INSERT_RESET_AUDIT,
+                params![
+                    row.sequence,
+                    row.key_id.as_str(),
+                    row.observed_generation,
+                    row.old_version,
+                    row.old_position.as_deref(),
+                    row.new_version,
+                    row.new_position.as_str(),
+                    row.reason.as_str(),
+                    row.redacted
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+    }
+    for row in &carry.runs {
+        transaction
+            .execute(
+                INSERT_RUN,
+                params![
+                    row.run_id.as_slice(),
+                    row.session_id.as_slice(),
+                    row.request_id.as_slice(),
+                    row.consumer_identity.as_str(),
+                    row.function_name.as_str(),
+                    row.source_identity.as_deref(),
+                    row.invocation_id.as_slice(),
+                    row.snapshot.as_slice(),
+                    row.generation_digest.as_slice(),
+                    row.runtime_id.as_slice(),
+                    row.runtime_generation,
+                    row.started_ms,
+                    row.ended_ms,
+                    row.observed_ms,
+                    row.status,
+                    row.checkpoint_count,
+                    row.diagnostic_code,
+                    row.diagnostic_class
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+    }
+    for row in &carry.streams {
+        transaction
+            .execute(
+                INSERT_STREAM,
+                params![
+                    row.stream_id.as_slice(),
+                    row.run_id.as_slice(),
+                    row.checkpoint_key_id.as_str(),
+                    row.producer.as_str(),
+                    row.consumer_name.as_deref(),
+                    row.consumer_identity.as_str(),
+                    row.source_identity.as_str(),
+                    row.partition.as_deref(),
+                    row.status,
+                    row.items_seen,
+                    row.items_committed,
+                    row.items_failed,
+                    row.checkpoint_version,
+                    row.last_failure_identity.as_deref(),
+                    row.last_item_ms,
+                    row.diagnostic_code,
+                    row.diagnostic_class,
+                    row.observed_ms
                 ],
             )
             .await
@@ -661,6 +837,9 @@ async fn read_carry_target(connection: &Connection) -> Result<StreamCarry, Runti
         controls: read_controls(connection).await?,
         pause_reasons: read_pause_reasons(connection).await?,
         bootstraps: read_bootstraps(connection).await?,
+        reset_audits: read_reset_audits(connection).await?,
+        runs: read_run_rows(connection).await?,
+        streams: read_stream_rows(connection).await?,
         failures: read_failure_carry(connection).await?,
         receipts: read_receipt_carry(connection).await?,
     })
@@ -1137,4 +1316,113 @@ async fn insert_failure_carry(
             .map_err(|_| RuntimeError::StorageUnavailable)?;
     }
     Ok(())
+}
+
+async fn read_reset_audits(connection: &Connection) -> Result<Vec<ResetAuditRow>, RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT sequence, key_id, observed_generation, old_version, old_position, new_version, new_position, reason, redacted FROM stream_checkpoint_reset_audit ORDER BY sequence",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let mut audits = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    {
+        audits.push(ResetAuditRow {
+            sequence: row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            key_id: row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            observed_generation: row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            old_version: row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            old_position: row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            new_version: row.get(5).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            new_position: row.get(6).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            reason: row.get(7).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            redacted: row.get(8).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        });
+    }
+    Ok(audits)
+}
+
+/// Reads `sys_run_observation` rows in primary-key order, for a carry and for
+/// the destination comparison.
+async fn read_run_rows(connection: &Connection) -> Result<Vec<RunRow>, RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT run_id, session_id, request_id, consumer_identity, function_name, source_identity, invocation_id, snapshot, generation_digest, runtime_id, runtime_generation, started_ms, ended_ms, observed_ms, status, checkpoint_count, diagnostic_code, diagnostic_class FROM sys_run_observation ORDER BY run_id",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let mut runs = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    {
+        runs.push(RunRow {
+            run_id: row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            session_id: row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            request_id: row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            consumer_identity: row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            function_name: row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            source_identity: row.get(5).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            invocation_id: row.get(6).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            snapshot: row.get(7).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            generation_digest: row.get(8).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            runtime_id: row.get(9).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            runtime_generation: row.get(10).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            started_ms: row.get(11).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            ended_ms: row.get(12).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            observed_ms: row.get(13).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            status: row.get(14).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            checkpoint_count: row.get(15).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            diagnostic_code: row.get(16).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            diagnostic_class: row.get(17).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        });
+    }
+    Ok(runs)
+}
+
+/// Reads `sys_stream_observation` rows in primary-key order, for a carry and
+/// for the destination comparison.
+async fn read_stream_rows(connection: &Connection) -> Result<Vec<StreamRow>, RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT stream_id, run_id, checkpoint_key_id, producer, consumer_name, consumer_identity, source_identity, partition, status, items_seen, items_committed, items_failed, checkpoint_version, last_failure_identity, last_item_ms, diagnostic_code, diagnostic_class, observed_ms FROM sys_stream_observation ORDER BY stream_id",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let mut streams = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    {
+        streams.push(StreamRow {
+            stream_id: row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            run_id: row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            checkpoint_key_id: row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            producer: row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            consumer_name: row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            consumer_identity: row.get(5).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            source_identity: row.get(6).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            partition: row.get(7).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            status: row.get(8).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            items_seen: row.get(9).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            items_committed: row.get(10).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            items_failed: row.get(11).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            checkpoint_version: row.get(12).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            last_failure_identity: row.get(13).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            last_item_ms: row.get(14).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            diagnostic_code: row.get(15).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            diagnostic_class: row.get(16).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            observed_ms: row.get(17).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        });
+    }
+    Ok(streams)
 }
