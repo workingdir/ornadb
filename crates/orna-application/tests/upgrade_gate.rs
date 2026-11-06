@@ -19,6 +19,7 @@ use orna_repository::{
     DatabaseId, FormatContextError, MigrationAnnotationDefaults, MigrationContinuityRecord,
     Repository, RepositoryError, TypedKey,
     migration_copy::{self, MigrationStore},
+    relation_admission::StagedRelation,
 };
 use orna_value::{
     ROV3_BLOB_TAG, Raw, decode_canonical_storage_value, encode_canonical_storage_value,
@@ -59,7 +60,7 @@ fn prepare(
         source,
         &destination,
         MigrationContinuityRecord::new(Vec::new()).expect("an empty continuity record"),
-        MigrationAnnotationDefaults::new(1).expect("the default annotation"),
+        Some(MigrationAnnotationDefaults::new(1).expect("the default annotation")),
         store_for,
     )
     .map(|_| ())
@@ -290,4 +291,33 @@ fn source_whose_store_root_is_a_text_file_is_refused() {
         ),
         "a text-file store root is refused as a mixed format: {error:?}"
     );
+}
+
+#[test]
+fn candidate_with_a_relation_the_legacy_snapshot_does_not_stage_is_refused() {
+    let (_source_directory, repository) = clone_golden();
+    let store_for =
+        |source: &Repository, database: DatabaseId| -> Result<MigrationStore, RepositoryError> {
+            let mut store = build_migration_store(source, database)?;
+            let descriptor = store
+                .relations
+                .first()
+                .expect("the golden store has a relation")
+                .descriptor()
+                .clone();
+            store
+                .relations
+                .push(StagedRelation::new([0xEE; 16], descriptor));
+            Ok(store)
+        };
+    let error = prepare(&repository, &store_for).expect_err(
+        "a candidate storing a relation the legacy snapshot does not stage must not pass the gate",
+    );
+    match error {
+        RepositoryError::MigrationStoreRefused(detail) => assert!(
+            detail.contains("the migration did not stage"),
+            "the refusal is the gate's unstaged-relation check: {detail}"
+        ),
+        other => panic!("an unstaged relation is refused by the gate: {other:?}"),
+    }
 }
