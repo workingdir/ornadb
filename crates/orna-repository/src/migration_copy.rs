@@ -74,7 +74,7 @@ pub struct MigrationStore {
 /// Supplies the [`MigrationStore`] of a migration once its database identity is
 /// known.
 pub type MigrationStoreSource<'a> =
-    &'a dyn Fn(DatabaseId) -> Result<MigrationStore, RepositoryError>;
+    &'a dyn Fn(&Repository, DatabaseId) -> Result<MigrationStore, RepositoryError>;
 
 /// The one frozen content format an unannotated legacy row transitions to
 /// during an explicit migration. UPGRADE-004 fixes this coordinate.
@@ -616,7 +616,7 @@ fn prepare_format3_migration_in(
     // byte with a fresh one.
     let commit_time = source_commit_time(source, &source_commit)?;
     let message = candidate_message(source_format, annotation_defaults, &continuity);
-    let store = store_for(database_id)?;
+    let store = store_for(&copy, database_id)?;
     require_retired_paths(source, &source_commit, &store.retired)?;
     // Boundary: the migration store is admitted for this database, and no
     // candidate has been built from it yet.
@@ -1121,7 +1121,7 @@ fn recover_prepared_copy(
     if let Some(store_for) = store_for {
         // The recovered candidate must be exactly what a fresh preparation of
         // this source builds: same store, same entries, same commit object.
-        let store = store_for(database_id)?;
+        let store = store_for(&repository, database_id)?;
         require_retired_paths(source, &source_commit, &store.retired)?;
         let database_bytes = canonical_database_bytes(&database_id);
         let expected = migration_entries(
