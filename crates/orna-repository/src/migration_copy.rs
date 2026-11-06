@@ -575,10 +575,12 @@ fn prepare_format3_migration_in(
     copy_source_index(&source_root, &root)?;
     release_source_ownership(&root)?;
 
-    if source.head()?.as_ref() != Some(&source_commit)
-        || source.index_generation()? != source_index_generation
-        || working_tree_identity(source)?.0 != source_working_tree_identity
-    {
+    let source_unchanged = || -> Result<bool, RepositoryError> {
+        Ok(source.head()?.as_ref() != Some(&source_commit)
+            || source.index_generation()? != source_index_generation
+            || working_tree_identity(source)?.0 != source_working_tree_identity)
+    };
+    if source_unchanged()? {
         return Err(RepositoryError::PublicationRecoveryConflict);
     }
     // Boundary: the staged graph, submodule administration, working tree and
@@ -618,6 +620,12 @@ fn prepare_format3_migration_in(
     let message = candidate_message(source_format, annotation_defaults, &continuity);
     let store = store_for(&copy, database_id)?;
     require_retired_paths(source, &source_commit, &store.retired)?;
+    // The store was built while the source was still free to move. The source
+    // must match what the candidate records before any candidate is built or
+    // pinned; a source that changed is refused and left untouched.
+    if source_unchanged()? {
+        return Err(RepositoryError::PublicationRecoveryConflict);
+    }
     // Boundary: the migration store is admitted for this database, and no
     // candidate has been built from it yet.
     crate::publication_crash_barrier("migration-store");
