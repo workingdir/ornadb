@@ -1247,3 +1247,136 @@ fn migration_refusal_leaves_a_live_owners_sidecars_intact() {
     drop(live);
     drop(runtime);
 }
+
+/// The committed format-1 golden bundle carries two Blob values
+/// (`legacy_fixture_bundle.rs`). Its annotation-default count is therefore
+/// derived from decoded rows, and a declared count is only an assertion.
+const GOLDEN_BUNDLE: &str = "tests/fixtures/legacy-format1.bundle";
+const GOLDEN_BLOB_VALUES: u32 = 2;
+
+fn clone_golden_bundle(parent: &Path, name: &str) -> std::path::PathBuf {
+    let bundle = Path::new(env!("CARGO_MANIFEST_DIR")).join(GOLDEN_BUNDLE);
+    let source = parent.join(name);
+    let clone = Command::new("git")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .arg("clone")
+        .arg("--quiet")
+        .arg(&bundle)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(
+        clone.status.success(),
+        "git clone bundle: {}",
+        String::from_utf8_lossy(&clone.stderr)
+    );
+    source
+}
+
+fn run_golden_copy(
+    source: &Path,
+    destination: &Path,
+    annotation_defaults: Option<&str>,
+) -> std::process::Output {
+    let mut arguments = vec![
+        "--db".to_owned(),
+        source.to_str().unwrap().to_owned(),
+        "--debug".to_owned(),
+        "migrate".to_owned(),
+        "copy".to_owned(),
+        destination.to_str().unwrap().to_owned(),
+    ];
+    if let Some(count) = annotation_defaults {
+        arguments.push("--annotation-defaults".to_owned());
+        arguments.push(count.to_owned());
+    }
+    arguments.push("--no-persistent-consumers".to_owned());
+    Command::new(env!("CARGO_BIN_EXE_orna"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args(&arguments)
+        .output()
+        .unwrap()
+}
+
+/// A declared count equal to the decoded Blob count prepares the candidate.
+#[test]
+fn cli_migration_copy_declared_annotation_count_matching_decoded_rows_passes() {
+    let parent = TempDir::new().unwrap();
+    let source = clone_golden_bundle(parent.path(), "source");
+    let destination = parent.path().join("migrated");
+
+    let copy = run_golden_copy(&source, &destination, Some("2"));
+    assert!(
+        copy.status.success(),
+        "migrate copy with the decoded count: {}",
+        String::from_utf8_lossy(&copy.stderr)
+    );
+    let journal = Repository::discover(&destination)
+        .unwrap()
+        .read_publication_journal()
+        .unwrap()
+        .expect("the prepared copy keeps its publication journal");
+    assert_eq!(
+        journal
+            .migration_annotation_defaults()
+            .expect("the copy records annotation defaults")
+            .entry_count(),
+        GOLDEN_BLOB_VALUES
+    );
+}
+
+/// A declared count that differs from the decoded Blob count refuses with
+/// E2100 naming both counts, creates no destination, and leaves the source
+/// unchanged (ORNA-UPGRADE-004).
+#[test]
+fn cli_migration_copy_declared_annotation_count_mismatch_refuses_without_a_copy() {
+    let parent = TempDir::new().unwrap();
+    let source = clone_golden_bundle(parent.path(), "source");
+    let head_before = git_output(&source, &["rev-parse", "HEAD"]);
+    let status_before = git_output(&source, &["status", "--porcelain"]);
+    let destination = parent.path().join("migrated");
+
+    let copy = run_golden_copy(&source, &destination, Some("0"));
+    assert!(!copy.status.success(), "a mismatched count must refuse");
+    let stderr = String::from_utf8_lossy(&copy.stderr);
+    assert!(stderr.contains("E2100"), "refusal names E2100: {stderr}");
+    assert!(
+        stderr.contains("declared=0") && stderr.contains("decoded=2"),
+        "refusal names both counts: {stderr}"
+    );
+    assert!(!destination.exists(), "no candidate is created");
+    assert_eq!(git_output(&source, &["rev-parse", "HEAD"]), head_before);
+    assert_eq!(
+        git_output(&source, &["status", "--porcelain"]),
+        status_before,
+        "the source worktree is unchanged"
+    );
+}
+
+/// Omitting the flag uses the decoded count, and the journal records it.
+#[test]
+fn cli_migration_copy_omitted_annotation_count_uses_and_records_decoded_count() {
+    let parent = TempDir::new().unwrap();
+    let source = clone_golden_bundle(parent.path(), "source");
+    let destination = parent.path().join("migrated");
+
+    let copy = run_golden_copy(&source, &destination, None);
+    assert!(
+        copy.status.success(),
+        "migrate copy without a declared count: {}",
+        String::from_utf8_lossy(&copy.stderr)
+    );
+    let journal = Repository::discover(&destination)
+        .unwrap()
+        .read_publication_journal()
+        .unwrap()
+        .expect("the prepared copy keeps its publication journal");
+    let defaults = journal
+        .migration_annotation_defaults()
+        .expect("the copy records annotation defaults");
+    assert_eq!(defaults.entry_count(), GOLDEN_BLOB_VALUES);
+    assert!(
+        !defaults.payload_inspected(),
+        "the annotation default is metadata-only (ORNA-UPGRADE-004)"
+    );
+}
