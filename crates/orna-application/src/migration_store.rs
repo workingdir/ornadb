@@ -8,7 +8,8 @@
 //! declared table's legacy rows are read from the same snapshot.
 
 use orna_project::{ObjectIdentityManifest, ProjectLoadMode, ProjectLoader};
-use orna_repository::migration_copy::{MigrationStore, RetiredLegacyPath};
+use orna_repository::migration_copy::{CandidateGate, MigrationStore, RetiredLegacyPath};
+use orna_repository::relation_admission::{OBJECT_IDENTITY_RELATION_ID, StoredObjectIdentity};
 use orna_repository::{
     CommittedTreeEntryKind, DatabaseId, Repository, RepositoryError, RepositoryFormat,
 };
@@ -17,7 +18,8 @@ use crate::format3_store::build_format3_store_relations;
 use crate::legacy_store::{
     LegacyReadError, LegacyTableAddress, LegacyTableRows, read_legacy_table_rows,
 };
-use crate::migration_rows::{LegacyTable, migration_row_input};
+use crate::migration_rows::{ExpectedRelation, LegacyTable, migration_row_input};
+use crate::upgrade_gate::{GateExpectation, verify_candidate};
 
 /// The largest committed `.orna` file a migration retires. It matches the
 /// bound on a compact storage file, the largest legacy file a source holds.
@@ -42,6 +44,19 @@ pub fn build_migration_store(
     repository: &Repository,
     database: DatabaseId,
 ) -> Result<MigrationStore, RepositoryError> {
+    let (mut store, expectation) = build_store_with_expectation(repository, database)?;
+    store.candidate_gate = Some(CandidateGate::new(move |repository, candidate| {
+        verify_candidate(repository, candidate, &expectation)
+    }));
+    Ok(store)
+}
+
+/// Builds the store of [`build_migration_store`] together with the content the
+/// candidate must carry, without installing the gate that checks it.
+pub(crate) fn build_store_with_expectation(
+    repository: &Repository,
+    database: DatabaseId,
+) -> Result<(MigrationStore, GateExpectation), RepositoryError> {
     let commit = repository
         .head()?
         .ok_or_else(|| refused("the source has no committed head"))?;
@@ -139,9 +154,20 @@ pub fn build_migration_store(
     let descriptors = repository
         .write_migration_blobs(input.blobs())
         .map_err(|error| refused(format!("{error}")))?;
-    let relations = input
-        .into_staged_relations(&descriptors)
+    let (relations, mut expected, blobs) = input
+        .into_staged_relations_with_expectation(&descriptors)
         .map_err(|error| refused(format!("{error}")))?;
+    let stored_identities = identities.to_stored();
+    let identity_rows = stored_identities
+        .iter()
+        .map(StoredObjectIdentity::inventory_row)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| refused(format!("the object identities are not canonical: {error}")))?;
+    expected.push(ExpectedRelation {
+        relation_id: OBJECT_IDENTITY_RELATION_ID,
+        rows: identity_rows,
+        blobs: Vec::new(),
+    });
 
     let mut retired = Vec::new();
     for entry in repository.list_committed_tree(&commit, MAX_RETIRED_TREE_ENTRIES)? {
@@ -165,13 +191,20 @@ pub fn build_migration_store(
         });
     }
 
-    Ok(MigrationStore {
+    let store = MigrationStore {
         relations,
-        identities: identities.to_stored(),
+        identities: stored_identities,
         retired,
         annotation_default_entries,
         ..MigrationStore::default()
-    })
+    };
+    Ok((
+        store,
+        GateExpectation {
+            relations: expected,
+            blobs,
+        },
+    ))
 }
 
 fn refused(detail: impl Into<String>) -> RepositoryError {

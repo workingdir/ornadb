@@ -1714,7 +1714,7 @@ impl NativeGraphContext {
     /// replaced by the value it stores, so the tuple has the shape its schema
     /// describes (store-format-3 section 5). The bytes read are charged as
     /// structured metadata; no Blob payload is read.
-    pub(crate) fn stored_row_fields(
+    pub fn stored_row_fields(
         &self,
         row: &crate::row_store::AdmittedRow,
         scope: &RepositoryReadScope,
