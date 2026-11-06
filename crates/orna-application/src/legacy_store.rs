@@ -24,7 +24,8 @@
 //! storage table id, the uuid that names its `.orna/storage` root. An editable
 //! table has no storage table id in the snapshot. A legacy snapshot may carry the
 //! identity sidecar (`.orna/object-identities.cbor`), which names each compact
-//! table by its storage id; the golden's sidecar names compact tables only, so an
+//! table by its storage id and each stored column by field id; the golden's sidecar
+//! names the compact tables and their key columns, so an
 //! editable table is addressed by the key-path directory its row units live under,
 //! the table's committed address in the 1.0.0 layout.
 //!

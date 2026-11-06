@@ -316,6 +316,28 @@ pub struct LoadedProject {
     standard_modules: BTreeSet<String>,
     standard_attach_failure: Option<String>,
     source_commit: Option<GitCommitRef>,
+    opaque_pins: Vec<OpaqueGitlinkPin>,
+}
+
+/// A dependency gitlink that a migration load recorded as an opaque pin. The
+/// pin binds the exact commit the parent tree records at `path`; the gitlink's
+/// own tree is never read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OpaqueGitlinkPin {
+    path: String,
+    commit: GitCommitRef,
+}
+
+impl OpaqueGitlinkPin {
+    /// The repository-relative path of the gitlink.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// The commit the parent tree binds at [`Self::path`].
+    pub fn commit(&self) -> &GitCommitRef {
+        &self.commit
+    }
 }
 
 impl LoadedProject {
@@ -332,6 +354,13 @@ impl LoadedProject {
     /// Canonical repository snapshot identity for the exact source commit.
     pub fn source_snapshot_id(&self) -> Option<[u8; 32]> {
         self.source_commit.as_ref().map(GitCommitRef::snapshot_id)
+    }
+
+    /// Dependency gitlinks a [`ProjectLoadMode::Migration`] committed load
+    /// recorded as opaque pins, in the order the committed tree lists them.
+    /// Always empty for a strict load.
+    pub fn opaque_pins(&self) -> &[OpaqueGitlinkPin] {
+        &self.opaque_pins
     }
 
     pub fn identities(&self) -> &[ModuleIdentity] {
@@ -1200,15 +1229,38 @@ fn decode_source_oid(value: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
+/// How a committed snapshot load treats dependency gitlinks other than
+/// `stdlib/std`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ProjectLoadMode {
+    /// Refuses every dependency gitlink as an unsafe path. Normal loads use this.
+    #[default]
+    Strict,
+    /// Records each dependency gitlink as an [`OpaqueGitlinkPin`] and never reads
+    /// its contents, so a source with dependency submodules can be migrated. A
+    /// module that imports from a pinned path fails closed. Only committed
+    /// snapshot loads honour this mode; worktree loads stay strict.
+    Migration,
+}
+
 /// Loads the root module and its reachable ordinary source imports.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ProjectLoader {
     limits: ProjectLimits,
+    mode: ProjectLoadMode,
 }
 
 impl ProjectLoader {
     pub fn new(limits: ProjectLimits) -> Self {
-        Self { limits }
+        Self {
+            limits,
+            mode: ProjectLoadMode::Strict,
+        }
+    }
+
+    /// Selects how committed snapshot loads treat dependency gitlinks.
+    pub fn with_mode(self, mode: ProjectLoadMode) -> Self {
+        Self { mode, ..self }
     }
 
     pub fn load(&self, repository: &Repository) -> Result<LoadedProject, ProjectLoadError> {
@@ -1310,7 +1362,7 @@ impl ProjectLoader {
         roots: Vec<String>,
         std_snapshot: bool,
     ) -> Result<LoadedProject, ProjectLoadError> {
-        let snapshot = validate_committed_tree(repository, commit, self.limits)?;
+        let snapshot = validate_committed_tree(repository, commit, self.limits, self.mode)?;
         if snapshot.has_standard_gitlink
             && let Some(profile) = &standard_profile
             && repository
@@ -1326,6 +1378,21 @@ impl ProjectLoader {
                 .open_format_context_at_selector(commit.as_str())
                 .map(|context| context.repository_format_number())
         })?;
+
+        // Each pin binds the exact commit its parent records. A strict load has
+        // no pins, so this does nothing for it.
+        let opaque_pins = snapshot
+            .opaque_pins
+            .iter()
+            .map(|path| -> Result<OpaqueGitlinkPin, ProjectLoadError> {
+                Ok(OpaqueGitlinkPin {
+                    path: path.clone(),
+                    commit: repository
+                        .committed_submodule_commit(commit, path)
+                        .map_err(ProjectLoadError::Repository)?,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
         let mut project = load_reachable_project(
             self.limits,
@@ -1346,6 +1413,7 @@ impl ProjectLoader {
                 if std_snapshot {
                     resolve_std_snapshot_import(&snapshot.source_paths, importer, segments)
                 } else {
+                    reject_opaque_gitlink_import(&snapshot.opaque_pins, importer, segments)?;
                     resolve_committed_import(&snapshot.source_paths, segments)
                 }
             },
@@ -1366,6 +1434,7 @@ impl ProjectLoader {
             },
         )?;
         project.source_commit = Some(commit.clone());
+        project.opaque_pins = opaque_pins;
         Ok(project)
     }
 
@@ -1585,8 +1654,13 @@ impl ProjectLoader {
         let module_commit = module_repository
             .resolve_snapshot(module_commit.as_str())
             .map_err(|_| StandardAttachError::SnapshotUnresolvable)?;
-        let snapshot = validate_committed_tree(&module_repository, &module_commit, self.limits)
-            .map_err(StandardAttachError::TreeInvalid)?;
+        let snapshot = validate_committed_tree(
+            &module_repository,
+            &module_commit,
+            self.limits,
+            ProjectLoadMode::Strict,
+        )
+        .map_err(StandardAttachError::TreeInvalid)?;
         let available = snapshot
             .source_paths
             .iter()
@@ -1608,6 +1682,7 @@ impl ProjectLoader {
             roots.push(String::from("main.orna"));
         }
         let module_project = self
+            .with_mode(ProjectLoadMode::Strict)
             .load_committed_project(&module_repository, &module_commit, None, roots, true)
             .map_err(StandardAttachError::ClosureUnloaded)?;
         let sources = module_project
@@ -2041,6 +2116,7 @@ fn load_reachable_project(
         standard_modules,
         standard_attach_failure: None,
         source_commit: None,
+        opaque_pins: Vec::new(),
     })
 }
 
@@ -2143,6 +2219,13 @@ pub enum ProjectLoadError {
     InvalidStandardBody(Box<StandardBodyDiagnostic>),
     InvalidTableSchema,
     InvalidSourceRow,
+    /// A module imports from a dependency gitlink that a migration pinned
+    /// opaquely, so the declared tables inside it cannot be derived.
+    OpaqueGitlinkImport {
+        module: String,
+        import: String,
+        gitlink: String,
+    },
 }
 
 impl fmt::Display for ProjectLoadError {
@@ -2187,6 +2270,16 @@ impl fmt::Display for ProjectLoadError {
             }
             Self::InvalidSourceRow => {
                 "source row could not be admitted against its committed schema"
+            }
+            Self::OpaqueGitlinkImport {
+                module,
+                import,
+                gitlink,
+            } => {
+                return write!(
+                    formatter,
+                    "module {module} imports {import} from opaque dependency gitlink {gitlink}, whose declared tables a migration cannot derive"
+                );
             }
         })
     }
@@ -2333,17 +2426,19 @@ struct ValidatedSnapshotTree {
     has_standard_gitlink: bool,
     has_database_metadata: bool,
     has_legacy_format_metadata: bool,
+    opaque_pins: Vec<String>,
 }
 
 fn validate_committed_tree(
     repository: &Repository,
     commit: &GitCommitRef,
     limits: ProjectLimits,
+    mode: ProjectLoadMode,
 ) -> Result<ValidatedSnapshotTree, ProjectLoadError> {
     let entries = repository
         .list_committed_source_tree(commit)
         .map_err(source_tree_load_error)?;
-    validate_snapshot_tree(entries, limits)
+    validate_snapshot_tree(entries, limits, mode)
 }
 
 fn validate_private_candidate_tree(
@@ -2354,7 +2449,7 @@ fn validate_private_candidate_tree(
     let entries = repository
         .list_private_candidate_source_tree(candidate)
         .map_err(source_tree_load_error)?;
-    validate_snapshot_tree(entries, limits)
+    validate_snapshot_tree(entries, limits, ProjectLoadMode::Strict)
 }
 
 /// A source tree over the fixed walk limit is reported as
@@ -2370,6 +2465,7 @@ fn source_tree_load_error(error: RepositoryError) -> ProjectLoadError {
 fn validate_snapshot_tree(
     entries: Vec<CommittedTreeEntry>,
     limits: ProjectLimits,
+    mode: ProjectLoadMode,
 ) -> Result<ValidatedSnapshotTree, ProjectLoadError> {
     let has_standard_gitlink = entries.iter().any(|entry| {
         entry.path().as_path() == Path::new("stdlib/std")
@@ -2387,13 +2483,16 @@ fn validate_snapshot_tree(
     let mut row_paths = BTreeSet::new();
     let mut module_owners = BTreeMap::<Vec<String>, String>::new();
     let mut siblings = BTreeMap::<PathBuf, BTreeMap<String, String>>::new();
+    let mut opaque_pins = Vec::new();
     for entry in entries {
         validate_committed_tree_entry(
             entry,
+            mode,
             &mut siblings,
             &mut module_owners,
             &mut source_paths,
             &mut row_paths,
+            &mut opaque_pins,
         )?;
         if module_owners.len() > limits.max_source_modules {
             return Err(ProjectLoadError::RepositoryLimit);
@@ -2405,22 +2504,31 @@ fn validate_snapshot_tree(
         has_standard_gitlink,
         has_database_metadata,
         has_legacy_format_metadata,
+        opaque_pins,
     })
 }
 
 fn validate_committed_tree_entry(
     entry: CommittedTreeEntry,
+    mode: ProjectLoadMode,
     siblings: &mut BTreeMap<PathBuf, BTreeMap<String, String>>,
     module_owners: &mut BTreeMap<Vec<String>, String>,
     source_paths: &mut BTreeSet<String>,
     row_paths: &mut BTreeSet<String>,
+    opaque_pins: &mut Vec<String>,
 ) -> Result<(), ProjectLoadError> {
     let path = entry.path().as_path();
     let attached_standard_module = path == Path::new("stdlib/std");
+    let mut opaque_pin = false;
     match entry.kind() {
         CommittedTreeEntryKind::File { .. } => {}
         CommittedTreeEntryKind::Symlink => return Err(ProjectLoadError::Symlink),
         CommittedTreeEntryKind::Submodule if attached_standard_module => {}
+        // A migration pins a dependency gitlink at the commit its parent binds.
+        // The gitlink's tree is never read, so it yields no source or row units.
+        CommittedTreeEntryKind::Submodule if mode == ProjectLoadMode::Migration => {
+            opaque_pin = true;
+        }
         CommittedTreeEntryKind::Submodule => return Err(ProjectLoadError::UnsafePath),
     }
 
@@ -2449,6 +2557,14 @@ fn validate_committed_tree_entry(
     }
     if components.is_empty() {
         return Err(ProjectLoadError::UnsafePath);
+    }
+    if opaque_pin {
+        opaque_pins.push(
+            path.to_str()
+                .ok_or(ProjectLoadError::UnsafePath)?
+                .to_owned(),
+        );
+        return Ok(());
     }
     if components[0] == ".orna" {
         return Ok(());
@@ -2535,6 +2651,28 @@ fn resolve_committed_import(
         return Err(ProjectLoadError::UnsupportedImport);
     }
     resolve_import_base(source_paths, &segments.join("/"))
+}
+
+/// Refuses a module import that resolves inside a dependency gitlink a
+/// migration pinned opaquely. The gitlink's tree is never read, so the declared
+/// tables inside it cannot be derived and the migration fails closed.
+fn reject_opaque_gitlink_import(
+    opaque_pins: &[String],
+    importer: &str,
+    segments: &[&str],
+) -> Result<(), ProjectLoadError> {
+    let base = segments.join("/");
+    match opaque_pins
+        .iter()
+        .find(|pin| base == **pin || base.starts_with(&format!("{pin}/")))
+    {
+        Some(pin) => Err(ProjectLoadError::OpaqueGitlinkImport {
+            module: importer.to_owned(),
+            import: segments.join("."),
+            gitlink: pin.clone(),
+        }),
+        None => Ok(()),
+    }
 }
 
 /// Maps one import base (`a/b`, no extension) onto the module file that exists:

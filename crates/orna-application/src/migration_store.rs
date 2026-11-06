@@ -7,7 +7,7 @@
 //! declared relations are built from the committed object identities, and each
 //! declared table's legacy rows are read from the same snapshot.
 
-use orna_project::{ObjectIdentityManifest, ProjectLoader};
+use orna_project::{ObjectIdentityManifest, ProjectLoadMode, ProjectLoader};
 use orna_repository::migration_copy::{MigrationStore, RetiredLegacyPath};
 use orna_repository::{
     CommittedTreeEntryKind, DatabaseId, Repository, RepositoryError, RepositoryFormat,
@@ -52,6 +52,7 @@ pub fn build_migration_store(
         return Err(RepositoryError::Format2RowConversionUnimplemented);
     }
     let project = ProjectLoader::default()
+        .with_mode(ProjectLoadMode::Migration)
         .load_committed_snapshot(repository, &commit)
         .map_err(|error| refused(format!("the source does not load: {error:?}")))?;
     let catalogue = project
