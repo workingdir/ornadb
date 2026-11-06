@@ -80,7 +80,8 @@ mod repository_identity;
 /// FUSE-free projected file and EDIT-1 replacement APIs for runtime owners.
 pub mod vfs;
 pub use repository_identity::{
-    migration_copy_runtime_identity, repository_runtime_identity, runtime_identity_for_database_id,
+    migration_copy_runtime_identity, migration_source_runtime_identity,
+    repository_runtime_identity, runtime_identity_for_database_id,
 };
 mod stream_carry;
 pub use catalogue::{
@@ -11959,8 +11960,101 @@ impl RuntimeState {
     /// This summary query avoids loading mutation payloads when a caller only
     /// needs to report whether and how much local state remains unpublished.
     pub async fn pending_count(&self) -> Result<usize, RuntimeError> {
-        let mut rows = self
-            .connection
+        Self::count_pending(&self.connection).await
+    }
+
+    /// Counts the unpublished tail of the runtime at `repository` without
+    /// writing to its database. Unlike [`RuntimeState::open`], this neither
+    /// creates `state.db` nor runs schema setup: the database is opened
+    /// read-only. A repository with no `state.db` has an empty tail. The count
+    /// is keyed by table, not by runtime identity, so it needs no identity.
+    ///
+    /// The probe takes the runtime owner lock without blocking. Only while it
+    /// holds that lock may it remove the `-wal`/`-shm` sidecars it created: a
+    /// live owner using those sidecars holds the lock, so they are then left
+    /// intact. A busy lock still counts read-only and removes nothing.
+    pub async fn read_pending_count(repository: &Repository) -> Result<usize, RuntimeError> {
+        let state_db = repository.runtime_paths().state_db();
+        if !state_db.exists() {
+            return Ok(0);
+        }
+        // Acquiring the owner lock rewrites `runtime-owner.state`. The bytes are
+        // read before the lock is taken, so a restore reinstates what the probe
+        // found. Another owner could write between this read and the lock; a
+        // probe that wins the lock then restores the earlier bytes over that write.
+        let owner_state_path = repository
+            .runtime_paths()
+            .locks()
+            .join("runtime-owner.state");
+        let owner_state_before = match std::fs::read(&owner_state_path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => return Err(RuntimeError::StorageUnavailable),
+        };
+        let owner_lock = match repository.acquire_runtime_owner_lock(process_owner_id()) {
+            Ok(lock) => Some(lock),
+            Err(RepositoryError::RepositoryBusy) => None,
+            Err(_) => return Err(RuntimeError::StorageUnavailable),
+        };
+        let sidecars = ["-wal", "-shm"].map(|suffix| {
+            let mut path = state_db.clone().into_os_string();
+            path.push(suffix);
+            std::path::PathBuf::from(path)
+        });
+        let existed = sidecars.clone().map(|path| path.exists());
+        let count = async {
+            let database = libsql::Builder::new_local(&state_db)
+                .flags(libsql::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .build()
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            let connection = database
+                .connect()
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            Self::count_pending(&connection).await
+        }
+        .await;
+        let restored = if owner_lock.is_some() {
+            for (path, existed) in sidecars.iter().zip(existed) {
+                if !existed {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+            Self::restore_owner_state(&owner_state_path, owner_state_before.as_deref())
+        } else {
+            Ok(())
+        };
+        drop(owner_lock);
+        match (count, restored) {
+            (Ok(pending), Ok(())) => Ok(pending),
+            (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+        }
+    }
+
+    /// Reinstates `runtime-owner.state` to the bytes captured before a probe
+    /// acquired the owner lock, or removes it when it was absent. Called only
+    /// while the probe holds the lock, so the write cannot race another owner.
+    fn restore_owner_state(path: &Path, bytes: Option<&[u8]>) -> Result<(), RuntimeError> {
+        match bytes {
+            Some(bytes) => {
+                let temporary = path.with_extension("restore");
+                let mut file = std::fs::File::create(&temporary)
+                    .map_err(|_| RuntimeError::StorageUnavailable)?;
+                file.write_all(bytes)
+                    .and_then(|()| file.sync_all())
+                    .map_err(|_| RuntimeError::StorageUnavailable)?;
+                std::fs::rename(&temporary, path).map_err(|_| RuntimeError::StorageUnavailable)
+            }
+            None => match std::fs::remove_file(path) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(_) => Err(RuntimeError::StorageUnavailable),
+            },
+        }
+    }
+
+    async fn count_pending(connection: &libsql::Connection) -> Result<usize, RuntimeError> {
+        let mut rows = connection
             .query("SELECT COUNT(*) FROM pending_mutation", ())
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
