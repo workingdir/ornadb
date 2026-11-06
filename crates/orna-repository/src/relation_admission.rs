@@ -43,7 +43,7 @@ use crate::{
     RepositoryFormatContext, StoreBinding, Uuid,
     allocator::AllocatorError,
     bind_tree_entry_in_index,
-    blob_store::GearChunker,
+    blob_store::{ContentIdentity, GearChunker},
     native_graph::{
         ByteIndexEntry, GitHashAlgorithm, GraphError, IndexMaintenance, MAX_GRAPH_HEIGHT, MAX_REFS,
         NativeGraphContext, NativeNodeEnvelope, NativeObjectKind, NativeOid, NodeData,
@@ -219,6 +219,9 @@ pub enum RelationAdmissionError {
     SourceNotStaged {
         path: String,
     },
+    /// A migration blob's bytes do not match the content identity it names
+    /// (length or SHA-256), so nothing is written for it.
+    MigrationBlobMismatch,
     Format(FormatContextError),
     Repository(RepositoryError),
     Graph(GraphError),
@@ -305,6 +308,9 @@ impl std::fmt::Display for RelationAdmissionError {
                 formatter,
                 "{path} is not a source file the index tracks; stage it with `git add`"
             ),
+            Self::MigrationBlobMismatch => formatter.write_str(
+                "a migration blob's bytes do not match the content identity it names",
+            ),
             Self::Format(error) => write!(formatter, "format context: {error:?}"),
             Self::Repository(error) => write!(formatter, "{error}"),
             Self::Graph(error) => write!(formatter, "native graph operation failed: {error}"),
@@ -335,6 +341,57 @@ impl From<FormatContextError> for RelationAdmissionError {
 impl From<AllocatorError> for RelationAdmissionError {
     fn from(error: AllocatorError) -> Self {
         Self::Allocator(error)
+    }
+}
+
+/// The blob descriptor objects a migration wrote, keyed by content identity
+/// (BLOB-001). A descriptor names content by length and SHA-256 and roots its
+/// byte index; identical content always yields the same descriptor object, so
+/// writing the same migration twice yields the same descriptors.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct MigrationBlobDescriptors {
+    descriptors: BTreeMap<ContentIdentity, NativeOid>,
+}
+
+impl MigrationBlobDescriptors {
+    /// The descriptor object for `identity`, if it was written.
+    pub fn descriptor(&self, identity: &ContentIdentity) -> Option<&NativeOid> {
+        self.descriptors.get(identity)
+    }
+}
+
+impl Repository {
+    /// Writes each migration blob's content into this repository's object
+    /// store: a byte index for non-empty content and a blob descriptor node
+    /// that names the content by length and SHA-256 (BLOB-001, BLOB-004).
+    /// Content is addressed by its identity alone; media type and suffix live
+    /// in the row, not here.
+    ///
+    /// Each payload must hash to its identity, otherwise
+    /// `MigrationBlobMismatch` is returned and no descriptor is returned.
+    /// Objects are written loose through the same barrier relation admission
+    /// uses; no ref moves, so objects the caller later abandons stay
+    /// unreachable.
+    pub fn write_migration_blobs(
+        &self,
+        blobs: &BTreeMap<ContentIdentity, Vec<u8>>,
+    ) -> Result<MigrationBlobDescriptors, RelationAdmissionError> {
+        let mut writer = NodeWriter::new(self)?;
+        let mut descriptors = BTreeMap::new();
+        for (identity, bytes) in blobs {
+            if crate::blob_store::digest_bytes(bytes) != *identity {
+                return Err(RelationAdmissionError::MigrationBlobMismatch);
+            }
+            let byte_root = write_byte_index(&mut writer, bytes)?;
+            let oid = writer.node(&NodeData::BlobDescriptor {
+                length: identity.length(),
+                raw_sha256: identity.sha256(),
+                byte_root,
+            })?;
+            descriptors.insert(*identity, oid);
+        }
+        writer.sync()?;
+        Ok(MigrationBlobDescriptors { descriptors })
     }
 }
 
