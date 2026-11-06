@@ -126,9 +126,28 @@ jobs:
       - name: Install the editors and media player for the Gate E suites
         if: matrix.shard == 'cli'
         # Run 39812765487 stalled in `apt-get update` for 5 h 51 m until the job cap.
+        # Each network call has a per-attempt cap and a bounded retry, so a stalled
+        # mirror fails and retries instead of holding the step until its timeout.
+        # Downloads are separated from the install so a killed attempt never leaves
+        # dpkg half-configured; apt keeps the partial .deb files and resumes them.
         timeout-minutes: 15
         run: |
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=60 -o Acquire::https::Timeout=60 update
+          retry() {
+            local attempts=$1 n
+            shift
+            for ((n = 1; n <= attempts; n++)); do
+              if "$@"; then
+                return 0
+              fi
+              echo "::warning::Attempt $n of $attempts failed: $*"
+              sleep 5
+            done
+            echo "::error::Giving up after $attempts attempts: $*"
+            return 1
+          }
+          apt_opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=60 -o Acquire::https::Timeout=60)
+          retry 2 sudo timeout -k 10 60 apt-get "${apt_opts[@]}" update
+          retry 3 sudo timeout -k 10 150 apt-get "${apt_opts[@]}" install -y --download-only emacs-nox mpv vim
           sudo apt-get install -y emacs-nox mpv vim
 
       - name: Test the ${{ matrix.shard }} shard
