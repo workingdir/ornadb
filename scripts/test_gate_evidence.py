@@ -731,19 +731,25 @@ class ReviewFindingTests(unittest.TestCase):
         self.assertTrue(calls)
         for line in calls:
             self.assertIn("--timeout-minutes", line)
-        for name in ("source-audits.yml", "cli-tests.yml", "nightly-gates.yml"):
+        installer = (Path(__file__).resolve().parent / "install_editor_hosts.sh").read_text(encoding="utf-8")
+        for needle in (
+            "-o Acquire::ForceIPv4=true",
+            "-o Acquire::http::Timeout=30",
+            "-o Acquire::https::Timeout=30",
+            "sudo timeout -k 10 150 apt-get",
+            "-o Debug::Acquire::http=true install -y --download-only --no-install-recommends",
+            r"'s|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g'",
+            "tail -n 40",
+        ):
+            self.assertIn(needle, installer)
+        for name, packages in (
+            ("source-audits.yml", "emacs-nox vim"),
+            ("cli-tests.yml", "emacs-nox mpv vim"),
+            ("nightly-gates.yml", "emacs-nox mpv vim"),
+        ):
             text = (root / name).read_text(encoding="utf-8")
-            self.assertIn(
-                "apt_opts=(-o Acquire::Retries=3 -o Acquire::ForceIPv4=true "
-                "-o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)",
-                text,
-                name,
-            )
-            self.assertIn('apt-get "${apt_opts[@]}" update', text, name)
-            self.assertIn("install -y --download-only --no-install-recommends", text, name)
-            if name != "source-audits.yml":
-                self.assertIn("-o Debug::Acquire::http=true install -y --download-only", text, name)
-                self.assertIn(r"'s|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g'", text, name)
+            self.assertIn(f"bash scripts/install_editor_hosts.sh {packages}", text, name)
+            self.assertNotIn("apt_opts=(", text, name)
             self.assertNotIn("sudo apt-get -o Acquire::Retries=3", text, name)
             self.assertNotIn("sudo apt-get update\n", text, name)
 
