@@ -72,7 +72,8 @@ pub use init::format_context::{
 };
 pub use init::{
     DatabaseId, RepositoryInitError, RepositoryInitialization, RepositoryMetadata, STORAGE_PROFILE,
-    initialize_repository, inspect_metadata, inspect_metadata_for_runtime,
+    initialize_repository, inspect_legacy_source_metadata, inspect_metadata,
+    inspect_metadata_for_runtime,
 };
 pub use mount::{MountError, MountRowBaselines, MountStatus, MountView};
 pub use native_graph::RowRevision;
