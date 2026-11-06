@@ -80,6 +80,8 @@ pub use legacy_store::{
     read_legacy_table_rows, single_legacy_source,
 };
 pub use migration_rows::{LegacyTable, MigrationRowError, MigrationRowInput, migration_row_input};
+mod migration_store;
+pub use migration_store::build_migration_store;
 
 const DIGEST_DOMAIN: &[u8] = b"ORNA-ACTIVATION-DIGEST\0";
 const TABLE_ID_DIGEST_DOMAIN: &[u8] = b"ORNA-ACTIVATION-DIGEST-TABLE-IDENTITIES\0";

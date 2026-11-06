@@ -1231,15 +1231,12 @@ fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnost
         &std::path::PathBuf::from(destination),
         continuity,
         annotation_defaults,
-        &|_: orna_repository::DatabaseId| -> Result<
+        &|repository: &orna_repository::Repository,
+          database: orna_repository::DatabaseId|
+         -> Result<
             orna_repository::migration_copy::MigrationStore,
             orna_repository::RepositoryError,
-        > {
-            Err(orna_repository::RepositoryError::MigrationStoreRefused(
-                "legacy row conversion is not yet wired into migrate copy (ornadb-5il1.479)"
-                    .to_string(),
-            ))
-        },
+        > { orna_application::build_migration_store(repository, database) },
     )
     .map_err(|error| match error {
         orna_repository::RepositoryError::FormatContext(context) => {
