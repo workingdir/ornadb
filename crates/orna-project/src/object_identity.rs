@@ -177,6 +177,10 @@ pub enum ObjectIdentityError {
     /// The Git index or `HEAD` changed while identities were being staged.
     StaleIndex,
     Io,
+    /// A legacy compact table's storage id names no unretired committed table
+    /// identity, or one storage id is claimed twice, so the migrated relation
+    /// cannot keep its legacy ObjectId.
+    LegacyTableCorrespondence,
 }
 
 impl std::fmt::Display for ObjectIdentityError {
@@ -190,6 +194,9 @@ impl std::fmt::Display for ObjectIdentityError {
             Self::MissingIdentity => "the object has no committed or staged identity to keep",
             Self::StaleIndex => {
                 "the Git index or HEAD changed while the identity was staged; retry"
+            }
+            Self::LegacyTableCorrespondence => {
+                "a legacy table's storage id does not match exactly one committed table identity"
             }
             Self::Io => "the object identity inventory could not be read or staged",
         })
@@ -391,6 +398,34 @@ impl ObjectIdentityManifest {
                 !record.retired && record.kind == kind && record.qualified_name == qualified_name
             })
             .map(|record| &record.id)
+    }
+
+    /// Resolves each legacy compact table's storage id to the qualified name of
+    /// its unretired committed `Table` identity (ORNA-OBJECT-002). Fails closed
+    /// when a storage id has no unretired table identity, or when one storage
+    /// id is claimed twice, so a migrated relation never gets an id that the
+    /// legacy inventory does not vouch for.
+    pub fn legacy_table_names(
+        &self,
+        storage_ids: &[[u8; 16]],
+    ) -> Result<BTreeMap<[u8; 16], String>, ObjectIdentityError> {
+        let mut names = BTreeMap::new();
+        for storage_id in storage_ids {
+            let mut matches = self.records.iter().filter(|record| {
+                !record.retired && record.kind == ObjectKind::Table && record.id == *storage_id
+            });
+            let record = matches
+                .next()
+                .ok_or(ObjectIdentityError::LegacyTableCorrespondence)?;
+            if matches.next().is_some()
+                || names
+                    .insert(*storage_id, record.qualified_name.clone())
+                    .is_some()
+            {
+                return Err(ObjectIdentityError::LegacyTableCorrespondence);
+            }
+        }
+        Ok(names)
     }
 
     pub fn encode(&self) -> Result<Vec<u8>, ObjectIdentityError> {
@@ -2840,6 +2875,47 @@ mod tests {
         assert_eq!(
             ObjectIdentityManifest::decode(&removed.encode().unwrap()).unwrap(),
             removed
+        );
+    }
+
+    /// A legacy table keeps its committed ObjectId when reconciled against the
+    /// legacy inventory, and only a table without a legacy record mints a new
+    /// id. The storage id resolver names the legacy table and fails closed on
+    /// an unknown or doubly claimed storage id.
+    #[test]
+    fn legacy_inventory_reuses_table_ids_and_refuses_bad_correspondence() {
+        let source = ModuleInput::new(
+            "main.orna",
+            "pub table Music(id: Str) { title: Str, }\npub table Note(id: Str) { body: Str, }\n",
+        );
+        let legacy_music = [0x11_u8; 16];
+        let legacy = ObjectIdentityManifest {
+            records: vec![ObjectIdentity {
+                kind: ObjectKind::Table,
+                qualified_name: "Music".to_owned(),
+                id: legacy_music,
+                retired: false,
+            }],
+        };
+        let reconciled =
+            ObjectIdentityManifest::reconcile(std::slice::from_ref(&source), Some(&legacy))
+                .unwrap();
+        assert_eq!(
+            reconciled.id(ObjectKind::Table, "Music"),
+            Some(&legacy_music)
+        );
+        let note_id = *reconciled.id(ObjectKind::Table, "Note").unwrap();
+        assert_ne!(note_id, legacy_music);
+
+        let names = reconciled.legacy_table_names(&[legacy_music]).unwrap();
+        assert_eq!(names.get(&legacy_music).map(String::as_str), Some("Music"));
+        assert_eq!(
+            reconciled.legacy_table_names(&[[0x22; 16]]),
+            Err(ObjectIdentityError::LegacyTableCorrespondence)
+        );
+        assert_eq!(
+            reconciled.legacy_table_names(&[legacy_music, legacy_music]),
+            Err(ObjectIdentityError::LegacyTableCorrespondence)
         );
     }
 
