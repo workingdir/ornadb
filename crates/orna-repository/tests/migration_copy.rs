@@ -6,9 +6,18 @@ use std::{fs, path::Path, process::Command};
 use orna_repository::{
     LegacyAnnotationCandidate, ManagedPath, MigrationAnnotationDefaults, MigrationContinuityRecord,
     PublicationJournal, PublicationJournalEntry, Repository, RepositoryError,
-    migration_copy::{self, DiscardOutcome, LegacyAnnotationInventory},
+    migration_copy::{self, DiscardOutcome, LegacyAnnotationInventory, MigrationStore},
 };
 use tempfile::TempDir;
+
+/// The migration store of a source that has no legacy rows to convert: no
+/// relations, no identities, zero watermarks and no retired legacy paths.
+fn no_store(
+    _: &Repository,
+    _: orna_repository::DatabaseId,
+) -> Result<MigrationStore, RepositoryError> {
+    Ok(MigrationStore::default())
+}
 
 fn git_output(directory: &Path, arguments: &[&str]) -> Vec<u8> {
     let output = Command::new("git")
@@ -167,6 +176,7 @@ fn populated_format1_dirty_workspace_is_preserved_in_copy() {
         &destination,
         MigrationContinuityRecord::new(Vec::new()).unwrap(),
         defaults,
+        &no_store,
     )
     .unwrap();
     assert_eq!(copy.database_id(), source_database_id);
@@ -428,6 +438,7 @@ fn populated_format2_dirty_workspace_is_preserved_in_copy() {
         &destination,
         continuity.clone(),
         defaults,
+        &no_store,
     )
     .unwrap();
     let migrated = Repository::discover(copy.destination()).unwrap();
@@ -499,17 +510,17 @@ fn populated_format2_dirty_workspace_is_preserved_in_copy() {
         ),
         committed_format_bytes
     );
-    // ORNA-META-001: the candidate tracks only the format-3 database record
-    // under `.orna/`. The migration coordinates are not a tracked file: the
-    // journal carries continuity and annotation defaults, and the commit
-    // trailer names the source format.
+    // ORNA-META-001: the candidate tracks the format-3 database record and the
+    // store root beside it under `.orna/`. The migration coordinates are not a
+    // tracked file: the journal carries continuity and annotation defaults, and
+    // the commit trailer names the source format.
     let candidate = copy.candidate_journal().new_head().as_str().to_owned();
     assert_eq!(
         git_text(
             copy.destination(),
-            &["ls-tree", "--name-only", "-r", &candidate, "--", ".orna"]
+            &["ls-tree", "--name-only", &candidate, "--", ".orna/"]
         ),
-        ".orna/database.orna"
+        ".orna/database.orna\n.orna/store"
     );
     let message = git_text(
         copy.destination(),
@@ -597,6 +608,7 @@ fn populated_format2_dirty_workspace_is_preserved_in_copy() {
         &destination,
         continuity.clone(),
         defaults,
+        &no_store,
     )
     .unwrap();
     assert_eq!(
@@ -624,8 +636,14 @@ fn populated_format2_dirty_workspace_is_preserved_in_copy() {
     )
     .unwrap();
     assert!(
-        migration_copy::prepare_format3_migration(&repository, &destination, continuity, defaults,)
-            .is_err()
+        migration_copy::prepare_format3_migration(
+            &repository,
+            &destination,
+            continuity,
+            defaults,
+            &no_store
+        )
+        .is_err()
     );
     assert_eq!(
         git_output(
@@ -796,6 +814,7 @@ fn pre_change_prepared_copy_is_refused_and_discardable() {
         &destination,
         continuity.clone(),
         defaults,
+        &no_store,
     )
     .unwrap();
     make_pre_change_copy(&destination);
@@ -807,6 +826,7 @@ fn pre_change_prepared_copy_is_refused_and_discardable() {
         &destination,
         continuity.clone(),
         defaults,
+        &no_store,
     )
     .expect_err("the pre-change copy is refused by preparation");
     assert!(matches!(refused, RepositoryError::LegacyMigrationCopy));
@@ -829,21 +849,81 @@ fn pre_change_prepared_copy_is_refused_and_discardable() {
         ),
         source_status
     );
-    let rerun =
-        migration_copy::prepare_format3_migration(&repository, &destination, continuity, defaults)
-            .unwrap();
+    let rerun = migration_copy::prepare_format3_migration(
+        &repository,
+        &destination,
+        continuity,
+        defaults,
+        &no_store,
+    )
+    .unwrap();
     assert_eq!(
         git_text(
             &destination,
             &[
                 "ls-tree",
                 "--name-only",
-                "-r",
                 rerun.candidate_journal().new_head().as_str(),
                 "--",
-                ".orna",
+                ".orna/",
             ]
         ),
-        ".orna/database.orna"
+        ".orna/database.orna\n.orna/store"
+    );
+}
+
+#[test]
+fn source_edited_after_the_store_is_built_is_refused_before_pinning() {
+    let source = TempDir::new().unwrap();
+    init_repository(source.path());
+    fs::write(
+        source.path().join("main.orna"),
+        include_str!("fixtures/git-repository-main.orna"),
+    )
+    .unwrap();
+    fs::write(source.path().join("tracked.txt"), b"committed bytes\n").unwrap();
+    fs::create_dir_all(source.path().join(".orna")).unwrap();
+    fs::write(
+        source.path().join(".orna/format.orna"),
+        include_str!("fixtures/format-context/format-1-ornadb-1.0.orna"),
+    )
+    .unwrap();
+    fs::write(
+        source.path().join(".orna/database.orna"),
+        include_str!("fixtures/format-context/database-sidecar.orna"),
+    )
+    .unwrap();
+    git_output(source.path(), &["add", "."]);
+    git_output(source.path(), &["commit", "-m", "format-1 source"]);
+    let repository = Repository::discover(source.path()).unwrap();
+    let source_head = git_text(source.path(), &["rev-parse", "HEAD"]);
+    let parent = TempDir::new().unwrap();
+    let destination = parent.path().join("migrated");
+    let tracked = source.path().join("tracked.txt");
+    // The store is built while the source is still free to move; the source is
+    // edited between the store build and the pin.
+    let edit_source_after_store = |_: &Repository,
+                                   _: orna_repository::DatabaseId|
+     -> Result<MigrationStore, RepositoryError> {
+        fs::write(&tracked, b"edited after the store was built\n").unwrap();
+        Ok(MigrationStore::default())
+    };
+    let error = migration_copy::prepare_format3_migration(
+        &repository,
+        &destination,
+        MigrationContinuityRecord::new(Vec::new()).unwrap(),
+        MigrationAnnotationDefaults::new(1).unwrap(),
+        &edit_source_after_store,
+    )
+    .expect_err("a source edited after the store is built is refused");
+    assert!(matches!(
+        error,
+        RepositoryError::PublicationRecoveryConflict
+    ));
+    assert!(!destination.exists());
+    assert_eq!(git_text(source.path(), &["rev-parse", "HEAD"]), source_head);
+    assert_eq!(
+        fs::read(&tracked).unwrap(),
+        b"edited after the store was built\n"
     );
 }
