@@ -11,6 +11,13 @@ been published.
   lock. The next preparation reclaims a pair whose lock it can take and leaves
   a live migration's copy untouched. Staging copies from earlier builds have no
   marker and are not reclaimed.
+- Fixed broken rustdoc intra-doc links that failed `RUSTDOCFLAGS="-D warnings"
+  cargo doc` (private items linked from public docs in `orna-sys`,
+  `orna-conformance`, `orna-repository`, `orna-runtime`, `orna-live`) and the
+  dead `crates/orna-client/src/lib.rs` reference in
+  `docs/decisions/0091-client-vm-trust-and-sandbox.md`, which failed
+  `scripts/check_doc_links.py` (ornadb-llsc). The rustdoc gate still fails in
+  `orna-storage`; see the pull request.
 - `orna migrate copy` is idempotent and reproducible for a populated format-1
   workspace (ornadb-5il1.397, Gate F; UPGRADE-3 items 3-7 and
   ORNA-UPGRADE-002/004/005/006). Re-running it against the same destination now
@@ -1201,6 +1208,12 @@ been published.
   `vehicle/corsa.orna`, is no longer rejected with `ORNA-S002-NAMESPACE`. The
   conformance fixture catalogue is an explicit harness opt-in only, through
   `TransactionalEvaluator::with_fixture_catalogue`.
+- `case` arm bodies now join with the same rule as `if` branches (ORNA-CASE-004,
+  ORNA-CFLOW-003; ornadb-wax4). An `Int` arm followed by an `Int?` arm now
+  unifies to `Int?`, as the reverse order already did, and a declared `Int?`
+  result accepts `Int` and `null` arms. Both previously failed with
+  `ORNA-S021-TYPE`. A genuinely incompatible pair still reports exactly one
+  diagnostic.
 
 ## 1.0.0 — release inventory (publication pending)
 
