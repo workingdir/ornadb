@@ -599,6 +599,22 @@ impl RepositoryFormatContext {
         })
     }
 
+    /// The relation IDs the committed `.orna/store` root binds, read from the
+    /// store's own relation map. No relation's rows are loaded.
+    pub fn store_relation_ids(&self) -> Result<Vec<[u8; 16]>, FormatContextError> {
+        self.require_format3()?;
+        let database_id = self.require_database_id()?;
+        let store = self.validate_store_root()?;
+        NativeGraphContext::read_store_relations(
+            &self.repository,
+            store.oid.algorithm(),
+            *database_id.as_bytes(),
+            &store.oid,
+        )
+        .map(|entries| entries.into_iter().map(|entry| entry.relation_id).collect())
+        .map_err(graph_context_error)
+    }
+
     /// Resolves one stable relation ID through the committed format-3 store
     /// root and seals its schema/root/count identity without loading table
     /// rows. Point/range access is available only through the matching
@@ -1077,6 +1093,11 @@ impl HistoricalFormatContext {
         relation_id: [u8; 16],
     ) -> Result<RowMapSnapshot, FormatContextError> {
         self.context.load_row_map(relation_id)
+    }
+
+    /// The relation IDs the pinned snapshot's `.orna/store` root binds.
+    pub fn store_relation_ids(&self) -> Result<Vec<[u8; 16]>, FormatContextError> {
+        self.context.store_relation_ids()
     }
 
     /// Opens a value context bound to this historical snapshot and relation.
