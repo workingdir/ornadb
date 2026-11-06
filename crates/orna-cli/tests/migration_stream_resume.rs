@@ -895,3 +895,228 @@ fn migration_carries_checkpoint_bootstrap_pin_and_keeps_snapshot_checkpoint() {
     assert_eq!(carried.version, seeded.version);
     assert_eq!(carried.committed, seeded.committed);
 }
+
+/// Inserts a failure for the source's checkpoint consumer, in `status`.
+const INSERT_FAILURE_FROM_CHECKPOINT: &str = "INSERT INTO stream_failure (identity_id, key_id, consumer_principal, consumer_root, consumer_function, consumer_binding, source_format, source, partition_format, partition, position_format, delivery_position, successor_position, version, attempts, status, diagnostic_code, diagnostic_class) SELECT ?1, key_id, consumer_principal, consumer_root, consumer_function, consumer_binding, source_format, source, partition_format, partition, position_format, 'delivery-position', 'successor-position', version, 1, ?2, 1, 1 FROM stream_checkpoint";
+
+async fn state_database(root: &Path) -> libsql::Database {
+    let repository = Repository::discover(root).unwrap();
+    libsql::Builder::new_local(repository.runtime_paths().state_db())
+        .build()
+        .await
+        .unwrap()
+}
+
+/// Seeds one failure in `status` for the source's checkpoint consumer.
+fn seed_failure(root: &Path, identity: &str, status: i64) {
+    runtime().block_on(async {
+        let database = state_database(root).await;
+        let connection = database.connect().unwrap();
+        connection
+            .execute(
+                INSERT_FAILURE_FROM_CHECKPOINT,
+                libsql::params![identity, status],
+            )
+            .await
+            .unwrap();
+    });
+}
+
+/// Seeds a failure in each non-in-flight state with its companion rows: an inline
+/// payload, a referenced payload with assertion detail, a legacy marker, and a
+/// provider failure on the checkpoint.
+fn seed_failure_records(root: &Path) {
+    runtime().block_on(async {
+        let database = state_database(root).await;
+        let connection = database.connect().unwrap();
+        for (identity, status) in [("failure-payload", 1_i64), ("failure-detail", 6), ("failure-legacy", 7)] {
+            connection
+                .execute(
+                    INSERT_FAILURE_FROM_CHECKPOINT,
+                    libsql::params![identity, status],
+                )
+                .await
+                .unwrap();
+        }
+        connection
+            .execute(
+                "INSERT INTO stream_failure_payload (identity_id, payload, payload_reference, payload_digest, retention) VALUES ('failure-payload', X'0102', NULL, NULL, 1)",
+                (),
+            )
+            .await
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO stream_failure_payload (identity_id, payload, payload_reference, payload_digest, retention) VALUES ('failure-detail', NULL, 'payload-ref', zeroblob(32), 2)",
+                (),
+            )
+            .await
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO stream_failure_payload_legacy (identity_id) VALUES ('failure-legacy')",
+                (),
+            )
+            .await
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO stream_failure_assertion_detail (identity_id, code, assertion_ref, owner_ref, owner_kind, predicate_ref, source_file_ref, start_byte, end_byte, start_line, start_column, end_line, end_column, safe_witness) VALUES ('failure-detail', 'ORNA-A091-009', X'01', X'02', 1, X'03', X'04', X'05', X'06', X'07', X'08', X'09', X'0A', 'witness text')",
+                (),
+            )
+            .await
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO stream_provider_failure (key_id, checkpoint_version, committed_position, attempts, diagnostic_code, diagnostic_class) SELECT key_id, version, committed_position, 1, 1, 1 FROM stream_checkpoint",
+                (),
+            )
+            .await
+            .unwrap();
+    });
+}
+
+/// Every row of the failure tables in a repository's runtime state, table by table.
+fn failure_table_rows(root: &Path) -> Vec<(&'static str, Vec<Vec<libsql::Value>>)> {
+    const TABLES: [(&str, &str); 5] = [
+        ("stream_failure", "identity_id"),
+        ("stream_failure_payload", "identity_id"),
+        ("stream_failure_payload_legacy", "identity_id"),
+        ("stream_failure_assertion_detail", "identity_id"),
+        ("stream_provider_failure", "key_id"),
+    ];
+    runtime().block_on(async {
+        let database = state_database(root).await;
+        let connection = database.connect().unwrap();
+        let mut tables = Vec::new();
+        for (table, key) in TABLES {
+            let mut rows = connection
+                .query(&format!("SELECT * FROM {table} ORDER BY {key}"), ())
+                .await
+                .unwrap();
+            let mut values = Vec::new();
+            while let Some(row) = rows.next().await.unwrap() {
+                let width = row.column_count();
+                values.push(
+                    (0..width)
+                        .map(|index| row.get_value(index).unwrap())
+                        .collect(),
+                );
+            }
+            tables.push((table, values));
+        }
+        tables
+    })
+}
+
+/// Every row of the stream checkpoint table, read without opening the runtime.
+fn stream_checkpoint_rows(root: &Path) -> Vec<Vec<libsql::Value>> {
+    runtime().block_on(async {
+        let database = state_database(root).await;
+        let connection = database.connect().unwrap();
+        let mut rows = connection
+            .query("SELECT * FROM stream_checkpoint ORDER BY key_id", ())
+            .await
+            .unwrap();
+        let mut values = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            let width = row.column_count();
+            values.push(
+                (0..width)
+                    .map(|index| row.get_value(index).unwrap())
+                    .collect(),
+            );
+        }
+        values
+    })
+}
+
+/// Runs `migrate copy` with `--debug`, which prints the refusal's `tables=` detail.
+fn run_copy_with_debug(source: &Path, destination: &Path) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_orna"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "--debug",
+            "--db",
+            source.to_str().unwrap(),
+            "migrate",
+            "copy",
+            destination.to_str().unwrap(),
+            "--annotation-defaults",
+            "0",
+            "--no-persistent-consumers",
+        ])
+        .output()
+        .unwrap()
+}
+
+/// Failure records that are not in flight are carried verbatim with their payload,
+/// assertion-detail, legacy and provider companion rows. The activated copy holds
+/// the same rows, and the checkpoint is carried unchanged.
+#[test]
+fn migration_carries_failure_records_verbatim() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    dirty_legacy_source(&source);
+    let before = give_source_a_persistent_consumer(&source, false);
+    seed_failure_records(&source);
+    let expected = failure_table_rows(&source);
+    for (table, rows) in &expected {
+        assert!(!rows.is_empty(), "{table} must be seeded");
+    }
+    let destination = parent.path().join("migrated");
+
+    let prepared = run_copy(&source, &destination);
+    assert!(
+        prepared.status.success(),
+        "migrate copy: {}",
+        String::from_utf8_lossy(&prepared.stderr)
+    );
+    let activated = run_upgrade(&source, &destination);
+    assert!(
+        activated.status.success(),
+        "upgrade --yes-activate: {}",
+        String::from_utf8_lossy(&activated.stderr)
+    );
+
+    assert_eq!(failure_table_rows(&destination), expected);
+    let carried = activated_checkpoint(&destination);
+    assert_eq!(carried.version, before.version);
+    assert_eq!(carried.committed, before.committed);
+}
+
+/// A failure in `Retrying` or `Replaying` names a claim that is not carried. The carry
+/// refuses it by name (`stream_failure`), copies nothing, and leaves the checkpoint
+/// unchanged.
+#[test]
+fn migration_refuses_in_flight_failure_and_names_it() {
+    for status in [2_i64, 5] {
+        let parent = TempDir::new().unwrap();
+        let source = parent.path().join("source");
+        fs::create_dir(&source).unwrap();
+        dirty_legacy_source(&source);
+        give_source_a_persistent_consumer(&source, false);
+        let checkpoint_before = stream_checkpoint_rows(&source);
+        seed_failure(&source, "failure-in-flight", status);
+        let failure_before = failure_table_rows(&source);
+        let destination = parent.path().join("migrated");
+
+        let output = run_copy_with_debug(&source, &destination);
+
+        assert!(
+            !output.status.success(),
+            "status {status} failure must not be dropped: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("E2100"), "{stderr}");
+        assert!(stderr.contains("tables=stream_failure"), "{stderr}");
+        assert!(
+            !destination.exists(),
+            "no migration copy may be prepared while a failure is in flight"
+        );
+        assert_eq!(stream_checkpoint_rows(&source), checkpoint_before);
+        assert_eq!(failure_table_rows(&source), failure_before);
+    }
+}
