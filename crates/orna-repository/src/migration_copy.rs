@@ -445,9 +445,11 @@ fn quarantine_for(destination: &Path) -> Result<PathBuf, RepositoryError> {
 /// the discard again finishes an interrupted removal, and reports
 /// [`DiscardOutcome::NothingToDiscard`] once nothing is left.
 ///
-/// A journal past the prepared stage means activation has begun. Only rolling
-/// it forward is safe, so such a copy is refused with
-/// [`RepositoryError::MigrationCopyAdvanced`]. A repository with no journal
+/// A journal past the prepared stage, or a ref that has moved past the
+/// journal's old head, means activation has begun. Only rolling it forward is
+/// safe, so such a copy is refused with
+/// [`RepositoryError::MigrationCopyAdvanced`] before any lock is touched.
+/// A repository with no journal
 /// that is already an activated format-3 store is kept and reported as
 /// [`DiscardOutcome::AlreadyActivated`].
 pub fn discard_prepared_format3_migration(
@@ -492,24 +494,22 @@ pub fn discard_prepared_format3_migration(
                     Err(RepositoryError::PublicationRecoveryConflict)
                 };
             };
-            // A Prepared journal whose ref already names the candidate is an
-            // activation past the ref CAS: a discard would roll the copy back.
-            let ref_advanced = match owned_copy_repository(&destination)? {
-                Some(copy) => {
-                    if copy.head()?.as_ref() == Some(journal.old_head()) {
-                        // Reclaim a dead publisher's lock bound to this journal before
-                        // the copy is validated; the validation refuses any present lock.
-                        let _coordination_lock = copy.acquire_coordination_lock()?;
-                        copy.reclaim_abandoned_publication_index_lock(&journal)?;
-                        false
-                    } else {
-                        true
-                    }
-                }
+            // Any ref move past the journal's old head is an activation that has
+            // begun: a discard would roll the copy back, so it is refused. The
+            // checks run before any lock is touched, so a refusal changes nothing.
+            let copy = owned_copy_repository(&destination)?;
+            let ref_moved = match &copy {
+                Some(copy) => copy.head()?.as_ref() != Some(journal.old_head()),
                 None => false,
             };
-            if journal.stage() != crate::PublicationJournalStage::Prepared || ref_advanced {
+            if journal.stage() != crate::PublicationJournalStage::Prepared || ref_moved {
                 return Err(RepositoryError::MigrationCopyAdvanced);
+            }
+            if let Some(copy) = copy {
+                // Reclaim a dead publisher's lock bound to this journal before the
+                // copy is validated; the validation refuses any present lock.
+                let _coordination_lock = copy.acquire_coordination_lock()?;
+                copy.reclaim_abandoned_publication_index_lock(&journal)?;
             }
             let (continuity, annotation_defaults) = migration_coordinates(&journal)?;
             // Discard removes a copy whatever its era; only preparation and
