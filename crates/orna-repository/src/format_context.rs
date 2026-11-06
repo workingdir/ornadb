@@ -59,15 +59,12 @@ const STORE_ENTRY: &str = "store";
 /// names the work that removes it. The commit gate
 /// ([`Repository::validate_format3_index_tree`]) admits none of them, so no
 /// reviewed commit adds one.
-const TRANSITIONAL_FORMAT3_ENTRIES: [&str; 2] = [
+const TRANSITIONAL_FORMAT3_ENTRIES: [&str; 1] = [
     // The object identity inventory from before it moved into the store.
     // LSP rename (`orna-lsp` `server.rs`) still writes it, and `orna commit`
     // migrates a staged copy into the store and drops it from the index.
     // Removed by the store-backed LSP rename, ornadb-5il1.414.
     crate::relation_admission::LEGACY_OBJECT_IDENTITY_SIDECAR_PATH,
-    // The record a prepared `orna migrate copy` candidate tracks. Removed when
-    // the migration coordinates move into commit trailers, ornadb-5il1.314.
-    crate::migration_copy::MIGRATION_RECORD,
 ];
 
 /// Repository-format dispatch selected from tracked metadata.
@@ -2140,16 +2137,17 @@ mod graph_bridge_tests {
         }
     }
 
-    /// The transitional `.orna/` entries are exactly the two this build still
-    /// writes, each removed by the work named in `TRANSITIONAL_FORMAT3_ENTRIES`.
-    /// A snapshot carrying one stays readable, but the commit gate refuses it,
+    /// The transitional `.orna/` entry is exactly the one this build still
+    /// writes, removed by the work named in `TRANSITIONAL_FORMAT3_ENTRIES`.
+    /// A snapshot carrying it stays readable, but the commit gate refuses it,
     /// so no reviewed commit adds one. Retiring a writer must retire its entry
-    /// here.
+    /// here. The migration coordinates are journal and commit-trailer data
+    /// (ORNA-META-001), so no migration record is tracked.
     #[test]
     fn transitional_format3_entries_are_pinned_and_refused_by_the_commit_gate() {
         assert_eq!(
             TRANSITIONAL_FORMAT3_ENTRIES,
-            [".orna/object-identities.cbor", ".orna/migration.json"]
+            [".orna/object-identities.cbor"]
         );
         for entry in TRANSITIONAL_FORMAT3_ENTRIES {
             let directory = repository();
