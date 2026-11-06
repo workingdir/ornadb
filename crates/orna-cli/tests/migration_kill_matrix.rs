@@ -237,13 +237,14 @@ fn committed_copy(root: &Path) -> CommittedCopy {
     }
 }
 
-/// The prepared candidate's format-transition record, read from the commit
-/// itself rather than from the journal that names it.
+/// The prepared candidate's format-transition coordinates, read from the commit
+/// itself rather than from the journal that names it. A candidate tracks no
+/// migration file (ORNA-META-001); the commit message carries the source format.
 struct CandidateRecord {
     commit: String,
     tree: String,
     database: Vec<u8>,
-    record: Vec<u8>,
+    message: String,
     carries_legacy_format: bool,
 }
 
@@ -269,7 +270,7 @@ fn candidate_record(root: &Path) -> CandidateRecord {
     let tree = git(root, &["rev-parse", &format!("{commit}^{{tree}}")]);
     CandidateRecord {
         database: git_bytes(root, &["show", &format!("{commit}:.orna/database.orna")]),
-        record: git_bytes(root, &["show", &format!("{commit}:.orna/migration.json")]),
+        message: git(root, &["log", "-1", "--format=%B", &commit]),
         carries_legacy_format: git_succeeds(
             root,
             &["cat-file", "-e", &format!("{commit}:.orna/format.orna")],
@@ -705,12 +706,37 @@ fn migration_copy_of_the_golden_bundle_is_idempotent() {
         source_head,
         "the candidate's parent is the legacy snapshot"
     );
+    // ORNA-META-001: no migration file is tracked; the source format is the
+    // commit trailer and the annotation default is the journal's.
     assert!(
-        String::from_utf8_lossy(&first_record.record).contains("source_format: 1"),
-        "the migration record names the source format"
+        first_record
+            .message
+            .lines()
+            .any(|line| line == "Orna-Migration: format-1-to-3"),
+        "the candidate commit names the source format in its trailer: {}",
+        first_record.message
     );
     assert!(
-        String::from_utf8_lossy(&first_record.record).contains("payload_inspected: false"),
+        !git_succeeds(
+            &destination,
+            &[
+                "cat-file",
+                "-e",
+                &format!("{}:.orna/migration.json", first_record.commit),
+            ],
+        ),
+        "the candidate must not track .orna/migration.json"
+    );
+    let journal = Repository::discover(&destination)
+        .unwrap()
+        .read_publication_journal()
+        .unwrap()
+        .expect("the prepared copy keeps its publication journal");
+    assert!(
+        !journal
+            .migration_annotation_defaults()
+            .expect("the copy records annotation defaults")
+            .payload_inspected(),
         "the annotation default is metadata-only (ORNA-UPGRADE-004)"
     );
     // The recovered identity is the legacy sidecar's, recorded in the
