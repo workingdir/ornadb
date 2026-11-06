@@ -71,7 +71,7 @@ command meets every Orna 1.1.0 requirement.
 | `annotate FILE --type MEDIA_TYPE --output FILE [--suffix HINT]` | Write an annotated Blob file. |
 | `import BUNDLE --dry-run [OPTIONS]` | Report what an import bundle contains. |
 | `export DEST --at SELECTOR [OPTIONS]` | Write, check or restore an offline archive. |
-| `migrate copy DEST --annotation-defaults N --no-persistent-consumers` | Prepare a format-3 candidate from a format-1/2 worktree. The flag confirms that consumer checkpoints are carried, not reset. |
+| `migrate copy DEST [--annotation-defaults N] --no-persistent-consumers` | Prepare a format-3 candidate from a format-1/2 worktree. The flag confirms that consumer checkpoints are carried, not reset. |
 | `publish [--message MESSAGE]` | Commit the durable runtime tail as one publication commit. |
 | `commit -m MESSAGE` | Review and publish exactly the staged candidate. |
 | `history RELATION KEY [OPTIONS]`, `history RELATION --diff FROM TO` | List row history, or compare two snapshots without payloads. |
