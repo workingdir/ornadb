@@ -5,6 +5,7 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- Partial (ornadb-5il1.311, UPGRADE-3 slice S2; ORP-1 row admission): a staged relation carries its admitted rows (`StagedRelation::with_rows`), and the format-3 store writer writes them into the relation's primary map in logical key order, one row per key. Every row is validated against the closed descriptor before any node is written; a refused row (`InvalidStagedRow`) or duplicate key (`DuplicateStagedRow`) fails the whole admission and leaves the store root unchanged. Staging rows for an already-committed relation is refused (`StagedRowsOnCommittedRelation`). Not claimed: the production store builder in `orna-application` does not yet source rows, and the rest of UPGRADE-3 is not done.
 - A killed `orna migrate copy` no longer leaks its staging directory for good
   (ornadb-zors). Each staging copy now pairs with an owner marker,
   `<staging>.owner`, that the running preparation holds under an exclusive
