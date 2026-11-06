@@ -18,7 +18,9 @@ use crate::format3_store::build_format3_store_relations;
 use crate::legacy_store::{
     LegacyReadError, LegacyTableAddress, LegacyTableRows, read_legacy_table_rows,
 };
-use crate::migration_rows::{ExpectedRelation, LegacyTable, migration_row_input};
+use crate::migration_rows::{
+    ExpectedRelation, Format2BlobReader, LegacyTable, migration_row_input_with_format2_blobs,
+};
 use crate::upgrade_gate::{GateExpectation, verify_candidate};
 
 /// The largest committed `.orna` file a migration retires. It matches the
@@ -27,6 +29,9 @@ const MAX_RETIRED_FILE_BYTES: usize = 64 * 1024 * 1024;
 
 /// The most committed tree entries the retired-file walk lists.
 const MAX_RETIRED_TREE_ENTRIES: usize = 1 << 20;
+
+/// The largest Blob a format-2 slot may materialise (ORNA-BLOB-011: 8 MiB).
+const FORMAT2_BLOB_LIMIT: u64 = 8 * 1024 * 1024;
 
 /// The format-3 database record a migration writes; never retired.
 const DATABASE_RECORD: &str = ".orna/database.orna";
@@ -63,9 +68,7 @@ pub(crate) fn build_store_with_expectation(
     let format = repository
         .open_format_context_at_selector(commit.as_str())
         .map_err(RepositoryError::FormatContext)?;
-    if format.repository_format() == RepositoryFormat::Legacy2 {
-        return Err(RepositoryError::Format2RowConversionUnimplemented);
-    }
+    let format2 = format.repository_format() == RepositoryFormat::Legacy2;
     let project = ProjectLoader::default()
         .with_mode(ProjectLoadMode::Migration)
         .load_committed_snapshot(repository, &commit)
@@ -91,7 +94,22 @@ pub(crate) fn build_store_with_expectation(
 
     // Each compact table is addressed by its storage id. A declared relation
     // with no compact storage is an editable table, addressed by its key path.
-    let compact = repository.read_legacy_authoritative_tables(&commit)?;
+    // Format 2 has no compact-storage-v2 decoder: a snapshot with compact
+    // manifests is refused by name, and a format-2 snapshot without them has
+    // only editable tables.
+    let compact = if format2 {
+        if !repository
+            .read_compact_manifest_inventory(&commit)?
+            .is_empty()
+        {
+            return Err(refused(
+                "the format-2 source holds compact-storage-v2 tables, which have no decoder",
+            ));
+        }
+        Vec::new()
+    } else {
+        repository.read_legacy_authoritative_tables(&commit)?
+    };
     let mut addresses: Vec<LegacyTableAddress> = compact
         .iter()
         .map(|table| LegacyTableAddress::Relation(*table.table().as_bytes()))
@@ -147,8 +165,14 @@ pub(crate) fn build_store_with_expectation(
         .zip(rows.iter())
         .map(|(address, table_rows)| LegacyTable::new(address, table_rows))
         .collect();
-    let input =
-        migration_row_input(&declared, &tables).map_err(|error| refused(format!("{error}")))?;
+    let format2_blob_reader = |text: &str| {
+        repository
+            .read_format2_orr_blob(commit.as_str(), text, FORMAT2_BLOB_LIMIT)
+            .map_err(|error| error.to_string())
+    };
+    let format2_blobs: Option<Format2BlobReader<'_>> = format2.then_some(&format2_blob_reader);
+    let input = migration_row_input_with_format2_blobs(&declared, &tables, format2_blobs)
+        .map_err(|error| refused(format!("{error}")))?;
     let annotation_default_entries = u32::try_from(input.annotation_default_count())
         .map_err(|_| refused("the legacy Blob count exceeds the migration coordinate"))?;
     let descriptors = repository
