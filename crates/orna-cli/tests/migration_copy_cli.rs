@@ -482,14 +482,25 @@ fn cli_migration_copy_names_unparseable_committed_format_record() {
 /// migrates like any other legacy source. The journal names the committed
 /// record bytes as the file the migration removes. The legacy source stays
 /// read-only, and only the prepared copy admits a runtime, so `migrate copy`
-/// can carry checkpoints into it. The format-2 record is refused by name in
-/// `cli_migration_copy_refuses_format_two_source_by_name` (MIGRATION.md:3).
+/// can carry checkpoints into it. Format-2 sources are populated in
+/// `cli_migration_copy_prepares_a_populated_format_two_source`.
 #[test]
 fn cli_migration_copy_prepares_a_candidate_from_recorded_legacy_metadata() {
-    let (format_record, format) = (
-        include_str!("fixtures/format-context/format-1-ornadb-1.0.orna"),
-        1,
-    );
+    for (format_record, format) in [
+        (
+            include_str!("fixtures/format-context/format-1-ornadb-1.0.orna"),
+            1,
+        ),
+        (
+            include_str!("fixtures/format-context/format-2-draft-1.1.0.orna"),
+            2,
+        ),
+    ] {
+        assert_legacy_metadata_source_prepares(format_record, format);
+    }
+}
+
+fn assert_legacy_metadata_source_prepares(format_record: &str, format: u8) {
     let parent = TempDir::new().unwrap();
     let source = parent.path().join("source");
     fs::create_dir(&source).unwrap();
@@ -584,35 +595,61 @@ fn cli_migration_copy_prepares_a_candidate_from_recorded_legacy_metadata() {
     );
 }
 
-/// ORNA-UPGRADE-003, MIGRATION.md:3, UPGRADE-3 step 3: a format-2 source is
-/// refused by name. Its row layout has no production decoder, and replacing
-/// its header would present draft data as format 3. The refusal names the
-/// missing conversion and writes neither a destination nor source state.
+/// ORNA-UPGRADE-001, ORNA-UPGRADE-002, ORNA-ROW-013, ORNA-OGB-007: a populated
+/// format-2 source migrates to a format-3 candidate. Its loose row unit holds
+/// an inline ORR-2 Blob (padded Base64), which the migration lowers through the
+/// same Blob path as format-1 content. Two preparations name the same candidate
+/// and leave the source untouched.
 #[test]
-fn cli_migration_copy_refuses_format_two_source_by_name() {
+fn cli_migration_copy_prepares_a_populated_format_two_source() {
     let parent = TempDir::new().unwrap();
     let source = parent.path().join("source");
     fs::create_dir(&source).unwrap();
-    initialize_legacy_source_with_format(
-        &source,
-        include_str!("fixtures/format-context/format-2-draft-1.1.0.orna"),
-    );
+    initialize_populated_format_two_source(&source);
     let source_status = git_output(
         &source,
         &["status", "--porcelain=v2", "--untracked-files=all"],
     );
-    let destination = parent.path().join("migrated");
     let git_trace = parent.path().join("git-trace.log");
 
-    let output = run_copy(&source, &destination, "0", &git_trace);
-
+    let first = parent.path().join("first");
+    let output = run_copy(&source, &first, "0", &git_trace);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!output.status.success(), "{stderr}");
+    assert!(output.status.success(), "{stderr}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
-        stderr.contains("format-2 row conversion is not implemented"),
-        "{stderr}"
+        stdout.starts_with("prepared or recovered format-3 migration copy: source_format=2 "),
+        "{stdout}"
     );
-    assert!(!destination.exists(), "{stderr}");
+
+    let second = parent.path().join("second");
+    let output = run_copy(&source, &second, "0", &git_trace);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+
+    let candidate_head = |destination: &Path| {
+        Repository::discover(destination)
+            .unwrap()
+            .read_publication_journal()
+            .unwrap()
+            .expect("the migration copy journals its candidate")
+            .new_head()
+            .as_str()
+            .to_owned()
+    };
+    // Store ref identities are per-preparation, so the two candidates are
+    // checked for their shared shape rather than an identical tree.
+    for destination in [&first, &second] {
+        let candidate = candidate_head(destination);
+        assert_eq!(
+            String::from_utf8(git_output(
+                destination,
+                &["ls-tree", "--name-only", &candidate, "--", ".orna/"],
+            ))
+            .unwrap(),
+            ".orna/database.orna\n.orna/store\n"
+        );
+    }
     assert_eq!(
         git_output(
             &source,
@@ -620,6 +657,40 @@ fn cli_migration_copy_refuses_format_two_source_by_name() {
         ),
         source_status
     );
+}
+
+/// Commits a format-2 source with one populated Contact table: the module, one
+/// loose row unit carrying an inline ORR-2 Blob, the format-2 record and the
+/// legacy sidecar.
+fn initialize_populated_format_two_source(root: &Path) {
+    git_output(root, &["init", "-b", "main"]);
+    git_output(root, &["config", "user.name", "kierandrewett"]);
+    git_output(root, &["config", "user.email", "kieran@drewett.dev"]);
+    git_output(root, &["config", "commit.gpgsign", "false"]);
+    fs::write(
+        root.join("main.orna"),
+        include_str!("fixtures/legacy-format2-loose-main.orna"),
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("contacts/Contact")).unwrap();
+    fs::write(
+        root.join("contacts/Contact/alice-smith.orna"),
+        include_str!("fixtures/legacy-format2-contact-alice-smith.orna"),
+    )
+    .unwrap();
+    fs::create_dir_all(root.join(".orna")).unwrap();
+    fs::write(
+        root.join(".orna/format.orna"),
+        include_str!("fixtures/format-context/format-2-draft-1.1.0.orna"),
+    )
+    .unwrap();
+    fs::write(
+        root.join(".orna/database.orna"),
+        include_str!("fixtures/format-context/database-sidecar.orna"),
+    )
+    .unwrap();
+    git_output(root, &["add", "."]);
+    git_output(root, &["commit", "-m", "populated format-2 source"]);
 }
 
 #[test]
