@@ -7,8 +7,12 @@
 //! declared relations are built from the committed object identities, and each
 //! declared table's legacy rows are read from the same snapshot.
 
+use std::collections::BTreeSet;
+
 use orna_project::{ObjectIdentityManifest, ProjectLoadMode, ProjectLoader};
-use orna_repository::migration_copy::{CandidateGate, MigrationStore, RetiredLegacyPath};
+use orna_repository::migration_copy::{
+    CandidateGate, MigrationStore, RetiredLegacyKind, RetiredLegacyPath,
+};
 use orna_repository::relation_admission::{OBJECT_IDENTITY_RELATION_ID, StoredObjectIdentity};
 use orna_repository::{
     CommittedTreeEntryKind, DatabaseId, Repository, RepositoryError, RepositoryFormat,
@@ -16,7 +20,8 @@ use orna_repository::{
 
 use crate::format3_store::build_format3_store_relations;
 use crate::legacy_store::{
-    LegacyReadError, LegacyTableAddress, LegacyTableRows, read_legacy_table_rows,
+    LegacyReadError, LegacyTableAddress, LegacyTableRows, loose_row_unit_paths,
+    read_legacy_table_rows,
 };
 use crate::migration_rows::{
     ExpectedRelation, Format2BlobReader, LegacyTable, migration_row_input_with_format2_blobs,
@@ -213,6 +218,30 @@ pub(crate) fn build_store_with_expectation(
         let committed = repository.read_committed_file(&commit, path, MAX_RETIRED_FILE_BYTES)?;
         retired.push(RetiredLegacyPath {
             path: path.to_owned(),
+            kind: RetiredLegacyKind::Metadata,
+            committed,
+        });
+    }
+
+    // The loose row units of every editable table the migration read are
+    // retired with it. They come from the same enumeration the row reader
+    // decodes, so a row file is retired exactly when its row was migrated.
+
+    let mut loose_paths = BTreeSet::new();
+    for address in &addresses {
+        if let LegacyTableAddress::TablePath(table_path) = address {
+            loose_paths.extend(
+                loose_row_unit_paths(repository, &commit, table_path).map_err(|error| {
+                    refused(format!("the loose rows are unreadable: {error:?}"))
+                })?,
+            );
+        }
+    }
+    for path in loose_paths {
+        let committed = repository.read_committed_file(&commit, &path, MAX_RETIRED_FILE_BYTES)?;
+        retired.push(RetiredLegacyPath {
+            path,
+            kind: RetiredLegacyKind::LooseRowUnit,
             committed,
         });
     }
