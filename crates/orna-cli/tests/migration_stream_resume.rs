@@ -10,11 +10,11 @@ use std::{fs, path::Path, process::Command};
 
 use orna_repository::{Repository, RepositoryFormat};
 use orna_runtime::{
-    CheckpointKey, Component, ConsumerIdentity, ListStreamSource, RuntimeError, RuntimeIdentity,
-    RuntimeState, StreamCheckpoint, StreamHandler, StreamHandlerResult, StreamItem,
-    StreamMutationBatch, StreamStep, WriterLease, import_stream_carry,
-    migration_copy_runtime_identity, read_stream_carry, repository_runtime_identity,
-    runtime_identity_for_database_id,
+    CheckpointKey, CheckpointPrecondition, CheckpointResetAudit, CheckpointResetRequest, Component,
+    ConsumerIdentity, ListStreamSource, Position, RuntimeError, RuntimeIdentity, RuntimeState,
+    StreamCheckpoint, StreamHandler, StreamHandlerResult, StreamItem, StreamMutationBatch,
+    StreamStep, WriterLease, import_stream_carry, migration_copy_runtime_identity,
+    read_stream_carry, repository_runtime_identity, runtime_identity_for_database_id,
 };
 use tempfile::TempDir;
 
@@ -697,4 +697,95 @@ fn activated_migration_copy_resumes_carried_checkpoint_without_reset() {
         git_output(&source, &["status", "--porcelain"]),
         source_status
     );
+}
+
+/// Resets the paused source consumer one version forward, to a new position.
+fn reset_source_checkpoint(root: &Path, before: &StreamCheckpoint) -> StreamCheckpoint {
+    runtime().block_on(async {
+        let repository = Repository::discover(root).unwrap();
+        let (identity, digest) = source_runtime_identity(root);
+        let state = RuntimeState::open(&repository, identity, digest)
+            .await
+            .expect("open source runtime");
+        let writer = state.acquire_lease([48; 16]).await.unwrap();
+        state
+            .reset_checkpoint(
+                writer,
+                CheckpointResetRequest {
+                    key: checkpoint_key(),
+                    expected: CheckpointPrecondition {
+                        version: before.version,
+                        committed: before.committed.clone(),
+                    },
+                    to: Position {
+                        token: Component::new("opaque-41").unwrap(),
+                    },
+                    reason: "operator reset after upstream repair".into(),
+                },
+            )
+            .await
+            .expect("resetting the paused consumer")
+    })
+}
+
+/// The checkpoint reset audit rows in an activated copy, in admission order.
+fn activated_reset_audits(root: &Path) -> Vec<CheckpointResetAudit> {
+    runtime().block_on(async {
+        let repository = Repository::discover(root).unwrap();
+        let (identity, digest) = repository_runtime_identity(&repository).unwrap();
+        let state = RuntimeState::open(&repository, identity, digest)
+            .await
+            .expect("open activated runtime");
+        state
+            .checkpoint_reset_audits(&checkpoint_key())
+            .await
+            .unwrap()
+    })
+}
+
+/// A checkpoint reset is durable history. The migrated copy keeps its audit row,
+/// with the old and new typed versions and positions and the reason, and the
+/// carried checkpoint is the reset target.
+#[test]
+fn activated_migration_copy_carries_checkpoint_reset_audit() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    dirty_legacy_source(&source);
+    let before = give_source_a_persistent_consumer(&source, true);
+    assert_eq!(before.version, 2);
+    let reset = reset_source_checkpoint(&source, &before);
+    assert_eq!(reset.version, 3);
+    let destination = parent.path().join("migrated");
+
+    let prepared = run_copy(&source, &destination);
+    assert!(
+        prepared.status.success(),
+        "migrate copy must carry the reset audit: {}",
+        String::from_utf8_lossy(&prepared.stderr)
+    );
+    let activated = run_upgrade(&source, &destination);
+    assert!(
+        activated.status.success(),
+        "upgrade --yes-activate: {}",
+        String::from_utf8_lossy(&activated.stderr)
+    );
+
+    let audits = activated_reset_audits(&destination);
+    assert_eq!(audits.len(), 1, "the reset audit survives activation");
+    let audit = &audits[0];
+    assert_eq!(audit.key, checkpoint_key());
+    assert_eq!(audit.old_version, before.version);
+    assert_eq!(audit.old_position, before.committed);
+    assert_eq!(audit.new_version, reset.version);
+    assert_eq!(
+        audit.new_position,
+        Position {
+            token: Component::new("opaque-41").unwrap(),
+        }
+    );
+    assert_eq!(audit.reason, "operator reset after upstream repair");
+    assert!(!audit.redacted);
+    assert_eq!(activated_checkpoint(&destination).version, reset.version);
+    assert_eq!(activated_bridge_count(&destination), 1);
 }
