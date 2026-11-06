@@ -96,7 +96,9 @@ impl CandidateGate {
         Self(Arc::new(check))
     }
 
-    fn check(&self, repository: &Repository, candidate: &PrivateCommit) -> Result<(), String> {
+    /// Runs the check over `candidate`, the way the migration does before it
+    /// accepts the candidate.
+    pub fn check(&self, repository: &Repository, candidate: &PrivateCommit) -> Result<(), String> {
         (self.0)(repository, candidate)
     }
 }
