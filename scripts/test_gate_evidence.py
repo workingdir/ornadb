@@ -733,9 +733,17 @@ class ReviewFindingTests(unittest.TestCase):
             self.assertIn("--timeout-minutes", line)
         for name in ("source-audits.yml", "cli-tests.yml", "nightly-gates.yml"):
             text = (root / name).read_text(encoding="utf-8")
-            self.assertIn("apt_opts=(-o Acquire::Retries=3", text, name)
+            self.assertIn(
+                "apt_opts=(-o Acquire::Retries=3 -o Acquire::ForceIPv4=true "
+                "-o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)",
+                text,
+                name,
+            )
             self.assertIn('apt-get "${apt_opts[@]}" update', text, name)
-            self.assertIn('apt-get "${apt_opts[@]}" install -y --download-only --no-install-recommends', text, name)
+            self.assertIn("install -y --download-only --no-install-recommends", text, name)
+            if name != "source-audits.yml":
+                self.assertIn("-o Debug::Acquire::http=true install -y --download-only", text, name)
+                self.assertIn(r"'s|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g'", text, name)
             self.assertNotIn("sudo apt-get -o Acquire::Retries=3", text, name)
             self.assertNotIn("sudo apt-get update\n", text, name)
 
