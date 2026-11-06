@@ -5,6 +5,11 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- `orna migrate copy` now refuses a legacy source whose runtime tail holds
+  unpublished mutations (ornadb-5il1.244). Such a copy would resume past rows
+  the destination never received. The refusal names the count, creates no
+  destination, and leaves the source unchanged. A source with an empty tail
+  still migrates.
 - A killed `orna migrate copy` no longer leaks its staging directory for good
   (ornadb-zors). Each staging copy now pairs with an owner marker,
   `<staging>.owner`, that the running preparation holds under an exclusive
