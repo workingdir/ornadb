@@ -1,6 +1,8 @@
 use std::{fs, path::Path, process::Command};
 
 use orna_repository::Repository;
+use orna_runtime::{Mutation, NoFault, RuntimeState};
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 fn git_output(directory: &Path, arguments: &[&str]) -> Vec<u8> {
@@ -985,4 +987,121 @@ fn cli_migration_copy_refuses_while_a_discard_quarantine_is_pending() {
         String::from_utf8_lossy(&discarded.stderr)
     );
     assert!(!quarantine.exists());
+}
+
+/// The source's pending runtime mutations, read straight from its state database.
+/// A source that never opened its runtime has no state database and an empty tail.
+fn pending_mutation_count(source: &Path) -> i64 {
+    let state_db = Repository::discover(source)
+        .unwrap()
+        .runtime_paths()
+        .state_db();
+    if !state_db.exists() {
+        return 0;
+    }
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let database = libsql::Builder::new_local(&state_db).build().await.unwrap();
+            let connection = database.connect().unwrap();
+            let mut rows = connection
+                .query("SELECT COUNT(*) FROM pending_mutation", ())
+                .await
+                .unwrap();
+            rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
+        })
+}
+
+/// Appends one real unpublished mutation to the legacy source through the
+/// runtime, under the same migration-carry identity the copy reads with.
+fn append_unpublished_mutation(source: &Path) {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let repository = Repository::discover(source).unwrap();
+            let (identity, digest) =
+                orna_runtime::migration_source_runtime_identity(&repository).unwrap();
+            let state = RuntimeState::open(&repository, identity, digest)
+                .await
+                .unwrap();
+            let lease = state.acquire_lease([45; 16]).await.unwrap();
+            let capture = state.capture().await.unwrap();
+            let payload = b"unpublished legacy-source row".to_vec();
+            let mutation = Mutation {
+                id: [1; 16],
+                digest: Sha256::digest(&payload).into(),
+                payload,
+            };
+            state
+                .commit(lease, &capture, &mutation, [2; 32], &NoFault)
+                .await
+                .unwrap();
+        });
+}
+
+#[test]
+fn migration_refuses_a_source_with_unpublished_rows_and_changes_nothing() {
+    let parent = TempDir::new().unwrap();
+    let git_trace = parent.path().join("git-trace.log");
+
+    // An empty tail still migrates.
+    let empty = parent.path().join("empty");
+    fs::create_dir(&empty).unwrap();
+    initialize_legacy_source(&empty);
+    assert_eq!(pending_mutation_count(&empty), 0);
+    let empty_destination = parent.path().join("empty-migrated");
+    let migrated = run_copy(&empty, &empty_destination, "0", &git_trace);
+    assert!(
+        migrated.status.success(),
+        "migration copy of an empty tail: {}",
+        String::from_utf8_lossy(&migrated.stderr)
+    );
+    assert!(empty_destination.is_dir());
+
+    // A source with an unpublished mutation is refused and left as it was.
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    initialize_legacy_source(&source);
+    append_unpublished_mutation(&source);
+    assert_eq!(pending_mutation_count(&source), 1);
+    let state_db = Repository::discover(&source)
+        .unwrap()
+        .runtime_paths()
+        .state_db();
+    let head_before = git_output(&source, &["rev-parse", "HEAD"]);
+    let status_before = git_output(
+        &source,
+        &["status", "--porcelain=v2", "--untracked-files=all"],
+    );
+    let refs_before = git_output(&source, &["for-each-ref"]);
+    let state_bytes_before = fs::read(&state_db).unwrap();
+
+    let destination = parent.path().join("refused");
+    let refused = run_copy(&source, &destination, "0", &git_trace);
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(!refused.status.success(), "a source with a tail is refused");
+    assert!(
+        stderr.contains("unpublished_mutations=1"),
+        "the refusal names the count: {stderr}"
+    );
+    assert!(
+        !destination.exists(),
+        "no destination is created for a refused source"
+    );
+
+    assert_eq!(git_output(&source, &["rev-parse", "HEAD"]), head_before);
+    assert_eq!(
+        git_output(
+            &source,
+            &["status", "--porcelain=v2", "--untracked-files=all"]
+        ),
+        status_before
+    );
+    assert_eq!(git_output(&source, &["for-each-ref"]), refs_before);
+    assert_eq!(fs::read(&state_db).unwrap(), state_bytes_before);
+    assert_eq!(pending_mutation_count(&source), 1);
 }
