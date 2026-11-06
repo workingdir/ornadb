@@ -4566,7 +4566,7 @@ mod legacy_fixture_builder;
 mod legacy_fixture_writer;
 #[cfg(feature = "legacy-fixture-writer")]
 pub use legacy_fixture_builder::{
-    write_legacy_format1_fixture, write_legacy_format1_golden_fixture,
+    golden_compact_schemas, write_legacy_format1_fixture, write_legacy_format1_golden_fixture,
 };
 
 #[cfg(test)]
