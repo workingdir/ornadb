@@ -15,6 +15,12 @@ been published.
   rows. Legacy-row admission through `admit_project_rows` is tracked separately
   under ornadb-5il1.473. ornadb-5il1.310 (S1) is not complete until that
   admission path is wired.
+- `migrate copy` refuses a source with an unpublished tail without writing to the source runtime; the pending-count probe is read-only and removes only the WAL/SHM sidecars it created. The refusal names the publish step only when the source HEAD is writable.
+- `orna migrate copy` now refuses a legacy source whose runtime tail holds
+  unpublished mutations (ornadb-5il1.244). Such a copy would resume past rows
+  the destination never received. The refusal names the count, creates no
+  destination, and leaves the source unchanged. A source with an empty tail
+  still migrates.
 - A killed `orna migrate copy` no longer leaks its staging directory for good
   (ornadb-zors). Each staging copy now pairs with an owner marker,
   `<staging>.owner`, that the running preparation holds under an exclusive

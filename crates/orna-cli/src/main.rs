@@ -1170,6 +1170,34 @@ fn unpublished_mutation_count(
         })
 }
 
+/// Counts the unpublished tail of a migration source without writing to it.
+/// The count is read through a read-only handle to `state.db`: no runtime is
+/// opened, no owner lock is taken and no schema is created or migrated, so a
+/// source that refuses a copy is left byte-identical.
+fn source_unpublished_mutation_count(
+    repository: &orna_repository::Repository,
+) -> Result<usize, Diagnostic> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2200",
+                "local runtime publication status could not be read",
+                "retry `migrate copy` after checking the source runtime state",
+            )
+        })?;
+    runtime
+        .block_on(orna_runtime::RuntimeState::read_pending_count(repository))
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2200",
+                "local runtime publication status could not be read",
+                "retry `migrate copy` after checking the source runtime state",
+            )
+        })
+}
+
 fn runtime_publication_metadata_rows(
     endpoint: &Endpoint,
     std_snapshot: StdSnapshotPin,
