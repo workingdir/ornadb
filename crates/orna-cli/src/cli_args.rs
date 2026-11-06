@@ -137,6 +137,7 @@ pub(super) enum Command {
     Publish(Vec<String>),
     Commit(Vec<String>),
     Migrate(Vec<String>),
+    Upgrade(Vec<String>),
     Annotate(Vec<String>),
     Check,
     Explain(String),
@@ -286,10 +287,6 @@ fn refused_command(name: &str) -> Diagnostic {
         "prune" => (
             "`prune` is not available in this build",
             "removing unreachable data is not available in this build; nothing was deleted",
-        ),
-        "upgrade" => (
-            "`upgrade` is not available in this build",
-            "format upgrades are not available in this build; nothing was changed",
         ),
         "restore" => (
             "`restore` is not available in this build",
@@ -667,6 +664,7 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
         Some("publish") => Command::Publish(words.by_ref().map(str::to_owned).collect()),
         Some("commit") => Command::Commit(words.by_ref().map(str::to_owned).collect()),
         Some("migrate") => Command::Migrate(words.by_ref().map(str::to_owned).collect()),
+        Some("upgrade") => Command::Upgrade(words.by_ref().map(str::to_owned).collect()),
         Some("serve") => {
             let mut port = 8080;
             let mut allow_push = false;
@@ -819,8 +817,7 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
             None => Command::Run(Invocation::ProjectMain),
         },
         Some(
-            name @ ("switch" | "merge" | "reset" | "pull" | "stash" | "fmt" | "verify" | "prune"
-            | "upgrade"),
+            name @ ("switch" | "merge" | "reset" | "pull" | "stash" | "fmt" | "verify" | "prune"),
         ) => {
             return Err(refused_command(name));
         }
