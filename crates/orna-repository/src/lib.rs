@@ -5253,6 +5253,9 @@ impl Repository {
         {
             return Err(RepositoryError::InvalidFormatMigration);
         }
+        if migration_copy::journal_lists_migration_record(journal)? {
+            return Err(RepositoryError::LegacyMigrationCopy);
+        }
         if journal.stage() != PublicationJournalStage::Prepared
             || journal.runtime_intent_id().is_none()
             || expected_index.head() != Some(journal.old_head())
@@ -5442,6 +5445,11 @@ impl Repository {
             self.reclaim_orphan_publication_index_lock()?;
             return Ok(None);
         };
+        if journal.stage() == PublicationJournalStage::Prepared
+            && migration_copy::journal_lists_migration_record(&journal)?
+        {
+            return Err(RepositoryError::LegacyMigrationCopy);
+        }
         self.adopt_publication_pins_locked(&journal)?;
         self.reclaim_abandoned_publication_index_lock(&journal)?;
         let base_tree = journal
@@ -10963,6 +10971,10 @@ pub enum RepositoryError {
     DetachedHead,
     InvalidPublicationJournal,
     InvalidFormatMigration,
+    /// A prepared migration copy journals `.orna/migration.json`, the record
+    /// copies prepared before ORNA-META-001 carried. It cannot be prepared,
+    /// recovered, or published; discarding it is the only remedy.
+    LegacyMigrationCopy,
     InvalidCompactManifest,
     UnsafeManagedPath,
     NoManagedPaths,
@@ -11036,6 +11048,9 @@ impl fmt::Display for RepositoryError {
             Self::InvalidFormatMigration => {
                 f.write_str("invalid or unsupported repository format migration")
             }
+            Self::LegacyMigrationCopy => f.write_str(
+                "prepared migration copy carries the retired migration record; discard it and prepare again",
+            ),
             Self::InvalidCompactManifest => f.write_str("invalid compact storage manifest"),
             Self::UnsafeManagedPath => f.write_str("unsafe managed path"),
             Self::NoManagedPaths => f.write_str("at least one managed path is required"),
