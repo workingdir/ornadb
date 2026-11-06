@@ -40,7 +40,7 @@ use sha2::{Digest, Sha256};
 use crate::{
     DatabaseId, FormatContextError, GitCommitRef, GitIndexLock, HistoricalFormatContext,
     IndexGeneration, IndexTreeRef, PrivateCommit, Repository, RepositoryError, RepositoryFormat,
-    RepositoryFormatContext, Uuid,
+    RepositoryFormatContext, StoreBinding, Uuid,
     allocator::AllocatorError,
     bind_tree_entry_in_index,
     blob_store::GearChunker,
@@ -108,6 +108,7 @@ pub type AllocatorWatermarks = BTreeMap<[u8; 16], BigInt>;
 pub const LEGACY_OBJECT_IDENTITY_SIDECAR_PATH: &str = ".orna/object-identities.cbor";
 
 const STORE_PATH: &str = ".orna/store";
+const DATABASE_RECORD_PATH: &str = ".orna/database.orna";
 const STAGED_CANDIDATE_MESSAGE: &str = "orna: staged candidate";
 
 /// Stable relation UUID of the sealed explicit-rekey log (ORNA-EVOL-007,
@@ -198,6 +199,9 @@ pub enum RelationAdmissionError {
     /// The ordinary index stages no `.orna/store`, so it has no identity
     /// inventory to change; the first `orna commit` creates one.
     NoStagedStore,
+    /// The expected `HEAD` already holds a `.orna/store`. A fresh store built
+    /// over it would drop the relations that store holds, so it is refused.
+    HeadStoreExists,
     /// A table's hidden allocator ref could not be read.
     Allocator(AllocatorError),
     /// A rekey log record is not a valid system relation entry.
@@ -278,6 +282,9 @@ impl std::fmt::Display for RelationAdmissionError {
                 formatter.write_str("an allocator summary record is invalid")
             }
             Self::NoStagedStore => formatter.write_str("the Git index stages no .orna/store"),
+            Self::HeadStoreExists => formatter.write_str(
+                "the expected HEAD already holds a .orna/store; a fresh store would drop its relations",
+            ),
             Self::Allocator(error) => write!(formatter, "{error}"),
             Self::InvalidRekeyLog => formatter.write_str("an object rekey log record is invalid"),
             Self::SourceNotStaged { path } => write!(
@@ -1024,6 +1031,15 @@ impl StoreAdmission {
     }
 }
 
+/// The store content a relation candidate admits: the relations, identities
+/// and allocator watermarks its fresh `.orna/store` is built from.
+#[derive(Clone, Copy, Debug)]
+pub struct RelationCandidateContent<'a> {
+    pub relations: &'a [StagedRelation],
+    pub identities: &'a [StoredObjectIdentity],
+    pub watermarks: &'a AllocatorWatermarks,
+}
+
 impl Repository {
     /// Captures the ordinary index as an immutable private candidate without
     /// changing the index, worktree or refs. The commit object stays
@@ -1629,6 +1645,94 @@ impl Repository {
             tree: tree.clone(),
             commit,
         })
+    }
+
+    /// Builds a private format-3 candidate whose `.orna/store` is a fresh store
+    /// admitting `relations` and `identities`, committed with the tree
+    /// `changes` describe (UPGRADE-3 steps 3-5). The store is written by the
+    /// same admission and root writer a staged store uses.
+    ///
+    /// `expected_head` must hold no `.orna/store`: a fresh store built over one
+    /// would drop its relations. A change may not write under `.orna/store`,
+    /// and a change to `.orna/database.orna` must record `database_id`. The
+    /// candidate is read back through the store reader before it is returned.
+    /// A refusal writes no ref; objects it wrote before the refusal stay
+    /// unreachable.
+    pub fn build_private_commit_with_relations(
+        &self,
+        expected_head: &GitCommitRef,
+        changes: &[crate::ManagedFileChange],
+        content: RelationCandidateContent<'_>,
+        database_id: DatabaseId,
+        message: &str,
+    ) -> Result<PrivateCommit, RelationAdmissionError> {
+        let RelationCandidateContent {
+            relations,
+            identities,
+            watermarks,
+        } = content;
+        if self.tree_store_root(expected_head.as_str())?.is_some() {
+            return Err(RelationAdmissionError::HeadStoreExists);
+        }
+        for change in changes {
+            let path = change.path.as_path();
+            if path.starts_with(STORE_PATH) {
+                return Err(RepositoryError::UnsafeManagedPath.into());
+            }
+            if path == Path::new(DATABASE_RECORD_PATH)
+                && let Some(bytes) = change.bytes()
+            {
+                let recorded = crate::init::format_context::parse_canonical_database(bytes)
+                    .map_err(|()| {
+                        RelationAdmissionError::Format(FormatContextError::MetadataInvalid)
+                    })?;
+                if recorded != database_id {
+                    return Err(RelationAdmissionError::Format(
+                        FormatContextError::MetadataInvalid,
+                    ));
+                }
+            }
+        }
+
+        let mut writer = NodeWriter::new(self)?;
+        let admitted = admit_relations(
+            &mut writer,
+            Vec::new(),
+            &BTreeMap::new(),
+            None,
+            relations,
+            identities,
+            watermarks,
+            CommittedRelationChanges::Allowed,
+        )?;
+        let store_root = write_store_root(&mut writer, *database_id.as_bytes(), &admitted.entries)?;
+        writer.sync()?;
+        NativeGraphContext::read_store_relations(
+            self,
+            writer.algorithm,
+            *database_id.as_bytes(),
+            &store_root,
+        )?;
+
+        let candidate = self
+            .build_private_commit_inner(
+                expected_head,
+                changes,
+                Some(StoreBinding::Decoded(&store_root)),
+                message,
+                None,
+            )
+            .map_err(RelationAdmissionError::Repository)?;
+        let format = self.open_private_candidate_format_context(&candidate)?;
+        if format.repository_format() != RepositoryFormat::Format3 {
+            return Err(RelationAdmissionError::NotFormat3);
+        }
+        if format.require_database_id()? != database_id {
+            return Err(RelationAdmissionError::Format(
+                FormatContextError::MetadataInvalid,
+            ));
+        }
+        Ok(candidate)
     }
 
     /// The `.orna/store` tree named by a tree-ish, when it has one.
@@ -3843,6 +3947,228 @@ mod tests {
         assert_eq!(git(root, &["ls-files", "--", "notes.txt"]), "");
         assert_eq!(fs::read(root.join("notes.txt")).unwrap(), b"tracked");
         assert_eq!(git(root, &["status", "--porcelain"]), "?? notes.txt\n");
+    }
+
+    /// A migration candidate's tree changes: the database record rewritten
+    /// and the legacy format record removed (UPGRADE-3 step 5).
+    fn migration_changes(database: Vec<u8>) -> Vec<crate::ManagedFileChange> {
+        vec![
+            crate::ManagedFileChange::new(
+                crate::ManagedPath::new(".orna/database.orna").expect("managed path"),
+                Some(database),
+            ),
+            crate::ManagedFileChange::new(
+                crate::ManagedPath::new(".orna/format.orna").expect("managed path"),
+                None,
+            ),
+        ]
+    }
+
+    /// `main.orna` and the database record committed as the base `HEAD`, with
+    /// the database identity it records.
+    fn committed_base(root: &Path, repository: &Repository) -> (GitCommitRef, DatabaseId, Vec<u8>) {
+        git(root, &["commit", "--quiet", "-m", "base"]);
+        let head = repository.head().unwrap().expect("committed HEAD");
+        let database_id = repository
+            .open_pinned_format_context(head.as_str())
+            .unwrap()
+            .require_database_id()
+            .unwrap();
+        let database = fs::read(root.join(".orna/database.orna")).unwrap();
+        (head, database_id, database)
+    }
+
+    /// Builds the candidate of the `music` relation with `rows` through the
+    /// public relation path.
+    fn build_music_candidate(
+        repository: &Repository,
+        head: &GitCommitRef,
+        changes: &[crate::ManagedFileChange],
+        rows: Vec<(crate::row_store::TypedKey, Vec<u8>)>,
+        database_id: DatabaseId,
+    ) -> Result<PrivateCommit, RelationAdmissionError> {
+        let music = relation(1);
+        let relations =
+            [StagedRelation::new(music, table_descriptor(music, "Str")).with_rows(rows)];
+        let identities = identities_for(&[music]);
+        let watermarks = AllocatorWatermarks::new();
+        repository.build_private_commit_with_relations(
+            head,
+            changes,
+            RelationCandidateContent {
+                relations: &relations,
+                identities: &identities,
+                watermarks: &watermarks,
+            },
+            database_id,
+            "migration candidate",
+        )
+    }
+
+    #[test]
+    fn a_candidate_carries_its_rows_identities_and_tree_changes() {
+        let (directory, repository) = initialized_repository();
+        let root = directory.path();
+        let (head, database_id, database) = committed_base(root, &repository);
+        let music = relation(1);
+
+        let candidate = build_music_candidate(
+            &repository,
+            &head,
+            &migration_changes(database),
+            music_rows(false),
+            database_id,
+        )
+        .expect("build the candidate");
+
+        // The tree holds the store and the rewritten database record, and no
+        // format record.
+        assert_eq!(
+            git(
+                root,
+                &[
+                    "ls-tree",
+                    "--name-only",
+                    candidate.tree().as_str(),
+                    ".orna/store",
+                    ".orna/database.orna",
+                    ".orna/format.orna"
+                ]
+            ),
+            ".orna/database.orna\n.orna/store\n"
+        );
+        assert_eq!(
+            git(
+                root,
+                &[
+                    "ls-tree",
+                    "--name-only",
+                    candidate.tree().as_str(),
+                    "main.orna"
+                ]
+            ),
+            "main.orna\n"
+        );
+
+        // The real store reader resolves the rows and the identity inventory.
+        let format = repository
+            .open_private_candidate_format_context(&candidate)
+            .expect("open the candidate through the store reader");
+        assert_eq!(format.repository_format(), RepositoryFormat::Format3);
+        assert_eq!(format.require_database_id().unwrap(), database_id);
+        let rows = format
+            .load_row_map(music)
+            .expect("the candidate's relation resolves");
+        assert_eq!(rows.version().row_count(), Some(2));
+        let graph = format
+            .open_native_graph(&rows)
+            .expect("issue the relation graph");
+        let scope = graph.open_read_scope().unwrap();
+        assert_eq!(
+            graph.committed_rows_with_fields(&scope).unwrap(),
+            vec![
+                (
+                    crate::row_store::TypedKey::Text("a".to_owned()),
+                    title_fields("Alpha")
+                ),
+                (
+                    crate::row_store::TypedKey::Text("b".to_owned()),
+                    title_fields("Beta")
+                ),
+            ]
+        );
+        assert_eq!(
+            repository
+                .read_object_identities_in(&format, candidate.commit().as_str())
+                .unwrap(),
+            Some(identities_for(&[music]))
+        );
+    }
+
+    #[test]
+    fn candidates_built_twice_are_byte_identical() {
+        let (directory, repository) = initialized_repository();
+        let root = directory.path();
+        let (head, database_id, database) = committed_base(root, &repository);
+        let changes = migration_changes(database);
+
+        let first =
+            build_music_candidate(&repository, &head, &changes, music_rows(false), database_id)
+                .expect("first build");
+        // The input order of the rows is irrelevant to the store.
+        let second =
+            build_music_candidate(&repository, &head, &changes, music_rows(true), database_id)
+                .expect("second build");
+        assert_eq!(first.tree(), second.tree());
+        assert_eq!(
+            git(root, &["ls-tree", first.tree().as_str(), ".orna/store"]),
+            git(root, &["ls-tree", second.tree().as_str(), ".orna/store"])
+        );
+    }
+
+    #[test]
+    fn a_refused_row_leaves_no_candidate_ref_or_head_movement() {
+        let (directory, repository) = initialized_repository();
+        let root = directory.path();
+        let (head, database_id, database) = committed_base(root, &repository);
+        let refs_before = git(root, &["for-each-ref"]);
+
+        // A title that is an integer is not a `Str` value the schema admits.
+        let mut mistyped = music_rows(false);
+        mistyped.push((
+            crate::row_store::TypedKey::Text("c".to_owned()),
+            vec![0x81, 0x01],
+        ));
+        let error = build_music_candidate(
+            &repository,
+            &head,
+            &migration_changes(database),
+            mistyped,
+            database_id,
+        )
+        .expect_err("a row the schema refuses");
+        assert!(matches!(
+            error,
+            RelationAdmissionError::InvalidStagedRow { relation_id } if relation_id == relation(1)
+        ));
+        assert_eq!(git(root, &["for-each-ref"]), refs_before);
+        assert!(repository.head().unwrap().as_ref() == Some(&head));
+    }
+
+    #[test]
+    fn candidate_changes_may_not_touch_the_store_or_another_database() {
+        let (directory, repository) = initialized_repository();
+        let root = directory.path();
+        let (head, database_id, database) = committed_base(root, &repository);
+
+        let store_write = vec![crate::ManagedFileChange::new(
+            crate::ManagedPath::new(".orna/store/x").expect("managed path"),
+            Some(b"x".to_vec()),
+        )];
+        let error = build_music_candidate(
+            &repository,
+            &head,
+            &store_write,
+            music_rows(false),
+            database_id,
+        )
+        .expect_err("a change under .orna/store");
+        assert!(matches!(
+            error,
+            RelationAdmissionError::Repository(RepositoryError::UnsafeManagedPath)
+        ));
+
+        // The database record names one identity; the store may not claim
+        // another.
+        let error = build_music_candidate(
+            &repository,
+            &head,
+            &migration_changes(database),
+            music_rows(false),
+            DatabaseId::new_v4(),
+        )
+        .expect_err("a store for another database identity");
+        assert!(matches!(error, RelationAdmissionError::Format(_)));
     }
 
     fn review(repository: &Repository) -> crate::ReviewedCandidateReview {
