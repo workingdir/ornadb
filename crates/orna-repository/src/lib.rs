@@ -2658,6 +2658,20 @@ pub struct Repository {
     section_cache: std::sync::Arc<std::sync::Mutex<HashMap<Vec<u8>, CachedFileDigest>>>,
 }
 
+/// How a private candidate commit binds its `.orna/store` tree.
+#[derive(Clone, Copy)]
+enum StoreBinding<'a> {
+    /// A store root decoded through `graph`, which must share its algorithm.
+    Validated {
+        graph: &'a NativeGraphContext,
+        root: &'a NativeOid,
+    },
+    /// A store root already read back through the store reader by the caller.
+    Decoded(&'a NativeOid),
+}
+
+const STORE_PATH: &str = ".orna/store";
+
 /// Binds a candidate tree entry at its exact index position.
 ///
 /// A regular entry keeps the ordinary `--cacheinfo` path. A tree entry cannot:
@@ -3117,7 +3131,10 @@ impl Repository {
         self.build_private_commit_inner(
             expected_head,
             &[],
-            Some((graph, store_root)),
+            Some(StoreBinding::Validated {
+                graph,
+                root: store_root,
+            }),
             message,
             None,
         )
@@ -3147,7 +3164,7 @@ impl Repository {
         &self,
         expected_head: &GitCommitRef,
         changes: &[ManagedFileChange],
-        store_projection: Option<(&NativeGraphContext, &NativeOid)>,
+        store_projection: Option<StoreBinding<'_>>,
         message: &str,
         commit_time: Option<i64>,
     ) -> Result<PrivateCommit, RepositoryError> {
@@ -3157,12 +3174,12 @@ impl Repository {
         if message.is_empty() || message.contains('\0') {
             return Err(RepositoryError::InvalidCommitMessage);
         }
-        if let Some((graph, store_root)) = store_projection
-            && store_root.algorithm() != graph.algorithm()
+        if let Some(StoreBinding::Validated { graph, root }) = store_projection
+            && root.algorithm() != graph.algorithm()
         {
             return Err(RepositoryError::Graph(GraphError::InvalidOidWidth {
                 expected: graph.algorithm().width(),
-                actual: store_root.as_bytes().len(),
+                actual: root.as_bytes().len(),
             }));
         }
         let _lock = self.acquire_coordination_lock()?;
@@ -3232,10 +3249,22 @@ impl Repository {
                     self.run(update)?;
                 }
             }
-            if let Some((graph, store_root)) = store_projection {
-                graph
-                    .pin_store_subtree_in_index(&index, store_root)
-                    .map_err(RepositoryError::Graph)?;
+            match store_projection {
+                None => {}
+                Some(StoreBinding::Validated { graph, root }) => {
+                    graph
+                        .pin_store_subtree_in_index(&index, root)
+                        .map_err(RepositoryError::Graph)?;
+                }
+                Some(StoreBinding::Decoded(root)) => {
+                    bind_tree_entry_in_index(
+                        || self.command(),
+                        &index,
+                        STORE_PATH,
+                        "040000",
+                        &root.to_hex(),
+                    )?;
+                }
             }
 
             let mut write_tree = self.command();
