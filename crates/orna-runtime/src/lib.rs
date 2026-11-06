@@ -11978,6 +11978,19 @@ impl RuntimeState {
         if !state_db.exists() {
             return Ok(0);
         }
+        // Acquiring the owner lock rewrites `runtime-owner.state`. The bytes are
+        // read before the lock is taken, so a restore reinstates what the probe
+        // found. Another owner could write between this read and the lock; a
+        // probe that wins the lock then restores the earlier bytes over that write.
+        let owner_state_path = repository
+            .runtime_paths()
+            .locks()
+            .join("runtime-owner.state");
+        let owner_state_before = match std::fs::read(&owner_state_path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => return Err(RuntimeError::StorageUnavailable),
+        };
         let owner_lock = match repository.acquire_runtime_owner_lock(process_owner_id()) {
             Ok(lock) => Some(lock),
             Err(RepositoryError::RepositoryBusy) => None,
@@ -12001,15 +12014,43 @@ impl RuntimeState {
             Self::count_pending(&connection).await
         }
         .await;
-        if owner_lock.is_some() {
+        let restored = if owner_lock.is_some() {
             for (path, existed) in sidecars.iter().zip(existed) {
                 if !existed {
                     let _ = std::fs::remove_file(path);
                 }
             }
-        }
+            Self::restore_owner_state(&owner_state_path, owner_state_before.as_deref())
+        } else {
+            Ok(())
+        };
         drop(owner_lock);
-        count
+        match (count, restored) {
+            (Ok(pending), Ok(())) => Ok(pending),
+            (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+        }
+    }
+
+    /// Reinstates `runtime-owner.state` to the bytes captured before a probe
+    /// acquired the owner lock, or removes it when it was absent. Called only
+    /// while the probe holds the lock, so the write cannot race another owner.
+    fn restore_owner_state(path: &Path, bytes: Option<&[u8]>) -> Result<(), RuntimeError> {
+        match bytes {
+            Some(bytes) => {
+                let temporary = path.with_extension("restore");
+                let mut file = std::fs::File::create(&temporary)
+                    .map_err(|_| RuntimeError::StorageUnavailable)?;
+                file.write_all(bytes)
+                    .and_then(|()| file.sync_all())
+                    .map_err(|_| RuntimeError::StorageUnavailable)?;
+                std::fs::rename(&temporary, path).map_err(|_| RuntimeError::StorageUnavailable)
+            }
+            None => match std::fs::remove_file(path) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(_) => Err(RuntimeError::StorageUnavailable),
+            },
+        }
     }
 
     async fn count_pending(connection: &libsql::Connection) -> Result<usize, RuntimeError> {
