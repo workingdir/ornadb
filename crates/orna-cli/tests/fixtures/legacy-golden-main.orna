@@ -1,0 +1,11 @@
+module main;
+
+pub table Counter(id: Int) {}
+
+pub table Label(id: Str) {}
+
+pub table Day(id: Date) {}
+
+pub table Asset(id: Int) {
+    payload: Blob,
+}
