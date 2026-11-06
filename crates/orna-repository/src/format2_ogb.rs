@@ -16,9 +16,9 @@
 //! object database. A missing object is reported as [`OgbError::Missing`],
 //! which is distinct from structural or integrity failures.
 //!
-//! Consumed by `format2_read`, the Blob-field read API. It is not yet reachable
-//! from a production row read path; see the follow-up beads cross-linked from
-//! ornadb-nne7.
+//! Consumed by `format2_read`, the Blob-field read API. The migration copy
+//! reaches it through `read_format2_orr_blob`; the format-2 runtime row read
+//! path does not.
 
 // `sha2` 0.11 implements `digest` 0.11 while `sha1` 0.10 implements `digest`
 // 0.10; name each trait through its own crate so both hashers resolve.
