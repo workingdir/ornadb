@@ -22,11 +22,12 @@
 //! The two sources have different committed addresses, and this module keeps
 //! them rather than inventing a shared one. A compact table is addressed by its
 //! storage table id, the uuid that names its `.orna/storage` root. An editable
-//! table has no storage table id in the snapshot: 1.0.0 recorded table object
-//! ids in committed identity metadata, and a legacy snapshot carries no such
-//! inventory (the 1.0.0 metadata records only the database identity), so it is
-//! addressed by the key-path directory its row units live under — the table's
-//! committed address in the 1.0.0 layout.
+//! table has no storage table id in the snapshot. A legacy snapshot may carry the
+//! identity sidecar (`.orna/object-identities.cbor`), which names each compact
+//! table by its storage id and each stored column by field id; the golden's sidecar
+//! names the compact tables and their key columns, so an
+//! editable table is addressed by the key-path directory its row units live under,
+//! the table's committed address in the 1.0.0 layout.
 //!
 //! Both sources are read from the committed tree alone. 1.0.0 discovered a
 //! module by its path, not by an import graph, so a row unit's table need not be
@@ -576,6 +577,17 @@ pub fn read_legacy_row_revisions(
             Ok(LegacyRowRevision { snapshot, present })
         })
         .collect()
+}
+
+impl LegacyTableRows {
+    /// The rows of a declared editable table the legacy snapshot holds no
+    /// directory for: it is committed with zero rows.
+    pub(crate) fn absent_loose() -> Self {
+        Self {
+            source: LegacyRowSource::LooseRowUnit,
+            rows: Vec::new(),
+        }
+    }
 }
 
 #[cfg(test)]
