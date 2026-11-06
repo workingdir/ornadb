@@ -9,10 +9,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use num_bigint::BigInt;
 use orna_project::StoredSchema;
-use orna_repository::TypedKey;
-use orna_repository::relation_admission::StagedRelation;
-use orna_value::{Raw, encode_canonical_storage_value};
+use orna_repository::relation_admission::{MigrationBlobDescriptors, StagedRelation};
+use orna_repository::{ContentIdentity, TypedKey};
+use orna_value::{ROV3_BLOB_TAG, Raw, encode_canonical_storage_value};
+use sha2::{Digest, Sha256};
 
 use crate::format3_store::StagedRelations;
 use crate::legacy_store::{
@@ -34,11 +36,13 @@ impl<'a> LegacyTable<'a> {
     }
 }
 
-/// One declared relation with the canonical stored tuples the copy admits.
+/// One declared relation with the rows the copy admits. Blob values stay
+/// pending until `encoded_rows` receives the blob descriptors.
 #[derive(Debug)]
 pub struct MigrationRelation {
+    name: String,
     relation: StagedRelation,
-    rows: Vec<(TypedKey, Vec<u8>)>,
+    rows: Vec<MigrationRow>,
 }
 
 impl MigrationRelation {
@@ -48,18 +52,78 @@ impl MigrationRelation {
         self.relation.relation_id()
     }
 
-    /// The canonical stored tuples, in the key order the legacy reader returned.
-    #[must_use]
-    pub fn rows(&self) -> &[(TypedKey, Vec<u8>)] {
-        &self.rows
+    /// The canonical stored tuples, in the key order the legacy reader
+    /// returned. Each blob value references the descriptor that
+    /// `write_migration_blobs` issued for it; a blob without one fails closed.
+    pub fn encoded_rows(
+        &self,
+        descriptors: &MigrationBlobDescriptors,
+    ) -> Result<Vec<(TypedKey, Vec<u8>)>, MigrationRowError> {
+        self.rows
+            .iter()
+            .map(|row| -> Result<(TypedKey, Vec<u8>), MigrationRowError> {
+                let mut stored = Vec::with_capacity(row.fields.len());
+                for field in &row.fields {
+                    stored.push(match field {
+                        StoredField::Value(raw) => raw.clone(),
+                        StoredField::Blob { identity, lowered } => {
+                            let descriptor = descriptors.descriptor(identity).ok_or_else(|| {
+                                MigrationRowError::BlobNotWritten {
+                                    relation: self.name.clone(),
+                                    key: row.key_text.clone(),
+                                }
+                            })?;
+                            replace_subtree(
+                                lowered,
+                                &blob_tuple(identity, &[]),
+                                &blob_tuple(identity, descriptor.as_bytes()),
+                            )
+                        }
+                    });
+                }
+                let tuple =
+                    encode_canonical_storage_value(&Raw::Array(stored)).map_err(|cause| {
+                        MigrationRowError::Encode {
+                            relation: self.name.clone(),
+                            cause,
+                        }
+                    })?;
+                Ok((row.key.clone(), tuple))
+            })
+            .collect()
     }
 }
 
+/// One legacy row: its key and its stored fields in descriptor order.
+#[derive(Debug)]
+struct MigrationRow {
+    key: TypedKey,
+    key_text: String,
+    fields: Vec<StoredField>,
+}
+
+/// One stored field of a row. A blob's reference is completed by its
+/// descriptor when the row is encoded.
+#[derive(Debug)]
+enum StoredField {
+    Value(Raw),
+    Blob {
+        identity: ContentIdentity,
+        lowered: Raw,
+    },
+}
+
+/// The media type recorded in a migrated blob's stored reference.
+const BLOB_MEDIA_TYPE: &str = "application/octet-stream";
+
 /// The admitted-row input of one migration: every declared relation with its
-/// legacy rows, ready for `StagedRelation::with_rows`.
+/// legacy rows, and the blob bytes those rows reference. Write the blobs with
+/// `Repository::write_migration_blobs`, then consume the input with
+/// `into_staged_relations`.
 #[derive(Debug)]
 pub struct MigrationRowInput {
     relations: Vec<MigrationRelation>,
+    blobs: BTreeMap<ContentIdentity, Vec<u8>>,
 }
 
 impl MigrationRowInput {
@@ -69,12 +133,24 @@ impl MigrationRowInput {
         &self.relations
     }
 
-    /// Consumes the input into staged relations carrying their rows.
+    /// The blob bytes the rows reference, keyed by content identity.
     #[must_use]
-    pub fn into_staged_relations(self) -> Vec<StagedRelation> {
+    pub const fn blobs(&self) -> &BTreeMap<ContentIdentity, Vec<u8>> {
+        &self.blobs
+    }
+
+    /// Consumes the input into staged relations carrying their encoded rows.
+    /// Every blob value must have a descriptor in `descriptors`.
+    pub fn into_staged_relations(
+        self,
+        descriptors: &MigrationBlobDescriptors,
+    ) -> Result<Vec<StagedRelation>, MigrationRowError> {
         self.relations
             .into_iter()
-            .map(|migration| migration.relation.with_rows(migration.rows))
+            .map(|migration| -> Result<StagedRelation, MigrationRowError> {
+                let rows = migration.encoded_rows(descriptors)?;
+                Ok(migration.relation.with_rows(rows))
+            })
             .collect()
     }
 }
@@ -107,6 +183,8 @@ pub enum MigrationRowError {
         key: String,
         reason: String,
     },
+    /// A row references a blob whose descriptor was not written.
+    BlobNotWritten { relation: String, key: String },
     /// The canonical stored tuple could not be encoded.
     Encode {
         relation: String,
@@ -160,6 +238,10 @@ impl std::fmt::Display for MigrationRowError {
                 formatter,
                 "row {key} of relation {relation} does not lower: {reason}"
             ),
+            Self::BlobNotWritten { relation, key } => write!(
+                formatter,
+                "row {key} of relation {relation} references a blob that was not written"
+            ),
             Self::Encode { relation, cause } => {
                 write!(
                     formatter,
@@ -191,6 +273,7 @@ pub fn migration_row_input(
     legacy: &[LegacyTable<'_>],
 ) -> Result<MigrationRowInput, MigrationRowError> {
     let mut sources = BTreeMap::<[u8; 16], Sources<'_>>::new();
+    let mut blobs = BTreeMap::<ContentIdentity, Vec<u8>>::new();
     for table in legacy {
         let (relation_id, is_compact) = match table.address {
             LegacyTableAddress::Relation(id) => {
@@ -240,29 +323,33 @@ pub fn migration_row_input(
         let chosen = single_legacy_source(&name, source.compact, source.loose)
             .map_err(MigrationRowError::Source)?;
         let rows = match chosen {
-            Some(rows) => encode_rows(relation, &name, rows)?,
+            Some(rows) => lower_rows(relation, &name, rows, &mut blobs)?,
             None => Vec::new(),
         };
         relations.push(MigrationRelation {
+            name,
             relation: relation.clone(),
             rows,
         });
     }
-    Ok(MigrationRowInput { relations })
+    Ok(MigrationRowInput { relations, blobs })
 }
 
-/// Lowers each legacy row to its relation's canonical stored tuple.
-fn encode_rows(
+/// Lowers each legacy row to its relation's stored fields in descriptor order.
+/// Blob values are recorded in `blobs` and held as a provisional reference
+/// until the blob descriptors are written.
+fn lower_rows(
     relation: &StagedRelation,
     name: &str,
     rows: &LegacyTableRows,
-) -> Result<Vec<(TypedKey, Vec<u8>)>, MigrationRowError> {
+    blobs: &mut BTreeMap<ContentIdentity, Vec<u8>>,
+) -> Result<Vec<MigrationRow>, MigrationRowError> {
     let descriptor = relation.descriptor();
     let schema =
         StoredSchema::new(descriptor).map_err(|_| MigrationRowError::InvalidDescriptor {
             relation: name.to_owned(),
         })?;
-    let mut encoded = Vec::with_capacity(rows.rows().len());
+    let mut lowered = Vec::with_capacity(rows.rows().len());
     for row in rows.rows() {
         let mut values = BTreeMap::<&str, &Raw>::new();
         let mut named = BTreeSet::<String>::new();
@@ -293,24 +380,110 @@ fn encode_rows(
             }
             values.insert(stored.name(), field.value());
         }
-        let stored_fields =
-            schema
-                .lower_stored_fields(&values)
-                .map_err(|error| MigrationRowError::InvalidRow {
-                    relation: name.to_owned(),
-                    key: row_key_text(row.key()),
-                    reason: error.to_string(),
-                })?;
-        let tuple =
-            encode_canonical_storage_value(&Raw::Array(stored_fields)).map_err(|cause| {
-                MigrationRowError::Encode {
-                    relation: name.to_owned(),
-                    cause,
-                }
-            })?;
-        encoded.push((row.key().clone(), tuple));
+        let key_text = row_key_text(row.key());
+        let fields = lower_row_fields(&schema, name, &key_text, &values, blobs)?;
+        lowered.push(MigrationRow {
+            key: row.key().clone(),
+            key_text,
+            fields,
+        });
     }
-    Ok(encoded)
+    Ok(lowered)
+}
+
+/// Lowers one row's stored fields. A `Blob` value is recorded in `blobs` and
+/// lowered against a provisional blob reference; every other value is lowered
+/// to its final stored form here.
+fn lower_row_fields(
+    schema: &StoredSchema<'_>,
+    relation: &str,
+    key: &str,
+    values: &BTreeMap<&str, &Raw>,
+    blobs: &mut BTreeMap<ContentIdentity, Vec<u8>>,
+) -> Result<Vec<StoredField>, MigrationRowError> {
+    let invalid = |reason: String| MigrationRowError::InvalidRow {
+        relation: relation.to_owned(),
+        key: key.to_owned(),
+        reason,
+    };
+    let mut fields = Vec::new();
+    for field in schema.fields().iter().filter(|field| field.role() == 1) {
+        let Some(value) = values.get(field.name()) else {
+            return Err(invalid(format!(
+                "stored field `{}` has no value",
+                field.name()
+            )));
+        };
+        let stored = match value {
+            Raw::Bytes(bytes) if field.is_blob() => {
+                let identity = blob_identity(bytes).map_err(&invalid)?;
+                blobs.entry(identity).or_insert_with(|| bytes.clone());
+                let provisional = blob_tuple(&identity, &[]);
+                let lowered = schema
+                    .lower_field(field, &provisional)
+                    .map_err(|error| invalid(error.to_string()))?;
+                StoredField::Blob { identity, lowered }
+            }
+            _ => StoredField::Value(
+                schema
+                    .lower_field(field, value)
+                    .map_err(|error| invalid(error.to_string()))?,
+            ),
+        };
+        fields.push(stored);
+    }
+    Ok(fields)
+}
+
+/// The content identity of blob bytes, computed the way the repository
+/// computes it for `write_migration_blobs`.
+fn blob_identity(bytes: &[u8]) -> Result<ContentIdentity, String> {
+    let length = u64::try_from(bytes.len()).map_err(|error| error.to_string())?;
+    let sha256: [u8; 32] = Sha256::digest(bytes).into();
+    ContentIdentity::new(length, sha256).map_err(|error| error.to_string())
+}
+
+/// The stored blob reference: the ROV3 blob tuple carrying the content
+/// identity and the descriptor's object id (empty while provisional).
+fn blob_tuple(identity: &ContentIdentity, descriptor: &[u8]) -> Raw {
+    Raw::Tag(
+        ROV3_BLOB_TAG,
+        Box::new(Raw::Array(vec![
+            Raw::Int(BigInt::from(identity.length())),
+            Raw::Bytes(identity.sha256().to_vec()),
+            Raw::Text(BLOB_MEDIA_TYPE.to_owned()),
+            Raw::Null,
+            Raw::Bytes(descriptor.to_vec()),
+        ])),
+    )
+}
+
+/// Replaces every occurrence of `from` in `raw` with `to`.
+fn replace_subtree(raw: &Raw, from: &Raw, to: &Raw) -> Raw {
+    if raw == from {
+        return to.clone();
+    }
+    match raw {
+        Raw::Array(items) => Raw::Array(
+            items
+                .iter()
+                .map(|item| replace_subtree(item, from, to))
+                .collect(),
+        ),
+        Raw::Map(entries) => Raw::Map(
+            entries
+                .iter()
+                .map(|(key, value)| {
+                    (
+                        replace_subtree(key, from, to),
+                        replace_subtree(value, from, to),
+                    )
+                })
+                .collect(),
+        ),
+        Raw::Tag(tag, inner) => Raw::Tag(*tag, Box::new(replace_subtree(inner, from, to))),
+        other => other.clone(),
+    }
 }
 
 fn relation_name(declared: &StagedRelations, id: &[u8; 16]) -> String {
@@ -328,10 +501,14 @@ mod tests {
     use orna_repository::TypedKey;
     use orna_repository::relation_admission::StagedRelation;
     use orna_value::{
-        Raw, SchemaDescriptor, decode_canonical_storage_value, encode_canonical_storage_value,
+        ROV3_BLOB_TAG, Raw, SchemaDescriptor, decode_canonical_storage_value,
+        encode_canonical_storage_value,
     };
 
-    use super::{LegacyTable, MigrationRowError, migration_row_input};
+    use super::{
+        LegacyTable, MigrationBlobDescriptors, MigrationRowError, MigrationRowInput, blob_identity,
+        migration_row_input,
+    };
     use crate::format3_store::StagedRelations;
     use crate::legacy_store::{
         LegacyField, LegacyFieldName, LegacyReadError, LegacyRow, LegacyTableAddress,
@@ -344,7 +521,7 @@ mod tests {
         AllocatorWatermarks, RelationCandidateContent, StoredObjectIdentity,
     };
     use orna_repository::{
-        GitCommitRef, KeyRange, ManagedFileChange, ManagedPath, Repository, Uuid,
+        GitCommitRef, KeyRange, ManagedFileChange, ManagedPath, PrivateCommit, Repository, Uuid,
         golden_compact_schemas,
     };
     use tempfile::TempDir;
@@ -468,7 +645,10 @@ mod tests {
     fn decoded_rows_equal_the_legacy_reader_values() {
         let rows = contacts();
         let input = map_contacts(&declared(), &rows).expect("the declared contacts relation maps");
-        let admitted = input.relations()[0].rows();
+        let descriptors = MigrationBlobDescriptors::default();
+        let admitted = input.relations()[0]
+            .encoded_rows(&descriptors)
+            .expect("the contacts encode");
         assert_eq!(admitted.len(), 2);
 
         let expected = [
@@ -503,7 +683,15 @@ mod tests {
         let rows = contacts();
         let first = map_contacts(&declared(), &rows).expect("first run maps");
         let second = map_contacts(&declared(), &rows).expect("second run maps");
-        assert_eq!(first.relations()[0].rows(), second.relations()[0].rows());
+        let descriptors = MigrationBlobDescriptors::default();
+        assert_eq!(
+            first.relations()[0]
+                .encoded_rows(&descriptors)
+                .expect("the first run encodes"),
+            second.relations()[0]
+                .encoded_rows(&descriptors)
+                .expect("the second run encodes"),
+        );
     }
 
     /// A legacy table that names no declared relation fails closed.
@@ -586,11 +774,11 @@ mod tests {
         ));
     }
 
-    /// A stored Blob field admits only a ROV3 blob reference. Legacy raw bytes
-    /// are not a reference and cannot be made one without the blob store, so
-    /// they fail closed with a typed row error instead of being admitted.
+    /// A stored Blob field lowers legacy raw bytes to a ROV3 blob reference:
+    /// the bytes enter the migration blob table, and the encoded row carries
+    /// the reference naming the descriptor the repository wrote for them.
     #[test]
-    fn legacy_blob_bytes_fail_closed() {
+    fn legacy_blob_bytes_lower_to_blob_references() {
         let rows = LegacyTableRows::loose_for_tests(vec![LegacyRow::for_tests(
             TypedKey::Text("alice".to_owned()),
             vec![
@@ -599,12 +787,39 @@ mod tests {
                 declared_field("avatar", Raw::Bytes(vec![1, 2, 3])),
             ],
         )]);
-        let error = map_contacts(&blob_declared(), &rows)
-            .expect_err("raw Blob bytes are not a stored blob reference");
-        assert!(matches!(
-            error,
-            MigrationRowError::InvalidRow { ref reason, .. } if reason.contains("avatar")
-        ));
+        let input = map_contacts(&blob_declared(), &rows).expect("the Blob bytes map");
+        let identity = blob_identity(&[1, 2, 3]).expect("the blob identity");
+        assert_eq!(
+            input.blobs().get(&identity).map(Vec::as_slice),
+            Some(&[1, 2, 3][..])
+        );
+
+        let missing = MigrationBlobDescriptors::default();
+        let error = input.relations()[0]
+            .encoded_rows(&missing)
+            .expect_err("a blob without a written descriptor fails closed");
+        assert!(matches!(error, MigrationRowError::BlobNotWritten { .. }));
+
+        let (_directory, repository, _commit) = golden();
+        let descriptors = write_blobs(&repository, &input);
+        let encoded = input.relations()[0]
+            .encoded_rows(&descriptors)
+            .expect("the blob row encodes");
+        let (_, tuple) = &encoded[0];
+        let Raw::Array(fields) = decode_canonical_storage_value(tuple).expect("the tuple decodes")
+        else {
+            panic!("the stored row is a tuple");
+        };
+        let Raw::Tag(ROV3_BLOB_TAG, payload) = &fields[2] else {
+            panic!("the Blob field is an ROV3 reference");
+        };
+        let Raw::Array(reference) = payload.as_ref() else {
+            panic!("the ROV3 reference is a tuple");
+        };
+        let oid = descriptors
+            .descriptor(&identity)
+            .expect("the descriptor was written");
+        assert_eq!(reference[4], Raw::Bytes(oid.as_bytes().to_vec()));
     }
 
     /// The golden bundle the CLI legacy tests read.
@@ -712,7 +927,11 @@ mod tests {
                 .iter()
                 .find(|relation| relation.relation_id() == &id)
                 .expect("the declared table is in the input");
-            assert_rows_match_legacy(&declared.relations()[0], relation.rows(), &legacy);
+            let descriptors = write_blobs(&repository, &input);
+            let rows = relation
+                .encoded_rows(&descriptors)
+                .expect("the golden compact rows encode");
+            assert_rows_match_legacy(&declared.relations()[0], &rows, &legacy);
         }
     }
 
@@ -731,7 +950,11 @@ mod tests {
             .iter()
             .find(|relation| relation.relation_id() == &TABLE)
             .expect("the declared Contact table is in the input");
-        assert_rows_match_legacy(&declared.relations()[0], relation.rows(), &legacy);
+        let descriptors = write_blobs(&repository, &input);
+        let rows = relation
+            .encoded_rows(&descriptors)
+            .expect("the golden contacts encode");
+        assert_rows_match_legacy(&declared.relations()[0], &rows, &legacy);
     }
 
     /// Sets the commit identity the candidate's commit objects need in the
@@ -784,23 +1007,23 @@ mod tests {
             .collect()
     }
 
-    /// A loose Contact admitted through the repository candidate path reads
-    /// back through the ordinary committed reader with the legacy key and the
-    /// stored tuple the copy derived.
-    #[test]
-    fn loose_contacts_round_trip_through_repository_admission() {
-        let (directory, repository, commit) = golden();
-        configure_identity(directory.path());
-        let address = LegacyTableAddress::TablePath(PATH.to_owned());
-        let legacy = read_legacy_table_rows(&repository, &commit, &address)
-            .expect("the legacy loose table decodes");
-        let declared_set = declared();
-        let input = migration_row_input(&declared_set, &[LegacyTable::new(&address, &legacy)])
-            .expect("the golden contacts map onto the declared Contact table");
-        let expected: Vec<(TypedKey, Vec<u8>)> = input.relations()[0].rows().to_vec();
-        let relations = input.into_staged_relations();
+    /// Writes the input's legacy blob values as Git blobs and returns the
+    /// descriptors the rows reference.
+    fn write_blobs(repository: &Repository, input: &MigrationRowInput) -> MigrationBlobDescriptors {
+        repository
+            .write_migration_blobs(input.blobs())
+            .expect("the migration blobs write")
+    }
 
-        let identities = [StoredObjectIdentity::new(TABLE, 1, "Contact", false)];
+    /// Admits `relations` as the candidate of `commit`, with the format-3
+    /// record the legacy golden does not carry, and returns the private commit.
+    fn admit(
+        repository: &Repository,
+        root: &Path,
+        commit: &GitCommitRef,
+        relations: &[StagedRelation],
+        identities: &[StoredObjectIdentity],
+    ) -> PrivateCommit {
         let watermarks = AllocatorWatermarks::new();
         // The legacy golden records no database identity in format 3, so the
         // candidate names a fixed test identity and writes the format-3 record
@@ -827,20 +1050,51 @@ mod tests {
                 None,
             ),
         ];
-        changes.extend(legacy_orna_removals(directory.path()));
-        let candidate = repository
+        changes.extend(legacy_orna_removals(root));
+        repository
             .build_private_commit_with_relations(
-                &commit,
+                commit,
                 &changes,
                 RelationCandidateContent {
-                    relations: &relations,
-                    identities: &identities,
+                    relations,
+                    identities,
                     watermarks: &watermarks,
                 },
                 database_id,
                 "migration candidate",
             )
-            .expect("the candidate admits the migrated rows");
+            .expect("the candidate admits the migrated rows")
+    }
+
+    /// A loose Contact admitted through the repository candidate path reads
+    /// back through the ordinary committed reader with the legacy key and the
+    /// stored tuple the copy derived.
+    #[test]
+    fn loose_contacts_round_trip_through_repository_admission() {
+        let (directory, repository, commit) = golden();
+        configure_identity(directory.path());
+        let address = LegacyTableAddress::TablePath(PATH.to_owned());
+        let legacy = read_legacy_table_rows(&repository, &commit, &address)
+            .expect("the legacy loose table decodes");
+        let declared_set = declared();
+        let input = migration_row_input(&declared_set, &[LegacyTable::new(&address, &legacy)])
+            .expect("the golden contacts map onto the declared Contact table");
+        let descriptors = write_blobs(&repository, &input);
+        let expected: Vec<(TypedKey, Vec<u8>)> = input.relations()[0]
+            .encoded_rows(&descriptors)
+            .expect("the golden contacts encode");
+        let relations = input
+            .into_staged_relations(&descriptors)
+            .expect("the golden contacts stage");
+
+        let identities = [StoredObjectIdentity::new(TABLE, 1, "Contact", false)];
+        let candidate = admit(
+            &repository,
+            directory.path(),
+            &commit,
+            &relations,
+            &identities,
+        );
 
         let format = repository
             .open_private_candidate_format_context(&candidate)
@@ -862,17 +1116,210 @@ mod tests {
         }
     }
 
+    /// The golden blob table admits through the repository candidate path:
+    /// each row reads back under its legacy key, and each legacy blob's bytes
+    /// read back through the committed blob descriptor.
     #[test]
-    fn golden_blob_table_fails_closed_as_invalid_row() {
-        let (_directory, repository, commit) = golden();
-        let address = LegacyTableAddress::Relation(golden_table(5));
+    fn golden_blob_table_round_trips_through_repository_admission() {
+        let (directory, repository, commit) = golden();
+        configure_identity(directory.path());
+        let id = golden_table(5);
+        let address = LegacyTableAddress::Relation(id);
         let legacy = read_legacy_table_rows(&repository, &commit, &address)
             .expect("the legacy blob table decodes");
-        let error = migration_row_input(
-            &golden_compact_declared(&[5]),
-            &[LegacyTable::new(&address, &legacy)],
-        )
-        .expect_err("raw Blob bytes are not a stored blob reference");
-        assert!(matches!(error, MigrationRowError::InvalidRow { .. }));
+        let declared = golden_compact_declared(&[5]);
+        let input = migration_row_input(&declared, &[LegacyTable::new(&address, &legacy)])
+            .expect("the golden blob table maps onto its declared schema");
+        let descriptors = write_blobs(&repository, &input);
+        let encoded_keys: Vec<TypedKey> = input.relations()[0]
+            .encoded_rows(&descriptors)
+            .expect("the golden blob rows encode")
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
+        let legacy_keys: Vec<TypedKey> =
+            legacy.rows().iter().map(|row| row.key().clone()).collect();
+        assert_eq!(
+            encoded_keys, legacy_keys,
+            "the admitted keys are the legacy keys"
+        );
+        let relations = input
+            .into_staged_relations(&descriptors)
+            .expect("the golden blob rows stage");
+        let identities = [StoredObjectIdentity::new(id, 1, "BlobTable", false)];
+        let candidate = admit(
+            &repository,
+            directory.path(),
+            &commit,
+            &relations,
+            &identities,
+        );
+
+        let format = repository
+            .open_private_candidate_format_context(&candidate)
+            .expect("the candidate opens");
+        let row_map = format
+            .load_row_map(id)
+            .expect("the blob table row map loads");
+        let graph = format
+            .open_native_graph(&row_map)
+            .expect("the native graph opens");
+        let scope = graph.open_read_scope().expect("a read scope opens");
+        let mut blobs_read = 0_usize;
+        for row in legacy.rows() {
+            let admitted = graph
+                .lookup_row(row.key(), &scope)
+                .expect("the admitted row reads")
+                .expect("the legacy row is admitted");
+            for field in row.fields() {
+                let Raw::Bytes(bytes) = field.value() else {
+                    continue;
+                };
+                let identity = blob_identity(bytes).expect("the blob identity");
+                let descriptor = descriptors
+                    .descriptor(&identity)
+                    .expect("the blob descriptor was written");
+                let stored = graph
+                    .read_stored_blob_value(&admitted, descriptor, &scope)
+                    .expect("the stored blob reads");
+                let read = graph
+                    .read_blob_range(stored.reference(), 0..identity.length(), &scope)
+                    .expect("the blob bytes read");
+                assert_eq!(read.bytes(), bytes.as_slice());
+                blobs_read += 1;
+            }
+        }
+        assert!(blobs_read > 0, "the golden blob table holds blob content");
+    }
+
+    /// Two independent repositories, each written twice, yield the same blob
+    /// content identities, descriptors and encoded rows: a descriptor is
+    /// content-addressed, so it depends on the blob bytes alone.
+    #[test]
+    fn migration_blob_descriptors_are_identical_across_runs() {
+        let run = || {
+            let (_directory, repository, commit) = golden();
+            let address = LegacyTableAddress::Relation(golden_table(5));
+            let legacy = read_legacy_table_rows(&repository, &commit, &address)
+                .expect("the legacy blob table decodes");
+            let declared = golden_compact_declared(&[5]);
+            let input = migration_row_input(&declared, &[LegacyTable::new(&address, &legacy)])
+                .expect("the golden blob table maps onto its declared schema");
+            let descriptors = write_blobs(&repository, &input);
+            let rewritten = write_blobs(&repository, &input);
+            assert_eq!(
+                descriptors, rewritten,
+                "rewriting the same blobs yields the same descriptors"
+            );
+            let identities: Vec<_> = input.blobs().keys().copied().collect();
+            let encoded = input.relations()[0]
+                .encoded_rows(&descriptors)
+                .expect("the golden blob rows encode");
+            (identities, descriptors, encoded)
+        };
+        let first = run();
+        let second = run();
+        assert!(
+            !first.0.is_empty(),
+            "the golden blob table holds blob content"
+        );
+        assert_eq!(
+            first, second,
+            "two runs yield identical identities, descriptors and rows"
+        );
+    }
+
+    /// An empty legacy Blob admits through repository admission: the private
+    /// candidate reads back zero bytes through the descriptor written for the
+    /// empty content, which names the null byte root.
+    #[test]
+    fn empty_blob_round_trips_through_repository_admission() {
+        let (directory, repository, commit) = golden();
+        configure_identity(directory.path());
+        let rows = LegacyTableRows::loose_for_tests(vec![LegacyRow::for_tests(
+            TypedKey::Text("alice".to_owned()),
+            vec![
+                declared_field("name", text("Alice Smith")),
+                declared_field("emails", Raw::Array(Vec::new())),
+                declared_field("avatar", Raw::Bytes(Vec::new())),
+            ],
+        )]);
+        let address = LegacyTableAddress::TablePath(PATH.to_owned());
+        let input = migration_row_input(&blob_declared(), &[LegacyTable::new(&address, &rows)])
+            .expect("the empty Blob maps");
+        let empty = blob_identity(&[]).expect("the empty blob identity");
+        assert_eq!(input.blobs().get(&empty).map(Vec::as_slice), Some(&[][..]));
+        let descriptors = write_blobs(&repository, &input);
+        let relations = input
+            .into_staged_relations(&descriptors)
+            .expect("the empty blob row stages");
+        let identities = [StoredObjectIdentity::new(TABLE, 1, "Contact", false)];
+        let candidate = admit(
+            &repository,
+            directory.path(),
+            &commit,
+            &relations,
+            &identities,
+        );
+
+        let format = repository
+            .open_private_candidate_format_context(&candidate)
+            .expect("the candidate opens");
+        let row_map = format
+            .load_row_map(TABLE)
+            .expect("the Contact row map loads");
+        let graph = format
+            .open_native_graph(&row_map)
+            .expect("the native graph opens");
+        let scope = graph.open_read_scope().expect("a read scope opens");
+        let admitted = graph
+            .lookup_row(&TypedKey::Text("alice".to_owned()), &scope)
+            .expect("the admitted row reads")
+            .expect("the legacy row is admitted");
+        let empty_descriptor = descriptors
+            .descriptor(&empty)
+            .expect("the empty descriptor was written");
+        let stored = graph
+            .read_stored_blob_value(&admitted, empty_descriptor, &scope)
+            .expect("the stored empty blob reads");
+        let read = graph
+            .read_blob_range(stored.reference(), 0..0, &scope)
+            .expect("the empty blob bytes read");
+        assert!(read.bytes().is_empty());
+    }
+
+    /// A Blob nested inside a List fails closed with a typed row error: the
+    /// nested bytes are not lowered to a blob reference, so nothing is written
+    /// for them.
+    #[test]
+    fn nested_blob_fails_closed() {
+        const PHOTOS: [u8; 16] = [0x76; 16];
+        let blob_node = Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Blob".to_owned())]);
+        let photos = Raw::Array(vec![
+            tagged(PHOTOS),
+            Raw::Text("photos".to_owned()),
+            Raw::Array(vec![Raw::Int(1.into()), blob_node]),
+            Raw::Int(1.into()),
+            Raw::Array(vec![Raw::Int(0.into())]),
+        ]);
+        let nested = StagedRelations::for_tests(
+            vec![StagedRelation::new(TABLE, descriptor_with(vec![photos]))],
+            vec![(TABLE, PATH)],
+        );
+        let rows = LegacyTableRows::loose_for_tests(vec![LegacyRow::for_tests(
+            TypedKey::Text("alice".to_owned()),
+            vec![
+                declared_field("name", text("Alice Smith")),
+                declared_field("emails", Raw::Array(Vec::new())),
+                declared_field("photos", Raw::Array(vec![Raw::Bytes(vec![1, 2, 3])])),
+            ],
+        )]);
+        let Err(error) = map_contacts(&nested, &rows) else {
+            panic!("a Blob nested in a List is refused");
+        };
+        assert!(matches!(
+            error,
+            MigrationRowError::InvalidRow { ref relation, .. } if relation == PATH
+        ));
     }
 }
