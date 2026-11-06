@@ -1446,3 +1446,205 @@ fn cli_migration_copy_omitted_annotation_count_uses_and_records_decoded_count() 
         "the annotation default is metadata-only (ORNA-UPGRADE-004)"
     );
 }
+
+/// Runs `orna upgrade --to-format 3 DEST`, with `--yes-activate` when `confirmed`.
+fn run_upgrade(source: &Path, destination: &Path, confirmed: bool) -> std::process::Output {
+    let mut arguments = vec![
+        "--db",
+        source.to_str().unwrap(),
+        "--debug",
+        "upgrade",
+        "--to-format",
+        "3",
+        destination.to_str().unwrap(),
+    ];
+    if confirmed {
+        arguments.push("--yes-activate");
+    }
+    Command::new(env!("CARGO_BIN_EXE_orna"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args(&arguments)
+        .output()
+        .unwrap()
+}
+
+/// Prepares the golden source's candidate at `parent/migrated` and activates it.
+fn activate_golden_copy(parent: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let source = clone_golden_bundle(parent, "source");
+    let destination = parent.join("migrated");
+    let prepared = run_golden_copy(&source, &destination, None);
+    assert!(
+        prepared.status.success(),
+        "migrate copy: {}",
+        String::from_utf8_lossy(&prepared.stderr)
+    );
+    let activated = run_upgrade(&source, &destination, true);
+    assert!(
+        activated.status.success(),
+        "upgrade --yes-activate: {}",
+        String::from_utf8_lossy(&activated.stderr)
+    );
+    (source, destination)
+}
+
+/// Without `--yes-activate` `upgrade` refuses before it touches anything: the
+/// prepared copy keeps its journal and head, and the source is unchanged.
+#[test]
+fn cli_upgrade_without_yes_activate_refuses_and_changes_nothing() {
+    let parent = TempDir::new().unwrap();
+    let source = clone_golden_bundle(parent.path(), "source");
+    let destination = parent.path().join("migrated");
+    let prepared = run_golden_copy(&source, &destination, None);
+    assert!(
+        prepared.status.success(),
+        "migrate copy: {}",
+        String::from_utf8_lossy(&prepared.stderr)
+    );
+    let copy_head = git_output(&destination, &["rev-parse", "HEAD"]);
+    let source_head = git_output(&source, &["rev-parse", "HEAD"]);
+    let source_status = git_output(&source, &["status", "--porcelain"]);
+
+    let output = run_upgrade(&source, &destination, false);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("E1002"), "usage refusal: {stderr}");
+    assert!(
+        stderr.contains("--yes-activate"),
+        "refusal names the flag: {stderr}"
+    );
+    assert!(
+        journal_is_present(&destination),
+        "the prepared journal is kept"
+    );
+    assert_eq!(git_output(&destination, &["rev-parse", "HEAD"]), copy_head);
+    assert_eq!(git_output(&source, &["rev-parse", "HEAD"]), source_head);
+    assert_eq!(
+        git_output(&source, &["status", "--porcelain"]),
+        source_status
+    );
+}
+
+/// `upgrade --to-format 3 DEST --yes-activate` publishes the prepared candidate
+/// through the copy's journal and completes the runtime intent (UPGRADE-3 steps
+/// 7 and 8). The copy is then an activated format-3 repository with no journal,
+/// and the source is unchanged.
+#[test]
+fn cli_upgrade_yes_activate_publishes_the_prepared_candidate() {
+    let parent = TempDir::new().unwrap();
+    let source = clone_golden_bundle(parent.path(), "source");
+    let destination = parent.path().join("migrated");
+    let prepared = run_golden_copy(&source, &destination, None);
+    assert!(
+        prepared.status.success(),
+        "migrate copy: {}",
+        String::from_utf8_lossy(&prepared.stderr)
+    );
+    let candidate = Repository::discover(&destination)
+        .unwrap()
+        .read_publication_journal()
+        .unwrap()
+        .expect("the prepared copy keeps its publication journal")
+        .new_head()
+        .clone();
+    let source_head = git_output(&source, &["rev-parse", "HEAD"]);
+    let source_status = git_output(&source, &["status", "--porcelain"]);
+
+    let output = run_upgrade(&source, &destination, true);
+    assert!(
+        output.status.success(),
+        "upgrade --yes-activate: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.starts_with("activated format-3 migration copy"),
+        "{stdout}"
+    );
+    assert!(
+        !journal_is_present(&destination),
+        "activation completes the journal"
+    );
+    assert_eq!(
+        git_output(&destination, &["rev-parse", "HEAD"]),
+        format!("{}\n", candidate.as_str()).into_bytes()
+    );
+    assert_eq!(
+        Repository::discover(&destination)
+            .unwrap()
+            .open_format_context()
+            .unwrap()
+            .repository_format(),
+        orna_repository::RepositoryFormat::Format3
+    );
+    assert_eq!(git_output(&source, &["rev-parse", "HEAD"]), source_head);
+    assert_eq!(
+        git_output(&source, &["status", "--porcelain"]),
+        source_status
+    );
+}
+
+/// Running `upgrade --yes-activate` again on an activated copy reports that
+/// activation already finished and changes nothing.
+#[test]
+fn cli_upgrade_rerun_after_activation_reports_already_activated() {
+    let parent = TempDir::new().unwrap();
+    let (source, destination) = activate_golden_copy(parent.path());
+    let head = git_output(&destination, &["rev-parse", "HEAD"]);
+
+    let output = run_upgrade(&source, &destination, true);
+    assert!(
+        output.status.success(),
+        "upgrade rerun: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.starts_with("already activated format-3 migration copy"),
+        "{stdout}"
+    );
+    assert!(!journal_is_present(&destination));
+    assert_eq!(git_output(&destination, &["rev-parse", "HEAD"]), head);
+}
+
+/// Once activation has finished, `migrate abort` keeps the activated copy and
+/// reports that nothing was discarded.
+#[test]
+fn cli_migration_abort_after_activation_keeps_the_activated_copy() {
+    let parent = TempDir::new().unwrap();
+    let (source, destination) = activate_golden_copy(parent.path());
+    let head = git_output(&destination, &["rev-parse", "HEAD"]);
+
+    let output = run_abort(&source, &destination);
+    assert!(
+        output.status.success(),
+        "migrate abort after activation: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.starts_with("nothing discarded"), "{stdout}");
+    assert_eq!(git_output(&destination, &["rev-parse", "HEAD"]), head);
+    assert_eq!(
+        Repository::discover(&destination)
+            .unwrap()
+            .open_format_context()
+            .unwrap()
+            .repository_format(),
+        orna_repository::RepositoryFormat::Format3
+    );
+}
+
+/// `upgrade` refuses a destination that no migration prepared, and creates
+/// nothing there.
+#[test]
+fn cli_upgrade_refuses_a_destination_that_was_never_prepared() {
+    let parent = TempDir::new().unwrap();
+    let source = clone_golden_bundle(parent.path(), "source");
+    let destination = parent.path().join("never-prepared");
+
+    let output = run_upgrade(&source, &destination, true);
+    assert_refused(
+        &output,
+        "prepared migration copy could not be read for activation",
+    );
+    assert!(!destination.exists());
+}
