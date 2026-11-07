@@ -6,8 +6,12 @@
 # per gate"). An item is passed only when its selected tests ran and passed. A
 # gate is passed only when every item passed and no item lists a limitation.
 #
-# Items cover the mandatory gates A-F of the repository-engine-1.1 and
-# vfs-linux-v1 profiles. Selectors pick tests from records:
+# Items cover the mandatory gates A-G of the repository-engine-1.1 and
+# vfs-linux-v1 profiles and Orna 1.1.0 Gate G. Gate G's paragraph in
+# implementation/ACCEPTANCE.md is unnumbered; items G1-G9 number its clauses in
+# order (table list, Run, refresh, download or rendering, console bindings,
+# invalid mutation, CSS removal, devtools removal, second app).
+# Selectors pick tests from records:
 #   record  record ID or glob (default: every record)
 #   package Cargo package
 #   target  lib, doc, bin:NAME, test:NAME or check:NAME
@@ -470,3 +474,63 @@ select = [
 limitations = [
   "Both snapshots are format-3 commits whose store is a text file, and the extractor checks Git object IDs only (ornadb-5il1.193, ornadb-5il1.192).",
 ]
+
+[[item]]
+gate = "G"
+id = "G1"
+title = "Table list over the production API, read from the admitted catalogue"
+select = [{ record = "workspace-cli", package = "orna-cli", target = "test:devtools_app", test = "devtools_lists_tables_runs_input_and_refreshes" }]
+limitations = ["The test asserts that a table element is present, not the admitted table names (ornadb-5il1.492)."]
+
+[[item]]
+gate = "G"
+id = "G2"
+title = "Input and Run submit over the production API, returning typed output"
+select = [{ record = "workspace-cli", package = "orna-cli", target = "test:devtools_app", test = "devtools_lists_tables_runs_input_and_refreshes" }]
+limitations = ["No POST run is sent and no typed output is checked (ornadb-5il1.493)."]
+
+[[item]]
+gate = "G"
+id = "G3"
+title = "Explicit refresh re-reads the table after a change"
+select = [{ record = "workspace-cli", package = "orna-cli", target = "test:devtools_app", test = "devtools_lists_tables_runs_input_and_refreshes" }]
+limitations = ["Refresh is checked only with no change between reads; a change is never re-read (ornadb-5il1.494)."]
+
+[[item]]
+gate = "G"
+id = "G4"
+title = "Download and native audio or image rendering over the same production API"
+limitations = ["No std.ui audio, image or download node exists; the content route proves bytes only (ornadb-5il1.495)."]
+
+[[item]]
+gate = "G"
+id = "G5"
+title = "Console bindings do not alter the page environment"
+select = [{ record = "workspace-rest", package = "orna-application", target = "lib", test = "page_watches_read_the_admitted_module_not_the_console_repl" }]
+limitations = ["Proven at the engine level only; no served page is requested over HTTP (ornadb-5il1.496)."]
+
+[[item]]
+gate = "G"
+id = "G6"
+title = "An invalid mutation stays invalid from UI, REPL and mount"
+limitations = ["No orna-cli test runs one invalid mutation through REPL, live, mount and edit; conformance-only parity does not show it (ornadb-5il1.384)."]
+
+[[item]]
+gate = "G"
+id = "G7"
+title = "CSS removal leaves usable native controls"
+select = [{ record = "workspace-cli", package = "orna-cli", target = "bin:orna", test = "renders_text_field_button_and_input_as_native_controls" }]
+limitations = ["The test checks rendered markup only; no served page loses its stylesheet (ornadb-5il1.497)."]
+
+[[item]]
+gate = "G"
+id = "G8"
+title = "Remove devtools and keep local queries, mount and content IO working"
+select = [{ record = "workspace-cli", package = "orna-cli", target = "test:serve_devtools_removal", test = "devtools_removal_keeps_local_query_mount_and_content_io" }]
+limitations = ["orna serve still answers /tree/ and /blob/ with a native git listing (ornadb-5il1.498)."]
+
+[[item]]
+gate = "G"
+id = "G9"
+title = "A second ordinary app uses the same source-hosted stack"
+select = [{ record = "workspace-cli", package = "orna-cli", target = "test:second_ordinary_app", test = "second_ordinary_app_uses_the_same_renderer_and_routes" }]
