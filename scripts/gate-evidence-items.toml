@@ -68,8 +68,9 @@ title = "Unknown and mixed formats fail early"
 select = [
   { record = "workspace-rest", package = "orna-repository", target = "test:format_context", test = "fails_closed_on_unknown_mixed_malformed_and_unavailable_metadata" },
   { record = "workspace-cli", package = "orna-cli", target = "test:migration_copy_cli", test = "cli_migration_copy_rejects_mixed_worktree_metadata" },
+  { record = "workspace-rest", package = "orna-repository", target = "test:format_context", test = "dispatches_legacy_formats_as_explicit_read_only_inputs" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:migration_copy_cli", test = "cli_migration_copy_prepares_a_candidate_from_recorded_legacy_metadata" },
 ]
-limitations = ["Real 1.0 records are rejected as malformed rather than read (ornadb-5il1.191)."]
 
 [[item]]
 gate = "A"
