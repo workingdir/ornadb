@@ -200,9 +200,14 @@ impl LoopbackAuthority {
             return Some(forbidden_response(request, "host_denied"));
         }
         // `HEAD` is a safe method: it carries the same headers as `GET` and no
-        // body, so it is not a cross-origin write.
+        // body, so it is not a cross-origin write. A media payload is still not
+        // readable by a foreign origin, so a foreign Origin on a media read is
+        // refused as well.
         if matches!(request.method.as_str(), "GET" | "HEAD") && !is_websocket_route(request) {
-            return None;
+            let foreign_media = request.path.starts_with("/media/")
+                && request_header(request, "origin")
+                    .is_some_and(|origin| !is_same_origin(origin, host));
+            return foreign_media.then(|| forbidden_response(request, "origin_denied"));
         }
         let admitted = match request_header(request, "origin") {
             Some(origin) => is_same_origin(origin, host),
@@ -1553,17 +1558,7 @@ fn content_route(root: &Path, request: &Request, suffix: &str) -> Response {
             .headers
             .push(("content-range".into(), content_range.clone()));
     }
-    if !is_allowlisted_media(media_type) {
-        response
-            .headers
-            .push(("content-disposition".into(), "attachment".into()));
-        response
-            .headers
-            .push(("x-content-type-options".into(), "nosniff".into()));
-        response
-            .headers
-            .push(("content-security-policy".into(), "sandbox".into()));
-    }
+    apply_payload_policy(&mut response, media_type);
     response
 }
 
@@ -1587,9 +1582,55 @@ fn content_media_type(path: &Path) -> &'static str {
     }
 }
 
-/// Types a browser may render inline; everything else is an attachment.
+/// Media types a browser may render inline (the MIME-1 profile's raster image
+/// and audio types). Exact essences only: `image/svg+xml` and `text/html` run
+/// script when rendered in the serving origin, so they are never inline.
+const INLINE_MEDIA_TYPES: [&str; 9] = [
+    "audio/flac",
+    "audio/mp4",
+    "audio/mpeg",
+    "audio/ogg",
+    "audio/wav",
+    "image/gif",
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+];
+
+/// True when `media_type`'s essence is an inline-renderable type. Parameters
+/// after `;` do not change the essence, and an unlisted type is never inline.
 fn is_allowlisted_media(media_type: &str) -> bool {
-    media_type.starts_with("image/") || media_type.starts_with("audio/")
+    let essence = media_type.split(';').next().unwrap_or_default().trim();
+    INLINE_MEDIA_TYPES
+        .iter()
+        .any(|allowed| essence.eq_ignore_ascii_case(allowed))
+}
+
+/// Inserts `name: value` unless a header of that name (any case) is present,
+/// so a policy header set by one layer is never duplicated by another.
+fn ensure_header(response: &mut Response, name: &str, value: &str) {
+    if !response
+        .headers
+        .iter()
+        .any(|(existing, _)| existing.eq_ignore_ascii_case(name))
+    {
+        response.headers.push((name.to_owned(), value.to_owned()));
+    }
+}
+
+/// Applies the payload policy to a stored Blob response. An allowlisted type
+/// keeps its media type and renders inline. Any other payload is served as an
+/// `application/octet-stream` attachment with `nosniff` and a `sandbox` policy,
+/// so a stored document cannot run script in the serving origin.
+fn apply_payload_policy(response: &mut Response, media_type: &str) {
+    if is_allowlisted_media(media_type) {
+        media_type.clone_into(&mut response.content_type);
+        return;
+    }
+    "application/octet-stream".clone_into(&mut response.content_type);
+    ensure_header(response, "content-disposition", "attachment");
+    ensure_header(response, "x-content-type-options", "nosniff");
+    ensure_header(response, "content-security-policy", "sandbox");
 }
 
 fn percent_decode(path: &str) -> Result<String, ()> {
@@ -2126,19 +2167,28 @@ fn response_head(response: &Response) -> Vec<u8> {
     if !response.content_type.is_empty() {
         let _ = write!(head, "Content-Type: {}\r\n", response.content_type);
     }
+    let declares = |name: &str| {
+        response
+            .headers
+            .iter()
+            .any(|(existing, _)| existing.eq_ignore_ascii_case(name))
+    };
     if response.content_type.starts_with("text/html") {
         for (name, value) in HTML_SECURITY_HEADERS {
-            let _ = write!(head, "{name}: {value}\r\n");
+            if !declares(name) {
+                let _ = write!(head, "{name}: {value}\r\n");
+            }
         }
     }
     for (name, value) in &response.headers {
         let _ = write!(head, "{name}: {value}\r\n");
     }
-    let _ = write!(
-        head,
-        "Content-Length: {}\r\nConnection: close\r\n\r\n",
-        response.body.len()
-    );
+    // A response that declares its own Content-Length (a media range) keeps it;
+    // the body length is the default only.
+    if !declares("content-length") {
+        let _ = write!(head, "Content-Length: {}\r\n", response.body.len());
+    }
+    head.push_str("Connection: close\r\n\r\n");
     head.into_bytes()
 }
 
