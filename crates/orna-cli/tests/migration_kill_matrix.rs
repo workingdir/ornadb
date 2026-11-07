@@ -40,6 +40,12 @@
 //! parked copy holds. Abort is allowed while the copy's ref is still the old
 //! head, and refused with `E2100` once it has moved to the candidate.
 //!
+//! The one-step in-place form (`upgrade --to-format 3`, no destination) finishes
+//! its activation and then crosses two exchange barriers. `upgrade-exchanging`
+//! parks with the worktree still the untouched source and the activated sibling
+//! beside it; `upgrade-exchanged` parks after the swap, with the worktree holding
+//! the activated copy and the sibling the old snapshot.
+//!
 //! | Marker | Journal stage | Ref |
 //! | --- | --- | --- |
 //! | `upgrade-activating` | `Prepared` | old head |
@@ -78,7 +84,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use orna_repository::{PublicationJournalStage, Repository};
+use orna_repository::{PublicationJournalStage, Repository, RepositoryFormat};
 use orna_runtime::{
     CheckpointKey, Component, ConsumerIdentity, ListStreamSource, RuntimeIdentity, RuntimeState,
     StreamCheckpoint, StreamHandler, StreamHandlerResult, StreamItem, StreamMutationBatch,
@@ -1770,4 +1776,259 @@ fn discard_refuses_a_prepared_copy_whose_ref_an_ordinary_writer_moved() {
         "the publication journal is kept"
     );
     assert_eq!(source_state(&source), pristine_state);
+}
+
+/// The one-step `orna upgrade --to-format 3` arguments, confirmed by `confirm`
+/// when given.
+fn in_place_words(confirm: Option<&str>) -> Vec<String> {
+    let mut words = ["upgrade", "--to-format", "3", "--no-persistent-consumers"]
+        .map(str::to_owned)
+        .to_vec();
+    if let Some(id) = confirm {
+        words.push("--confirm".to_owned());
+        words.push(id.to_owned());
+    }
+    words
+}
+
+/// Runs the one-step `orna upgrade --to-format 3` against the worktree `source`.
+fn run_in_place(source: &Path, confirm: Option<&str>) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_orna"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .args(["--db", source.to_str().unwrap()])
+        .args(in_place_words(confirm))
+        .output()
+        .expect("in-place upgrade starts")
+}
+
+/// Reads `candidate_commit=` from the review printed before publication.
+fn candidate_from_review(output: &Output) -> String {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .split_whitespace()
+        .find_map(|word| word.strip_prefix("candidate_commit="))
+        .unwrap_or_else(|| panic!("the review names the candidate: {stdout}"))
+        .to_owned()
+}
+
+/// The sibling copy the one-step upgrade of the worktree `source` prepares and
+/// activates. After the exchange it holds the old snapshot.
+fn in_place_sibling(source: &Path) -> PathBuf {
+    let name = source.file_name().unwrap().to_string_lossy().into_owned();
+    source
+        .parent()
+        .unwrap()
+        .join(format!("{name}-format3-candidate"))
+}
+
+fn repository_format(path: &Path) -> RepositoryFormat {
+    Repository::discover(path)
+        .unwrap()
+        .open_format_context()
+        .unwrap()
+        .repository_format()
+}
+
+/// Reviews the one-step upgrade of a duplicate of `pristine` in `case`, then
+/// kills the confirmed run at `boundary`. Returns the worktree and the candidate.
+fn park_in_place(case: &Path, pristine: &Path, boundary: &str) -> (PathBuf, String) {
+    let source = case.join("source");
+    duplicate(pristine, &source);
+    let review = run_in_place(&source, None);
+    let stderr = String::from_utf8_lossy(&review.stderr);
+    assert_eq!(review.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("publication was not confirmed"), "{stderr}");
+    let candidate = candidate_from_review(&review);
+    let crash = case.join("crash");
+    fs::create_dir(&crash).unwrap();
+    let words = in_place_words(Some(&candidate));
+    let words = words
+        .iter()
+        .map(|word| std::ffi::OsStr::new(word.as_str()))
+        .collect::<Vec<_>>();
+    let mut child = park_command_at(&source, &words, boundary, &crash);
+    child.kill_and_reap();
+    (source, candidate)
+}
+
+/// Appends one real unpublished mutation to the legacy source through the
+/// runtime, under the legacy-source identity the runtime keys its tail by.
+fn append_unpublished_mutation(source: &Path) {
+    runtime().block_on(async {
+        let repository = Repository::discover(source).unwrap();
+        let (identity, digest) =
+            orna_runtime::migration_source_runtime_identity(&repository).unwrap();
+        let state = RuntimeState::open(&repository, identity, digest)
+            .await
+            .unwrap();
+        let lease = state.acquire_lease([45; 16]).await.unwrap();
+        let capture = state.capture().await.unwrap();
+        let payload = b"unpublished legacy-source row".to_vec();
+        let mutation = orna_runtime::Mutation {
+            id: [1; 16],
+            digest: Sha256::digest(&payload).into(),
+            payload,
+        };
+        state
+            .commit(lease, &capture, &mutation, [2; 32], &orna_runtime::NoFault)
+            .await
+            .unwrap();
+    });
+}
+
+/// Killed at each exchange boundary of the one-step upgrade. Before the swap the
+/// worktree is still the untouched source and a rerun publishes the reviewed
+/// candidate byte for byte, as an uninterrupted run does. After the swap the
+/// worktree holds the activated copy and a rerun is refused without a change.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn in_place_upgrade_kill_at_each_exchange_boundary_resumes_or_refuses() {
+    let parent = TempDir::new().unwrap();
+    let pristine = pristine_source(parent.path());
+    let legacy_head = git(&pristine, &["rev-parse", "HEAD"]);
+    let pristine_state = source_state(&pristine);
+
+    // The reference: a confirmed one-step upgrade that is never interrupted.
+    let reference = parent.path().join("reference");
+    duplicate(&pristine, &reference);
+    let candidate = candidate_from_review(&run_in_place(&reference, None));
+    let published = run_in_place(&reference, Some(&candidate));
+    assert!(
+        published.status.success(),
+        "reference publication: {}",
+        String::from_utf8_lossy(&published.stderr)
+    );
+    let reference_copy = committed_copy(&reference);
+    let reference_carry = destination_carry(&reference);
+
+    // Killed before the exchange: the worktree is still the source.
+    let case = TempDir::new().unwrap();
+    let (source, parked_candidate) = park_in_place(case.path(), &pristine, "upgrade-exchanging");
+    assert_eq!(
+        parked_candidate, candidate,
+        "the candidate is deterministic"
+    );
+    let sibling = in_place_sibling(&source);
+    assert_eq!(
+        source_state(&source),
+        pristine_state,
+        "a parked exchange leaves the worktree untouched"
+    );
+    assert_eq!(repository_format(&source), RepositoryFormat::Legacy1);
+    assert_eq!(git(&sibling, &["rev-parse", "HEAD"]), candidate);
+    assert!(
+        Repository::discover(&sibling)
+            .unwrap()
+            .read_publication_journal()
+            .unwrap()
+            .is_none(),
+        "the activated sibling keeps no publication journal"
+    );
+    let rerun = run_in_place(&source, Some(&candidate));
+    let stdout = String::from_utf8_lossy(&rerun.stdout);
+    assert!(
+        rerun.status.success(),
+        "rerun after the exchange parked: {}",
+        String::from_utf8_lossy(&rerun.stderr)
+    );
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.starts_with("published format-3 repository in place")),
+        "{stdout}"
+    );
+    assert_eq!(
+        committed_copy(&source),
+        reference_copy,
+        "the rerun publishes the reference byte for byte"
+    );
+    assert_eq!(
+        destination_carry(&source),
+        reference_carry,
+        "no carried row is lost or duplicated"
+    );
+    assert_eq!(
+        git(&sibling, &["rev-parse", "HEAD"]),
+        legacy_head,
+        "the rollback copy keeps the old snapshot"
+    );
+
+    // Killed after the exchange: the worktree holds the activated copy.
+    let case = TempDir::new().unwrap();
+    let (source, parked_candidate) = park_in_place(case.path(), &pristine, "upgrade-exchanged");
+    assert_eq!(
+        parked_candidate, candidate,
+        "the candidate is deterministic"
+    );
+    let sibling = in_place_sibling(&source);
+    assert_eq!(repository_format(&source), RepositoryFormat::Format3);
+    assert_eq!(git(&source, &["rev-parse", "HEAD"]), candidate);
+    assert_eq!(
+        committed_copy(&source),
+        reference_copy,
+        "the exchanged worktree is the reference"
+    );
+    assert_eq!(
+        git(&sibling, &["rev-parse", "HEAD"]),
+        legacy_head,
+        "the rollback copy keeps the old snapshot"
+    );
+    assert_eq!(
+        source_state(&sibling),
+        pristine_state,
+        "the rollback copy is the old snapshot byte for byte"
+    );
+    let worktree_before = committed_copy(&source);
+    let rollback_before = source_state(&sibling);
+    let refused = run_in_place(&source, Some(&candidate));
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert_eq!(refused.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("E2100"), "{stderr}");
+    assert!(stderr.contains("already completed"), "{stderr}");
+    assert_eq!(
+        committed_copy(&source),
+        worktree_before,
+        "a refused rerun changes no byte of the worktree"
+    );
+    assert_eq!(
+        source_state(&sibling),
+        rollback_before,
+        "a refused rerun changes no byte of the rollback copy"
+    );
+}
+
+/// An unpublished tail appended after the one-step exchange parked is refused
+/// at the rerun before any verification copy is prepared. The worktree and the
+/// activated sibling keep their bytes (ORNA-UPGRADE-006).
+#[test]
+fn in_place_rerun_refuses_an_unpublished_tail_appended_after_the_exchange_parked() {
+    let parent = TempDir::new().unwrap();
+    let pristine = pristine_source(parent.path());
+    let case = TempDir::new().unwrap();
+    let (source, candidate) = park_in_place(case.path(), &pristine, "upgrade-exchanging");
+    let sibling = in_place_sibling(&source);
+    append_unpublished_mutation(&source);
+    let source_before = source_state(&source);
+    let sibling_before = source_state(&sibling);
+
+    let refused = run_in_place(&source, Some(&candidate));
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert_eq!(refused.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("E2100"), "{stderr}");
+    assert!(stderr.contains("unpublished runtime mutations"), "{stderr}");
+    assert_eq!(
+        source_state(&source),
+        source_before,
+        "the worktree is unchanged"
+    );
+    assert_eq!(
+        source_state(&sibling),
+        sibling_before,
+        "the activated sibling is unchanged"
+    );
+    assert!(
+        !case.path().join("source-format3-verify").exists(),
+        "no verification copy is prepared"
+    );
 }
