@@ -6764,3 +6764,36 @@ fn mount_detach_propagates_non_not_found_registry_read_errors() {
             .success()
     );
 }
+
+/// ORNA-CAP-006: shared maintenance leases coexist, an exclusive maintenance
+/// boundary is refused while any lease is held, and a lease is refused while the
+/// boundary is held. Every refusal is bounded and reports `RepositoryBusy`.
+#[test]
+fn maintenance_boundary_and_leases_refuse_each_other_both_ways() {
+    let root = repository();
+    let repo = Repository::discover(root.path())
+        .unwrap()
+        .with_coordination_lock_wait(std::time::Duration::from_millis(50));
+
+    let first = repo.hold_maintenance_lease().expect("first shared lease");
+    let second = repo
+        .hold_maintenance_lease()
+        .expect("shared leases coexist");
+    assert!(matches!(
+        repo.with_maintenance_boundary(|| Ok::<(), orna_repository::RepositoryError>(())),
+        Err(orna_repository::RepositoryError::RepositoryBusy)
+    ));
+    drop(first);
+    drop(second);
+
+    repo.with_maintenance_boundary(|| {
+        assert!(matches!(
+            repo.hold_maintenance_lease(),
+            Err(orna_repository::RepositoryError::RepositoryBusy)
+        ));
+        Ok::<(), orna_repository::RepositoryError>(())
+    })
+    .expect("exclusive boundary is free once shared leases are dropped");
+    repo.hold_maintenance_lease()
+        .expect("lease is free once the boundary returns");
+}

@@ -706,6 +706,12 @@ fn build_index(
             &domain,
             &(15..20).map(|key| (key, key)).collect::<Vec<_>>(),
         );
+        let leaf_row_counts = vec![
+            left.row_count,
+            right.row_count,
+            low.row_count,
+            high.row_count,
+        ];
         let healthy = vec![low, high];
         let healthy_oid = graph.add_node(
             encode_branch(&domain, 1, &healthy),
@@ -729,12 +735,15 @@ fn build_index(
             tree_edges(&branch),
             true,
         );
+        // Leaf counts are the four built leaves in key order. Only a descent
+        // into the overlapping interior branch reads the malformed node; the
+        // healthy sibling branch stays queryable.
         return IndexShape {
             root,
-            leaf_pages: 4,
+            leaf_pages: leaf_row_counts.len(),
             branch_pages: 3,
             tree_height: 3,
-            leaf_row_counts: Vec::new(),
+            leaf_row_counts,
         };
     }
 
