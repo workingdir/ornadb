@@ -115,6 +115,17 @@ fn committed_payload_project(
     payload: &[u8],
     media_type: &str,
 ) -> (PathBuf, String) {
+    committed_payload_project_with_limit(directory, source_name, payload, media_type, 65536)
+}
+
+/// Like [`committed_payload_project`], with an explicit capture byte bound.
+fn committed_payload_project_with_limit(
+    directory: &TempDir,
+    source_name: &str,
+    payload: &[u8],
+    media_type: &str,
+    capture_limit: u64,
+) -> (PathBuf, String) {
     let root = directory.path().join("library");
     let init = orna(
         directory.path(),
@@ -142,7 +153,7 @@ fn committed_payload_project(
     // The blob source must lie inside the repository worktree (the capture root).
     fs::write(root.join(source_name), payload).expect("write the payload into the worktree");
     let input = format!(
-        "main.Object.insert({{ id: \"a\", payload: sys.blob.annotate(sys.blob.capture_file(\"{}\", \"{source_name}\", 65536), \"{media_type}\"), content: \"x\" }})",
+        "main.Object.insert({{ id: \"a\", payload: sys.blob.annotate(sys.blob.capture_file(\"{}\", \"{source_name}\", {capture_limit}), \"{media_type}\"), content: \"x\" }})",
         root.to_str().expect("UTF-8 test path")
     );
     let inserted = orna_repl(&root, &input);
@@ -289,8 +300,24 @@ struct Served {
 /// A running server over `payload` committed as `media_type` from the worktree
 /// file `source_name`.
 fn served_payload(source_name: &str, payload: &[u8], media_type: &str) -> Served {
+    served_payload_with_limit(source_name, payload, media_type, 65536)
+}
+
+/// Like [`served_payload`], with an explicit capture byte bound.
+fn served_payload_with_limit(
+    source_name: &str,
+    payload: &[u8],
+    media_type: &str,
+    capture_limit: u64,
+) -> Served {
     let directory = TempDir::new().expect("temporary project directory");
-    let (root, relation) = committed_payload_project(&directory, source_name, payload, media_type);
+    let (root, relation) = committed_payload_project_with_limit(
+        &directory,
+        source_name,
+        payload,
+        media_type,
+        capture_limit,
+    );
     let commit = git_stdout(&root, &["rev-parse", "HEAD"]);
     let descriptor = committed_descriptor(&root, &relation);
     let (server, address) = start_server(&root);
@@ -648,4 +675,160 @@ fn truncated_loose_objects_fail_closed_without_payload_bytes() {
         rewrite_object(object, &bytes[..bytes.len() / 2]);
     }
     assert_refused_without_payload(&served);
+}
+
+fn fixture_bytes(name: &str) -> Vec<u8> {
+    fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/media")
+            .join(name),
+    )
+    .expect("read a media fixture")
+}
+
+/// The `/preview/` path for the same committed descriptor as `served.media_path`.
+fn preview_path(served: &Served) -> String {
+    served.media_path.replacen("/media/", "/preview/", 1)
+}
+
+fn preview_json(reply: &Reply) -> serde_json::Value {
+    serde_json::from_slice(&reply.body).expect("the preview body is JSON")
+}
+
+#[test]
+fn preview_decodes_a_committed_png_to_its_dimensions() {
+    let served = served_payload("pixel.png", &fixture_bytes("pixel.png"), "image/png");
+    let reply = request(&served.address, "GET", &preview_path(&served), &[]).expect("GET");
+    assert_eq!(reply.status, 200);
+    assert_eq!(reply.header("content-type"), Some("application/json"));
+    let json = preview_json(&reply);
+    assert_eq!(json["kind"], "image");
+    assert_eq!(json["width"], 1);
+    assert_eq!(json["height"], 1);
+}
+
+#[test]
+fn preview_inspects_a_committed_wav_as_pcm_wave() {
+    let served = served_blob();
+    let reply = request(&served.address, "GET", &preview_path(&served), &[]).expect("GET");
+    assert_eq!(reply.status, 200);
+    let json = preview_json(&reply);
+    assert_eq!(json["kind"], "pcm_wave");
+    assert_eq!(json["channels"], 1);
+    assert_eq!(json["sample_rate"], 8000);
+    assert_eq!(json["bits_per_sample"], 16);
+    assert_eq!(json["frame_count"], 2000);
+    assert_eq!(json["duration_nanos"], 250_000_000);
+}
+
+#[test]
+fn preview_refuses_an_unsupported_media_type_with_415() {
+    let served = served_payload("note.txt", b"plain text", "text/plain");
+    let reply = request(&served.address, "GET", &preview_path(&served), &[]).expect("GET");
+    assert_eq!(reply.status, 415);
+    assert!(String::from_utf8_lossy(&reply.body).contains("media.preview.unsupported"));
+}
+
+#[test]
+fn preview_refuses_malformed_png_content_with_422() {
+    let mut payload = b"\x89PNG\r\n\x1a\n".to_vec();
+    payload.extend_from_slice(&[0xff; 64]);
+    let served = served_payload("broken.png", &payload, "image/png");
+    let reply = request(&served.address, "GET", &preview_path(&served), &[]).expect("GET");
+    assert_eq!(reply.status, 422);
+    assert!(String::from_utf8_lossy(&reply.body).contains("media.preview.malformed"));
+}
+
+#[test]
+fn preview_head_carries_the_status_without_a_body() {
+    let served = served_blob();
+    let reply = request(&served.address, "HEAD", &preview_path(&served), &[]).expect("HEAD");
+    assert_eq!(reply.status, 200);
+    assert!(reply.body.is_empty(), "HEAD never carries a body");
+}
+
+#[test]
+fn preview_refuses_a_stale_commit_and_other_methods() {
+    let served = served_blob();
+    let stale = format!("/preview/{ZERO_OID}/{}", served.descriptor);
+    let not_found = request(&served.address, "GET", &stale, &[]).expect("GET");
+    assert_eq!(not_found.status, 404);
+    let origin = format!("http://{}", served.address);
+    let refused = request(
+        &served.address,
+        "POST",
+        &preview_path(&served),
+        &[("Origin", origin.as_str())],
+    )
+    .expect("POST");
+    assert_eq!(refused.status, 405);
+}
+
+/// The descriptor is authority only while HEAD references it: after the row is
+/// deleted and republished, the old descriptor is not served under the new commit.
+#[test]
+fn preview_and_media_refuse_a_descriptor_no_longer_referenced_at_head() {
+    let directory = TempDir::new().expect("temporary project directory");
+    let (root, relation) = committed_payload_project(
+        &directory,
+        "pixel.png",
+        &fixture_bytes("pixel.png"),
+        "image/png",
+    );
+    let descriptor = committed_descriptor(&root, &relation);
+    let removed = orna_repl(&root, "main.Object.delete(\"a\")");
+    assert_success(&removed, "REPL delete");
+    let published = orna(&root, &["publish", "--message", "Remove object"]);
+    assert_success(&published, "orna publish");
+    let commit = git_stdout(&root, &["rev-parse", "HEAD"]);
+    let (_server, address) = start_server(&root);
+    for path in [
+        format!("/media/{commit}/{descriptor}"),
+        format!("/preview/{commit}/{descriptor}"),
+    ] {
+        let reply = request(&address, "GET", &path, &[]).expect("GET succeeds");
+        assert_eq!(reply.status, 404, "{path} is not referenced at HEAD");
+        assert_eq!(reply.body, br#"{"error":"media.not_found"}"#.to_vec());
+    }
+}
+
+#[test]
+fn preview_foreign_host_and_origin_are_refused() {
+    let served = served_payload("pixel.png", &fixture_bytes("pixel.png"), "image/png");
+    let foreign_host = request(
+        &served.address,
+        "GET",
+        &preview_path(&served),
+        &[("Host", "evil.example")],
+    )
+    .expect("GET succeeds at transport");
+    assert_eq!(foreign_host.status, 403);
+    assert_eq!(foreign_host.body, br#"{"error":"host_denied"}"#.to_vec());
+    let foreign_origin = request(
+        &served.address,
+        "GET",
+        &preview_path(&served),
+        &[("Origin", "http://evil.example")],
+    )
+    .expect("GET succeeds at transport");
+    assert_eq!(foreign_origin.status, 403);
+    assert_eq!(
+        foreign_origin.body,
+        br#"{"error":"origin_denied"}"#.to_vec()
+    );
+}
+
+#[test]
+fn preview_refuses_a_declared_wave_with_wrong_magic_as_malformed_422() {
+    let served = served_payload(
+        "fake.wav",
+        b"this is plainly not a RIFF/WAVE container",
+        "audio/wav",
+    );
+    let reply = request(&served.address, "GET", &preview_path(&served), &[]).expect("GET");
+    assert_eq!(
+        reply.status, 422,
+        "MIME never substitutes for byte validation"
+    );
+    assert!(String::from_utf8_lossy(&reply.body).contains("media.preview.malformed"));
 }
