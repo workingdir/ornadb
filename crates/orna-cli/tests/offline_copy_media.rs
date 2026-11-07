@@ -105,7 +105,7 @@ fn offline_copy_hydrates_verified_payloads_and_rejects_tampering() {
 }
 
 #[test]
-fn unknown_format_row_is_retrievable_from_the_offline_copy() {
+fn offline_copy_retrieves_row_with_unrecognised_media_type() {
     // ORNA-MEDIA-001 (offline-copy path only): a payload with a media type no
     // inspector recognises is still a committed row. Its metadata answers from
     // the copy without a payload read, and hydration returns the exact bytes.
