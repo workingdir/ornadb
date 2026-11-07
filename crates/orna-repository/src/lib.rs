@@ -13643,6 +13643,182 @@ mod tests {
         );
     }
 
+    /// Repository with one committed file. Each per-guard test below builds one
+    /// crafted journal state, so a refusal can only come from the guard it names.
+    fn managed_guard_fixture() -> (tempfile::TempDir, Repository) {
+        let root = tempfile::TempDir::new().unwrap();
+        git(root.path(), &["init", "-b", "main"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
+        git(root.path(), &["config", "commit.gpgsign", "false"]);
+        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
+        git(root.path(), &["add", "main.orna"]);
+        git(root.path(), &["commit", "-m", "initial"]);
+        let repository = Repository::discover(root.path()).unwrap();
+        (root, repository)
+    }
+
+    fn managed_guard_journal(
+        repository: &Repository,
+        path: &ManagedPath,
+        expected: Option<&[u8]>,
+        next: Option<&[u8]>,
+        id: u8,
+    ) -> PublicationJournal {
+        let head = repository.head().unwrap().unwrap();
+        let tree = repository
+            .index_generation()
+            .unwrap()
+            .tree()
+            .unwrap()
+            .clone();
+        PublicationJournal::new_with_runtime_intent(
+            head,
+            GitCommitRef("e".repeat(40)),
+            tree,
+            [id; 16],
+            vec![PublicationJournalEntry::new(
+                path.clone(),
+                expected.map(<[u8]>::to_vec),
+                next.map(<[u8]>::to_vec),
+            )],
+        )
+        .unwrap()
+    }
+
+    /// Clean phase with quarantine residue: the guard at the
+    /// `quarantine_bytes.is_some()` check in materialize_publication_entry_phases_locked.
+    /// The target already holds `next`, which the Clean branch accepts as complete,
+    /// so only this guard refuses.
+    #[test]
+    fn managed_guard_clean_quarantine_residue_is_refused_before_completion_check() {
+        let (root, repository) = managed_guard_fixture();
+        let path = ManagedPath::new("generated/row.orna").unwrap();
+        let mut journal =
+            managed_guard_journal(&repository, &path, Some(b"expected"), Some(b"next"), 31);
+        let parent = root.path().join("generated");
+        let quarantine = parent.join(journal.quarantine_name(0).unwrap());
+        let target = root.path().join(path.as_path());
+        fs::create_dir_all(&parent).unwrap();
+        fs::write(&target, b"next").unwrap();
+        fs::write(&quarantine, b"expected").unwrap();
+        repository.write_publication_journal(&journal).unwrap();
+
+        assert!(matches!(
+            repository.materialize_publication_entry(&mut journal, 0),
+            Err(RepositoryError::ManagedContentConflict)
+        ));
+        assert_eq!(fs::read(&target).unwrap(), b"next");
+        assert_eq!(fs::read(&quarantine).unwrap(), b"expected");
+    }
+
+    /// Clean phase with a target matching neither expected nor next: the guard at
+    /// the `current != entry.expected()` check. The impl-level check would also refuse,
+    /// but only after the phase had advanced, so this asserts the journal never advances.
+    #[test]
+    fn managed_guard_clean_unexpected_target_is_refused_without_advancing_the_journal() {
+        let (root, repository) = managed_guard_fixture();
+        let path = ManagedPath::new("generated/row.orna").unwrap();
+        let mut journal =
+            managed_guard_journal(&repository, &path, Some(b"expected"), Some(b"next"), 32);
+        let target = root.path().join(path.as_path());
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, b"foreign").unwrap();
+        repository.write_publication_journal(&journal).unwrap();
+
+        assert!(matches!(
+            repository.materialize_publication_entry(&mut journal, 0),
+            Err(RepositoryError::ManagedContentConflict)
+        ));
+        assert_eq!(fs::read(&target).unwrap(), b"foreign");
+        let persisted = repository.read_publication_journal().unwrap().unwrap();
+        assert_eq!(
+            persisted.entries()[0].materialization().phase,
+            PublicationMaterializationPhase::Clean
+        );
+    }
+
+    /// Quarantine-prepared phase with a foreign quarantine file: the guard at the
+    /// `Some(bytes) != entry.expected()` check. The target is absent, so without this
+    /// guard the next-content install would write `next` into the target.
+    #[test]
+    fn managed_guard_foreign_quarantine_is_refused_before_installing_next() {
+        let (root, repository) = managed_guard_fixture();
+        let path = ManagedPath::new("generated/row.orna").unwrap();
+        let mut journal =
+            managed_guard_journal(&repository, &path, Some(b"expected"), Some(b"next"), 33);
+        let name = journal.quarantine_name(0).unwrap();
+        journal
+            .set_materialization(
+                0,
+                PublicationMaterializationPhase::QuarantinePrepared,
+                Some(name.clone()),
+            )
+            .unwrap();
+        let parent = root.path().join("generated");
+        let quarantine = parent.join(&name);
+        let target = root.path().join(path.as_path());
+        fs::create_dir_all(&parent).unwrap();
+        fs::write(&quarantine, b"foreign").unwrap();
+        repository.write_publication_journal(&journal).unwrap();
+
+        assert!(matches!(
+            repository.materialize_publication_entry(&mut journal, 0),
+            Err(RepositoryError::ManagedContentConflict)
+        ));
+        assert!(!target.exists());
+        assert_eq!(fs::read(&quarantine).unwrap(), b"foreign");
+    }
+
+    /// Installed phase with no quarantine file and the target still at `expected`: the
+    /// guard at the phase check that follows the quarantine branch. Only this guard
+    /// refuses; without it the managed install would move `expected` aside and write `next`.
+    #[test]
+    fn managed_guard_installed_phase_without_quarantine_does_not_rewind_the_target() {
+        let (root, repository) = managed_guard_fixture();
+        let path = ManagedPath::new("generated/row.orna").unwrap();
+        let mut journal =
+            managed_guard_journal(&repository, &path, Some(b"expected"), Some(b"next"), 34);
+        let name = journal.quarantine_name(0).unwrap();
+        journal
+            .set_materialization(0, PublicationMaterializationPhase::Installed, Some(name))
+            .unwrap();
+        let target = root.path().join(path.as_path());
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, b"expected").unwrap();
+        repository.write_publication_journal(&journal).unwrap();
+
+        assert!(matches!(
+            repository.materialize_publication_entry(&mut journal, 0),
+            Err(RepositoryError::ManagedContentConflict)
+        ));
+        assert_eq!(fs::read(&target).unwrap(), b"expected");
+        let persisted = repository.read_publication_journal().unwrap().unwrap();
+        assert_eq!(
+            persisted.entries()[0].materialization().phase,
+            PublicationMaterializationPhase::Installed
+        );
+    }
+
+    /// Managed install entry check: removal (`next` None) with the expected bytes absent.
+    /// The removal branch returns Ok for an absent target, so only the entry guard refuses.
+    #[test]
+    fn managed_guard_install_refuses_missing_target_for_expected_removal() {
+        let (_root, repository) = managed_guard_fixture();
+        let path = ManagedPath::new("generated/row.orna").unwrap();
+        let _lock = repository.acquire_coordination_lock().unwrap();
+        assert!(matches!(
+            repository.materialize_managed_file_impl_with_quarantine_locked(
+                &path,
+                Some(b"expected"),
+                None,
+                None,
+                None,
+                None,
+            ),
+            Err(RepositoryError::ManagedContentConflict)
+        ));
+    }
+
     #[test]
     fn final_quarantine_replacement_is_preserved_and_reports_conflict() {
         let root = tempfile::TempDir::new().unwrap();
