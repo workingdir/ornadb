@@ -83,7 +83,8 @@ impl Context<'_, '_> {
         };
         let contract_name = match kind.as_str() {
             "field" | "text" | "rows" | "cols" | "stack" | "details" | "table" | "tree"
-            | "code" | "diff" | "chart" | "button" | "form" | "input" => kind,
+            | "code" | "diff" | "chart" | "button" | "form" | "input" | "image" | "audio"
+            | "download" => kind,
             _ => return Err(error("ORNA-EVAL-ARGUMENT")),
         };
         self.items(properties.len() + children.len() + actions.len() + property_types.len() + 5)?;
