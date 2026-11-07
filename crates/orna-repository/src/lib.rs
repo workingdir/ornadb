@@ -529,6 +529,24 @@ const MAX_MIGRATION_ANNOTATION_DEFAULTS: usize = 1_000_000_000;
 /// fixes this default; a migration never chooses another one.
 pub const LEGACY_ANNOTATION_DEFAULT_MEDIA_TYPE: &str = "application/octet-stream";
 
+/// Whether an absent journal object is a refusal or an accepted loss.
+/// `RequireObjects` is for publish; `AcceptLostObjects` is for recovery,
+/// which classifies a lost candidate or base itself (ORNA-GIT-010).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PublicationPinPolicy {
+    RequireObjects,
+    AcceptLostObjects,
+}
+
+impl PublicationPinPolicy {
+    fn absent_object(self) -> Result<(), RepositoryError> {
+        match self {
+            Self::RequireObjects => Err(RepositoryError::PublicationObjectUnavailable),
+            Self::AcceptLostObjects => Ok(()),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PublicationMaterializationPhase {
     Clean,
@@ -4352,6 +4370,7 @@ impl Repository {
     fn adopt_publication_pins_locked(
         &self,
         journal: &PublicationJournal,
+        policy: PublicationPinPolicy,
     ) -> Result<(), RepositoryError> {
         let pins = Self::publication_pins(journal);
         let keep: Vec<String> = pins
@@ -4360,7 +4379,7 @@ impl Repository {
             .collect();
         self.sweep_publication_pins_locked(&keep)?;
         for (reference, oid) in &pins {
-            self.pin_publication_object_locked(reference, oid)?;
+            self.pin_publication_object_locked(reference, oid, policy)?;
         }
         Ok(())
     }
@@ -4404,16 +4423,19 @@ impl Repository {
         format!("refs/orna/publication-candidates/{commit}")
     }
 
-    /// Pins one object a journal names. An object Git no longer holds cannot
-    /// be kept alive, so it is left unpinned: the recovery path already
-    /// classifies a lost candidate or base tree (ORNA-GIT-010).
+    /// Pins one object a journal names. Recovery (`AcceptLostObjects`) leaves
+    /// an object Git no longer holds unpinned: the recovery path already
+    /// classifies a lost candidate or base tree (ORNA-GIT-010). Publish
+    /// (`RequireObjects`) refuses instead, so a prepared candidate or base is
+    /// never published while its object is unpinned (ORNA-CAP-006).
     fn pin_publication_object_locked(
         &self,
         reference: &str,
         oid: &str,
+        policy: PublicationPinPolicy,
     ) -> Result<(), RepositoryError> {
         if !self.publication_object_present(oid)? {
-            return Ok(());
+            return policy.absent_object();
         }
         let zero = "0".repeat(oid.len());
         let mut update = self.command();
@@ -4422,9 +4444,9 @@ impl Repository {
             return Ok(());
         }
         // A GC that removed the object after the check above makes the create
-        // fail. That is the same absent-object case: leave it unpinned.
+        // fail. That is the same absent-object case.
         if !self.publication_object_present(oid)? {
-            return Ok(());
+            return policy.absent_object();
         }
         // Creation is refused when the pin already names this object. Accept
         // only that exact pin; any other value is a conflicting journal pin.
@@ -5318,7 +5340,7 @@ impl Repository {
         self.ensure_atomic_index_install_supported()?;
         let index = self.git_path("index")?;
         let base_index = self.capture_index_for_expected(expected_index, &index)?;
-        self.adopt_publication_pins_locked(journal)?;
+        self.adopt_publication_pins_locked(journal, PublicationPinPolicy::RequireObjects)?;
         let lock_binding = journal.lock_binding()?;
         // A publisher killed after taking Git's lock leaves an Orna-marked lock bound
         // to this journal. Reclaim exactly that lock, and only once its owner is
@@ -5481,7 +5503,7 @@ impl Repository {
         {
             return Err(RepositoryError::LegacyMigrationCopy);
         }
-        self.adopt_publication_pins_locked(&journal)?;
+        self.adopt_publication_pins_locked(&journal, PublicationPinPolicy::AcceptLostObjects)?;
         self.reclaim_abandoned_publication_index_lock(&journal)?;
         let base_tree = journal
             .base_index_tree()
@@ -9173,6 +9195,78 @@ impl Repository {
             .map_err(|_| RepositoryError::LocalStateUnavailable)
     }
 
+    /// Runs `operation` inside the declared maintenance boundary (ORNA-CAP-006).
+    ///
+    /// Locks are taken in one fixed order: the exclusive maintenance lease, then
+    /// the coordination lock. Capture and prepare hold the shared maintenance
+    /// lease while they write objects that no ref names yet, so a Git `gc` or
+    /// `repack` run here cannot prune them. A held boundary or lease, in this
+    /// process or another, is reported as `RepositoryBusy` once the bounded wait
+    /// elapses; the call never blocks indefinitely.
+    ///
+    /// Git GC and repack are supported only through this entry. Concurrent
+    /// destructive prune that bypasses the boundary, such as `git prune --expire
+    /// now` run by another tool, is unsupported and is not advertised as safe.
+    pub fn with_maintenance_boundary<T, E>(
+        &self,
+        operation: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, E>
+    where
+        E: From<RepositoryError>,
+    {
+        let _maintenance = self
+            .acquire_maintenance_lease(MaintenanceMode::Exclusive)
+            .map_err(E::from)?;
+        let _coordination = self
+            .acquire_coordination_lock_for_publication()
+            .map_err(E::from)?;
+        operation()
+    }
+
+    /// Holds the shared maintenance lease for the duration of a capture or a
+    /// prepare. Shared leases coexist with each other; a held exclusive boundary
+    /// is reported as `RepositoryBusy` once the bounded wait elapses (ORNA-CAP-006).
+    pub fn hold_maintenance_lease(&self) -> Result<MaintenanceLease, RepositoryError> {
+        self.acquire_maintenance_lease(MaintenanceMode::Shared)
+    }
+
+    fn acquire_maintenance_lease(
+        &self,
+        mode: MaintenanceMode,
+    ) -> Result<MaintenanceLease, RepositoryError> {
+        let locks = self.runtime.locks();
+        fs::create_dir_all(&locks).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(locks.join("maintenance.lock"))
+            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        let deadline = std::time::Instant::now() + self.coordination_lock_wait;
+        loop {
+            let attempt = match mode {
+                MaintenanceMode::Shared => FileExt::try_lock_shared(&file),
+                MaintenanceMode::Exclusive => file.try_lock_exclusive(),
+            };
+            match attempt {
+                Ok(()) => return Ok(MaintenanceLease { file }),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(RepositoryError::RepositoryBusy);
+                    }
+                    std::thread::sleep(COORDINATION_LOCK_POLL);
+                }
+                Err(_) => return Err(RepositoryError::LocalStateUnavailable),
+            }
+        }
+    }
+
     /// Acquires the process-lifetime owner lock for this worktree's local
     /// runtime. The lock is separate from short-lived repository coordination
     /// locks and remains held for the runtime lifetime.
@@ -9650,6 +9744,25 @@ struct CoordinationLock {
 }
 
 impl Drop for CoordinationLock {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
+
+/// The maintenance-boundary mode requested from `maintenance.lock`.
+#[derive(Clone, Copy)]
+enum MaintenanceMode {
+    Shared,
+    Exclusive,
+}
+
+/// A shared or exclusive hold on the declared maintenance boundary
+/// (ORNA-CAP-006). The lease is released when it is dropped.
+pub struct MaintenanceLease {
+    file: fs::File,
+}
+
+impl Drop for MaintenanceLease {
     fn drop(&mut self) {
         let _ = self.file.unlock();
     }
@@ -11052,6 +11165,11 @@ pub enum RepositoryError {
     MissingGitIdentity,
     DetachedHead,
     InvalidPublicationJournal,
+    /// A publish step names a candidate or base object that Git no longer
+    /// holds. The publish is refused before any ref, index, or journal state
+    /// changes, so the prepared candidate is not silently left unpinned
+    /// (ORNA-CAP-006, ORNA-GIT-010).
+    PublicationObjectUnavailable,
     InvalidFormatMigration,
     /// A prepared migration copy journals `.orna/migration.json`, the record
     /// copies prepared before ORNA-META-001 carried. It cannot be prepared,
@@ -11148,6 +11266,9 @@ impl fmt::Display for RepositoryError {
             }
             Self::DetachedHead => f.write_str("publication requires a symbolic Git HEAD"),
             Self::InvalidPublicationJournal => f.write_str("invalid publication journal"),
+            Self::PublicationObjectUnavailable => {
+                f.write_str("a publication object is no longer held by the repository")
+            }
             Self::InvalidFormatMigration => {
                 f.write_str("invalid or unsupported repository format migration")
             }
@@ -11416,7 +11537,8 @@ mod tests {
     use super::{
         GitCommitRef, GitIndexLock, ManagedFileChange, ManagedPath, PublicationJournal,
         PublicationJournalEntry, PublicationJournalStage, PublicationMaterializationPhase,
-        RemoteContinuity, Repository, RepositoryError, RuntimeGeneration, parse_remote_orna_refs,
+        PublicationPinPolicy, RemoteContinuity, Repository, RepositoryError, RuntimeGeneration,
+        parse_remote_orna_refs,
     };
 
     #[cfg(target_os = "linux")]
@@ -11636,6 +11758,77 @@ mod tests {
             repository.publication_object_present(&present),
             Err(RepositoryError::GitOperationFailed)
         ));
+    }
+
+    /// ORNA-GIT-010 and ORNA-CAP-006: the pin policy decides an absent journal
+    /// object. Publish (`RequireObjects`) refuses it and creates no pin, so a
+    /// candidate whose object is gone is never published. Recovery
+    /// (`AcceptLostObjects`) classifies the loss itself, so it accepts the
+    /// absence and still creates no pin. A present object is pinned under
+    /// either policy.
+    #[test]
+    fn pin_policy_refuses_absent_object_only_for_publish() {
+        let root = tempfile::TempDir::new().unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(root.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let repository = Repository::discover(root.path()).unwrap();
+        let absent = "0123456789abcdef0123456789abcdef01234567";
+        let absent_ref = Repository::publication_candidate_pin_ref(absent);
+        let pin_exists = |reference: &str| {
+            Command::new("git")
+                .args(["show-ref", "--verify", "--quiet", reference])
+                .current_dir(root.path())
+                .status()
+                .unwrap()
+                .success()
+        };
+
+        assert!(matches!(
+            repository.pin_publication_object_locked(
+                &absent_ref,
+                absent,
+                PublicationPinPolicy::RequireObjects
+            ),
+            Err(RepositoryError::PublicationObjectUnavailable)
+        ));
+        assert!(!pin_exists(&absent_ref), "a refused pin must not exist");
+
+        repository
+            .pin_publication_object_locked(
+                &absent_ref,
+                absent,
+                PublicationPinPolicy::AcceptLostObjects,
+            )
+            .expect("recovery accepts a lost object");
+        assert!(!pin_exists(&absent_ref), "an accepted loss must not pin");
+
+        let mut hash = Command::new("git")
+            .args(["hash-object", "-w", "--stdin"])
+            .current_dir(root.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        std::io::Write::write_all(hash.stdin.as_mut().unwrap(), b"pinned").unwrap();
+        let present = String::from_utf8(hash.wait_with_output().unwrap().stdout)
+            .unwrap()
+            .trim()
+            .to_owned();
+        let present_ref = Repository::publication_candidate_pin_ref(&present);
+        repository
+            .pin_publication_object_locked(
+                &present_ref,
+                &present,
+                PublicationPinPolicy::RequireObjects,
+            )
+            .expect("publish pins a present object");
+        assert!(pin_exists(&present_ref), "a present object must be pinned");
     }
 
     /// A child repository nested inside a parent repository must not let a
