@@ -49,6 +49,8 @@ STATES = ("passed", "failed", "not-executed", "unavailable")
 # Worst first: a gate or item takes the first state any of its parts has.
 STATE_PRECEDENCE = ("failed", "unavailable", "not-executed", "passed")
 GATES = tuple("ABCDEFGH")
+# Schema of the one-gate document `summarize --gate` writes (e.g. gate-f-evidence.json).
+GATE_SCHEMA = "ornadb-gate-evidence-gate/1"
 BEAD_PATTERN = re.compile(r"ornadb-[0-9a-z]+(?:\.[0-9]+)*")
 TARGET_PATTERN = re.compile(r"(?:lib|doc|(?:bin|test|example|bench):[A-Za-z0-9_-]+|check:[a-z0-9-]+)")
 RECORD_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
@@ -1093,6 +1095,46 @@ def gate_rollup(items: list[dict]) -> list[dict]:
     return gates
 
 
+def gate_document(summary: dict, gate: str) -> dict:
+    """Return one gate's evidence: its rollup, each item's row state, and the commands and records those rows ran."""
+    rollup = next(entry for entry in summary["gates"] if entry["gate"] == gate)
+    rows = [item for item in summary["items"] if item["gate"] == gate]
+    used = sorted({run["record"] for row in rows for run in row["executed_by"]})
+    return {
+        "schema": GATE_SCHEMA,
+        "gate": gate,
+        "commit": summary["commit"],
+        "publication": summary["publication"],
+        "generated_at": summary["generated_at"],
+        "workflow_run": summary["workflow_run"],
+        "reviewer": summary["reviewer"],
+        "state": rollup["state"],
+        "items": rollup["items"],
+        "items_with_limitations": rollup["items_with_limitations"],
+        "rows": [
+            {
+                "id": row["id"],
+                "title": row["title"],
+                "state": row["state"],
+                "commands": row["commands"],
+                "tests": row["tests"],
+                "limitations": row["limitations"],
+            }
+            for row in rows
+        ],
+        "records": {
+            name: {
+                "command": summary["records"][name]["command"],
+                "state": summary["records"][name]["state"],
+                "exit_status": summary["records"][name]["exit_status"],
+                "log_sha256": summary["records"][name]["log"]["sha256"],
+            }
+            for name in used
+        },
+        "problems": summary["problems"],
+    }
+
+
 def load_records(root: Path) -> tuple[dict[str, dict], dict[str, Path], list[str]]:
     records: dict[str, dict] = {}
     directories: dict[str, Path] = {}
@@ -1213,7 +1255,13 @@ def command_summarize(arguments: argparse.Namespace) -> int:
     }
     out = Path(arguments.out)
     out.parent.mkdir(parents=True, exist_ok=True)
+    if bool(arguments.gate) != bool(arguments.gate_out):
+        raise EvidenceError("--gate and --gate-out must be given together")
     write_json(out, summary)
+    if arguments.gate:
+        gate_out = Path(arguments.gate_out)
+        gate_out.parent.mkdir(parents=True, exist_ok=True)
+        write_json(gate_out, gate_document(summary, arguments.gate))
     text = markdown(summary)
     if arguments.markdown:
         with Path(arguments.markdown).open("a", encoding="utf-8") as handle:
@@ -1445,6 +1493,8 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="person accountable for this summary; absent for an unattended run",
     )
+    summarize.add_argument("--gate", choices=GATES, help="also write the one-gate document for this gate (requires --gate-out)")
+    summarize.add_argument("--gate-out", help="one-gate document JSON path (requires --gate)")
 
     check = commands.add_parser("check", help="validate the baseline and the gate-item manifest")
     check.add_argument("--items", default=str(ITEMS), help="gate-item manifest (TOML)")
