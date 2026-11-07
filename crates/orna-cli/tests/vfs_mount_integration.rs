@@ -5937,9 +5937,228 @@ async fn field_add_and_retype_at_head_keep_pinned_handles_and_reject_stale_saves
         after_refusal, baseline,
         "a stale-generation save leaves the pinned handle's captured bytes unchanged"
     );
+
+    // A HEAD that names no commit leaves the committed head unreadable, which does not prove the
+    // draft's schema is unservable. A retained draft is released at unmount only when its schema is
+    // proven unservable, so the draft stays listed and unmount refuses (profiles/vfs-1.md:144). The
+    // refusal keeps the mount attached, and the pinned read handle keeps its captured bytes.
+    let head_file = repository.join(git_output(
+        &repository,
+        &["rev-parse", "--git-path", "HEAD"],
+    ));
+    let committed_head = std::fs::read(&head_file).expect("read HEAD before corrupting it");
+    std::fs::write(&head_file, b"ref: refs/heads/orna-cby2-missing\n")
+        .expect("point HEAD at a missing branch");
+    let refused = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .args([
+            "--db",
+            row.repository_directory.path().to_str().unwrap(),
+            "unmount",
+        ])
+        .arg(&row.mounted.mountpoint)
+        .output()
+        .expect("run unmount with an unreadable HEAD");
+    let diagnostic = format!(
+        "{}{}",
+        String::from_utf8_lossy(&refused.stdout),
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(
+        !refused.status.success(),
+        "unmount accepted a retained draft while HEAD is unreadable: {diagnostic}"
+    );
+    assert!(
+        diagnostic.contains("unresolved workspace drafts remain")
+            && diagnostic.contains("Music/london/data.orna"),
+        "the refusal names the retained draft: {diagnostic}"
+    );
+    read_handle
+        .seek(SeekFrom::Start(0))
+        .expect("rewind the pinned handle after the refused unmount");
+    let mut after_refused_unmount = Vec::new();
+    read_handle
+        .read_to_end(&mut after_refused_unmount)
+        .expect("the pinned handle still reads after the refused unmount");
+    assert_eq!(
+        after_refused_unmount, baseline,
+        "a refused unmount leaves the pinned handle's captured bytes unchanged"
+    );
     drop(read_handle);
+    std::fs::write(&head_file, committed_head).expect("restore HEAD");
 
     // The refused candidate is retained in recovery storage and names its draft. Its row can no
     // longer be opened, so the remedy cannot resolve it from the mount; unmount must accept it.
+    row.unmount();
+}
+
+/// ORNA-VFS-009 and profiles/vfs-1.md:144: a refused candidate that recovery storage could not keep
+/// is the only copy of its bytes. A second refused candidate of the same inode that recovery storage
+/// kept does not make the first one releasable, so unmount with an unavailable schema must refuse.
+#[tokio::test]
+async fn field_add_retype_with_unretained_refusal_keeps_unmount_refused() {
+    let Some(mut row) = mount_music_row("{ title: \"before\", }\n").await else {
+        return;
+    };
+    let repository = row.repository_directory.path().to_path_buf();
+    let document = row.row_path.join("data.orna");
+    let record_dir = record_directory(&row.repository);
+    let original_main =
+        std::fs::read(repository.join("main.orna")).expect("read the original declaration");
+    let mut first = OpenOptions::new()
+        .write(true)
+        .open(&document)
+        .expect("a write-intent open captures the v1 generation");
+    let mut second = OpenOptions::new()
+        .write(true)
+        .open(&document)
+        .expect("a second write-intent open captures the v1 generation");
+
+    std::fs::write(repository.join("main.orna"), RETYPED_AND_ADDED_SOURCE)
+        .expect("write the retyped declaration");
+    format3::git(&repository, &["add", "main.orna"]);
+    format3::git(
+        &repository,
+        &[
+            "commit",
+            "--quiet",
+            "-m",
+            "retype title and add note at HEAD",
+        ],
+    );
+
+    // Recovery storage refuses the first candidate, so the candidate is unretained.
+    set_mode(&record_dir, 0o500);
+    first
+        .set_len(0)
+        .expect("truncate the first private candidate");
+    first
+        .write_all(b"{ title: \"unretained\", }\n")
+        .expect("the bytes are accepted into the first handle");
+    let refused = first
+        .sync_all()
+        .expect_err("a write captured before the retype is stale");
+    // Recovery storage cannot keep this candidate, so its refusal is the retention failure's EIO
+    // rather than EAGAIN (profiles/vfs-1.md:134 and :140, backing unavailability).
+    assert_eq!(
+        refused.raw_os_error(),
+        Some(5),
+        "an unretained refused candidate reports the retention failure: {refused}"
+    );
+    drop(first);
+    // FUSE release is asynchronous to close(2); let it refuse retention before storage opens.
+    thread::sleep(Duration::from_millis(300));
+
+    // Recovery storage keeps the second refused candidate.
+    set_mode(&record_dir, 0o700);
+    second
+        .set_len(0)
+        .expect("truncate the second private candidate");
+    second
+        .write_all(b"{ title: \"retained\", }\n")
+        .expect("the bytes are accepted into the second handle");
+    let refused = second
+        .sync_all()
+        .expect_err("a write captured before the retype is stale");
+    assert_eq!(
+        refused.raw_os_error(),
+        Some(11),
+        "a stale-generation save is EAGAIN: {refused}"
+    );
+    drop(second);
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        retained_record_bodies(&row.repository),
+        ["{ title: \"retained\", }\n"],
+        "only the second refused candidate is in recovery storage"
+    );
+
+    // While the committed schema still resolves, the live drafts block unmount on their own, so
+    // the unavailable-schema release below is not the only thing that could let unmount succeed.
+    let refused = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .args(["--db", repository.to_str().unwrap(), "unmount"])
+        .arg(&row.mounted.mountpoint)
+        .output()
+        .expect("run unmount while the committed schema resolves");
+    assert!(
+        !refused.status.success(),
+        "unmount released live drafts while the committed schema resolves: {}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(
+        mountinfo_contains(&row.mounted.mountpoint),
+        "the refused unmount keeps the mount attached while the schema resolves"
+    );
+
+    // The unretained candidate is released only by the schema check at unmount, so the committed
+    // schema must be unresolvable here. An available schema refuses unmount without the unretained
+    // check and cannot prove the fix, so commit an unterminated declaration.
+    std::fs::write(
+        repository.join("main.orna"),
+        "pub table Music(id: Str) { title: Str?, note: Str?,\n",
+    )
+    .expect("write an unresolvable declaration");
+    format3::git(&repository, &["add", "main.orna"]);
+    format3::git(
+        &repository,
+        &[
+            "commit",
+            "--quiet",
+            "-m",
+            "commit an unresolvable declaration",
+        ],
+    );
+
+    // The unretained candidate is a live copy the mount alone holds, and the retained one does not
+    // release it while the schema is unavailable, so unmount refuses and the mount stays attached.
+    let refused = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .args(["--db", repository.to_str().unwrap(), "unmount"])
+        .arg(&row.mounted.mountpoint)
+        .output()
+        .expect("run unmount with an unretained refused candidate");
+    let diagnostic = format!(
+        "{}{}",
+        String::from_utf8_lossy(&refused.stdout),
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(
+        !refused.status.success(),
+        "unmount released a draft whose first candidate is unretained: {diagnostic}"
+    );
+    assert!(
+        diagnostic.contains("unresolved workspace drafts remain")
+            && diagnostic.contains("Music/london/data.orna"),
+        "the refusal names the unretained draft: {diagnostic}"
+    );
+    assert!(
+        mountinfo_contains(&row.mounted.mountpoint),
+        "the refused unmount keeps the mount attached"
+    );
+
+    // Restore the declaration, then accept a save of the row against it; that save supersedes the
+    // refusals, so the final unmount is accepted.
+    std::fs::write(repository.join("main.orna"), original_main)
+        .expect("restore the original declaration");
+    format3::git(&repository, &["add", "main.orna"]);
+    format3::git(
+        &repository,
+        &[
+            "commit",
+            "--quiet",
+            "-m",
+            "restore the original declaration",
+        ],
+    );
+    let mut fresh = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&document)
+        .expect("open the row against the restored schema");
+    fresh
+        .write_all(b"{ title: \"after\", }\n")
+        .expect("the bytes are accepted into the fresh handle");
+    fresh
+        .sync_all()
+        .expect("a save against the restored schema is accepted");
+    drop(fresh);
     row.unmount();
 }

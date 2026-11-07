@@ -3677,19 +3677,23 @@ fn noncandidate_ack(
 /// document open returns EIO (profiles/vfs-1.md:134). Such a draft cannot be resolved through the
 /// mount, and its retained copy is the explicit retention profiles/vfs-1.md:144 asks unmount to
 /// accept.
+///
+/// A refusal still holding an unretained source is never unservable: that live copy exists only in
+/// the mount, so unmount must refuse it. A `HEAD` that cannot be read is not an unavailable schema,
+/// so the draft stays listed and blocks unmount.
 fn refusal_is_unservable_retained(state: &FsBuilder, inode: u64, refusal: &DraftRefusal) -> bool {
-    if refusal.draft.is_none() {
+    if refusal.draft.is_none() || !refusal.unretained.is_empty() {
         return false;
     }
     let Some(NodeKind::Document { save, .. }) = state.nodes.get(&inode).map(|node| &node.kind)
     else {
         return false;
     };
-    crate::table_schema::committed_table_schema_identity(
+    crate::table_schema::committed_table_schema_unresolvable(
         &save.writer.repository,
         save.table.object_id(),
     )
-    .is_err()
+    .unwrap_or(false)
 }
 
 struct WorkspaceFilesystem {
