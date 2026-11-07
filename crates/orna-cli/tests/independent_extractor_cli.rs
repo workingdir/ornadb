@@ -101,10 +101,15 @@ fn relation_hex(relation_id: [u8; 16]) -> String {
     out
 }
 
-/// The extracted row whose key is the text `key`.
+/// The extracted row whose key is `key`. An integer key matches its decimal
+/// text, the form the real reader's listings print.
 fn extracted_row<'a>(rows: &'a [Value], key: &str) -> &'a Value {
     rows.iter()
-        .find(|row| row["key"] == key)
+        .find(|row| match &row["key"] {
+            Value::String(text) => text == key,
+            Value::Number(number) => key.parse::<u64>().ok() == number.as_u64(),
+            _ => false,
+        })
         .unwrap_or_else(|| panic!("the extractor recovers the {key} row"))
 }
 
@@ -355,4 +360,276 @@ async fn extractor_recovers_modules_schema_rows_and_blob_bytes_from_an_export() 
             "{path}: the module text matches the tree"
         );
     }
+}
+
+/// The golden legacy format-1 bundle the migration tests clone.
+const GOLDEN_BUNDLE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/legacy-format1.bundle"
+);
+/// The gitlink the golden snapshot pins: a legacy orna snapshot with no origin.
+const LEGACY_DEPENDENCY: &str = "vendor/stdlib";
+/// The golden copy's relations, as the 32-digit hex the CLI and extractor print.
+const GOLDEN_RELATIONS: [&str; 5] = [
+    "018f0000000071000000000000000001",
+    "018f0000000071000000000000000002",
+    "018f0000000071000000000000000003",
+    "018f0000000071000000000000000005",
+    "2a3cc85f989e8a79a242eef69e41174b",
+];
+/// The golden copy lists two Blob values, both in relation ...05.
+const GOLDEN_BLOB_LISTINGS: usize = 2;
+
+/// Clones the golden bundle into `parent/source`.
+fn clone_golden_bundle(parent: &Path) -> PathBuf {
+    let source = parent.join("source");
+    let clone = Command::new("git")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .arg("clone")
+        .arg("--quiet")
+        .arg(GOLDEN_BUNDLE)
+        .arg(&source)
+        .output()
+        .expect("git starts");
+    assert!(
+        clone.status.success(),
+        "git clone bundle: {}",
+        String::from_utf8_lossy(&clone.stderr)
+    );
+    source
+}
+
+/// Migrates the golden source into `parent/migrated` and activates it in
+/// place. The source is only read by the migration.
+fn activated_golden_copy(parent: &Path) -> PathBuf {
+    let source = clone_golden_bundle(parent);
+    let destination = parent.join("migrated");
+    let source_arg = source.to_str().unwrap();
+    let destination_arg = destination.to_str().unwrap();
+    let prepared = run(
+        parent,
+        &[
+            "--db",
+            source_arg,
+            "migrate",
+            "copy",
+            destination_arg,
+            "--no-persistent-consumers",
+        ],
+    );
+    assert_eq!(
+        prepared.status.code(),
+        Some(0),
+        "migrate copy: {}",
+        String::from_utf8_lossy(&prepared.stderr)
+    );
+    let activated = run(
+        parent,
+        &[
+            "--db",
+            source_arg,
+            "upgrade",
+            "--to-format",
+            "3",
+            destination_arg,
+            "--yes-activate",
+        ],
+    );
+    assert_eq!(
+        activated.status.code(),
+        Some(0),
+        "upgrade --yes-activate: {}",
+        String::from_utf8_lossy(&activated.stderr)
+    );
+    destination
+}
+
+/// Drops the golden snapshot's legacy gitlink with a plain commit. The
+/// complete-copy export pins no legacy dependency only after this step; the
+/// shipped golden snapshot fails export with E2000 (no recorded origin).
+fn drop_legacy_dependency(copy: &Path) {
+    git(copy, &["rm", "--quiet", "--", LEGACY_DEPENDENCY]);
+    git(
+        copy,
+        &["commit", "--quiet", "-m", "drop legacy dependency gitlink"],
+    );
+}
+
+/// A migrated golden copy, exported with the real `orna export`, restored,
+/// and removed from the disk: the extractor's rows, schema, modules and Blob
+/// records must match what the real reader reports for the same copy, and
+/// each Blob's recovered bytes must hash to the real reader's length and
+/// SHA-256.
+#[allow(clippy::too_many_lines)]
+#[test]
+fn extractor_matches_the_real_reader_on_a_migrated_golden_copy() {
+    let parent = TempDir::new().unwrap();
+    let copy = activated_golden_copy(parent.path());
+    drop_legacy_dependency(&copy);
+    let snapshot = String::from_utf8(git_output(&copy, &["rev-parse", "HEAD"], None))
+        .unwrap()
+        .trim()
+        .to_owned();
+
+    // The real reader's answer for every golden relation, read while the copy
+    // still exists.
+    let source_reports: Vec<(&str, Value)> = GOLDEN_RELATIONS
+        .iter()
+        .map(|relation| {
+            let query = run(&copy, &["query", relation, "--format", "json"]);
+            assert_eq!(
+                query.status.code(),
+                Some(0),
+                "{relation}: source query failed: {}",
+                String::from_utf8_lossy(&query.stderr)
+            );
+            (*relation, serde_json::from_slice(&query.stdout).unwrap())
+        })
+        .collect();
+
+    let outside = TempDir::new().unwrap();
+    let archive = outside.path().join("archive");
+    let archive_path = archive.to_str().unwrap();
+    let exported = run(&copy, &["export", archive_path, "--at", "HEAD"]);
+    assert_eq!(
+        exported.status.code(),
+        Some(0),
+        "export: {}",
+        String::from_utf8_lossy(&exported.stderr)
+    );
+    let restored: PathBuf = outside.path().join("restored");
+    let restored_path = restored.to_str().unwrap().to_owned();
+    let reconstructed = run(
+        &copy,
+        &[
+            "export",
+            archive_path,
+            "--restore",
+            restored_path.as_str(),
+            "--worktree",
+        ],
+    );
+    assert_eq!(
+        reconstructed.status.code(),
+        Some(0),
+        "restore: {}",
+        String::from_utf8_lossy(&reconstructed.stderr)
+    );
+
+    // The migrated copy and its source are gone before the extractor runs.
+    drop(parent);
+    assert!(!copy.exists(), "the migrated copy is removed");
+
+    let output = outside.path().join("extracted");
+    let extracted = extract(&restored, &output);
+    assert_eq!(
+        extracted.status.code(),
+        Some(0),
+        "extractor failed: {}",
+        String::from_utf8_lossy(&extracted.stderr)
+    );
+    let report: Value = serde_json::from_slice(&extracted.stdout).unwrap();
+    assert_eq!(
+        report["snapshot"]["commit"],
+        snapshot.as_str(),
+        "the extracted snapshot"
+    );
+
+    let relations = report["snapshot"]["relations"].as_array().unwrap();
+    let mut extracted_ids: Vec<&str> = relations
+        .iter()
+        .map(|entry| entry["relation_id"].as_str().unwrap())
+        .collect();
+    extracted_ids.sort_unstable();
+    let mut expected_ids = GOLDEN_RELATIONS.to_vec();
+    expected_ids.sort_unstable();
+    assert_eq!(
+        extracted_ids, expected_ids,
+        "the extractor recovers exactly the golden relations"
+    );
+
+    let blobs = report["blobs"].as_array().unwrap();
+    let mut listed = 0;
+    for (relation, source) in &source_reports {
+        let entry = relations
+            .iter()
+            .find(|entry| entry["relation_id"] == *relation)
+            .unwrap_or_else(|| panic!("the extractor recovers relation {relation}"));
+        let rows = entry["rows"].as_array().unwrap();
+        let source_rows = source["rows"].as_u64().unwrap();
+        assert_eq!(
+            rows.len() as u64,
+            source_rows,
+            "{relation}: the extractor recovers every row the real reader counts"
+        );
+        assert_eq!(entry["row_count"].as_u64(), Some(source_rows));
+        for listing in source["listings"].as_array().unwrap() {
+            listed += 1;
+            let key = listing["key"].as_str().unwrap();
+            let field = listing["field"].as_u64().unwrap();
+            let row = extracted_row(rows, key);
+            let blob = &extracted_field(row, field)["blob"];
+            for name in ["descriptor", "length", "media_type", "suffix", "sha256"] {
+                assert_eq!(
+                    blob[name], listing[name],
+                    "{relation} {key}: {name} matches the real reader"
+                );
+            }
+            let path = blob["path"].as_str().unwrap();
+            let recovered = std::fs::read(output.join(path)).unwrap();
+            assert_eq!(
+                recovered.len() as u64,
+                listing["length"].as_u64().unwrap(),
+                "{key}: the recovered length"
+            );
+            assert_eq!(
+                hex(Sha256::digest(&recovered).as_slice()),
+                listing["sha256"].as_str().unwrap(),
+                "{key}: the recovered bytes hash to the real reader's SHA-256"
+            );
+            assert!(
+                blobs.iter().any(|record| record["path"] == path),
+                "{key}: the Blob is listed in the report's blob table"
+            );
+        }
+    }
+    assert_eq!(
+        listed, GOLDEN_BLOB_LISTINGS,
+        "the real reader lists both golden Blobs"
+    );
+
+    for module in report["snapshot"]["modules"].as_array().unwrap() {
+        let path = module["path"].as_str().unwrap();
+        let content = git_output(&restored, &["show", &format!("{snapshot}:{path}")], None);
+        assert_eq!(
+            module["size"].as_u64(),
+            Some(content.len() as u64),
+            "{path}: the module size"
+        );
+        assert_eq!(
+            module["text"].as_str().unwrap().as_bytes(),
+            content.as_slice(),
+            "{path}: the module text matches the tree"
+        );
+    }
+}
+
+/// The extractor reads format 3 only. A migrated copy that still pins the
+/// legacy dependency is refused with exit 1, not read partially.
+#[test]
+fn extractor_refuses_a_migrated_copy_that_pins_an_unreadable_legacy_dependency() {
+    let parent = TempDir::new().unwrap();
+    let copy = activated_golden_copy(parent.path());
+    let output = parent.path().join("extracted");
+    let extracted = extract(&copy, &output);
+    let stderr = String::from_utf8_lossy(&extracted.stderr);
+    assert_eq!(extracted.status.code(), Some(1), "{stderr}");
+    assert!(
+        extracted.stdout.is_empty(),
+        "a refused extraction prints no partial report"
+    );
+    assert!(
+        stderr.contains("vendor/stdlib") && stderr.contains("is unavailable"),
+        "the refusal names the unreadable dependency: {stderr}"
+    );
 }
