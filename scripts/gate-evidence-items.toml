@@ -506,7 +506,7 @@ limitations = ["Refresh is checked only with no change between reads; a change i
 gate = "G"
 id = "G4"
 title = "Download and native audio or image rendering over the same production API"
-limitations = ["No std.ui audio, image or download node exists; the content route proves bytes only (ornadb-5il1.495)."]
+limitations = ["A served page cannot yet carry a committed Blob reference: pinned page reads replace it with a placeholder, so std.ui audio, image and download nodes over committed Blobs are not proven through the pinned route (ornadb-5il1.495.1.1)."]
 
 [[item]]
 gate = "G"
