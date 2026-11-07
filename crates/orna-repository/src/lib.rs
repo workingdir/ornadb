@@ -1861,6 +1861,25 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
+#[cfg(test)]
+thread_local! {
+    /// A race an install test queues for the candidate-recheck window: after the
+    /// candidate is written and before the target is rechecked (ORNA-PUB-010).
+    static MANAGED_CANDIDATE_RECHECK_RACE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn managed_candidate_recheck_race() {
+    let race = MANAGED_CANDIDATE_RECHECK_RACE.with(|slot| slot.borrow_mut().take());
+    if let Some(race) = race {
+        race();
+    }
+}
+
+#[cfg(not(test))]
+fn managed_candidate_recheck_race() {}
+
 impl WorktreeState {
     pub fn as_porcelain_v2_z(&self) -> &[u8] {
         &self.0
@@ -8372,6 +8391,7 @@ impl Repository {
                     .map_err(|_| RepositoryError::LocalStateUnavailable)?;
                 file.sync_all()
                     .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+                managed_candidate_recheck_race();
                 if self.read_managed_file(&target)?.as_deref() != expected {
                     return Err(RepositoryError::ManagedContentConflict);
                 }
@@ -13817,6 +13837,309 @@ mod tests {
             ),
             Err(RepositoryError::ManagedContentConflict)
         ));
+    }
+
+    /// Repository with `.orna/store/data` committed as `committed`. The layered
+    /// reconcile guards run through `reconcile_store_worktree_transition`, so each
+    /// test edits one leaf state and names the single guard it expects to refuse.
+    fn managed_guard_store_fixture(committed: &[u8]) -> (tempfile::TempDir, Repository) {
+        let root = tempfile::TempDir::new().unwrap();
+        git(root.path(), &["init", "-b", "main"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
+        git(root.path(), &["config", "commit.gpgsign", "false"]);
+        fs::create_dir_all(root.path().join(".orna/store")).unwrap();
+        fs::write(root.path().join(".orna/store/data"), committed).unwrap();
+        git(root.path(), &["add", ".orna/store/data"]);
+        git(root.path(), &["commit", "-m", "base"]);
+        let repository = Repository::discover(root.path()).unwrap();
+        (root, repository)
+    }
+
+    /// The current index as a private candidate: the reconcile target when the
+    /// store did not change, or the commit after a changed store leaf.
+    fn managed_guard_committed_candidate(repository: &Repository) -> super::PrivateCommit {
+        let index = repository.index_generation().unwrap();
+        super::PrivateCommit {
+            tree: index.tree().unwrap().clone(),
+            commit: index.head().unwrap().clone(),
+        }
+    }
+
+    /// Layered guard at line 4086 of `reconcile_store_worktree_transition`: a
+    /// skipped, unchanged store leaf whose worktree bytes differ from the committed
+    /// bytes is an external edit and is refused, not reconciled.
+    #[test]
+    fn managed_guard_layered_skipped_unchanged_leaf_edit_is_refused() {
+        let (root, repository) = managed_guard_store_fixture(b"committed\n");
+        git(
+            root.path(),
+            &["update-index", "--skip-worktree", ".orna/store/data"],
+        );
+        let expected = repository.index_generation().unwrap();
+        let candidate = managed_guard_committed_candidate(&repository);
+        fs::write(root.path().join(".orna/store/data"), b"edited\n").unwrap();
+
+        assert!(matches!(
+            repository.reconcile_store_worktree_transition(&expected, &candidate, false),
+            Err(RepositoryError::ManagedContentConflict)
+        ));
+        assert_eq!(
+            fs::read(root.path().join(".orna/store/data")).unwrap(),
+            b"edited\n"
+        );
+    }
+
+    /// Layered guard at line 4093: a skipped store leaf that is absent from the
+    /// worktree may be restored only from its committed bytes, so a quarantine that
+    /// holds other bytes is refused and left in place.
+    #[test]
+    fn managed_guard_layered_skipped_absent_leaf_with_foreign_quarantine_is_refused() {
+        let (root, repository) = managed_guard_store_fixture(b"committed\n");
+        git(
+            root.path(),
+            &["update-index", "--skip-worktree", ".orna/store/data"],
+        );
+        let expected = repository.index_generation().unwrap();
+        let candidate = managed_guard_committed_candidate(&repository);
+        let store = root.path().join(".orna/store");
+        fs::remove_file(store.join("data")).unwrap();
+        let quarantine = store.join(format!(
+            ".orna-store-reconcile-{}-data",
+            candidate.commit().as_str()
+        ));
+        fs::write(&quarantine, b"foreign\n").unwrap();
+
+        assert!(matches!(
+            repository.reconcile_store_worktree_transition(&expected, &candidate, false),
+            Err(RepositoryError::ManagedContentConflict)
+        ));
+        assert_eq!(fs::read(&quarantine).unwrap(), b"foreign\n");
+        assert!(!store.join("data").exists());
+    }
+
+    /// Layered guard at line 4121: a changed store leaf whose displaced quarantine
+    /// holds bytes other than the old committed leaf is refused, even when the
+    /// worktree already holds the new committed bytes.
+    #[test]
+    fn managed_guard_layered_changed_leaf_with_foreign_quarantine_is_refused() {
+        let (root, repository) = managed_guard_store_fixture(b"old\n");
+        let expected = repository.index_generation().unwrap();
+        fs::write(root.path().join(".orna/store/data"), b"new\n").unwrap();
+        git(root.path(), &["commit", "-a", "-m", "next"]);
+        let candidate = managed_guard_committed_candidate(&repository);
+        let store = root.path().join(".orna/store");
+        let quarantine = store.join(format!(
+            ".orna-store-reconcile-{}-data",
+            candidate.commit().as_str()
+        ));
+        fs::write(&quarantine, b"foreign\n").unwrap();
+
+        assert!(matches!(
+            repository.reconcile_store_worktree_transition(&expected, &candidate, false),
+            Err(RepositoryError::ManagedContentConflict)
+        ));
+        assert_eq!(fs::read(store.join("data")).unwrap(), b"new\n");
+        assert_eq!(fs::read(&quarantine).unwrap(), b"foreign\n");
+    }
+
+    /// Layered guard at line 4133: a changed store leaf whose worktree bytes are
+    /// neither the old nor the new committed bytes, with no quarantine, is an
+    /// external edit and is refused.
+    #[test]
+    fn managed_guard_layered_changed_leaf_with_foreign_content_is_refused() {
+        let (root, repository) = managed_guard_store_fixture(b"old\n");
+        let expected = repository.index_generation().unwrap();
+        fs::write(root.path().join(".orna/store/data"), b"new\n").unwrap();
+        git(root.path(), &["commit", "-a", "-m", "next"]);
+        let candidate = managed_guard_committed_candidate(&repository);
+        fs::write(root.path().join(".orna/store/data"), b"editor\n").unwrap();
+
+        assert!(matches!(
+            repository.reconcile_store_worktree_transition(&expected, &candidate, false),
+            Err(RepositoryError::ManagedContentConflict)
+        ));
+        assert_eq!(
+            fs::read(root.path().join(".orna/store/data")).unwrap(),
+            b"editor\n"
+        );
+    }
+
+    /// The candidate that writes `path` from absent to `published`, with the
+    /// Prepared journal that names it. The index it journals is the current one.
+    fn managed_guard_publication(
+        repository: &Repository,
+        path: &ManagedPath,
+    ) -> (super::PrivateCommit, PublicationJournal) {
+        let old_head = repository.head().unwrap().unwrap();
+        let index = repository.index_generation().unwrap();
+        let candidate = repository
+            .build_private_commit(
+                &old_head,
+                &[ManagedFileChange::new(
+                    path.clone(),
+                    Some(b"published\n".to_vec()),
+                )],
+                "orna: publish runtime data",
+            )
+            .unwrap();
+        let journal = PublicationJournal::new_with_runtime_intent(
+            old_head,
+            candidate.commit().clone(),
+            index.tree().unwrap().clone(),
+            [41; 16],
+            vec![PublicationJournalEntry::new(
+                path.clone(),
+                None,
+                Some(b"published\n".to_vec()),
+            )],
+        )
+        .unwrap();
+        (candidate, journal)
+    }
+
+    /// Pre-advance guard at line 5393 of `publish_candidate_body` (ORNA-PUB-010): a
+    /// managed target that holds neither the expected nor the next bytes refuses
+    /// before the ref CAS, so no journal is written and HEAD does not move.
+    #[test]
+    fn managed_guard_pre_advance_foreign_target_is_refused_before_ref_advance() {
+        let (root, repository) = managed_guard_fixture();
+        let path = ManagedPath::new("generated/row.orna").unwrap();
+        let old_head = repository.head().unwrap().unwrap();
+        let index = repository.index_generation().unwrap();
+        let (candidate, mut journal) = managed_guard_publication(&repository, &path);
+        let target = root.path().join(path.as_path());
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, b"editor\n").unwrap();
+
+        assert!(matches!(
+            repository.publish_candidate(&index, &candidate, &mut journal),
+            Err(RepositoryError::ManagedContentConflict)
+        ));
+        assert_eq!(repository.head().unwrap().unwrap(), old_head);
+        assert!(repository.read_publication_journal().unwrap().is_none());
+        assert_eq!(fs::read(&target).unwrap(), b"editor\n");
+    }
+
+    /// Pre-advance guard at line 5382: a target that holds the expected bytes (here
+    /// absent, matching an install's `None`) is admitted, so the publication the
+    /// guard above refuses goes through and advances HEAD.
+    #[test]
+    fn managed_guard_pre_advance_target_matching_expected_is_admitted() {
+        let (root, repository) = managed_guard_fixture();
+        let path = ManagedPath::new("generated/row.orna").unwrap();
+        let index = repository.index_generation().unwrap();
+        let (candidate, mut journal) = managed_guard_publication(&repository, &path);
+
+        repository
+            .publish_candidate(&index, &candidate, &mut journal)
+            .unwrap();
+        assert_eq!(
+            repository.head().unwrap().unwrap(),
+            candidate.commit().clone()
+        );
+        assert_eq!(
+            fs::read(root.path().join(path.as_path())).unwrap(),
+            b"published\n"
+        );
+    }
+
+    /// Race-only install guard at line 8382 (ORNA-PUB-010): a quarantine path that
+    /// already exists is refused before the target is moved, so the install hook is
+    /// never reached.
+    #[test]
+    fn managed_guard_install_refuses_existing_quarantine_path_before_moving_target() {
+        let (root, repository) = managed_guard_fixture();
+        let path = ManagedPath::new("generated/row.orna").unwrap();
+        repository
+            .materialize_managed_file(&path, None, Some(b"first"))
+            .unwrap();
+        let target = root.path().join(path.as_path());
+        let quarantine = target
+            .parent()
+            .unwrap()
+            .join(".orna-quarantine-preexisting");
+        fs::write(&quarantine, b"unexpected").unwrap();
+        let mut hook_calls = 0;
+        let mut before_install = || hook_calls += 1;
+
+        assert!(matches!(
+            repository.materialize_managed_file_impl_with_quarantine(
+                &path,
+                Some(b"first"),
+                Some(b"second"),
+                Some(&quarantine),
+                Some(&mut before_install),
+                None,
+            ),
+            Err(RepositoryError::ManagedContentConflict)
+        ));
+        assert_eq!(hook_calls, 0);
+        assert_eq!(fs::read(&target).unwrap(), b"first");
+        assert_eq!(fs::read(&quarantine).unwrap(), b"unexpected");
+    }
+
+    /// Race-only install guard at line 8398 (ORNA-PUB-010): a target that vanishes
+    /// between the quarantine check and the rename is a managed conflict, not a
+    /// local-state failure, and nothing is left at the quarantine path.
+    #[test]
+    fn managed_guard_install_refuses_target_removed_at_quarantine_boundary() {
+        let (root, repository) = managed_guard_fixture();
+        let path = ManagedPath::new("generated/row.orna").unwrap();
+        repository
+            .materialize_managed_file(&path, None, Some(b"first"))
+            .unwrap();
+        let target = root.path().join(path.as_path());
+        let quarantine = target.parent().unwrap().join(".orna-quarantine-vanished");
+        let mut remove_target = || fs::remove_file(&target).unwrap();
+
+        assert!(matches!(
+            repository.materialize_managed_file_impl_with_quarantine(
+                &path,
+                Some(b"first"),
+                Some(b"second"),
+                Some(&quarantine),
+                Some(&mut remove_target),
+                None,
+            ),
+            Err(RepositoryError::ManagedContentConflict)
+        ));
+        assert!(!target.exists());
+        assert!(!quarantine.exists());
+    }
+
+    /// Race-only install guard at line 8376 (ORNA-PUB-010): an editor write in the
+    /// window between the candidate write and the target recheck is refused before
+    /// the target is quarantined or the install hook runs.
+    #[test]
+    fn managed_guard_install_recheck_refuses_editor_race_before_quarantine() {
+        let (root, repository) = managed_guard_fixture();
+        let path = ManagedPath::new("generated/row.orna").unwrap();
+        repository
+            .materialize_managed_file(&path, None, Some(b"first"))
+            .unwrap();
+        let target = root.path().join(path.as_path());
+        let race_target = target.clone();
+        super::MANAGED_CANDIDATE_RECHECK_RACE.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                fs::write(&race_target, b"editor").unwrap();
+            }));
+        });
+        let mut hook_calls = 0;
+        let mut before_install = || hook_calls += 1;
+
+        assert!(matches!(
+            repository.materialize_managed_file_impl_with_quarantine(
+                &path,
+                Some(b"first"),
+                Some(b"second"),
+                None,
+                Some(&mut before_install),
+                None,
+            ),
+            Err(RepositoryError::ManagedContentConflict)
+        ));
+        assert_eq!(hook_calls, 0);
+        assert_eq!(fs::read(&target).unwrap(), b"editor");
     }
 
     #[test]
