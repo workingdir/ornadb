@@ -41,9 +41,22 @@ jobs:
         run: node --version
 
       # Runs only the ignored parity test; the rest of the crate stays on the
-      # default test set.
+      # default test set. An --exact name filter that matches nothing still exits
+      # 0, so first require the test to be listed exactly once, then require the
+      # run to report exactly one test passed.
       - name: Run the Wasm parity test
-        run: >-
-          cargo test --locked -p orna-application
-          --test browser_profile_wasm_parity
-          -- --ignored --exact browser_profile_wasm_matches_native_canonical_output
+        run: |
+          set -euo pipefail
+          test_name=browser_profile_wasm_matches_native_canonical_output
+          listing=$(cargo test --locked -p orna-application --test browser_profile_wasm_parity -- --list --exact "$test_name")
+          listed=$(printf '%s\n' "$listing" | grep -cxF "$test_name: test" || true)
+          if [ "$listed" -ne 1 ]; then
+            echo "expected exactly one listed test named $test_name, found $listed" >&2
+            exit 1
+          fi
+          output=$(mktemp)
+          cargo test --locked -p orna-application --test browser_profile_wasm_parity -- --ignored --exact "$test_name" 2>&1 | tee "$output"
+          if ! grep -q 'test result: ok. 1 passed; 0 failed;' "$output"; then
+            echo "expected exactly one passing test; the run did not report it" >&2
+            exit 1
+          fi
