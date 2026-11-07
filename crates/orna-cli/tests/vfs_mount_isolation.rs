@@ -20,7 +20,7 @@ use std::{
     io::{Read, Seek, SeekFrom, Write},
     os::unix::fs::{MetadataExt, PermissionsExt},
     path::PathBuf,
-    process::Command,
+    process::{Command, Stdio},
     time::Duration,
 };
 
@@ -436,6 +436,90 @@ async fn repeated_observer_reads_never_show_private_draft_and_read_handles_pin_g
         read_from_start(&mut pinned),
         original,
         "a read handle opened before acceptance keeps its captured generation"
+    );
+    drop(writer);
+    drop(pinned);
+}
+
+/// Maps `length` bytes of `handle` `MAP_PRIVATE` from a child process that inherits the same
+/// open file description. The mapping is taken through this handle, not through a fresh open
+/// of the path: a fresh open would drop the inode's cached pages and hide a leak.
+fn map_private_through(handle: &File, length: usize) -> String {
+    let probe = r"import mmap, sys
+n = int(sys.argv[1])
+m = mmap.mmap(0, n, flags=mmap.MAP_PRIVATE, prot=mmap.PROT_READ)
+sys.stdout.buffer.write(m[:n])
+";
+    let output = Command::new("python3")
+        .args(["-c", probe, &length.to_string()])
+        .stdin(Stdio::from(
+            handle.try_clone().expect("duplicate the pinned handle"),
+        ))
+        .output()
+        .expect("run the MAP_PRIVATE probe");
+    assert!(
+        output.status.success(),
+        "MAP_PRIVATE probe failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("probe output is UTF-8")
+}
+
+/// profiles/vfs-1.md:126-130: "Use direct I/O or a tested mode that preserves private drafts
+/// and per-open versions ... No cross-generation kernel page-cache sharing of incompatible
+/// contents."
+///
+/// The writer's own read caches the draft bytes in the inode's page cache when direct I/O is
+/// off. A read handle opened before the draft must still read committed bytes through `read(2)`
+/// and through a `MAP_PRIVATE` mapping taken from that same handle. No open of the path happens
+/// between the draft and the pinned reads, since each open drops the inode's cached pages.
+#[tokio::test]
+async fn pinned_handle_reads_and_maps_committed_bytes_while_writer_draft_is_cached() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let original = fresh_view(&fixture);
+    let mut pinned = File::open(&fixture.data_path).unwrap();
+    assert_eq!(
+        read_from_start(&mut pinned),
+        original,
+        "the pinned handle starts on accepted bytes"
+    );
+
+    let mut writer = open_rw(&fixture);
+    writer.set_len(0).unwrap();
+    // The draft is longer than the captured generation. fstat on the pinned handle reports the
+    // draft's size (ornadb-5il1.470), so the probe's mapping length must fit inside it.
+    let draft = music_row(&format!("Cached draft {}", "x".repeat(200)));
+    assert!(
+        draft.len() > original.len(),
+        "the draft must be longer than the captured generation"
+    );
+    writer.write_all(draft.as_bytes()).unwrap();
+    assert!(
+        read_from_start(&mut writer).contains("Cached draft"),
+        "the writer sees its own draft"
+    );
+
+    assert_eq!(
+        read_from_start(&mut pinned),
+        original,
+        "read(2) on the pinned handle shows committed bytes while the draft is private"
+    );
+    assert_eq!(
+        read_from_start(&mut pinned),
+        original,
+        "repeated read(2) on the pinned handle stays on committed bytes"
+    );
+    assert_eq!(
+        map_private_through(&pinned, original.len()),
+        original,
+        "a MAP_PRIVATE mapping through the pinned handle shows committed bytes"
+    );
+    assert!(
+        read_from_start(&mut writer).contains("Cached draft"),
+        "the draft stays private through the pinned reads and mapping"
     );
     drop(writer);
     drop(pinned);
