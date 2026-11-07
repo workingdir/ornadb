@@ -594,13 +594,23 @@ fn encode_branch(domain: &[u8], height: u8, candidates: &[BranchCandidate]) -> V
     data
 }
 
+/// Shape of a built row index: the root OID, page counts, the root-to-leaf
+/// depth in nodes, and the row count of each leaf in key order.
+struct IndexShape {
+    root: Oid,
+    leaf_pages: usize,
+    branch_pages: usize,
+    tree_height: usize,
+    leaf_row_counts: Vec<u64>,
+}
+
 fn build_index(
     graph: &mut GraphFixture,
     relation_id: [u8; 16],
     schema_digest: [u8; 32],
     row_count: u64,
     fault: Fault,
-) -> (Oid, usize, usize) {
+) -> IndexShape {
     let mut domain_digest = schema_digest;
     if fault == Fault::WrongSchemaDomain {
         domain_digest[0] ^= 0x80;
@@ -633,7 +643,14 @@ fn build_index(
             tree_edges(&branch),
             true,
         );
-        return (root, 2, 1);
+        // Malformed shapes are only rejected, never queried, so no leaf sizes are recorded.
+        return IndexShape {
+            root,
+            leaf_pages: 2,
+            branch_pages: 1,
+            tree_height: 2,
+            leaf_row_counts: Vec::new(),
+        };
     }
 
     if fault == Fault::GiantFanout {
@@ -645,10 +662,78 @@ fn build_index(
             tree_edges(&leaves),
             true,
         );
-        return (root, leaves.len(), 1);
+        // Malformed shapes are only rejected, never queried, so no leaf sizes are recorded.
+        return IndexShape {
+            root,
+            leaf_pages: leaves.len(),
+            branch_pages: 1,
+            tree_height: 2,
+            leaf_row_counts: Vec::new(),
+        };
+    }
+
+    if fault == Fault::NestedOverlap {
+        // Interior branch C overlaps its two leaves (both fences are 4). The
+        // root is well formed, so only a descent into C can detect the fault.
+        let left = make_leaf(
+            graph,
+            &domain,
+            &(0..5).map(|key| (key, key)).collect::<Vec<_>>(),
+        );
+        let right = make_leaf(
+            graph,
+            &domain,
+            &(5..10).map(|key| (key, key)).collect::<Vec<_>>(),
+        );
+        let inner = vec![
+            BranchCandidate {
+                max_key: encode_uint(4),
+                ..left
+            },
+            BranchCandidate {
+                max_key: encode_uint(4),
+                ..right
+            },
+        ];
+        let inner_oid = graph.add_node(encode_branch(&domain, 1, &inner), tree_edges(&inner), true);
+        let low = make_leaf(
+            graph,
+            &domain,
+            &(10..15).map(|key| (key, key)).collect::<Vec<_>>(),
+        );
+        let high = make_leaf(
+            graph,
+            &domain,
+            &(15..20).map(|key| (key, key)).collect::<Vec<_>>(),
+        );
+        let healthy = vec![low, high];
+        let healthy_oid = graph.add_node(
+            encode_branch(&domain, 1, &healthy),
+            tree_edges(&healthy),
+            true,
+        );
+        let branch = vec![
+            BranchCandidate {
+                max_key: encode_uint(4),
+                oid: inner_oid,
+                row_count: 10,
+            },
+            BranchCandidate {
+                max_key: encode_uint(19),
+                oid: healthy_oid,
+                row_count: 10,
+            },
+        ];
+        let root = graph.add_node(
+            encode_branch(&domain, 2, &branch),
+            tree_edges(&branch),
+            true,
+        );
+        return (root, 4, 3);
     }
 
     let (mut level, leaf_count) = leaf_pages(graph, &domain, row_count);
+    let leaf_row_counts: Vec<u64> = level.iter().map(|leaf| leaf.row_count).collect();
     let mut height = 1u8;
     while level.len() > 1 {
         let groups = branch_groups(&level, &domain, height);
@@ -677,7 +762,13 @@ fn build_index(
     }
     let root = level.pop().expect("nonempty row index").oid;
     let branch_count = graph.index_tree_oids.len() - leaf_count;
-    (root, leaf_count, branch_count)
+    IndexShape {
+        root,
+        leaf_pages: leaf_count,
+        branch_pages: branch_count,
+        tree_height: usize::from(height),
+        leaf_row_counts,
+    }
 }
 
 fn tree_edges(candidates: &[BranchCandidate]) -> Vec<Edge> {
@@ -697,6 +788,7 @@ enum Fault {
     BrokenCounts,
     GiantFanout,
     WrongSchemaDomain,
+    NestedOverlap,
 }
 
 fn schema_descriptor(relation_id: [u8; 16]) -> SchemaDescriptor {
@@ -806,6 +898,8 @@ struct Fixture {
     media_payload_oids: BTreeSet<Oid>,
     leaf_pages: usize,
     branch_pages: usize,
+    tree_height: usize,
+    leaf_row_counts: Vec<u64>,
     root_data_oid: Oid,
 }
 
@@ -875,7 +969,13 @@ fn build_fixture(row_count: u64, fault: Fault) -> Fixture {
         false,
     );
 
-    let (row_root, leaf_pages, branch_pages) = {
+    let IndexShape {
+        root: row_root,
+        leaf_pages,
+        branch_pages,
+        tree_height,
+        leaf_row_counts,
+    } = {
         let _phase = Phase::new("build_index", row_count);
         build_index(&mut graph, relation_id, schema_digest, row_count, fault)
     };
@@ -961,6 +1061,8 @@ fn build_fixture(row_count: u64, fault: Fault) -> Fixture {
         media_payload_oids: graph.media_payload_oids,
         leaf_pages,
         branch_pages,
+        tree_height,
+        leaf_row_counts,
         root_data_oid,
     }
 }
@@ -1719,6 +1821,12 @@ fn run_case(fixture: &Fixture) {
     );
     let after_point = inventory("inventory_after_point", fixture.row_count, &clone_path);
     let point_metadata = index_data_delta(&fixture.index_data_blobs, &after_load, &after_point);
+    assert!(
+        point_metadata.0 <= fixture.tree_height,
+        "cold point query fetched {} index pages, above tree height {}",
+        point_metadata.0,
+        fixture.tree_height
+    );
     let point_tree_delta = tree_object_delta(&after_load, &after_point);
 
     let before_warm_point = allocations();
@@ -1765,6 +1873,19 @@ fn run_case(fixture: &Fixture) {
     let after_range = inventory("inventory_after_range", fixture.row_count, &clone_path);
     let range_metadata =
         index_data_delta(&fixture.index_data_blobs, &after_warm_point, &after_range);
+    let range_bound = range_page_bound(
+        fixture.tree_height,
+        &fixture.leaf_row_counts,
+        range_start,
+        range_end,
+    );
+    assert!(
+        range_metadata.0 <= range_bound,
+        "cold range query fetched {} index pages, above bound {} (tree height {})",
+        range_metadata.0,
+        range_bound,
+        fixture.tree_height
+    );
     let range_tree_delta = tree_object_delta(&after_warm_point, &after_range);
 
     let before_warm_range = allocations();
@@ -1794,6 +1915,12 @@ fn run_case(fixture: &Fixture) {
     let after_missing = inventory("inventory_after_missing", fixture.row_count, &clone_path);
     let missing_metadata =
         index_data_delta(&fixture.index_data_blobs, &after_range, &after_missing);
+    assert!(
+        missing_metadata.0 <= fixture.tree_height,
+        "cold missing-key query fetched {} index pages, above tree height {}",
+        missing_metadata.0,
+        fixture.tree_height
+    );
     let missing_tree_delta = tree_object_delta(&after_range, &after_missing);
 
     let before_warm_missing = allocations();
@@ -2073,6 +2200,31 @@ fn object_inventory(repository: &Path) -> ObjectInventory {
         objects.insert(oid, ObjectInfo { kind, size });
     }
     ObjectInventory { objects }
+}
+
+/// Number of leaf pages whose key interval intersects the closed interval
+/// `start..=end`. Keys are row indices and the leaves cover them in order.
+fn leaves_touched(leaf_row_counts: &[u64], start: u64, end: u64) -> usize {
+    let mut first_key = 0u64;
+    let mut touched = 0usize;
+    for &count in leaf_row_counts {
+        let leaf_end = first_key + count;
+        if first_key <= end && leaf_end > start {
+            touched += 1;
+        }
+        first_key = leaf_end;
+    }
+    touched
+}
+
+/// Upper bound on index pages one cold range read fetches. Per tree level the
+/// reader considers the children overlapping the range plus the first child
+/// past its upper key; overlapping children never outnumber the touched leaves.
+/// Each considered child costs its own node plus the boundary spines that
+/// `ordered_node_bounds_with` reads beneath it, at most `2^tree_height` pages.
+fn range_page_bound(tree_height: usize, leaf_row_counts: &[u64], start: u64, end: u64) -> usize {
+    let considered = leaves_touched(leaf_row_counts, start, end) + 1;
+    tree_height * considered * ((1usize << tree_height) + 1)
 }
 
 fn index_data_delta(
@@ -2871,6 +3023,40 @@ fn orp1_malformed_graphs_report_specific_diagnostics() {
             FormatContextError::GraphMalformed(GraphError::InvalidDomain)
         )
     });
+}
+
+#[test]
+fn orp1_nested_overlap_reports_diagnostic_on_descent() {
+    use orna_repository::GraphError;
+    let fixture = build_fixture(20, Fault::NestedOverlap);
+    let repository =
+        Repository::discover(fixture.root.path()).expect("discover nested malformed fixture");
+    let context = repository
+        .open_format_context()
+        .expect("admit nested malformed graph snapshot header");
+    let snapshot = context
+        .load_row_map(fixture.relation_id)
+        .expect("root is well formed; only an interior branch is malformed");
+    let graph = context
+        .open_native_graph(&snapshot)
+        .expect("open nested malformed graph");
+    let scope = graph
+        .open_read_scope()
+        .expect("open read scope over nested malformed graph");
+    assert!(
+        matches!(
+            graph.lookup_row(&TypedKey::UInt(3), &scope),
+            Err(GraphError::OverlappingChildRange)
+        ),
+        "a key routed through the overlapping interior branch must report OverlappingChildRange"
+    );
+    assert!(
+        graph
+            .lookup_row(&TypedKey::UInt(15), &scope)
+            .expect("healthy sibling branch resolves")
+            .is_some(),
+        "the fault must stay localized to the overlapping branch"
+    );
 }
 
 #[test]
