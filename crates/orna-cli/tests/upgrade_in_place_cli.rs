@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
     process::{Command, Output},
@@ -101,6 +102,36 @@ fn repository_format(path: &Path) -> RepositoryFormat {
         .repository_format()
 }
 
+/// Every regular file under `root`, keyed by its path relative to `root`. A
+/// refused run must leave the whole source tree byte-identical, not only its
+/// HEAD and status.
+fn tree_snapshot(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    fn walk(root: &Path, directory: &Path, out: &mut BTreeMap<PathBuf, Vec<u8>>) {
+        for entry in fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                walk(root, &path, out);
+            } else {
+                let relative = path.strip_prefix(root).unwrap().to_path_buf();
+                out.insert(relative, fs::read(&path).unwrap());
+            }
+        }
+    }
+    let mut out = BTreeMap::new();
+    walk(root, root, &mut out);
+    out
+}
+
+/// Runs `migrate abort DEST` against the worktree `source`.
+fn run_abort(source: &Path, destination: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_orna"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args(["--db", source.to_str().unwrap(), "migrate", "abort"])
+        .arg(destination)
+        .output()
+        .unwrap()
+}
+
 /// Asserts that a refused upgrade exited with status 1 and the E2100 diagnostic
 /// titled `title`.
 fn assert_refused(output: &Output, title: &str) {
@@ -119,6 +150,7 @@ fn upgrade_in_place_without_confirmation_refuses_and_keeps_the_prepared_copy() {
     let source = clone_golden_bundle(parent.path(), "source");
     let source_head = git_output(&source, &["rev-parse", "HEAD"]);
     let source_status = git_output(&source, &["status", "--porcelain"]);
+    let source_tree = tree_snapshot(&source);
 
     let output = run_in_place(&source, None);
     assert_refused(&output, "publication was not confirmed");
@@ -141,6 +173,11 @@ fn upgrade_in_place_without_confirmation_refuses_and_keeps_the_prepared_copy() {
         RepositoryFormat::Legacy1,
         "the worktree stays in its source format"
     );
+    assert_eq!(
+        tree_snapshot(&source),
+        source_tree,
+        "the refused run leaves the source tree byte-identical"
+    );
 }
 
 /// A `--confirm` naming a different candidate refuses before publication.
@@ -149,6 +186,7 @@ fn upgrade_in_place_with_a_mismatched_confirmation_refuses_and_keeps_the_worktre
     let parent = TempDir::new().unwrap();
     let source = clone_golden_bundle(parent.path(), "source");
     let source_head = git_output(&source, &["rev-parse", "HEAD"]);
+    let source_tree = tree_snapshot(&source);
 
     let prepared = run_in_place(&source, None);
     assert_refused(&prepared, "publication was not confirmed");
@@ -164,7 +202,35 @@ fn upgrade_in_place_with_a_mismatched_confirmation_refuses_and_keeps_the_worktre
         RepositoryFormat::Legacy1,
         "the worktree stays in its source format"
     );
+    assert_eq!(
+        tree_snapshot(&source),
+        source_tree,
+        "the refused run leaves the source tree byte-identical"
+    );
     assert!(journal_is_present(&sibling_candidate(&source)));
+}
+
+/// A refused run leaves the prepared sibling for `migrate abort`, which removes
+/// it and leaves the worktree tree byte-identical.
+#[test]
+fn upgrade_in_place_refusal_leaves_the_sibling_for_migrate_abort() {
+    let parent = TempDir::new().unwrap();
+    let source = clone_golden_bundle(parent.path(), "source");
+    let source_tree = tree_snapshot(&source);
+
+    let refused = run_in_place(&source, None);
+    assert_refused(&refused, "publication was not confirmed");
+    let sibling = sibling_candidate(&source);
+    assert!(journal_is_present(&sibling), "the prepared copy is kept");
+
+    let discarded = run_abort(&source, &sibling);
+    assert!(
+        discarded.status.success(),
+        "migrate abort: {}",
+        String::from_utf8_lossy(&discarded.stderr)
+    );
+    assert!(!sibling.exists(), "migrate abort removes the prepared copy");
+    assert_eq!(tree_snapshot(&source), source_tree);
 }
 
 /// A confirmed one-step upgrade publishes the reviewed candidate in place: the
