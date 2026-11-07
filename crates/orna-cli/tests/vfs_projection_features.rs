@@ -28,6 +28,9 @@ use editor_mount::{
 };
 
 const DEEP_SOURCE: &str = "pub fn deep(): Int = 3;\n";
+/// Entries in the held nested list: about 96 KiB of dirents, more than one 32 KiB `getdents`
+/// buffer, so the held iterator calls back into the mount after the refresh.
+const HELD_LIST_LEN: usize = 4000;
 
 fn music_row(title: &str) -> String {
     format!("{{ title: \"{title}\", artist: \"Kieran\", }}\n")
@@ -883,6 +886,78 @@ async fn stale_save_refreshes_nested_directories_and_keeps_scratch() {
         read_view(&scratch),
         "pending bytes",
         "the pending scratch file survives"
+    );
+}
+
+/// profiles/vfs-1.md:71-75 and 41-vfs.md:39-40: a directory listing held across an owner
+/// refresh keeps enumerating the generation it captured. Each captured entry is returned
+/// exactly once and the held listing never fails, while new opens show the current row.
+#[tokio::test]
+async fn held_nested_list_listing_survives_owner_refresh() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let items: Vec<String> = (0..HELD_LIST_LEN)
+        .map(|index| format!("\"t{index}\""))
+        .collect();
+    let document = format!(
+        "{{ meta: {{ label: \"x\", rank: 1, }}, tags: [{}], }}\n",
+        items.join(", ")
+    );
+    let (repository_directory, _repository, _relation_id) = repository_with_music_rows_and_modules(
+        "pub table Music(id: Str) { meta: { label: Str, rank: Int, }, tags: [Str], }\n",
+        &[],
+        &[("london", document.as_str())],
+    )
+    .await;
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    let mut mounted = spawn_mount_process(repository_directory.path(), &mountpoint);
+    let row = mountpoint.join("Music/london");
+    let tags = row.join("tags");
+    mounted.await_path(&tags.join((HELD_LIST_LEN - 1).to_string()));
+
+    let mut held = std::fs::read_dir(&tags).expect("open a held listing");
+    let mut seen = vec![
+        held.next()
+            .expect("the held listing has a first entry")
+            .expect("the first entry reads")
+            .file_name()
+            .into_string()
+            .expect("list names are UTF-8"),
+    ];
+    edit_outside_mount(
+        repository_directory.path(),
+        "london",
+        "{ meta: { label: \"y\", rank: 2, }, tags: [\"q\"], }\n",
+    );
+    let error = editor_mount::write_and_sync(
+        &row.join("data.orna"),
+        "{ meta: { label: \"z\", rank: 3, }, tags: [\"r\"], }\n",
+    )
+    .expect_err("a save against a row another writer changed is stale");
+    assert_eq!(error.raw_os_error(), Some(EAGAIN));
+    assert_eq!(
+        sorted_names(&tags),
+        vec!["0".to_owned()],
+        "a new open shows the current row"
+    );
+
+    for entry in held {
+        seen.push(
+            entry
+                .expect("the held listing must not fail after the refresh")
+                .file_name()
+                .into_string()
+                .expect("list names are UTF-8"),
+        );
+    }
+    seen.sort();
+    let mut expected: Vec<String> = (0..HELD_LIST_LEN).map(|index| index.to_string()).collect();
+    expected.sort();
+    assert_eq!(
+        seen, expected,
+        "the held listing returns each captured entry exactly once"
     );
 }
 
