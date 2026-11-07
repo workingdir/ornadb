@@ -84,6 +84,14 @@ jobs:
       - name: Prove independent extractor behavior
         run: python3 -m unittest scripts.test_orna_extract
 
+      - name: Set up Python 3.14 for the Parquet reader's ZSTD pages
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Prove Parquet reader behavior
+        run: python3 -m unittest scripts.test_orna_parquet
+
       - name: Prove product claim checker behavior
         run: python3 -m unittest scripts.test_check_product_claims
 
