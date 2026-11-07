@@ -415,6 +415,22 @@ fn loose_row_units(
     Ok(units)
 }
 
+/// The repository-relative paths of every loose row unit the commit tracks
+/// under `table_path`, in path order. Retirement reads the same enumeration the
+/// row reader decodes, so the files a migration deletes are exactly the files
+/// it migrated. A table with no loose units has none.
+pub(crate) fn loose_row_unit_paths(
+    repository: &Repository,
+    commit: &GitCommitRef,
+    table_path: &str,
+) -> Result<Vec<String>, LegacyReadError> {
+    match loose_row_units(repository, commit, table_path) {
+        Ok(units) => Ok(units.into_iter().map(|unit| unit.path).collect()),
+        Err(LegacyReadError::MissingTablePath(_)) => Ok(Vec::new()),
+        Err(error) => Err(error),
+    }
+}
+
 fn read_loose_table_rows(
     repository: &Repository,
     commit: &GitCommitRef,
