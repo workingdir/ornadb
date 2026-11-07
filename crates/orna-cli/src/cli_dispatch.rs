@@ -1437,6 +1437,18 @@ fn run_upgrade(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnost
         &store_for,
     )
     .map_err(|error| {
+        if matches!(error, orna_repository::RepositoryError::LegacyPathChanged(_)) {
+            // The path is the title so it shows without `--debug`: the edited
+            // legacy file is the one thing the user must restore.
+            let mut diagnostic = Diagnostic::target_with_detail(
+                "E2300",
+                "legacy file was edited after capture",
+                "restore the legacy file named in the title to its committed bytes or move the edit aside, then re-run `orna upgrade --to-format 3 DEST --yes-activate`; the source worktree is unchanged",
+                format!("{error:?}"),
+            );
+            diagnostic.title = std::borrow::Cow::Owned(error.to_string());
+            return diagnostic;
+        }
         Diagnostic::target_with_detail(
             "E2100",
             "prepared migration copy could not be activated",

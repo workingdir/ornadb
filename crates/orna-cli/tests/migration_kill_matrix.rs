@@ -518,11 +518,24 @@ fn cli_command(source: &Path) -> Command {
     command
 }
 
+/// The `migrate copy` options the golden bundle needs: its Blob column holds two
+/// annotation defaults, which the command asserts against the decoded count.
+const GOLDEN_COPY_OPTIONS: &[&str] = &["--annotation-defaults", "2"];
+
+/// The `migrate copy` options for a source with no Blob column: the decoded
+/// count is used, so no assertion is passed.
+const NO_COPY_OPTIONS: &[&str] = &[];
+
 fn run_copy(source: &Path, destination: &Path) -> Output {
+    run_copy_with(source, destination, GOLDEN_COPY_OPTIONS)
+}
+
+fn run_copy_with(source: &Path, destination: &Path, options: &[&str]) -> Output {
     let mut command = cli_command(source);
     command
         .arg(destination)
-        .args(["--annotation-defaults", "2", "--no-persistent-consumers"])
+        .args(options)
+        .arg("--no-persistent-consumers")
         .output()
         .expect("migration command starts")
 }
@@ -1293,10 +1306,20 @@ fn run_upgrade(source: &Path, destination: &Path) -> Output {
 /// Prepares a copy of `pristine` in `case`, then kills `upgrade --yes-activate`
 /// at `boundary`. Returns the source and the parked copy.
 fn park_activation(case: &Path, pristine: &Path, boundary: &str) -> (PathBuf, PathBuf) {
+    park_activation_with(case, pristine, boundary, GOLDEN_COPY_OPTIONS)
+}
+
+/// [`park_activation`] with the `migrate copy` options the preparation takes.
+fn park_activation_with(
+    case: &Path,
+    pristine: &Path,
+    boundary: &str,
+    copy_options: &[&str],
+) -> (PathBuf, PathBuf) {
     let source = case.join("source");
     duplicate(pristine, &source);
     let destination = case.join("migrated");
-    let prepared = run_copy(&source, &destination);
+    let prepared = run_copy_with(&source, &destination, copy_options);
     assert!(
         prepared.status.success(),
         "prepared migration: {}",
@@ -1505,6 +1528,209 @@ fn upgrade_kill_at_each_activation_boundary_rolls_forward_or_refuses_abort() {
                 "{boundary}: the rebuilt copy is the old snapshot, byte for byte"
             );
         }
+    }
+}
+
+/// Commits a format-2 source whose `Contact` table is declared in
+/// `contacts/main.orna` and imported by the root module, with two loose row
+/// units and one unrelated file.
+fn initialize_contacts_source(root: &Path) {
+    const ROOT: &str = "use contacts;\n\npub fn run() {}\n";
+    const CONTACTS: &str = "pub table Contact(id: Str) {\n    name: Str,\n}\n";
+    const ALICE: &str = "{\n    name: \"Alice Smith\",\n}\n";
+    const BOB: &str = "{\n    name: \"Bob Jones\",\n}\n";
+    git(root, &["init", "-b", "main"]);
+    git(root, &["config", "user.name", "kierandrewett"]);
+    git(root, &["config", "user.email", "kieran@drewett.dev"]);
+    git(root, &["config", "commit.gpgsign", "false"]);
+    fs::write(root.join("main.orna"), ROOT).unwrap();
+    fs::create_dir_all(root.join("contacts/Contact")).unwrap();
+    fs::write(root.join("contacts/main.orna"), CONTACTS).unwrap();
+    fs::write(root.join("contacts/Contact/alice-smith.orna"), ALICE).unwrap();
+    fs::write(root.join("contacts/Contact/bob-jones.orna"), BOB).unwrap();
+    fs::write(root.join("ordinary.txt"), "base\n").unwrap();
+    fs::create_dir_all(root.join(".orna")).unwrap();
+    fs::write(
+        root.join(".orna/format.orna"),
+        include_str!("fixtures/format-context/format-2-draft-1.1.0.orna"),
+    )
+    .unwrap();
+    fs::write(
+        root.join(".orna/database.orna"),
+        include_str!("fixtures/format-context/database-sidecar.orna"),
+    )
+    .unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-m", "contacts format-2 source"]);
+}
+
+/// A copy of the contacts source under `parent/name`.
+fn contacts_source(parent: &Path, name: &str) -> PathBuf {
+    let root = parent.join(name);
+    fs::create_dir(&root).unwrap();
+    initialize_contacts_source(&root);
+    root
+}
+
+/// Prepares and activates the contacts source without interruption. Returns the
+/// activated worktree manifest and committed copy every interrupted run must
+/// reach.
+fn uninterrupted_contacts_activation(
+    parent: &Path,
+    pristine: &Path,
+) -> (Vec<(String, String)>, CommittedCopy) {
+    let source = parent.join("reference-source");
+    duplicate(pristine, &source);
+    let destination = parent.join("reference-destination");
+    let prepared = run_copy_with(&source, &destination, NO_COPY_OPTIONS);
+    assert!(
+        prepared.status.success(),
+        "reference preparation: {}",
+        String::from_utf8_lossy(&prepared.stderr)
+    );
+    let activation = run_upgrade(&source, &destination);
+    assert!(
+        activation.status.success(),
+        "reference activation: {}",
+        String::from_utf8_lossy(&activation.stderr)
+    );
+    assert!(
+        !destination.join("contacts/Contact").exists(),
+        "the reference prunes the directory the retired rows left empty"
+    );
+    (
+        worktree_manifest(&destination),
+        committed_copy(&destination),
+    )
+}
+
+/// A loose-row migration killed at each activation boundary rolls forward to
+/// the uninterrupted activation: the retired rows are gone, the directory they
+/// left empty is pruned, and a rerun changes nothing.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn upgrade_kill_at_each_activation_boundary_retires_the_loose_rows() {
+    let parent = TempDir::new().unwrap();
+    let pristine = contacts_source(parent.path(), "pristine");
+    let source_head = git(&pristine, &["rev-parse", "HEAD"]);
+    let pristine_state = source_state(&pristine);
+    let (reference_manifest, reference_copy) =
+        uninterrupted_contacts_activation(parent.path(), &pristine);
+
+    for boundary in ACTIVATION_BOUNDARIES {
+        let case = TempDir::new().unwrap();
+        let (source, destination) =
+            park_activation_with(case.path(), &pristine, boundary, NO_COPY_OPTIONS);
+        assert_parked_activation(
+            &source,
+            &destination,
+            boundary,
+            &source_head,
+            &pristine_state,
+        );
+        let restarted = run_upgrade(&source, &destination);
+        assert!(
+            restarted.status.success(),
+            "{boundary} restart: {}",
+            String::from_utf8_lossy(&restarted.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&restarted.stdout)
+                .contains("activated format-3 migration copy"),
+            "{boundary}: the restart completes the activation"
+        );
+        assert!(
+            !destination.join("contacts/Contact").exists(),
+            "{boundary}: the directory the retired rows left empty is pruned"
+        );
+        assert_eq!(
+            worktree_manifest(&destination),
+            reference_manifest,
+            "{boundary}: the worktree must equal the uninterrupted activation"
+        );
+        assert_eq!(
+            committed_copy(&destination),
+            reference_copy,
+            "{boundary}: the rolled-forward copy must equal the reference byte for byte"
+        );
+        assert_eq!(source_state(&source), pristine_state, "{boundary}");
+        let rerun = run_upgrade(&source, &destination);
+        assert!(rerun.status.success(), "{boundary} rerun");
+        assert!(
+            String::from_utf8_lossy(&rerun.stdout).contains("already activated"),
+            "{boundary}: a rerun reports the finished activation"
+        );
+        assert_eq!(
+            committed_copy(&destination),
+            reference_copy,
+            "{boundary}: a rerun changes no committed byte"
+        );
+    }
+}
+
+/// A retired loose row the user edits while the copy is parked after its ref
+/// moved is refused and named by the barrier's recovery. The edit stays on
+/// disk, and the copy completes to the uninterrupted activation once the user
+/// restores the file.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn upgrade_refuses_a_dirty_loose_row_at_each_barrier_until_it_is_restored() {
+    let parent = TempDir::new().unwrap();
+    let pristine = contacts_source(parent.path(), "pristine");
+    let (reference_manifest, reference_copy) =
+        uninterrupted_contacts_activation(parent.path(), &pristine);
+    let row = Path::new("contacts/Contact/alice-smith.orna");
+    let edit: &[u8] = b"{\n    name: \"Locally Edited\",\n}\n";
+
+    for boundary in ["store-worktree", "worktree"] {
+        let case = TempDir::new().unwrap();
+        let (source, destination) =
+            park_activation_with(case.path(), &pristine, boundary, NO_COPY_OPTIONS);
+        let parked_row = destination.join(row);
+        // The legacy row is on disk until the worktree is reconciled, which
+        // retires it; the source keeps the committed bytes it must restore.
+        assert_eq!(
+            parked_row.exists(),
+            boundary == "store-worktree",
+            "{boundary}: the legacy row is on disk only before the worktree is reconciled"
+        );
+        let original = fs::read(pristine.join(row)).unwrap();
+        fs::create_dir_all(parked_row.parent().unwrap()).unwrap();
+        fs::write(&parked_row, edit).unwrap();
+
+        let refused = run_upgrade(&source, &destination);
+        let stderr = String::from_utf8_lossy(&refused.stderr);
+        assert!(
+            !refused.status.success(),
+            "{boundary}: must refuse: {stderr}"
+        );
+        assert!(
+            stderr.contains("contacts/Contact/alice-smith.orna"),
+            "{boundary}: the refusal names the dirty row: {stderr}"
+        );
+        assert_eq!(
+            fs::read(&parked_row).unwrap(),
+            edit,
+            "{boundary}: the refused copy keeps the user's edit"
+        );
+
+        fs::write(&parked_row, &original).unwrap();
+        let restarted = run_upgrade(&source, &destination);
+        assert!(
+            restarted.status.success(),
+            "{boundary}: the restored copy completes: {}",
+            String::from_utf8_lossy(&restarted.stderr)
+        );
+        assert_eq!(
+            worktree_manifest(&destination),
+            reference_manifest,
+            "{boundary}: the resumed worktree must equal the uninterrupted activation"
+        );
+        assert_eq!(
+            committed_copy(&destination),
+            reference_copy,
+            "{boundary}: the resumed copy must equal the reference byte for byte"
+        );
     }
 }
 
