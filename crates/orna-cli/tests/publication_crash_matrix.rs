@@ -1642,8 +1642,8 @@ async fn managed_store_edit_in_kill_window_is_retained_and_not_rewound() {
         );
         let stderr = String::from_utf8_lossy(&rejected.stderr);
         assert!(
-            stderr.contains("E2300"),
-            "managed edit at {boundary} not reported as E2300: {stderr}"
+            stderr.contains("E2300") && stderr.contains("a managed path was edited after capture"),
+            "managed edit at {boundary} not reported as the managed-worktree conflict: {stderr}"
         );
         assert_eq!(
             head(&repository),
