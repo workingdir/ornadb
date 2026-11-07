@@ -6,19 +6,32 @@
 //! recognised node is left to the Inspect fallback, and every text value is
 //! escaped so a stored string cannot introduce markup.
 
-use orna_foundation::{CanonicalValue, OvbRaw};
+use std::fmt::Write as _;
 
-/// Renders `value` as HTML when it is a `std.ui` node, or `None` so the caller
-/// can fall back to Inspect.
-pub fn render_ui_html(value: &CanonicalValue) -> Option<String> {
+use orna_foundation::OvbRaw;
+use orna_value::{ContextValue, ROV3_BLOB_TAG};
+
+/// Renders a value read through a Format-3 context as HTML when it is a
+/// `std.ui` node, or `None` so the caller can fall back to Inspect.
+/// `media_commit` is the HEAD commit that Blob nodes link to through
+/// `/media/<commit>/<descriptor>`; without it a Blob node has no route and the
+/// whole value falls back to Inspect.
+pub fn render_ui_html(value: &ContextValue, media_commit: Option<&str>) -> Option<String> {
+    render_value_html(value.raw(), media_commit)
+}
+
+/// Renders a canonical (OVB-1) value's raw form the same way. A canonical value
+/// cannot hold a Blob node, so the serve path renders it without copying it
+/// into a context.
+pub fn render_value_html(raw: &OvbRaw, media_commit: Option<&str>) -> Option<String> {
     let mut html = String::new();
-    render_node(value.raw(), &mut html, 0)?;
+    render_node(raw, &mut html, 0, media_commit)?;
     Some(html)
 }
 
 const MAX_DEPTH: usize = 32;
 
-fn render_node(raw: &OvbRaw, out: &mut String, depth: usize) -> Option<()> {
+fn render_node(raw: &OvbRaw, out: &mut String, depth: usize, media: Option<&str>) -> Option<()> {
     if depth >= MAX_DEPTH {
         return None;
     }
@@ -48,18 +61,40 @@ fn render_node(raw: &OvbRaw, out: &mut String, depth: usize) -> Option<()> {
         "rows" | "cols" | "stack" => {
             out.push_str("<div>");
             for child in children {
-                render_node(child, out, depth + 1)?;
+                render_node(child, out, depth + 1, media)?;
             }
             out.push_str("</div>");
         }
         "details" => {
             out.push_str("<dl>");
             for child in children {
-                render_node(child, out, depth + 1)?;
+                render_node(child, out, depth + 1, media)?;
             }
             out.push_str("</dl>");
         }
-        "table" => render_table_node(properties, children, out, depth)?,
+        "table" => render_table_node(properties, children, out, depth, media)?,
+        "image" => {
+            let href = media_href(properties, "blob", media)?;
+            out.push_str("<img src=\"");
+            push_escaped(&href, out);
+            out.push_str("\" alt=\"");
+            push_value(properties, "alt", out)?;
+            out.push_str("\">");
+        }
+        "audio" => {
+            let href = media_href(properties, "blob", media)?;
+            out.push_str("<audio controls src=\"");
+            push_escaped(&href, out);
+            out.push_str("\"></audio>");
+        }
+        "download" => {
+            let href = media_href(properties, "blob", media)?;
+            out.push_str("<a download href=\"");
+            push_escaped(&href, out);
+            out.push_str("\">");
+            push_value(properties, "label", out)?;
+            out.push_str("</a>");
+        }
         "code" => {
             out.push_str("<pre><code>");
             push_value(properties, "source", out)?;
@@ -73,7 +108,7 @@ fn render_node(raw: &OvbRaw, out: &mut String, depth: usize) -> Option<()> {
         "form" => {
             out.push_str("<form method=\"get\">");
             for child in children {
-                render_node(child, out, depth + 1)?;
+                render_node(child, out, depth + 1, media)?;
             }
             out.push_str("</form>");
         }
@@ -110,6 +145,28 @@ fn push_value(properties: &[(OvbRaw, OvbRaw)], name: &str, out: &mut String) -> 
     Some(())
 }
 
+/// The `/media` route of a Blob property: `/media/<commit>/<descriptor>` at
+/// HEAD. The node carries only the committed ROV-3 reference, so its descriptor
+/// names the bytes and they are never inlined. A value that is not such a
+/// reference, or a page without a HEAD commit, has no media route and returns
+/// `None`, so the caller falls back to Inspect.
+fn media_href(properties: &[(OvbRaw, OvbRaw)], name: &str, media: Option<&str>) -> Option<String> {
+    let commit = media?;
+    let entry = as_map(field(properties, name)?)?;
+    let OvbRaw::Tag(ROV3_BLOB_TAG, payload) = field(entry, "value")? else {
+        return None;
+    };
+    let [_, _, _, _, OvbRaw::Bytes(descriptor)] = as_list(payload)? else {
+        return None;
+    };
+    let mut hex = String::with_capacity(descriptor.len() * 2);
+    for byte in descriptor {
+        // Writing into a `String` cannot fail.
+        let _ = write!(hex, "{byte:02x}");
+    }
+    Some(format!("/media/{commit}/{hex}"))
+}
+
 /// Renders a table node. Its records live in the `rows` property (the
 /// evaluator materialises a relation there), so they are rendered from the
 /// property rather than from child nodes; any child nodes still render after
@@ -119,6 +176,7 @@ fn render_table_node(
     children: &[OvbRaw],
     out: &mut String,
     depth: usize,
+    media: Option<&str>,
 ) -> Option<()> {
     let rows = field(properties, "rows")
         .and_then(value_list)
@@ -156,7 +214,7 @@ fn render_table_node(
         out.push_str("</tr>");
     }
     for child in children {
-        render_node(child, out, depth + 1)?;
+        render_node(child, out, depth + 1, media)?;
     }
     out.push_str("</tbody></table>");
     Some(())
@@ -257,6 +315,12 @@ fn push_escaped(text: &str, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orna_foundation::CanonicalValue;
+    use orna_value::{
+        AvailabilityState, BlobResolver, ContentReference, Format3Context, Format3Quota, GitHash,
+        NativeOid, OwnerLifetime, Snapshot, ValueFormat,
+    };
+    use std::sync::Arc;
 
     /// OVB orders map keys by their complete encoded form, and
     /// `CanonicalValue::new` validates that order instead of sorting.
@@ -302,7 +366,7 @@ mod tests {
 
     fn render(raw: OvbRaw) -> Option<String> {
         let value = CanonicalValue::new(raw).expect("node is canonical");
-        render_ui_html(&value)
+        render_value_html(value.raw(), None)
     }
 
     #[test]
@@ -385,6 +449,140 @@ mod tests {
     #[test]
     fn a_plain_value_is_not_html() {
         let value = CanonicalValue::new(OvbRaw::Text("plain".into())).expect("text is canonical");
-        assert!(render_ui_html(&value).is_none());
+        assert!(render_value_html(value.raw(), None).is_none());
+    }
+
+    /// A Blob property as ROV-3 stores a committed reference: `{ type, value }`
+    /// whose value is `[length, sha256, media, suffix, descriptor]`.
+    fn blob_property(descriptor: [u8; 20]) -> OvbRaw {
+        ordered(vec![
+            ("type", OvbRaw::Text("std.binary_large_object".into())),
+            (
+                "value",
+                OvbRaw::Tag(
+                    ROV3_BLOB_TAG,
+                    Box::new(OvbRaw::Array(vec![
+                        OvbRaw::Int(3.into()),
+                        OvbRaw::Bytes(vec![7; 32]),
+                        OvbRaw::Text("image/png".into()),
+                        OvbRaw::Null,
+                        OvbRaw::Bytes(descriptor.to_vec()),
+                    ])),
+                ),
+            ),
+        ])
+    }
+
+    /// Synthetic Format-3 context. The resolver is never read: rendering needs
+    /// only the committed reference, not the blob bytes.
+    struct NoBytes;
+
+    impl BlobResolver for NoBytes {
+        fn read_range(
+            &self,
+            _reference: &ContentReference,
+            _offset: u64,
+            _length: u64,
+        ) -> orna_value::Result<Vec<u8>> {
+            Err(orna_value::Error::MissingDescriptor)
+        }
+    }
+
+    fn format3_context() -> Format3Context {
+        let database = [1; 16];
+        Format3Context::from_persisted(
+            database,
+            Snapshot::cwd(database, [2; 16], 0.into()).expect("snapshot"),
+            GitHash::Sha1,
+            NativeOid::from_bytes(&[9; 20]).expect("schema root"),
+            NativeOid::from_bytes(&[8; 20]).expect("store root"),
+            AvailabilityState::Available,
+            OwnerLifetime::new([3; 16]),
+            Format3Quota::new(8 * 1024 * 1024, 1_u64 << 62).expect("quota"),
+            Arc::new(NoBytes),
+        )
+        .expect("context")
+    }
+
+    /// A blob-bearing node is a ROV-3 value, so it is built inside a context.
+    fn render_at(raw: OvbRaw, commit: Option<&str>) -> Option<String> {
+        let value = ContextValue::new_in_context(&format3_context(), ValueFormat::Rov3, raw)
+            .expect("blob node is a valid ROV-3 value");
+        render_ui_html(&value, commit)
+    }
+
+    #[test]
+    // Specified: Orna-1.1.0 std.ui Image, Audio and Download link a committed
+    // blob through the explicit media route and never inline its bytes.
+    fn blob_nodes_link_the_media_route_without_inlining_bytes() {
+        let commit = "0123456789abcdef0123456789abcdef01234567";
+        let hex = "ab".repeat(20);
+        let href = format!("/media/{commit}/{hex}");
+
+        let image = node(
+            "image",
+            vec![("blob", blob_property([0xab; 20])), ("alt", entry("Cover"))],
+            Vec::new(),
+        );
+        let html = render_at(image, Some(commit)).expect("image renders");
+        assert!(
+            html.starts_with(&format!("<img src=\"{href}\" alt=\"")),
+            "{html}"
+        );
+        assert!(
+            !html.contains("base64") && !html.contains("data:"),
+            "{html}"
+        );
+
+        let audio = node(
+            "audio",
+            vec![("blob", blob_property([0xab; 20]))],
+            Vec::new(),
+        );
+        assert_eq!(
+            render_at(audio, Some(commit)).as_deref(),
+            Some(format!("<audio controls src=\"{href}\"></audio>").as_str())
+        );
+
+        let download = node(
+            "download",
+            vec![
+                ("blob", blob_property([0xab; 20])),
+                ("label", entry("Save")),
+            ],
+            Vec::new(),
+        );
+        assert_eq!(
+            render_at(download, Some(commit)).as_deref(),
+            Some(format!("<a download href=\"{href}\">Save</a>").as_str())
+        );
+    }
+
+    #[test]
+    // Specified: a Blob node without a HEAD commit or without a committed
+    // reference has no media route, so the whole value falls back to Inspect.
+    fn blob_nodes_without_a_route_fall_back_to_inspect() {
+        let audio = || {
+            node(
+                "audio",
+                vec![("blob", blob_property([0xab; 20]))],
+                Vec::new(),
+            )
+        };
+        assert!(render_at(audio(), None).is_none());
+
+        let not_a_reference = node(
+            "audio",
+            vec![(
+                "blob",
+                ordered(vec![
+                    ("type", OvbRaw::Text("std.binary_large_object".into())),
+                    ("value", OvbRaw::Bytes(vec![1, 2, 3])),
+                ]),
+            )],
+            Vec::new(),
+        );
+        let value = CanonicalValue::new(not_a_reference).expect("node is canonical");
+        assert!(render_value_html(value.raw(), Some("abc")).is_none());
     }
 }
