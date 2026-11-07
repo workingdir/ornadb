@@ -1,0 +1,49 @@
+name: Browser profile Wasm parity
+
+# Runs the ignored browser_profile_wasm_matches_native_canonical_output test so
+# the Wasm build of the shared evaluator is proven against native canonical OVB
+# output (ORNA-APP-015). The test is #[ignore] because it needs the
+# wasm32-unknown-unknown target and Node.js; this job provides both.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_BUILD_JOBS: 2
+  RUST_TEST_THREADS: 2
+
+concurrency:
+  group: browser-profile-wasm-parity-${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  browser-profile-wasm-parity:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Install Rust with the Wasm target
+        uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Check Node.js is available
+        run: node --version
+
+      # Runs only the ignored parity test; the rest of the crate stays on the
+      # default test set.
+      - name: Run the Wasm parity test
+        run: >-
+          cargo test --locked -p orna-application
+          --test browser_profile_wasm_parity
+          -- --ignored --exact browser_profile_wasm_matches_native_canonical_output
