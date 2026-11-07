@@ -25,9 +25,7 @@ use orna_live::{
     WebSocketUpgrade, WireRequest, WireResponse, encode_websocket_output,
 };
 use orna_protocol::{Envelope, Limits as ProtocolLimits, Message, PresentationContext};
-use orna_repository::{
-    CommittedTreeEntryKind, GitCommitRef, ManagedPath, Repository, RuntimeGeneration,
-};
+use orna_repository::{GitCommitRef, ManagedPath, Repository, RuntimeGeneration};
 use orna_security::{
     MAX_SESSION_LEASE, Origin, OriginPolicy, SessionBoundary, SessionDeletionAdapter,
 };
@@ -1455,7 +1453,7 @@ impl Drop for WebSocketWorker<'_> {
 }
 
 // The project root is selected once by `orna serve`; requests never supply a
-// repository path. Browsing is based on immutable Git commits and trees.
+// repository path. Blob bytes are addressed by immutable commit id and path.
 fn host_route(
     root: &Path,
     identity: RuntimeIdentity,
@@ -1465,7 +1463,7 @@ fn host_route(
     if let Some(response) = git_transport_route(root, allow_push, request) {
         return response;
     }
-    if let Some(response) = git_listing_route(root, request) {
+    if let Some(response) = git_content_route(root, request) {
         return response;
     }
     match (request.method.as_str(), request.path.as_str()) {
@@ -1477,85 +1475,15 @@ fn host_route(
     }
 }
 
-const MAX_LISTING_TREE_ENTRIES: usize = 10_000;
 const MAX_LISTING_FILE_BYTES: usize = 2 * 1024 * 1024;
-const LISTING_STYLE: &str = "<style>:root{--page-width:72ch;--text:#202122;--background:#fff;--link:#0645ad;--visited:#0b0080;--rule:#a2a9b1;--body-font:Georgia,'Times New Roman',serif;--code-font:ui-monospace,monospace}body{max-width:var(--page-width);margin:1.5rem auto;padding:0 1rem;color:var(--text);background:var(--background);font:1rem/1.5 var(--body-font)}a{color:var(--link)}a:visited{color:var(--visited)}pre,textarea{overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--code-font)}textarea{box-sizing:border-box;width:100%}button{font:inherit}table{border-collapse:collapse}th,td{border:1px solid var(--rule);padding:.2rem .45rem;text-align:left;vertical-align:top}</style>";
-/// Renderer-neutral data used by the simple Inspect-compatible HTML fallback.
-enum InspectionNode {
-    Text(String),
-    Link { label: String, href: String },
-    Record(Vec<(String, Self)>),
-    List(Vec<Self>),
-    OrderedList(Vec<Self>),
-    Code(String),
-}
-
-struct Breadcrumb {
-    label: String,
-    href: String,
-}
-
-fn git_listing_route(root: &Path, request: &Request) -> Option<Response> {
-    // The content route answers HEAD as well as GET, so it is matched before
-    // the page routes that only render documents.
-    if let Some(suffix) = request.path.strip_prefix("/content/")
-        && matches!(request.method.as_str(), "GET" | "HEAD")
-    {
-        return Some(content_route(root, request, suffix));
-    }
-    if request.method != "GET" {
+fn git_content_route(root: &Path, request: &Request) -> Option<Response> {
+    let suffix = request.path.strip_prefix("/content/")?;
+    // The content route answers HEAD as well as GET; any other request falls
+    // through to `host_route`, which answers `not_found`.
+    if !matches!(request.method.as_str(), "GET" | "HEAD") {
         return None;
     }
-    match request.path.as_str() {
-        path if path.starts_with("/tree/") => Some(tree_page(root, &path[6..])),
-        path if path.starts_with("/blob/") => Some(blob_page(root, &path[6..])),
-        _ => None,
-    }
-}
-
-fn tree_page(root: &Path, suffix: &str) -> Response {
-    let (object_id, encoded_path) = suffix.split_once('/').unwrap_or((suffix, ""));
-    let Ok(repository) = Repository::discover(root) else {
-        return unavailable_response();
-    };
-    let Some(commit) = resolve_listing_commit(&repository, object_id) else {
-        return not_found_response();
-    };
-    let Ok(decoded_path) = percent_decode(encoded_path) else {
-        return bad_request_response();
-    };
-    let directory = decoded_path.trim_end_matches('/');
-    let directory = if directory.is_empty() {
-        String::new()
-    } else {
-        match ManagedPath::new(directory) {
-            Ok(path) => path.as_path().to_string_lossy().into_owned(),
-            Err(_) => return bad_request_response(),
-        }
-    };
-    let Ok(entries) = repository.list_committed_tree(&commit, MAX_LISTING_TREE_ENTRIES) else {
-        return unavailable_response();
-    };
-    let children = tree_children(&entries, &directory);
-    if !directory.is_empty() && children.is_empty() {
-        return not_found_response();
-    }
-    let rows = children
-        .iter()
-        .map(|child| tree_child_node(&commit, &directory, child))
-        .collect::<Vec<_>>();
-    let content = if rows.is_empty() {
-        InspectionNode::Text("This commit has no files in this tree.".into())
-    } else {
-        InspectionNode::List(rows)
-    };
-    let title = if directory.is_empty() {
-        "Tree".to_owned()
-    } else {
-        directory.clone()
-    };
-    let breadcrumbs = tree_breadcrumbs(&commit, &directory);
-    render_inspection_document(&title, &breadcrumbs, &content)
+    Some(content_route(root, request, suffix))
 }
 
 fn resolve_listing_commit(repository: &Repository, object_id: &str) -> Option<GitCommitRef> {
@@ -1565,149 +1493,6 @@ fn resolve_listing_commit(repository: &Repository, object_id: &str) -> Option<Gi
         return None;
     }
     repository.resolve_snapshot(object_id).ok()
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum TreeChildKind {
-    Directory,
-    File { executable: bool },
-    Symlink,
-    Submodule,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct TreeChild {
-    name: String,
-    kind: TreeChildKind,
-}
-
-#[allow(clippy::needless_pass_by_value)]
-fn tree_children(
-    entries: &[orna_repository::CommittedTreeEntry],
-    directory: &str,
-) -> Vec<TreeChild> {
-    let prefix = if directory.is_empty() {
-        String::new()
-    } else {
-        format!("{directory}/")
-    };
-    let mut children = std::collections::BTreeMap::<String, TreeChildKind>::new();
-    for entry in entries {
-        let Some(path) = entry.path().as_path().to_str() else {
-            continue;
-        };
-        let Some(relative) = path.strip_prefix(&prefix) else {
-            continue;
-        };
-        if relative.is_empty() {
-            continue;
-        }
-        let (name, kind) = match relative.split_once('/') {
-            Some((name, _)) => (name, TreeChildKind::Directory),
-            None => (
-                relative,
-                match entry.kind() {
-                    CommittedTreeEntryKind::File { executable } => {
-                        TreeChildKind::File { executable }
-                    }
-                    CommittedTreeEntryKind::Symlink => TreeChildKind::Symlink,
-                    CommittedTreeEntryKind::Submodule => TreeChildKind::Submodule,
-                },
-            ),
-        };
-        children.entry(name.to_owned()).or_insert(kind);
-    }
-    let mut children = children
-        .into_iter()
-        .map(|(name, kind)| TreeChild { name, kind })
-        .collect::<Vec<_>>();
-    children.sort_by(|left, right| {
-        tree_child_rank(&left.kind)
-            .cmp(&tree_child_rank(&right.kind))
-            .then_with(|| left.name.cmp(&right.name))
-    });
-    children
-}
-
-#[allow(clippy::trivially_copy_pass_by_ref)]
-const fn tree_child_rank(kind: &TreeChildKind) -> u8 {
-    match kind {
-        TreeChildKind::Directory => 0,
-        TreeChildKind::File { .. } => 1,
-        TreeChildKind::Symlink => 2,
-        TreeChildKind::Submodule => 3,
-    }
-}
-
-#[allow(clippy::needless_pass_by_value)]
-fn tree_child_node(commit: &GitCommitRef, directory: &str, child: &TreeChild) -> InspectionNode {
-    let path = if directory.is_empty() {
-        child.name.clone()
-    } else {
-        format!("{directory}/{}", child.name)
-    };
-    let (label, kind) = match child.kind {
-        TreeChildKind::Directory => {
-            let href = format!("/tree/{}/{}/", commit.as_str(), percent_encode_path(&path));
-            (
-                InspectionNode::Link {
-                    label: format!("{}/", child.name),
-                    href,
-                },
-                "directory",
-            )
-        }
-        TreeChildKind::File { executable } => {
-            let href = format!("/blob/{}/{}", commit.as_str(), percent_encode_path(&path));
-            (
-                InspectionNode::Link {
-                    label: child.name.clone(),
-                    href,
-                },
-                if executable {
-                    "executable file"
-                } else {
-                    "file"
-                },
-            )
-        }
-        TreeChildKind::Symlink => (InspectionNode::Text(child.name.clone()), "symbolic link"),
-        TreeChildKind::Submodule => (InspectionNode::Text(child.name.clone()), "submodule"),
-    };
-    InspectionNode::Record(vec![
-        ("name".into(), label),
-        ("kind".into(), InspectionNode::Text(kind.into())),
-    ])
-}
-
-fn tree_breadcrumbs(commit: &GitCommitRef, directory: &str) -> Vec<Breadcrumb> {
-    let commit_id = commit.as_str();
-    let commit_label = &commit_id[..12];
-    // The deleted native commit-log page was the old `/` root crumb; this
-    // commit's tree is the browsable root, so no crumb links to `/`.
-    let mut breadcrumbs = vec![Breadcrumb {
-        label: commit_label.into(),
-        href: format!("/tree/{commit_id}/"),
-    }];
-    let mut prefix = String::new();
-    let parts = directory
-        .split('/')
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>();
-    for (index, part) in parts.iter().enumerate() {
-        if !prefix.is_empty() {
-            prefix.push('/');
-        }
-        prefix.push_str(part);
-        breadcrumbs.push(Breadcrumb {
-            label: (*part).to_owned(),
-            href: format!("/tree/{commit_id}/{}/", percent_encode_path(&prefix)),
-        });
-        if index + 1 == parts.len() {
-            break;
-        }
-    }
-    breadcrumbs
 }
 
 /// Serves a stored Blob's exact bytes with explicit byte-range support
@@ -1805,189 +1590,6 @@ fn content_media_type(path: &Path) -> &'static str {
 /// Types a browser may render inline; everything else is an attachment.
 fn is_allowlisted_media(media_type: &str) -> bool {
     media_type.starts_with("image/") || media_type.starts_with("audio/")
-}
-
-fn blob_page(root: &Path, suffix: &str) -> Response {
-    let Some((object_id, encoded_path)) = suffix.split_once('/') else {
-        return bad_request_response();
-    };
-    let Ok(repository) = Repository::discover(root) else {
-        return unavailable_response();
-    };
-    let Some(commit) = resolve_listing_commit(&repository, object_id) else {
-        return not_found_response();
-    };
-    let Ok(decoded_path) = percent_decode(encoded_path) else {
-        return bad_request_response();
-    };
-    let Ok(path) = ManagedPath::new(&decoded_path) else {
-        return bad_request_response();
-    };
-    let Ok(bytes) = repository.read_committed_file(&commit, path.as_path(), MAX_LISTING_FILE_BYTES)
-    else {
-        return not_found_response();
-    };
-    let path = path.as_path().to_string_lossy().into_owned();
-    let (content_type, content) = match std::str::from_utf8(&bytes) {
-        Ok(source)
-            if source.chars().all(|character| {
-                !character.is_control() || matches!(character, '\n' | '\r' | '\t')
-            }) =>
-        {
-            ("UTF-8 text", InspectionNode::Code(source.to_owned()))
-        }
-        _ => (
-            "binary",
-            InspectionNode::Text(format!("Binary content ({} bytes).", bytes.len())),
-        ),
-    };
-    let node = InspectionNode::Record(vec![
-        ("path".into(), InspectionNode::Text(path.clone())),
-        (
-            "content type".into(),
-            InspectionNode::Text(content_type.into()),
-        ),
-        (
-            "size".into(),
-            InspectionNode::Text(format!("{} bytes", bytes.len())),
-        ),
-        ("content".into(), content),
-    ]);
-    let breadcrumbs = file_breadcrumbs(&commit, &path);
-    render_inspection_document(&path, &breadcrumbs, &node)
-}
-
-fn file_breadcrumbs(commit: &GitCommitRef, path: &str) -> Vec<Breadcrumb> {
-    let commit_id = commit.as_str();
-    let commit_label = &commit_id[..12];
-    // As in `tree_breadcrumbs`, the commit's tree replaces the deleted native
-    // commit-log page as the breadcrumb root.
-    let mut breadcrumbs = vec![Breadcrumb {
-        label: commit_label.into(),
-        href: format!("/tree/{commit_id}/"),
-    }];
-    let mut prefix = String::new();
-    let parts = path
-        .split('/')
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>();
-    for part in parts.iter().take(parts.len().saturating_sub(1)) {
-        if !prefix.is_empty() {
-            prefix.push('/');
-        }
-        prefix.push_str(part);
-        breadcrumbs.push(Breadcrumb {
-            label: (*part).to_owned(),
-            href: format!("/tree/{commit_id}/{}/", percent_encode_path(&prefix)),
-        });
-    }
-    breadcrumbs
-}
-
-fn render_inspection_document(
-    title: &str,
-    breadcrumbs: &[Breadcrumb],
-    content: &InspectionNode,
-) -> Response {
-    let mut page = String::from(
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\"><title>",
-    );
-    page.push_str(&html_escape(title));
-    page.push_str("</title>");
-    page.push_str(LISTING_STYLE);
-    page.push_str("</head><body>");
-    if !breadcrumbs.is_empty() {
-        page.push_str("<nav aria-label=\"Breadcrumb\"><ol>");
-        for breadcrumb in breadcrumbs {
-            page.push_str("<li><a href=\"");
-            page.push_str(&html_escape(&breadcrumb.href));
-            page.push_str("\">");
-            page.push_str(&html_escape(&breadcrumb.label));
-            page.push_str("</a></li>");
-        }
-        page.push_str("</ol></nav>");
-    }
-    page.push_str("<main><h1>");
-    page.push_str(&html_escape(title));
-    page.push_str("</h1>");
-    render_inspection_node(content, &mut page);
-    page.push_str("</main></body></html>");
-    Response::new(200, "text/html; charset=utf-8", page.into_bytes())
-}
-
-fn render_inspection_node(node: &InspectionNode, page: &mut String) {
-    match node {
-        InspectionNode::Text(value) => page.push_str(&html_escape(value)),
-        InspectionNode::Link { label, href } => {
-            page.push_str("<a href=\"");
-            page.push_str(&html_escape(href));
-            page.push_str("\">");
-            page.push_str(&html_escape(label));
-            page.push_str("</a>");
-        }
-        InspectionNode::Record(fields) => {
-            page.push_str("<dl>");
-            for (label, value) in fields {
-                page.push_str("<dt>");
-                page.push_str(&html_escape(label));
-                page.push_str("</dt><dd>");
-                render_inspection_node(value, page);
-                page.push_str("</dd>");
-            }
-            page.push_str("</dl>");
-        }
-        InspectionNode::List(values) | InspectionNode::OrderedList(values) => {
-            let (open, close) = if matches!(node, InspectionNode::OrderedList(_)) {
-                ("<ol>", "</ol>")
-            } else {
-                ("<ul>", "</ul>")
-            };
-            page.push_str(open);
-            for value in values {
-                page.push_str("<li>");
-                render_inspection_node(value, page);
-                page.push_str("</li>");
-            }
-            page.push_str(close);
-        }
-        InspectionNode::Code(source) => {
-            page.push_str("<pre><code>");
-            page.push_str(&html_escape(source));
-            page.push_str("</code></pre>");
-        }
-    }
-}
-
-fn html_escape(value: &str) -> String {
-    let mut output = String::with_capacity(value.len());
-    for character in value.chars() {
-        match character {
-            '&' => output.push_str("&amp;"),
-            '<' => output.push_str("&lt;"),
-            '>' => output.push_str("&gt;"),
-            '"' => output.push_str("&quot;"),
-            '\'' => output.push_str("&#39;"),
-            character if character.is_control() && !matches!(character, '\n' | '\r' | '\t') => {
-                use std::fmt::Write as _;
-                let _ = write!(output, "&#x{:x};", u32::from(character));
-            }
-            character => output.push(character),
-        }
-    }
-    output
-}
-
-fn percent_encode_path(path: &str) -> String {
-    let mut encoded = String::with_capacity(path.len());
-    for byte in path.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/') {
-            encoded.push(char::from(byte));
-        } else {
-            use std::fmt::Write as _;
-            let _ = write!(encoded, "%{byte:02X}");
-        }
-    }
-    encoded
 }
 
 fn percent_decode(path: &str) -> Result<String, ()> {
@@ -2720,56 +2322,31 @@ mod tests {
 
     #[test]
     fn html_pages_carry_csp_nosniff_framing_and_referrer_headers() {
-        let directory = tempfile::tempdir().expect("temporary clone");
-        git_succeeds(
-            directory.path(),
-            &["init", "--quiet", "--initial-branch=pages"],
+        let html = String::from_utf8(response_head(&Response::new(
+            200,
+            "text/html; charset=utf-8",
+            Vec::new(),
+        )))
+        .expect("HTML response head");
+        assert!(
+            html.contains("Content-Type: text/html; charset=utf-8"),
+            "{html}"
         );
-        std::fs::write(directory.path().join("main.orna"), SERVE_FIXTURE)
-            .expect("vendored project source");
-        git_succeeds(directory.path(), &["add", "main.orna"]);
-        git_succeeds(
-            directory.path(),
-            &[
-                "-c",
-                "user.name=kierandrewett",
-                "-c",
-                "user.email=kieran@drewett.dev",
-                "commit",
-                "--quiet",
-                "-m",
-                "pages",
-            ],
-        );
-        let repository = Repository::discover(directory.path()).expect("database repository");
-        let commit = repository.head().expect("read HEAD").expect("commit");
-        let commit_id = commit.as_str();
-        let address = start_live_server(directory.path(), TEST_IDENTITY, ServeOptions::default());
-        let host = address.to_string();
-
-        for path in [
-            format!("/tree/{commit_id}/"),
-            format!("/blob/{commit_id}/main.orna"),
+        for header in [
+            "Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+            "X-Content-Type-Options: nosniff",
+            "X-Frame-Options: DENY",
+            "Referrer-Policy: no-referrer",
         ] {
-            let page = exchange(
-                address,
-                &format!("GET {path} HTTP/1.1\r\nHost: {host}\r\n\r\n"),
-            );
-            assert_eq!(page.status, 200, "{path}");
-            assert!(page.head.contains("Content-Type: text/html"), "{path}");
-            for header in [
-                "Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
-                "X-Content-Type-Options: nosniff",
-                "X-Frame-Options: DENY",
-                "Referrer-Policy: no-referrer",
-            ] {
-                assert!(
-                    page.head.contains(header),
-                    "{path} lacks {header}: {}",
-                    page.head
-                );
-            }
+            assert!(html.contains(header), "lacks {header}: {html}");
         }
+        let plain = String::from_utf8(response_head(&Response::new(
+            200,
+            "text/plain; charset=utf-8",
+            Vec::new(),
+        )))
+        .expect("plain response head");
+        assert!(!plain.contains("Content-Security-Policy"), "{plain}");
     }
 
     #[test]
@@ -2786,7 +2363,7 @@ mod tests {
         let own = exchange(
             address,
             &format!(
-                "POST /tree/x/ HTTP/1.1\r\nHost: {host}\r\nOrigin: http://{host}\r\nContent-Length: {declared}\r\n\r\n"
+                "POST /api/x/ HTTP/1.1\r\nHost: {host}\r\nOrigin: http://{host}\r\nContent-Length: {declared}\r\n\r\n"
             ),
         );
         assert_eq!(own.status, 413, "{}", own.head);
@@ -2795,7 +2372,7 @@ mod tests {
         let foreign = exchange(
             address,
             &format!(
-                "POST /tree/x/ HTTP/1.1\r\nHost: {host}\r\nOrigin: http://evil.example\r\nContent-Length: {declared}\r\n\r\n"
+                "POST /api/x/ HTTP/1.1\r\nHost: {host}\r\nOrigin: http://evil.example\r\nContent-Length: {declared}\r\n\r\n"
             ),
         );
         assert_eq!(
@@ -2839,7 +2416,7 @@ mod tests {
         );
     }
 
-    fn listing_page(root: &Path, path: &str) -> Response {
+    fn content_page(root: &Path, path: &str) -> Response {
         host_route(
             root,
             RuntimeIdentity {
@@ -2912,7 +2489,7 @@ mod tests {
     }
 
     #[test]
-    fn listing_routes_serve_a_published_capture_artifact() {
+    fn content_route_serves_published_and_committed_bytes() {
         use orna_repository::{
             ManagedFileChange, ManagedPath, PublicationJournal, PublicationJournalEntry,
         };
@@ -2981,26 +2558,16 @@ mod tests {
             .expect("published commit");
         let published_id = published.as_str();
 
-        let tree = listing_page(
+        let published = content_page(
             directory.path(),
-            &format!("/tree/{published_id}/published/"),
+            &format!("/content/{published_id}/published/capture.orna"),
         );
-        assert_eq!(tree.status, 200);
-        let tree = String::from_utf8(tree.body).expect("published tree HTML");
-        assert!(tree.contains(&format!("/blob/{published_id}/published/capture.orna")));
-
-        let blob = listing_page(
-            directory.path(),
-            &format!("/blob/{published_id}/published/capture.orna"),
-        );
-        assert_eq!(blob.status, 200);
-        let blob = String::from_utf8(blob.body).expect("published blob HTML");
-        assert!(blob.contains("orna"));
-        assert!(!blob.contains("uncommitted"));
+        assert_eq!(published.status, 200);
+        assert_eq!(published.body, SERVE_FIXTURE.as_bytes());
     }
 
     #[test]
-    fn default_listing_reads_commits_trees_and_files_from_git() {
+    fn default_content_route_reads_committed_files_from_git() {
         let directory = tempfile::tempdir().expect("temporary database");
         git_succeeds(
             directory.path(),
@@ -3051,56 +2618,56 @@ mod tests {
             .expect("listing commit");
         let commit_id = commit.as_str();
 
-        let root = listing_page(directory.path(), "/");
+        let root = content_page(directory.path(), "/");
         assert_eq!(root.status, 404, "no native root page without serve");
 
-        let tree = listing_page(directory.path(), &format!("/tree/{commit_id}/"));
-        assert_eq!(tree.status, 200);
-        let tree = String::from_utf8(tree.body).expect("tree HTML");
-        assert!(tree.contains(&format!("/tree/{commit_id}/src/")));
-        assert!(tree.contains(&format!("/blob/{commit_id}/main.orna")));
-        assert!(tree.contains(&format!("/blob/{commit_id}/README.txt")));
-        assert!(!tree.contains("uncommitted.txt"));
-        assert!(
-            tree.contains("&lt;b&gt;&amp;&#39;&quot;x.txt"),
-            "tree names are escaped: {tree}"
+        let tree = content_page(directory.path(), &format!("/tree/{commit_id}/"));
+        assert_eq!(tree.status, 404, "the native tree listing is removed");
+
+        let blob = content_page(directory.path(), &format!("/blob/{commit_id}/README.txt"));
+        assert_eq!(blob.status, 404, "the native blob listing is removed");
+        assert_eq!(
+            blob.content_type, "application/json",
+            "a removed listing returns no HTML page"
         );
         assert!(
-            !tree.contains("<b>&'\"x.txt"),
-            "raw hostile name must not render: {tree}"
+            !String::from_utf8_lossy(&blob.body).contains("<html"),
+            "a removed listing must not render document markup"
         );
 
-        let nested_tree = listing_page(directory.path(), &format!("/tree/{commit_id}/src/"));
-        assert_eq!(nested_tree.status, 200);
-        let nested_tree = String::from_utf8(nested_tree.body).expect("nested tree HTML");
-        assert!(nested_tree.contains(&format!("/blob/{commit_id}/src/nested.orna")));
-        assert!(nested_tree.contains(&format!("/blob/{commit_id}/src/data.bin")));
-
-        let source = listing_page(
+        let nested = content_page(
             directory.path(),
-            &format!("/blob/{commit_id}/src/nested.orna"),
+            &format!("/content/{commit_id}/src/nested.orna"),
         );
-        assert_eq!(source.status, 200);
-        let source = String::from_utf8(source.body).expect("Orna source HTML");
-        assert!(source.contains("pub fn main(): Int = 1 / 0;"));
-        assert!(source.contains("&lt;script&gt;alert(&#39;source&#39;)&lt;/script&gt;"));
-        assert!(!source.contains("<script>alert('source')</script>"));
+        assert_eq!(nested.status, 200);
+        assert_eq!(nested.body, SERVE_FIXTURE.as_bytes());
 
-        let text = listing_page(directory.path(), &format!("/blob/{commit_id}/README.txt"));
+        let text = content_page(
+            directory.path(),
+            &format!("/content/{commit_id}/README.txt"),
+        );
         assert_eq!(text.status, 200);
-        assert!(
-            String::from_utf8(text.body)
-                .unwrap()
-                .contains("committed text")
-        );
+        assert_eq!(text.body, b"committed text\n");
 
-        let binary = listing_page(directory.path(), &format!("/blob/{commit_id}/src/data.bin"));
-        assert_eq!(binary.status, 200);
-        assert!(
-            String::from_utf8(binary.body)
-                .unwrap()
-                .contains("Binary content (2 bytes).")
+        let hostile = content_page(
+            directory.path(),
+            &format!("/content/{commit_id}/%3Cb%3E%26%27%22x.txt"),
         );
+        assert_eq!(hostile.status, 200);
+        assert_eq!(hostile.body, b"hostile name");
+
+        let binary = content_page(
+            directory.path(),
+            &format!("/content/{commit_id}/src/data.bin"),
+        );
+        assert_eq!(binary.status, 200);
+        assert_eq!(binary.body, [0, 255]);
+
+        let uncommitted = content_page(
+            directory.path(),
+            &format!("/content/{commit_id}/uncommitted.txt"),
+        );
+        assert_eq!(uncommitted.status, 404);
     }
 
     /// ORNA-SERVE-003: A different clone running `orna serve` serves that clone's HEAD and CWD; CWD MUST remain local to that clone.
@@ -4194,82 +3761,41 @@ mod tests {
     /// deadline, and the client later finds the page cut short.
     #[test]
     fn a_response_the_client_stops_reading_is_abandoned_at_its_deadline() {
-        let directory = tempfile::tempdir().expect("temporary clone");
-        git_succeeds(
-            directory.path(),
-            &["init", "--quiet", "--initial-branch=stalled"],
+        // The writer is under test. No route reaches this size now: the
+        // committed-file route caps its reads at MAX_LISTING_FILE_BYTES.
+        let response = Response::new(200, "text/plain; charset=utf-8", vec![b'"'; 12_000_000]);
+        let total = response_head(&response).len() + response.body.len();
+        assert!(
+            total > 10_000_000,
+            "the response outgrows the socket buffers"
         );
-        // Each quote renders as the six bytes of `&quot;`, so the page is
-        // about 12 MB, more than the loopback socket buffers hold.
-        std::fs::write(directory.path().join("quotes.txt"), vec![b'"'; 2_000_000])
-            .expect("large text file");
-        git_succeeds(directory.path(), &["add", "--", "quotes.txt"]);
-        git_succeeds(
-            directory.path(),
-            &[
-                "-c",
-                "user.name=Orna test",
-                "-c",
-                "user.email=orna-test@example.invalid",
-                "commit",
-                "--quiet",
-                "-m",
-                "large page",
-            ],
-        );
-        let commit = Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(directory.path())
-            .output()
-            .expect("HEAD")
-            .stdout;
-        let commit = String::from_utf8(commit).expect("HEAD UTF-8");
         let transfer = TransferBudget {
             base: StdDuration::from_millis(500),
             min_bytes_per_second: u64::MAX,
         };
-        let address = start_live_server(
-            directory.path(),
-            TEST_IDENTITY,
-            ServeOptions {
-                transfer,
-                ..ServeOptions::default()
-            },
-        );
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener");
+        let address = listener.local_addr().expect("listener address");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accepted connection");
+            write_response(&mut stream, response, transfer)
+        });
         let mut client = TcpStream::connect(address).expect("loopback connection");
         client
             .set_read_timeout(Some(LIVE_TEST_TIMEOUT))
             .expect("client read timeout");
-        write!(
-            client,
-            "GET /blob/{}/quotes.txt HTTP/1.1\r\nHost: {address}\r\n\r\n",
-            commit.trim()
-        )
-        .expect("request");
-        // Read the head only, then stop reading until well past the deadline.
-        let mut head = Vec::new();
-        let mut byte = [0; 1];
-        while !head.ends_with(b"\r\n\r\n") {
-            client.read_exact(&mut byte).expect("response head");
-            head.push(byte[0]);
-        }
-        let head = String::from_utf8(head).expect("UTF-8 response head");
-        assert!(head.starts_with("HTTP/1.1 200 "), "{head}");
-        let declared: usize = head
-            .lines()
-            .find_map(|line| line.strip_prefix("Content-Length: "))
-            .and_then(|length| length.parse().ok())
-            .expect("declared body length");
-        assert!(
-            declared > 10_000_000,
-            "the page outgrows the socket buffers"
-        );
+        // Read a little, then stop reading until well past the deadline.
+        let mut first = [0; 1024];
+        client.read_exact(&mut first).expect("first bytes");
         std::thread::sleep(transfer.base * 4);
-        let body = read_until_closed(&mut client);
+        let received = first.len() + read_until_closed(&mut client).len();
+        let outcome = server.join().expect("server thread");
+        assert_eq!(
+            outcome.expect_err("the writer gives up").kind(),
+            io::ErrorKind::TimedOut
+        );
         assert!(
-            body.len() < declared,
-            "the server stops writing at its deadline: {} of {declared} bytes",
-            body.len()
+            received < total,
+            "the server stops writing at its deadline: {received} of {total} bytes"
         );
     }
 
