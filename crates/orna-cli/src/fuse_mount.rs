@@ -11222,6 +11222,52 @@ mod readdir_cursor_tests {
         );
     }
 
+    /// ORNA-VFS-017 (refresh): a row refresh through `reconcile_row_files` retires a file the row
+    /// no longer projects and appends one it now does. A listing held at a cursor past the
+    /// retired file must see the appended file exactly once, and no two entries may share an
+    /// offset.
+    #[test]
+    fn held_listing_sees_a_row_refresh_that_retires_one_file_and_adds_another_once() {
+        let (mut builder, row) = directory_with(&["data.orna", "a", "b", "c", "d"]);
+        let data = builder
+            .directory(row)
+            .and_then(|directory| directory.entry(OsStr::new("data.orna")))
+            .expect("the row projects data.orna")
+            .inode;
+        let before = list(&mut builder, row, 0, usize::MAX);
+        assert_eq!(names(&before), ["data.orna", "a", "b", "c", "d"]);
+        let projected = vec![
+            ("a".to_owned(), NodeKind::Bytes(Vec::new())),
+            ("c".to_owned(), NodeKind::Bytes(Vec::new())),
+            ("d".to_owned(), NodeKind::Bytes(Vec::new())),
+            ("e".to_owned(), NodeKind::Bytes(Vec::new())),
+        ];
+        builder
+            .reconcile_row_files(data, None, projected)
+            .expect("the refresh reconciles the row");
+        let after_c = list(&mut builder, row, offset_of(&before, "c"), usize::MAX);
+        assert_eq!(
+            names(&after_c),
+            ["d", "e"],
+            "a cursor at c neither skips nor repeats the appended file"
+        );
+        let after_d = list(&mut builder, row, offset_of(&before, "d"), usize::MAX);
+        assert_eq!(
+            names(&after_d),
+            ["e"],
+            "a cursor at d neither skips nor repeats the appended file"
+        );
+        let all = list(&mut builder, row, 0, usize::MAX);
+        let mut offsets: Vec<u64> = all.iter().map(|(offset, _)| *offset).collect();
+        offsets.sort_unstable();
+        offsets.dedup();
+        assert_eq!(
+            offsets.len(),
+            all.len(),
+            "every entry carries its own offset"
+        );
+    }
+
     /// A child replaced in place (refresh, Blob generation) keeps its position in a held listing.
     #[test]
     fn replaced_child_keeps_its_position_for_a_held_listing() {
