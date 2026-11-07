@@ -1,8 +1,8 @@
 use std::io::Cursor;
 
-use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
+use image::{DynamicImage, GrayImage, ImageFormat, Rgba, RgbaImage};
 use orna_serving::media_preview::{
-    DecodedImage, MAX_PREVIEW_DIMENSION, MAX_PREVIEW_INPUT_BYTES, PreviewError,
+    DecodedImage, MAX_PREVIEW_DIMENSION, MAX_PREVIEW_INPUT_BYTES, MAX_PREVIEW_PIXELS, PreviewError,
     decode_image_preview,
 };
 use orna_value::Blob;
@@ -168,4 +168,51 @@ fn preview_input_limit_rejects_before_attempting_full_blob_read() {
         Err(PreviewError::InputTooLarge)
     );
     assert_eq!(blob.length(), MAX_PREVIEW_INPUT_BYTES + 1);
+}
+
+fn grey_png(width: u32, height: u32) -> Blob {
+    let image = GrayImage::from_pixel(width, height, image::Luma([128]));
+    let mut encoded = Cursor::new(Vec::new());
+    DynamicImage::ImageLuma8(image)
+        .write_to(&mut encoded, ImageFormat::Png)
+        .expect("encode grey synthetic fixture");
+    Blob::from_bytes_with_annotation(encoded.into_inner(), "image/png", None)
+        .expect("valid PNG declaration")
+}
+
+/// ORNA-MEDIA-005: the total pixel cap refuses an image whose dimensions are
+/// each within the per-side limit. A grey PNG keeps the decoder allocation
+/// under its bound, so only the pixel-count check can refuse it.
+#[test]
+fn total_pixel_cap_refuses_images_within_each_dimension_limit() {
+    let over = grey_png(2049, 2048);
+    assert_eq!(
+        decode_image_preview(&over),
+        Err(PreviewError::MalformedOrOverLimit)
+    );
+
+    let at_cap = grey_png(2048, 2048);
+    let decoded = decode_image_preview(&at_cap).expect("an image at the pixel cap decodes");
+    assert_eq!((decoded.width, decoded.height), (2048, 2048));
+    assert_eq!(
+        u64::from(decoded.width) * u64::from(decoded.height),
+        MAX_PREVIEW_PIXELS
+    );
+}
+
+/// ORNA-MEDIA-003: a successful preview reads the blob but changes neither
+/// its bytes nor its recorded identity.
+#[test]
+fn successful_preview_leaves_blob_identity_and_bytes_unchanged() {
+    let blob = encoded_blob(ImageFormat::Png, "image/png", 2, 1);
+    let identity = blob.content_identity();
+    let length = blob.length();
+    let before = blob.read(0, length).expect("raw bytes readable");
+    decode_image_preview(&blob).expect("valid PNG decodes");
+    assert_eq!(blob.content_identity(), identity);
+    assert_eq!(blob.length(), length);
+    assert_eq!(
+        blob.read(0, length).expect("raw bytes still readable"),
+        before
+    );
 }
