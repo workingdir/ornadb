@@ -675,50 +675,15 @@ fn migrated_golden_copy_exports_and_restores_its_pinned_legacy_dependency() {
     let parent = TempDir::new().unwrap();
     let copy = activated_golden_copy(parent.path());
     let dependency = parent.path().join("source");
-    let probe = parent.path().join("shipped-archive");
-    let refused = run(&copy, &["export", probe.to_str().unwrap(), "--at", "HEAD"]);
-    assert_eq!(
-        refused.status.code(),
-        Some(1),
-        "the shipped golden refuses export: {}",
-        String::from_utf8_lossy(&refused.stderr)
-    );
-    assert!(
-        String::from_utf8_lossy(&refused.stderr).contains("has no recorded origin"),
-        "the shipped refusal names the missing origin: {}",
-        String::from_utf8_lossy(&refused.stderr)
-    );
-    assert!(!probe.exists(), "no archive is written on refusal");
+    assert_shipped_golden_refuses_export(&copy, parent.path());
 
     record_legacy_dependency_origin(&copy);
-    let pin = String::from_utf8(git_output(
-        &copy,
-        &["ls-tree", "HEAD", "--", LEGACY_DEPENDENCY],
-        None,
-    ))
-    .unwrap();
-    let pinned = pin
-        .split_whitespace()
-        .nth(2)
-        .expect("the golden snapshot pins the dependency")
-        .to_owned();
+    let pinned = legacy_dependency_pin(&copy);
 
     let outside = TempDir::new().unwrap();
     let archive = outside.path().join("archive");
     let archive_path = archive.to_str().unwrap();
-    let unavailable = run(&copy, &["export", archive_path, "--at", "HEAD"]);
-    assert_eq!(
-        unavailable.status.code(),
-        Some(1),
-        "a recorded origin without its repository is refused: {}",
-        String::from_utf8_lossy(&unavailable.stderr)
-    );
-    assert!(
-        String::from_utf8_lossy(&unavailable.stderr).contains("A pinned dependency is unavailable"),
-        "the refusal names the unavailable dependency: {}",
-        String::from_utf8_lossy(&unavailable.stderr)
-    );
-    assert!(!archive.exists(), "no archive is written on refusal");
+    assert_unavailable_dependency_refused(&copy, archive_path, &archive);
 
     let dependency_arg = format!("{LEGACY_DEPENDENCY}={}", dependency.to_str().unwrap());
     let exported = run(
@@ -784,4 +749,53 @@ fn migrated_golden_copy_exports_and_restores_its_pinned_legacy_dependency() {
         stderr.contains("vendor/stdlib") && stderr.contains("legacy format-1/2 snapshot"),
         "the refusal names the legacy dependency: {stderr}"
     );
+}
+
+/// The shipped golden copy refuses export for its missing origin and writes no archive.
+fn assert_shipped_golden_refuses_export(copy: &Path, parent: &Path) {
+    let probe = parent.join("shipped-archive");
+    let refused = run(copy, &["export", probe.to_str().unwrap(), "--at", "HEAD"]);
+    assert_eq!(
+        refused.status.code(),
+        Some(1),
+        "the shipped golden refuses export: {}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("has no recorded origin"),
+        "the shipped refusal names the missing origin: {}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(!probe.exists(), "no archive is written on refusal");
+}
+
+/// The commit that the golden copy pins for the legacy dependency.
+fn legacy_dependency_pin(copy: &Path) -> String {
+    let pin = String::from_utf8(git_output(
+        copy,
+        &["ls-tree", "HEAD", "--", LEGACY_DEPENDENCY],
+        None,
+    ))
+    .unwrap();
+    pin.split_whitespace()
+        .nth(2)
+        .expect("the golden snapshot pins the dependency")
+        .to_owned()
+}
+
+/// A recorded origin whose repository is absent refuses export and writes no archive.
+fn assert_unavailable_dependency_refused(copy: &Path, archive_path: &str, archive: &Path) {
+    let unavailable = run(copy, &["export", archive_path, "--at", "HEAD"]);
+    assert_eq!(
+        unavailable.status.code(),
+        Some(1),
+        "a recorded origin without its repository is refused: {}",
+        String::from_utf8_lossy(&unavailable.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&unavailable.stderr).contains("A pinned dependency is unavailable"),
+        "the refusal names the unavailable dependency: {}",
+        String::from_utf8_lossy(&unavailable.stderr)
+    );
+    assert!(!archive.exists(), "no archive is written on refusal");
 }
