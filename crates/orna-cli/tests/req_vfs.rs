@@ -1,28 +1,10 @@
-//! Requirement-targeted entry point for production VFS integration coverage.
+//! Requirement-targeted VFS runtime coverage, run in-process without a mount.
 
-// This target composes four VFS test files as modules; each of them includes
-// the shared support modules by path, so the same support file is loaded once
-// per composed module. The copies never exchange their types.
-#![allow(clippy::duplicate_mod)]
+// The FUSE tests for ORNA-VFS-010, ORNA-VFS-024 and the SIGTERM unmount live in the
+// vfs_mount_integration target; cargo runs each test binary once, so they are not composed here.
 
 use std::sync::Arc;
 
-#[path = "support/media_commit.rs"]
-mod media_commit;
-
-// The shared media commit harness resolves the format-3 publication helper from
-// the integration-test crate root, including when VFS tests are nested here.
-#[path = "support/format3.rs"]
-mod format3;
-
-// ORNA-VFS-010 is exercised by `cwd_mount_metadata_save_avoids_corrupt_sibling_payload`;
-// ORNA-VFS-024 is exercised by `cwd_mount_refuses_unmount_with_dirty_draft_and_allows_clean_unmount`.
-// Both are production FUSE tests compiled into this req_vfs target.
-#[path = "vfs_mount_integration.rs"]
-mod vfs_mount_integration;
-
-#[path = "vfs_editor_compat.rs"]
-mod vfs_editor_compat;
 #[test]
 /// ORNA-VFS-016: escaped key components round-trip without aliasing reserved names.
 fn typed_key_components_round_trip_reserved_and_escaped_names() {
