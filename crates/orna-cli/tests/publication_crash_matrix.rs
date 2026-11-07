@@ -2673,6 +2673,10 @@ fn cli_run_row_commit_kill_recovers_the_committed_row_exactly_once() {
     std::fs::write(root.join("main.orna"), SOURCE).unwrap();
     std::fs::write(root.join("notes.txt"), "committed notes\n").unwrap();
     git(root, &["init", "-q"]);
+    // `orna commit` records the configured identity (16-administration) and the
+    // CLI runs with global config disabled, so the fixture supplies its own.
+    git(root, &["config", "user.name", "Orna Test"]);
+    git(root, &["config", "user.email", "orna-test@example.invalid"]);
     git(root, &["add", "-A"]);
     let committed = cli(root, &["commit", "-m", "publish widgets"]);
     assert!(committed.status.success(), "commit: {committed:?}");
@@ -2779,7 +2783,7 @@ async fn kill_at_the_activation_row_commit_barrier_keeps_the_committed_row() {
         .spawn()
         .unwrap();
     let mut child = ChildGuard(child);
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_mins(1);
     while !marker.exists() {
         if let Some(status) = child.try_wait().unwrap() {
             panic!("the child exited ({status}) without parking at the row-commit barrier");
