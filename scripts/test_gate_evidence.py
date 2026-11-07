@@ -638,6 +638,73 @@ class EndToEndTests(unittest.TestCase):
             self.assertEqual(summary["problems"], ["gate-c-million-rows: no record (the job did not finish)"])
             self.assertEqual(summary["gates"][0]["state"], "not-executed")
 
+    def test_gate_document_names_the_gate_its_rows_and_records_and_needs_publication(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            records = root / "records"
+            records.mkdir()
+            log = records / "gate-f.log"
+            log.write_text("ORP-1 phase label=run_case rows=3 ms=1\n", encoding="utf-8")
+            value = record("gate-f", "passed", [target("orna-repository", "test:migration_copy", {"copy_round_trip": "passed"})])
+            value.update(
+                schema="ornadb-gate-evidence/1",
+                commit="b" * 40,
+                totals={"passed": 1},
+                failures={"new": [], "known": []},
+                baseline=[],
+            )
+            value["log"]["sha256"] = hashlib.sha256(log.read_bytes()).hexdigest()
+            value["exit_status"] = 0
+            (records / "gate-f.record.json").write_text(json.dumps(value), encoding="utf-8")
+            items = root / "items.toml"
+            items.write_text(
+                textwrap.dedent(
+                    """\
+                    [publication]
+                    version = "1.1.0"
+                    revision = "final-2026-10-05"
+                    archive_sha256 = "fe4a35dc81c2c2994e0a18d7c7931ea0bbd298ab23248496cbe880f264c5db56"
+
+                    [records]
+                    expected = ["gate-f"]
+
+                    [[item]]
+                    gate = "F"
+                    id = "F2"
+                    title = "Copy round trip keeps every row"
+                    select = [
+                      { record = "gate-f", package = "orna-repository", target = "test:migration_copy", test = "copy_round_trip" },
+                    ]
+                    """
+                ),
+                encoding="utf-8",
+            )
+            baseline = root / "baseline.toml"
+            baseline.write_text("", encoding="utf-8")
+            out = root / "summary.json"
+            gate_out = root / "gate-f-evidence.json"
+            argv = ["summarize", "--records", str(records), "--out", str(out), "--items", str(items), "--baseline", str(baseline), "--gate", "F", "--gate-out", str(gate_out)]
+
+            self.assertEqual(self.run_main(argv), 0)
+            document = json.loads(gate_out.read_text(encoding="utf-8"))
+            self.assertEqual(document["schema"], "ornadb-gate-evidence-gate/1")
+            self.assertEqual(document["gate"], "F")
+            self.assertEqual(document["commit"], "b" * 40)
+            self.assertEqual(document["publication"]["archive_sha256"], "fe4a35dc81c2c2994e0a18d7c7931ea0bbd298ab23248496cbe880f264c5db56")
+            self.assertEqual(document["state"], "passed")
+            self.assertEqual([row["id"] for row in document["rows"]], ["F2"])
+            self.assertEqual(document["rows"][0]["state"], "passed")
+            self.assertEqual(set(document["records"]), {"gate-f"})
+            self.assertEqual(document["records"]["gate-f"]["exit_status"], 0)
+            self.assertEqual(document["records"]["gate-f"]["log_sha256"], value["log"]["sha256"])
+            self.assertEqual(document["problems"], [])
+
+            # Mutation: without publication.archive_sha256 the manifest is refused and no gate document is written.
+            gate_out.unlink()
+            items.write_text(items.read_text(encoding="utf-8").replace('archive_sha256 = "fe4a', '# archive_sha256 = "fe4a'), encoding="utf-8")
+            self.assertNotEqual(self.run_main(argv), 0)
+            self.assertFalse(gate_out.exists())
+
 
 class ReviewFindingTests(unittest.TestCase):
     """Regression tests for the independent review of PR 9186 (W53)."""
