@@ -1,0 +1,318 @@
+{
+ "generator": "reference/Orna-1.1.0/tools/final_model.py annotation() and selected_suffix()",
+ "cases": [
+  {
+   "input": "image/jpeg",
+   "hint": null,
+   "media_type": "image/jpeg",
+   "suffix": null,
+   "selected_suffix": "jpg"
+  },
+  {
+   "input": "image/jpeg",
+   "hint": "JPG",
+   "media_type": "image/jpeg",
+   "suffix": null,
+   "selected_suffix": "jpg"
+  },
+  {
+   "input": "image/jpeg",
+   "hint": "jpe",
+   "media_type": "image/jpeg",
+   "suffix": "jpe",
+   "selected_suffix": "jpe"
+  },
+  {
+   "input": "image/jpeg",
+   "hint": "png",
+   "error": "sys.blob.incompatible_suffix"
+  },
+  {
+   "input": "Image/JPEG; Charset=UTF-8",
+   "hint": null,
+   "media_type": "image/jpeg;charset=utf-8",
+   "suffix": null,
+   "selected_suffix": "jpg"
+  },
+  {
+   "input": "  text/plain  ",
+   "hint": "TXT",
+   "media_type": "text/plain",
+   "suffix": null,
+   "selected_suffix": "txt"
+  },
+  {
+   "input": "text/plain;charset=\"UTF-8\"",
+   "hint": null,
+   "media_type": "text/plain;charset=utf-8",
+   "suffix": null,
+   "selected_suffix": "txt"
+  },
+  {
+   "input": "application/javascript",
+   "hint": "mjs",
+   "media_type": "text/javascript",
+   "suffix": "mjs",
+   "selected_suffix": "mjs"
+  },
+  {
+   "input": "application/ecmascript",
+   "hint": null,
+   "media_type": "text/javascript",
+   "suffix": null,
+   "selected_suffix": "js"
+  },
+  {
+   "input": "text/ecmascript",
+   "hint": "JS",
+   "media_type": "text/javascript",
+   "suffix": null,
+   "selected_suffix": "js"
+  },
+  {
+   "input": "audio/x-wav",
+   "hint": null,
+   "media_type": "audio/wav",
+   "suffix": null,
+   "selected_suffix": "wav"
+  },
+  {
+   "input": "audio/wave",
+   "hint": "wav",
+   "media_type": "audio/wav",
+   "suffix": null,
+   "selected_suffix": "wav"
+  },
+  {
+   "input": "audio/x-flac",
+   "hint": null,
+   "media_type": "audio/flac",
+   "suffix": null,
+   "selected_suffix": "flac"
+  },
+  {
+   "input": "audio/mpeg",
+   "hint": "MP2",
+   "media_type": "audio/mpeg",
+   "suffix": "mp2",
+   "selected_suffix": "mp2"
+  },
+  {
+   "input": "audio/mpeg",
+   "hint": "m4a",
+   "error": "sys.blob.incompatible_suffix"
+  },
+  {
+   "input": "video/mp4",
+   "hint": "mp4",
+   "media_type": "video/mp4",
+   "suffix": null,
+   "selected_suffix": "mp4"
+  },
+  {
+   "input": "video/mp4;codecs=avc1",
+   "hint": "m4v",
+   "media_type": "video/mp4;codecs=avc1",
+   "suffix": "m4v",
+   "selected_suffix": "m4v"
+  },
+  {
+   "input": "audio/mp4",
+   "hint": "mpg4",
+   "media_type": "audio/mp4",
+   "suffix": "mpg4",
+   "selected_suffix": "mpg4"
+  },
+  {
+   "input": "application/x-example",
+   "hint": "my_ext",
+   "media_type": "application/x-example",
+   "suffix": "my_ext",
+   "selected_suffix": "my_ext"
+  },
+  {
+   "input": "application/x-example",
+   "hint": "BIN",
+   "media_type": "application/x-example",
+   "suffix": null,
+   "selected_suffix": "bin"
+  },
+  {
+   "input": "application/x-example",
+   "hint": null,
+   "media_type": "application/x-example",
+   "suffix": null,
+   "selected_suffix": "bin"
+  },
+  {
+   "input": "application/octet-stream",
+   "hint": "Tar.GZ",
+   "media_type": "application/octet-stream",
+   "suffix": "tar.gz",
+   "selected_suffix": "tar.gz"
+  },
+  {
+   "input": "application/octet-stream",
+   "hint": "dat",
+   "media_type": "application/octet-stream",
+   "suffix": "dat",
+   "selected_suffix": "dat"
+  },
+  {
+   "input": "application/gzip",
+   "hint": "tar.gz",
+   "media_type": "application/gzip",
+   "suffix": "tar.gz",
+   "selected_suffix": "tar.gz"
+  },
+  {
+   "input": "application/gzip",
+   "hint": "gz",
+   "media_type": "application/gzip",
+   "suffix": null,
+   "selected_suffix": "gz"
+  },
+  {
+   "input": "text/plain;b=2;a=1",
+   "hint": null,
+   "media_type": "text/plain;a=1;b=2",
+   "suffix": null,
+   "selected_suffix": "txt"
+  },
+  {
+   "input": "text/plain;title=\"a b\";charset=utf-8",
+   "hint": null,
+   "media_type": "text/plain;charset=utf-8;title=\"a b\"",
+   "suffix": null,
+   "selected_suffix": "txt"
+  },
+  {
+   "input": "text/plain;title=\"q\\\"x\"",
+   "hint": null,
+   "media_type": "text/plain;title=\"q\\\"x\"",
+   "suffix": null,
+   "selected_suffix": "txt"
+  },
+  {
+   "input": "text/plain;title=abc",
+   "hint": null,
+   "media_type": "text/plain;title=abc",
+   "suffix": null,
+   "selected_suffix": "txt"
+  },
+  {
+   "input": "text/plain;a=1;a=2",
+   "hint": null,
+   "error": "sys.blob.invalid_media_type"
+  },
+  {
+   "input": "*/plain",
+   "hint": null,
+   "error": "sys.blob.invalid_media_type"
+  },
+  {
+   "input": "text/*",
+   "hint": null,
+   "error": "sys.blob.invalid_media_type"
+  },
+  {
+   "input": "image",
+   "hint": null,
+   "error": "sys.blob.invalid_media_type"
+  },
+  {
+   "input": "image/png;",
+   "hint": null,
+   "error": "sys.blob.invalid_media_type"
+  },
+  {
+   "input": "image/png ; x=y",
+   "hint": null,
+   "media_type": "image/png;x=y",
+   "suffix": null,
+   "selected_suffix": "png"
+  },
+  {
+   "input": "image/png",
+   "hint": ".png",
+   "error": "sys.blob.invalid_suffix"
+  },
+  {
+   "input": "image/png",
+   "hint": "a..b",
+   "error": "sys.blob.invalid_suffix"
+  },
+  {
+   "input": "image/png",
+   "hint": "a b",
+   "error": "sys.blob.invalid_suffix"
+  },
+  {
+   "input": "image/png",
+   "hint": "",
+   "error": "sys.blob.invalid_suffix"
+  },
+  {
+   "input": "image/png",
+   "hint": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "error": "sys.blob.invalid_suffix"
+  },
+  {
+   "input": "text/x\u00e9",
+   "hint": null,
+   "error": "sys.blob.invalid_media_type"
+  },
+  {
+   "input": "image/png",
+   "hint": "\u00e9",
+   "error": "sys.blob.invalid_suffix"
+  },
+  {
+   "input": "image/png;k=vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv",
+   "hint": null,
+   "error": "sys.blob.invalid_media_type"
+  },
+  {
+   "input": "text/plain;p0=1;p1=1;p2=1",
+   "hint": null,
+   "media_type": "text/plain;p0=1;p1=1;p2=1",
+   "suffix": null,
+   "selected_suffix": "txt"
+  },
+  {
+   "input": "image/svg+xml",
+   "hint": "svg",
+   "media_type": "image/svg+xml",
+   "suffix": null,
+   "selected_suffix": "svg"
+  },
+  {
+   "input": "text/css",
+   "hint": "CSS",
+   "media_type": "text/css",
+   "suffix": null,
+   "selected_suffix": "css"
+  },
+  {
+   "input": "video/webm",
+   "hint": "WEBM",
+   "media_type": "video/webm",
+   "suffix": null,
+   "selected_suffix": "webm"
+  },
+  {
+   "input": "text/javascript",
+   "hint": "mjs",
+   "media_type": "text/javascript",
+   "suffix": "mjs",
+   "selected_suffix": "mjs"
+  },
+  {
+   "input": "text/plain",
+   "hint": "text",
+   "media_type": "text/plain",
+   "suffix": "text",
+   "selected_suffix": "text"
+  }
+ ]
+}
