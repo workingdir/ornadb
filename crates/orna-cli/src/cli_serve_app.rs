@@ -12,6 +12,7 @@
 //! Git transport, installs no page at `/`, and reports the absence once at
 //! startup.
 
+use super::apply_payload_policy;
 use super::{
     CommittedRowsError, CommittedTableIdentity, Diagnostic, Limits, Mutex, PinnedCommittedRows,
     PinnedCommittedTables, Request, Response, RuntimeState, admitted_table_schemas,
@@ -19,13 +20,21 @@ use super::{
     legacy_bare_module_candidates, legacy_bare_module_table, runtime_identity,
     unavailable_response,
 };
+use crate::media_range::{MediaMethod, MediaReply, media_reply, plan_media_response};
 use orna_application::{ApplicationAuthority, ApplicationError, StagedActivation};
 use orna_evaluator::Environment;
+use orna_repository::{GitHashAlgorithm, KeyRange, NativeOid};
 
 /// Repository-relative module that hosts the serving entry.
 pub(super) const SERVE_MODULE_PATH: &str = "main.orna";
 /// The function invoked for each `GET /`.
 pub(super) const SERVE_ENTRY: &str = "serve";
+/// Path prefix of the explicit media route (ORNA-APP-013, ORNA-APP-014).
+const MEDIA_PREFIX: &str = "/media/";
+/// Rows read per page while locating a media descriptor at HEAD.
+const MEDIA_ROW_PAGE: usize = 64;
+/// Bytes read from the repository per verified range read.
+const MEDIA_READ_CHUNK: u64 = 1024 * 1024;
 
 /// The admitted serving entry's authority. Each request re-admits the module
 /// from its committed HEAD source, so the startup admission only proves that
@@ -268,6 +277,125 @@ impl ServeApp {
             .flatten()
             .ok_or("serve.entry_unavailable")
     }
+
+    /// Serves one committed media descriptor at HEAD (ORNA-APP-013, ORNA-APP-014).
+    ///
+    /// The descriptor is authorised only when a committed row of the HEAD
+    /// `main.orna` tables stores a blob reference to it: the row scan is the
+    /// authority check, and the response never names a path or a CWD object.
+    /// Bytes are read as verified ranges from the immutable HEAD graph, and the
+    /// descriptor OID is the validator (`ETag`), so the validator names exactly
+    /// the bytes served.
+    fn media_at_head(
+        &self,
+        method: MediaMethod,
+        commit: &str,
+        descriptor: &str,
+        range: Option<&str>,
+    ) -> Result<Response, (u16, &'static str)> {
+        let not_found = (404, "media.not_found");
+        let unavailable = (500, "media.read_unavailable");
+        let repository = orna_repository::Repository::discover(&self.root)
+            .map_err(|_| (500, "media.entry_unavailable"))?;
+        let head = Self::head_commit(&repository).map_err(|_| (500, "media.entry_unavailable"))?;
+        if head.as_str() != commit {
+            return Err(not_found);
+        }
+        let algorithm = match descriptor.len() {
+            40 => GitHashAlgorithm::Sha1,
+            64 => GitHashAlgorithm::Sha256,
+            _ => return Err(not_found),
+        };
+        let descriptor = NativeOid::from_hex(algorithm, descriptor).map_err(|_| not_found)?;
+        // Blob metadata carries the value-layer OID; the same bytes name the object.
+        let value_descriptor =
+            orna_value::NativeOid::from_bytes(descriptor.as_bytes()).map_err(|_| not_found)?;
+        let bytes = repository
+            .read_committed_file(
+                &head,
+                SERVE_MODULE_PATH,
+                orna_project::ProjectLimits::default().max_source_bytes,
+            )
+            .map_err(|_| (500, "media.entry_unavailable"))?;
+        let source = String::from_utf8(bytes).map_err(|_| (500, "media.entry_unavailable"))?;
+        if !serve_is_public(&source) {
+            return Err((500, "media.entry_unavailable"));
+        }
+        let base = self
+            .authority
+            .admit_module(SERVE_MODULE_PATH, source, SERVE_ENTRY)
+            .map_err(|_| (500, "media.entry_unavailable"))?;
+        let names = base.table_schemas().keys().cloned().collect::<Vec<_>>();
+        if names.is_empty() {
+            return Err(not_found);
+        }
+        let tables = committed_table_identities(&repository, &head, names)
+            .map_err(|_| (500, "media.table_identity_unavailable"))?;
+        let format = repository
+            .open_pinned_format_context(head.as_str())
+            .map_err(|_| unavailable)?;
+        for table in &tables {
+            let row_map = format
+                .load_row_map(table.object_id().bytes())
+                .map_err(|_| unavailable)?;
+            let graph = format
+                .open_native_graph(&row_map)
+                .map_err(|_| unavailable)?;
+            let scope = graph.open_read_scope().map_err(|_| unavailable)?;
+            let mut lower = None;
+            loop {
+                let page_range =
+                    KeyRange::new(lower.clone(), None, MEDIA_ROW_PAGE).map_err(|_| unavailable)?;
+                let page = graph
+                    .range_rows(&page_range, &scope)
+                    .map_err(|_| unavailable)?;
+                if page.is_empty() {
+                    break;
+                }
+                let next_lower = page.last().map(|row| row.key().clone());
+                for row in page.iter().skip(usize::from(lower.is_some())) {
+                    let fields = row.blob_fields().map_err(|_| unavailable)?;
+                    let Some((_, metadata)) = fields
+                        .iter()
+                        .find(|(_, metadata)| metadata.descriptor_oid() == Some(&value_descriptor))
+                    else {
+                        continue;
+                    };
+                    let reference = graph
+                        .admit_blob_reference(row, &descriptor, &scope)
+                        .map_err(|_| unavailable)?;
+                    let length = metadata.length();
+                    let media_type = metadata.media_type().to_owned();
+                    check_media_span(method, range, length, MEDIA_MAX_BODY_BYTES)?;
+                    let reply = media_reply(method, range, length, |start, end| {
+                        let mut out = Vec::new();
+                        let mut cursor = start;
+                        while cursor <= end {
+                            let last = end.min(cursor.saturating_add(MEDIA_READ_CHUNK - 1));
+                            let expected = last - cursor + 1;
+                            let verified = graph
+                                .read_blob_range(&reference, cursor..last + 1, &scope)
+                                .map_err(|_| ())?;
+                            // A chunk that is not the requested length is a truncated stream.
+                            if u64::try_from(verified.bytes().len()) != Ok(expected) {
+                                return Err(());
+                            }
+                            out.extend_from_slice(verified.bytes());
+                            cursor = last + 1;
+                        }
+                        Ok(out)
+                    })
+                    .map_err(|_| unavailable)?;
+                    return Ok(media_response(reply, &media_type, &descriptor));
+                }
+                if next_lower == lower {
+                    break;
+                }
+                lower = next_lower;
+            }
+        }
+        Err(not_found)
+    }
 }
 
 /// The `serve` error response: a JSON body naming a stable code, never a value.
@@ -288,14 +416,15 @@ pub(super) fn serving_entry_route(
     request: &Request,
 ) -> Option<Response> {
     let mut response = serving_entry_route_inner(app, request)?;
-    response
-        .headers
-        .push(("X-Content-Type-Options".to_owned(), "nosniff".to_owned()));
+    super::ensure_header(&mut response, "X-Content-Type-Options", "nosniff");
     Some(response)
 }
 
 fn serving_entry_route_inner(app: Option<&Mutex<ServeApp>>, request: &Request) -> Option<Response> {
     let app = app?;
+    if let Some(suffix) = request.path.strip_prefix(MEDIA_PREFIX) {
+        return Some(media_route(app, request, suffix));
+    }
     if request.path != "/" {
         return None;
     }
@@ -320,6 +449,96 @@ fn serving_entry_route_inner(app: Option<&Mutex<ServeApp>>, request: &Request) -
     })
 }
 
+/// Answers `/media/<commit>/<descriptor>` at HEAD (ORNA-APP-013, ORNA-APP-014).
+/// Only GET and HEAD are served; every other method is refused.
+fn media_route(app: &Mutex<ServeApp>, request: &Request, suffix: &str) -> Response {
+    if request.method != "GET" && request.method != "HEAD" {
+        return Response::new(
+            405,
+            "application/json",
+            br#"{"error":"method_not_allowed"}"#.to_vec(),
+        );
+    }
+    let method = if request.method == "HEAD" {
+        MediaMethod::Head
+    } else {
+        MediaMethod::Get
+    };
+    let range = request
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("range"))
+        .map(|(_, value)| value.as_str());
+    let Some((commit, descriptor)) = suffix.split_once('/') else {
+        return media_error(404, "media.not_found");
+    };
+    let mut response = match app.lock() {
+        Ok(app) => match app.media_at_head(method, commit, descriptor, range) {
+            Ok(response) => response,
+            Err((status, code)) => media_error(status, code),
+        },
+        Err(_) => unavailable_response(),
+    };
+    // RFC 9110 9.3.2: HEAD carries the same status and headers, never a body.
+    if method == MediaMethod::Head {
+        response.body.clear();
+    }
+    response
+}
+
+/// A media error response: a JSON body naming a stable `media.*` code.
+fn media_error(status: u16, code: &str) -> Response {
+    Response::new(
+        status,
+        "application/json",
+        format!(r#"{{"error":"{code}"}}"#).into_bytes(),
+    )
+}
+
+/// Largest media body one response buffers (64 MiB). A selected span above it
+/// is refused with `413 media.response_too_large` before any byte is read; the
+/// client reads a larger payload as several `Range` requests.
+const MEDIA_MAX_BODY_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Refuses a response whose planned body is larger than `cap`. The plan is
+/// computed from the range alone, so an oversized span costs no read.
+fn check_media_span(
+    method: MediaMethod,
+    range: Option<&str>,
+    length: u64,
+    cap: u64,
+) -> Result<(), (u16, &'static str)> {
+    let plan = plan_media_response(method, range, length);
+    if plan.send_body && plan.content_length > cap {
+        return Err((413, "media.response_too_large"));
+    }
+    Ok(())
+}
+
+/// Builds the media response from the plan: the status and range headers, the
+/// descriptor OID as the validator, and the payload policy (an attachment with
+/// `nosniff` and a sandbox unless the media type is allowlisted for inline).
+fn media_response(reply: MediaReply, media_type: &str, descriptor: &NativeOid) -> Response {
+    let mut response = Response::new(reply.plan.status, media_type, reply.body);
+    apply_payload_policy(&mut response, media_type);
+    response
+        .headers
+        .push(("accept-ranges".into(), "bytes".into()));
+    response.headers.push((
+        "content-length".into(),
+        reply.plan.content_length.to_string(),
+    ));
+    if let Some(content_range) = &reply.plan.content_range {
+        response
+            .headers
+            .push(("content-range".into(), content_range.clone()));
+    }
+    response
+        .headers
+        .push(("etag".into(), format!("\"{}\"", descriptor.to_hex())));
+    response
+}
+
 /// True when `source` declares `serve` as a `pub fn` (the only serving entry).
 fn serve_is_public(source: &str) -> bool {
     orna_syntax::parse_module(source).value.items.iter().any(|item| {
@@ -338,4 +557,68 @@ pub(super) fn missing_entry_diagnostic() -> Diagnostic {
         "no serving entry: main.orna does not declare `pub fn serve()`",
         "add `pub fn serve()` to main.orna to serve `/`; Git transport remains available",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn span_above_the_cap_is_refused_before_any_read() {
+        assert_eq!(
+            check_media_span(MediaMethod::Get, None, 100, 64),
+            Err((413, "media.response_too_large"))
+        );
+        assert_eq!(
+            check_media_span(MediaMethod::Get, Some("bytes=0-63"), 100, 64),
+            Ok(()),
+            "a 64-byte span is exactly at the cap"
+        );
+        assert_eq!(
+            check_media_span(MediaMethod::Get, Some("bytes=0-63"), 100, 63),
+            Err((413, "media.response_too_large")),
+        );
+    }
+
+    #[test]
+    fn head_carries_no_body_so_the_cap_does_not_apply() {
+        assert_eq!(check_media_span(MediaMethod::Head, None, 100, 64), Ok(()));
+    }
+
+    #[test]
+    fn payload_policy_sets_every_header_on_a_fresh_non_inline_response() {
+        let mut response = Response::new(200, "image/svg+xml", Vec::new());
+        apply_payload_policy(&mut response, "image/svg+xml");
+        assert_eq!(response.content_type, "application/octet-stream");
+        let value = |name: &str| {
+            response
+                .headers
+                .iter()
+                .find(|(existing, _)| existing.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(value("content-disposition"), Some("attachment"));
+        assert_eq!(value("x-content-type-options"), Some("nosniff"));
+        assert_eq!(value("content-security-policy"), Some("sandbox"));
+    }
+
+    #[test]
+    fn payload_policy_attaches_non_inline_types_once() {
+        let mut response = Response::new(200, "image/svg+xml", Vec::new());
+        response
+            .headers
+            .push(("x-content-type-options".into(), "nosniff".into()));
+        apply_payload_policy(&mut response, "image/svg+xml");
+        assert_eq!(response.content_type, "application/octet-stream");
+        let count = |name: &str| {
+            response
+                .headers
+                .iter()
+                .filter(|(existing, _)| existing.eq_ignore_ascii_case(name))
+                .count()
+        };
+        assert_eq!(count("x-content-type-options"), 1);
+        assert_eq!(count("content-disposition"), 1);
+        assert_eq!(count("content-security-policy"), 1);
+    }
 }
