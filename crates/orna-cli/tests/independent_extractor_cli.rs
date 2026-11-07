@@ -633,3 +633,155 @@ fn extractor_refuses_a_migrated_copy_that_pins_an_unreadable_legacy_dependency()
         "the refusal names the unreadable dependency: {stderr}"
     );
 }
+
+/// The origin the legacy stdlib submodule records. Export reads it from
+/// `.gitmodules` and never fetches it.
+const LEGACY_DEPENDENCY_ORIGIN: &str = "https://github.com/workingdir/ornadb-std.git";
+
+/// Records the golden gitlink's origin in `.gitmodules` with a plain commit,
+/// keeping the pin. The shipped snapshot records no origin.
+fn record_legacy_dependency_origin(copy: &Path) {
+    let path_key = format!("submodule.{LEGACY_DEPENDENCY}.path");
+    let url_key = format!("submodule.{LEGACY_DEPENDENCY}.url");
+    git(
+        copy,
+        &["config", "-f", ".gitmodules", &path_key, LEGACY_DEPENDENCY],
+    );
+    git(
+        copy,
+        &[
+            "config",
+            "-f",
+            ".gitmodules",
+            &url_key,
+            LEGACY_DEPENDENCY_ORIGIN,
+        ],
+    );
+    git(copy, &["add", "--", ".gitmodules"]);
+    git(
+        copy,
+        &["commit", "--quiet", "-m", "record legacy dependency origin"],
+    );
+}
+
+/// The golden copy as shipped, gitlink kept. Export refuses the missing origin
+/// (ORNA-GIT-001). With the origin recorded and the pinned dependency supplied,
+/// export and restore carry the dependency at its exact pin (ORNA-GIT-003,
+/// ORNA-GIT-007). The independent extractor still refuses the restored copy,
+/// because the pinned dependency is a legacy format-1/2 snapshot it does not
+/// read; the refusal is defined and names the dependency.
+#[test]
+fn migrated_golden_copy_exports_and_restores_its_pinned_legacy_dependency() {
+    let parent = TempDir::new().unwrap();
+    let copy = activated_golden_copy(parent.path());
+    let dependency = parent.path().join("source");
+    let probe = parent.path().join("shipped-archive");
+    let refused = run(&copy, &["export", probe.to_str().unwrap(), "--at", "HEAD"]);
+    assert_eq!(
+        refused.status.code(),
+        Some(1),
+        "the shipped golden refuses export: {}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("has no recorded origin"),
+        "the shipped refusal names the missing origin: {}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(!probe.exists(), "no archive is written on refusal");
+
+    record_legacy_dependency_origin(&copy);
+    let pin = String::from_utf8(git_output(
+        &copy,
+        &["ls-tree", "HEAD", "--", LEGACY_DEPENDENCY],
+        None,
+    ))
+    .unwrap();
+    let pinned = pin
+        .split_whitespace()
+        .nth(2)
+        .expect("the golden snapshot pins the dependency")
+        .to_owned();
+
+    let outside = TempDir::new().unwrap();
+    let archive = outside.path().join("archive");
+    let archive_path = archive.to_str().unwrap();
+    let unavailable = run(&copy, &["export", archive_path, "--at", "HEAD"]);
+    assert_eq!(
+        unavailable.status.code(),
+        Some(1),
+        "a recorded origin without its repository is refused: {}",
+        String::from_utf8_lossy(&unavailable.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&unavailable.stderr).contains("A pinned dependency is unavailable"),
+        "the refusal names the unavailable dependency: {}",
+        String::from_utf8_lossy(&unavailable.stderr)
+    );
+    assert!(!archive.exists(), "no archive is written on refusal");
+
+    let dependency_arg = format!("{LEGACY_DEPENDENCY}={}", dependency.to_str().unwrap());
+    let exported = run(
+        &copy,
+        &[
+            "export",
+            archive_path,
+            "--at",
+            "HEAD",
+            "--dependency",
+            &dependency_arg,
+        ],
+    );
+    assert_eq!(
+        exported.status.code(),
+        Some(0),
+        "export: {}",
+        String::from_utf8_lossy(&exported.stderr)
+    );
+
+    let restored = outside.path().join("restored");
+    let restored_arg = restored.to_str().unwrap();
+    let reconstructed = run(
+        &copy,
+        &[
+            "export",
+            archive_path,
+            "--restore",
+            restored_arg,
+            "--worktree",
+        ],
+    );
+    assert_eq!(
+        reconstructed.status.code(),
+        Some(0),
+        "restore: {}",
+        String::from_utf8_lossy(&reconstructed.stderr)
+    );
+    let restored_dependency = restored.join(LEGACY_DEPENDENCY);
+    assert_eq!(
+        String::from_utf8(git_output(
+            &restored_dependency,
+            &["rev-parse", "HEAD"],
+            None
+        ))
+        .unwrap()
+        .trim(),
+        pinned,
+        "the restored dependency is checked out at its exact pin"
+    );
+
+    // The copy and the dependency source are gone before the extractor runs.
+    drop(parent);
+    let output = outside.path().join("extracted");
+    let extracted = extract(&restored, &output);
+    let stderr = String::from_utf8_lossy(&extracted.stderr);
+    assert_eq!(extracted.status.code(), Some(1), "{stderr}");
+    assert!(
+        extracted.stdout.is_empty(),
+        "a refused extraction prints no partial report"
+    );
+    assert!(
+        stderr.contains("vendor/stdlib") && stderr.contains("legacy format-1/2 snapshot"),
+        "the refusal names the legacy dependency: {stderr}"
+    );
+}
