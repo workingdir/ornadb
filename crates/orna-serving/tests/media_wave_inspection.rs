@@ -1,10 +1,8 @@
 use orna_serving::media_preview::{
-    MAX_WAVE_CHANNELS, MAX_WAVE_INPUT_BYTES, MAX_WAVE_SAMPLE_RATE, WaveInspectionError,
-    inspect_pcm_wave,
+    MAX_WAVE_CHANNELS, MAX_WAVE_SAMPLE_RATE, WaveInspectionError, inspect_pcm_wave, is_wave_essence,
 };
-use orna_value::Blob;
 
-fn wave(channels: u16, rate: u32, bits: u16, samples: &[u8], mime: &str) -> Blob {
+fn wave(channels: u16, rate: u32, bits: u16, samples: &[u8]) -> Vec<u8> {
     let align = channels * (bits / 8);
     let mut bytes = Vec::new();
     bytes.extend_from_slice(b"RIFF");
@@ -22,13 +20,12 @@ fn wave(channels: u16, rate: u32, bits: u16, samples: &[u8], mime: &str) -> Blob
     bytes.extend_from_slice(samples);
     let riff_len = (bytes.len() - 8) as u32;
     bytes[4..8].copy_from_slice(&riff_len.to_le_bytes());
-    Blob::from_bytes_with_annotation(bytes, mime, None).expect("Blob annotation is valid")
+    bytes
 }
 
 #[test]
-fn inspects_pcm_from_blob_bytes_and_reports_absent_optional_title() {
-    let blob = wave(2, 48_000, 16, &[0; 16], "application/octet-stream");
-    let props = inspect_pcm_wave(&blob).expect("valid PCM WAVE");
+fn inspects_pcm_bytes_and_reports_absent_optional_title() {
+    let props = inspect_pcm_wave(wave(2, 48_000, 16, &[0; 16])).expect("valid PCM WAVE");
     assert_eq!(props.channels, 2);
     assert_eq!(props.sample_rate, 48_000);
     assert_eq!(props.bits_per_sample, 16);
@@ -38,66 +35,64 @@ fn inspects_pcm_from_blob_bytes_and_reports_absent_optional_title() {
 }
 
 #[test]
-fn rejects_malformed_riff_headers_and_chunk_or_format_inconsistencies() {
+fn wrong_magic_is_malformed_content_even_under_a_wave_declaration() {
+    // ORNA-MEDIA-002: the audio/* declaration never substitutes for byte validation.
     for bytes in [
         vec![],
         b"RIFF\0\0\0\0NOPE".to_vec(),
         b"RIFF\x04\0\0\0WAVE".to_vec(),
+        b"this is plainly not a RIFF/WAVE container".to_vec(),
     ] {
-        let blob = Blob::from_bytes_with_annotation(bytes, "audio/wav", None).unwrap();
-        assert!(matches!(
-            inspect_pcm_wave(&blob),
-            Err(WaveInspectionError::UnsupportedFormat | WaveInspectionError::MalformedContent)
-        ));
+        assert_eq!(
+            inspect_pcm_wave(bytes),
+            Err(WaveInspectionError::MalformedContent),
+            "a WAVE declaration with bad magic must be 422, not a format verdict"
+        );
     }
-    let mut malformed = wave(1, 8_000, 16, &[0, 0], "audio/wav")
-        .read(0, 64)
-        .unwrap();
+}
+
+#[test]
+fn rejects_chunk_or_format_inconsistencies() {
+    let mut malformed = wave(1, 8_000, 16, &[0, 0]);
     malformed[40..44].copy_from_slice(&u32::MAX.to_le_bytes());
-    let blob = Blob::from_bytes_with_annotation(malformed, "audio/wav", None).unwrap();
     assert_eq!(
-        inspect_pcm_wave(&blob),
+        inspect_pcm_wave(malformed),
         Err(WaveInspectionError::MalformedContent)
     );
-    let odd_samples = wave(1, 8_000, 16, &[0], "audio/wav");
     assert_eq!(
-        inspect_pcm_wave(&odd_samples),
+        inspect_pcm_wave(wave(1, 8_000, 16, &[0])),
         Err(WaveInspectionError::MalformedContent)
     );
 }
 
 #[test]
-fn resource_limits_have_a_distinct_typed_error() {
-    let too_many_channels = wave(MAX_WAVE_CHANNELS + 1, 8_000, 16, &[], "audio/wav");
+fn format_resource_limits_have_a_distinct_typed_error() {
     assert_eq!(
-        inspect_pcm_wave(&too_many_channels),
+        inspect_pcm_wave(wave(MAX_WAVE_CHANNELS + 1, 8_000, 16, &[])),
         Err(WaveInspectionError::ResourceLimit)
     );
-    let too_fast = wave(1, MAX_WAVE_SAMPLE_RATE + 1, 16, &[], "audio/wav");
     assert_eq!(
-        inspect_pcm_wave(&too_fast),
-        Err(WaveInspectionError::ResourceLimit)
-    );
-    let oversized = Blob::from_bytes_with_annotation(
-        vec![0; (MAX_WAVE_INPUT_BYTES + 1) as usize],
-        "audio/wav",
-        None,
-    )
-    .unwrap();
-    assert_eq!(
-        inspect_pcm_wave(&oversized),
+        inspect_pcm_wave(wave(1, MAX_WAVE_SAMPLE_RATE + 1, 16, &[])),
         Err(WaveInspectionError::ResourceLimit)
     );
 }
 
 #[test]
 fn non_pcm_wave_is_classified_as_unsupported() {
-    let blob = wave(1, 8_000, 16, &[], "audio/wav");
-    let mut bytes = blob.read(0, blob.length()).unwrap();
+    let mut bytes = wave(1, 8_000, 16, &[]);
     bytes[20..22].copy_from_slice(&3u16.to_le_bytes());
-    let blob = Blob::from_bytes_with_annotation(bytes, "audio/wav", None).unwrap();
     assert_eq!(
-        inspect_pcm_wave(&blob),
+        inspect_pcm_wave(bytes),
         Err(WaveInspectionError::UnsupportedFormat)
     );
+}
+
+#[test]
+fn wave_essences_are_the_declared_wave_names() {
+    for essence in ["audio/wav", "audio/x-wav", "audio/wave", "audio/vnd.wave"] {
+        assert!(is_wave_essence(essence), "{essence}");
+    }
+    for essence in ["audio/mpeg", "application/octet-stream", "image/png"] {
+        assert!(!is_wave_essence(essence), "{essence}");
+    }
 }
