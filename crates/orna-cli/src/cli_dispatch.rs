@@ -1235,7 +1235,7 @@ fn prepare_migration_copy(
                     "E2100",
                     "migration source holds live per-attempt stream state",
                     "let the live stream attempts finish or be cancelled, then retry; no copy was prepared and the source is unchanged",
-                    format!("tables={tables:?}"),
+                    format!("tables={}", tables.join(", ")),
                 )
             }
             orna_runtime::StreamCarryError::Runtime(error) => Diagnostic::target_with_detail(
