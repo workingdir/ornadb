@@ -1497,7 +1497,7 @@ async fn map_private_mappings_keep_per_handle_drafts_and_never_persist() {
         through_dirty.contains("Private draft"),
         "a MAP_PRIVATE mapping on the dirty handle shows its own draft, got {through_dirty:?}",
     );
-    let (through_second, _) = private_mapping_view(&fixture, None);
+    let (through_second, _second_probe) = private_mapping_view(&fixture, None);
     assert!(
         through_second.contains("Original") && !through_second.contains("Private draft"),
         "a MAP_PRIVATE mapping on a second handle shows accepted state, got {through_second:?}",
