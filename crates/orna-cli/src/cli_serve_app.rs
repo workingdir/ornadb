@@ -101,7 +101,7 @@ impl ServeApp {
     /// Invokes `serve` read-only and renders its value as the `GET /` body.
     /// A `serve` that stages any table mutation is refused.
     fn respond(&self) -> Response {
-        let staged = match self.stage_at_head() {
+        let (staged, commit) = match self.stage_at_head() {
             Ok(staged) => staged,
             Err(code) => return serve_error(code),
         };
@@ -110,7 +110,7 @@ impl ServeApp {
         }
         // A `std.ui` node tree renders as semantic HTML; every other value
         // keeps the Inspect text fallback.
-        match crate::ui_render::render_ui_html(staged.value()) {
+        match crate::ui_render::render_value_html(staged.value().raw(), Some(commit.as_str())) {
             Some(html) => Response::new(200, "text/html; charset=utf-8", html.into_bytes()),
             None => Response::new(
                 200,
@@ -145,7 +145,9 @@ impl ServeApp {
     /// CWD generation captured for this activation. A missing or unreadable HEAD
     /// entry is `serve.entry_unavailable`; a table whose committed identity is
     /// missing, or present for only some tables, is refused before any read.
-    fn stage_at_head(&self) -> Result<StagedActivation, &'static str> {
+    fn stage_at_head(
+        &self,
+    ) -> Result<(StagedActivation, orna_repository::GitCommitRef), &'static str> {
         let repository = orna_repository::Repository::discover(&self.root)
             .map_err(|_| "serve.entry_unavailable")?;
         // An unborn HEAD is reported before any runtime state opens.
@@ -188,6 +190,7 @@ impl ServeApp {
             return self
                 .authority
                 .evaluate_staged(&base, &Environment::new())
+                .map(|staged| (staged, commit))
                 .map_err(|_| "serve.evaluation_failed");
         }
         let Ok(tables) = committed_table_identities(&repository, &commit, names.clone()) else {
@@ -263,7 +266,7 @@ impl ServeApp {
             None,
         )
         .map_err(|_| "serve.evaluation_failed")?;
-        Ok(staged)
+        Ok((staged, commit))
     }
 
     /// The HEAD commit of `repository`. An unborn HEAD has no commit to serve
