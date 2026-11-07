@@ -18,6 +18,8 @@ import yaml
 
 from scripts.gate_evidence import (
     BASELINE,
+    counter_lines,
+    counter_values,
     ITEMS,
     baseline_status,
     executed_tests,
@@ -806,6 +808,30 @@ class ReviewFindingTests(unittest.TestCase):
         for item_id in ("B1", "B2", "B3"):
             item = next(i for i in manifest.items if i["id"] == item_id)
             self.assertTrue(all(sel["record"] == "workspace-cli" for sel in item["select"]), item_id)
+
+    def test_gate_b2_line_is_ingested_with_measured_counters(self) -> None:
+        # The Gate B test prints one measurement line; every B2 counter must come from it, measured.
+        line = (
+            "Gate B: small fixture rows=2; large network bytes=10737418240; remote fetches=1310720; "
+            "graph payload bytes read=10737418240; graph payload bytes written=10737418240; native objects read=6; "
+            "new Git objects=3; elapsed_ms=4321; peak_rss_bytes=268435456; scratch_storage_bytes=2147483648"
+        )
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "workspace-cli.log").write_text(f"noise\n{line}\n", encoding="utf-8")
+            record_value = {"record": "workspace-cli", "log": {"file": "workspace-cli.log"}}
+            found = counter_lines(["^Gate B: "], [(record_value, root)])
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["line"], line)
+        values = found[0]["values"]
+        self.assertEqual(values["remote_fetches"], 1310720)
+        self.assertEqual(values["large_network_bytes"], 10737418240)
+        self.assertEqual(values["graph_payload_bytes_read"], 10737418240)
+        self.assertEqual(values["graph_payload_bytes_written"], 10737418240)
+        self.assertEqual(values["elapsed_ms"], 4321)
+        self.assertEqual(values["peak_rss_bytes"], 268435456)
+        self.assertEqual(values["scratch_storage_bytes"], 2147483648)
+        self.assertNotIn("remote_git_objects", values)
 
     def summarize_known_failure(self, status: str, entry_options: str, expect_commit: str) -> tuple[int, dict]:
         """Summarize one record of commit a*40 that gives a baselined test this status; return the exit code and summary."""
