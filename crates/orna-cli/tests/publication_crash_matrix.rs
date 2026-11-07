@@ -2640,3 +2640,173 @@ async fn publication_recovery_keeps_uncertain_external_effects_uncertain() {
         );
     }
 }
+
+/// S10 (ORNA-PUB row-commit, Gate D): the real `orna run` process is killed at
+/// the row-commit barrier, after its table activation commits. Recovery through
+/// `orna publish` must leave exactly one row with its committed bytes, and a
+/// subsequent run must see that row. The CLI mints a fresh request identity per
+/// invocation, so a same-identity retry is not reachable through this surface.
+/// Unrelated staged and unstaged work must survive the kill and recovery (P4).
+#[test]
+fn cli_run_row_commit_kill_recovers_the_committed_row_exactly_once() {
+    const SOURCE: &str = concat!(
+        "pub table Widget(id: Str) {\n",
+        "    label: Str,\n",
+        "}\n",
+        "\n",
+        "pub fn seed() {\n",
+        "    Widget.insert({ id: \"w-1\", label: \"first\" });\n",
+        "}\n",
+        "\n",
+        "pub fn verify() {\n",
+        "    assert (Widget | filter(widget => widget.label == \"first\") | count()) == 1;\n",
+        "}\n",
+    );
+    let directory = TempDir::new().unwrap();
+    let root = directory.path();
+    assert!(
+        cli(root, &["init", root.to_str().unwrap()])
+            .status
+            .success(),
+        "init"
+    );
+    std::fs::write(root.join("main.orna"), SOURCE).unwrap();
+    std::fs::write(root.join("notes.txt"), "committed notes\n").unwrap();
+    git(root, &["init", "-q"]);
+    // `orna commit` records the configured identity (16-administration) and the
+    // CLI runs with global config disabled, so the fixture supplies its own.
+    git(root, &["config", "user.name", "Orna Test"]);
+    git(root, &["config", "user.email", "orna-test@example.invalid"]);
+    git(root, &["add", "-A"]);
+    let committed = cli(root, &["commit", "-m", "publish widgets"]);
+    assert!(committed.status.success(), "commit: {committed:?}");
+    let before = head_of(root);
+    std::fs::write(root.join("notes.txt"), "unstaged before run\n").unwrap();
+    std::fs::write(root.join("staged.txt"), "staged before run\n").unwrap();
+    git(root, &["add", "staged.txt"]);
+    let staged_before = git_output(root, &["diff", "--cached", "--binary"], None);
+    let unstaged_before = git_output(root, &["diff", "--binary"], None);
+    assert!(!staged_before.is_empty() && !unstaged_before.is_empty());
+
+    let crash = TempDir::new().unwrap();
+    let marker = crash.path().join(MARKER_FILE);
+    let mut child = launch_with_arguments(root, "row-commit", crash.path(), &["run", "main.seed"]);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !marker.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        marker.exists(),
+        "the run must park at the row-commit barrier"
+    );
+    assert_eq!(std::fs::read(&marker).unwrap(), b"row-commit");
+    child.kill().expect("kill the parked run");
+    child.wait().expect("reap the killed run");
+    assert_eq!(
+        head_of(root),
+        before,
+        "a run killed before publication must not move HEAD"
+    );
+
+    let published = cli(root, &["publish"]);
+    assert!(published.status.success(), "publish: {published:?}");
+    let verified = cli(root, &["run", "main.verify"]);
+    assert!(
+        verified.status.success(),
+        "the committed row must survive the kill exactly once: {verified:?}"
+    );
+    assert_eq!(
+        git_output(root, &["diff", "--cached", "--binary"], None),
+        staged_before,
+        "the run and publish must leave unrelated staged work untouched"
+    );
+    assert_eq!(
+        git_output(root, &["diff", "--binary"], None),
+        unstaged_before,
+        "the run and publish must leave unrelated unstaged work untouched"
+    );
+}
+
+fn head_of(root: &Path) -> String {
+    String::from_utf8(git_output(root, &["rev-parse", "HEAD"], None))
+        .unwrap()
+        .trim()
+        .to_owned()
+}
+
+/// S11 (ORNA-PUB row-commit, Gate D): `commit_table_activation` reaches its
+/// row-commit barrier only after the table transaction has committed. The parent
+/// re-executes this test binary with the barrier armed, SIGKILLs the child parked
+/// there, and reopens the repository: the acknowledged row must survive exactly
+/// once. A child that returns without parking means the barrier is absent, so the
+/// parent fails rather than passing silently.
+#[tokio::test]
+async fn kill_at_the_activation_row_commit_barrier_keeps_the_committed_row() {
+    const CHILD_REPOSITORY: &str = "ORNA_TEST_ROW_COMMIT_CHILD_REPOSITORY";
+    const ROW_KEY: u8 = 2;
+    const ROW_PAYLOAD: u8 = 8;
+    if let Some(repository_root) = std::env::var_os(CHILD_REPOSITORY) {
+        let repository = Repository::discover(Path::new(&repository_root)).unwrap();
+        let (identity, digest) = cli_runtime_identity(&repository);
+        let state = RuntimeState::open(&repository, identity, digest)
+            .await
+            .unwrap();
+        let lease = state.acquire_lease(identity.repository_id).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutation =
+            TableMutation::insert([65; 16], "records", vec![ROW_KEY], vec![ROW_PAYLOAD]).unwrap();
+        // Returns here only when the barrier is absent; the parent then fails.
+        state
+            .commit_table_activation(lease, &context, &[mutation], [66; 32], &NoFault)
+            .await
+            .unwrap();
+        return;
+    }
+
+    let (directory, _source, repository, state, _base, _relation_id, _format_context) =
+        seeded_project().await;
+    let (identity, digest) = cli_runtime_identity(&repository);
+    drop(state);
+
+    let crash = TempDir::new().unwrap();
+    let marker = crash.path().join(MARKER_FILE);
+    let child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "kill_at_the_activation_row_commit_barrier_keeps_the_committed_row",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(CRASH_AT, "row-commit")
+        .env(CRASH_DIR, crash.path())
+        .env(CHILD_REPOSITORY, directory.path())
+        .spawn()
+        .unwrap();
+    let mut child = ChildGuard(child);
+    let deadline = Instant::now() + Duration::from_mins(1);
+    while !marker.exists() {
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!("the child exited ({status}) without parking at the row-commit barrier");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the child never reached the row-commit barrier"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(std::fs::read(&marker).unwrap(), b"row-commit");
+    child.kill().expect("kill the parked child");
+    child.wait().expect("reap the killed child");
+
+    let reopened = RuntimeState::open(&repository, identity, digest)
+        .await
+        .unwrap();
+    assert_eq!(
+        reopened
+            .committed_table_row("records", &[ROW_KEY])
+            .await
+            .unwrap(),
+        Some(vec![ROW_PAYLOAD]),
+        "the row committed before the barrier must survive the kill exactly once"
+    );
+}
