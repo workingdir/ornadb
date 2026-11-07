@@ -1444,6 +1444,7 @@ dependencies = [
  "orna-semantic",
  "orna-serving",
  "orna-storage",
+ "orna-stream",
  "orna-syntax",
  "orna-sys",
  "orna-value",
