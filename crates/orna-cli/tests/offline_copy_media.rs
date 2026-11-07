@@ -104,6 +104,34 @@ fn offline_copy_hydrates_verified_payloads_and_rejects_tampering() {
     ));
 }
 
+#[test]
+fn unknown_format_blob_stays_storable_queryable_and_retrievable() {
+    // ORNA-MEDIA-001: a payload no bundled inspector recognises is still a
+    // committed row. Its metadata answers queries without a payload read, and
+    // hydration returns the exact bytes it was written with.
+    let directory = TempDir::new().unwrap();
+    let bundle = directory.path().join("bundle");
+    let payload = b"\x00\xffNOT-A-KNOWN-CONTAINER\x13\x37".to_vec();
+    let media_type = "application/x-orna-unknown";
+    let row = OfflineRow {
+        key: b"opaque".to_vec(),
+        media_type: media_type.to_owned(),
+        suffix: None,
+        length: payload.len() as u64,
+        sha256: Sha256::digest(&payload).into(),
+        payload: Some(payload.clone()),
+    };
+    write_offline_copy(&bundle, std::slice::from_ref(&row), &[]).unwrap();
+
+    let copy = OfflineCopy::open(&bundle).unwrap();
+    let metadata = copy.metadata(b"opaque").expect("opaque row is in the copy");
+    assert_eq!(metadata.media_type, media_type);
+    assert_eq!(metadata.length, payload.len() as u64);
+    assert_eq!(metadata.sha256, row.sha256);
+    assert!(metadata.has_payload);
+    assert_eq!(copy.hydrate(b"opaque").unwrap(), payload);
+}
+
 fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
     let mut out = String::with_capacity(bytes.len() * 2);
