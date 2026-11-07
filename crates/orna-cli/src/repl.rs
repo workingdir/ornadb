@@ -1251,6 +1251,77 @@ mod tests {
     }
 
     #[test]
+    fn every_registered_tag_is_shown_by_its_type_name() {
+        // Every OVB 1.1 registered tag 60000..=60027, in tag order. Tags
+        // 60011, 60012, 60016 and 60026 are redacted before the name table
+        // is consulted, so they show their redacted type name instead.
+        let expected: [(u64, &str); 28] = [
+            (60000, "Decimal(0) : Decimal"),
+            (60001, "Date(0) : Date"),
+            (60002, "Instant(0) : Instant"),
+            (60003, "LocalDateTime(0) : LocalDateTime"),
+            (60004, "TimeZone(0) : TimeZone"),
+            (60005, "Duration(0) : Duration"),
+            (60006, "Quantity(0) : Quantity"),
+            (60007, "Money(0) : Money"),
+            (60008, "Enum(0) : Enum"),
+            (60009, "Record(0) : Record"),
+            (60010, "RowRef(0) : RowRef"),
+            (60011, "<redacted> : Diagnostic"),
+            (60012, "<redacted> : Present"),
+            (60013, "Option(0) : Option"),
+            (60014, "Unit(0) : Unit"),
+            (60015, "Tuple(0) : Tuple"),
+            (60016, "<redacted> : Error"),
+            (60017, "TimeOfDay(0) : TimeOfDay"),
+            (60018, "ZonedDateTime(0) : ZonedDateTime"),
+            (60019, "Range(0) : Range"),
+            (60020, "Refined(0) : Refined"),
+            (60021, "TableRef(0) : TableRef"),
+            (60022, "LiveHandle(0) : LiveHandle"),
+            (60023, "SystemId(0) : SystemId"),
+            (60024, "Path(0) : Path"),
+            (60025, "Digest(0) : Digest"),
+            (60026, "<redacted> : sys.Value"),
+            (60027, "Relation(0) : Relation"),
+        ];
+        for (index, (tag, expected_text)) in expected.iter().enumerate() {
+            assert_eq!(
+                *tag,
+                60000 + index as u64,
+                "table covers the registered range"
+            );
+            // `inspect` formats `inspect_raw` output as `{text} : {type}`. The
+            // canonical constructor refuses these ill-shaped payloads, so the
+            // table calls `inspect_raw` directly; that is the same renderer.
+            let (text, ty) = inspect_raw(&Raw::Tag(*tag, Box::new(Raw::Int(0.into()))), 0);
+            let text = format!("{text} : {ty}");
+            assert_eq!(text, *expected_text, "tag {tag}");
+            assert!(!text.contains("Tag<"), "tag {tag} must not show its number");
+        }
+    }
+
+    #[test]
+    fn invalid_uuid_under_tag_37_is_named_uuid_not_a_tag_number() {
+        let invalid = [
+            Raw::Int(7.into()),
+            Raw::Bytes(vec![0; 15]),
+            Raw::Bytes(vec![0; 17]),
+        ];
+        // The canonical constructor refuses these payloads, so the test calls
+        // `inspect_raw` (the renderer `inspect` wraps) directly.
+        for payload in invalid {
+            let (text, ty) = inspect_raw(&Raw::Tag(37, Box::new(payload)), 0);
+            assert_eq!(format!("{text} : {ty}"), "Uuid(<invalid>) : Uuid");
+        }
+        let (text, ty) = inspect_raw(&Raw::Tag(37, Box::new(Raw::Bytes(vec![0; 16]))), 0);
+        assert_eq!(
+            format!("{text} : {ty}"),
+            "00000000-0000-0000-0000-000000000000 : Uuid"
+        );
+    }
+
+    #[test]
     fn scripted_loop_admits_typed_declarations() {
         let mut input = b"let answer: Int = 42;\nanswer\n:quit\n".as_slice();
         let mut output = Vec::new();
