@@ -360,7 +360,7 @@ class BaselineFileTests(unittest.TestCase):
 
         self.assertTrue(all(entry.bead.startswith("ornadb-") for entry in baseline))
         self.assertEqual(manifest.publication["revision"], "final-2026-10-05")
-        self.assertEqual({item["gate"] for item in manifest.items}, set("ABCDEFG"))
+        self.assertEqual({item["gate"] for item in manifest.items}, set("ABCDEFGH"))
 
 
 class CommandTests(unittest.TestCase):
