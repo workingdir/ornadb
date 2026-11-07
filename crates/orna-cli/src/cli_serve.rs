@@ -204,7 +204,8 @@ impl LoopbackAuthority {
         // readable by a foreign origin, so a foreign Origin on a media read is
         // refused as well.
         if matches!(request.method.as_str(), "GET" | "HEAD") && !is_websocket_route(request) {
-            let foreign_media = request.path.starts_with("/media/")
+            let foreign_media = (request.path.starts_with("/media/")
+                || request.path.starts_with("/preview/"))
                 && request_header(request, "origin")
                     .is_some_and(|origin| !is_same_origin(origin, host));
             return foreign_media.then(|| forbidden_response(request, "origin_denied"));
