@@ -281,6 +281,45 @@ impl ObjectReader {
         })
     }
 
+    /// Streams the bytes of one blob of exactly `size` to `visit`, in order, in
+    /// bounded chunks. The header must name a blob of that size, so a mismatch
+    /// fails before any byte is visited.
+    pub(crate) fn stream_blob(
+        &self,
+        oid: &str,
+        size: u64,
+        mut visit: impl FnMut(&[u8]) -> Result<(), RepositoryError>,
+    ) -> Result<(), RepositoryError> {
+        const CHUNK_BYTES: u64 = 64 * 1024;
+        let algorithm = self.algorithm()?;
+        self.with_session(|session| {
+            let header = session
+                .request("info", oid, algorithm)?
+                .ok_or(RepositoryError::GitOperationFailed)?;
+            if header.kind != ObjectKind::Blob || header.size != size {
+                return Err(RepositoryError::GitOperationFailed);
+            }
+            if session.request("contents", oid, algorithm)? != Some(header) {
+                return Err(RepositoryError::GitOperationFailed);
+            }
+            let capacity = usize::try_from(size.min(CHUNK_BYTES))
+                .map_err(|_| RepositoryError::GitOperationFailed)?;
+            let mut buffer = vec![0_u8; capacity];
+            let mut remaining = size;
+            while remaining > 0 {
+                let take = usize::try_from(remaining.min(CHUNK_BYTES))
+                    .map_err(|_| RepositoryError::GitOperationFailed)?;
+                session
+                    .output()?
+                    .read_exact(&mut buffer[..take])
+                    .map_err(|_| RepositoryError::GitOperationFailed)?;
+                visit(&buffer[..take])?;
+                remaining -= take as u64;
+            }
+            session.finish_contents()
+        })
+    }
+
     /// Lists every entry of one tree object, in Git's tree order.
     pub(crate) fn tree_entries(&self, oid: &str) -> Result<Vec<TreeEntry>, RepositoryError> {
         let mut entries = Vec::new();
@@ -846,6 +885,29 @@ mod tests {
         git(root, &["commit", "--quiet", "--no-verify", "-m", "gitlink"]);
         let repository = Repository::discover(root).expect("discover repository");
         (directory, repository)
+    }
+
+    #[test]
+    fn stream_blob_delivers_a_large_blob_in_order_and_refuses_a_wrong_size() {
+        let (directory, repository) = repository();
+        let root = directory.path();
+        let payload: Vec<u8> = (0..270_000_u32).map(|index| (index % 251) as u8).collect();
+        fs::write(root.join("large.bin"), &payload).expect("write large blob");
+        let oid = git(root, &["hash-object", "-w", "large.bin"]);
+        let objects = repository.objects();
+        let mut streamed = Vec::new();
+        objects
+            .stream_blob(&oid, payload.len() as u64, |chunk| {
+                streamed.extend_from_slice(chunk);
+                Ok(())
+            })
+            .expect("stream the blob");
+        assert_eq!(streamed, payload);
+        assert!(
+            objects
+                .stream_blob(&oid, payload.len() as u64 - 1, |_| Ok(()))
+                .is_err()
+        );
     }
 
     #[test]

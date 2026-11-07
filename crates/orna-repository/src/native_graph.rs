@@ -2785,6 +2785,16 @@ impl NativeGraphContext {
         if max_bytes > scope.byte_quota {
             return Err(GraphError::ReadQuotaExceeded);
         }
+        // ORNA-CAP-006: objects written below stay unreferenced until the caller
+        // protects them, so a GC or repack maintenance boundary must not run
+        // concurrently with this capture. The shared lease is held to return.
+        let _maintenance =
+            self.repository
+                .hold_maintenance_lease()
+                .map_err(|error| match error {
+                    crate::RepositoryError::RepositoryBusy => GraphError::RepositoryBusy,
+                    _ => GraphError::DurabilityFailed,
+                })?;
         let mut digest = crate::blob_store::ContentDigest::new();
         let mut chunker = StreamingGearChunker::new();
         let mut written = BTreeSet::new();
@@ -4309,10 +4319,10 @@ fn reserve_atomic(counter: &AtomicU64, amount: u64, limit: u64) -> Result<(), ()
 }
 
 #[derive(Clone, Debug)]
-struct ParsedGitTreeEntry {
-    mode: Vec<u8>,
-    name: Vec<u8>,
-    oid: NativeOid,
+pub(crate) struct ParsedGitTreeEntry {
+    pub(crate) mode: Vec<u8>,
+    pub(crate) name: Vec<u8>,
+    pub(crate) oid: NativeOid,
 }
 
 struct GearCutState {
@@ -4589,7 +4599,7 @@ fn encode_git_tree(mut entries: Vec<ParsedGitTreeEntry>) -> Result<Vec<u8>, Grap
 
 const MAX_VERIFY_EDGES: u64 = 4_000_000;
 
-fn parse_git_tree(
+pub(crate) fn parse_git_tree(
     bytes: &[u8],
     algorithm: GitHashAlgorithm,
     maximum_entries: usize,
@@ -8699,6 +8709,38 @@ mod persisted_orp_tests {
         assert_eq!(*pin.transfer_record().owner_id(), graph.owner_id);
         assert!(fixture_ref_exists(directory.path(), pin.protected_ref()));
         assert!(!fixture_ref_exists(directory.path(), &pending_ref));
+    }
+
+    /// ORNA-CAP-006: a capture writes candidate objects that nothing references
+    /// until protected, so it holds the shared maintenance lease. While an exclusive
+    /// maintenance boundary (GC or repack) is held it is refused with
+    /// `RepositoryBusy`; once the boundary releases the same capture succeeds.
+    #[test]
+    fn capture_is_refused_while_a_maintenance_boundary_is_held() {
+        let (directory, mut graph) = capture_test_context();
+        graph.repository = graph
+            .repository
+            .clone()
+            .with_coordination_lock_wait(std::time::Duration::from_millis(50));
+        let scope = graph.open_read_scope().expect("owner read scope");
+        let payload = b"capture under maintenance";
+        let refused = graph
+            .repository
+            .with_maintenance_boundary(|| {
+                Ok::<_, crate::RepositoryError>(
+                    graph
+                        .capture_blob_candidate(&payload[..], payload.len() as u64, &scope)
+                        .err(),
+                )
+            })
+            .expect("exclusive boundary is free");
+        assert!(matches!(refused, Some(GraphError::RepositoryBusy)));
+
+        let candidate = graph
+            .capture_blob_candidate(&payload[..], payload.len() as u64, &scope)
+            .expect("capture is accepted once the boundary is released");
+        let pending_ref = scratch_content_ref(&graph.owner_id, &candidate.pin_id);
+        assert!(fixture_ref_exists(directory.path(), &pending_ref));
     }
 
     /// A byte-identical copy of the Orna 1.1.0 release `tests/final-vectors.json`,
@@ -13787,6 +13829,8 @@ pub enum GraphError {
     UnsupportedGitObjectType,
     InvalidProtectedRef,
     PublicationNotTerminal,
+    /// The declared maintenance boundary is held by another owner (ORNA-CAP-006).
+    RepositoryBusy,
     DuplicateReference,
     MissingReference,
     UnusedReference,
@@ -13929,6 +13973,9 @@ impl fmt::Display for GraphError {
                 write!(f, "repository format {format} is reader-only")
             }
             Self::UnsupportedWriterProfile => f.write_str("legacy writer profile is unsupported"),
+            Self::RepositoryBusy => {
+                f.write_str("repository maintenance boundary is held by another owner")
+            }
         }
     }
 }
