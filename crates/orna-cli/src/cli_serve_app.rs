@@ -26,7 +26,7 @@ use orna_evaluator::Environment;
 use orna_repository::{GitHashAlgorithm, KeyRange, NativeOid};
 use orna_serving::media_preview::{
     MAX_PREVIEW_INPUT_BYTES, MAX_WAVE_INPUT_BYTES, PreviewError, WaveInspectionError,
-    decode_image_preview, inspect_pcm_wave,
+    decode_image_preview, image_format_for, inspect_pcm_wave, is_wave_essence,
 };
 
 /// Repository-relative module that hosts the serving entry.
@@ -374,9 +374,11 @@ impl ServeApp {
                         .map_err(|_| unavailable)?;
                     let length = metadata.length();
                     let media_type = metadata.media_type().to_owned();
-                    let suffix = metadata.suffix().map(str::to_owned);
                     let read_span = |start: u64, end: u64| -> Result<Vec<u8>, ()> {
-                        let mut out = Vec::new();
+                        let mut out = Vec::with_capacity(
+                            usize::try_from(end.saturating_sub(start).saturating_add(1))
+                                .unwrap_or(0),
+                        );
                         let mut cursor = start;
                         while cursor <= end {
                             let last = end.min(cursor.saturating_add(MEDIA_READ_CHUNK - 1));
@@ -396,12 +398,7 @@ impl ServeApp {
                     let (method, range) = match use_ {
                         MediaUse::Bytes { method, range } => (method, range),
                         MediaUse::Preview => {
-                            return preview_representation(
-                                &media_type,
-                                suffix.as_deref(),
-                                length,
-                                read_span,
-                            );
+                            return preview_representation(&media_type, length, read_span);
                         }
                     };
                     check_media_span(method, range, length, MEDIA_MAX_BODY_BYTES)?;
@@ -550,21 +547,21 @@ fn preview_route(app: &Mutex<ServeApp>, request: &Request, suffix: &str) -> Resp
 }
 
 /// Decodes one authorised representation through the bounded preview decoders.
-/// The media-type split and the input cap are decided before any byte is read,
-/// so an oversized or non-previewable Blob costs no read.
+/// The declared essence and the input cap are decided before any byte is read, so an
+/// unsupported, oversized or non-previewable representation costs no read. The verified
+/// bytes are moved into the decoder; no second copy of the payload is made.
 fn preview_representation(
     media_type: &str,
-    suffix: Option<&str>,
     length: u64,
     read_span: impl FnOnce(u64, u64) -> Result<Vec<u8>, ()>,
 ) -> Result<Response, (u16, &'static str)> {
     let essence = media_type.split(';').next().unwrap_or_default().trim();
-    if essence.starts_with("image/") {
+    if let Some(format) = image_format_for(essence) {
         if length > MAX_PREVIEW_INPUT_BYTES {
             return Err((413, "media.preview.resource_limit"));
         }
-        let blob = preview_blob(media_type, suffix, length, read_span)?;
-        return decode_image_preview(&blob)
+        let bytes = read_preview_bytes(length, read_span)?;
+        return decode_image_preview(format, bytes)
             .map(|image| {
                 preview_json(&serde_json::json!({
                     "kind": "image",
@@ -574,12 +571,14 @@ fn preview_representation(
             })
             .map_err(image_preview_error);
     }
-    if essence.starts_with("audio/") {
+    // Only the declared PCM WAVE essences are previewable; any other audio/* is refused by
+    // essence before a byte is read.
+    if is_wave_essence(essence) {
         if length > MAX_WAVE_INPUT_BYTES {
             return Err((413, "media.preview.resource_limit"));
         }
-        let blob = preview_blob(media_type, suffix, length, read_span)?;
-        return inspect_pcm_wave(&blob)
+        let bytes = read_preview_bytes(length, read_span)?;
+        return inspect_pcm_wave(bytes)
             .map(|props| {
                 preview_json(&serde_json::json!({
                     "kind": "pcm_wave",
@@ -596,20 +595,15 @@ fn preview_representation(
     Err((415, "media.preview.unsupported"))
 }
 
-/// Reads one verified representation into an inline Blob for a decoder.
-fn preview_blob(
-    media_type: &str,
-    suffix: Option<&str>,
+/// Reads one verified representation of `length` bytes for a decoder.
+fn read_preview_bytes(
     length: u64,
     read_span: impl FnOnce(u64, u64) -> Result<Vec<u8>, ()>,
-) -> Result<orna_value::Blob, (u16, &'static str)> {
-    let bytes = if length == 0 {
-        Vec::new()
-    } else {
-        read_span(0, length - 1).map_err(|()| (503, "media.preview.unavailable"))?
-    };
-    orna_value::Blob::from_bytes_with_annotation(bytes, media_type, suffix)
-        .map_err(|_| (415, "media.preview.unsupported"))
+) -> Result<Vec<u8>, (u16, &'static str)> {
+    if length == 0 {
+        return Ok(Vec::new());
+    }
+    read_span(0, length - 1).map_err(|()| (503, "media.preview.unavailable"))
 }
 
 fn preview_json(value: &serde_json::Value) -> Response {
@@ -621,9 +615,7 @@ fn image_preview_error(error: PreviewError) -> (u16, &'static str) {
     match error {
         PreviewError::UnsupportedMediaType => (415, "media.preview.unsupported"),
         PreviewError::Malformed => (422, "media.preview.malformed"),
-        PreviewError::InputTooLarge | PreviewError::ResourceLimit => {
-            (413, "media.preview.resource_limit")
-        }
+        PreviewError::ResourceLimit => (413, "media.preview.resource_limit"),
         PreviewError::ContentUnavailable => (503, "media.preview.unavailable"),
     }
 }
@@ -634,7 +626,6 @@ fn wave_preview_error(error: WaveInspectionError) -> (u16, &'static str) {
         WaveInspectionError::UnsupportedFormat => (415, "media.preview.unsupported"),
         WaveInspectionError::MalformedContent => (422, "media.preview.malformed"),
         WaveInspectionError::ResourceLimit => (413, "media.preview.resource_limit"),
-        WaveInspectionError::ContentUnavailable => (503, "media.preview.unavailable"),
     }
 }
 
@@ -648,10 +639,6 @@ mod preview_status_tests {
     #[test]
     fn resource_bounds_are_413_and_unavailable_content_is_503() {
         assert_eq!(
-            image_preview_error(PreviewError::InputTooLarge),
-            (413, "media.preview.resource_limit")
-        );
-        assert_eq!(
             image_preview_error(PreviewError::ResourceLimit),
             (413, "media.preview.resource_limit")
         );
@@ -662,10 +649,6 @@ mod preview_status_tests {
         assert_eq!(
             wave_preview_error(WaveInspectionError::ResourceLimit),
             (413, "media.preview.resource_limit")
-        );
-        assert_eq!(
-            wave_preview_error(WaveInspectionError::ContentUnavailable),
-            (503, "media.preview.unavailable")
         );
     }
 
@@ -693,18 +676,38 @@ mod preview_status_tests {
     fn oversized_image_and_audio_are_refused_before_any_read() {
         let image = preview_representation(
             "image/png",
-            None,
             MAX_PREVIEW_INPUT_BYTES + 1,
             |_: u64, _: u64| -> Result<Vec<u8>, ()> { unreachable!("no read above the cap") },
         );
         assert!(matches!(image, Err((413, "media.preview.resource_limit"))));
         let audio = preview_representation(
             "audio/wav",
-            None,
             MAX_WAVE_INPUT_BYTES + 1,
             |_: u64, _: u64| -> Result<Vec<u8>, ()> { unreachable!("no read above the cap") },
         );
         assert!(matches!(audio, Err((413, "media.preview.resource_limit"))));
+    }
+
+    #[test]
+    fn undeclared_or_non_previewable_media_is_refused_before_any_read() {
+        // A BMP declaration is outside the pinned decoder's set: refused by essence alone,
+        // so the descriptor's bytes are never read.
+        let bmp =
+            preview_representation("image/bmp", 16, |_: u64, _: u64| -> Result<Vec<u8>, ()> {
+                unreachable!("no read for bmp")
+            });
+        assert!(matches!(bmp, Err((415, "media.preview.unsupported"))));
+        let text =
+            preview_representation("text/plain", 16, |_: u64, _: u64| -> Result<Vec<u8>, ()> {
+                unreachable!("no read for text")
+            });
+        assert!(matches!(text, Err((415, "media.preview.unsupported"))));
+        // Non-WAVE audio is outside the decoder set: refused by essence, never read.
+        let mpeg =
+            preview_representation("audio/mpeg", 16, |_: u64, _: u64| -> Result<Vec<u8>, ()> {
+                unreachable!("no read for audio/mpeg")
+            });
+        assert!(matches!(mpeg, Err((415, "media.preview.unsupported"))));
     }
 }
 
