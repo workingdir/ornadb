@@ -8,6 +8,7 @@ use std::{
     fs::{File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
     path::PathBuf,
+    process::{Command, Stdio},
     time::Duration,
 };
 
@@ -1431,5 +1432,77 @@ async fn failed_write_then_fsync_is_ok_and_not_dirty() {
         fresh_view(&fixture),
         accepted,
         "accepted state is unchanged"
+    );
+}
+
+/// Probes a `MAP_PRIVATE` mapping of `data.orna` from a `python3` child. With `handle`, the
+/// child's stdin is a duplicate of that handle: the same open file description, so the same
+/// draft. Without it, the child opens the path itself, a second handle. The probe prints the
+/// bytes its mapping shows before a copy-on-write store.
+fn private_mapping_view(fixture: &EditorMount, handle: Option<&File>) -> String {
+    let probe = r##"import mmap, os, sys
+path, mode = sys.argv[1], sys.argv[2]
+fd = 0 if mode == "dirty" else os.open(path, os.O_RDONLY)
+size = os.fstat(fd).st_size
+m = mmap.mmap(fd, size, flags=mmap.MAP_PRIVATE, prot=mmap.PROT_READ | mmap.PROT_WRITE)
+seen = m[:]
+m[0:1] = b"#"
+sys.stdout.write(seen.decode("utf-8"))
+"##;
+    let mut command = Command::new("python3");
+    command.args(["-c", probe]).arg(&fixture.data_path);
+    match handle {
+        Some(file) => {
+            command.arg("dirty").stdin(Stdio::from(
+                file.try_clone().expect("duplicate the draft handle"),
+            ));
+        }
+        None => {
+            command.arg("second").stdin(Stdio::null());
+        }
+    }
+    let output = command.output().expect("run the MAP_PRIVATE probe");
+    assert!(
+        output.status.success(),
+        "MAP_PRIVATE probe failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("probe output is UTF-8")
+}
+
+/// profiles/vfs-1.md:124-130 (no cross-generation kernel page-cache sharing of
+/// incompatible contents): a `MAP_PRIVATE` mapping through the dirty handle populates
+/// the inode's pages first, so a second handle's mapping must not show that draft.
+/// Copy-on-write stores stay private and never reach the row (Gate E T4, S14).
+#[ignore = "ornadb-391g: MAP_PRIVATE second-handle mapping shows the dirty handle's draft (profiles/vfs-1.md:126-130)"]
+#[tokio::test]
+async fn map_private_mappings_keep_per_handle_drafts_and_never_persist() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let mut dirty = open_rw(&fixture);
+    replace_draft(&mut dirty, &row("Private draft"));
+    assert_view_lacks(&fixture, "Private draft");
+
+    let through_dirty = private_mapping_view(&fixture, Some(&dirty));
+    assert!(
+        through_dirty.contains("Private draft"),
+        "a MAP_PRIVATE mapping on the dirty handle shows its own draft, got {through_dirty:?}",
+    );
+    let through_second = private_mapping_view(&fixture, None);
+    assert!(
+        through_second.contains("Original") && !through_second.contains("Private draft"),
+        "a MAP_PRIVATE mapping on a second handle shows accepted state, got {through_second:?}",
+    );
+    let draft = read_own_draft(&mut dirty);
+    assert!(
+        draft.starts_with('{') && draft.contains("Private draft"),
+        "the dirty handle keeps its draft, unchanged by the copy-on-write store",
+    );
+    let accepted = fresh_view(&fixture);
+    assert!(
+        accepted.starts_with('{') && accepted.contains("Original"),
+        "a copy-on-write store never reaches the accepted row",
     );
 }
