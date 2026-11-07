@@ -769,6 +769,27 @@ impl LiveApplication for UntrustedTransactionalApplication {
             .dispatch_eval_with_work(session, request, message, context, work)
     }
 
+    fn dispatch_event_with_work<'a>(
+        &'a mut self,
+        session: [u8; 16],
+        request: [u8; 16],
+        message: &'a Message,
+        watch: Option<[u8; 16]>,
+        fingerprint: [u8; 32],
+        context: Option<&'a orna_runtime::RuntimeActivationContext>,
+        work: &'a mut orna_live::LiveApplicationWorkLease,
+    ) -> Pin<Box<dyn Future<Output = Result<LiveEvalResponse, Error>> + 'a>> {
+        self.0.dispatch_event_with_work(
+            session,
+            request,
+            message,
+            watch,
+            fingerprint,
+            context,
+            work,
+        )
+    }
+
     fn watch(
         &mut self,
         session: [u8; 16],
@@ -776,6 +797,75 @@ impl LiveApplication for UntrustedTransactionalApplication {
         message: &Message,
     ) -> Result<Envelope, Error> {
         self.0.watch(session, request, message)
+    }
+
+    fn trusts_controlled_effect_reports(&self) -> bool {
+        false
+    }
+}
+
+/// A third-party application that declares its own `ExternalPossible` effect
+/// report and performs a host table write inside its transaction. It does not
+/// opt in to trusting its report, so an observed rollback must recover as
+/// `ExternalEffectsUncertain` (REQUEST-1 step 5; ACCEPTANCE.md Gate D).
+struct ThirdPartyHostEffectApplication {
+    calls: usize,
+    faults: Arc<dyn FaultInjector>,
+    mutations: Vec<TableMutation>,
+}
+
+impl LiveApplication for ThirdPartyHostEffectApplication {
+    fn eval(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope, Error> {
+        Err(Error::UnsupportedOperation)
+    }
+
+    fn eval_with_transaction<'a>(
+        &'a mut self,
+        session: [u8; 16],
+        request: [u8; 16],
+        message: &'a Message,
+        _: Option<&'a orna_runtime::RuntimeActivationContext>,
+        _: &'a mut orna_live::LiveApplicationWorkLease,
+    ) -> Pin<Box<dyn Future<Output = Result<LiveEvalResponse, Error>> + 'a>> {
+        let Message::Eval { fingerprint, .. } = message else {
+            return Box::pin(async { Err(Error::ApplicationRejected) });
+        };
+        self.calls += 1;
+        let response = unit_result(request, *fingerprint);
+        let transaction = LiveEvalTransaction::new(
+            self.mutations.clone(),
+            [3; 32],
+            ActivationEffectReport::declare(DeclaredEffectSet::ExternalPossible),
+            Arc::clone(&self.faults),
+        )
+        .for_request(RequestIdentity {
+            session_id: session,
+            request_id: request,
+        });
+        Box::pin(async move { Ok(LiveEvalResponse::transaction(response, transaction)) })
+    }
+
+    fn dispatch_eval_with_work<'a>(
+        &'a mut self,
+        session: [u8; 16],
+        request: [u8; 16],
+        message: &'a Message,
+        context: Option<&'a orna_runtime::RuntimeActivationContext>,
+        work: &'a mut orna_live::LiveApplicationWorkLease,
+    ) -> Pin<Box<dyn Future<Output = Result<LiveEvalResponse, Error>> + 'a>> {
+        Box::pin(async move {
+            work.check_active()?;
+            let response = self
+                .eval_with_transaction(session, request, message, context, work)
+                .await?;
+            work.complete();
+            work.check_active()?;
+            Ok(response)
+        })
+    }
+
+    fn watch(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope, Error> {
+        Err(Error::UnsupportedOperation)
     }
 
     fn trusts_controlled_effect_reports(&self) -> bool {
@@ -9648,6 +9738,20 @@ fn durable_third_party_rollback_recovers_as_external_effects_uncertain() {
             .unwrap()
             .unwrap();
     assert_eq!(failed_status.state, RequestState::Completed);
+    // Reopen the durable repository before replaying: the replay must be served
+    // from retained state, not from the host that observed the failed commit.
+    drop(host);
+    let mut host = durable_host(open_durable_state(&repository));
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [6; 16],
+        now: 3,
+    }))
+    .unwrap();
 
     let mut replay_application = UntrustedTransactionalApplication(TransactionalApplication {
         calls: 0,
@@ -9655,7 +9759,172 @@ fn durable_third_party_rollback_recovers_as_external_effects_uncertain() {
         mutations: Vec::new(),
     });
     let replay =
-        block_on(host.dispatch_frame([5; 16], 3, Frame::Binary(request), &mut replay_application))
+        block_on(host.dispatch_frame([6; 16], 4, Frame::Binary(request), &mut replay_application))
+            .unwrap();
+    assert!(matches!(
+        replay.response.as_ref().unwrap().message,
+        Message::Result {
+            status: ResultStatus::RetainedWithoutValue,
+            value: None,
+            fingerprint: returned,
+            ..
+        } if returned == fingerprint
+    ));
+    assert_eq!(replay_application.0.calls, 0);
+    drop(host);
+    remove_test_repository(&root);
+}
+
+#[test]
+fn durable_third_party_declared_host_effect_recovers_as_external_effects_uncertain() {
+    let (root, repository) = durable_repository();
+    let mut host = durable_host(open_durable_state(&repository));
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [5; 16],
+        now: 1,
+    }))
+    .unwrap();
+
+    // The third party declares its own ExternalPossible report and performs a
+    // host table write. Its observed rollback must never replay as proven.
+    let request = eval([1; 16], [27; 16], "rollback");
+    let fingerprint = request_fingerprint(&request, [1; 16]);
+    let identity = RequestIdentity {
+        session_id: [1; 16],
+        request_id: [27; 16],
+    };
+    let mut application = ThirdPartyHostEffectApplication {
+        calls: 0,
+        faults: Arc::new(FailAt(FaultPoint::AfterTableWrite)),
+        mutations: vec![TableMutation::new([8; 16], "books", vec![8], Some(vec![9])).unwrap()],
+    };
+    assert_eq!(
+        block_on(host.dispatch_frame([5; 16], 2, Frame::Binary(request.clone()), &mut application)),
+        Err(Error::RuntimeUnavailable)
+    );
+    assert_eq!(application.calls, 1);
+    assert_eq!(
+        block_on(open_durable_state(&repository).committed_table_row("books", &[8])),
+        Ok(None)
+    );
+    let failed_status =
+        block_on(open_durable_state(&repository).request_status_for_identity(identity))
+            .unwrap()
+            .unwrap();
+    assert_eq!(failed_status.state, RequestState::Completed);
+    drop(host);
+
+    let mut host = durable_host(open_durable_state(&repository));
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [6; 16],
+        now: 3,
+    }))
+    .unwrap();
+    let mut replay_application = ThirdPartyHostEffectApplication {
+        calls: 0,
+        faults: Arc::new(NoFault),
+        mutations: Vec::new(),
+    };
+    let replay =
+        block_on(host.dispatch_frame([6; 16], 4, Frame::Binary(request), &mut replay_application))
+            .unwrap();
+    assert!(matches!(
+        replay.response.as_ref().unwrap().message,
+        Message::Result {
+            status: ResultStatus::RetainedWithoutValue,
+            value: None,
+            fingerprint: returned,
+            ..
+        } if returned == fingerprint
+    ));
+    assert_eq!(replay_application.calls, 0);
+    drop(host);
+    remove_test_repository(&root);
+}
+
+#[test]
+fn durable_third_party_event_rollback_recovers_as_external_effects_uncertain() {
+    let (root, repository) = durable_repository();
+    let mut host = durable_host(open_durable_state(&repository));
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [5; 16],
+        now: 1,
+    }))
+    .unwrap();
+
+    // A trusted fake establishes the watch; the event itself is delivered by the
+    // untrusted third-party wrapper, so its rollback must not be reported proven.
+    let mut subscriber = TransactionalApplication {
+        calls: 0,
+        faults: Arc::new(NoFault),
+        mutations: Vec::new(),
+    };
+    block_on(host.dispatch_frame([5; 16], 2, Frame::Binary(subscribe()), &mut subscriber)).unwrap();
+
+    let request = event([1; 16], [26; 16], [11; 16]);
+    let fingerprint = request_fingerprint(&request, [1; 16]);
+    let identity = RequestIdentity {
+        session_id: [1; 16],
+        request_id: [26; 16],
+    };
+    let mut application = UntrustedTransactionalApplication(TransactionalApplication {
+        calls: 0,
+        faults: Arc::new(FailAt(FaultPoint::AfterTableWrite)),
+        mutations: vec![
+            TableMutation::new([9; 16], "event_books_uncertain", vec![1], Some(vec![2])).unwrap(),
+        ],
+    });
+    assert_eq!(
+        block_on(host.dispatch_frame([5; 16], 3, Frame::Binary(request.clone()), &mut application)),
+        Err(Error::RuntimeUnavailable)
+    );
+    assert_eq!(application.0.calls, 1);
+    assert_eq!(
+        block_on(
+            open_durable_state(&repository).committed_table_row("event_books_uncertain", &[1])
+        ),
+        Ok(None)
+    );
+    let failed_status =
+        block_on(open_durable_state(&repository).request_status_for_identity(identity))
+            .unwrap()
+            .unwrap();
+    assert_eq!(failed_status.state, RequestState::Completed);
+    drop(host);
+
+    let mut host = durable_host(open_durable_state(&repository));
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [6; 16],
+        now: 3,
+    }))
+    .unwrap();
+    let mut replay_application = UntrustedTransactionalApplication(TransactionalApplication {
+        calls: 0,
+        faults: Arc::new(NoFault),
+        mutations: Vec::new(),
+    });
+    let replay =
+        block_on(host.dispatch_frame([6; 16], 4, Frame::Binary(request), &mut replay_application))
             .unwrap();
     assert!(matches!(
         replay.response.as_ref().unwrap().message,
