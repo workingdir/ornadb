@@ -697,6 +697,16 @@ fn head(repository: &Repository) -> String {
     repository.head().unwrap().unwrap().as_str().to_owned()
 }
 
+/// Publication commits made since `base`. Each consumed freeze range is one commit.
+fn commits_since(root: &Path, base: &str) -> usize {
+    let range = format!("{base}..HEAD");
+    String::from_utf8(git_output(root, &["rev-list", "--count", &range], None))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap()
+}
+
 /// Every publication pin ref, in `for-each-ref` order (ORNA-GIT-010).
 fn publication_pin_refs(root: &Path) -> Vec<String> {
     let listing = git_output(
@@ -1405,12 +1415,59 @@ fn published_payload(repository: &Repository, relation_id: [u8; 16]) -> Vec<u8> 
         .to_vec()
 }
 
-/// W76 S5 / ORNA-PUB-007/008/016: a later mutation captured after the SIGKILL at every
-/// boundary stays pending. Recovery publishes only the frozen range where a journal exists,
-/// and the later tail is published by the next publish, never folded into the frozen batch.
+/// Journal stage that is durable on disk when the child is killed by SIGKILL at `boundary`. Each barrier
+/// sits after the stage write it follows in orna-repository `lib.rs`: `ref-cas-pre-journal` and
+/// `prepared` after the `Prepared` write, `ref-cas` (fired by the `RefAdvanced` callback),
+/// `store-worktree` (inside reconciliation that runs after the `RefAdvanced` write) and
+/// `index-install` (before the `IndexReconciled` write) after `RefAdvanced`, `index` and `worktree`
+/// after `IndexReconciled`, and `ref-index` and `runtime-complete` after `WorktreeReconciled`.
+fn expected_journal_stage(boundary: &str) -> orna_repository::PublicationJournalStage {
+    use orna_repository::PublicationJournalStage as Stage;
+    match boundary {
+        "prepared" | "ref-cas-pre-journal" => Stage::Prepared,
+        "ref-cas" | "store-worktree" | "index-install" => Stage::RefAdvanced,
+        "index" | "worktree" => Stage::IndexReconciled,
+        "ref-index" | "runtime-complete" => Stage::WorktreeReconciled,
+        other => panic!("no journal stage is expected at {other}"),
+    }
+}
+
+/// The stage persisted in the publication journal at the moment the child was killed.
+fn persisted_journal_stage(
+    repository: &Repository,
+    boundary: &str,
+) -> orna_repository::PublicationJournalStage {
+    repository
+        .read_publication_journal()
+        .unwrap()
+        .unwrap_or_else(|| panic!("journal missing before recovery at {boundary}"))
+        .stage()
+}
+
+/// W76 S5 / ORNA-PUB-007/008/016: a later mutation captured after the SIGKILL stays pending
+/// across the kill boundaries listed below, and the resumed publish makes exactly that tail
+/// visible. What recovery must do depends on the boundary class:
+///
+/// - Journaled (`ref-cas-pre-journal` through `runtime-complete`): recovery publishes only the
+///   frozen range, in one commit, and leaves exactly one pending row (the later tail).
+/// - `prepared`: HEAD still names the base, so recovery publishes nothing and keeps both the
+///   frozen range and the later tail pending (22-publication.md, "Ref still at H").
+/// - `index-lock`, `capture`, `row`, `candidate`, `tail`: no recovery assertion. The child dies
+///   before any ref moves (`tail` dies after the frozen range is published), so only the final
+///   checks run.
+///
+/// The journaled and `prepared` boundaries first assert the exact journal stage persisted on disk
+/// (`expected_journal_stage`), so a stage write that is not durable before its barrier fails here
+/// even when recovery would still succeed from the ref state alone.
+///
+/// Every boundary then asserts that the resumed publish makes the tail visible, that the frozen
+/// range is not republished (2 publication commits since the base where the frozen range was
+/// published before the resumed publish, 1 otherwise), and that an unrelated tracked file is
+/// unchanged on disk and absent from the publication diff.
 #[tokio::test]
-async fn publication_later_tail_is_retained_at_every_kill_boundary() {
-    const JOURNALED: [&str; 7] = [
+async fn publication_later_tail_is_retained_across_kill_boundaries() {
+    const JOURNALED: [&str; 8] = [
+        "ref-cas-pre-journal",
         "ref-cas",
         "store-worktree",
         "index-install",
@@ -1524,9 +1581,10 @@ async fn publication_later_tail_is_retained_at_every_kill_boundary() {
             let recovered = RuntimeState::open(&repository, identity, digest)
                 .await
                 .unwrap();
-            assert!(
-                repository.read_publication_journal().unwrap().is_some(),
-                "journal missing before recovery at {boundary}"
+            assert_eq!(
+                persisted_journal_stage(&repository, boundary),
+                expected_journal_stage(boundary),
+                "persisted journal stage before recovery at {boundary}"
             );
             RuntimePublicationCoordinator::recover(&repository, &recovered)
                 .await
@@ -1540,9 +1598,47 @@ async fn publication_later_tail_is_retained_at_every_kill_boundary() {
                 initial_payload,
                 "frozen range not recovered at {boundary}"
             );
+            assert_eq!(
+                recovered.pending_count().await.unwrap(),
+                1,
+                "recovery did not leave exactly the later tail pending at {boundary}"
+            );
+            assert_eq!(
+                commits_since(root, base.as_str()),
+                1,
+                "recovery published more than the frozen range at {boundary}"
+            );
+            drop(recovered);
+        } else if boundary == "prepared" {
+            let recovered = RuntimeState::open(&repository, identity, digest)
+                .await
+                .unwrap();
+            assert_eq!(
+                persisted_journal_stage(&repository, boundary),
+                expected_journal_stage(boundary),
+                "persisted journal stage before recovery at {boundary}"
+            );
+            RuntimePublicationCoordinator::recover(&repository, &recovered)
+                .await
+                .unwrap_or_else(|error| panic!("prepared recovery at {boundary}: {error:?}"));
             assert!(
-                recovered.pending_count().await.unwrap() > 0,
-                "later tail consumed by frozen recovery at {boundary}"
+                repository.read_publication_journal().unwrap().is_none(),
+                "journal left after prepared recovery"
+            );
+            assert_eq!(
+                head(&repository),
+                base.as_str(),
+                "recovery advanced the ref for an unpublished candidate at {boundary}"
+            );
+            assert_eq!(
+                recovered.pending_count().await.unwrap(),
+                2,
+                "recovery consumed the frozen range or tail at {boundary}"
+            );
+            assert_eq!(
+                commits_since(root, base.as_str()),
+                0,
+                "recovery published a commit for an unpublished candidate at {boundary}"
             );
             drop(recovered);
         }
@@ -1565,6 +1661,31 @@ async fn publication_later_tail_is_retained_at_every_kill_boundary() {
             published_payload(&repository, relation_id),
             tail_payload,
             "later tail not published after {boundary}"
+        );
+        let expected_commits = if JOURNALED.contains(&boundary) || boundary == "tail" {
+            2
+        } else {
+            1
+        };
+        assert_eq!(
+            commits_since(root, base.as_str()),
+            expected_commits,
+            "frozen range republished or lost at {boundary}"
+        );
+        assert_eq!(
+            std::fs::read(root.join("unrelated-tracked.txt")).unwrap(),
+            b"committed baseline\n",
+            "unrelated working file changed at {boundary}"
+        );
+        let changed = String::from_utf8(git_output(
+            root,
+            &["diff", "--name-only", base.as_str(), "HEAD"],
+            None,
+        ))
+        .unwrap();
+        assert!(
+            !changed.lines().any(|path| path == "unrelated-tracked.txt"),
+            "publication committed the unrelated file at {boundary}"
         );
         let (identity, digest) = cli_runtime_identity(&repository);
         let reopened = RuntimeState::open(&repository, identity, digest)
