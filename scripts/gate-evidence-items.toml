@@ -132,7 +132,6 @@ select = [
   { record = "workspace-cli", package = "orna-cli", target = "test:media_import_query", test = "gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata" },
 ]
 counters = ["^Gate B: "]
-limitations = ["The test prints `remote Git objects=0` as a literal rather than a measurement (ornadb-5il1.8)."]
 
 [[item]]
 gate = "B"
