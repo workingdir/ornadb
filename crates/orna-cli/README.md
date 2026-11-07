@@ -67,6 +67,17 @@ prepares a journalled candidate only; it does not activate a writable format-3
 repository. `orna upgrade --to-format 3 DEST --yes-activate` activates the
 prepared copy, as described below.
 
+`orna upgrade --to-format 3 --no-persistent-consumers` without a DEST is the
+one-step form. It prepares the candidate in a sibling copy named
+`<worktree>-format3-candidate`, prints its review, and publishes only after
+confirmation: `--confirm <candidate_commit>` with the id the review printed, or
+an interactive terminal confirmation. Publication swaps the activated copy in
+for the worktree path with one atomic exchange, so the worktree holds the
+format-3 repository at the candidate commit and the old snapshot stays at the
+sibling path as the rollback copy. A refused confirmation changes nothing and
+keeps the prepared copy for `migrate abort`. The form refuses `--yes-activate`
+and a linked worktree. The two-step DEST form below is unchanged.
+
 `migrate abort DEST` discards the prepared format-3 copy in DEST. It verifies
 first that DEST is the copy this source prepared, so a directory the operator
 owns is never a discard target. The source repository is unchanged. Until the
