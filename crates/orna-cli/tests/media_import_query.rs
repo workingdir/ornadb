@@ -2593,11 +2593,11 @@ impl<R: std::io::Read> std::io::Read for CountingReader<R> {
 }
 
 #[cfg(target_os = "linux")]
-fn write_high_entropy_fixture(path: &Path) -> [u8; 32] {
+fn write_high_entropy_fixture(path: &Path, payload_bytes: u64) -> [u8; 32] {
     let mut random = File::open("/dev/urandom").expect("open operating-system random source");
     let mut output = File::create(path).expect("create disposable high-entropy fixture");
     let mut buffer = vec![0_u8; 64 * 1024];
-    let mut remaining = GATE_B_LARGE_PAYLOAD_BYTES;
+    let mut remaining = payload_bytes;
     let mut digest = Sha256::new();
     while remaining != 0 {
         let count = usize::try_from(remaining.min(buffer.len() as u64))
@@ -2722,10 +2722,24 @@ async fn commit_captured_binding(
     publish_media_row(repository, state, key, ordinal + 0x10).await;
 }
 
-#[allow(clippy::too_many_lines)]
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata() {
+    run_gate_b_import_and_metadata_update(GATE_B_LARGE_PAYLOAD_BYTES).await;
+}
+
+// The MiB-scale twin runs the same capture, accept, commit, metadata-only
+// re-pin and query sequence as the 10 GiB run, so per-PR CI exercises every
+// code path without the 10 GiB payload.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn gate_b_metadata_update_reads_zero_payload_bytes_at_mib_scale() {
+    run_gate_b_import_and_metadata_update(8 * 1024 * 1024).await;
+}
+
+#[allow(clippy::too_many_lines)]
+#[cfg(target_os = "linux")]
+async fn run_gate_b_import_and_metadata_update(payload_bytes: u64) {
     let (directory, repository, relation_id) = empty_format3_repository();
     let source = TempDir::new_in(directory.path()).expect("create disposable input directory");
     for name in ["tone.wav", "pixel.png"] {
@@ -2773,11 +2787,8 @@ async fn gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_met
     drop(bindings);
 
     let large_path = source.path().join("high-entropy.bin");
-    let expected_sha256 = write_high_entropy_fixture(&large_path);
-    assert_eq!(
-        std::fs::metadata(&large_path).unwrap().len(),
-        GATE_B_LARGE_PAYLOAD_BYTES
-    );
+    let expected_sha256 = write_high_entropy_fixture(&large_path, payload_bytes);
+    assert_eq!(std::fs::metadata(&large_path).unwrap().len(), payload_bytes);
     let object_count_before = git_object_count(directory.path());
     let capability = repository.capture_capability(relation_id).unwrap();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback source");
@@ -2797,23 +2808,23 @@ async fn gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_met
     // Capture completes before an activation request is opened: the long read
     // only produces a protected candidate; the row is installed afterwards.
     let candidate = capability
-        .capture_blob_candidate(&mut network_source, GATE_B_LARGE_PAYLOAD_BYTES)
+        .capture_blob_candidate(&mut network_source, payload_bytes)
         .expect("stream the network payload into the owned OGB-2 writer");
     let network_bytes_read = network_source.bytes_read;
     let graph_payload_bytes_read = capability.payload_bytes_read();
     let graph_payload_bytes_written = capability.payload_bytes_written();
     let graph_objects_read = capability.objects_read();
     let identity = candidate.content_identity();
-    assert_eq!(identity.length(), GATE_B_LARGE_PAYLOAD_BYTES);
+    assert_eq!(identity.length(), payload_bytes);
     assert_eq!(identity.sha256(), expected_sha256);
-    assert_eq!(network_bytes_read, GATE_B_LARGE_PAYLOAD_BYTES);
+    assert_eq!(network_bytes_read, payload_bytes);
     assert_eq!(
-        graph_payload_bytes_written, GATE_B_LARGE_PAYLOAD_BYTES,
+        graph_payload_bytes_written, payload_bytes,
         "the owned writer accounts exactly the captured media bytes"
     );
     assert_eq!(
         sender.join().expect("payload sender completes"),
-        GATE_B_LARGE_PAYLOAD_BYTES
+        payload_bytes
     );
     let binding = capability
         .accept_captured_blob(candidate, "application/octet-stream", None)
@@ -2874,6 +2885,20 @@ async fn gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_met
     .await;
     assert_eq!(scope.payload_bytes_read(), 0);
     assert_eq!(scope.payload_bytes_written(), 0);
+    let update_metadata_bytes = scope.structured_metadata_bytes_read();
+    let update_objects = scope.objects_read();
+    // Control: this scope charges a real payload read, so the zero above is a
+    // measurement and not a seam that cannot observe payload bytes.
+    let control = graph.read_blob_range(&reference, 0..4096, &scope).unwrap();
+    assert_eq!(control.bytes().len(), 4096);
+    assert!(
+        scope.payload_bytes_read() >= 4096,
+        "the control range read must charge payload bytes to this scope"
+    );
+    eprintln!(
+        "Gate B: metadata-only update payload bytes read=0, written=0; structured metadata bytes read={update_metadata_bytes}; native objects read={update_objects}; control payload bytes read={}",
+        scope.payload_bytes_read()
+    );
 
     let relation = relation_hex(relation_id);
     let report = query_json(directory.path(), &[&relation, "--format", "json"]);
@@ -2885,7 +2910,7 @@ async fn gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_met
         .find(|listing| listing["key"] == "payload")
         .expect("the large row is returned from metadata");
     assert_eq!(large["media_type"], "application/pdf");
-    assert_eq!(large["length"], GATE_B_LARGE_PAYLOAD_BYTES);
+    assert_eq!(large["length"], payload_bytes);
     assert_eq!(large["sha256"], hex(&expected_sha256));
     assert_eq!(large["hydrated"], false);
 
@@ -2903,10 +2928,10 @@ async fn gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_met
     let peak_rss = process_peak_rss_bytes();
     let scratch_bytes = scratch_tree_bytes(directory.path());
     let object_count_after = git_object_count(directory.path());
-    let temporary_storage_bound = 2 * GATE_B_LARGE_PAYLOAD_BYTES + 1024 * 1024 * 1024;
+    let temporary_storage_bound = 2 * payload_bytes + 1024 * 1024 * 1024;
     assert!(
         peak_rss < 512 * 1024 * 1024,
-        "10 GiB import exceeded bounded RSS: {peak_rss} bytes"
+        "Gate B import of {payload_bytes} bytes exceeded bounded RSS: {peak_rss} bytes"
     );
     assert!(
         scratch_bytes <= temporary_storage_bound,
