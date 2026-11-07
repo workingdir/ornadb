@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
+import tempfile
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
@@ -488,6 +490,107 @@ class Orr2Tests(unittest.TestCase):
             with self.subTest(text=text):
                 with self.assertRaises(legacy.LegacyBlobError):
                     legacy.orr2_inline_bytes(text)
+
+
+class RowUnitTests(unittest.TestCase):
+    REPO = Path(__file__).resolve().parent.parent
+    FIXTURES = REPO / "crates" / "orna-cli" / "tests" / "fixtures"
+    BUNDLE = FIXTURES / "legacy-format1.bundle"
+    ALICE = {"name": "Alice Smith", "emails": ["alice@example.com"]}
+    BOB = {"name": "Bob Jones", "emails": []}
+
+    def test_golden_contact_rows_from_the_committed_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            clone = Path(tmp) / "legacy"
+            subprocess.run(["git", "clone", "-q", str(self.BUNDLE), str(clone)], check=True)
+            for name, expected in (("alice-smith", self.ALICE), ("bob-jones", self.BOB)):
+                committed = subprocess.run(
+                    ["git", "-C", str(clone), "show", f"HEAD:contacts/Contact/{name}.orna"],
+                    check=True,
+                    capture_output=True,
+                ).stdout
+                fixture = (self.FIXTURES / f"legacy-loose-contact-{name}.orna").read_bytes()
+                self.assertEqual(committed, fixture)
+                self.assertEqual(legacy.parse_row_unit(committed), expected)
+
+    def test_inline_blob_field_of_the_alice_row(self) -> None:
+        row = legacy.parse_row_unit(b'{\n    name: "Alice Smith",\n    avatar: "aGVsbG8=",\n}\n')
+        self.assertEqual(legacy.row_blob_field(row, "avatar"), b"hello")
+
+    def test_storage_record_blob_field(self) -> None:
+        digest = hashlib.sha256(b"hello").hexdigest()
+        row = legacy.parse_row_unit(
+            ('{ avatar: { blob: "sha256:' + digest + '", length: 5 }, }').encode()
+        )
+        self.assertEqual(legacy.row_blob_field(row, "avatar"), legacy.StoredBlob(digest, 5))
+
+    def test_accepts_the_engine_row_grammar(self) -> None:
+        cases = {
+            "empty record": (b"{}", {}),
+            "trailing comma": (b"{ a: 1, }", {"a": 1}),
+            "trailing semicolon": (b"{ a: 1 };\n", {"a": 1}),
+            "nested comments": (
+                b"// head\n{ /* x /* nested */ y */ a: 1, // tail\n b: null }\n",
+                {"a": 1, "b": None},
+            ),
+            "literals": (
+                b'{ t: true, f: false, n: -0, s: "x", arr: [], nested: { k: [1, "two",], }, }',
+                {"t": True, "f": False, "n": 0, "s": "x", "arr": [], "nested": {"k": [1, "two"]}},
+            ),
+            "escapes": (
+                r'{ s: "q\"b\\n\n\t\0\u{1F600}\u{41}" }'.encode(),
+                {"s": "q\"b\\n\n\t\0\U0001F600A"},
+            ),
+        }
+        for name, (data, expected) in cases.items():
+            with self.subTest(case=name):
+                self.assertEqual(legacy.parse_row_unit(data), expected)
+
+    def test_rejects_what_the_engine_row_grammar_does_not_admit(self) -> None:
+        cases = {
+            "not a record": b"[1]",
+            "two records": b"{ a: 1 } { b: 2 }",
+            "trailing text": b"{ a: 1 } x",
+            "missing colon": b"{ a 1 }",
+            "missing comma": b"{ a: 1 b: 2 }",
+            "leading comma": b"{ , a: 1 }",
+            "duplicate field": b"{ a: 1, a: 2 }",
+            "keyword field": b"{ true: 1 }",
+            "identifier value": b"{ a: b }",
+            "expression value": b"{ a: 1 + 2 }",
+            "leading zero": b"{ a: 007 }",
+            "float": b"{ a: 1.5 }",
+            "interpolated string": b'{ a: "x{1}" }',
+            "bad escape": r'{ a: "\q" }'.encode(),
+            "unicode without brace": r'{ a: "\u41" }'.encode(),
+            "surrogate escape": r'{ a: "\u{D800}" }'.encode(),
+            "empty unicode escape": r'{ a: "\u{}" }'.encode(),
+            "unterminated string": b'{ a: "x }',
+            "unterminated comment": b"{ a: 1 } /* open",
+            "unterminated record": b"{ a: 1",
+            "not utf-8": b'{ a: "\xff" }',
+            "byte order mark": b"\xef\xbb\xbf{ a: 1 }",
+        }
+        for name, data in cases.items():
+            with self.subTest(case=name):
+                with self.assertRaises(legacy.LegacyBlobError):
+                    legacy.parse_row_unit(data)
+
+    def test_blob_field_rejects_absent_and_non_blob_values(self) -> None:
+        digest = "sha256:" + "ab" * 32
+        cases = {
+            "absent": {},
+            "integer": {"avatar": 5},
+            "boolean": {"avatar": True},
+            "list": {"avatar": []},
+            "record with extra field": {"avatar": {"blob": digest, "length": 1, "x": 1}},
+            "record without length": {"avatar": {"blob": digest}},
+            "non-canonical inline": {"avatar": "YQ"},
+        }
+        for name, row in cases.items():
+            with self.subTest(case=name):
+                with self.assertRaises(legacy.LegacyBlobError):
+                    legacy.row_blob_field(row, "avatar")
 
 
 if __name__ == "__main__":
