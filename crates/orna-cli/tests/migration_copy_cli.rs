@@ -686,34 +686,7 @@ fn cli_migration_copy_preserves_a_dirty_format_two_workspace_and_old_commit_byte
     fs::write(source.join("tracked.txt"), b"committed bytes\n").unwrap();
     initialize_populated_format_two_source(&source);
 
-    let dependency = parent.path().join("dependency");
-    fs::create_dir(&dependency).unwrap();
-    git_output(&dependency, &["init", "-b", "main"]);
-    git_output(&dependency, &["config", "user.name", "kierandrewett"]);
-    git_output(&dependency, &["config", "user.email", "kieran@drewett.dev"]);
-    git_output(&dependency, &["config", "commit.gpgsign", "false"]);
-    fs::write(dependency.join("dependency.txt"), b"committed dependency\n").unwrap();
-    git_output(&dependency, &["add", "."]);
-    git_output(&dependency, &["commit", "-m", "dependency source"]);
-    let added = Command::new("git")
-        .current_dir(&source)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .args(["-c", "protocol.file.allow=always", "submodule", "add"])
-        .arg(&dependency)
-        .arg("dependencies/example")
-        .output()
-        .unwrap();
-    assert!(
-        added.status.success(),
-        "git submodule add: {}",
-        String::from_utf8_lossy(&added.stderr)
-    );
-    git_output(&source, &["commit", "-am", "record dependency"]);
-    let source_head = String::from_utf8(git_output(&source, &["rev-parse", "HEAD"]))
-        .unwrap()
-        .trim()
-        .to_owned();
-    let committed_bytes = git_output(&source, &["show", "HEAD:tracked.txt"]);
+    let (source_head, committed_bytes) = commit_dependency_submodule(parent.path(), &source);
 
     // Dirty index, source and submodule work that the copy must keep.
     fs::write(source.join("tracked.txt"), b"staged bytes\n").unwrap();
@@ -791,6 +764,40 @@ fn cli_migration_copy_preserves_a_dirty_format_two_workspace_and_old_commit_byte
         ),
         committed_bytes
     );
+}
+
+/// Adds a committed dependency submodule to a format-2 source and commits the
+/// superproject. Returns the source HEAD and the committed `tracked.txt` bytes.
+fn commit_dependency_submodule(parent: &Path, source: &Path) -> (String, Vec<u8>) {
+    let dependency = parent.join("dependency");
+    fs::create_dir(&dependency).unwrap();
+    git_output(&dependency, &["init", "-b", "main"]);
+    git_output(&dependency, &["config", "user.name", "kierandrewett"]);
+    git_output(&dependency, &["config", "user.email", "kieran@drewett.dev"]);
+    git_output(&dependency, &["config", "commit.gpgsign", "false"]);
+    fs::write(dependency.join("dependency.txt"), b"committed dependency\n").unwrap();
+    git_output(&dependency, &["add", "."]);
+    git_output(&dependency, &["commit", "-m", "dependency source"]);
+    let added = Command::new("git")
+        .current_dir(source)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args(["-c", "protocol.file.allow=always", "submodule", "add"])
+        .arg(&dependency)
+        .arg("dependencies/example")
+        .output()
+        .unwrap();
+    assert!(
+        added.status.success(),
+        "git submodule add: {}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    git_output(source, &["commit", "-am", "record dependency"]);
+    let source_head = String::from_utf8(git_output(source, &["rev-parse", "HEAD"]))
+        .unwrap()
+        .trim()
+        .to_owned();
+    let committed_bytes = git_output(source, &["show", "HEAD:tracked.txt"]);
+    (source_head, committed_bytes)
 }
 
 /// Commits a format-2 source with one populated Contact table: the module, one
