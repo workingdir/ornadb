@@ -1212,15 +1212,7 @@ fn prepare_migration_copy(
     // A source whose runtime holds unpublished mutations has rows the copy would
     // not receive, while its stream checkpoints may already cover them. Refuse
     // before any destination is created so the source keeps its tail (ORNA-UPGRADE-006).
-    let unpublished_count = crate::source_unpublished_mutation_count(repository)?;
-    if unpublished_count != 0 {
-        return Err(Diagnostic::target_with_detail(
-            "E2100",
-            "migration source holds unpublished runtime mutations",
-            "make the source's unpublished runtime mutations durable where its HEAD allows a publish, or discard them, then retry; no copy was prepared and the source is unchanged",
-            format!("unpublished_mutations={unpublished_count}"),
-        ));
-    }
+    refuse_unpublished_tail(repository)?;
     // Persistent stream checkpoints are carried into the prepared destination
     // under the identity correspondence recorded there before any row is
     // imported. Live per-attempt stream state is not carried: a source holding
@@ -1587,10 +1579,83 @@ fn run_upgrade_in_place(
         ));
     };
     let destination = parent.join(format!("{}-format3-candidate", name.to_string_lossy()));
-    let prepared =
-        prepare_migration_copy(&repository, &destination, arguments.annotation_defaults)?;
+    if repository.open_format_context().is_ok_and(|context| {
+        context.repository_format() == orna_repository::RepositoryFormat::Format3
+    }) {
+        return Err(Diagnostic::target(
+            "E2100",
+            "in-place upgrade already completed; nothing changed",
+            "the worktree is already format-3; the sibling copy holds the previous snapshot; nothing was changed",
+        ));
+    }
+    let activated = orna_repository::migration_copy::finished_activation_head(&destination)
+        .map_err(|error| {
+            Diagnostic::target_with_detail(
+                "E2100",
+                "prepared migration copy could not be inspected",
+                "remove the sibling copy with `orna migrate abort` and re-run; the worktree is unchanged",
+                format!("{error:?}"),
+            )
+        })?;
+    // A finished activation whose exchange did not complete is resumed. Its
+    // candidate is re-derived from the source in a verification copy, and only
+    // a source that reproduces the activated candidate may publish it.
+    let review_destination = if activated.is_some() {
+        parent.join(format!("{}-format3-verify", name.to_string_lossy()))
+    } else {
+        destination.clone()
+    };
+    let prepared = prepare_migration_copy(
+        &repository,
+        &review_destination,
+        arguments.annotation_defaults,
+    )?;
     print_prepared_copy(&prepared);
     let candidate = prepared.copy.candidate_journal().new_head().clone();
+    print_in_place_review(&root, &destination, activated.is_some());
+    confirm_and_activate(
+        &repository,
+        &candidate,
+        activated.as_ref(),
+        &destination,
+        &review_destination,
+        arguments.confirm,
+    )?;
+    // The exchange is the last point the source can still move: refuse a tail
+    // that appeared since the copy was prepared, leaving the worktree untouched.
+    refuse_unpublished_tail(&repository)?;
+    orna_repository::migration_copy::exchange_activated_copy(
+        &repository,
+        &prepared.copy,
+        &destination,
+    )
+    .map_err(|error| {
+        Diagnostic::target_with_detail(
+            "E2100",
+            "activated candidate could not be published in place",
+            "the worktree is unchanged because the exchange is atomic; the activated copy is kept at destination; re-run the same command to resume the exchange",
+            format!("{error:?}"),
+        )
+    })?;
+    println!(
+        "published format-3 repository in place: worktree={} candidate_commit={} rollback_snapshot={}",
+        root.display(),
+        candidate.as_str(),
+        destination.display()
+    );
+    Ok(())
+}
+
+/// Prints the resume note and the publication review: the candidate replaces
+/// the worktree, and the old snapshot stays at the destination as the rollback
+/// copy until it is removed.
+fn print_in_place_review(root: &std::path::Path, destination: &std::path::Path, resumed: bool) {
+    if resumed {
+        println!(
+            "resume: destination={} is already activated; the candidate re-derived from the source is verified against it before the exchange",
+            destination.display()
+        );
+    }
     println!(
         "review: publication replaces worktree={} with the activated candidate; the old snapshot stays at destination={} as the rollback copy",
         root.display(),
@@ -1600,43 +1665,108 @@ fn run_upgrade_in_place(
         "review: abort before publication with `orna migrate abort {}`; the worktree is unchanged until then",
         destination.display()
     );
-    match arguments.confirm {
-        Some(id) if id != candidate.as_str() => {
-            return Err(Diagnostic::target_with_detail(
-                "E2100",
-                "confirmation names a different candidate than the reviewed one",
-                "re-run with the candidate_commit printed above; the worktree is unchanged and the prepared copy is kept",
-                format!("confirmed={id} candidate={}", candidate.as_str()),
-            ));
+}
+
+/// Confirms the reviewed candidate and activates it in the sibling copy. A
+/// resumed run already has an activated sibling, so after the confirmation it
+/// only discards its verification copy.
+fn confirm_and_activate(
+    repository: &orna_repository::Repository,
+    candidate: &orna_repository::GitCommitRef,
+    activated: Option<&orna_repository::GitCommitRef>,
+    destination: &std::path::Path,
+    review_destination: &std::path::Path,
+    confirm: Option<&str>,
+) -> Result<(), Diagnostic> {
+    let confirmed = match activated {
+        Some(head) if head != candidate => Err(Diagnostic::target_with_detail(
+            "E2100",
+            "activated sibling was built from a different candidate",
+            "the source changed since the sibling was activated; inspect and remove the sibling copy by hand, then re-run; the worktree is unchanged",
+            format!(
+                "activated={} candidate={}",
+                head.as_str(),
+                candidate.as_str()
+            ),
+        )),
+        _ => confirm_candidate(confirm, candidate),
+    };
+    if let Err(error) = confirmed {
+        if activated.is_some() {
+            // The verification copy is not the activated sibling; removing it
+            // leaves the sibling in place for the next run.
+            let _ = discard_verification_copy(repository, review_destination);
         }
-        Some(_) => {}
-        None if confirm_interactively(candidate.as_str())? => {}
-        None => {
-            return Err(Diagnostic::target_with_detail(
-                "E2100",
-                "publication was not confirmed",
-                "re-run with `--confirm <candidate_commit>` shown above, or confirm at an interactive terminal; the worktree is unchanged and the prepared copy is kept",
-                format!("candidate={}", candidate.as_str()),
-            ));
-        }
+        return Err(error);
     }
-    activate_prepared(&repository, &destination, &candidate)?;
-    orna_repository::migration_copy::exchange_activated_copy(&repository, &prepared.copy)
-        .map_err(|error| {
-            Diagnostic::target_with_detail(
-                "E2100",
-                "activated candidate could not be published in place",
-                "the worktree is unchanged because the exchange is atomic; the activated copy is kept at destination and the same command may be re-run",
-                format!("{error:?}"),
-            )
-        })?;
-    println!(
-        "published format-3 repository in place: worktree={} candidate_commit={} rollback_snapshot={}",
-        root.display(),
-        candidate.as_str(),
-        destination.display()
-    );
+    if activated.is_none() {
+        refuse_unpublished_tail(repository)?;
+        activate_prepared(repository, destination, candidate)?;
+    } else {
+        discard_verification_copy(repository, review_destination)?;
+    }
     Ok(())
+}
+
+/// Confirms the reviewed candidate: `--confirm` must name it, or an interactive
+/// terminal must type it back.
+fn confirm_candidate(
+    confirm: Option<&str>,
+    candidate: &orna_repository::GitCommitRef,
+) -> Result<(), Diagnostic> {
+    match confirm {
+        Some(id) if id != candidate.as_str() => Err(Diagnostic::target_with_detail(
+            "E2100",
+            "confirmation names a different candidate than the reviewed one",
+            "re-run with the candidate_commit printed above; the worktree is unchanged and the sibling copy is kept",
+            format!("confirmed={id} candidate={}", candidate.as_str()),
+        )),
+        Some(_) => Ok(()),
+        None if confirm_interactively(candidate.as_str())? => Ok(()),
+        None => Err(Diagnostic::target_with_detail(
+            "E2100",
+            "publication was not confirmed",
+            "re-run with `--confirm <candidate_commit>` shown above, or confirm at an interactive terminal; the worktree is unchanged and the sibling copy is kept",
+            format!("candidate={}", candidate.as_str()),
+        )),
+    }
+}
+
+/// Refuses while the source holds unpublished runtime mutations: its rows would
+/// miss them while its stream checkpoints may already cover them (ORNA-UPGRADE-006).
+fn refuse_unpublished_tail(repository: &orna_repository::Repository) -> Result<(), Diagnostic> {
+    let unpublished_count = crate::source_unpublished_mutation_count(repository)?;
+    if unpublished_count != 0 {
+        return Err(Diagnostic::target_with_detail(
+            "E2100",
+            "migration source holds unpublished runtime mutations",
+            "make the source's unpublished runtime mutations durable where its HEAD allows a publish, or discard them, then retry; the source is unchanged",
+            format!("unpublished_mutations={unpublished_count}"),
+        ));
+    }
+    Ok(())
+}
+
+/// Removes the verification copy a resumed run prepared; the activated sibling
+/// and the worktree are not touched.
+fn discard_verification_copy(
+    repository: &orna_repository::Repository,
+    verification: &std::path::Path,
+) -> Result<(), Diagnostic> {
+    let detail = match orna_repository::migration_copy::discard_prepared_format3_migration(
+        repository,
+        verification,
+    ) {
+        Ok(orna_repository::migration_copy::DiscardOutcome::Discarded) => return Ok(()),
+        Ok(outcome) => format!("outcome={outcome:?}"),
+        Err(error) => format!("{error:?}"),
+    };
+    Err(Diagnostic::target_with_detail(
+        "E2100",
+        "verification copy could not be removed",
+        "remove the verification copy with `orna migrate abort` and re-run; the worktree and the activated sibling are unchanged",
+        detail,
+    ))
 }
 
 /// Asks for the candidate commit id on a terminal and reports whether it was
