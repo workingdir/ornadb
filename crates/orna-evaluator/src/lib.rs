@@ -3066,6 +3066,13 @@ fn distinct_identity(value: &Value) -> Result<DistinctIdentity, EvaluationError>
     })
 }
 
+/// Tag of the placeholder `strip_blobs` writes for each inline OVB-2 Blob; its
+/// integer payload is the Blob's index in `blobs`. No admitted raw carries this
+/// number: `validate_tag` and `validate_context_tag` accept only their own tag
+/// numbers, and `u64::MAX` is in neither table. A genuine Blob node therefore
+/// never reads as a placeholder slot in `identity_skeleton`.
+const DISTINCT_SLOT_TAG: u64 = u64::MAX;
+
 /// Returns `value` with each inline OVB-2 Blob replaced by a placeholder whose
 /// integer payload is the Blob's index in `blobs`. Every other node is copied
 /// as it is; a Blob in another form keeps its own raw node and so has no slot.
@@ -3074,7 +3081,7 @@ fn strip_blobs<'a>(value: &'a Value, blobs: &mut Vec<&'a Raw>) -> Value {
         Value::AnnotatedBlob(raw) => {
             let slot = blobs.len();
             blobs.push(raw);
-            Value::AnnotatedBlob(Raw::Tag(OVB2_BLOB_TAG, Box::new(Raw::Int(slot.into()))))
+            Value::AnnotatedBlob(Raw::Tag(DISTINCT_SLOT_TAG, Box::new(Raw::Int(slot.into()))))
         }
         Value::List(values) => Value::List(List::from(
             values
@@ -3132,12 +3139,18 @@ fn identity_skeleton(
     let index = *next_index;
     *next_index += 1;
     match raw {
-        Raw::Tag(OVB2_BLOB_TAG | ROV3_BLOB_TAG | SOV3_BLOB_TAG, payload) => {
+        Raw::Tag(DISTINCT_SLOT_TAG, payload) => {
             let slot = match *payload {
                 Raw::Int(slot) => slot.to_usize(),
                 _ => None,
             };
             slots.push((index, slot));
+            Raw::Null
+        }
+        Raw::Tag(OVB2_BLOB_TAG | ROV3_BLOB_TAG | SOV3_BLOB_TAG, _) => {
+            // A Blob node that was not stripped has no placeholder slot, so its
+            // fingerprint is unavailable and its key stays undecided.
+            slots.push((index, None));
             Raw::Null
         }
         Raw::Array(items) => Raw::Array(
@@ -20180,10 +20193,10 @@ mod blob_equality_tests {
     #[test]
     fn distinct_fold_matches_brute_force_equality_over_mixed_sequences() {
         // The fold keeps a value exactly when `==` finds it unequal to every
-        // value already kept. The reference below compares each value with all
+        // value already kept. The reference below compares each value with the
         // kept values using `==` only, with no keys or fingerprints, so a bucket
-        // or fingerprint shortcut that skips a pair `==` relates changes the
-        // kept rows and fails here.
+        // or fingerprint shortcut that skips a pair `==` relates changes the kept
+        // rows and fails here.
         let ovb2 = |bytes: &[u8]| {
             annotated_ovb2(
                 &orna_value::Blob::from_bytes_with_annotation(
@@ -20202,15 +20215,19 @@ mod blob_equality_tests {
             )
             .unwrap(),
         );
-        // Format-3 Blobs are left to the dedicated tests: `==` cannot decide some
-        // pairs with them here, and this reference must decide every pair.
-        let sequence = vec![
+        // The empty ROV-3 Blob is decided by its identity alone, so `==` relates
+        // it to the empty OVB-2 Blob. A ROV-3 Blob with content is a
+        // descriptor-only value whose bytes `==` cannot read, so it is checked
+        // separately below.
+        let decidable = vec![
             ovb2(b"payload"),
             ovb2(b"paylaod"),
             audio,
             ovb2(b"payload"),
             ovb2(b"other!!"),
             ovb2(b""),
+            rov3_blob_value(b""),
+            rov3_blob_value(b""),
             Value::Tuple(vec![ovb2(b"payload")]),
             Value::Tuple(vec![ovb2(b"payload"), ovb2(b"other!!")]),
             Value::Tuple(vec![ovb2(b"other!!"), ovb2(b"payload")]),
@@ -20218,39 +20235,57 @@ mod blob_equality_tests {
             Value::Int(1.into()),
         ];
         // Repeating the sequence makes later values meet several kept candidates.
-        let values: Vec<Value> = sequence
+        let values: Vec<Value> = decidable
             .iter()
             .cloned()
-            .chain(sequence.iter().cloned())
-            .chain(sequence.iter().cloned())
+            .chain(decidable.iter().cloned())
+            .chain(decidable.iter().cloned())
             .collect();
+        let kept = assert_fold_matches_brute_force(&values);
+        assert!(kept > 1 && kept < values.len());
+
+        // A ROV-3 Blob with content has the same bytes as an OVB-2 entry, but
+        // `==` reports `sys.blob.unavailable` for the pair, so the fold must fail
+        // with that code at that value in either order rather than guess.
+        assert_fold_matches_brute_force(&[ovb2(b"payload"), rov3_blob_value(b"payload")]);
+        assert_fold_matches_brute_force(&[rov3_blob_value(b"payload"), ovb2(b"payload")]);
+    }
+
+    /// Replays `values` through the fold and through a reference that uses only
+    /// `==` against every kept value. Returns the number of kept rows. When `==`
+    /// cannot decide a pair, the fold must fail with the same code at that value
+    /// and the replay stops there.
+    fn assert_fold_matches_brute_force(values: &[Value]) -> usize {
+        let mut fold = DistinctValueFold::default();
         let mut expected: Vec<Value> = Vec::new();
-        for value in &values {
+        for value in values {
             let mut duplicate = false;
+            let mut undecided = None;
             for kept in &expected {
-                if blob_aware_eq(kept, value).unwrap() {
-                    duplicate = true;
-                    break;
+                match blob_aware_eq(kept, value) {
+                    Ok(true) => {
+                        duplicate = true;
+                        break;
+                    }
+                    Ok(false) => {}
+                    Err(failure) => {
+                        undecided = Some(failure.code().to_owned());
+                        break;
+                    }
                 }
             }
+            if let Some(code) = undecided {
+                let failure = fold.insert(value.clone()).unwrap_err();
+                assert_eq!(failure.code(), code.as_str());
+                return expected.len();
+            }
+            assert_eq!(fold.insert(value.clone()).unwrap(), !duplicate);
             if !duplicate {
                 expected.push(value.clone());
             }
         }
-        assert!(expected.len() > 1 && expected.len() < values.len());
-
-        let mut fold = DistinctValueFold::default();
-        let mut kept = Vec::new();
-        for value in values {
-            if fold.insert(value.clone()).unwrap() {
-                kept.push(value);
-            }
-        }
         assert_eq!(fold.len(), expected.len());
-        assert_eq!(kept.len(), expected.len());
-        for (left, right) in kept.iter().zip(&expected) {
-            assert!(blob_aware_eq(left, right).unwrap());
-        }
+        expected.len()
     }
 
     #[test]
@@ -20287,6 +20322,25 @@ mod blob_equality_tests {
         );
         assert!(fold.insert(Value::Tuple(vec![Value::Null, blob])).unwrap());
         assert_eq!(fold.len(), 2);
+    }
+
+    #[test]
+    fn identity_skeleton_reads_only_placeholder_tags_as_slots() {
+        // A genuine OVB-2 Blob node may carry an integer payload, the shape a
+        // placeholder uses. It must still have no slot, so its key stays
+        // undecided instead of reading another Blob's fingerprint.
+        let mut slots = Vec::new();
+        let mut next_index = 0;
+        let genuine = Raw::Tag(OVB2_BLOB_TAG, Box::new(Raw::Int(0.into())));
+        let skeleton = identity_skeleton(genuine, &mut next_index, &mut slots);
+        assert!(matches!(skeleton, Raw::Null));
+        assert_eq!(slots, vec![(0, None)]);
+
+        let mut slots = Vec::new();
+        let mut next_index = 0;
+        let placeholder = Raw::Tag(DISTINCT_SLOT_TAG, Box::new(Raw::Int(3.into())));
+        identity_skeleton(placeholder, &mut next_index, &mut slots);
+        assert_eq!(slots, vec![(0, Some(3))]);
     }
 
     fn rov3_context(payload: &[u8]) -> Format3Context {
