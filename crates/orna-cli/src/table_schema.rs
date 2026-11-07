@@ -16,6 +16,17 @@ pub fn committed_table_schema_identity(
     resolve_at(repository, &head, table)
 }
 
+/// Whether `table`'s committed schema cannot be resolved at the committed head. A head that cannot
+/// be read is an error, not an unresolvable schema: the two must not be conflated, or a transient
+/// `HEAD` failure would hide a draft whose schema is in fact available.
+pub fn committed_table_schema_unresolvable(
+    repository: &Repository,
+    table: TableObjectId,
+) -> Result<bool, String> {
+    let head = committed_head(repository)?;
+    Ok(resolve_at(repository, &head, table).is_err())
+}
+
 /// The live identity of `table` read by one save, for the save's two committed
 /// schema checks (`with_live_schema_identity` in `orna-runtime` `vfs.rs`).
 ///
