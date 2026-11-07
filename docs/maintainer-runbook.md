@@ -73,6 +73,7 @@ command meets every Orna 1.1.0 requirement.
 | `export DEST --at SELECTOR [OPTIONS]` | Write, check or restore an offline archive. |
 | `migrate copy DEST [--annotation-defaults N] --no-persistent-consumers` | Prepare a format-3 candidate from a format-1/2 worktree. The flag confirms that consumer checkpoints are carried, not reset. |
 | `upgrade DEST --to-format 3 --yes-activate` | Activate the copy that `migrate copy` prepared in DEST by publishing its candidate. Refuses without `--yes-activate` and changes nothing. Re-running after an interruption resumes. |
+| `upgrade --to-format 3 [--annotation-defaults N] --no-persistent-consumers [--confirm ID]` | One-step in-place upgrade of a standalone format-1/2 worktree. Prepares the candidate in `<worktree>-format3-candidate`, prints its review, and publishes only after `--confirm <candidate_commit>` or an interactive confirmation. The worktree path then holds the activated copy; the old snapshot stays at the sibling path. A refused confirmation changes nothing. |
 | `publish [--message MESSAGE]` | Commit the durable runtime tail as one publication commit. |
 | `commit -m MESSAGE` | Review and publish exactly the staged candidate. |
 | `history RELATION KEY [OPTIONS]`, `history RELATION --diff FROM TO` | List row history, or compare two snapshots without payloads. |
