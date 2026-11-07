@@ -3828,36 +3828,43 @@ async fn mount_captured_media_with_limit(
 async fn mount_titled_cover_row(content: &[u8], cover: &[u8]) -> Option<MountedBlobRow> {
     mount_blob_row_with_source(
         "pub table Music(id: Str) { title: Str, content: Blob, cover: Blob?, }\n",
-        content,
+        Some(content),
         cover,
     )
     .await
 }
 
-/// Mounts `Music/london` over `source`, which declares the `title`, `content` and `cover` fields
-/// of [`mount_titled_cover_row`]. Returns `None` when FUSE is opted out or its prerequisites are
-/// optional and absent.
+/// Mounts `Music/london` over `source`, which declares the `cover` field of
+/// [`mount_titled_cover_row`] and, when `content` is given, its `content` field too. Returns
+/// `None` when FUSE is opted out or its prerequisites are optional and absent.
 async fn mount_blob_row_with_source(
     source: &str,
-    content: &[u8],
+    content: Option<&[u8]>,
     cover: &[u8],
 ) -> Option<MountedBlobRow> {
     if !fuse_test_available() {
         return None;
     }
     let media_root = TempDir::new().unwrap();
-    std::fs::write(media_root.path().join("tone.mp3"), content).unwrap();
     std::fs::write(media_root.path().join("cover.png"), cover).unwrap();
     let root = format!("{:?}", media_root.path().to_string_lossy().as_ref());
-    let content_capture = format!(
-        "sys.blob.annotate(sys.blob.capture_file({root}, \"tone.mp3\", 4194304), \"audio/mpeg\")"
-    );
+    let content_capture = content.map(|content| {
+        std::fs::write(media_root.path().join("tone.mp3"), content).unwrap();
+        format!(
+            "sys.blob.annotate(sys.blob.capture_file({root}, \"tone.mp3\", 4194304), \"audio/mpeg\")"
+        )
+    });
     let cover_capture = format!(
         "sys.blob.annotate(sys.blob.capture_file({root}, \"cover.png\", 4194304), \"image/png\")"
     );
-    let row_source = format!(
-        "{{\n    title: \"before\",\n    content: {content_capture},\n    cover: {cover_capture},\n}}\n"
-    );
+    let mut blob_captures = Vec::with_capacity(2);
+    let mut row_source = String::from("{\n    title: \"before\",\n");
+    if let Some(capture) = &content_capture {
+        blob_captures.push(("content", capture.as_str()));
+        row_source.push_str(&format!("    content: {capture},\n"));
+    }
+    blob_captures.push(("cover", cover_capture.as_str()));
+    row_source.push_str(&format!("    cover: {cover_capture},\n}}\n"));
     let (repository_directory, repository, relation_id, format_context) =
         format3::format3_repository_with_context(source, "Music");
     let (runtime_identity, initial_digest) = format3::cli_runtime_identity(&repository);
@@ -3874,10 +3881,6 @@ async fn mount_blob_row_with_source(
     let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
         .with_filesystem_provider(filesystem)
         .with_repository_capture_capability(capability);
-    let blob_captures = [
-        ("content", content_capture.as_str()),
-        ("cover", cover_capture.as_str()),
-    ];
     let capture_rows = [media_commit::SourceCaptureRow {
         key: "london",
         blob_fields: &blob_captures,
@@ -5034,7 +5037,7 @@ async fn cwd_mount_optional_blob_unlink_refused_by_schema_keeps_file() {
     let cover = lcg_bytes(0x7171_0000_0000_0002, 8 * 1024 + 9);
     let Some(mut row) = mount_blob_row_with_source(
         "pub table Music(id: Str) {\n    title: Str,\n    content: Blob,\n    cover: Blob?,\n    assert every(track => track.cover != null);\n}\n",
-        &content,
+        Some(content.as_slice()),
         &cover,
     )
     .await
@@ -5110,7 +5113,7 @@ async fn cwd_mount_optional_blob_unlink_after_owner_advances_row_is_stale_then_r
 }
 
 #[tokio::test]
-/// profiles/vfs-1.md:76-80 and ORNA-VFS-011 (ornadb-5il1.372.5): another writer's accepted save that projects no Blob (the optional `cover` becomes null) retires the cover's stale sibling, although the accepted row projects no file at all. A write-open handle captured before that save keeps its generation, and its later fsync is refused.
+/// profiles/vfs-1.md:76-80 and ORNA-VFS-011 (ornadb-5il1.372.5): another writer's accepted save that sets the optional `cover` to null retires the cover's stale sibling, while the accepted row still projects the required `content`. A write-open handle captured before that save keeps its generation, and its later fsync is refused.
 async fn cwd_mount_accepted_null_blob_retires_stale_blob_sibling() {
     let content = lcg_bytes(0x5a5a_0000_0000_0001, 16 * 1024 + 5);
     let cover = lcg_bytes(0x5a5a_0000_0000_0002, 8 * 1024 + 9);
@@ -5146,6 +5149,41 @@ async fn cwd_mount_accepted_null_blob_retires_stale_blob_sibling() {
     assert!(
         !cover_path.exists(),
         "a refused stale write does not recreate the sibling"
+    );
+    drop(row);
+}
+
+#[tokio::test]
+/// profiles/vfs-1.md:66-67, :82 and :110 (ornadb-5il1.372.5): the row's only Blob is the optional `cover`. Another writer's accepted save that writes `cover: null` projects no Blob, so the accepted row projects no other file. The explicit null is accepted rather than refused as a non-descriptor, and the stale `cover.png` sibling is retired.
+async fn cwd_mount_accepted_null_optional_only_row_retires_stale_blob_sibling() {
+    let cover = lcg_bytes(0x5c5c_0000_0000_0002, 8 * 1024 + 9);
+    let Some(row) = mount_blob_row_with_source(
+        "pub table Music(id: Str) { title: Str, cover: Blob?, }\n",
+        None,
+        &cover,
+    )
+    .await
+    else {
+        return;
+    };
+    let repository = row.repository_directory.path().to_path_buf();
+    let row_path = row.mounted.mountpoint.join("Music/london");
+    let cover_path = row_path.join("cover.png");
+    assert!(
+        cover_path.exists(),
+        "the optional cover is projected before the save"
+    );
+
+    owner_edit_row_text(&repository, "cover: .*", "cover: null,");
+
+    assert!(
+        !cover_path.exists(),
+        "the accepted null cover leaves no stale sibling although the row projects no other file"
+    );
+    let document = String::from_utf8(std::fs::read(row_path.join("data.orna")).unwrap()).unwrap();
+    assert!(
+        document.contains("cover: null"),
+        "data.orna commits the optional Blob as null: {document}"
     );
     drop(row);
 }
