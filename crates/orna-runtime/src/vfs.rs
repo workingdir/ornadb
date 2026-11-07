@@ -2391,10 +2391,11 @@ fn percent_byte(byte: u8) -> String {
     format!("%{byte:02X}")
 }
 
-/// True for the names the profile reserves: `.`, `..`, `.orna`, every Git metadata spelling, and
-/// Windows device basenames in any case with any extension.
+/// True for the names the profile reserves: `.`, `..`, `.orna`, the row document `data.orna`
+/// (profiles/vfs-1.md:44-50), every Git metadata spelling, and Windows device basenames in any
+/// case with any extension.
 fn is_reserved_component(text: &str) -> bool {
-    if matches!(text, "." | ".." | ".orna")
+    if matches!(text, "." | ".." | ".orna" | VFS_ROW_DOCUMENT)
         || orna_foundation::is_git_metadata_component(text.as_bytes())
     {
         return true;
@@ -6801,5 +6802,12 @@ mod git_metadata_reserved_tests {
         }
         assert!(!is_reserved_component("git-notes"));
         assert!(!is_reserved_component("gitfile"));
+    }
+
+    #[test]
+    fn row_document_spelling_is_a_reserved_component() {
+        assert!(is_reserved_component("data.orna"));
+        assert!(!is_reserved_component("data"));
+        assert!(!is_reserved_component("data.orna.bak"));
     }
 }
