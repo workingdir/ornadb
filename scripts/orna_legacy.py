@@ -25,8 +25,10 @@ and whether it accepts the `\0` escape. The reader accepts both as the EBNF read
 from __future__ import annotations
 
 import base64
+import datetime
 import hashlib
 import re
+import unicodedata
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Protocol
@@ -34,10 +36,13 @@ from typing import Protocol
 from scripts.orna_extract import (
     PROFILE_TAGS,
     REGISTERED_TAGS,
+    UUID_TAG,
+    CborMap,
     ExtractionError,
     Tag,
     UnavailableObject,
     decode_canonical,
+    encode,
 )
 
 MAX_LENGTH = (1 << 63) - 1
@@ -299,8 +304,257 @@ class OgbReader:
 
 
 def decode_ovb1(data: bytes, where: str = "OVB-1 value") -> object:
-    """Strict OVB-1 value (ROV-1). Profile tags 60110..60113 and storage tag 60100 are rejected."""
-    return decode_canonical(data, where, OVB1_TAGS)
+    """Strict OVB-1 value (ROV-1). Profile tags 60110..60113 and storage tag 60100 are rejected.
+
+    Every admitted tag is also checked against its registry payload rule (1.1.0 formats table),
+    at every nesting level. Descriptor-dependent rules are not checked here.
+    """
+    value = decode_canonical(data, where, OVB1_TAGS)
+    _check_registry_tree(value, where)
+    return value
+
+
+_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+_LOCAL_DATETIME = re.compile(r"([0-9]{4}-[0-9]{2}-[0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})\.[0-9]{9}")
+_NANOS_LIMIT = 1_000_000_000
+_TIME_OF_DAY_MAX = 86_399_999_999_999
+_PATH_FLAVOURS = frozenset({"repo", "posix", "windows"})
+_UUID_NAMES = frozenset(
+    {
+        "sys.DatabaseId",
+        "sys.FileId",
+        "sys.DefinitionId",
+        "sys.ObjectId",
+        "sys.RuntimeId",
+        "sys.TransactionId",
+        "sys.InvocationId",
+        "sys.RunId",
+        "sys.QueryId",
+        "sys.SessionId",
+        "sys.ClientId",
+        "sys.TraceId",
+        "sys.SpanId",
+        "sys.SegmentId",
+        "sys.BuildId",
+    }
+)
+_DIGEST_NAMES = frozenset({"sys.RevisionId", "sys.SnapshotId", "sys.ConsumerIdentity"})
+_VERSION_NAMES = frozenset({"sys.CheckpointVersion", "sys.FailureVersion"})
+
+
+def _is_int(value: object) -> bool:
+    return type(value) is int
+
+
+def _is_bytes(value: object, length: int) -> bool:
+    return type(value) is bytes and len(value) == length
+
+
+def _is_list(value: object, length: int | None = None) -> bool:
+    return type(value) is list and (length is None or len(value) == length)
+
+
+def _is_tagged(value: object, number: int) -> bool:
+    return isinstance(value, Tag) and value.number == number
+
+
+def _is_uuid(value: object) -> bool:
+    return _is_tagged(value, UUID_TAG) and _is_bytes(value.value, 16)
+
+
+def _calendar_date(text: str) -> bool:
+    if _DATE.fullmatch(text) is None:
+        return False
+    try:
+        datetime.date.fromisoformat(text)
+    except ValueError:
+        return False
+    return True
+
+
+def _local_datetime(text: str) -> bool:
+    match = _LOCAL_DATETIME.fullmatch(text)
+    if match is None or not _calendar_date(match.group(1)):
+        return False
+    try:
+        # datetime.time rejects second 60, so leap-second notation is refused.
+        datetime.time(int(match.group(2)), int(match.group(3)), int(match.group(4)))
+    except ValueError:
+        return False
+    return True
+
+
+def _seconds_nanos(value: object) -> bool:
+    return _is_list(value, 2) and _is_int(value[0]) and _is_int(value[1]) and 0 <= value[1] < _NANOS_LIMIT
+
+
+def _decimal(value: object) -> bool:
+    if not (_is_list(value, 2) and _is_int(value[0]) and _is_int(value[1])):
+        return False
+    coefficient, exponent = value
+    if coefficient == 0:
+        return exponent == 0
+    return coefficient % 10 != 0
+
+
+def _option(value: object) -> bool:
+    if not _is_list(value):
+        return False
+    if len(value) == 1:
+        return _is_int(value[0]) and value[0] == 0
+    return len(value) == 2 and _is_int(value[0]) and value[0] == 1
+
+
+def _cwd_digest(database: Tag, runtime: Tag, generation: int) -> bytes:
+    """The CWD snapshot_id: SHA-256 of 'orna.snapshot.v1', a zero byte and the structural encoding of the descriptor."""
+    return hashlib.sha256(b"orna.snapshot.v1\x00" + encode([0, database, runtime, generation])).digest()
+
+
+def _snapshot(value: object) -> bool:
+    if not _is_list(value):
+        return False
+    if len(value) == 5 and _is_int(value[0]) and value[0] == 0:
+        return (
+            _is_uuid(value[1])
+            and _is_uuid(value[2])
+            and _uint(value[3])
+            and _is_bytes(value[4], 32)
+            and value[4] == _cwd_digest(value[1], value[2], value[3])
+        )
+    if len(value) == 4 and _is_int(value[0]) and value[0] == 1:
+        algorithm = value[2]
+        return _is_uuid(value[1]) and (
+            (algorithm == "sha1" and _is_bytes(value[3], 20)) or (algorithm == "sha256" and _is_bytes(value[3], 32))
+        )
+    return False
+
+
+def _pinned_row(value: object) -> bool:
+    return _is_list(value, 4) and _is_uuid(value[0]) and _is_uuid(value[1]) and _snapshot(value[3])
+
+
+def _record(value: object) -> bool:
+    if not (_is_list(value, 2) and (value[0] is None or _is_uuid(value[0])) and _is_list(value[1])):
+        return False
+    if not all(_is_list(field, 2) and (type(field[0]) is str or _is_uuid(field[0])) for field in value[1]):
+        return False
+    names = [field[0] for field in value[1]]
+    # Structural field names are NFC text, and equal field keys are invalid (formats spec, structural records).
+    if not all(unicodedata.is_normalized("NFC", name) for name in names if type(name) is str):
+        return False
+    keys = [name if type(name) is str else name.value for name in names]
+    return len(set(keys)) == len(keys)
+
+
+def _enum(value: object) -> bool:
+    return _is_list(value, 3) and _is_uuid(value[0]) and _is_uuid(value[1]) and (value[2] is None or _is_tagged(value[2], 60009))
+
+
+def _error(value: object) -> bool:
+    if not isinstance(value, CborMap):
+        return False
+    keys = [key for key, _ in value.entries]
+    if not all(_is_int(key) for key in keys) or sorted(keys) != [0, 1, 2, 3]:
+        return False
+    fields = dict(value.entries)
+    causes = fields[2]
+    details = fields[3]
+    return (
+        _is_list(causes)
+        and all(_is_tagged(cause, 60016) for cause in causes)
+        and isinstance(details, CborMap)
+        and all(type(key) is str for key, _ in details.entries)
+    )
+
+
+def _zoned_datetime(value: object) -> bool:
+    return _is_list(value, 3) and _is_tagged(value[0], 60002) and _is_tagged(value[1], 60004) and _is_int(value[2])
+
+
+def _range(value: object) -> bool:
+    return (
+        _is_list(value, 3)
+        and _is_tagged(value[0], 60013)
+        and _is_tagged(value[1], 60013)
+        and type(value[2]) is bool
+    )
+
+
+def _opaque_representation(name: str, representation: object) -> bool:
+    if name in _UUID_NAMES:
+        return _is_uuid(representation)
+    if name in _DIGEST_NAMES:
+        return _is_bytes(representation, 32)
+    if name in _VERSION_NAMES:
+        return _uint(representation)
+    if name == "sys.GitOid" and _is_list(representation, 2):
+        algorithm, digest = representation
+        return (algorithm == "sha1" and _is_bytes(digest, 20)) or (algorithm == "sha256" and _is_bytes(digest, 32))
+    return False
+
+
+def _opaque(value: object) -> bool:
+    return _is_list(value, 2) and type(value[0]) is str and _opaque_representation(value[0], value[1])
+
+
+def _repository_path(text: str) -> bool:
+    if not text or text.startswith("/") or "\\" in text or "\0" in text:
+        return False
+    return all(segment not in ("", ".", "..") for segment in text.split("/"))
+
+
+def _path(value: object) -> bool:
+    if not (_is_list(value, 2) and type(value[0]) is str and value[0] in _PATH_FLAVOURS and type(value[1]) is str):
+        return False
+    return value[0] != "repo" or _repository_path(value[1])
+
+
+# One rule per registered OVB-1 tag: the payload shape and the constraints the 1.1.0 table states.
+_REGISTRY_RULES = {
+    UUID_TAG: lambda p: _is_bytes(p, 16),
+    60000: _decimal,
+    60001: lambda p: type(p) is str and _calendar_date(p),
+    60002: _seconds_nanos,
+    60003: lambda p: type(p) is str and _local_datetime(p),
+    60004: lambda p: type(p) is str and p != "",
+    60005: _seconds_nanos,
+    60006: lambda p: _is_list(p, 2) and _is_uuid(p[1]),
+    60007: lambda p: _is_list(p, 2) and _is_tagged(p[0], 60000) and _is_uuid(p[1]),
+    60008: _enum,
+    60009: _record,
+    60010: _pinned_row,
+    60011: lambda p: isinstance(p, CborMap),
+    60012: lambda p: _is_list(p, 4) and _is_list(p[3]),
+    60013: _option,
+    60014: lambda p: _is_list(p, 0),
+    60015: lambda p: _is_list(p) and len(p) > 0,
+    60016: _error,
+    60017: lambda p: _is_int(p) and 0 <= p <= _TIME_OF_DAY_MAX,
+    60018: _zoned_datetime,
+    60019: _range,
+    60020: lambda p: _is_list(p, 2) and _is_uuid(p[0]),
+    60021: lambda p: _is_list(p, 3) and _is_uuid(p[0]) and _is_uuid(p[1]),
+    60022: lambda p: _is_list(p, 4) and _is_uuid(p[0]) and _is_uuid(p[1]) and p[3] is False,
+    60023: _opaque,
+    60024: _path,
+    60025: lambda p: _is_list(p, 2) and p[0] == "sha256" and _is_bytes(p[1], 32),
+}
+
+
+def _check_registry_tree(value: object, where: str) -> None:
+    """Apply each tag's registry rule to every tag in the decoded tree; unknown tags fail closed."""
+    if isinstance(value, Tag):
+        rule = _REGISTRY_RULES.get(value.number)
+        if rule is None or not rule(value.value):
+            _reject(f"{where}: tag {value.number} payload violates the registry")
+        _check_registry_tree(value.value, where)
+    elif isinstance(value, list):
+        for item in value:
+            _check_registry_tree(item, where)
+    elif isinstance(value, CborMap):
+        for key, item in value.entries:
+            _check_registry_tree(key, where)
+            _check_registry_tree(item, where)
 
 
 def decode_rov2(data: bytes, where: str = "ROV-2 Blob") -> StoredBlob:
