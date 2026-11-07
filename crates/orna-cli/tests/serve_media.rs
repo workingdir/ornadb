@@ -115,6 +115,17 @@ fn committed_payload_project(
     payload: &[u8],
     media_type: &str,
 ) -> (PathBuf, String) {
+    committed_payload_project_with_limit(directory, source_name, payload, media_type, 65536)
+}
+
+/// Like [`committed_payload_project`], with an explicit capture byte bound.
+fn committed_payload_project_with_limit(
+    directory: &TempDir,
+    source_name: &str,
+    payload: &[u8],
+    media_type: &str,
+    capture_limit: u64,
+) -> (PathBuf, String) {
     let root = directory.path().join("library");
     let init = orna(
         directory.path(),
@@ -142,7 +153,7 @@ fn committed_payload_project(
     // The blob source must lie inside the repository worktree (the capture root).
     fs::write(root.join(source_name), payload).expect("write the payload into the worktree");
     let input = format!(
-        "main.Object.insert({{ id: \"a\", payload: sys.blob.annotate(sys.blob.capture_file(\"{}\", \"{source_name}\", 65536), \"{media_type}\"), content: \"x\" }})",
+        "main.Object.insert({{ id: \"a\", payload: sys.blob.annotate(sys.blob.capture_file(\"{}\", \"{source_name}\", {capture_limit}), \"{media_type}\"), content: \"x\" }})",
         root.to_str().expect("UTF-8 test path")
     );
     let inserted = orna_repl(&root, &input);
@@ -289,8 +300,24 @@ struct Served {
 /// A running server over `payload` committed as `media_type` from the worktree
 /// file `source_name`.
 fn served_payload(source_name: &str, payload: &[u8], media_type: &str) -> Served {
+    served_payload_with_limit(source_name, payload, media_type, 65536)
+}
+
+/// Like [`served_payload`], with an explicit capture byte bound.
+fn served_payload_with_limit(
+    source_name: &str,
+    payload: &[u8],
+    media_type: &str,
+    capture_limit: u64,
+) -> Served {
     let directory = TempDir::new().expect("temporary project directory");
-    let (root, relation) = committed_payload_project(&directory, source_name, payload, media_type);
+    let (root, relation) = committed_payload_project_with_limit(
+        &directory,
+        source_name,
+        payload,
+        media_type,
+        capture_limit,
+    );
     let commit = git_stdout(&root, &["rev-parse", "HEAD"]);
     let descriptor = committed_descriptor(&root, &relation);
     let (server, address) = start_server(&root);
@@ -735,4 +762,73 @@ fn preview_refuses_a_stale_commit_and_other_methods() {
     )
     .expect("POST");
     assert_eq!(refused.status, 405);
+}
+
+/// The descriptor is authority only while HEAD references it: after the row is
+/// deleted and republished, the old descriptor is not served under the new commit.
+#[test]
+fn preview_and_media_refuse_a_descriptor_no_longer_referenced_at_head() {
+    let directory = TempDir::new().expect("temporary project directory");
+    let (root, relation) = committed_payload_project(
+        &directory,
+        "pixel.png",
+        &fixture_bytes("pixel.png"),
+        "image/png",
+    );
+    let descriptor = committed_descriptor(&root, &relation);
+    let removed = orna_repl(&root, "main.Object.delete(\"a\")");
+    assert_success(&removed, "REPL delete");
+    let published = orna(&root, &["publish", "--message", "Remove object"]);
+    assert_success(&published, "orna publish");
+    let commit = git_stdout(&root, &["rev-parse", "HEAD"]);
+    let (_server, address) = start_server(&root);
+    for path in [
+        format!("/media/{commit}/{descriptor}"),
+        format!("/preview/{commit}/{descriptor}"),
+    ] {
+        let reply = request(&address, "GET", &path, &[]).expect("GET succeeds");
+        assert_eq!(reply.status, 404, "{path} is not referenced at HEAD");
+        assert_eq!(reply.body, br#"{"error":"media.not_found"}"#.to_vec());
+    }
+}
+
+#[test]
+fn preview_foreign_host_and_origin_are_refused() {
+    let served = served_payload("pixel.png", &fixture_bytes("pixel.png"), "image/png");
+    let foreign_host = request(
+        &served.address,
+        "GET",
+        &preview_path(&served),
+        &[("Host", "evil.example")],
+    )
+    .expect("GET succeeds at transport");
+    assert_eq!(foreign_host.status, 403);
+    assert_eq!(foreign_host.body, br#"{"error":"host_denied"}"#.to_vec());
+    let foreign_origin = request(
+        &served.address,
+        "GET",
+        &preview_path(&served),
+        &[("Origin", "http://evil.example")],
+    )
+    .expect("GET succeeds at transport");
+    assert_eq!(foreign_origin.status, 403);
+    assert_eq!(
+        foreign_origin.body,
+        br#"{"error":"origin_denied"}"#.to_vec()
+    );
+}
+
+#[test]
+fn preview_refuses_a_declared_wave_with_wrong_magic_as_malformed_422() {
+    let served = served_payload(
+        "fake.wav",
+        b"this is plainly not a RIFF/WAVE container",
+        "audio/wav",
+    );
+    let reply = request(&served.address, "GET", &preview_path(&served), &[]).expect("GET");
+    assert_eq!(
+        reply.status, 422,
+        "MIME never substitutes for byte validation"
+    );
+    assert!(String::from_utf8_lossy(&reply.body).contains("media.preview.malformed"));
 }
