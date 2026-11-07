@@ -34,6 +34,8 @@ const CAPTURE_SOURCE: &str = "ORNA_TEST_CAPTURE_SOURCE";
 const CAPTURE_RELATION: &str = "ORNA_TEST_CAPTURE_RELATION";
 const CAPTURE_SCHEMA_ROOT: &str = "ORNA_TEST_CAPTURE_SCHEMA_ROOT";
 const CAPTURE_STORE_ROOT: &str = "ORNA_TEST_CAPTURE_STORE_ROOT";
+const CRASH_RELEASE: &str = "ORNA_TEST_PUBLICATION_CRASH_RELEASE";
+const CAPTURE_OUTCOME: &str = "ORNA_TEST_CAPTURE_OUTCOME";
 
 async fn commit_capture(
     repository: &Repository,
@@ -228,7 +230,9 @@ fn launch_capture_child(
         .env(CAPTURE_RELATION, hex(&relation_id))
         .env(CAPTURE_SCHEMA_ROOT, schema_root)
         .env(CAPTURE_STORE_ROOT, store_root)
-        .env(CRASH_DIR, crash_dir);
+        .env(CRASH_DIR, crash_dir)
+        .env(CRASH_RELEASE, crash_dir.join("release"))
+        .env(CAPTURE_OUTCOME, crash_dir.join("outcome"));
     for name in [
         "GIT_DIR",
         "GIT_WORK_TREE",
@@ -240,6 +244,54 @@ fn launch_capture_child(
     }
     command.args(["--exact", "capture_crash_child", "--nocapture"]);
     ChildGuard(command.spawn().expect("capture crash child starts"))
+}
+
+/// Object count reported by `git count-objects -v`, used to show a prune removed
+/// a loose object.
+fn loose_object_count(root: &Path) -> u64 {
+    let output = git_output(root, &["count-objects", "-v"], None);
+    String::from_utf8(output)
+        .unwrap()
+        .lines()
+        .find_map(|line| line.strip_prefix("count: "))
+        .expect("count-objects reports loose objects")
+        .trim()
+        .parse()
+        .unwrap()
+}
+
+/// Waits until the capture child has published its pause marker, meaning its
+/// first chunk is written and unrooted and its maintenance lease is held.
+fn await_capture_pause(child: &mut ChildGuard, marker: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !marker.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        marker.exists(),
+        "capture child never paused at the unrooted chunk; status: {:?}",
+        child.try_wait().unwrap()
+    );
+}
+
+/// Releases a paused capture child and waits for it to exit successfully.
+fn release_and_await_capture(child: &mut ChildGuard, release: &Path) {
+    std::fs::write(release, b"resume").unwrap();
+    let deadline = Instant::now() + Duration::from_mins(1);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "capture child did not resume after release"
+        );
+        thread::sleep(Duration::from_millis(10));
+    };
+    assert!(
+        status.success(),
+        "capture child failed after release: {status:?}"
+    );
 }
 
 #[tokio::test]
@@ -261,6 +313,16 @@ async fn capture_crash_child() {
             let _candidate = capability
                 .capture_blob_candidate(File::open(&source_path).unwrap(), 1 << 20)
                 .unwrap();
+        }
+        "capture-chunk-unrooted" => {
+            let outcome = std::env::var(CAPTURE_OUTCOME).expect("capture outcome path");
+            let result =
+                capability.capture_blob_candidate(File::open(&source_path).unwrap(), 1 << 20);
+            let record = match &result {
+                Ok(_) => "ok".to_owned(),
+                Err(error) => format!("err {error:?}"),
+            };
+            std::fs::write(outcome, record).unwrap();
         }
         "pin" | "row-commit" => {
             let base = repository.head().unwrap().unwrap();
@@ -2479,6 +2541,135 @@ async fn capture_and_row_commit_recover_after_process_kill() {
             second.status.code().unwrap()
         );
     }
+}
+
+/// The capture child is paused after its first chunk is written and before any
+/// ref roots it. While paused, the parent runs `git prune --expire=now`, which
+/// bypasses the maintenance lease (ORNA-CAP-006, ORNA-GIT-010 make that path
+/// unsupported). The capture must then either finish or return a typed error;
+/// it must not panic, move HEAD, or publish a row.
+#[test]
+fn capture_chunk_unrooted_by_bypassing_prune_fails_closed() {
+    let source = TempDir::new().unwrap();
+    let payload: Vec<u8> = (0..(1usize << 20))
+        .map(|index| (index.wrapping_mul(0x9E37_79B9) >> 13).to_le_bytes()[0])
+        .collect();
+    let source_path = source.path().join("capture.bin");
+    std::fs::write(&source_path, &payload).unwrap();
+    let (directory, repository, relation_id, format_context) = object_format3_repository();
+    let root = directory.path();
+    let base = head(&repository);
+    let schema_root = hex(format_context.schema_root().as_bytes());
+    let store_root = hex(format_context.store_root().as_bytes());
+    let crash = TempDir::new().unwrap();
+    let marker = crash.path().join(MARKER_FILE);
+    let release = crash.path().join("release");
+    let outcome_path = crash.path().join("outcome");
+    let mut child = launch_capture_child(
+        root,
+        &source_path,
+        relation_id,
+        &schema_root,
+        &store_root,
+        "capture-chunk-unrooted",
+        crash.path(),
+    );
+    await_capture_pause(&mut child, &marker);
+    let loose_before = loose_object_count(root);
+    git(root, &["prune", "--expire=now"]);
+    let loose_after = loose_object_count(root);
+    assert!(
+        loose_after < loose_before,
+        "prune removed no loose object while the chunk was unrooted ({loose_before} before, {loose_after} after)"
+    );
+    release_and_await_capture(&mut child, &release);
+    let outcome = std::fs::read_to_string(&outcome_path)
+        .expect("capture child records a typed outcome instead of panicking");
+    assert_eq!(head(&repository), base, "capture moved HEAD");
+    assert!(
+        committed_store_rows(&repository, relation_id).is_empty(),
+        "capture published a row"
+    );
+    println!("unrooted-chunk capture outcome: {outcome}");
+    if outcome == "ok" {
+        let capability = repository.capture_capability(relation_id).unwrap();
+        capability
+            .capture_blob_candidate(File::open(&source_path).unwrap(), 1 << 20)
+            .expect("fresh capture verifies after the prune");
+    } else {
+        assert!(
+            outcome.starts_with("err "),
+            "unexpected capture outcome: {outcome}"
+        );
+    }
+    git(root, &["fsck", "--no-dangling", "--no-progress"]);
+}
+
+/// Family C coordinated-GC leg (ornadb-5il1.408, ORNA-CAP-006): the capture
+/// child is paused with its first chunk written and unrooted, while it holds
+/// the shared maintenance lease for the whole capture call. The engine's own
+/// coordinated GC, entered through `Repository::with_maintenance_boundary`, must
+/// be refused as busy while the capture is paused and must not touch the object
+/// store. After the capture resumes it must complete with full verification,
+/// publish no row, and leave the boundary free for the GC.
+#[test]
+fn capture_paused_refuses_coordinated_gc_then_completes_verified() {
+    let source = TempDir::new().unwrap();
+    let payload: Vec<u8> = (0..(1usize << 20))
+        .map(|index| (index.wrapping_mul(0x9E37_79B9) >> 13).to_le_bytes()[0])
+        .collect();
+    let source_path = source.path().join("capture.bin");
+    std::fs::write(&source_path, &payload).unwrap();
+    let (directory, repository, relation_id, format_context) = object_format3_repository();
+    let root = directory.path();
+    let base = head(&repository);
+    let schema_root = hex(format_context.schema_root().as_bytes());
+    let store_root = hex(format_context.store_root().as_bytes());
+    let crash = TempDir::new().unwrap();
+    let marker = crash.path().join(MARKER_FILE);
+    let release = crash.path().join("release");
+    let outcome_path = crash.path().join("outcome");
+    let mut child = launch_capture_child(
+        root,
+        &source_path,
+        relation_id,
+        &schema_root,
+        &store_root,
+        "capture-chunk-unrooted",
+        crash.path(),
+    );
+    await_capture_pause(&mut child, &marker);
+    let loose_before = loose_object_count(root);
+    let refused =
+        repository.with_maintenance_boundary(|| Ok::<(), orna_repository::RepositoryError>(()));
+    assert!(
+        matches!(
+            refused,
+            Err(orna_repository::RepositoryError::RepositoryBusy)
+        ),
+        "coordinated GC ran while the capture held its lease: {refused:?}"
+    );
+    assert_eq!(
+        loose_object_count(root),
+        loose_before,
+        "refused coordinated GC changed the object store"
+    );
+    release_and_await_capture(&mut child, &release);
+    let outcome = std::fs::read_to_string(&outcome_path)
+        .expect("capture child records a typed outcome instead of panicking");
+    assert_eq!(
+        outcome, "ok",
+        "capture with no prune must complete with full verification"
+    );
+    assert_eq!(head(&repository), base, "capture moved HEAD");
+    assert!(
+        committed_store_rows(&repository, relation_id).is_empty(),
+        "capture published a row"
+    );
+    repository
+        .with_maintenance_boundary(|| Ok::<(), orna_repository::RepositoryError>(()))
+        .expect("coordinated GC boundary is free once the capture completes");
+    git(root, &["fsck", "--no-dangling", "--no-progress"]);
 }
 
 /// Refuses one activation fault point without unwinding, so the caller can leave
