@@ -527,7 +527,6 @@ gate = "G"
 id = "G8"
 title = "Remove devtools and keep local queries, mount and content IO working"
 select = [{ record = "workspace-cli", package = "orna-cli", target = "test:serve_devtools_removal", test = "devtools_removal_keeps_local_query_mount_and_content_io" }]
-limitations = ["orna serve still answers /tree/ and /blob/ with a native git listing (ornadb-5il1.498)."]
 
 [[item]]
 gate = "G"
