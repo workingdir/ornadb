@@ -27,7 +27,10 @@ Usage::
 REPOSITORY is a repository's top-level directory or a bare repository, for
 example the result of ``orna export ARCHIVE --restore DEST``. COMMIT defaults to
 ``HEAD``. Gitlink dependencies are read from ``--dependency`` mappings, from a
-nested repository at the gitlink's path, or from ``.git/modules/<path>``.
+nested repository at the gitlink's path, or from ``.git/modules/<path>``. A
+gitlink is recorded as a verified pin: the extractor checks that the pinned
+commit object exists in that dependency repository and does not extract the
+dependency's contents. A pin whose commit is absent exits 1 as unavailable.
 
 The JSON report is written to stdout with sorted keys. Each Blob's verified
 bytes are written to ``DIR/blobs/<sha256>``. A structural violation, an
@@ -89,7 +92,6 @@ REFS_TREE_LIMIT = 65_536
 MAX_CBOR_DEPTH = 256
 MAX_CBOR_ITEMS = 4_000_000
 MAX_DIRECTORY_DEPTH = 256
-MAX_DEPENDENCY_DEPTH = 32
 
 UUID_TAG = 37
 OPTION_TAG = 60013
@@ -2102,8 +2104,8 @@ class Extraction:
         self.dependency_paths = dependencies
         self.objects_verified = 0
 
-    def snapshot(self, repository: Path, objects: GitObjects, commit: str, commit_data: bytes, prefix: str, depth: int) -> dict:
-        where = f"snapshot {commit}" if not prefix else f"dependency {prefix} at {commit}"
+    def snapshot(self, repository: Path, objects: GitObjects, commit: str, commit_data: bytes) -> dict:
+        where = f"snapshot {commit}"
         tree = commit_tree(commit_data, objects.width, where)
         modules: list[dict] = []
         gitlinks: list[tuple[str, str]] = []
@@ -2149,13 +2151,10 @@ class Extraction:
         report: dict = {"commit": commit, "tree": tree, "modules": sorted(modules, key=lambda item: item["path"].encode("utf-8"))}
         graph = Graph(objects, self.blobs)
         if orna_tree is None:
-            if not prefix:
-                fail(f"{where}: commit has no .orna directory; it is not an Orna database snapshot")
-            report.update({"database": None, "relations": [], "store_root": None})
-        else:
-            report.update(self.database(objects, graph, orna_tree, where))
+            fail(f"{where}: commit has no .orna directory; it is not an Orna database snapshot")
+        report.update(self.database(objects, graph, orna_tree, where))
         report["dependencies"] = [
-            self.dependency(repository, objects.width, path, oid, prefix, depth, where) for path, oid in sorted(gitlinks, key=lambda item: item[0].encode("utf-8"))
+            self.dependency(repository, objects.width, path, oid, where) for path, oid in sorted(gitlinks, key=lambda item: item[0].encode("utf-8"))
         ]
         return report
 
@@ -2185,13 +2184,10 @@ class Extraction:
             "store_root": store.oid,
         }
 
-    def dependency(self, repository: Path, width: int, path: str, commit: str, prefix: str, depth: int, where: str) -> dict:
-        full_path = f"{prefix}/{path}" if prefix else path
-        if depth >= MAX_DEPENDENCY_DEPTH:
-            fail(f"{where}: dependencies nest deeper than {MAX_DEPENDENCY_DEPTH} levels")
+    def dependency(self, repository: Path, width: int, path: str, commit: str, where: str) -> dict:
         candidates = []
-        if full_path in self.dependency_paths:
-            candidates.append(self.dependency_paths[full_path])
+        if path in self.dependency_paths:
+            candidates.append(self.dependency_paths[path])
         candidates.append(repository / path)
         administrative = git_directory(repository)
         if administrative is not None:
@@ -2199,20 +2195,19 @@ class Extraction:
         for candidate in candidates:
             if git_directory(candidate) is None:
                 continue
-            objects = GitObjects(candidate, f"dependency {full_path}", width)
+            objects = GitObjects(candidate, f"dependency {path}", width)
             try:
                 try:
-                    commit_data = objects.read(commit, "commit", SOURCE_TREE_BYTES_LIMIT, f"dependency {full_path}")
+                    objects.read(commit, "commit", SOURCE_TREE_BYTES_LIMIT, f"dependency {path}")
                 except UnavailableObject:
                     continue
-                snapshot = self.snapshot(candidate, objects, commit, commit_data, full_path, depth + 1)
                 self.objects_verified += len(objects.verified)
-                return {"commit": commit, "path": path, "snapshot": snapshot}
+                return {"commit": commit, "path": path, "verified": True}
             finally:
                 objects.close()
         fail(
-            f"{where}: dependency {full_path} at {commit} is unavailable; "
-            f"pass --dependency {full_path}=REPOSITORY naming a repository that holds it"
+            f"{where}: dependency {path} at {commit} is unavailable; "
+            f"pass --dependency {path}=REPOSITORY naming a repository that holds it"
         )
 
 
@@ -2224,7 +2219,7 @@ def extract(repository: Path, revision: str, output: Path, dependencies: dict[st
     objects = GitObjects(repository, f"repository {repository}")
     try:
         commit, commit_data = objects.resolve_commit(revision, f"commit {revision}")
-        snapshot = extraction.snapshot(repository, objects, commit, commit_data, "", 0)
+        snapshot = extraction.snapshot(repository, objects, commit, commit_data)
         extraction.objects_verified += len(objects.verified)
         algorithm = objects.algorithm
     finally:
