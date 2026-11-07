@@ -8,8 +8,9 @@ The byte layout follows the draft chapter source/37 that accompanies the
 1.1.0 compatibility archive and is cross-checked against the golden vectors in
 scripts/golden/ogb1-blob-vectors.json. It is independent of the Rust engine.
 
-Not implemented: the ORR-2 row-unit tokenizer that finds the logical record
-inside a repository row. Callers pass the already-tokenized field pairs.
+Row units: `parse_row_unit` tokenizes one loose row unit from its committed bytes
+(ORNA-ROW-001); `row_blob_field` reads an ORR-2 Blob field of that row. Only
+literal values are admitted; any expression is refused, never evaluated.
 """
 
 from __future__ import annotations
@@ -334,3 +335,205 @@ def orr2_inline_bytes(text: str) -> bytes:
     if base64.b64encode(raw).decode("ascii") != text:
         _reject("ORR-2 inline Blob is not canonical padded Base64")
     return raw
+
+
+_ROW_IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_ROW_INT = re.compile(r"-?(?:0|[1-9][0-9]*)")
+_ROW_KEYWORDS = {"true": True, "false": False, "null": None}
+_ROW_ESCAPES = {'"': '"', "\\": "\\", "n": "\n", "r": "\r", "t": "\t", "0": "\0"}
+_ROW_WHITESPACE = " \t\r\n"
+_ROW_HEX = frozenset("0123456789abcdefABCDEF")
+
+
+class _RowUnitParser:
+    """Tokenizer for one row unit: one record of literal values (see parse_row_unit)."""
+
+    def __init__(self, text: str, where: str) -> None:
+        self.text = text
+        self.pos = 0
+        self.where = where
+
+    def fail(self, message: str) -> None:
+        _reject(f"{self.where}: {message} at offset {self.pos}")
+
+    def skip(self) -> None:
+        text = self.text
+        while self.pos < len(text):
+            if text[self.pos] in _ROW_WHITESPACE:
+                self.pos += 1
+            elif text.startswith("//", self.pos):
+                end = text.find("\n", self.pos)
+                self.pos = len(text) if end < 0 else end + 1
+            elif text.startswith("/*", self.pos):
+                self._block_comment()
+            else:
+                return
+
+    def _block_comment(self) -> None:
+        # Block comments nest, as in the engine lexer.
+        depth = 0
+        while True:
+            if self.text.startswith("/*", self.pos):
+                depth += 1
+                self.pos += 2
+            elif self.text.startswith("*/", self.pos):
+                depth -= 1
+                self.pos += 2
+                if depth == 0:
+                    return
+            elif self.pos < len(self.text):
+                self.pos += 1
+            else:
+                self.fail("unterminated block comment")
+
+    def peek(self) -> str:
+        self.skip()
+        return self.text[self.pos] if self.pos < len(self.text) else ""
+
+    def expect(self, char: str) -> None:
+        if self.peek() != char:
+            self.fail(f"expected {char!r}")
+        self.pos += 1
+
+    def value(self) -> object:
+        char = self.peek()
+        if char == "{":
+            return self.record()
+        if char == "[":
+            return self.array()
+        if char == '"':
+            return self.string()
+        if char and (char == "-" or "0" <= char <= "9"):
+            match = _ROW_INT.match(self.text, self.pos)
+            if match is None:
+                self.fail("malformed integer")
+            self.pos = match.end()
+            return int(match.group(0))
+        match = _ROW_IDENT.match(self.text, self.pos) if char else None
+        if match is not None and match.group(0) in _ROW_KEYWORDS:
+            self.pos = match.end()
+            return _ROW_KEYWORDS[match.group(0)]
+        self.fail("expression is not a literal value")
+        raise AssertionError("unreachable")
+
+    def record(self) -> dict[str, object]:
+        self.expect("{")
+        out: dict[str, object] = {}
+        if self.peek() == "}":
+            self.pos += 1
+            return out
+        while True:
+            self.skip()
+            match = _ROW_IDENT.match(self.text, self.pos)
+            if match is None or match.group(0) in _ROW_KEYWORDS:
+                self.fail("expected a field name")
+            name = match.group(0)
+            self.pos = match.end()
+            if name in out:
+                self.fail(f"duplicate field {name}")
+            self.expect(":")
+            out[name] = self.value()
+            separator = self.peek()
+            if separator == "}":
+                self.pos += 1
+                return out
+            if separator != ",":
+                self.fail("expected ',' or '}'")
+            self.pos += 1
+            if self.peek() == "}":
+                self.pos += 1
+                return out
+
+    def array(self) -> list[object]:
+        self.expect("[")
+        out: list[object] = []
+        if self.peek() == "]":
+            self.pos += 1
+            return out
+        while True:
+            out.append(self.value())
+            separator = self.peek()
+            if separator == "]":
+                self.pos += 1
+                return out
+            if separator != ",":
+                self.fail("expected ',' or ']'")
+            self.pos += 1
+            if self.peek() == "]":
+                self.pos += 1
+                return out
+
+    def string(self) -> str:
+        self.expect('"')
+        chars: list[str] = []
+        text = self.text
+        while self.pos < len(text):
+            char = text[self.pos]
+            self.pos += 1
+            if char == '"':
+                return "".join(chars)
+            if char == "{":
+                self.fail("string interpolation is not admitted in a row value")
+            if char != "\\":
+                chars.append(char)
+                continue
+            if self.pos >= len(text):
+                self.fail("unterminated string escape")
+            escape = text[self.pos]
+            self.pos += 1
+            if escape in _ROW_ESCAPES:
+                chars.append(_ROW_ESCAPES[escape])
+            elif escape == "u":
+                chars.append(self._unicode_escape())
+            else:
+                self.fail("invalid string escape")
+        self.fail("unterminated string")
+        raise AssertionError("unreachable")
+
+    def _unicode_escape(self) -> str:
+        if self.pos >= len(self.text) or self.text[self.pos] != "{":
+            self.fail("unicode escape requires '{'")
+        end = self.text.find("}", self.pos)
+        digits = self.text[self.pos + 1 : end] if end >= 0 else ""
+        if not (1 <= len(digits) <= 6 and all(c in _ROW_HEX for c in digits)):
+            self.fail("invalid unicode scalar escape")
+        scalar = int(digits, 16)
+        if scalar > 0x10FFFF or 0xD800 <= scalar <= 0xDFFF:
+            self.fail("invalid unicode scalar escape")
+        self.pos = end + 1
+        return chr(scalar)
+
+
+def parse_row_unit(data: bytes, where: str = "row unit") -> dict[str, object]:
+    """Tokenizes one loose row unit from its committed bytes (ORNA-ROW-001).
+
+    A row unit is exactly one record of literal values, with an optional
+    trailing comma, an optional trailing `;`, and only whitespace and comments
+    around it. Strict UTF-8 is required; any non-literal expression is refused.
+    """
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        _reject(f"{where}: row unit is not UTF-8")
+    parser = _RowUnitParser(text, where)
+    if parser.peek() != "{":
+        parser.fail("row unit must contain one record")
+    record = parser.record()
+    if parser.peek() == ";":
+        parser.pos += 1
+    if parser.peek() != "":
+        parser.fail("trailing content after the row record")
+    return record
+
+
+def row_blob_field(row: dict[str, object], field: str, where: str = "row unit") -> bytes | StoredBlob:
+    """One ORR-2 Blob field of a parsed row: inline padded Base64 bytes or a storage record."""
+    if field not in row:
+        _reject(f"{where}: Blob field {field} is absent")
+    value = row[field]
+    if isinstance(value, str):
+        return orr2_inline_bytes(value)
+    if isinstance(value, dict):
+        return orr2_reference(list(value.items()))
+    _reject(f"{where}: Blob field {field} is neither inline Base64 nor a storage record")
+    raise AssertionError("unreachable")
