@@ -273,8 +273,14 @@ title = "Exercise coordinated GC/repack and captured external edits"
 select = [
   { record = "gate-d-crash-matrix", package = "orna-cli", target = "test:publication_crash_matrix", test = "coordinated_gc_prune_keeps_pinned_objects_and_removes_unreferenced_ones" },
   { record = "gate-d-crash-matrix", package = "orna-cli", target = "test:publication_crash_matrix", test = "format3_publication_recovers_when_gc_prunes_candidate_before_publish" },
+  { record = "gate-d-crash-matrix", package = "orna-cli", target = "test:publication_crash_matrix", test = "cli_publication_reopens_after_external_edit_in_kill_window" },
+  { record = "gate-d-crash-matrix", package = "orna-cli", target = "test:publication_crash_matrix", test = "cli_publication_reopens_after_coordinated_gc_with_external_edit_in_kill_window" },
+  { record = "gate-d-crash-matrix", package = "orna-cli", target = "test:publication_crash_matrix", test = "managed_store_edit_in_kill_window_is_retained_and_not_rewound" },
+  { record = "gate-d-crash-matrix", package = "orna-cli", target = "test:publication_crash_matrix", test = "managed_store_payload_edit_in_kill_window_is_retained_and_not_rewound" },
+  { record = "gate-d-crash-matrix", package = "orna-cli", target = "test:publication_crash_matrix", test = "managed_store_discard_remedy_restores_payload_and_publishes" },
+  { record = "gate-d-crash-matrix", package = "orna-cli", target = "test:publication_crash_matrix", test = "capture_paused_refuses_coordinated_gc_then_completes_verified" },
 ]
-limitations = ["No Orna-coordinated maintenance operation exists; the tests run git gc directly (ornadb-5il1.58, ornadb-20ac)."]
+limitations = ["Capture holds the shared maintenance lease in production, but the exclusive Repository::with_maintenance_boundary (ORNA-CAP-006) that runs coordinated GC has only test callers; no production command runs git gc, repack or prune (ornadb-20ac). The first two rows call git gc directly, so only rows that enter the boundary prove coordination. Uncoordinated git prune --expire now is unsupported and is not advertised safe (D4)."]
 
 [[item]]
 gate = "D"
