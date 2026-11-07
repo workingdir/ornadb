@@ -648,6 +648,66 @@ fn build_index(
         return (root, leaves.len(), 1);
     }
 
+    if fault == Fault::NestedOverlap {
+        // Interior branch C overlaps its two leaves (both fences are 4). The
+        // root is well formed, so only a descent into C can detect the fault.
+        let left = make_leaf(
+            graph,
+            &domain,
+            &(0..5).map(|key| (key, key)).collect::<Vec<_>>(),
+        );
+        let right = make_leaf(
+            graph,
+            &domain,
+            &(5..10).map(|key| (key, key)).collect::<Vec<_>>(),
+        );
+        let inner = vec![
+            BranchCandidate {
+                max_key: encode_uint(4),
+                ..left
+            },
+            BranchCandidate {
+                max_key: encode_uint(4),
+                ..right
+            },
+        ];
+        let inner_oid = graph.add_node(encode_branch(&domain, 1, &inner), tree_edges(&inner), true);
+        let low = make_leaf(
+            graph,
+            &domain,
+            &(10..15).map(|key| (key, key)).collect::<Vec<_>>(),
+        );
+        let high = make_leaf(
+            graph,
+            &domain,
+            &(15..20).map(|key| (key, key)).collect::<Vec<_>>(),
+        );
+        let healthy = vec![low, high];
+        let healthy_oid = graph.add_node(
+            encode_branch(&domain, 1, &healthy),
+            tree_edges(&healthy),
+            true,
+        );
+        let branch = vec![
+            BranchCandidate {
+                max_key: encode_uint(4),
+                oid: inner_oid,
+                row_count: 10,
+            },
+            BranchCandidate {
+                max_key: encode_uint(19),
+                oid: healthy_oid,
+                row_count: 10,
+            },
+        ];
+        let root = graph.add_node(
+            encode_branch(&domain, 2, &branch),
+            tree_edges(&branch),
+            true,
+        );
+        return (root, 4, 3);
+    }
+
     let (mut level, leaf_count) = leaf_pages(graph, &domain, row_count);
     let mut height = 1u8;
     while level.len() > 1 {
@@ -697,6 +757,7 @@ enum Fault {
     BrokenCounts,
     GiantFanout,
     WrongSchemaDomain,
+    NestedOverlap,
 }
 
 fn schema_descriptor(relation_id: [u8; 16]) -> SchemaDescriptor {
@@ -2871,6 +2932,40 @@ fn orp1_malformed_graphs_report_specific_diagnostics() {
             FormatContextError::GraphMalformed(GraphError::InvalidDomain)
         )
     });
+}
+
+#[test]
+fn orp1_nested_overlap_reports_diagnostic_on_descent() {
+    use orna_repository::GraphError;
+    let fixture = build_fixture(20, Fault::NestedOverlap);
+    let repository =
+        Repository::discover(fixture.root.path()).expect("discover nested malformed fixture");
+    let context = repository
+        .open_format_context()
+        .expect("admit nested malformed graph snapshot header");
+    let snapshot = context
+        .load_row_map(fixture.relation_id)
+        .expect("root is well formed; only an interior branch is malformed");
+    let graph = context
+        .open_native_graph(&snapshot)
+        .expect("open nested malformed graph");
+    let scope = graph
+        .open_read_scope()
+        .expect("open read scope over nested malformed graph");
+    assert!(
+        matches!(
+            graph.lookup_row(&TypedKey::UInt(3), &scope),
+            Err(GraphError::OverlappingChildRange)
+        ),
+        "a key routed through the overlapping interior branch must report OverlappingChildRange"
+    );
+    assert!(
+        graph
+            .lookup_row(&TypedKey::UInt(15), &scope)
+            .expect("healthy sibling branch resolves")
+            .is_some(),
+        "the fault must stay localized to the overlapping branch"
+    );
 }
 
 #[test]
