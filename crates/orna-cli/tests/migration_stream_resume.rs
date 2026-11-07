@@ -6,7 +6,12 @@
 // time, so boxing them here would only move the state to the heap.
 #![allow(clippy::large_futures)]
 
-use std::{fs, path::Path, process::Command};
+use std::{
+    fs,
+    future::{Ready, ready},
+    path::Path,
+    process::Command,
+};
 
 use orna_repository::{Repository, RepositoryFormat};
 use orna_runtime::{
@@ -17,6 +22,11 @@ use orna_runtime::{
     StreamStep, TerminalOutcome, WriterLease, import_stream_carry, migration_copy_runtime_identity,
     read_stream_carry, repository_runtime_identity, runtime_identity_for_database_id,
 };
+use orna_runtime::{
+    StreamFailurePayload, StreamRunControl, StreamSource, StreamSourceDescriptor, StreamSourceKind,
+    StreamSourcePoll,
+};
+use orna_stream::{DeliveryIdentity, SafeDiagnostic};
 use tempfile::TempDir;
 
 fn git_output(directory: &Path, arguments: &[&str]) -> Vec<u8> {
@@ -895,6 +905,187 @@ fn migration_carries_checkpoint_bootstrap_pin_and_keeps_snapshot_checkpoint() {
     let carried = activated_snapshot_checkpoint(&destination);
     assert_eq!(carried.version, seeded.version);
     assert_eq!(carried.committed, seeded.committed);
+}
+
+/// The snapshot consumer's source. Its committed position is the snapshot's next
+/// delivery, `offset:0001/β`, and that delivery commits `offset:0002/β`. A checkpoint
+/// with no committed position would re-deliver the earlier item `offset:0000/β`, so the
+/// source yields it then; any other committed position has nothing left to deliver.
+struct SnapshotTailSource {
+    key: CheckpointKey,
+}
+
+impl SnapshotTailSource {
+    fn item(&self, position: &str, successor: &str, payload: &[u8]) -> StreamSourcePoll {
+        StreamSourcePoll::Item(Box::new(StreamItem {
+            delivery: DeliveryIdentity {
+                consumer: self.key.consumer.clone(),
+                source_format: self.key.source_format.clone(),
+                source: self.key.source.clone(),
+                partition_format: self.key.partition_format.clone(),
+                partition: self.key.partition.clone(),
+                position_format: self.key.position_format.clone(),
+                position: Position {
+                    token: Component::new(position).unwrap(),
+                },
+                successor: Position {
+                    token: Component::new(successor).unwrap(),
+                },
+            },
+            payload: payload.to_vec(),
+        }))
+    }
+}
+
+impl StreamSource for SnapshotTailSource {
+    type NextFuture<'a>
+        = Ready<Result<StreamSourcePoll, SafeDiagnostic>>
+    where
+        Self: 'a;
+    type WaitFuture<'a>
+        = Ready<Result<(), SafeDiagnostic>>
+    where
+        Self: 'a;
+
+    fn descriptor(&self) -> StreamSourceDescriptor {
+        StreamSourceDescriptor {
+            kind: StreamSourceKind::Finite,
+            replayable: true,
+        }
+    }
+
+    fn checkpoint_key(&self) -> CheckpointKey {
+        self.key.clone()
+    }
+
+    fn failure_payload(&self, item: &StreamItem) -> StreamFailurePayload {
+        StreamFailurePayload::Plaintext(item.payload.clone())
+    }
+
+    fn next<'a>(&'a mut self, checkpoint: &'a StreamCheckpoint) -> Self::NextFuture<'a> {
+        let poll = match checkpoint
+            .committed
+            .as_ref()
+            .map(|position| position.token.as_str())
+        {
+            None => self.item("offset:0000/β", "offset:0001/β", b"before-snapshot"),
+            Some("offset:0001/β") => {
+                self.item("offset:0001/β", "offset:0002/β", b"after-snapshot")
+            }
+            Some(_) => StreamSourcePoll::Exhausted,
+        };
+        ready(Ok(poll))
+    }
+
+    fn wait<'a>(&'a mut self, _: &'a dyn StreamRunControl) -> Self::WaitFuture<'a> {
+        ready(Ok(()))
+    }
+}
+
+/// One delivery as the handler saw it: its position, its successor and its payload.
+type Delivery = (String, String, Vec<u8>);
+
+/// Records every delivery and commits it with the supplied digest.
+struct RecordDeliveries {
+    seen: Vec<Delivery>,
+    next_digest: [u8; 32],
+}
+
+impl StreamHandler for RecordDeliveries {
+    fn handle(&mut self, item: &StreamItem) -> StreamHandlerResult {
+        self.seen.push((
+            item.delivery.position.token.as_str().to_owned(),
+            item.delivery.successor.token.as_str().to_owned(),
+            item.payload.clone(),
+        ));
+        StreamHandlerResult::Commit(StreamMutationBatch {
+            mutations: Vec::new(),
+            next_digest: self.next_digest,
+        })
+    }
+}
+
+/// Runs one step of the snapshot consumer's stream on an activated copy, opened by its
+/// format-3 identity. Returns the step and every delivery the handler saw.
+fn step_snapshot_tail(root: &Path) -> (StreamStep, Vec<Delivery>) {
+    runtime().block_on(async {
+        let repository = Repository::discover(root).unwrap();
+        let (identity, digest) = repository_runtime_identity(&repository).unwrap();
+        let state = RuntimeState::open(&repository, identity, digest)
+            .await
+            .expect("open activated runtime");
+        let writer = state.acquire_lease([48; 16]).await.unwrap();
+        let key = snapshot_key();
+        let mut source = SnapshotTailSource { key: key.clone() };
+        let mut handler = RecordDeliveries {
+            seen: Vec::new(),
+            next_digest: state.capture().await.unwrap().generation_digest(),
+        };
+        let step = state
+            .run_stream_once(writer, &key, &mut source, &mut handler)
+            .await
+            .expect("snapshot stream step runs");
+        (step, handler.seen)
+    })
+}
+
+/// An activated copy resumes the snapshot consumer from its carried bootstrap checkpoint.
+/// The first delivery is the one after the snapshot, the copy commits to version 43, and
+/// the earlier item is never re-delivered. A second step finds nothing left to deliver.
+#[test]
+fn activated_migration_copy_resumes_snapshot_stream_without_redelivery() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    dirty_legacy_source(&source);
+    let (seeded, _selected) = bootstrap_source_from_snapshot(&source);
+    assert_eq!(seeded.version, 42);
+    let destination = parent.path().join("migrated");
+    let prepared = run_copy(&source, &destination);
+    assert!(
+        prepared.status.success(),
+        "migrate copy: {}",
+        String::from_utf8_lossy(&prepared.stderr)
+    );
+    let activated = run_upgrade(&source, &destination);
+    assert!(
+        activated.status.success(),
+        "upgrade --yes-activate: {}",
+        String::from_utf8_lossy(&activated.stderr)
+    );
+
+    let carried = activated_snapshot_checkpoint(&destination);
+    assert_eq!(carried.version, 42);
+    assert_eq!(carried.committed, seeded.committed);
+
+    let (step, seen) = step_snapshot_tail(&destination);
+    assert_eq!(
+        seen,
+        vec![(
+            "offset:0001/β".to_owned(),
+            "offset:0002/β".to_owned(),
+            b"after-snapshot".to_vec(),
+        )]
+    );
+    let StreamStep::Committed { checkpoint } = step else {
+        panic!("the first delivery after the snapshot must commit");
+    };
+    assert_eq!(checkpoint.version, 43);
+    assert_eq!(
+        checkpoint
+            .committed
+            .as_ref()
+            .map(|position| position.token.as_str()),
+        Some("offset:0002/β")
+    );
+    assert_eq!(activated_snapshot_checkpoint(&destination).version, 43);
+
+    let (second, seen_again) = step_snapshot_tail(&destination);
+    assert!(
+        seen_again.is_empty(),
+        "nothing is delivered twice: {seen_again:?}"
+    );
+    assert!(matches!(second, StreamStep::Exhausted));
 }
 
 /// Inserts a failure for the source's checkpoint consumer, in `status`.
