@@ -2318,6 +2318,32 @@ fn source_state(source: &std::path::Path) -> Result<SourceState, Failure> {
     })
 }
 
+/// Every regular file under `source` with its bytes, keyed by its path relative
+/// to `source`. `.git/index` is left out: `git status` refreshes its stat cache
+/// without changing any commit, worktree file or format record.
+fn tree_bytes(
+    source: &std::path::Path,
+) -> Result<std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>, Failure> {
+    let io = |error: std::io::Error| Failure::Harness(format!("read legacy source tree: {error}"));
+    let index = source.join(".git/index");
+    let mut files = std::collections::BTreeMap::new();
+    let mut pending = vec![source.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory).map_err(io)? {
+            let path = entry.map_err(io)?.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path != index {
+                let relative = path
+                    .strip_prefix(source)
+                    .map_err(|error| Failure::Harness(format!("strip prefix: {error}")))?;
+                files.insert(relative.to_path_buf(), fs::read(&path).map_err(io)?);
+            }
+        }
+    }
+    Ok(files)
+}
+
 /// `orna --db DATABASE query ARGS --format json`, run from the database root.
 fn query(
     db: &mut Db,
@@ -2499,6 +2525,7 @@ fn activated_copy_tracks_loose_rows(db: &mut Db) -> Probe {
 fn refused_in_place_upgrade_keeps_the_source(db: &mut Db) -> Check {
     let source = legacy_source(db)?;
     let before = source_state(&source)?;
+    let before_tree = tree_bytes(&source)?;
     let unconfirmed = db.orna(&[
         "--db",
         utf8(&source)?,
@@ -2538,6 +2565,10 @@ fn refused_in_place_upgrade_keeps_the_source(db: &mut Db) -> Check {
     ensure!(
         source_state(&source)? == before,
         "a refused in-place upgrade changed the legacy source"
+    );
+    ensure!(
+        tree_bytes(&source)? == before_tree,
+        "a refused in-place upgrade changed a file in the legacy source tree"
     );
     Ok(())
 }
