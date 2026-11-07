@@ -13860,6 +13860,40 @@ pub enum GraphError {
     UnsupportedWriterProfile,
 }
 
+impl GraphError {
+    /// Whether this fault proves the stored graph is malformed (store-format-3
+    /// section 2). Operational faults (unavailable objects, quotas,
+    /// cancellation, durability, Git command failure, context mismatch) do not
+    /// prove malformation and are not reported as malformed.
+    #[must_use]
+    pub fn is_malformed(&self) -> bool {
+        matches!(
+            self,
+            Self::MalformedOid
+                | Self::UnknownNodeKind(_)
+                | Self::NonCanonicalData
+                | Self::NodeDataTooLarge(_)
+                | Self::FanoutExceeded(_)
+                | Self::HeightExceeded(_)
+                | Self::InvalidLength(_)
+                | Self::InvalidCount(_)
+                | Self::InvalidDomain
+                | Self::OverlappingChildRange
+                | Self::UncollapsedRoot
+                | Self::InvalidDigestLength
+                | Self::InvalidEmptyBlob
+                | Self::DuplicateRowKey
+                | Self::WrongNodeKind { .. }
+                | Self::InvalidTreeEnvelope
+                | Self::MissingNodeData
+                | Self::GitObjectMalformed
+                | Self::GitObjectHashMismatch
+                | Self::ContentIdentityMismatch
+                | Self::ChunkDigestMismatch
+        )
+    }
+}
+
 impl fmt::Display for GraphError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
