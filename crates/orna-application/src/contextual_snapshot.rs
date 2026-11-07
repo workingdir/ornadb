@@ -7,7 +7,7 @@
 //! evaluator boundary. It never stages mutations and never publishes.
 
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use orna_evaluator::{
     ContextValueEffectHandler, ContextValueRelationPage, EffectHandler, EvaluationError,
@@ -65,6 +65,26 @@ pub(crate) fn page_table_rows<T: Clone>(
     Ok((rows, next))
 }
 
+/// Pages the rows of one context-bearing table, keyed by encoded primary key.
+fn scan_context_table(
+    table: &BTreeMap<Vec<u8>, ContextValue>,
+    after: Option<&[u8]>,
+    limit: usize,
+    budget: &mut StepBudget,
+) -> Result<ContextValueRelationPage, EvaluationError> {
+    let mut live = Vec::with_capacity(table.len());
+    for (key, row) in table {
+        let logical = orna_foundation::Value::decode(key)
+            .map_err(|_| SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-SNAPSHOT"))?;
+        live.push((logical, row));
+    }
+    let (rows, next) = page_table_rows(live, after, limit, budget)?;
+    Ok(ContextValueRelationPage {
+        rows: rows.into_iter().cloned().collect(),
+        next,
+    })
+}
+
 /// Serves table scans from a decoded, context-bearing snapshot. Effects are
 /// declined here: a served read that reaches a non-table effect falls through
 /// to the evaluator's normal unhandled-call path.
@@ -83,18 +103,7 @@ impl ContextualSnapshotEffectHandler {
         let Some(table) = self.tables.get(source) else {
             return Ok(None);
         };
-        let mut live = Vec::with_capacity(table.len());
-        for (key, row) in table {
-            let logical = orna_foundation::Value::decode(key).map_err(|_| {
-                SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-SNAPSHOT")
-            })?;
-            live.push((logical, row));
-        }
-        let (rows, next) = page_table_rows(live, after, limit, budget)?;
-        Ok(Some(ContextValueRelationPage {
-            rows: rows.into_iter().cloned().collect(),
-            next,
-        }))
+        scan_context_table(table, after, limit, budget).map(Some)
     }
 }
 
@@ -174,11 +183,134 @@ pub fn evaluate_contextual_snapshot_read(
     .map_err(|error| ApplicationError::Evaluation(error.code().to_owned()))
 }
 
+impl ContextValueEffectHandler for SourceMutationEffectHandler {
+    fn handle_context(
+        &mut self,
+        _callee: &Expr,
+        _arguments: &[ContextValue],
+    ) -> Result<Option<ContextValue>, EvaluationError> {
+        Ok(None)
+    }
+
+    fn scan_context_relation_page_scoped(
+        &mut self,
+        source: &str,
+        _scope: RelationReadScope,
+        after: Option<&[u8]>,
+        limit: usize,
+        budget: &mut StepBudget,
+    ) -> Result<Option<ContextValueRelationPage>, EvaluationError> {
+        let Some(table) = self.context_table_rows.get(source) else {
+            return Ok(None);
+        };
+        scan_context_table(table, after, limit, budget).map(Some)
+    }
+}
+
+/// Evaluates the admitted entry over a committed snapshot in which every table
+/// whose schema holds a Blob is read from `context_rows` (format-3 rows decoded
+/// in the owner context), and every other table is read from `rows` through
+/// the canonical scan, as `evaluate_staged_over_table_rows` reads it.
+///
+/// `context_rows` must name exactly the Blob-holding tables, and each of those
+/// tables must carry no canonical rows in `rows`. Only table scans are served:
+/// any other effect is declined, and a read that stages a mutation is refused.
+/// No system host is attached to this read.
+pub fn evaluate_contextual_page_read(
+    application: &AdmittedApplication,
+    arguments: &BTreeMap<String, ContextValue>,
+    mut rows: RuntimeTableRows,
+    context_rows: BTreeMap<String, Vec<(Vec<u8>, ContextValue)>>,
+) -> Result<ContextValue, ApplicationError> {
+    let tables = crate::application_table_schemas(application);
+    let blob_tables = tables
+        .iter()
+        .filter(|(_, schema)| schema.fields.values().any(orna_project::holds_blob))
+        .map(|(name, _)| name.clone())
+        .collect::<BTreeSet<_>>();
+    if context_rows
+        .keys()
+        .any(|table| !blob_tables.contains(table))
+    {
+        return Err(ApplicationError::Runtime(
+            "contextual rows named a table without a Blob field".into(),
+        ));
+    }
+    for table in &blob_tables {
+        if !context_rows.contains_key(table) {
+            return Err(ApplicationError::UnadmittedTable(table.clone()));
+        }
+        if rows
+            .get(table)
+            .is_some_and(|table_rows| !table_rows.is_empty())
+        {
+            return Err(ApplicationError::Runtime(
+                "a Blob table carried canonical rows".into(),
+            ));
+        }
+        rows.insert(table.clone(), Vec::new());
+    }
+    for table in tables.keys().filter(|table| !blob_tables.contains(*table)) {
+        if !rows.contains_key(table) {
+            return Err(ApplicationError::UnadmittedTable(table.clone()));
+        }
+    }
+    if let Some(table) = rows.keys().find(|table| !tables.contains_key(*table)) {
+        return Err(ApplicationError::UnadmittedTable(table.clone()));
+    }
+    let mut context_table_rows = BTreeMap::new();
+    for (table, table_rows) in context_rows {
+        let mut decoded = BTreeMap::new();
+        for (key, row) in table_rows {
+            orna_foundation::Value::decode(&key).map_err(|_| {
+                ApplicationError::Runtime("contextual table row had an invalid key".into())
+            })?;
+            if decoded.insert(key, row).is_some() {
+                return Err(ApplicationError::Runtime(
+                    "contextual table had duplicate keys".into(),
+                ));
+            }
+        }
+        context_table_rows.insert(table, decoded);
+    }
+    let table_object_ids = crate::application_table_object_ids(application);
+    let mut handler = SourceMutationEffectHandler::with_table_rows_and_table_object_ids(
+        tables,
+        rows,
+        table_object_ids,
+    )?
+    .with_insert_defaults(
+        application.table_insert_defaults.clone(),
+        application.functions.clone(),
+        application.limits,
+    );
+    handler.context_table_rows = context_table_rows;
+    let mut budget = StepBudget::new(application.limits.max_steps);
+    let value = invoke_named_with_context_effects(
+        &application.entry,
+        &application.functions,
+        arguments,
+        application.limits,
+        &mut handler,
+        &mut budget,
+    )
+    .map_err(|error| ApplicationError::Evaluation(error.code().to_owned()))?;
+    if !handler.mutations.is_empty() {
+        return Err(ApplicationError::Runtime(
+            "a contextual read staged a mutation".into(),
+        ));
+    }
+    Ok(value)
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::ApplicationAuthority;
+    use orna_evaluator::{Environment, Limits};
+    use orna_semantic::Catalogue;
 
     struct UnavailableResolver;
 
@@ -250,5 +382,86 @@ mod tests {
                 .expect("scan")
                 .is_none()
         );
+    }
+
+    const BLOB_SOURCE: &str = "pub table Media(id: Int) { payload: Blob, }\n\npub fn main(): Int {\n  Media | count()\n}\n";
+    const NOTE_SOURCE: &str =
+        "pub table Note(id: Int) { text: Str, }\n\npub fn main(): Int {\n  Note | count()\n}\n";
+
+    fn admit(source: &str) -> AdmittedApplication {
+        ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default())
+            .admit_module("main.orna", source, "main")
+            .expect("module admitted")
+    }
+
+    #[test]
+    fn blob_table_page_is_read_from_its_owner_context_rows() {
+        let context = context();
+        let reference = context
+            .reference(
+                orna_value::ContentIdentity::from_bytes(b"served payload"),
+                orna_value::NativeOid::from_bytes(&[0x26; 20]).expect("descriptor"),
+            )
+            .expect("owner-scoped reference");
+        let blob = orna_value::Blob::from_reference(reference).expect("owner-scoped blob");
+        let row = ContextValue::from_blob(&blob, ValueFormat::Rov3).expect("contextual row");
+        let key = orna_foundation::Value::int(1.into())
+            .encode()
+            .expect("key bytes");
+        let result = evaluate_contextual_page_read(
+            &admit(BLOB_SOURCE),
+            &BTreeMap::new(),
+            RuntimeTableRows::from([("Media".to_owned(), Vec::new())]),
+            BTreeMap::from([("Media".to_owned(), vec![(key, row)])]),
+        )
+        .expect("contextual page read");
+        assert_eq!(result.raw(), orna_foundation::Value::int(1.into()).raw());
+    }
+
+    #[test]
+    fn blob_table_without_context_rows_is_refused() {
+        let result = evaluate_contextual_page_read(
+            &admit(BLOB_SOURCE),
+            &BTreeMap::new(),
+            RuntimeTableRows::from([("Media".to_owned(), Vec::new())]),
+            BTreeMap::new(),
+        );
+        assert!(
+            matches!(&result, Err(ApplicationError::UnadmittedTable(table)) if table == "Media")
+        );
+    }
+
+    #[test]
+    fn context_rows_for_a_non_blob_table_are_refused() {
+        let result = evaluate_contextual_page_read(
+            &admit(NOTE_SOURCE),
+            &BTreeMap::new(),
+            RuntimeTableRows::from([("Note".to_owned(), Vec::new())]),
+            BTreeMap::from([("Note".to_owned(), Vec::new())]),
+        );
+        assert!(matches!(result, Err(ApplicationError::Runtime(_))));
+    }
+
+    #[test]
+    fn non_blob_page_matches_the_canonical_read() {
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let application = authority
+            .admit_module("main.orna", NOTE_SOURCE, "main")
+            .expect("module admitted");
+        let rows = RuntimeTableRows::from([("Note".to_owned(), Vec::new())]);
+        let staged = authority
+            .evaluate_staged_over_table_rows(
+                &application,
+                &Environment::new(),
+                rows.clone(),
+                None,
+                None,
+            )
+            .expect("canonical read");
+        let contextual =
+            evaluate_contextual_page_read(&application, &BTreeMap::new(), rows, BTreeMap::new())
+                .expect("contextual read");
+        assert_eq!(contextual.raw(), staged.value().raw());
     }
 }
