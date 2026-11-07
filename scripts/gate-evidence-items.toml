@@ -112,9 +112,14 @@ select = [{ record = "workspace-rest", package = "orna-value", target = "lib", p
 gate = "A"
 id = "A7"
 title = "Required source and row identities survive ordinary rename and rekey"
-select = [{ record = "workspace-cli", package = "orna-cli", target = "test:object_identity_mv" }]
+select = [
+  { record = "workspace-cli", package = "orna-cli", target = "test:object_identity_mv" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:rename_identity_e2e" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:repl_rekey_publishes_one_logical_rekey" },
+]
 limitations = [
   "Identities live in a tracked sidecar and loose row directories that the format-3 layout forbids, and no production path issues them into a fresh store (ornadb-5il1.117).",
+  "Raw filesystem path rename is not proven to be a rekey rather than delete plus insert (ORNA-MUT-011); no test covers it (ornadb-5il1.117).",
 ]
 
 # Gate B: actual data path. B1-B3 are evidence from the nightly workspace-cli record
