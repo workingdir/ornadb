@@ -104,6 +104,42 @@ fn offline_copy_hydrates_verified_payloads_and_rejects_tampering() {
     ));
 }
 
+#[test]
+fn offline_copy_retrieves_row_with_unrecognised_media_type() {
+    // ORNA-MEDIA-001 (offline-copy path only): a payload with a media type no
+    // inspector recognises is still a committed row. Its metadata answers from
+    // the copy without a payload read, and hydration returns the exact bytes.
+    // Default inspection of unknown formats is not exercised here.
+    let directory = TempDir::new().unwrap();
+    let payload = b"\x00\xffNOT-A-KNOWN-CONTAINER\x13\x37".to_vec();
+    let media_type = "application/x-orna-unknown";
+    let row = OfflineRow {
+        key: b"opaque".to_vec(),
+        media_type: media_type.to_owned(),
+        suffix: None,
+        length: payload.len() as u64,
+        sha256: Sha256::digest(&payload).into(),
+        payload: Some(payload.clone()),
+    };
+
+    // Metadata: drop the media directory so the metadata query cannot read a payload.
+    let metadata_bundle = directory.path().join("metadata-bundle");
+    write_offline_copy(&metadata_bundle, std::slice::from_ref(&row), &[]).unwrap();
+    std::fs::remove_dir_all(metadata_bundle.join("media")).unwrap();
+    let copy = OfflineCopy::open(&metadata_bundle).unwrap();
+    let metadata = copy.metadata(b"opaque").expect("opaque row is in the copy");
+    assert_eq!(metadata.media_type, media_type);
+    assert_eq!(metadata.length, payload.len() as u64);
+    assert_eq!(metadata.sha256, row.sha256);
+    assert!(metadata.has_payload);
+
+    // Hydration: an intact bundle returns the exact bytes written.
+    let hydrate_bundle = directory.path().join("hydrate-bundle");
+    write_offline_copy(&hydrate_bundle, std::slice::from_ref(&row), &[]).unwrap();
+    let copy = OfflineCopy::open(&hydrate_bundle).unwrap();
+    assert_eq!(copy.hydrate(b"opaque").unwrap(), payload);
+}
+
 fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
     let mut out = String::with_capacity(bytes.len() * 2);
