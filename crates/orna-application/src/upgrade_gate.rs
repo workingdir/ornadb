@@ -263,6 +263,20 @@ mod tests {
             "git clone bundle: {}",
             String::from_utf8_lossy(&clone.stderr)
         );
+        for (key, value) in [
+            ("user.name", "Upgrade Gate Test"),
+            ("user.email", "upgrade-gate@example.invalid"),
+            ("commit.gpgsign", "false"),
+        ] {
+            let status = Command::new("git")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .arg("-C")
+                .arg(directory.path())
+                .args(["config", key, value])
+                .status()
+                .expect("the git config process starts");
+            assert!(status.success(), "git config {key}");
+        }
         let repository = Repository::discover(directory.path()).expect("the clone opens");
         (directory, repository)
     }
