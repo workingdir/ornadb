@@ -4,11 +4,11 @@
 //! The same violating change (a `Music` row whose title is `Forbidden`, which
 //! the table assertion rejects) is submitted through the trusted REPL, through
 //! `orna edit --row`, and through a mounted editor. Each refuses the change and
-//! leaves the stored row unchanged. The REPL leg names the refusal `ORNA-A091-009`,
-//! the spec diagnostic. The edit leg names the refusal class it reports today,
-//! `TableAssertionFalse`; it does not yet print `ORNA-A091-009` (defect bead filed
-//! with this PR). The mount reports the refusal only as `EINVAL` on sync, so that leg
-//! proves the errno and the unchanged row, not a diagnostic code.
+//! leaves the stored row unchanged. The REPL and `orna edit --row` legs both name the
+//! refusal `ORNA-A091-009`, the spec diagnostic (33-diagnostics.md), and both check the
+//! stored row bytes. The mount leg proves only the kernel contract: the save is refused
+//! with `EINVAL` and the stored row is unchanged. The mount channel carries no
+//! diagnostic code, so no `ORNA-A091-009` assertion is made for it.
 
 #[path = "support/editor_mount.rs"]
 mod editor_mount;
@@ -30,7 +30,10 @@ use editor_mount::{open_rw, require_fuse_or_skip, start_editor_mount_with_source
 use orna_evaluator::SysHostBindingRegistry;
 use orna_runtime::{RuntimeState, RuntimeTableIdentity, TableObjectId};
 use orna_sys::EnvironmentProvider;
-use product::{assert_success, commit_source, git, initialized_database, orna_repl, transcript};
+use product::{
+    admitted_relations, assert_success, commit_source, git, head, initialized_database, orna_repl,
+    relation_bytes, transcript,
+};
 use tempfile::TempDir;
 
 const SOURCE: &str = "pub table Music(id: Str) {\n    title: Str,\n    artist: Str,\n    \
@@ -39,21 +42,23 @@ const ORIGINAL: &str = "{ title: \"Original\", artist: \"Kieran\", }\n";
 const VIOLATING: &str = "{ title: \"Forbidden\", artist: \"Kieran\", }\n";
 const ROW_PATH: &str = "Music/london/data.orna";
 const REFUSAL: &str = "ORNA-A091-009";
-/// The class the edit path reports today; the spec code is not yet printed (defect).
-const EDIT_REFUSAL: &str = "TableAssertionFalse";
 
 #[tokio::test]
 async fn invalid_table_assertion_is_refused_identically_from_repl_edit_and_mount() {
-    repl_leg();
+    repl_leg().await;
     edit_leg().await;
     mount_leg().await;
 }
 
-/// The REPL leg: the update is refused, and neither HEAD nor the worktree moves.
-fn repl_leg() {
+/// The REPL leg: the update is refused, neither HEAD nor the worktree moves, and the
+/// stored row is byte-for-byte what it was.
+async fn repl_leg() {
     let directory = TempDir::new().expect("temporary directory");
     let root = initialized_database(&directory, SOURCE);
-    commit_source(&root, "invalid mutation parity fixture");
+    let music = admitted_relations(&commit_source(&root, "invalid mutation parity fixture"))
+        .get("Music")
+        .expect("Music is admitted")
+        .clone();
     assert_success(
         &orna_repl(
             &root,
@@ -61,8 +66,13 @@ fn repl_leg() {
         ),
         "admit valid row",
     );
-    let head = git(&root, &["rev-parse", "HEAD"]);
+    let repository = orna_repository::Repository::discover(&root).expect("discover the repository");
+    let relation = relation_bytes(&music);
+    let head_before = head(&root);
     let status = git(&root, &["status", "--porcelain"]);
+    let row_before = current_runtime_row(&repository, relation, "Music", b"london")
+        .await
+        .expect("the admitted row is readable before the update");
 
     let output = orna_repl(
         &root,
@@ -70,11 +80,16 @@ fn repl_leg() {
     );
     let text = transcript(&output);
     assert!(text.contains(REFUSAL), "REPL refusal: {text}");
-    assert_eq!(git(&root, &["rev-parse", "HEAD"]), head, "REPL: {text}");
+    assert_eq!(head(&root), head_before, "REPL: {text}");
     assert_eq!(
         git(&root, &["status", "--porcelain"]),
         status,
         "REPL worktree: {text}"
+    );
+    assert_eq!(
+        current_runtime_row(&repository, relation, "Music", b"london").await,
+        Some(row_before),
+        "REPL changed the stored row: {text}"
     );
 }
 
@@ -118,7 +133,11 @@ async fn edit_leg() {
     let output = run_row_edit(&repository_directory, &editor);
     let text = output_text(&output);
     assert!(!output.status.success(), "edit leg accepted: {text}");
-    assert!(text.contains(EDIT_REFUSAL), "edit refusal: {text}");
+    assert!(text.contains(REFUSAL), "edit refusal: {text}");
+    assert!(
+        !text.contains("TableAssertionFalse"),
+        "edit refusal leaked the internal class: {text}"
+    );
     assert_eq!(
         current_runtime_row(&repository, relation_id, "Music", b"london").await,
         Some(before),
@@ -126,7 +145,8 @@ async fn edit_leg() {
     );
 }
 
-/// The mount leg: the mounted draft's save fails and the stored row bytes stay put.
+/// The mount leg: the mounted draft's save fails with `EINVAL` and the stored row bytes
+/// stay put. The mount channel carries only the errno, so no diagnostic is asserted here.
 async fn mount_leg() {
     if !require_fuse_or_skip() {
         return;
