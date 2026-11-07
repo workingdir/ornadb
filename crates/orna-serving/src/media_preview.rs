@@ -1,7 +1,6 @@
 //! Explicit, bounded media inspection for stored Blobs.
 //! Reads occur only on explicit request through the selected Blob's pinned resolver.
 use image::{ImageFormat, ImageReader, Limits as ImageLimits};
-use orna_value::Blob;
 use std::io::Cursor;
 pub const MAX_PREVIEW_INPUT_BYTES: u64 = 8 * 1024 * 1024;
 pub const MAX_PREVIEW_DIMENSION: u32 = 4096;
@@ -13,34 +12,48 @@ pub const MAX_WAVE_SAMPLE_RATE: u32 = 384_000;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PreviewError {
     UnsupportedMediaType,
-    InputTooLarge,
     ContentUnavailable,
     /// The bytes do not conform to the declared format (ORNA-MEDIA-002).
     Malformed,
     /// Well-formed content that exceeds a pinned decoder bound (ORNA-MEDIA-005).
     ResourceLimit,
 }
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DecodedImage {
+/// The image formats the pinned decoder reads for a declared essence. `None` refuses the
+/// declaration before any byte is read.
+#[must_use]
+pub fn image_format_for(essence: &str) -> Option<ImageFormat> {
+    match essence {
+        "image/png" => Some(ImageFormat::Png),
+        "image/jpeg" => Some(ImageFormat::Jpeg),
+        "image/gif" => Some(ImageFormat::Gif),
+        "image/webp" => Some(ImageFormat::WebP),
+        _ => None,
+    }
+}
+
+/// The declared essences that name PCM WAVE. Their bytes must carry the RIFF/WAVE magic.
+#[must_use]
+pub fn is_wave_essence(essence: &str) -> bool {
+    matches!(
+        essence,
+        "audio/wav" | "audio/x-wav" | "audio/wave" | "audio/vnd.wave"
+    )
+}
+
+/// The properties of a fully decoded image. The pixel buffer is dropped inside
+/// [`decode_image_preview`]; no RGBA copy is made.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ImagePreview {
     pub width: u32,
     pub height: u32,
-    pub rgba: Vec<u8>,
 }
-pub fn decode_image_preview(blob: &Blob) -> Result<DecodedImage, PreviewError> {
-    let format = match blob.annotation().essence() {
-        "image/png" => ImageFormat::Png,
-        "image/jpeg" => ImageFormat::Jpeg,
-        "image/gif" => ImageFormat::Gif,
-        "image/webp" => ImageFormat::WebP,
-        _ => return Err(PreviewError::UnsupportedMediaType),
-    };
-    let length = blob.length();
-    if length > MAX_PREVIEW_INPUT_BYTES {
-        return Err(PreviewError::InputTooLarge);
-    }
-    let bytes = blob
-        .read(0, length)
-        .map_err(|_| PreviewError::ContentUnavailable)?;
+
+/// Fully decodes `bytes` as `format` and reports its dimensions. `bytes` is moved into the
+/// decoder, not copied. Peak allocation is `bytes` plus at most [`MAX_DECODER_ALLOCATION`].
+pub fn decode_image_preview(
+    format: ImageFormat,
+    bytes: Vec<u8>,
+) -> Result<ImagePreview, PreviewError> {
     let mut reader = ImageReader::with_format(Cursor::new(bytes), format);
     let mut limits = ImageLimits::default();
     limits.max_image_width = Some(MAX_PREVIEW_DIMENSION);
@@ -49,6 +62,7 @@ pub fn decode_image_preview(blob: &Blob) -> Result<DecodedImage, PreviewError> {
     reader.limits(limits);
     let decoded = reader.decode().map_err(preview_error)?;
     let (width, height) = (decoded.width(), decoded.height());
+    drop(decoded);
     if width == 0 || height == 0 {
         return Err(PreviewError::Malformed);
     }
@@ -58,11 +72,7 @@ pub fn decode_image_preview(blob: &Blob) -> Result<DecodedImage, PreviewError> {
     {
         return Err(PreviewError::ResourceLimit);
     }
-    Ok(DecodedImage {
-        width,
-        height,
-        rgba: decoded.into_rgba8().into_raw(),
-    })
+    Ok(ImagePreview { width, height })
 }
 
 /// Classifies a decoder failure. A truncated stream surfaces as an I/O `UnexpectedEof`
@@ -101,7 +111,6 @@ pub enum WaveInspectionError {
     UnsupportedFormat,
     MalformedContent,
     ResourceLimit,
-    ContentUnavailable,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PcmWaveProperties {
@@ -112,19 +121,15 @@ pub struct PcmWaveProperties {
     pub duration_nanos: u64,
     pub embedded_title: Option<&'static str>,
 }
-pub fn inspect_pcm_wave(blob: &Blob) -> Result<PcmWaveProperties, WaveInspectionError> {
-    let length = blob.length();
-    if length > MAX_WAVE_INPUT_BYTES {
-        return Err(WaveInspectionError::ResourceLimit);
-    }
-    let bytes = blob
-        .read(0, length)
-        .map_err(|_| WaveInspectionError::ContentUnavailable)?;
+/// Inspects owned PCM WAVE bytes. The caller has already admitted an `audio/*` WAVE
+/// essence (see [`is_wave_essence`]); bytes that lack the RIFF/WAVE magic are malformed,
+/// because the declaration never substitutes for byte validation (ORNA-MEDIA-002).
+pub fn inspect_pcm_wave(bytes: Vec<u8>) -> Result<PcmWaveProperties, WaveInspectionError> {
     parse_pcm_wave(&bytes)
 }
 fn parse_pcm_wave(bytes: &[u8]) -> Result<PcmWaveProperties, WaveInspectionError> {
     if bytes.len() < 12 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
-        return Err(WaveInspectionError::UnsupportedFormat);
+        return Err(WaveInspectionError::MalformedContent);
     }
     let riff_size = u32::from_le_bytes(bytes[4..8].try_into().expect("four-byte field")) as usize;
     let riff_end = riff_size
