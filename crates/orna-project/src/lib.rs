@@ -48,11 +48,11 @@ pub use object_identity::{
     ObjectIdentityRename, ObjectKind, SourceTableSchemaArtifact, SourceTableSchemaError,
 };
 pub use table_storage::{
-    CommittedReadError, CommittedReadLimits, CommittedTable, TableStorageError,
-    admitted_table_schemas, blob_placeholder, committed_tables, evaluator_rows,
+    CommittedReadError, CommittedReadLimits, CommittedTable, StoredBlobReference,
+    TableStorageError, admitted_table_schemas, blob_placeholder, committed_tables, evaluator_rows,
     evaluator_rows_from_stored, has_text_primary_key, holds_blob, private_candidate_tables,
-    restore_stored_blobs, runtime_key_from_evaluator, storage_row_from_record, stored_field_names,
-    stored_rows_hold_blob,
+    restore_stored_blobs, runtime_key_from_evaluator, storage_row_from_record,
+    stored_blob_references, stored_field_names, stored_rows_hold_blob,
 };
 pub use typed_row::{DescriptorField, StoredSchema, TypedRowError};
 
