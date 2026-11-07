@@ -3757,19 +3757,47 @@ async fn mount_captured_media_with_limit(
     mounted_name: &str,
     capture_limit: usize,
 ) -> Option<MountedBlobRow> {
+    mount_captured_field_with_limit(
+        "content",
+        None,
+        original,
+        file_name,
+        media_type,
+        mounted_name,
+        capture_limit,
+    )
+    .await
+}
+
+/// Captures `original` from `file_name` as the Blob field `field` of `Music/london`, annotated with
+/// `media_type` and the explicit `suffix` when one is given, with a host cap of `capture_limit`.
+/// The exported filename is `mounted_name`. Returns `None` when FUSE is opted out or its
+/// prerequisites are optional and absent.
+async fn mount_captured_field_with_limit(
+    field: &str,
+    suffix: Option<&str>,
+    original: &[u8],
+    file_name: &str,
+    media_type: &str,
+    mounted_name: &str,
+    capture_limit: usize,
+) -> Option<MountedBlobRow> {
     if !fuse_test_available() {
         return None;
     }
     let media_root = TempDir::new().unwrap();
     std::fs::write(media_root.path().join(file_name), original).unwrap();
-    let source = "pub table Music(id: Str) { content: Blob, }\n";
+    let source = format!("pub table Music(id: Str) {{ {field}: Blob, }}\n");
     let root = format!("{:?}", media_root.path().to_string_lossy().as_ref());
+    let suffix_argument = suffix
+        .map(|value| format!(", \"{value}\""))
+        .unwrap_or_default();
     let capture = format!(
-        "sys.blob.annotate(sys.blob.capture_file({root}, \"{file_name}\", {capture_limit}), \"{media_type}\")"
+        "sys.blob.annotate(sys.blob.capture_file({root}, \"{file_name}\", {capture_limit}), \"{media_type}\"{suffix_argument})"
     );
-    let row_source = format!("{{\n    content: {capture},\n}}\n");
+    let row_source = format!("{{\n    {field}: {capture},\n}}\n");
     let (repository_directory, repository, relation_id, format_context) =
-        format3::format3_repository_with_context(source, "Music");
+        format3::format3_repository_with_context(&source, "Music");
     let (runtime_identity, initial_digest) = format3::cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
         .await
@@ -3784,7 +3812,7 @@ async fn mount_captured_media_with_limit(
     let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
         .with_filesystem_provider(filesystem)
         .with_repository_capture_capability(capability);
-    let blob_captures = [("content", capture.as_str())];
+    let blob_captures = [(field, capture.as_str())];
     let capture_rows = [media_commit::SourceCaptureRow {
         key: "london",
         blob_fields: &blob_captures,
@@ -6241,4 +6269,59 @@ async fn field_add_retype_with_unretained_refusal_keeps_unmount_refused() {
         .expect("a save against the restored schema is accepted");
     drop(fresh);
     row.unmount();
+}
+
+#[tokio::test]
+/// profiles/vfs-1.md:41-56 and ACCEPTANCE Gate E: a Blob field `data` with suffix `orna` projects as `%64ata.orna` beside the row document `data.orna`, never as the row document. The live mount lists both names, serves the Blob bytes under the escaped name, serves the row document under `data.orna`, and resolves only the exact projected path, so a case alias of the Blob name does not reach it.
+async fn cwd_mount_blob_field_data_with_orna_suffix_escapes_beside_row_document() {
+    let original = lcg_bytes(0x00e8_0000_5eed, 4096);
+    let Some(mut row) = mount_captured_field_with_limit(
+        "data",
+        Some("orna"),
+        &original,
+        "payload.bin",
+        "application/octet-stream",
+        "%64ata.orna",
+        4 << 20,
+    )
+    .await
+    else {
+        return;
+    };
+    let london = row.mounted.mountpoint.join("Music/london");
+
+    let mut names: Vec<String> = std::fs::read_dir(&london)
+        .expect("list the row directory")
+        .map(|entry| {
+            entry
+                .expect("read a row directory entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec!["%64ata.orna".to_owned(), "data.orna".to_owned()],
+        "the Blob and the row document are distinct names in the row directory"
+    );
+
+    let blob = std::fs::read(london.join("%64ata.orna")).expect("read the escaped Blob");
+    assert_eq!(
+        blob, original,
+        "the escaped Blob serves the captured bytes unchanged"
+    );
+
+    let document =
+        std::fs::read_to_string(london.join("data.orna")).expect("read the row document");
+    assert!(
+        document.contains("./%64ata.orna"),
+        "the row document names the escaped Blob file: {document}"
+    );
+    assert!(
+        !london.join("%64ATA.orna").exists(),
+        "only the exact projected path resolves; a case alias of the Blob name does not"
+    );
+    unmount_and_reap(row.repository_directory.path(), &mut row.mounted);
 }
