@@ -31,8 +31,8 @@ use std::{
 };
 
 use editor_mount::{
-    assert_errno, require_fuse_or_skip, run_orna_unmount, spawn_mount_process, start_mount_process,
-    wait_for_mount, write_and_sync,
+    MountedProcess, assert_errno, require_fuse_or_skip, run_orna_unmount, spawn_mount_process,
+    start_mount_process, wait_for_mount, write_and_sync,
 };
 use product::{commit_source, git, head, initialized_database, orna, publish, repl_writes};
 use tempfile::TempDir;
@@ -232,6 +232,38 @@ fn vfs_019_remount_after_schema_change_shows_new_shape() {
     assert!(status.success(), "remounted process exited with {status}");
 }
 
+/// A save through a handle captured before a schema change is stale: the bytes are accepted into
+/// the handle, the commit is refused EAGAIN, and the accepted row is unchanged.
+fn assert_pre_removal_save_refused(
+    mut write_handle: File,
+    london: &Path,
+    mounted: &MountedProcess,
+) {
+    write_handle
+        .set_len(0)
+        .expect("truncate the private candidate");
+    write_handle
+        .write_all(STALE.as_bytes())
+        .expect("the bytes are accepted into the handle");
+    let refused = write_handle
+        .sync_all()
+        .expect_err("a v1-generation save after the removal is stale");
+    assert_eq!(
+        refused.raw_os_error(),
+        Some(EAGAIN),
+        "stale generation is EAGAIN: {refused}; mount stderr: {}",
+        mounted.stderr_text()
+    );
+    drop(write_handle);
+    assert!(
+        same_row(
+            &fs::read_to_string(london).expect("read the accepted row"),
+            ORIGINAL
+        ),
+        "a stale-generation save keeps the accepted row"
+    );
+}
+
 /// ORNA-EVOL-002, ORNA-EVOL-003 and ORNA-VFS-019: an owner commit that removes `artist` from Music
 /// is a schema change. The live mount keeps its pinned v1 generation: an open read handle keeps
 /// its captured bytes, the attribute size and listing match them, and a save through a write
@@ -260,7 +292,7 @@ fn vfs_019_field_removal_under_live_mount_pins_handles_then_remount_admits_row()
         "the mount shows the accepted v1 row: {baseline:?}"
     );
     let mut read_handle = File::open(&london).expect("open a read handle before the change");
-    let mut write_handle = OpenOptions::new()
+    let write_handle = OpenOptions::new()
         .write(true)
         .open(&london)
         .expect("a write-intent open captures the v1 generation");
@@ -294,29 +326,7 @@ fn vfs_019_field_removal_under_live_mount_pins_handles_then_remount_admits_row()
     );
     drop(read_handle);
     // A save through a handle captured before the removal is stale: EAGAIN.
-    write_handle
-        .set_len(0)
-        .expect("truncate the private candidate");
-    write_handle
-        .write_all(STALE.as_bytes())
-        .expect("the bytes are accepted into the handle");
-    let refused = write_handle
-        .sync_all()
-        .expect_err("a v1-generation save after the removal is stale");
-    assert_eq!(
-        refused.raw_os_error(),
-        Some(EAGAIN),
-        "stale generation is EAGAIN: {refused}; mount stderr: {}",
-        mounted.stderr_text()
-    );
-    drop(write_handle);
-    assert!(
-        same_row(
-            &fs::read_to_string(&london).expect("read the accepted row"),
-            ORIGINAL
-        ),
-        "a stale-generation save keeps the accepted row"
-    );
+    assert_pre_removal_save_refused(write_handle, &london, &mounted);
     // The refused candidate is a draft that blocks unmount until it is dropped. A fresh open on
     // the live mount is still on v1, so writing the current row clears the draft.
     write_and_sync(&london, ORIGINAL)
