@@ -1086,7 +1086,7 @@ fn build_frozen_publication_store_root(
     };
     let scope = base_graph
         .open_read_scope()
-        .map_err(|_| Error::RepositoryUnavailable)?;
+        .map_err(graph_operation_error)?;
     let candidates = relation_candidates
         .iter()
         .filter_map(|(rows, _, maintenance)| {
@@ -1102,7 +1102,7 @@ fn build_frozen_publication_store_root(
         .collect::<Vec<_>>();
     let store_root = base_graph
         .maintain_relations_rows(&candidates, &scope)
-        .map_err(|_| Error::RepositoryUnavailable)?;
+        .map_err(graph_operation_error)?;
     let mut churn = PublicationChurn::default();
     for (_, maintenance) in &candidates {
         churn.add(maintenance);
@@ -1495,6 +1495,17 @@ fn repository_format_error(error: orna_repository::FormatContextError) -> Error 
     match error {
         orna_repository::FormatContextError::GraphMalformed(_) => Error::RepositoryMalformed(error),
         _ => Error::RepositoryUnavailable,
+    }
+}
+
+/// Keeps a malformed native graph distinct from an unavailable one for the
+/// graph operations a publication runs; every other graph fault, including
+/// quota, cancellation and missing objects, stays `RepositoryUnavailable`.
+fn graph_operation_error(error: orna_repository::GraphError) -> Error {
+    if error.is_malformed() {
+        Error::RepositoryMalformed(orna_repository::FormatContextError::GraphMalformed(error))
+    } else {
+        Error::RepositoryUnavailable
     }
 }
 
@@ -2242,5 +2253,27 @@ mod tests {
         );
         assert_eq!(publication_state(temp.path(), &repository), before);
         assert_eq!(runtime.pending_through(&freeze).await.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn graph_operation_faults_keep_malformed_distinct_from_unavailable() {
+        use orna_repository::{FormatContextError, GraphError};
+        assert_eq!(
+            graph_operation_error(GraphError::OverlappingChildRange),
+            Error::RepositoryMalformed(FormatContextError::GraphMalformed(
+                GraphError::OverlappingChildRange
+            ))
+        );
+        for operational in [
+            GraphError::ReadQuotaExceeded,
+            GraphError::UnavailableObject,
+            GraphError::GitCommandFailed,
+        ] {
+            assert_eq!(
+                graph_operation_error(operational.clone()),
+                Error::RepositoryUnavailable,
+                "operational graph fault must stay unavailable: {operational:?}"
+            );
+        }
     }
 }
