@@ -35,10 +35,10 @@ mod media_commit;
 #[path = "support/editor_mount.rs"]
 mod editor_mount;
 use editor_mount::{
-    EditorMount, assert_errno, await_draft_guard, fresh_view, open_rw,
+    EditorMount, assert_errno, await_draft_guard, fresh_view, mountinfo_contains, open_rw,
     repository_with_music_rows_and_modules, require_fuse_or_skip, retained_drafts,
-    spawn_mount_process, start_editor_mount, start_editor_mount_with_source, start_mount_process,
-    wait_for_mount,
+    run_orna_unmount, spawn_mount_process, start_editor_mount, start_editor_mount_with_source,
+    start_mount_process, wait_for_mount,
 };
 
 fn music_row(title: &str) -> String {
@@ -1327,6 +1327,80 @@ async fn blind_replacement_after_late_temp_overwrites_owner_change_while_orna_ed
         view.contains("Second owner change") && !view.contains("Strong edit"),
         "the refused orna edit leaves the other writer's row and does not admit Strong edit, got {view}"
     );
+}
+
+/// Demonstrated limitation, REPL-change variant (41-vfs.md:65-80, profiles/vfs-1.md:117-119).
+/// A REPL write is refused while a writable mount is live (ORNA-TURSO-005), so a REPL change
+/// can only land between two mount generations. An editor that read the row in generation
+/// one, then saw the REPL change land, then created its temporary and renamed it over the row
+/// in generation two has no read witness for that change: the late temp-create captured the
+/// REPL baseline, the rename is admitted, and the REPL change is replaced silently. This is
+/// recorded as a limitation, not claimed impossible (ornadb-5il1.64).
+#[tokio::test]
+async fn late_temp_create_after_repl_change_overwrites_it_as_documented() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let editor_read = fresh_view(&fixture);
+    assert!(editor_read.contains("Original"), "{editor_read}");
+
+    let repository_path = fixture.repository_directory.path().to_path_buf();
+    let mountpoint = fixture.mount_parent.path().join("library");
+    drop(fixture.mounted);
+    assert!(
+        !mountinfo_contains(&mountpoint),
+        "generation one is unmounted before the REPL write"
+    );
+    run_orna_unmount(&repository_path, &mountpoint);
+    let repl = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .arg("--db")
+        .arg(&repository_path)
+        .args([
+            "repl",
+            "main.Music.update(\"london\", { title: \"Repl change\" })",
+        ])
+        .output()
+        .expect("run orna repl between mount generations");
+    assert!(
+        repl.status.success(),
+        "the REPL change commits while no mount is live: stdout={}, stderr={}",
+        String::from_utf8_lossy(&repl.stdout),
+        String::from_utf8_lossy(&repl.stderr),
+    );
+
+    let mounted = wait_for_mount(start_mount_process(&repository_path, &mountpoint));
+    let fixture = EditorMount { mounted, ..fixture };
+    await_accepted_view(&fixture, "Repl change");
+
+    let temp = write_temporary_sibling(
+        &fixture,
+        ".data.orna.blind-temp",
+        &music_row("Blind replacement"),
+    );
+    std::fs::rename(&temp, &fixture.data_path)
+        .expect("the late temp has no read witness, so the blind rename is admitted");
+    let view = fresh_view(&fixture);
+    assert!(
+        view.contains("Blind replacement") && !view.contains("Repl change"),
+        "DEMONSTRATED LIMITATION: the blind replacement overwrote the REPL change, got {view}"
+    );
+}
+
+/// Waits until the accepted row `data.orna` shows `marker` in a new mount generation.
+fn await_accepted_view(fixture: &EditorMount, marker: &str) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let view = std::fs::read_to_string(&fixture.data_path).unwrap_or_default();
+        if view.contains(marker) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the accepted row never showed {marker}: {view}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// A REPL write while a live editor mount holds the writer lease is refused, not
