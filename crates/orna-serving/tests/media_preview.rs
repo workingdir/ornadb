@@ -99,6 +99,18 @@ fn malformed_inputs_and_oversized_dimensions_are_rejected_without_panicking() {
     );
 }
 
+/// ORNA-MEDIA-002: a real PNG cut short mid-stream is malformed content (the decoder
+/// reports an I/O `UnexpectedEof`), not an unavailable blob and not a resource limit.
+#[test]
+fn truncated_png_stream_is_malformed_content() {
+    let blob = encoded_blob(ImageFormat::Png, "image/png", 8, 8);
+    let bytes = blob.read(0, blob.length()).expect("stored bytes read");
+    let truncated = bytes[..bytes.len() / 2].to_vec();
+    let blob = Blob::from_bytes_with_annotation(truncated, "image/png", None)
+        .expect("valid PNG declaration");
+    assert_eq!(decode_image_preview(&blob), Err(PreviewError::Malformed));
+}
+
 /// A PNG whose IHDR carries a correct CRC and the given dimensions, with no pixel data.
 fn png_with_ihdr(width: u32, height: u32) -> Vec<u8> {
     let mut chunk = b"IHDR".to_vec();
