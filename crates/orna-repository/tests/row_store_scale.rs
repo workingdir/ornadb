@@ -966,19 +966,24 @@ fn build_fixture(row_count: u64, fault: Fault) -> Fixture {
 }
 
 fn clone_partial(source: &Path) -> (TempDir, PathBuf, Duration) {
+    clone_promisor(source, &["--no-checkout"])
+}
+
+/// Clones the source as a blob-filtered promisor clone. `extra` adds clone
+/// options; a checkout keeps the worktree the publisher reads.
+fn clone_promisor(source: &Path, extra: &[&str]) -> (TempDir, PathBuf, Duration) {
     let holder = TempDir::new().expect("create partial clone parent");
     let destination = holder.path().join("clone");
     let source_url = format!("file://{}", source.canonicalize().unwrap().display());
+    let destination_text = destination.to_str().expect("UTF-8 temp clone path");
+    // The file:// upload-pack ignores `--filter` unless the source allows it;
+    // without this the "partial" clone silently fetches every object.
+    git(source, &["config", "uploadpack.allowFilter", "true"]);
+    let mut arguments = vec!["clone", "--quiet", "--filter=blob:none", "--no-local"];
+    arguments.extend_from_slice(extra);
+    arguments.extend([source_url.as_str(), destination_text]);
     let started = Instant::now();
-    git_outside(&[
-        "clone",
-        "--quiet",
-        "--filter=blob:none",
-        "--no-checkout",
-        "--no-local",
-        &source_url,
-        destination.to_str().expect("UTF-8 temp clone path"),
-    ]);
+    git_outside(&arguments);
     (holder, destination, started.elapsed())
 }
 
@@ -2276,9 +2281,22 @@ struct AdmittedProductionRows {
 /// publication cost grows.
 const PRODUCTION_ROWS: u64 = 10;
 
-/// Admits ten rows through a runtime request commit and freezes the admitted
-/// prefix. Publication is left to the caller.
+/// Admits ten rows into a fresh empty format-3 repository and freezes the
+/// admitted prefix. Publication is left to the caller.
 async fn admit_ten_production_rows() -> AdmittedProductionRows {
+    let (repository_dir, repository, relation_id) = format3::empty_format3_repository();
+    admit_production_rows_into(repository_dir, repository, relation_id).await
+}
+
+/// Admits ten rows through a runtime request commit into `repository`, then
+/// freezes the admitted prefix. The rows are admitted by the repository that
+/// publishes them, because a clone made afterwards does not carry the admitted
+/// store subtree. Publication is left to the caller.
+async fn admit_production_rows_into(
+    _repository_dir: TempDir,
+    repository: Repository,
+    relation_id: [u8; 16],
+) -> AdmittedProductionRows {
     use orna_evaluator::SysHostBindingRegistry;
     use orna_runtime::RuntimeState;
     use orna_sys::{EnvironmentProvider, FilesystemProvider};
@@ -2287,7 +2305,6 @@ async fn admit_ten_production_rows() -> AdmittedProductionRows {
         env!("CARGO_MANIFEST_DIR"),
         "/../orna-cli/tests/fixtures/media"
     );
-    let (_repository_dir, repository, relation_id) = format3::empty_format3_repository();
     let media = TempDir::new().expect("temporary media directory");
     fs::copy(
         Path::new(media_fixtures).join("tone.wav"),
@@ -2535,22 +2552,49 @@ fn assert_whole_store_graph(repository: &Repository, relation_id: [u8; 16]) {
     );
 }
 
-/// Two publishers stage the same frozen prefix against one expected head and
-/// index, then race `publish` on two threads. Exactly one compare-and-set
-/// wins; the other fails with `RefConflict` and changes nothing.
-#[tokio::test]
-async fn orp1_production_publication_race() {
+/// Two publishers prepared against one frozen prefix, one expected head and one
+/// expected index. `winner` won the ref compare-and-set; `loser` failed it.
+struct PublicationRace {
+    winner: orna_storage::RuntimePublicationCoordinator,
+    winner_generation: orna_repository::IndexGeneration,
+    loser: orna_storage::RuntimePublicationCoordinator,
+}
+
+/// Object ids anywhere in the clone's history that it does not hold locally.
+/// A checkout clone already holds HEAD's closure, so only history can be
+/// missing.
+fn missing_history_objects(repository_path: &Path) -> Vec<String> {
+    git_text(
+        repository_path,
+        &["rev-list", "--objects", "--missing=print", "--all"],
+    )
+    .lines()
+    .filter_map(|line| line.strip_prefix('?'))
+    .map(|line| line.split(' ').next().unwrap_or_default().to_owned())
+    .collect()
+}
+
+/// Hydrates the missing history through one `cat-file --batch` session, which
+/// triggers Git's promisor fetch for each of the objects.
+fn hydrate_history(repository_path: &Path) {
+    let mut session = CatFileSession::spawn(repository_path);
+    for object in missing_history_objects(repository_path) {
+        session
+            .request(&object)
+            .unwrap_or_else(|error| panic!("hydrate {object}: {error}"));
+    }
+}
+
+/// Stages the same frozen prefix twice against one expected head and index,
+/// then races `publish` on two threads. Exactly one compare-and-set wins; the
+/// other fails with `RefConflict` and changes nothing.
+async fn race_frozen_prefix(
+    repository: &Repository,
+    state: &orna_runtime::RuntimeState,
+    freeze: &orna_runtime::PublicationFreeze,
+) -> PublicationRace {
     use orna_storage::{Error as StorageError, RuntimePublicationCoordinator};
 
-    let AdmittedProductionRows {
-        _repository_dir,
-        _media,
-        repository,
-        relation_id,
-        head_before,
-        state,
-        freeze,
-    } = admit_ten_production_rows().await;
     let head = repository
         .head()
         .expect("read repository head")
@@ -2559,11 +2603,11 @@ async fn orp1_production_publication_race() {
         .index_generation()
         .expect("read repository index generation");
     let left_prepared = RuntimePublicationCoordinator::prepare_allow_noop(
-        &repository,
-        &state,
+        repository,
+        state,
         &head,
         index.clone(),
-        &freeze,
+        freeze,
         |_| Err(StorageError::InvalidKey),
         "orna: publish race left",
     )
@@ -2571,11 +2615,11 @@ async fn orp1_production_publication_race() {
     .expect("left publisher prepares")
     .expect("ten admitted rows are a visible change");
     let right_prepared = RuntimePublicationCoordinator::prepare_allow_noop(
-        &repository,
-        &state,
+        repository,
+        state,
         &head,
         index,
-        &freeze,
+        freeze,
         |_| Err(StorageError::InvalidKey),
         "orna: publish race right",
     )
@@ -2607,7 +2651,7 @@ async fn orp1_production_publication_race() {
             right.join().expect("right publisher thread"),
         )
     });
-    let (mut winner, winner_generation, loser, loser_error) = match (left, right) {
+    let (winner, winner_generation, loser, loser_error) = match (left, right) {
         ((coordinator, Ok(generation)), (loser, Err(error)))
         | ((loser, Err(error)), (coordinator, Ok(generation))) => {
             (coordinator, generation, loser, error)
@@ -2622,9 +2666,31 @@ async fn orp1_production_publication_race() {
         StorageError::RefConflict,
         "the losing publisher fails its ref compare-and-set"
     );
+    PublicationRace {
+        winner,
+        winner_generation,
+        loser,
+    }
+}
 
+/// Completes the winning publication, then asserts the published state: HEAD is
+/// the winner's candidate, the loser's candidate never reached HEAD, the index
+/// is the winner's, and the store reads back as one whole graph.
+async fn settle_race(
+    repository: &Repository,
+    relation_id: [u8; 16],
+    head_before: &orna_repository::GitCommitRef,
+    race: PublicationRace,
+    state: &orna_runtime::RuntimeState,
+    freeze: &orna_runtime::PublicationFreeze,
+) {
+    let PublicationRace {
+        mut winner,
+        winner_generation,
+        loser,
+    } = race;
     winner
-        .complete(&repository, &state, &freeze)
+        .complete(repository, state, freeze)
         .await
         .expect("winning publisher completes its publication");
     let head_after = repository
@@ -2666,14 +2732,116 @@ async fn orp1_production_publication_race() {
         Some(10),
         "the losing publisher adds no rows"
     );
-    let rows = format3::committed_store_rows(&repository, relation_id);
+    let rows = format3::committed_store_rows(repository, relation_id);
     assert_eq!(
         rows.len(),
         10,
         "the winner's ten rows are readable from the store"
     );
 
-    assert_whole_store_graph(&repository, relation_id);
+    assert_whole_store_graph(repository, relation_id);
+}
+
+/// Two publishers stage the same frozen prefix against one expected head and
+/// index, then race `publish` on two threads. Exactly one compare-and-set
+/// wins; the other fails with `RefConflict` and changes nothing.
+#[tokio::test]
+async fn orp1_production_publication_race() {
+    let AdmittedProductionRows {
+        _repository_dir,
+        _media,
+        repository,
+        relation_id,
+        head_before,
+        state,
+        freeze,
+    } = admit_ten_production_rows().await;
+    let race = race_frozen_prefix(&repository, &state, &freeze).await;
+    settle_race(
+        &repository,
+        relation_id,
+        &head_before,
+        race,
+        &state,
+        &freeze,
+    )
+    .await;
+}
+
+/// Runs the publication race against a promisor clone that admits its own
+/// rows. The clone checks out HEAD so the publisher reads a worktree, as it
+/// does in production. The rows are admitted by the clone itself: a clone made
+/// after admission does not carry the admitted store subtree, so the publisher
+/// would read state its repository does not hold. The cold clone keeps the rest
+/// of the history missing; the warm clone hydrates it before the race. Both
+/// must settle like the in-process race.
+async fn run_partial_clone_publication_race(hydrate_head: bool) {
+    let (source_dir, _source, source_relation_id) = format3::empty_format3_repository();
+    let (clone_holder, clone_path, _) = clone_promisor(source_dir.path(), &[]);
+    // The clone is a fresh repository without the fixture's local identity, and
+    // global config is isolated, so the publisher could not commit without it.
+    for (name, value) in [
+        ("user.name", "Orna scale fixture"),
+        ("user.email", "orna-scale@example.invalid"),
+        ("commit.gpgsign", "false"),
+    ] {
+        git(&clone_path, &["config", name, value]);
+    }
+    assert_eq!(
+        git_text(&clone_path, &["config", "--get", "remote.origin.promisor"]),
+        "true",
+        "the publisher runs against a promisor clone"
+    );
+    assert_eq!(
+        git_text(&clone_path, &["rev-parse", "HEAD"]),
+        git_text(source_dir.path(), &["rev-parse", "HEAD"]),
+        "the clone starts at the fixture head"
+    );
+    let clone_repository = Repository::discover(&clone_path).expect("discover the partial clone");
+    let AdmittedProductionRows {
+        _repository_dir,
+        _media,
+        repository,
+        relation_id,
+        head_before,
+        state,
+        freeze,
+    } = admit_production_rows_into(clone_holder, clone_repository, source_relation_id).await;
+    if hydrate_head {
+        hydrate_history(&clone_path);
+        assert!(
+            missing_history_objects(&clone_path).is_empty(),
+            "the warm clone holds the full history before staging"
+        );
+    } else {
+        assert!(
+            !missing_history_objects(&clone_path).is_empty(),
+            "the cold clone lacks part of the history before staging"
+        );
+    }
+    let race = race_frozen_prefix(&repository, &state, &freeze).await;
+    settle_race(
+        &repository,
+        relation_id,
+        &head_before,
+        race,
+        &state,
+        &freeze,
+    )
+    .await;
+}
+
+/// Gate C2 cold case: a fresh promisor clone races the same frozen prefix.
+#[tokio::test]
+async fn orp1_partial_clone_cold_publication_race() {
+    run_partial_clone_publication_race(false).await;
+}
+
+/// Gate C2 warm case: a promisor clone with the full history hydrated races
+/// the same frozen prefix.
+#[tokio::test]
+async fn orp1_partial_clone_warm_publication_race() {
+    run_partial_clone_publication_race(true).await;
 }
 
 #[test]
