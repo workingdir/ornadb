@@ -188,7 +188,7 @@ fn total_pixel_cap_refuses_images_within_each_dimension_limit() {
     let over = grey_png(2049, 2048);
     assert_eq!(
         decode_image_preview(&over),
-        Err(PreviewError::MalformedOrOverLimit)
+        Err(PreviewError::ResourceLimit)
     );
 
     let at_cap = grey_png(2048, 2048);
