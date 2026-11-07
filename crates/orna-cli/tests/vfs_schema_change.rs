@@ -233,10 +233,11 @@ fn vfs_019_remount_after_schema_change_shows_new_shape() {
 }
 
 /// ORNA-EVOL-002, ORNA-EVOL-003 and ORNA-VFS-019: an owner commit that removes `artist` from Music
-/// is a schema change. The live mount keeps its pinned v1 generation: an open handle keeps its
-/// captured bytes, and the attribute size and listing match them. A remounted mount admits the v1
-/// row to the title-only generation: `title` keeps its accepted value, the removed field is absent,
-/// and a write through the admitted generation commits.
+/// is a schema change. The live mount keeps its pinned v1 generation: an open read handle keeps
+/// its captured bytes, the attribute size and listing match them, and a save through a write
+/// handle captured before the change is refused EAGAIN. A remounted mount admits the v1 row to
+/// the title-only generation: `title` keeps its accepted value, the removed field is absent, the
+/// listing keeps its row set, and a write through the admitted generation commits.
 #[test]
 fn vfs_019_field_removal_under_live_mount_pins_handles_then_remount_admits_row() {
     if !require_fuse_or_skip() {
@@ -259,6 +260,10 @@ fn vfs_019_field_removal_under_live_mount_pins_handles_then_remount_admits_row()
         "the mount shows the accepted v1 row: {baseline:?}"
     );
     let mut read_handle = File::open(&london).expect("open a read handle before the change");
+    let mut write_handle = OpenOptions::new()
+        .write(true)
+        .open(&london)
+        .expect("a write-intent open captures the v1 generation");
 
     // The owner commits the removal while the mount is live.
     let before_change = head(&root);
@@ -288,6 +293,34 @@ fn vfs_019_field_removal_under_live_mount_pins_handles_then_remount_admits_row()
         "the live listing keeps its row set"
     );
     drop(read_handle);
+    // A save through a handle captured before the removal is stale: EAGAIN.
+    write_handle
+        .set_len(0)
+        .expect("truncate the private candidate");
+    write_handle
+        .write_all(STALE.as_bytes())
+        .expect("the bytes are accepted into the handle");
+    let refused = write_handle
+        .sync_all()
+        .expect_err("a v1-generation save after the removal is stale");
+    assert_eq!(
+        refused.raw_os_error(),
+        Some(EAGAIN),
+        "stale generation is EAGAIN: {refused}; mount stderr: {}",
+        mounted.stderr_text()
+    );
+    drop(write_handle);
+    assert!(
+        same_row(
+            &fs::read_to_string(&london).expect("read the accepted row"),
+            ORIGINAL
+        ),
+        "a stale-generation save keeps the accepted row"
+    );
+    // The refused candidate is a draft that blocks unmount until it is dropped. A fresh open on
+    // the live mount is still on v1, so writing the current row clears the draft.
+    write_and_sync(&london, ORIGINAL)
+        .expect("dropping the refused change and fsyncing the current row clears the draft");
     run_orna_unmount(&root, &mountpoint);
     let status = mounted
         .wait_for_exit(Duration::from_secs(10))
@@ -298,6 +331,11 @@ fn vfs_019_field_removal_under_live_mount_pins_handles_then_remount_admits_row()
     // A remounted mount admits the v1 row to the title-only generation.
     let mut remounted = wait_for_mount(start_mount_process(&root, &mountpoint));
     remounted.await_path(&london);
+    assert_eq!(
+        sorted_names(&music),
+        listing_before,
+        "the remounted listing keeps the row set"
+    );
     assert!(
         same_row(
             &fs::read_to_string(&london).expect("read the remounted row"),
