@@ -40,14 +40,14 @@ use orna_repository::{
 };
 use orna_stream::{
     AssertionDiagnosticCode, AssertionDiagnosticDetail, AssertionOwnerKind,
-    AsyncFailurePayloadBackend, CancellationClassification, CheckpointPrecondition, CommitIntent,
-    CommitResult, DeliveryIdentity, DeliveryLease, DiagnosticClass, DiagnosticCode,
-    FailureIdentity, FailureRecord, LeasePurpose, Position, RejectReason, ReplayGrant,
-    SafeAssertionWitness, SafeDiagnostic, StreamState, StreamStatus,
+    AsyncFailurePayloadBackend, CancellationClassification, CommitIntent, CommitResult,
+    DeliveryIdentity, DeliveryLease, DiagnosticClass, DiagnosticCode, FailureIdentity,
+    FailureRecord, LeasePurpose, RejectReason, ReplayGrant, SafeAssertionWitness, SafeDiagnostic,
+    StreamState, StreamStatus,
 };
 pub use orna_stream::{
-    AsyncCheckpointBackend, Checkpoint as StreamCheckpoint, CheckpointKey, Component,
-    ConsumerIdentity, FailureStatus, StreamFailurePayload,
+    AsyncCheckpointBackend, Checkpoint as StreamCheckpoint, CheckpointKey, CheckpointPrecondition,
+    Component, ConsumerIdentity, FailureStatus, Position, StreamFailurePayload,
 };
 use sha2::{Digest, Sha256};
 use tokio::sync::Notify;
