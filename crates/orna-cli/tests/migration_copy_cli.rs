@@ -678,6 +678,128 @@ fn cli_migration_copy_prepares_a_populated_format_two_source() {
     );
 }
 
+#[test]
+fn cli_migration_copy_preserves_a_dirty_format_two_workspace_and_old_commit_bytes() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("tracked.txt"), b"committed bytes\n").unwrap();
+    initialize_populated_format_two_source(&source);
+
+    let (source_head, committed_bytes) = commit_dependency_submodule(parent.path(), &source);
+
+    // Dirty index, source and submodule work that the copy must keep.
+    fs::write(source.join("tracked.txt"), b"staged bytes\n").unwrap();
+    git_output(&source, &["add", "tracked.txt"]);
+    fs::write(source.join("tracked.txt"), b"unstaged bytes\n").unwrap();
+    fs::write(source.join("new-source.txt"), b"untracked source\n").unwrap();
+    let submodule = source.join("dependencies/example");
+    fs::write(submodule.join("dependency.txt"), b"staged dependency\n").unwrap();
+    git_output(&submodule, &["add", "dependency.txt"]);
+    fs::write(submodule.join("dependency.txt"), b"unstaged dependency\n").unwrap();
+    fs::write(submodule.join("local.txt"), b"untracked dependency\n").unwrap();
+    let source_status = git_output(
+        &source,
+        &["status", "--porcelain=v2", "--untracked-files=all"],
+    );
+    let source_submodule_status = git_output(
+        &submodule,
+        &["status", "--porcelain=v2", "--untracked-files=all"],
+    );
+
+    let destination = parent.path().join("migrated");
+    let git_trace = parent.path().join("git-trace.log");
+    let output = run_copy(&source, &destination, "0", &git_trace);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+
+    // The copy leaves the source's dirty state exactly as it was.
+    assert_eq!(
+        git_output(
+            &source,
+            &["status", "--porcelain=v2", "--untracked-files=all"]
+        ),
+        source_status
+    );
+    assert_eq!(
+        git_output(
+            &submodule,
+            &["status", "--porcelain=v2", "--untracked-files=all"]
+        ),
+        source_submodule_status
+    );
+
+    // The copy keeps the staged, unstaged and untracked work of the source.
+    assert_eq!(
+        git_output(&destination, &["show", ":tracked.txt"]),
+        b"staged bytes\n"
+    );
+    assert_eq!(
+        fs::read(destination.join("tracked.txt")).unwrap(),
+        b"unstaged bytes\n"
+    );
+    assert_eq!(
+        fs::read(destination.join("new-source.txt")).unwrap(),
+        b"untracked source\n"
+    );
+    let copy_submodule = destination.join("dependencies/example");
+    assert_eq!(
+        git_output(&copy_submodule, &["show", ":dependency.txt"]),
+        b"staged dependency\n"
+    );
+    assert_eq!(
+        fs::read(copy_submodule.join("dependency.txt")).unwrap(),
+        b"unstaged dependency\n"
+    );
+    assert_eq!(
+        fs::read(copy_submodule.join("local.txt")).unwrap(),
+        b"untracked dependency\n"
+    );
+
+    // The old commit keeps its committed blob bytes in the copy.
+    assert_eq!(
+        git_output(
+            &destination,
+            &["show", &format!("{source_head}:tracked.txt")]
+        ),
+        committed_bytes
+    );
+}
+
+/// Adds a committed dependency submodule to a format-2 source and commits the
+/// superproject. Returns the source HEAD and the committed `tracked.txt` bytes.
+fn commit_dependency_submodule(parent: &Path, source: &Path) -> (String, Vec<u8>) {
+    let dependency = parent.join("dependency");
+    fs::create_dir(&dependency).unwrap();
+    git_output(&dependency, &["init", "-b", "main"]);
+    git_output(&dependency, &["config", "user.name", "kierandrewett"]);
+    git_output(&dependency, &["config", "user.email", "kieran@drewett.dev"]);
+    git_output(&dependency, &["config", "commit.gpgsign", "false"]);
+    fs::write(dependency.join("dependency.txt"), b"committed dependency\n").unwrap();
+    git_output(&dependency, &["add", "."]);
+    git_output(&dependency, &["commit", "-m", "dependency source"]);
+    let added = Command::new("git")
+        .current_dir(source)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args(["-c", "protocol.file.allow=always", "submodule", "add"])
+        .arg(&dependency)
+        .arg("dependencies/example")
+        .output()
+        .unwrap();
+    assert!(
+        added.status.success(),
+        "git submodule add: {}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    git_output(source, &["commit", "-am", "record dependency"]);
+    let source_head = String::from_utf8(git_output(source, &["rev-parse", "HEAD"]))
+        .unwrap()
+        .trim()
+        .to_owned();
+    let committed_bytes = git_output(source, &["show", "HEAD:tracked.txt"]);
+    (source_head, committed_bytes)
+}
+
 /// Commits a format-2 source with one populated Contact table: the module, one
 /// loose row unit carrying an inline ORR-2 Blob, the format-2 record and the
 /// legacy sidecar.
