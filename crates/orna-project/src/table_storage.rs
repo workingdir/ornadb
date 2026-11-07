@@ -22,7 +22,8 @@ use orna_repository::{GitCommitRef, KeyRange, PrivateCommit, Repository, Reposit
 use orna_runtime::TableObjectId;
 use orna_semantic::{ModuleHeader, SymbolKind, TableSchema, Type};
 use orna_value::{
-    ROV3_BLOB_TAG, Raw, Value, decode_canonical_storage_value, encode_canonical_storage_value,
+    BlobMetadata, ROV3_BLOB_TAG, Raw, Value, decode_canonical_storage_value,
+    encode_canonical_storage_value,
 };
 
 use crate::{ProjectLoadError, ProjectLoader, ResolvedTableSchema};
@@ -386,6 +387,56 @@ pub fn stored_rows_hold_blob(
         }
     }
     Ok(false)
+}
+
+/// One present Blob reference a stored row carries, read from the committed
+/// tuple rather than from its evaluator placeholder.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredBlobReference {
+    /// The row's runtime key.
+    pub key: Vec<u8>,
+    /// The Blob field that holds the reference.
+    pub field: String,
+    /// The reference's media type, length and descriptor OID.
+    pub metadata: BlobMetadata,
+}
+
+/// The present Blob references of one table's stored rows, in row order and
+/// then storage order. An absent `Blob?` contributes nothing. A Blob field
+/// that is not an ROV-3 reference is refused.
+pub fn stored_blob_references(
+    schema: &TableSchema,
+    storage_order: &[String],
+    rows: &[EvaluatorRow],
+) -> Result<Vec<StoredBlobReference>, TableStorageError> {
+    let mut references = Vec::new();
+    for (key, storage_row) in rows {
+        let Raw::Array(values) =
+            decode_canonical_storage_value(storage_row).map_err(|_| TableStorageError)?
+        else {
+            return Err(TableStorageError);
+        };
+        if values.len() != storage_order.len() {
+            return Err(TableStorageError);
+        }
+        for (value, name) in values.iter().zip(storage_order) {
+            let ty = schema.fields.get(name).ok_or(TableStorageError)?;
+            if !holds_blob(ty) {
+                continue;
+            }
+            let Some(reference) = present_blob(ty, value)? else {
+                continue;
+            };
+            let metadata =
+                orna_value::blob_metadata_from_raw(reference).map_err(|_| TableStorageError)?;
+            references.push(StoredBlobReference {
+                key: key.clone(),
+                field: name.clone(),
+                metadata,
+            });
+        }
+    }
+    Ok(references)
 }
 
 /// One stored tuple in portable form: each present Blob reference becomes its
@@ -868,6 +919,54 @@ mod tests {
             restore_stored_blobs(&plain, &titles, &schema, None).expect("plain"),
             plain
         );
+    }
+
+    #[test]
+    fn stored_blob_references_carry_descriptors_without_the_placeholder() {
+        let schema = media_schema();
+        let order = vec!["content".to_owned(), "cover".to_owned(), "title".to_owned()];
+        let first = storage(vec![
+            stored_blob(1),
+            option(None),
+            Raw::Text("a".to_owned()),
+        ]);
+        let second = storage(vec![
+            stored_blob(2),
+            option(Some(stored_blob(3))),
+            Raw::Text("b".to_owned()),
+        ]);
+        let rows = vec![(b"k1".to_vec(), first), (b"k2".to_vec(), second)];
+        let references = stored_blob_references(&schema, &order, &rows).expect("references");
+        let found = references
+            .iter()
+            .map(|reference| (reference.key.as_slice(), reference.field.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            found,
+            vec![
+                (b"k1".as_slice(), "content"),
+                (b"k2".as_slice(), "content"),
+                (b"k2".as_slice(), "cover"),
+            ]
+        );
+        assert_eq!(references[0].metadata.length(), 23);
+        assert_eq!(references[0].metadata.media_type(), "audio/mpeg");
+        assert_eq!(
+            references[0].metadata.descriptor_oid(),
+            Some(&orna_value::NativeOid::from_bytes(&[1; 20]).expect("descriptor"))
+        );
+        assert_eq!(
+            references[2].metadata.descriptor_oid(),
+            Some(&orna_value::NativeOid::from_bytes(&[3; 20]).expect("descriptor"))
+        );
+
+        // A Blob field holding a plain value is not a committed reference.
+        let invented = storage(vec![
+            Raw::Bytes(vec![7]),
+            option(None),
+            Raw::Text("c".to_owned()),
+        ]);
+        assert!(stored_blob_references(&schema, &order, &[(b"k3".to_vec(), invented)]).is_err());
     }
 
     #[test]
