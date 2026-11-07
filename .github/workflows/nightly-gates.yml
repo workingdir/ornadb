@@ -310,6 +310,7 @@ jobs:
             --records "$RUNNER_TEMP/gate-evidence" \
             --out "$RUNNER_TEMP/gate-evidence-summary/gate-evidence-summary.json" \
             --markdown "$GITHUB_STEP_SUMMARY" \
+            --gate F --gate-out "$RUNNER_TEMP/gate-evidence-summary/gate-f-evidence.json" \
             "${reviewer[@]}"
 
       - name: Upload the evidence summary
