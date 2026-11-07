@@ -67,7 +67,7 @@ fn malformed_inputs_and_oversized_dimensions_are_rejected_without_panicking() {
             .expect("valid PNG declaration");
         assert_eq!(
             decode_image_preview(&blob),
-            Err(PreviewError::MalformedOrOverLimit),
+            Err(PreviewError::Malformed),
             "malformed fixture must fail closed"
         );
     }
@@ -76,21 +76,67 @@ fn malformed_inputs_and_oversized_dimensions_are_rejected_without_panicking() {
     let too_wide = encoded_blob(ImageFormat::Png, "image/png", MAX_PREVIEW_DIMENSION + 1, 1);
     assert_eq!(
         decode_image_preview(&too_wide),
-        Err(PreviewError::MalformedOrOverLimit)
+        Err(PreviewError::ResourceLimit)
     );
 
-    // The dimensions are rejected from the header before pixel-buffer
-    // allocation; malformed/missing CRC is irrelevant to the resource bound.
-    let mut huge_png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
-    huge_png.extend_from_slice(&u32::MAX.to_be_bytes());
-    huge_png.extend_from_slice(&u32::MAX.to_be_bytes());
-    huge_png.extend_from_slice(&[8, 6, 0, 0, 0]);
-    let blob = Blob::from_bytes_with_annotation(huge_png, "image/png", None)
+    // A header with no CRC is malformed content, not a resource bound.
+    let mut truncated_huge_png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+    truncated_huge_png.extend_from_slice(&u32::MAX.to_be_bytes());
+    truncated_huge_png.extend_from_slice(&u32::MAX.to_be_bytes());
+    truncated_huge_png.extend_from_slice(&[8, 6, 0, 0, 0]);
+    let blob = Blob::from_bytes_with_annotation(truncated_huge_png, "image/png", None)
         .expect("valid PNG declaration");
+    assert_eq!(decode_image_preview(&blob), Err(PreviewError::Malformed));
+
+    // A well-formed header declaring u32::MAX dimensions exceeds the pinned
+    // decoder bound before any pixel buffer is allocated.
+    let huge = png_with_ihdr(u32::MAX, u32::MAX);
+    let blob =
+        Blob::from_bytes_with_annotation(huge, "image/png", None).expect("valid PNG declaration");
     assert_eq!(
         decode_image_preview(&blob),
-        Err(PreviewError::MalformedOrOverLimit)
+        Err(PreviewError::ResourceLimit)
     );
+}
+
+/// ORNA-MEDIA-002: a real PNG cut short mid-stream is malformed content (the decoder
+/// reports an I/O `UnexpectedEof`), not an unavailable blob and not a resource limit.
+#[test]
+fn truncated_png_stream_is_malformed_content() {
+    let blob = encoded_blob(ImageFormat::Png, "image/png", 8, 8);
+    let bytes = blob.read(0, blob.length()).expect("stored bytes read");
+    let truncated = bytes[..bytes.len() / 2].to_vec();
+    let blob = Blob::from_bytes_with_annotation(truncated, "image/png", None)
+        .expect("valid PNG declaration");
+    assert_eq!(decode_image_preview(&blob), Err(PreviewError::Malformed));
+}
+
+/// A PNG whose IHDR carries a correct CRC and the given dimensions, with no pixel data.
+fn png_with_ihdr(width: u32, height: u32) -> Vec<u8> {
+    let mut chunk = b"IHDR".to_vec();
+    chunk.extend_from_slice(&width.to_be_bytes());
+    chunk.extend_from_slice(&height.to_be_bytes());
+    chunk.extend_from_slice(&[8, 6, 0, 0, 0]);
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    png.extend_from_slice(&13u32.to_be_bytes());
+    png.extend_from_slice(&chunk);
+    png.extend_from_slice(&crc32(&chunk).to_be_bytes());
+    png
+}
+
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = 0xffff_ffff_u32;
+    for &byte in bytes {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            crc = if crc & 1 == 1 {
+                (crc >> 1) ^ 0xedb8_8320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    !crc
 }
 
 #[test]
@@ -142,7 +188,7 @@ fn total_pixel_cap_refuses_images_within_each_dimension_limit() {
     let over = grey_png(2049, 2048);
     assert_eq!(
         decode_image_preview(&over),
-        Err(PreviewError::MalformedOrOverLimit)
+        Err(PreviewError::ResourceLimit)
     );
 
     let at_cap = grey_png(2048, 2048);
