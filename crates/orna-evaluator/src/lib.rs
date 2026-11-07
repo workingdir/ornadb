@@ -19948,8 +19948,8 @@ mod blob_equality_tests {
 
     #[test]
     fn distinct_fold_merges_format3_blob_shared_with_its_context() {
-        // A clone shares its admitted context, the witness the fold requires
-        // before it treats two occurrences of nonempty content as one row.
+        // A clone shares its admitted context, so `blob_aware_eq` reads the
+        // nonempty payload through that context and finds the two equal.
         let blob = rov3_blob_value(b"payload");
         let mut fold = DistinctValueFold::default();
         assert!(fold.insert(blob.clone()).unwrap());
