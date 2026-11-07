@@ -78,7 +78,7 @@ fn render_node(raw: &OvbRaw, out: &mut String, depth: usize, media: Option<&str>
             out.push_str("<img src=\"");
             push_escaped(&href, out);
             out.push_str("\" alt=\"");
-            push_value(properties, "alt", out)?;
+            push_escaped(&field(properties, "alt").and_then(value_text)?, out);
             out.push_str("\">");
         }
         "audio" => {
@@ -556,6 +556,35 @@ mod tests {
             render_at(download, Some(commit)).as_deref(),
             Some(format!("<a download href=\"{href}\">Save</a>").as_str())
         );
+    }
+
+    #[test]
+    // Specified: std.ui Image takes a required `alt: Str` (stdlib/std/ui.orna),
+    // so an image without alt is not a contract node and falls back to Inspect.
+    // Alt text is escaped as an attribute value, so it cannot add an attribute.
+    fn image_alt_is_required_and_escaped() {
+        let commit = "0123456789abcdef0123456789abcdef01234567";
+        let without_alt = node(
+            "image",
+            vec![("blob", blob_property([0xab; 20]))],
+            Vec::new(),
+        );
+        assert_eq!(render_at(without_alt, Some(commit)), None);
+
+        let hostile = node(
+            "image",
+            vec![
+                ("blob", blob_property([0xab; 20])),
+                ("alt", entry("x\" onerror=\"alert(1)")),
+            ],
+            Vec::new(),
+        );
+        let html = render_at(hostile, Some(commit)).expect("image renders");
+        assert!(
+            html.ends_with("alt=\"x&quot; onerror=&quot;alert(1)\">"),
+            "{html}"
+        );
+        assert!(!html.contains("\" onerror=\""), "{html}");
     }
 
     #[test]
