@@ -12,6 +12,7 @@
 )]
 #![cfg(target_os = "linux")]
 
+use std::fmt::Write as _;
 use std::{
     fs::{File, OpenOptions},
     io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
@@ -3861,10 +3862,10 @@ async fn mount_blob_row_with_source(
     let mut row_source = String::from("{\n    title: \"before\",\n");
     if let Some(capture) = &content_capture {
         blob_captures.push(("content", capture.as_str()));
-        row_source.push_str(&format!("    content: {capture},\n"));
+        writeln!(row_source, "    content: {capture},").unwrap();
     }
     blob_captures.push(("cover", cover_capture.as_str()));
-    row_source.push_str(&format!("    cover: {cover_capture},\n}}\n"));
+    writeln!(row_source, "    cover: {cover_capture},\n}}").unwrap();
     let (repository_directory, repository, relation_id, format_context) =
         format3::format3_repository_with_context(source, "Music");
     let (runtime_identity, initial_digest) = format3::cli_runtime_identity(&repository);
