@@ -380,6 +380,16 @@ id = "E8"
 title = "Schema changes, renamed MIME suffix, key and namespace collisions, long and composite keys (empty keys: test ignored, ornadb-5il1.462.1), nested collections, large Str, multi-file source edits, permissions and unsupported operations"
 select = [
   { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_integration", test = "cwd_mount_save_after_head_renames_table_keeps_pinned_declaration" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_schema_change", test = "vfs_019_schema_change_under_live_mount_pins_handles_and_listing" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_schema_change", test = "vfs_019_field_removal_under_live_mount_pins_handles_then_remount_admits_row" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_schema_change", test = "vfs_019_remount_after_schema_change_shows_new_shape" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_schema_change", test = "vfs_019_remount_fills_introduced_field_with_default_frozen_at_introduction" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_schema_change", test = "vfs_019_stale_generation_write_after_schema_change_is_eagain" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_schema_change", test = "vfs_019_commit_the_row_cannot_admit_is_refused_and_mount_keeps_row" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_integration", test = "field_add_and_retype_at_head_keep_pinned_handles_and_reject_stale_saves" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_integration", test = "cwd_mount_edit_row_refused_after_head_changes_music_schema" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_integration", test = "cwd_mount_text_handle_opened_before_schema_change_is_eagain" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_integration", test = "cwd_mount_schema_change_between_saves_refuses_the_next_save_on_same_handle" },
   { record = "workspace-cli", package = "orna-cli", target = "test:vfs_unsupported_ops" },
   { record = "workspace-cli", package = "orna-cli", target = "test:vfs_editor_compat", test = "editor_mount_rejects_unsupported_links_devices_and_shared_mmap" },
   { record = "workspace-cli", package = "orna-cli", target = "test:vfs_projection_features", test = "reserved_key_components_escape_first_byte" },
@@ -400,7 +410,7 @@ select = [
   { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_integration", test = "cwd_mount_blob_compatible_suffix_rename_keeps_bytes" },
   { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_integration", test = "cwd_mount_blob_suffix_round_trip_keeps_bytes" },
 ]
-limitations = ["Only the selectors above are claimed. Reserved-name escapes beyond the literal profiles/vfs-1.md:46 text are a conservative, spec-silent selector, not a spec requirement. The renamed MIME suffix clause is carried by the two Blob suffix-rename selectors: a compatible suffix moves only the descriptor's suffix hint and keeps the bytes, an incompatible one is refused with EPERM, and a suffix round trip keeps the bytes. Not covered: empty keys (test ignored: vfs_projection_features 'empty text key cannot be stored', ornadb-5il1.462.1); namespace collisions have no selector; schema change is covered only for a head table rename; the composite-key selector is one fixture; grouped source edits do not assert no-evaluation during speculative writes (ORNA-VFS-020 proper, ornadb-9npn) (ornadb-5il1.63)."]
+limitations = ["Only the selectors above are claimed. Reserved-name escapes beyond the literal profiles/vfs-1.md:46 text are a conservative, spec-silent selector, not a spec requirement. The renamed MIME suffix clause is carried by the two Blob suffix-rename selectors: a compatible suffix moves only the descriptor's suffix hint and keeps the bytes, an incompatible one is refused with EPERM, and a suffix round trip keeps the bytes. Schema change is carried by the vfs_019 live-mount selectors: head table rename, field add and retype at head, field removal by owner commit, a default frozen at introduction, stale generation saves and refused commits. Not covered: empty keys (test ignored: vfs_projection_features 'empty text key cannot be stored', ornadb-5il1.462.1); namespace collisions have no selector; a field rename has no live-mount selector (it is reachable only through the LSP rename path); the composite-key selector is one fixture; grouped source edits do not assert no-evaluation during speculative writes (ORNA-VFS-020 proper, ornadb-9npn) (ornadb-5il1.63)."]
 
 [[item]]
 gate = "E"
