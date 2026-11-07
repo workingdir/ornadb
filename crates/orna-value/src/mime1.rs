@@ -321,45 +321,97 @@ mod tests {
 
     /// ORNA-MIME-002 (bead .422): 49 differential vectors generated from
     /// `reference/Orna-1.1.0/tools/final_model.py` (`annotation` and
-    /// `selected_suffix`). Accepted pairs must normalise, hint-check and select
+    /// `selected_suffix`) and inlined here, so the vectors need no shared
+    /// fixture manifest. Accepted pairs must normalise, hint-check and select
     /// their suffix exactly as the model does; rejected pairs must raise the
-    /// model's `sys.blob.*` code.
+    /// model's `sys.blob.*` code, mapped to the matching media error variant.
     #[test]
+    #[rustfmt::skip]
     fn media_type_normalisation_matches_normative_model() {
-        const CASES_JSON: &str =
-            include_str!("fixtures/reference/tests/media-normalisation-vectors.json");
-        let document: serde_json::Value =
-            serde_json::from_str(CASES_JSON).expect("the normalisation vectors are JSON");
-        let cases = document["cases"].as_array().expect("normalisation cases");
-        assert!(cases.len() >= 20, "MIME-002 requires at least 20 cases");
+        enum Expected {
+            Accepted {
+                media_type: &'static str,
+                suffix: Option<&'static str>,
+                selected_suffix: &'static str,
+            },
+            Rejected(crate::Error),
+        }
+        use Expected::{Accepted, Rejected};
+        // The model's oversized-parameter case: a 1112-character media type.
+        let oversized = format!("image/png;k={}", "v".repeat(1100));
+        let cases: [(&str, Option<&str>, Expected); 49] = [
+            ("image/jpeg", None, Accepted { media_type: "image/jpeg", suffix: None, selected_suffix: "jpg" }),
+            ("image/jpeg", Some("JPG"), Accepted { media_type: "image/jpeg", suffix: None, selected_suffix: "jpg" }),
+            ("image/jpeg", Some("jpe"), Accepted { media_type: "image/jpeg", suffix: Some("jpe"), selected_suffix: "jpe" }),
+            ("image/jpeg", Some("png"), Rejected(crate::Error::IncompatibleSuffix)),
+            ("Image/JPEG; Charset=UTF-8", None, Accepted { media_type: "image/jpeg;charset=utf-8", suffix: None, selected_suffix: "jpg" }),
+            ("  text/plain  ", Some("TXT"), Accepted { media_type: "text/plain", suffix: None, selected_suffix: "txt" }),
+            ("text/plain;charset=\"UTF-8\"", None, Accepted { media_type: "text/plain;charset=utf-8", suffix: None, selected_suffix: "txt" }),
+            ("application/javascript", Some("mjs"), Accepted { media_type: "text/javascript", suffix: Some("mjs"), selected_suffix: "mjs" }),
+            ("application/ecmascript", None, Accepted { media_type: "text/javascript", suffix: None, selected_suffix: "js" }),
+            ("text/ecmascript", Some("JS"), Accepted { media_type: "text/javascript", suffix: None, selected_suffix: "js" }),
+            ("audio/x-wav", None, Accepted { media_type: "audio/wav", suffix: None, selected_suffix: "wav" }),
+            ("audio/wave", Some("wav"), Accepted { media_type: "audio/wav", suffix: None, selected_suffix: "wav" }),
+            ("audio/x-flac", None, Accepted { media_type: "audio/flac", suffix: None, selected_suffix: "flac" }),
+            ("audio/mpeg", Some("MP2"), Accepted { media_type: "audio/mpeg", suffix: Some("mp2"), selected_suffix: "mp2" }),
+            ("audio/mpeg", Some("m4a"), Rejected(crate::Error::IncompatibleSuffix)),
+            ("video/mp4", Some("mp4"), Accepted { media_type: "video/mp4", suffix: None, selected_suffix: "mp4" }),
+            ("video/mp4;codecs=avc1", Some("m4v"), Accepted { media_type: "video/mp4;codecs=avc1", suffix: Some("m4v"), selected_suffix: "m4v" }),
+            ("audio/mp4", Some("mpg4"), Accepted { media_type: "audio/mp4", suffix: Some("mpg4"), selected_suffix: "mpg4" }),
+            ("application/x-example", Some("my_ext"), Accepted { media_type: "application/x-example", suffix: Some("my_ext"), selected_suffix: "my_ext" }),
+            ("application/x-example", Some("BIN"), Accepted { media_type: "application/x-example", suffix: None, selected_suffix: "bin" }),
+            ("application/x-example", None, Accepted { media_type: "application/x-example", suffix: None, selected_suffix: "bin" }),
+            ("application/octet-stream", Some("Tar.GZ"), Accepted { media_type: "application/octet-stream", suffix: Some("tar.gz"), selected_suffix: "tar.gz" }),
+            ("application/octet-stream", Some("dat"), Accepted { media_type: "application/octet-stream", suffix: Some("dat"), selected_suffix: "dat" }),
+            ("application/gzip", Some("tar.gz"), Accepted { media_type: "application/gzip", suffix: Some("tar.gz"), selected_suffix: "tar.gz" }),
+            ("application/gzip", Some("gz"), Accepted { media_type: "application/gzip", suffix: None, selected_suffix: "gz" }),
+            ("text/plain;b=2;a=1", None, Accepted { media_type: "text/plain;a=1;b=2", suffix: None, selected_suffix: "txt" }),
+            ("text/plain;title=\"a b\";charset=utf-8", None, Accepted { media_type: "text/plain;charset=utf-8;title=\"a b\"", suffix: None, selected_suffix: "txt" }),
+            ("text/plain;title=\"q\\\"x\"", None, Accepted { media_type: "text/plain;title=\"q\\\"x\"", suffix: None, selected_suffix: "txt" }),
+            ("text/plain;title=abc", None, Accepted { media_type: "text/plain;title=abc", suffix: None, selected_suffix: "txt" }),
+            ("text/plain;a=1;a=2", None, Rejected(crate::Error::InvalidMediaType)),
+            ("*/plain", None, Rejected(crate::Error::InvalidMediaType)),
+            ("text/*", None, Rejected(crate::Error::InvalidMediaType)),
+            ("image", None, Rejected(crate::Error::InvalidMediaType)),
+            ("image/png;", None, Rejected(crate::Error::InvalidMediaType)),
+            ("image/png ; x=y", None, Accepted { media_type: "image/png;x=y", suffix: None, selected_suffix: "png" }),
+            ("image/png", Some(".png"), Rejected(crate::Error::InvalidSuffix)),
+            ("image/png", Some("a..b"), Rejected(crate::Error::InvalidSuffix)),
+            ("image/png", Some("a b"), Rejected(crate::Error::InvalidSuffix)),
+            ("image/png", Some(""), Rejected(crate::Error::InvalidSuffix)),
+            ("image/png", Some("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"), Rejected(crate::Error::InvalidSuffix)),
+            ("text/x\u{e9}", None, Rejected(crate::Error::InvalidMediaType)),
+            ("image/png", Some("\u{e9}"), Rejected(crate::Error::InvalidSuffix)),
+            (oversized.as_str(), None, Rejected(crate::Error::InvalidMediaType)),
+            ("text/plain;p0=1;p1=1;p2=1", None, Accepted { media_type: "text/plain;p0=1;p1=1;p2=1", suffix: None, selected_suffix: "txt" }),
+            ("image/svg+xml", Some("svg"), Accepted { media_type: "image/svg+xml", suffix: None, selected_suffix: "svg" }),
+            ("text/css", Some("CSS"), Accepted { media_type: "text/css", suffix: None, selected_suffix: "css" }),
+            ("video/webm", Some("WEBM"), Accepted { media_type: "video/webm", suffix: None, selected_suffix: "webm" }),
+            ("text/javascript", Some("mjs"), Accepted { media_type: "text/javascript", suffix: Some("mjs"), selected_suffix: "mjs" }),
+            ("text/plain", Some("text"), Accepted { media_type: "text/plain", suffix: Some("text"), selected_suffix: "text" }),
+        ];
         let registry = MimeRegistry::mime1();
-        for case in cases {
-            let input = text(&case["input"]);
-            let hint = case["hint"].as_str();
-            if let Some(expected_code) = case["error"].as_str() {
-                let error = registry
-                    .canonical_annotation(input, hint)
-                    .expect_err("the model rejects this pair");
-                // The value layer carries media failures as variants; the
-                // `sys.blob.*` codes are assigned at the evaluator boundary.
-                let expected = match expected_code {
-                    "sys.blob.invalid_media_type" => crate::Error::InvalidMediaType,
-                    "sys.blob.invalid_suffix" => crate::Error::InvalidSuffix,
-                    "sys.blob.incompatible_suffix" => crate::Error::IncompatibleSuffix,
-                    other => panic!("the model raises an unmapped code {other}"),
-                };
-                assert_eq!(error, expected, "{case}");
-            } else {
-                let annotation = registry
-                    .canonical_annotation(input, hint)
-                    .expect("the model accepts this pair");
-                assert_eq!(annotation.media_type(), text(&case["media_type"]), "{case}");
-                assert_eq!(annotation.suffix(), case["suffix"].as_str(), "{case}");
-                assert_eq!(
-                    annotation.selected_suffix(),
-                    text(&case["selected_suffix"]),
-                    "{case}"
-                );
+        for (input, hint, expected) in &cases {
+            let result = registry.canonical_annotation(input, *hint);
+            match expected {
+                Rejected(expected_error) => match result {
+                    Err(error) => assert_eq!(error, *expected_error, "{input:?} {hint:?}"),
+                    Ok(_) => panic!("the model rejects {input:?} {hint:?}"),
+                },
+                Accepted {
+                    media_type,
+                    suffix,
+                    selected_suffix,
+                } => {
+                    let annotation = result.expect("the model accepts this pair");
+                    assert_eq!(annotation.media_type(), *media_type, "{input:?} {hint:?}");
+                    assert_eq!(annotation.suffix(), *suffix, "{input:?} {hint:?}");
+                    assert_eq!(
+                        annotation.selected_suffix(),
+                        *selected_suffix,
+                        "{input:?} {hint:?}"
+                    );
+                }
             }
         }
     }
