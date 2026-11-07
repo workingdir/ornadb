@@ -7,10 +7,11 @@
 # gate is passed only when every item passed and no item lists a limitation.
 #
 # Items cover the mandatory gates A-G of the repository-engine-1.1 and
-# vfs-linux-v1 profiles and Orna 1.1.0 Gate G. Gate G's paragraph in
-# implementation/ACCEPTANCE.md is unnumbered; items G1-G9 number its clauses in
-# order (table list, Run, refresh, download or rendering, console bindings,
-# invalid mutation, CSS removal, devtools removal, second app).
+# vfs-linux-v1 profiles, Orna 1.1.0 Gate G and Orna 1.1.0 Gate H. Gate G's
+# paragraph in implementation/ACCEPTANCE.md is unnumbered; items G1-G9 number its
+# clauses in order (table list, Run, refresh, download or rendering, console
+# bindings, invalid mutation, CSS removal, devtools removal, second app). Gate
+# H's paragraph is unnumbered too; items H1-H9 cover its clauses.
 # Selectors pick tests from records:
 #   record  record ID or glob (default: every record)
 #   package Cargo package
@@ -563,3 +564,62 @@ gate = "G"
 id = "G9"
 title = "A second ordinary app uses the same source-hosted stack"
 select = [{ record = "workspace-cli", package = "orna-cli", target = "test:second_ordinary_app", test = "second_ordinary_app_uses_the_same_renderer_and_routes" }]
+
+[[item]]
+gate = "H"
+id = "H1"
+title = "Structured local drafts: FUSE editor drafts are listed with their code and removed only by an accepted edit"
+select = [{ record = "workspace-cli", package = "orna-cli", target = "bin:orna", test = "draft_list_lines_carry_the_code_and_draft_id" }, { record = "workspace-cli", package = "orna-cli", target = "bin:orna", test = "accepted_edit_removes_its_draft_and_refusals_retain_it" }]
+limitations = ["Covers FUSE editor drafts only. Typed client drafts and their recovery after a reconnect or restart have no executed test (ornadb-jf1z1)."]
+
+[[item]]
+gate = "H"
+id = "H2"
+title = "Reconnect fences old watch deltas and installs a replacement snapshot"
+select = [{ record = "workspace-cli", package = "orna-cli", target = "test:watch_command", test = "reconnect_fences_old_deltas_and_installs_replacement_snapshot" }]
+limitations = ["Covers the watch command only. Status recovery after a lost reply is not run by any nightly record: orna-live is excluded from the nightly rest shard, and its reconnect and durable status tests run in live-v1-tests.yml (ornadb-rt9zj)."]
+
+[[item]]
+gate = "H"
+id = "H3"
+title = "Served media returns 422 for malformed content and 415 for unsupported formats, and refuses undeclared media before any read"
+select = [{ record = "workspace-cli", package = "orna-cli", target = "bin:orna", test = "malformed_content_is_422_and_unsupported_format_is_415" }, { record = "workspace-cli", package = "orna-cli", target = "bin:orna", test = "undeclared_or_non_previewable_media_is_refused_before_any_read" }]
+limitations = ["Covers the served media routes, not the decoders: pinned decoder implementations and their bounded malformed-input tests are not proven (ornadb-yl8p)."]
+
+[[item]]
+gate = "H"
+id = "H4"
+title = "The browser-profile renderer and client run through the shared evaluator"
+select = [{ record = "workspace-rest", package = "orna-application", target = "test:browser_profile", test = "selected_ordinary_orna_client_and_renderer_execute_through_shared_evaluator" }]
+limitations = ["Native execution only; the Wasm build is not run by any nightly record (ornadb-ahk9y)."]
+
+[[item]]
+gate = "H"
+id = "H5"
+title = "Generated host-only JS has executed tests"
+limitations = ["No executed test covers generated host-only JS, and none is mapped (ornadb-w2gdn)."]
+
+[[item]]
+gate = "H"
+id = "H6"
+title = "Typed events are admitted and diagnosed by executed tests"
+limitations = ["The typed event tests are in orna-live. The nightly rest shard excludes orna-live, so no nightly record executes them (ornadb-rt9zj)."]
+
+[[item]]
+gate = "H"
+id = "H7"
+title = "Wasm renderer and client output match native canonical output"
+limitations = ["browser_profile_wasm_matches_native_canonical_output is #[ignore] and runs only in browser-profile-wasm-parity.yml, which no nightly record reads (ornadb-ahk9y)."]
+
+[[item]]
+gate = "H"
+id = "H8"
+title = "Media decoders use pinned implementations with bounded malformed-input tests"
+limitations = ["No pinned decoder or decoder malformed-input test is mapped (ornadb-yl8p)."]
+
+[[item]]
+gate = "H"
+id = "H9"
+title = "Remote analysis is refused by default and needs explicit policy and recorded provenance"
+select = [{ record = "workspace-rest", package = "orna-application", target = "lib", test = "remote_analysis_is_denied_by_default_without_disclosure" }, { record = "workspace-rest", package = "orna-application", target = "lib", test = "remote_analysis_requires_explicit_policy_and_records_disclosed_boundary" }, { record = "workspace-rest", package = "orna-application", target = "lib", test = "remote_analysis_explicit_deny_has_no_disclosure" }, { record = "workspace-rest", package = "orna-security", target = "lib", test = "remote_analysis_requires_explicit_policy_and_records_provenance" }]
+limitations = ["Disclosure coverage beyond default-deny is open (ornadb-5il1.34)."]
