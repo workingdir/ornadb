@@ -592,13 +592,13 @@ fn repl_update(repository: &Path, key: &str, title: &str) -> Output {
 }
 
 /// ACCEPTANCE.md Gate E (concurrent REPL changes against captured file-write
-/// baselines), ORNA-TURSO-005 and ORNA-VFS-009: a REPL write issued while the
-/// mount holds its captured baseline is refused for the writer lease, so it
-/// never advances the row the mount compares against. The mount's save against
-/// that baseline is then accepted rather than stale, and the refused value never
-/// lands in the row.
+/// baselines), ORNA-TURSO-005 and ORNA-VFS-009: a REPL write issued while a
+/// live mount holds the writer lease is refused with `ORNA-REPL-EFFECT` and does
+/// not land, so the row the mount reads is unchanged. The mount's save is then
+/// accepted. Only the lease refusal is proven: no competing change lands under
+/// the lease, so the stale-baseline `E2000` path is not exercised here.
 #[tokio::test]
-async fn repl_change_refused_under_mount_baseline_leaves_mount_save_accepted() {
+async fn repl_write_refused_by_live_mount_writer_lease_leaves_mount_save_accepted() {
     if !require_fuse_or_skip() {
         return;
     }
