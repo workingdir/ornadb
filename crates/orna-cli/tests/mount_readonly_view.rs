@@ -164,6 +164,86 @@ fn legacy_and_format3_views_attach_in_one_process_without_sharing_state() {
 }
 
 #[test]
+fn legacy_and_format3_mounts_reopen_simultaneously_by_path_and_identity() {
+    let (legacy, legacy_head) = legacy_repository();
+    let (workspace, workspace_head) = format3_repository();
+    let mounts = TempDir::new().unwrap();
+    let legacy_mountpoint = mountpoint(mounts.path(), "old");
+    let workspace_mountpoint = mountpoint(mounts.path(), "library");
+
+    let legacy_repository = Repository::discover(legacy.path()).unwrap();
+    let workspace_repository = Repository::discover(workspace.path()).unwrap();
+    let legacy_view = MountView::attach(&legacy_repository, &legacy_mountpoint, &legacy_head)
+        .expect("the format-1 migration reader attaches read-only");
+    let workspace_view = MountView::attach(
+        &workspace_repository,
+        &workspace_mountpoint,
+        &workspace_head,
+    )
+    .expect("the format-3 workspace view attaches read-only");
+    let legacy_status = legacy_repository.mount_status().unwrap();
+    let workspace_status = workspace_repository.mount_status().unwrap();
+    assert_eq!(legacy_status.len(), 1);
+    assert_eq!(workspace_status.len(), 1);
+
+    // The originals stay held while both mounts are reopened, so the reopened
+    // handles and the originals coexist in this one process. Reopen goes both
+    // by mountpoint path and by recorded view identity.
+    let legacy_by_path = legacy_repository
+        .open_mount_view(&legacy_mountpoint)
+        .expect("the legacy mount reopens by path while the workspace mount is live");
+    let workspace_by_path = workspace_repository
+        .open_mount_view(&workspace_mountpoint)
+        .expect("the workspace mount reopens by path while the legacy mount is live");
+    let legacy_by_id = legacy_repository
+        .open_mount_view_by_id(&legacy_status[0].view_hex())
+        .expect("the legacy mount reopens by identity");
+    let workspace_by_id = workspace_repository
+        .open_mount_view_by_id(&workspace_status[0].view_hex())
+        .expect("the workspace mount reopens by identity");
+
+    for (reopened, original) in [
+        (&legacy_by_path, &legacy_view),
+        (&legacy_by_id, &legacy_view),
+        (&workspace_by_path, &workspace_view),
+        (&workspace_by_id, &workspace_view),
+    ] {
+        assert_eq!(reopened.view_id(), original.view_id());
+        assert_eq!(reopened.snapshot_id(), original.snapshot_id());
+        assert_eq!(
+            reopened.repository_format_number(),
+            original.repository_format_number()
+        );
+        assert_eq!(reopened.is_legacy_format(), original.is_legacy_format());
+        assert!(reopened.is_read_only());
+    }
+    assert_eq!(legacy_by_path.repository_format_number(), 1);
+    assert!(legacy_by_path.is_legacy_format());
+    assert_eq!(workspace_by_path.repository_format_number(), 3);
+    assert!(!workspace_by_path.is_legacy_format());
+
+    // Each reopened record verifies to exactly the status its own registry reports.
+    assert_eq!(legacy_by_path.verify_record().unwrap(), legacy_status[0]);
+    assert_eq!(legacy_by_id.verify_record().unwrap(), legacy_status[0]);
+    assert_eq!(
+        workspace_by_path.verify_record().unwrap(),
+        workspace_status[0]
+    );
+    assert_eq!(
+        workspace_by_id.verify_record().unwrap(),
+        workspace_status[0]
+    );
+
+    // Reopening one format does not add, drop, or retarget the other's record.
+    let legacy_after = legacy_repository.mount_status().unwrap();
+    let workspace_after = workspace_repository.mount_status().unwrap();
+    assert_eq!(legacy_after, legacy_status);
+    assert_eq!(workspace_after, workspace_status);
+    assert_eq!(legacy_after[0].repository_format_number(), 1);
+    assert_eq!(workspace_after[0].repository_format_number(), 3);
+}
+
+#[test]
 fn cli_reports_and_releases_a_readonly_view_of_each_format() {
     let (legacy, legacy_head) = legacy_repository();
     let (workspace, _) = format3_repository();

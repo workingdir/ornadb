@@ -14,7 +14,7 @@ use orna_evaluator::{
     SysHostContext, invoke_named, invoke_named_with_effects, invoke_named_with_sys_host_context,
     module_function_alias_key, reference_standard_profile, reference_standard_sources,
 };
-use orna_foundation::{CanonicalSnapshot, CanonicalValue, OvbRaw, SafeText, compare_primary_keys};
+use orna_foundation::{CanonicalSnapshot, CanonicalValue, OvbRaw, SafeText};
 use orna_live::{
     Error as LiveError, LiveAdminEffectDispatcher, LiveApplication, LiveApplicationWorkLease,
     LiveEvalResponse, LiveEvalTransaction,
@@ -45,7 +45,6 @@ use orna_syntax::{
 use orna_value::{ContextValue, Format3Context, ValueFormat};
 use sha2::{Digest, Sha256};
 use std::{
-    cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
     fmt,
     future::Future,
@@ -66,9 +65,11 @@ pub fn remote_analysis_request(
 }
 
 mod browser_profile;
+mod contextual_snapshot;
 mod repl_transaction;
 mod table_reference;
 pub use browser_profile::execute_browser_profile;
+pub use contextual_snapshot::evaluate_contextual_snapshot_read;
 pub use repl_transaction::{ReplEvaluationFailure, ReplTransactionScope};
 mod format3_store;
 pub use format3_store::{Format3TableSchemaError, StagedRelations, build_format3_store_relations};
@@ -2125,35 +2126,8 @@ impl SourceMutationEffectHandler {
                 .map_err(|_| Self::effect_error("ORNA-EVAL-TABLE-SNAPSHOT"))?;
             live.push((logical, row));
         }
-        let mut comparison_failed = false;
-        live.sort_by(|(left, _), (right, _)| {
-            compare_primary_keys(left, right).unwrap_or_else(|_| {
-                comparison_failed = true;
-                Ordering::Equal
-            })
-        });
-        if comparison_failed {
-            return Err(Self::effect_error("ORNA-EVAL-TABLE-SNAPSHOT"));
-        }
-        let start = match after {
-            None => 0,
-            Some(cursor) => {
-                let bytes: [u8; 8] = cursor
-                    .try_into()
-                    .map_err(|_| Self::effect_error("ORNA-EVAL-TABLE-SNAPSHOT"))?;
-                usize::try_from(u64::from_be_bytes(bytes))
-                    .map_err(|_| Self::effect_error("ORNA-EVAL-TABLE-SNAPSHOT"))?
-            }
-        }
-        .min(live.len());
-        let end = start.saturating_add(limit).min(live.len());
-        let mut rows = Vec::with_capacity(end - start);
-        for (_, row) in &live[start..end] {
-            budget.debit(1)?;
-            rows.push(CanonicalValue::clone(row));
-        }
-        let next =
-            (end < live.len() && !rows.is_empty()).then(|| (end as u64).to_be_bytes().to_vec());
+        let (rows, next) = contextual_snapshot::page_table_rows(live, after, limit, budget)?;
+        let rows = rows.into_iter().cloned().collect();
         Ok(RelationPage { rows, next })
     }
 
