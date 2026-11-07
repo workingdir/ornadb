@@ -24,10 +24,10 @@
 
 [[failure]]
 package = "orna-cli"
-target = "test:req_vfs"
-test = "vfs_mount_integration::cwd_mount_sigterm_unmounts_and_detaches_the_view"
+target = "test:vfs_mount_integration"
+test = "cwd_mount_sigterm_unmounts_and_detaches_the_view"
 bead = "ornadb-9aj6"
-reason = "Fails intermittently in a full req_vfs run on main. Passed in the d35b7c0c3 baseline (orna-cli req_vfs: 36 of 36)."
+reason = "Fails intermittently in a full req_vfs run on main, when req_vfs composed vfs_mount_integration; that include is dropped (ornadb-5il1.369), so the test now runs in the vfs_mount_integration target. Passed in the d35b7c0c3 baseline (orna-cli req_vfs: 36 of 36)."
 intermittent = true
 
 [[failure]]

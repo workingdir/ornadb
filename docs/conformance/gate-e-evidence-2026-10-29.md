@@ -4,9 +4,11 @@ Scope: ornadb-5il1.369 (Gate E media reader diagnostic record) and the evidence 
 Gate E is the actual writable mount. This document covers the media-reader diagnostic for the E2 leg and the
 environment facts that every Gate E item must carry. Gate item E2 selects the nightly `workspace-cli` record, not the per-PR diagnostic below.
 
+Crate names in this record use the current package `orna-cli`; the crate was renamed from `orna-cli-v1`, and the results were recorded under the old name.
+
 ## What the record proves
 
-`crates/orna-cli-v1/tests/vfs_media_reader.rs` mounts a captured 64 MiB WAV Blob with
+`crates/orna-cli/tests/vfs_media_reader.rs` mounts a captured 64 MiB WAV Blob with
 `orna mount --cwd` and reads it through the kernel FUSE path:
 
 - `cwd_mount_64_mib_wav_blob_serves_media_reader_patterns_byte_exact`: stat reports the row's
@@ -75,7 +77,7 @@ Result of the focused proof on this worktree (`fix/ornadb-5il1.369-gate-e-eviden
 `origin/main` 6f2512726), run with `ORNA_REQUIRE_FUSE=1`:
 
 ```
-cargo test --locked -p orna-cli-v1 --test vfs_media_reader
+cargo test --locked -p orna-cli --test vfs_media_reader
 ```
 
 Results (three local runs on this worktree before the W282 fixes; `EXIT` is the cargo exit status):
@@ -88,7 +90,7 @@ The CI artifact for this head is `gate-e-evidence-media-reader` in the PR 9417 c
 
 ## Gate E items E2, E3, E6, E7, E8, E9 (ornadb-5il1.245)
 
-These items are registered in `scripts/gate-evidence-items.toml` against the `workspace-cli` record. That record runs `gate_evidence.py test -p orna-cli-v1`, which covers every `tests/*.rs` target and the package's unit tests, so no CI step was added. Most selectors are existing mount tests. This change adds one new mount test file, `crates/orna-cli-v1/tests/vfs_composite_key_mount.rs` (E8, composite keys), and selects existing tests for E3 (SIGTERM retention, `vfs_mount_sessions`), E8 (nested collections, long and oversize keys, large Str, grouped source edits, chmod EPERM) and E9 (the mount-flag unit test, `bin:orna`).
+These items are registered in `scripts/gate-evidence-items.toml` against the `workspace-cli` record. That record runs `gate_evidence.py test -p orna-cli`, which covers every `tests/*.rs` target and the package's unit tests, so no CI step was added. Most selectors are existing mount tests. This change adds one new mount test file, `crates/orna-cli/tests/vfs_composite_key_mount.rs` (E8, composite keys), and selects existing tests for E3 (SIGTERM retention, `vfs_mount_sessions`), E8 (nested collections, long and oversize keys, large Str, grouped source edits, chmod EPERM) and E9 (the mount-flag unit test, `bin:orna`).
 
 - E2: existing selector `cwd_mount_wav_blob_row_plays_through_seek_reads_and_exports_byte_for_byte` (`vfs_mount_integration`): a WAV Blob serves seek and range reads through the mount and exports byte-for-byte (profiles/vfs-1.md Blob fields). No selector was added for E2.
 - E3: `rejected_sync_retains_recoverable_draft_listed_by_id` (`vfs_mount_sync_semantics`, new): an fsync refused with EINVAL leaves the row unchanged; the fields xattr is read while mounted and names the `sys.vfs.invalid_document` cause with a draft id and a non-empty diagnostic; a retain request then keeps the candidate as the record `<id>.draft` in recovery storage. The test asserts the record header names that id and cause, and that the record body after the header is the exact rejected candidate bytes (profiles/vfs-1.md:101-102, errno table, ORNA-VFS-009).
@@ -105,8 +107,8 @@ Local results on `fix/ornadb-5il1.245-gate-e-items` (`CARGO_TARGET_DIR` on the s
 - `vfs_mount_isolation blind_replacement_after_late_temp`: `test result: ok. 1 passed; 0 failed`.
 - `vfs_mount_isolation` (whole binary): 18 passed, 1 ignored (the pre-existing ignored test).
 - `vfs_mount_integration` (the two selectors above): 2 passed.
-- `vfs_composite_key_mount composite_key_components_project_as_nested_directories` (E8), `cargo test --locked -p orna-cli-v1 --test vfs_composite_key_mount`, kernel `6.19.10-300.fc44.x86_64`, `ORNA_REQUIRE_FUSE=1`: on this PR head `test result: ok. 1 passed; 0 failed`, exit 0. On origin/main `5ec573fea` with the same test file (throwaway worktree, same pinned `stdlib/std`): `test result: ok. 1 passed; 0 failed`, exit 0. This is the basis for the CHANGELOG statement that the test passes on main; it is coverage, not a fix.
-- `vfs_mount_isolation` E9 test: failed once in three runs before a fix. The failure was `fresh_view` returning NotFound after the SIGKILL remount. `wait_for_mount` waits only for the root to answer, so the test now calls `await_path` on the projected row before reading. After the fix, ten consecutive single-test runs passed, and a later 20-iteration loop of the single test passed 20 of 20 (`cargo test -q -p orna-cli-v1 --test vfs_mount_isolation -- --exact <E9 name>`, exit 0 each time). The cause is [INFERENCE] a readiness race; the failure did not reproduce on demand.
+- `vfs_composite_key_mount composite_key_components_project_as_nested_directories` (E8), `cargo test --locked -p orna-cli --test vfs_composite_key_mount`, kernel `6.19.10-300.fc44.x86_64`, `ORNA_REQUIRE_FUSE=1`: on this PR head `test result: ok. 1 passed; 0 failed`, exit 0. On origin/main `5ec573fea` with the same test file (throwaway worktree, same pinned `stdlib/std`): `test result: ok. 1 passed; 0 failed`, exit 0. This is the basis for the CHANGELOG statement that the test passes on main; it is coverage, not a fix.
+- `vfs_mount_isolation` E9 test: failed once in three runs before a fix. The failure was `fresh_view` returning NotFound after the SIGKILL remount. `wait_for_mount` waits only for the root to answer, so the test now calls `await_path` on the projected row before reading. After the fix, ten consecutive single-test runs passed, and a later 20-iteration loop of the single test passed 20 of 20 (`cargo test -q -p orna-cli --test vfs_mount_isolation -- --exact <E9 name>`, exit 0 each time). The cause is [INFERENCE] a readiness race; the failure did not reproduce on demand.
 - `python3 scripts/gate_evidence.py check`: exit 0.
 - `python3 -m unittest scripts/test_gate_evidence.py`: 44 tests, OK.
 - `vfs_*` suites that use the shared `await_path` (one run, `ORNA_REQUIRE_FUSE=1`): `vfs_media_reader` 3 passed; `vfs_mount_cases` 18 passed; `vfs_mount_integration` 58 passed; `vfs_mount_isolation` 18 passed, 1 ignored; `vfs_mount_sessions` 19 passed; `vfs_mount_sync_semantics` 32 passed; `vfs_mount_truncate_sparse` 9 passed; `vfs_projection_features` 14 passed, 1 ignored; `vfs_schema_change` 2 passed, 1 ignored. Every binary exited 0 with no failures.
