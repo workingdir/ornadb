@@ -980,17 +980,15 @@ fn build_frozen_publication_store_root(
                 .map_err(repository_format_error)?;
             let graph = format
                 .open_native_graph(&rows)
-                .map_err(|_| Error::RepositoryUnavailable)?;
-            let scope = graph
-                .open_read_scope()
-                .map_err(|_| Error::RepositoryUnavailable)?;
+                .map_err(repository_format_error)?;
+            let scope = graph.open_read_scope().map_err(graph_operation_error)?;
             let descriptor = graph
                 .read_schema_descriptor(&scope)
-                .map_err(|_| Error::RepositoryUnavailable)?;
+                .map_err(graph_operation_error)?;
             let schema = committed_projection_schema(descriptor)?;
             let value_context = format
                 .open_value_context(relation_id)
-                .map_err(|_| Error::RepositoryUnavailable)?;
+                .map_err(repository_format_error)?;
             e.insert((rows, graph, schema, value_context));
         }
         let (_, _, schema, value_context) = relation_bases
@@ -1055,13 +1053,11 @@ fn build_frozen_publication_store_root(
         let maintenance = if operations.is_empty() {
             None
         } else {
-            let scope = graph
-                .open_read_scope()
-                .map_err(|_| Error::RepositoryUnavailable)?;
+            let scope = graph.open_read_scope().map_err(graph_operation_error)?;
             Some(
                 graph
                     .maintain_row_index(&operations, &scope)
-                    .map_err(|_| Error::RepositoryUnavailable)?,
+                    .map_err(graph_operation_error)?,
             )
         };
         relation_candidates.push((rows, graph, maintenance));
@@ -1226,7 +1222,7 @@ impl RuntimePublicationCoordinator {
                     .ok_or(Error::IncompleteStaging)?
                     .bytes(),
             )
-            .map_err(|_| Error::RepositoryUnavailable)?
+            .map_err(repository_format_error)?
             .version()
             .store_root()
             .clone();
