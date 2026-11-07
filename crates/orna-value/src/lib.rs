@@ -809,6 +809,13 @@ impl Format3Context {
         self.inner.mime_registry
     }
 
+    /// Whether both handles name the same admitted context instance. Descriptor-
+    /// backed Blobs share content without streaming only through such a witness
+    /// (ORNA-BLOB-005), so collection identity must not cross contexts.
+    pub fn is_same_admitted_context(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
     pub fn cancel(&self) {
         self.inner.owner.cancel();
     }
