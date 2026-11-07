@@ -1,6 +1,7 @@
 use std::{fs, path::Path, process::Command};
 
-use orna_repository::Repository;
+use orna_project::{ObjectIdentityManifest, ObjectKind};
+use orna_repository::{Repository, Uuid};
 use orna_runtime::{Mutation, NoFault, RuntimeState};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -1664,4 +1665,280 @@ fn cli_upgrade_refuses_a_destination_that_was_never_prepared() {
         "prepared migration copy could not be read for activation",
     );
     assert!(!destination.exists());
+}
+
+/// The journal's candidate commit, as the prepared copy records it.
+fn prepared_candidate(destination: &Path) -> String {
+    Repository::discover(destination)
+        .unwrap()
+        .read_publication_journal()
+        .unwrap()
+        .expect("the prepared copy keeps its publication journal")
+        .new_head()
+        .as_str()
+        .to_owned()
+}
+
+fn tracked_paths(directory: &Path, commit: &str) -> Vec<String> {
+    String::from_utf8(git_output(
+        directory,
+        &["ls-tree", "-r", "--name-only", commit],
+    ))
+    .unwrap()
+    .lines()
+    .map(str::to_owned)
+    .collect()
+}
+
+/// The committed `Contact` relation id, as the 32-digit hex `orna query` takes.
+fn contact_relation_hex(root: &Path) -> String {
+    let repository = Repository::discover(root).expect("discover the repository");
+    let head = repository
+        .head()
+        .expect("read HEAD")
+        .expect("a committed HEAD");
+    let identities =
+        ObjectIdentityManifest::read_committed(&repository, &head).expect("committed identities");
+    let id = identities
+        .id(ObjectKind::Table, "contacts.Contact")
+        .expect("Contact has a committed identity");
+    Uuid::from_bytes(*id).simple().to_string()
+}
+
+fn query_contact_rows(root: &Path) -> u64 {
+    let relation = contact_relation_hex(root);
+    let output = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "--db",
+            root.to_str().unwrap(),
+            "query",
+            &relation,
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "orna query: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    report["rows"].as_u64().expect("the report counts rows")
+}
+
+/// Commits a format-2 source whose `Contact` table is declared in
+/// `contacts/main.orna` and imported by the root module, with two loose row
+/// units and one unrelated file.
+fn initialize_contacts_module_source(root: &Path) {
+    const ROOT: &str = "use contacts;\n\npub fn run() {}\n";
+    const CONTACTS: &str = "pub table Contact(id: Str) {\n    name: Str,\n}\n";
+    const ALICE: &str = "{\n    name: \"Alice Smith\",\n}\n";
+    const BOB: &str = "{\n    name: \"Bob Jones\",\n}\n";
+    git_output(root, &["init", "-b", "main"]);
+    git_output(root, &["config", "user.name", "kierandrewett"]);
+    git_output(root, &["config", "user.email", "kieran@drewett.dev"]);
+    git_output(root, &["config", "commit.gpgsign", "false"]);
+    fs::write(root.join("main.orna"), ROOT).unwrap();
+    fs::create_dir_all(root.join("contacts/Contact")).unwrap();
+    fs::write(root.join("contacts/main.orna"), CONTACTS).unwrap();
+    fs::write(root.join("contacts/Contact/alice-smith.orna"), ALICE).unwrap();
+    fs::write(root.join("contacts/Contact/bob-jones.orna"), BOB).unwrap();
+    fs::write(root.join("ordinary.txt"), "base\n").unwrap();
+    fs::create_dir_all(root.join(".orna")).unwrap();
+    fs::write(
+        root.join(".orna/format.orna"),
+        include_str!("fixtures/format-context/format-2-draft-1.1.0.orna"),
+    )
+    .unwrap();
+    fs::write(
+        root.join(".orna/database.orna"),
+        include_str!("fixtures/format-context/database-sidecar.orna"),
+    )
+    .unwrap();
+    git_output(root, &["add", "."]);
+    git_output(root, &["commit", "-m", "contacts format-2 source"]);
+}
+
+/// Prepares the contacts source's candidate at `parent/migrated`.
+fn prepare_contacts_source(parent: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let source = parent.join("source");
+    fs::create_dir(&source).unwrap();
+    initialize_contacts_module_source(&source);
+    let destination = parent.join("migrated");
+    let prepared = run_golden_copy(&source, &destination, None);
+    assert!(
+        prepared.status.success(),
+        "migrate copy: {}",
+        String::from_utf8_lossy(&prepared.stderr)
+    );
+    (source, destination)
+}
+
+/// UPGRADE-3 step 5: the prepared candidate no longer tracks the migrated loose
+/// row files, and keeps the unrelated user files.
+#[test]
+fn cli_migration_copy_candidate_retires_the_migrated_loose_rows() {
+    let parent = TempDir::new().unwrap();
+    let (_source, destination) = prepare_contacts_source(parent.path());
+    let candidate = prepared_candidate(&destination);
+    let paths = tracked_paths(&destination, &candidate);
+
+    assert!(
+        !paths
+            .iter()
+            .any(|path| path.starts_with("contacts/Contact/")),
+        "the candidate still tracks loose rows: {paths:?}"
+    );
+    for kept in ["contacts/main.orna", "main.orna", "ordinary.txt"] {
+        assert!(
+            paths.iter().any(|path| path == kept),
+            "{kept} is an unrelated user file and must stay: {paths:?}"
+        );
+    }
+}
+
+/// Activation deletes the retired loose row files from the worktree, and the
+/// migrated rows are queryable from the store.
+#[test]
+fn cli_upgrade_yes_activate_removes_the_loose_rows_and_keeps_them_queryable() {
+    let parent = TempDir::new().unwrap();
+    let (source, destination) = prepare_contacts_source(parent.path());
+    let activated = run_upgrade(&source, &destination, true);
+    assert!(
+        activated.status.success(),
+        "upgrade --yes-activate: {}",
+        String::from_utf8_lossy(&activated.stderr)
+    );
+
+    assert!(
+        !destination
+            .join("contacts/Contact/alice-smith.orna")
+            .exists()
+    );
+    assert!(!destination.join("contacts/Contact/bob-jones.orna").exists());
+    assert!(
+        !destination.join("contacts/Contact").exists(),
+        "the directory the retired rows left empty is pruned"
+    );
+    assert!(destination.join("contacts/main.orna").exists());
+    assert_eq!(query_contact_rows(&destination), 2);
+}
+
+/// A loose row file with uncommitted local edits is not an unrelated change:
+/// activation refuses, names the file, and keeps both the edit and the journal.
+#[test]
+fn cli_upgrade_refuses_a_dirty_migrated_loose_row_and_names_it() {
+    let parent = TempDir::new().unwrap();
+    let (source, destination) = prepare_contacts_source(parent.path());
+    let row = destination.join("contacts/Contact/alice-smith.orna");
+    let edit = "{\n    name: \"Locally Edited\",\n}\n";
+    fs::write(&row, edit).unwrap();
+    let copy_head = git_output(&destination, &["rev-parse", "HEAD"]);
+
+    let output = run_upgrade(&source, &destination, true);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "activation must refuse: {stderr}");
+    assert!(
+        stderr.contains("contacts/Contact/alice-smith.orna"),
+        "the refusal names the dirty file: {stderr}"
+    );
+    assert_eq!(fs::read_to_string(&row).unwrap(), edit);
+    assert!(journal_is_present(&destination), "the journal is kept");
+    assert_eq!(git_output(&destination, &["rev-parse", "HEAD"]), copy_head);
+}
+
+/// An untracked file added to the prepared copy after preparation is not part
+/// of the prepared candidate. Activation refuses it, keeps the file on disk, and
+/// keeps the journal, the same as any other unexpected change to the copy.
+#[test]
+fn cli_upgrade_refuses_an_untracked_file_added_after_preparation() {
+    let parent = TempDir::new().unwrap();
+    let (source, destination) = prepare_contacts_source(parent.path());
+    let scratch = destination.join("scratch-notes.txt");
+    fs::write(&scratch, "keep me\n").unwrap();
+    let copy_head = git_output(&destination, &["rev-parse", "HEAD"]);
+
+    let output = run_upgrade(&source, &destination, true);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "activation must refuse: {stderr}");
+    assert_eq!(fs::read_to_string(&scratch).unwrap(), "keep me\n");
+    assert!(journal_is_present(&destination), "the journal is kept");
+    assert_eq!(git_output(&destination, &["rev-parse", "HEAD"]), copy_head);
+}
+
+/// A migrated loose row file the user deleted before activation is already
+/// retired: activation accepts the copy and removes the remaining rows.
+#[test]
+fn cli_upgrade_yes_activate_accepts_a_migrated_loose_row_the_user_deleted() {
+    let parent = TempDir::new().unwrap();
+    let (source, destination) = prepare_contacts_source(parent.path());
+    fs::remove_file(destination.join("contacts/Contact/alice-smith.orna")).unwrap();
+
+    let activated = run_upgrade(&source, &destination, true);
+    assert!(
+        activated.status.success(),
+        "upgrade --yes-activate: {}",
+        String::from_utf8_lossy(&activated.stderr)
+    );
+    assert!(!destination.join("contacts/Contact/bob-jones.orna").exists());
+    assert!(!destination.join("contacts/Contact").exists());
+    assert!(destination.join("contacts/main.orna").exists());
+    assert_eq!(query_contact_rows(&destination), 2);
+}
+
+/// A migrated loose row file the user renamed is an untracked file in the copy:
+/// activation refuses it, keeps the renamed file, and keeps the journal.
+#[test]
+fn cli_upgrade_refuses_a_migrated_loose_row_the_user_renamed() {
+    let parent = TempDir::new().unwrap();
+    let (source, destination) = prepare_contacts_source(parent.path());
+    let renamed = destination.join("contacts/Contact/alice-renamed.orna");
+    fs::rename(
+        destination.join("contacts/Contact/alice-smith.orna"),
+        &renamed,
+    )
+    .unwrap();
+    let copy_head = git_output(&destination, &["rev-parse", "HEAD"]);
+
+    let output = run_upgrade(&source, &destination, true);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "activation must refuse: {stderr}");
+    assert_eq!(
+        fs::read_to_string(&renamed).unwrap(),
+        "{\n    name: \"Alice Smith\",\n}\n"
+    );
+    assert!(journal_is_present(&destination), "the journal is kept");
+    assert_eq!(git_output(&destination, &["rev-parse", "HEAD"]), copy_head);
+}
+
+/// A symlink in place of a migrated loose row file is a changed path, not the
+/// committed file, even when its target holds the same bytes. Activation
+/// refuses, names the path, and keeps the link and the journal.
+#[cfg(unix)]
+#[test]
+fn cli_upgrade_refuses_a_symlink_in_place_of_a_migrated_loose_row() {
+    let parent = TempDir::new().unwrap();
+    let (source, destination) = prepare_contacts_source(parent.path());
+    let row = destination.join("contacts/Contact/alice-smith.orna");
+    let target = parent.path().join("alice-elsewhere.orna");
+    fs::write(&target, "{\n    name: \"Alice Smith\",\n}\n").unwrap();
+    fs::remove_file(&row).unwrap();
+    std::os::unix::fs::symlink(&target, &row).unwrap();
+    let copy_head = git_output(&destination, &["rev-parse", "HEAD"]);
+
+    let output = run_upgrade(&source, &destination, true);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "activation must refuse: {stderr}");
+    assert!(
+        stderr.contains("contacts/Contact/alice-smith.orna"),
+        "the refusal names the linked row file: {stderr}"
+    );
+    assert!(
+        fs::symlink_metadata(&row).unwrap().file_type().is_symlink(),
+        "the link is kept"
+    );
+    assert!(journal_is_present(&destination), "the journal is kept");
+    assert_eq!(git_output(&destination, &["rev-parse", "HEAD"]), copy_head);
 }

@@ -51,12 +51,22 @@ use crate::{
 };
 use crate::{ManagedFileChange, ManagedPath, PrivateCommit};
 
-/// One legacy `.orna` file the migration candidate deletes: the path and the
+/// Which legacy file a retirement names. A metadata file lives under `.orna/`;
+/// a loose row unit is a committed `.orna` file under a migrated table's
+/// directory, which the migration reads into the store and then deletes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RetiredLegacyKind {
+    Metadata,
+    LooseRowUnit,
+}
+
+/// One legacy file the migration candidate deletes: the path, its kind, and the
 /// exact bytes the source commit records there. The candidate is refused unless
 /// the source holds those bytes, so a retirement names what it removes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RetiredLegacyPath {
     pub path: String,
+    pub kind: RetiredLegacyKind,
     pub committed: Vec<u8>,
 }
 
@@ -133,6 +143,9 @@ const STAGING_PREFIX: &str = ".orna-migration-copy-";
 /// The suffix of the owner marker that pairs a staging copy with the lock its
 /// preparation holds on it.
 const OWNER_SUFFIX: &str = ".owner";
+/// The most entries the candidate tree listing reads. A candidate tree is
+/// bounded like the committed tree a migration reads.
+const MAX_CANDIDATE_TREE_ENTRIES: usize = 1 << 20;
 
 /// The legacy annotation metadata of one source snapshot, as decoded from the
 /// source's own recorded objects without reading a payload byte.
@@ -1446,8 +1459,6 @@ fn recover_prepared_copy(
     let source_index_generation = source.index_generation()?;
     require_index_tree(&source_index_generation)?;
     let source_tree_identity = source_tree_identity(source, &source_commit)?;
-    let (source_working_tree_identity, source_working_tree_entries) =
-        working_tree_identity(source)?;
 
     let metadata =
         fs::symlink_metadata(destination).map_err(|_| RepositoryError::LocalStateUnavailable)?;
@@ -1529,11 +1540,14 @@ fn recover_prepared_copy(
     if !entries_match {
         return Err(RepositoryError::InvalidFormatMigration);
     }
+    let mut absent_retired = BTreeSet::new();
     if let Some(store_for) = store_for {
         // The recovered candidate must be exactly what a fresh preparation of
         // this source builds: same store, same entries, same commit object.
         let store = store_for(&repository, database_id)?;
         require_retired_paths(source, &source_commit, &store.retired)?;
+        refuse_edited_retired_loose_rows(&repository, &store.retired)?;
+        absent_retired = absent_retired_loose_rows(&repository, &store.retired)?;
         let database_bytes = canonical_database_bytes(&database_id);
         let expected = migration_entries(
             committed_database.as_deref(),
@@ -1561,7 +1575,10 @@ fn recover_prepared_copy(
             return Err(RepositoryError::PublicationRecoveryConflict);
         }
     }
-    let (working_tree_identity, working_tree_entries) = working_tree_identity(&repository)?;
+    let (source_working_tree_identity, source_working_tree_entries) =
+        working_tree_identity_excluding(source, &absent_retired)?;
+    let (working_tree_identity, working_tree_entries) =
+        working_tree_identity_excluding(&repository, &absent_retired)?;
     if working_tree_identity != source_working_tree_identity
         || working_tree_entries != source_working_tree_entries
     {
@@ -1723,6 +1740,12 @@ fn build_migration_candidate(
         .tree_store_root(candidate.tree().as_str())
         .map_err(admission_error)?
         .ok_or(RepositoryError::InvalidFormatMigration)?;
+    let tracked: BTreeSet<String> = repository
+        .list_private_candidate_tree(&candidate, MAX_CANDIDATE_TREE_ENTRIES)?
+        .iter()
+        .filter_map(|entry| entry.path().as_path().to_str().map(str::to_owned))
+        .collect();
+    refuse_tracked_loose_rows(&tracked, &store.retired)?;
     match &store.candidate_gate {
         Some(gate) => gate
             .check(repository, &candidate)
@@ -1737,8 +1760,10 @@ fn build_migration_candidate(
     Ok((candidate, store_root))
 }
 
-/// Refuses a store whose retired paths are not legacy `.orna` files the source
-/// commit records with exactly the named bytes.
+/// Refuses a store whose retired paths are not legacy files the source commit
+/// records with exactly the named bytes. A metadata file must sit under
+/// `.orna/` and not be a reserved record; a loose row unit must be an `.orna`
+/// file outside that directory, so a migration can retire the rows it read.
 fn require_retired_paths(
     source: &Repository,
     source_commit: &GitCommitRef,
@@ -1747,17 +1772,74 @@ fn require_retired_paths(
     let mut seen = BTreeSet::new();
     for entry in retired {
         let path = entry.path.as_str();
-        let reserved = path == ".orna/database.orna"
-            || path == LEGACY_FORMAT_PATH
-            || path == ".orna/store"
-            || path.starts_with(".orna/store/");
-        if !path.starts_with(".orna/") || reserved || !seen.insert(path) {
+        let shape_ok = match entry.kind {
+            RetiredLegacyKind::Metadata => {
+                let reserved = path == ".orna/database.orna"
+                    || path == LEGACY_FORMAT_PATH
+                    || path == ".orna/store"
+                    || path.starts_with(".orna/store/");
+                path.starts_with(".orna/") && !reserved
+            }
+            RetiredLegacyKind::LooseRowUnit => {
+                !path.starts_with(".orna/") && path.ends_with(".orna")
+            }
+        };
+        if !shape_ok || !seen.insert(path) {
             return Err(RepositoryError::InvalidFormatMigration);
         }
         if candidate_file(source, source_commit.as_str(), path)?.as_deref()
             != Some(entry.committed.as_slice())
         {
             return Err(RepositoryError::InvalidFormatMigration);
+        }
+    }
+    Ok(())
+}
+
+/// Refuses a candidate whose tree still tracks a loose row unit the migration
+/// retires. The candidate deletes each one; a survivor would leave a migrated
+/// row readable both from the store and from its legacy file.
+fn refuse_tracked_loose_rows(
+    tracked: &BTreeSet<String>,
+    retired: &[RetiredLegacyPath],
+) -> Result<(), RepositoryError> {
+    for entry in retired {
+        if entry.kind == RetiredLegacyKind::LooseRowUnit && tracked.contains(&entry.path) {
+            return Err(RepositoryError::MigrationStoreRefused(format!(
+                "the candidate still tracks the migrated row file {}",
+                entry.path
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Refuses activation when a retired loose row file holds local edits: the
+/// migration would delete the file and lose them. A missing file is already
+/// retired and is left alone.
+fn refuse_edited_retired_loose_rows(
+    repository: &Repository,
+    retired: &[RetiredLegacyPath],
+) -> Result<(), RepositoryError> {
+    for entry in retired {
+        if entry.kind != RetiredLegacyKind::LooseRowUnit {
+            continue;
+        }
+        let path = repository.worktree().join(&entry.path);
+        // `symlink_metadata` does not follow a link: a symlink in place of the
+        // row file is a changed path even when its target holds equal bytes.
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return Err(RepositoryError::LocalStateUnavailable),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(RepositoryError::LegacyPathChanged(entry.path.clone()));
+        }
+        match fs::read(&path) {
+            Ok(bytes) if bytes == entry.committed => {}
+            Ok(_) => return Err(RepositoryError::LegacyPathChanged(entry.path.clone())),
+            Err(_) => return Err(RepositoryError::LocalStateUnavailable),
         }
     }
     Ok(())
@@ -2362,17 +2444,56 @@ fn dependency_entries(
 /// Main `.git` metadata is excluded; nested HEADs and indexes are included so
 /// prepared-copy recovery detects dirty submodule changes.
 fn working_tree_identity(copy: &Repository) -> Result<([u8; 32], usize), RepositoryError> {
+    working_tree_identity_excluding(copy, &BTreeSet::new())
+}
+
+/// Like [`working_tree_identity`], but the `excluded` paths are left out.
+fn working_tree_identity_excluding(
+    copy: &Repository,
+    excluded: &BTreeSet<String>,
+) -> Result<([u8; 32], usize), RepositoryError> {
     let mut hash = Sha256::new();
     hash.update(b"orna.migration.working-tree-identity.v3\0");
     let mut entries = 0;
-    hash_working_tree(copy.worktree(), Path::new(""), &mut hash, &mut entries)?;
+    hash_working_tree(
+        copy.worktree(),
+        Path::new(""),
+        &mut hash,
+        &mut entries,
+        excluded,
+    )?;
     Ok((hash.finalize().into(), entries))
 }
+
+/// The retired loose-row files `copy` no longer holds. A row the user deleted
+/// already has the state activation would make, so only these paths leave the
+/// identity comparison; every file that remains is still compared.
+fn absent_retired_loose_rows(
+    copy: &Repository,
+    retired: &[RetiredLegacyPath],
+) -> Result<BTreeSet<String>, RepositoryError> {
+    let mut absent = BTreeSet::new();
+    for entry in retired {
+        if entry.kind != RetiredLegacyKind::LooseRowUnit {
+            continue;
+        }
+        match fs::symlink_metadata(copy.worktree().join(&entry.path)) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                absent.insert(entry.path.clone());
+            }
+            Err(_) => return Err(RepositoryError::LocalStateUnavailable),
+        }
+    }
+    Ok(absent)
+}
+
 fn hash_working_tree(
     root: &Path,
     relative: &Path,
     hash: &mut Sha256,
     entry_count: &mut usize,
+    excluded: &BTreeSet<String>,
 ) -> Result<(), RepositoryError> {
     let directory = root.join(relative);
     let mut entries = fs::read_dir(&directory)
@@ -2395,6 +2516,9 @@ fn hash_working_tree(
             continue;
         }
         let child = relative.join(name);
+        if child.to_str().is_some_and(|path| excluded.contains(path)) {
+            continue;
+        }
         let metadata = fs::symlink_metadata(entry.path())
             .map_err(|_| RepositoryError::LocalStateUnavailable)?;
         let file_type = metadata.file_type();
@@ -2421,7 +2545,7 @@ fn hash_working_tree(
             hash.update(target_bytes);
         } else if file_type.is_dir() {
             hash.update(b"directory\0");
-            hash_working_tree(root, &child, hash, entry_count)?;
+            hash_working_tree(root, &child, hash, entry_count, excluded)?;
         } else {
             hash.update(b"file\0");
             hash.update(metadata.len().to_be_bytes());
@@ -2593,6 +2717,68 @@ fn hex(bytes: &[u8]) -> String {
         text.push(char::from_digit(u32::from(byte & 0x0f), 16).unwrap_or('0'));
     }
     text
+}
+
+#[cfg(test)]
+mod retired_path_tests {
+    use super::*;
+
+    fn retired(path: &str, kind: RetiredLegacyKind) -> RetiredLegacyPath {
+        RetiredLegacyPath {
+            path: path.to_owned(),
+            kind,
+            committed: b"row\n".to_vec(),
+        }
+    }
+
+    #[test]
+    fn a_candidate_still_tracking_a_migrated_loose_row_is_refused_by_name() {
+        let retired = [
+            retired(".orna/database.orna", RetiredLegacyKind::Metadata),
+            retired(
+                "contacts/Contact/alice-smith.orna",
+                RetiredLegacyKind::LooseRowUnit,
+            ),
+        ];
+        let tracked: BTreeSet<String> = [
+            "contacts/Contact/alice-smith.orna".to_owned(),
+            "contacts/main.orna".to_owned(),
+        ]
+        .into_iter()
+        .collect();
+        match refuse_tracked_loose_rows(&tracked, &retired) {
+            Err(RepositoryError::MigrationStoreRefused(detail)) => {
+                assert!(
+                    detail.contains("contacts/Contact/alice-smith.orna"),
+                    "{detail}"
+                );
+            }
+            other => panic!("expected a named refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_candidate_that_drops_the_loose_rows_and_keeps_user_files_is_admitted() {
+        let retired = [retired(
+            "contacts/Contact/alice-smith.orna",
+            RetiredLegacyKind::LooseRowUnit,
+        )];
+        let tracked: BTreeSet<String> = [
+            "contacts/main.orna".to_owned(),
+            "main.orna".to_owned(),
+            "ordinary.txt".to_owned(),
+        ]
+        .into_iter()
+        .collect();
+        assert!(refuse_tracked_loose_rows(&tracked, &retired).is_ok());
+    }
+
+    #[test]
+    fn a_metadata_path_is_never_refused_as_a_tracked_loose_row() {
+        let retired = [retired(".orna/extra.orna", RetiredLegacyKind::Metadata)];
+        let tracked: BTreeSet<String> = [".orna/extra.orna".to_owned()].into_iter().collect();
+        assert!(refuse_tracked_loose_rows(&tracked, &retired).is_ok());
+    }
 }
 
 #[cfg(test)]
@@ -2796,7 +2982,14 @@ mod git_metadata_tests {
     fn digest_and_entries(root: &Path) -> ([u8; 32], usize) {
         let mut hash = Sha256::new();
         let mut entries = 0;
-        hash_working_tree(root, Path::new(""), &mut hash, &mut entries).unwrap();
+        hash_working_tree(
+            root,
+            Path::new(""),
+            &mut hash,
+            &mut entries,
+            &BTreeSet::new(),
+        )
+        .unwrap();
         (hash.finalize().into(), entries)
     }
 
