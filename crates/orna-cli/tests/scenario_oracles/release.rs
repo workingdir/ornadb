@@ -25,12 +25,14 @@ use std::{
     sync::LazyLock,
 };
 
+use orna_repository::Repository;
+use orna_runtime::{Mutation, NoFault, RuntimeState};
 use sha2::{Digest, Sha256};
 
 use crate::{
     harness::{
-        Check, Db, Entry, Failure, Probe, check_refuses, ensure, harness_ensure, hex, repl_refuses,
-        unknown_command, vendored_fixture,
+        Check, Db, Entry, Failure, Probe, Run, check_refuses, ensure, harness_ensure, hex,
+        repl_refuses, unknown_command, vendored_fixture,
     },
     mandatory::{LIVE_BLOCKER as LIVE_WATCH, watches_receive_no_update},
 };
@@ -2279,10 +2281,10 @@ fn utf8(path: &std::path::Path) -> Result<&str, Failure> {
         .ok_or_else(|| Failure::Harness(format!("non-UTF-8 path {}", path.display())))
 }
 
-/// Clones the committed format-1 fixture into a scratch directory of `db`.
-fn legacy_source(db: &mut Db) -> Result<std::path::PathBuf, Failure> {
+/// Clones the committed format-1 fixture into `name` under a scratch directory of `db`.
+fn legacy_source_in(db: &mut Db, name: &str) -> Result<std::path::PathBuf, Failure> {
     let bundle = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(LEGACY_BUNDLE);
-    let source = db.scratch("legacy")?.join("source");
+    let source = db.scratch(name)?.join("source");
     let output = isolated_git()
         .arg("clone")
         .arg("--quiet")
@@ -2298,6 +2300,95 @@ fn legacy_source(db: &mut Db) -> Result<std::path::PathBuf, Failure> {
         )));
     }
     Ok(source)
+}
+
+/// Clones the committed format-1 fixture into a scratch directory of `db`.
+fn legacy_source(db: &mut Db) -> Result<std::path::PathBuf, Failure> {
+    legacy_source_in(db, "legacy")
+}
+
+/// Every byte a failed in-place upgrade must leave alone: the legacy commit,
+/// the worktree bytes, the runtime state database with its WAL and shared-memory
+/// sidecars, and the runtime owner state.
+#[derive(Debug, PartialEq, Eq)]
+struct SourceSnapshot {
+    state: SourceState,
+    tree: std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
+    runtime: Vec<Option<Vec<u8>>>,
+    owner: Option<Vec<u8>>,
+}
+
+fn source_snapshot(source: &std::path::Path) -> Result<SourceSnapshot, Failure> {
+    let repository = Repository::discover(source)
+        .map_err(|error| Failure::Harness(format!("discover legacy source: {error:?}")))?;
+    let state_db = repository.runtime_paths().state_db();
+    let owner = repository
+        .runtime_paths()
+        .locks()
+        .join("runtime-owner.state");
+    let runtime = ["", "-wal", "-shm"]
+        .into_iter()
+        .map(|suffix| {
+            read_optional(&std::path::PathBuf::from(format!(
+                "{}{suffix}",
+                state_db.display()
+            )))
+        })
+        .collect::<Result<Vec<Option<Vec<u8>>>, Failure>>()?;
+    Ok(SourceSnapshot {
+        state: source_state(source)?,
+        tree: tree_bytes(source)?,
+        runtime,
+        owner: read_optional(&owner)?,
+    })
+}
+
+fn read_optional(path: &std::path::Path) -> Result<Option<Vec<u8>>, Failure> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(Failure::Harness(format!(
+            "read {}: {error}",
+            path.display()
+        ))),
+    }
+}
+
+/// Appends one real unpublished mutation to the legacy source through the
+/// runtime, the same setup the migration tail refusal tests use.
+fn append_unpublished_mutation(source: &std::path::Path) -> Result<(), Failure> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| Failure::Harness(format!("tokio runtime: {error}")))?;
+    runtime.block_on(async {
+        let repository = Repository::discover(source)
+            .map_err(|error| Failure::Harness(format!("discover legacy source: {error:?}")))?;
+        let (identity, digest) = orna_runtime::migration_source_runtime_identity(&repository)
+            .map_err(|error| Failure::Harness(format!("runtime identity: {error:?}")))?;
+        let state = RuntimeState::open(&repository, identity, digest)
+            .await
+            .map_err(|error| Failure::Harness(format!("open runtime: {error:?}")))?;
+        let lease = state
+            .acquire_lease([45; 16])
+            .await
+            .map_err(|error| Failure::Harness(format!("acquire lease: {error:?}")))?;
+        let capture = state
+            .capture()
+            .await
+            .map_err(|error| Failure::Harness(format!("capture runtime: {error:?}")))?;
+        let payload = b"unpublished legacy-source row".to_vec();
+        let mutation = Mutation {
+            id: [1; 16],
+            digest: Sha256::digest(&payload).into(),
+            payload,
+        };
+        state
+            .commit(lease, &capture, &mutation, [2; 32], &NoFault)
+            .await
+            .map_err(|error| Failure::Harness(format!("commit tail: {error:?}")))?;
+        Ok::<(), Failure>(())
+    })
 }
 
 /// What a migration must leave alone: the legacy commit, its worktree status
@@ -2519,22 +2610,139 @@ fn activated_copy_tracks_loose_rows(db: &mut Db) -> Probe {
     ))
 }
 
-/// FINAL-UPGRADE-006: an in-place upgrade refused without confirmation, or
-/// confirmed against another candidate, leaves the legacy commit, worktree and
-/// format record as they were.
+/// FINAL-UPGRADE-006: a failed or refused in-place upgrade leaves the legacy
+/// source as it was. Each case forces a real refusal through the CLI and then
+/// compares the whole source byte for byte: its commit, every worktree file,
+/// the format record, the unpublished runtime tail and the runtime owner state.
+/// The forced refusals are an unpublished runtime tail, a dirty tracked file
+/// beside an untracked file, a committed corrupt format record, an unconfirmed
+/// publication and a confirmation naming another candidate.
+///
+/// This oracle covers failure refusals only. The kill proof for an upgrade that
+/// is interrupted mid-publication is the crash matrix, which the oracle harness
+/// cannot run: `cargo test --features crash-barriers --test migration_kill_matrix`
+/// with the tests `in_place_upgrade_kill_at_each_exchange_boundary_resumes_or_refuses`,
+/// `in_place_rerun_refuses_an_unpublished_tail_appended_after_the_exchange_parked`,
+/// `upgrade_kill_at_each_activation_boundary_rolls_forward_or_refuses_abort` and
+/// `discard_refuses_a_prepared_copy_whose_ref_an_ordinary_writer_moved`.
 fn refused_in_place_upgrade_keeps_the_source(db: &mut Db) -> Check {
-    let source = legacy_source(db)?;
-    let before = source_state(&source)?;
-    let before_tree = tree_bytes(&source)?;
-    let unconfirmed = db.orna(&[
+    refused_by_unpublished_tail(db)?;
+    refused_with_dirty_worktree(db)?;
+    refused_by_corrupt_format_record(db)?;
+    refused_without_confirmation(db)
+}
+
+/// `upgrade --to-format 3` of `source`, with `extra` words after the fixed form.
+fn run_in_place(db: &mut Db, source: &std::path::Path, extra: &[&str]) -> Result<Run, Failure> {
+    let mut words = vec![
         "--db",
-        utf8(&source)?,
+        utf8(source)?,
         "--debug",
         "upgrade",
         "--to-format",
         "3",
         "--no-persistent-consumers",
-    ])?;
+    ];
+    words.extend_from_slice(extra);
+    db.orna(&words)
+}
+
+/// An unpublished runtime tail refuses the in-place upgrade before the source changes.
+fn refused_by_unpublished_tail(db: &mut Db) -> Check {
+    let source = legacy_source_in(db, "tail")?;
+    append_unpublished_mutation(&source)?;
+    let before = source_snapshot(&source)?;
+    let run = run_in_place(db, &source, &[])?;
+    ensure!(
+        !run.succeeded() && run.output().contains("unpublished_mutations=1"),
+        "an in-place upgrade of a source with an unpublished tail was not refused: {}",
+        run.diagnostic()
+    );
+    ensure!(
+        source_snapshot(&source)? == before,
+        "a refused in-place upgrade changed a source with an unpublished tail"
+    );
+    Ok(())
+}
+
+/// A dirty tracked file and an untracked file are left byte-identical by an
+/// unconfirmed in-place upgrade.
+fn refused_with_dirty_worktree(db: &mut Db) -> Check {
+    let source = legacy_source_in(db, "dirty")?;
+    let io = |error: std::io::Error| Failure::Harness(format!("edit legacy source: {error}"));
+    let tracked = git_in(&source, &["ls-files"])?
+        .lines()
+        .find(|path| !path.starts_with(".orna/"))
+        .ok_or_else(|| Failure::Harness("the legacy source tracks no user file".to_owned()))?
+        .to_owned();
+    let tracked_path = source.join(&tracked);
+    let mut edited = fs::read(&tracked_path).map_err(io)?;
+    edited.extend_from_slice(b"uncommitted user edit\n");
+    fs::write(&tracked_path, edited).map_err(io)?;
+    fs::write(
+        source.join("untracked-user-note.txt"),
+        b"untracked user edit\n",
+    )
+    .map_err(io)?;
+    let before = source_snapshot(&source)?;
+    ensure!(
+        !before.state.status.is_empty(),
+        "the edited legacy source reports no worktree change"
+    );
+    let run = run_in_place(db, &source, &[])?;
+    ensure!(
+        !run.succeeded(),
+        "an unconfirmed in-place upgrade of a dirty source succeeded: {}",
+        run.diagnostic()
+    );
+    ensure!(
+        source_snapshot(&source)? == before,
+        "a refused in-place upgrade changed the dirty legacy source's files"
+    );
+    Ok(())
+}
+
+/// A corrupt format record committed to the source makes the in-place upgrade
+/// fail before any publication, and the source keeps its commit and bytes.
+fn refused_by_corrupt_format_record(db: &mut Db) -> Check {
+    let source = legacy_source_in(db, "corrupt")?;
+    fs::write(source.join(".orna/format.orna"), b"not a format record\n")
+        .map_err(|error| Failure::Harness(format!("corrupt format record: {error}")))?;
+    git_in(
+        &source,
+        &[
+            "-c",
+            "user.name=oracle",
+            "-c",
+            "user.email=oracle@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--quiet",
+            "--all",
+            "--message",
+            "commit a corrupt format record",
+        ],
+    )?;
+    let before = source_snapshot(&source)?;
+    let run = run_in_place(db, &source, &[])?;
+    ensure!(
+        !run.succeeded(),
+        "an in-place upgrade of a source with a corrupt committed format record succeeded: {}",
+        run.diagnostic()
+    );
+    ensure!(
+        source_snapshot(&source)? == before,
+        "a failed in-place upgrade changed a source with a corrupt format record"
+    );
+    Ok(())
+}
+
+/// The unconfirmed and mismatched-confirmation refusals keep the source unchanged.
+fn refused_without_confirmation(db: &mut Db) -> Check {
+    let source = legacy_source_in(db, "confirm")?;
+    let before = source_snapshot(&source)?;
+    let unconfirmed = run_in_place(db, &source, &[])?;
     ensure!(
         unconfirmed.code == Some(1)
             && unconfirmed
@@ -2543,17 +2751,11 @@ fn refused_in_place_upgrade_keeps_the_source(db: &mut Db) -> Check {
         "an unconfirmed in-place upgrade was not refused: {}",
         unconfirmed.diagnostic()
     );
-    let mismatched = db.orna(&[
-        "--db",
-        utf8(&source)?,
-        "--debug",
-        "upgrade",
-        "--to-format",
-        "3",
-        "--no-persistent-consumers",
-        "--confirm",
-        "0000000000000000000000000000000000000000",
-    ])?;
+    let mismatched = run_in_place(
+        db,
+        &source,
+        &["--confirm", "0000000000000000000000000000000000000000"],
+    )?;
     ensure!(
         mismatched.code == Some(1)
             && mismatched
@@ -2563,12 +2765,8 @@ fn refused_in_place_upgrade_keeps_the_source(db: &mut Db) -> Check {
         mismatched.diagnostic()
     );
     ensure!(
-        source_state(&source)? == before,
+        source_snapshot(&source)? == before,
         "a refused in-place upgrade changed the legacy source"
-    );
-    ensure!(
-        tree_bytes(&source)? == before_tree,
-        "a refused in-place upgrade changed a file in the legacy source tree"
     );
     Ok(())
 }
