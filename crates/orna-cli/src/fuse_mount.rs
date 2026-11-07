@@ -2456,9 +2456,15 @@ impl RowSaveContext {
                 }
                 Ok(accepted_row)
             }
-            Ok(TemporaryRenameOutcome::Rejected { .. }) => Err(DocumentCommitError::Rejected(
-                "mounted row document was rejected by semantic admission".into(),
-            )),
+            Ok(TemporaryRenameOutcome::Rejected { diagnostic }) => {
+                Err(DocumentCommitError::Rejected(format!(
+                    "mounted row document was rejected by semantic admission: {}",
+                    refusal_text(
+                        orna_conformance::is_table_assertion_false(diagnostic),
+                        diagnostic
+                    )
+                )))
+            }
             Ok(TemporaryRenameOutcome::Stale { .. }) => Err(DocumentCommitError::Stale),
             Err(error) => Err(save_failure("mounted row save failed", error)),
         }
@@ -2575,9 +2581,15 @@ impl RowSaveContext {
                     bytes: replacement_bytes,
                 })
             }
-            Ok(TemporaryRenameOutcome::Rejected { .. }) => Err(DocumentCommitError::Rejected(
-                "mounted replacement was rejected by semantic admission".into(),
-            )),
+            Ok(TemporaryRenameOutcome::Rejected { diagnostic }) => {
+                Err(DocumentCommitError::Rejected(format!(
+                    "mounted replacement was rejected by semantic admission: {}",
+                    refusal_text(
+                        orna_conformance::is_table_assertion_false(diagnostic),
+                        diagnostic
+                    )
+                )))
+            }
             Ok(TemporaryRenameOutcome::Stale { .. }) => Err(DocumentCommitError::Stale),
             Err(error) => Err(save_failure("mounted replacement failed", error)),
         }
@@ -2814,9 +2826,15 @@ impl RowSaveContext {
                         .map_err(|error| DocumentCommitError::Failed(candidate_unreadable(error))),
                 }
             }
-            Ok(TemporaryRenameOutcome::Rejected { .. }) => Err(DocumentCommitError::Rejected(
-                "temporary mounted row document was rejected by semantic admission".into(),
-            )),
+            Ok(TemporaryRenameOutcome::Rejected { diagnostic }) => {
+                Err(DocumentCommitError::Rejected(format!(
+                    "temporary mounted row document was rejected by semantic admission: {}",
+                    refusal_text(
+                        orna_conformance::is_table_assertion_false(diagnostic),
+                        diagnostic
+                    )
+                )))
+            }
             Ok(TemporaryRenameOutcome::Stale { .. }) => Err(DocumentCommitError::Stale),
             Err(error) => Err(save_failure("temporary mounted row save failed", error)),
         }
