@@ -1818,6 +1818,10 @@ fn cli_upgrade_yes_activate_removes_the_loose_rows_and_keeps_them_queryable() {
             .exists()
     );
     assert!(!destination.join("contacts/Contact/bob-jones.orna").exists());
+    assert!(
+        !destination.join("contacts/Contact").exists(),
+        "the directory the retired rows left empty is pruned"
+    );
     assert!(destination.join("contacts/main.orna").exists());
     assert_eq!(query_contact_rows(&destination), 2);
 }
@@ -1860,6 +1864,81 @@ fn cli_upgrade_refuses_an_untracked_file_added_after_preparation() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "activation must refuse: {stderr}");
     assert_eq!(fs::read_to_string(&scratch).unwrap(), "keep me\n");
+    assert!(journal_is_present(&destination), "the journal is kept");
+    assert_eq!(git_output(&destination, &["rev-parse", "HEAD"]), copy_head);
+}
+
+/// A migrated loose row file the user deleted before activation is already
+/// retired: activation accepts the copy and removes the remaining rows.
+#[test]
+fn cli_upgrade_yes_activate_accepts_a_migrated_loose_row_the_user_deleted() {
+    let parent = TempDir::new().unwrap();
+    let (source, destination) = prepare_contacts_source(parent.path());
+    fs::remove_file(destination.join("contacts/Contact/alice-smith.orna")).unwrap();
+
+    let activated = run_upgrade(&source, &destination, true);
+    assert!(
+        activated.status.success(),
+        "upgrade --yes-activate: {}",
+        String::from_utf8_lossy(&activated.stderr)
+    );
+    assert!(!destination.join("contacts/Contact/bob-jones.orna").exists());
+    assert!(!destination.join("contacts/Contact").exists());
+    assert!(destination.join("contacts/main.orna").exists());
+    assert_eq!(query_contact_rows(&destination), 2);
+}
+
+/// A migrated loose row file the user renamed is an untracked file in the copy:
+/// activation refuses it, keeps the renamed file, and keeps the journal.
+#[test]
+fn cli_upgrade_refuses_a_migrated_loose_row_the_user_renamed() {
+    let parent = TempDir::new().unwrap();
+    let (source, destination) = prepare_contacts_source(parent.path());
+    let renamed = destination.join("contacts/Contact/alice-renamed.orna");
+    fs::rename(
+        destination.join("contacts/Contact/alice-smith.orna"),
+        &renamed,
+    )
+    .unwrap();
+    let copy_head = git_output(&destination, &["rev-parse", "HEAD"]);
+
+    let output = run_upgrade(&source, &destination, true);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "activation must refuse: {stderr}");
+    assert_eq!(
+        fs::read_to_string(&renamed).unwrap(),
+        "{\n    name: \"Alice Smith\",\n}\n"
+    );
+    assert!(journal_is_present(&destination), "the journal is kept");
+    assert_eq!(git_output(&destination, &["rev-parse", "HEAD"]), copy_head);
+}
+
+/// A symlink in place of a migrated loose row file is a changed path, not the
+/// committed file, even when its target holds the same bytes. Activation
+/// refuses, names the path, and keeps the link and the journal.
+#[cfg(unix)]
+#[test]
+fn cli_upgrade_refuses_a_symlink_in_place_of_a_migrated_loose_row() {
+    let parent = TempDir::new().unwrap();
+    let (source, destination) = prepare_contacts_source(parent.path());
+    let row = destination.join("contacts/Contact/alice-smith.orna");
+    let target = parent.path().join("alice-elsewhere.orna");
+    fs::write(&target, "{\n    name: \"Alice Smith\",\n}\n").unwrap();
+    fs::remove_file(&row).unwrap();
+    std::os::unix::fs::symlink(&target, &row).unwrap();
+    let copy_head = git_output(&destination, &["rev-parse", "HEAD"]);
+
+    let output = run_upgrade(&source, &destination, true);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "activation must refuse: {stderr}");
+    assert!(
+        stderr.contains("contacts/Contact/alice-smith.orna"),
+        "the refusal names the linked row file: {stderr}"
+    );
+    assert!(
+        fs::symlink_metadata(&row).unwrap().file_type().is_symlink(),
+        "the link is kept"
+    );
     assert!(journal_is_present(&destination), "the journal is kept");
     assert_eq!(git_output(&destination, &["rev-parse", "HEAD"]), copy_head);
 }
