@@ -32,7 +32,11 @@ use orna_runtime::{
     RuntimeError, RuntimePublicationMetadataRows, RuntimeTableActivationSnapshot,
     RuntimeTableIdentity, RuntimeTableRows, StagedTableActivation, TableMutation, TableObjectId,
 };
-pub use orna_security::{RemoteAnalysisDecision, RemoteAnalysisPolicy, RemoteAnalysisRequest};
+pub use orna_security::{
+    CostAcknowledgement, RecordedRemoteAnalysis, RemoteAnalysisDecision, RemoteAnalysisPolicy,
+    RemoteAnalysisRecordError, RemoteAnalysisRequest, Reproducibility, RetainedArtifact,
+    RetainedArtifactError,
+};
 use orna_semantic::{
     Analysis, Catalogue, DIAG_AMBIGUOUS, DIAG_IMPORT, ModuleInput, Namespace,
     StandardCatalogueError, StandardDependencyProfile, SystemProviders, TableSchema,
@@ -60,8 +64,16 @@ pub fn remote_analysis_request(
     policy: RemoteAnalysisPolicy,
     admitted_snapshot_identity: impl Into<String>,
     disclosed_data: impl IntoIterator<Item = String>,
+    declared_cost_units: u64,
+    acknowledgement: CostAcknowledgement,
 ) -> RemoteAnalysisRequest {
-    RemoteAnalysisRequest::new(policy, admitted_snapshot_identity, disclosed_data)
+    RemoteAnalysisRequest::new(
+        policy,
+        admitted_snapshot_identity,
+        disclosed_data,
+        declared_cost_units,
+        acknowledgement,
+    )
 }
 
 mod browser_profile;
@@ -4483,48 +4495,69 @@ mod tests {
     }
 
     #[test]
-    fn remote_analysis_is_denied_by_default_without_disclosure() {
+    fn remote_analysis_is_denied_by_default_and_cannot_be_recorded() {
         let denied = remote_analysis_request(
             RemoteAnalysisPolicy::default(),
             "snapshot:sha256:source-deps-resources-toolchain-abi",
-            Vec::new(),
+            ["source".to_owned()],
+            0,
+            CostAcknowledgement::Given,
         );
         assert_eq!(denied.decision(), RemoteAnalysisDecision::DeniedLocalOnly);
         assert!(!denied.is_allowed());
         assert!(denied.disclosed_data().is_empty());
         assert_eq!(
-            denied.source_snapshot(),
-            "snapshot:sha256:source-deps-resources-toolchain-abi"
+            RecordedRemoteAnalysis::record(&denied, Reproducibility::NotReproducible),
+            Err(RemoteAnalysisRecordError::NotAllowed(
+                RemoteAnalysisDecision::DeniedLocalOnly
+            ))
         );
     }
 
     #[test]
-    fn remote_analysis_requires_explicit_policy_and_records_disclosed_boundary() {
+    fn remote_analysis_records_the_disclosed_boundary_under_explicit_policy() {
+        let policy = RemoteAnalysisPolicy::AllowRemoteDisclosure { max_cost_units: 0 };
         let allowed = remote_analysis_request(
-            RemoteAnalysisPolicy::AllowRemoteDisclosure,
+            policy,
             "snapshot:sha256:source-deps-resources-toolchain-abi",
             ["source", "dependency snapshot", "query"].map(str::to_owned),
+            0,
+            CostAcknowledgement::Withheld,
         );
         assert_eq!(
             allowed.decision(),
             RemoteAnalysisDecision::AllowedByUserPolicy
         );
-        assert!(allowed.is_allowed());
+        let recorded = RecordedRemoteAnalysis::record(
+            &allowed,
+            Reproducibility::RetainedOutputReplay(
+                RetainedArtifact::new("remote-output:sha256:abc").unwrap(),
+            ),
+        )
+        .unwrap();
         assert_eq!(
-            allowed.disclosed_data(),
+            recorded.disclosed_data(),
             &["source", "dependency snapshot", "query"]
         );
+        assert_eq!(recorded.declared_cost_units(), 0);
     }
+
     #[test]
-    fn remote_analysis_explicit_deny_has_no_disclosure() {
-        let denied = remote_analysis_request(
-            RemoteAnalysisPolicy::LocalOnly,
+    fn remote_analysis_cost_above_host_ceiling_is_refused_even_when_acknowledged() {
+        let policy = RemoteAnalysisPolicy::AllowRemoteDisclosure { max_cost_units: 10 };
+        let over = remote_analysis_request(
+            policy,
             "snapshot:sha256:source-deps-resources-toolchain-abi",
-            Vec::new(),
+            ["source".to_owned()],
+            11,
+            CostAcknowledgement::Given,
         );
-        assert_eq!(denied.decision(), RemoteAnalysisDecision::DeniedLocalOnly);
-        assert!(!denied.is_allowed());
-        assert!(denied.disclosed_data().is_empty());
+        assert_eq!(
+            over.decision(),
+            RemoteAnalysisDecision::DeniedCostExceedsPolicy
+        );
+        assert!(over.disclosed_data().is_empty());
+        assert!(!over.is_allowed());
     }
     #[test]
     fn source_admission_reaches_real_evaluator() {
