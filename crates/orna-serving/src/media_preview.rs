@@ -76,7 +76,24 @@ fn preview_error(error: image::ImageError) -> PreviewError {
             PreviewError::Malformed
         }
         image::ImageError::IoError(_) => PreviewError::ContentUnavailable,
-        _ => PreviewError::Malformed,
+        image::ImageError::Decoding(_)
+        | image::ImageError::Encoding(_)
+        | image::ImageError::Parameter(_) => PreviewError::Malformed,
+    }
+}
+
+#[cfg(test)]
+mod preview_error_tests {
+    use super::{PreviewError, preview_error};
+    use image::error::{ImageFormatHint, UnsupportedError, UnsupportedErrorKind};
+
+    #[test]
+    fn unsupported_decoder_feature_is_unsupported_media_not_malformed() {
+        let error = image::ImageError::Unsupported(UnsupportedError::from_format_and_kind(
+            ImageFormatHint::Unknown,
+            UnsupportedErrorKind::GenericFeature("progressive jpeg".to_owned()),
+        ));
+        assert_eq!(preview_error(error), PreviewError::UnsupportedMediaType);
     }
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
