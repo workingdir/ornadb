@@ -729,7 +729,62 @@ fn build_index(
             tree_edges(&branch),
             true,
         );
-        return (root, 4, 3);
+        return IndexShape {
+            root,
+            leaf_pages: 4,
+            branch_pages: 3,
+            tree_height: 3,
+            leaf_row_counts: Vec::new(),
+        };
+    }
+
+    if fault == Fault::InteriorCountMismatch {
+        // Interior branch C holds keys 0..=7 in two leaves of 5 and 3 rows, but
+        // its parent claims 9. The root's claims sum to the declared 10 rows, so
+        // the row map admits the graph and only a descent into C detects it.
+        let left = make_leaf(
+            graph,
+            &domain,
+            &(0..5).map(|key| (key, key)).collect::<Vec<_>>(),
+        );
+        let right = make_leaf(
+            graph,
+            &domain,
+            &(5..8).map(|key| (key, key)).collect::<Vec<_>>(),
+        );
+        let inner = vec![left, right];
+        let inner_oid = graph.add_node(encode_branch(&domain, 1, &inner), tree_edges(&inner), true);
+        let tail_leaf = make_leaf(graph, &domain, &[(9, 9)]);
+        let tail_children = vec![tail_leaf];
+        let tail_oid = graph.add_node(
+            encode_branch(&domain, 1, &tail_children),
+            tree_edges(&tail_children),
+            true,
+        );
+        let branch = vec![
+            BranchCandidate {
+                max_key: encode_uint(7),
+                oid: inner_oid,
+                row_count: 9,
+            },
+            BranchCandidate {
+                max_key: encode_uint(9),
+                oid: tail_oid,
+                row_count: 1,
+            },
+        ];
+        let root = graph.add_node(
+            encode_branch(&domain, 2, &branch),
+            tree_edges(&branch),
+            true,
+        );
+        return IndexShape {
+            root,
+            leaf_pages: 3,
+            branch_pages: 3,
+            tree_height: 3,
+            leaf_row_counts: Vec::new(),
+        };
     }
 
     let (mut level, leaf_count) = leaf_pages(graph, &domain, row_count);
@@ -789,6 +844,7 @@ enum Fault {
     GiantFanout,
     WrongSchemaDomain,
     NestedOverlap,
+    InteriorCountMismatch,
 }
 
 fn schema_descriptor(relation_id: [u8; 16]) -> SchemaDescriptor {
@@ -3056,6 +3112,40 @@ fn orp1_nested_overlap_reports_diagnostic_on_descent() {
             .expect("healthy sibling branch resolves")
             .is_some(),
         "the fault must stay localized to the overlapping branch"
+    );
+}
+
+#[test]
+fn orp1_interior_count_mismatch_reports_diagnostic_on_descent() {
+    use orna_repository::GraphError;
+    let fixture = build_fixture(10, Fault::InteriorCountMismatch);
+    let repository =
+        Repository::discover(fixture.root.path()).expect("discover interior count fixture");
+    let context = repository
+        .open_format_context()
+        .expect("admit interior count graph snapshot header");
+    let snapshot = context
+        .load_row_map(fixture.relation_id)
+        .expect("root claims sum to the declared count; only an interior branch is wrong");
+    let graph = context
+        .open_native_graph(&snapshot)
+        .expect("open interior count graph");
+    let scope = graph
+        .open_read_scope()
+        .expect("open read scope over interior count graph");
+    assert!(
+        matches!(
+            graph.lookup_row(&TypedKey::UInt(3), &scope),
+            Err(GraphError::InvalidCount(8))
+        ),
+        "a key routed through the interior branch must report its 8 rows against the claimed 9"
+    );
+    assert!(
+        graph
+            .lookup_row(&TypedKey::UInt(9), &scope)
+            .expect("healthy sibling leaf resolves")
+            .is_some(),
+        "the count fault must stay localized to the interior branch"
     );
 }
 
