@@ -5110,6 +5110,47 @@ async fn cwd_mount_optional_blob_unlink_after_owner_advances_row_is_stale_then_r
 }
 
 #[tokio::test]
+/// profiles/vfs-1.md:76-80 and ORNA-VFS-011 (ornadb-5il1.372.5): another writer's accepted save that projects no Blob (the optional `cover` becomes null) retires the cover's stale sibling, although the accepted row projects no file at all. A write-open handle captured before that save keeps its generation, and its later fsync is refused.
+async fn cwd_mount_accepted_null_blob_retires_stale_blob_sibling() {
+    let content = lcg_bytes(0x5a5a_0000_0000_0001, 16 * 1024 + 5);
+    let cover = lcg_bytes(0x5a5a_0000_0000_0002, 8 * 1024 + 9);
+    let Some(row) = mount_titled_cover_row(&content, &cover).await else {
+        return;
+    };
+    let repository = row.repository_directory.path().to_path_buf();
+    let row_path = row.mounted.mountpoint.join("Music/london");
+    let cover_path = row_path.join("cover.png");
+    let mut held = OpenOptions::new()
+        .write(true)
+        .open(&cover_path)
+        .expect("a write-mode open captures the optional Blob");
+
+    owner_edit_row_text(&repository, "cover: .*", "cover: null,");
+
+    assert!(
+        !cover_path.exists(),
+        "the accepted null cover leaves no stale sibling in the row directory"
+    );
+    let document = String::from_utf8(std::fs::read(row_path.join("data.orna")).unwrap()).unwrap();
+    assert!(
+        document.contains("cover: null"),
+        "data.orna commits the optional Blob as null: {document}"
+    );
+    held.write_all(&lcg_bytes(0x5a5a_0000_0000_0003, 4 * 1024))
+        .unwrap();
+    assert!(
+        held.sync_all().is_err(),
+        "a write captured before the accepted null is refused, not committed"
+    );
+    drop(held);
+    assert!(
+        !cover_path.exists(),
+        "a refused stale write does not recreate the sibling"
+    );
+    drop(row);
+}
+
+#[tokio::test]
 /// ORNA-VFS-012 and profiles/vfs-1.md: a Blob renamed to a compatible suffix and renamed back keeps its bytes through each step, and the document names the suffix it has at the end.
 async fn cwd_mount_blob_suffix_round_trip_keeps_bytes() {
     let original = lcg_bytes(0x6363_0000_0000_0001, 32 * 1024 + 7);
