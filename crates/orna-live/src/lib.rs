@@ -786,6 +786,17 @@ impl LiveEvalTransaction {
         self.after_commit = Some(Box::new(callback));
         self
     }
+
+    /// Applies the host's trust decision to this transaction's effect report.
+    /// An untrusted application's controlled report is downgraded to
+    /// `ExternalPossible`, so its rollback cannot be recovered as proven.
+    #[must_use]
+    pub fn with_effect_report_trust(mut self, trusted: bool) -> Self {
+        if !trusted {
+            self.effects = ActivationEffectReport::ExternalPossible;
+        }
+        self
+    }
 }
 
 /// The result of a remote Eval admission. `Pure` preserves the existing
@@ -811,6 +822,22 @@ impl LiveEvalResponse {
         Self::Transaction {
             response,
             transaction,
+        }
+    }
+
+    /// Applies the host's trust decision to a transactional response's effect
+    /// report. Pure responses carry no effect report and pass through.
+    #[must_use]
+    pub fn with_effect_report_trust(self, trusted: bool) -> Self {
+        match self {
+            Self::Pure(response) => Self::Pure(response),
+            Self::Transaction {
+                response,
+                transaction,
+            } => Self::Transaction {
+                response,
+                transaction: transaction.with_effect_report_trust(trusted),
+            },
         }
     }
 }
@@ -1035,6 +1062,18 @@ pub trait LiveApplication {
             self.eval(session, request, message)
                 .map(LiveEvalResponse::pure)
         })
+    }
+
+    /// Declares whether this application's transaction effect reports are
+    /// trusted. A `ControlledOnly` report yields the controlled marker that
+    /// lets recovery prove a rollback (REQUEST-1 step 5, ORNA-CAP-005;
+    /// ACCEPTANCE.md Gate D). The runtime cannot observe what an application
+    /// does, so the host honours a report only from an application that opts
+    /// in here. Any other report is downgraded to `ExternalPossible`, which
+    /// recovers as `ExternalEffectsUncertain` after an observed rollback.
+    /// The default is untrusted.
+    fn trusts_controlled_effect_reports(&self) -> bool {
+        false
     }
 
     /// # Errors
@@ -1537,6 +1576,7 @@ impl LiveApplicationTicket {
         mut self,
         application: &mut impl LiveApplication,
     ) -> LiveApplicationCompletion {
+        let trusted = application.trusts_controlled_effect_reports();
         let response = if self.invoke_callback {
             if matches!(&*self.message, Message::Eval { .. }) {
                 let session = self.session;
@@ -1593,6 +1633,7 @@ impl LiveApplicationTicket {
                 self.fingerprint,
             )))
         };
+        let response = response.map(|response| response.with_effect_report_trust(trusted));
         self.work.complete();
         LiveApplicationCompletion {
             ticket: self,
@@ -2991,6 +3032,10 @@ impl LiveHost {
                     }
                     return Err(Error::UnsupportedOperation);
                 };
+                let controlled = matches!(
+                    transaction.effects,
+                    ActivationEffectReport::ControlledOnly(_)
+                );
                 let committed = self
                     .commit_eval_transaction(
                         RequestIdentity {
@@ -3027,9 +3072,8 @@ impl LiveHost {
                         return Err(error);
                     }
                     Err(error) => {
-                        if !self.deleted_sessions.contains_key(&session) {
-                            self.retain_failure(session, request, fingerprint).await?;
-                        }
+                        self.retain_failed_commit(session, request, fingerprint, controlled)
+                            .await?;
                         return Err(error);
                     }
                 }
@@ -3794,6 +3838,7 @@ impl LiveHost {
             .map(|dispatcher| dispatcher as &dyn LiveAdminEffectDispatcher);
         let session_id = session;
         let request_id = request;
+        let trusted = application.trusts_controlled_effect_reports();
         let execute = move || async move {
             application
                 .dispatch_eval_with_effects(
@@ -3816,7 +3861,7 @@ impl LiveHost {
             _ => execute().await,
         };
         work.complete();
-        let result = result?;
+        let result = result?.with_effect_report_trust(trusted);
         match result {
             LiveEvalResponse::Pure(response) => Ok(response),
             LiveEvalResponse::Transaction {
@@ -3826,14 +3871,14 @@ impl LiveHost {
                 let validated =
                     validate_result_response(request, fingerprint, response, self.limits.protocol)?;
                 let response = validated.response.ok_or(Error::ApplicationRejected)?;
-                self.commit_eval_transaction(
+                self.commit_transaction_or_retain(
                     RequestIdentity {
                         session_id: session,
                         request_id: request,
                     },
                     fingerprint,
                     None,
-                    context.as_ref().ok_or(Error::UnsupportedOperation)?,
+                    context.as_ref(),
                     response,
                     transaction,
                 )
@@ -3864,6 +3909,7 @@ impl LiveHost {
             None
         };
         let mut work = self.application_work.admit(session, request)?;
+        let trusted = application.trusts_controlled_effect_reports();
         let result = application
             .dispatch_event_with_work(
                 session,
@@ -3876,7 +3922,7 @@ impl LiveHost {
             )
             .await;
         work.complete();
-        match result? {
+        match result?.with_effect_report_trust(trusted) {
             LiveEvalResponse::Pure(response) => Ok(response),
             LiveEvalResponse::Transaction {
                 response,
@@ -3885,14 +3931,14 @@ impl LiveHost {
                 let validated =
                     validate_result_response(request, fingerprint, response, self.limits.protocol)?;
                 let response = validated.response.ok_or(Error::ApplicationRejected)?;
-                self.commit_eval_transaction(
+                self.commit_transaction_or_retain(
                     RequestIdentity {
                         session_id: session,
                         request_id: request,
                     },
                     fingerprint,
                     watch,
-                    context.as_ref().ok_or(Error::UnsupportedOperation)?,
+                    context.as_ref(),
                     response,
                     transaction,
                 )
@@ -4652,21 +4698,111 @@ impl LiveHost {
         request: [u8; 16],
         fingerprint: [u8; 32],
     ) -> Result<()> {
+        self.retain_terminal(
+            session,
+            request,
+            fingerprint,
+            redacted_failure_outcome(request, fingerprint),
+        )
+        .await
+    }
+
+    /// Retains an observed rollback whose effects were not Orna-controlled.
+    /// Without a controlled rollback proof the failed transaction may have
+    /// performed external effects, so it is retained as uncertain rather than
+    /// as a proven `Failure` (REQUEST-1 step 5; ACCEPTANCE Gate D).
+    async fn retain_uncertain(
+        &mut self,
+        session: [u8; 16],
+        request: [u8; 16],
+        fingerprint: [u8; 32],
+    ) -> Result<()> {
+        self.retain_terminal(
+            session,
+            request,
+            fingerprint,
+            retained_without_value_outcome(request, fingerprint),
+        )
+        .await
+    }
+
+    /// Retains a failed commit. Only a controlled rollback proof may retain a
+    /// proven `Failure`; any other rollback may have performed external effects
+    /// and is retained as uncertain (REQUEST-1 step 5; ACCEPTANCE Gate D).
+    async fn retain_failed_commit(
+        &mut self,
+        session: [u8; 16],
+        request: [u8; 16],
+        fingerprint: [u8; 32],
+        controlled: bool,
+    ) -> Result<()> {
+        if self.deleted_sessions.contains_key(&session) {
+            return Ok(());
+        }
+        if controlled {
+            self.retain_failure(session, request, fingerprint).await
+        } else {
+            self.retain_uncertain(session, request, fingerprint).await
+        }
+    }
+
+    /// Commits a transaction-bearing response. A failed commit is retained via
+    /// `retain_failed_commit` unless it is a validation rejection, which is
+    /// returned without retention.
+    async fn commit_transaction_or_retain(
+        &mut self,
+        identity: RequestIdentity,
+        fingerprint: [u8; 32],
+        watch: Option<[u8; 16]>,
+        context: Option<&RuntimeActivationContext>,
+        response: Envelope,
+        transaction: LiveEvalTransaction,
+    ) -> Result<Envelope> {
+        let (session, request) = (identity.session_id, identity.request_id);
+        let controlled = matches!(
+            transaction.effects,
+            ActivationEffectReport::ControlledOnly(_)
+        );
+        let committed = self
+            .commit_eval_transaction(
+                identity,
+                fingerprint,
+                watch,
+                context.ok_or(Error::UnsupportedOperation)?,
+                response,
+                transaction,
+            )
+            .await;
+        match committed {
+            Ok(response) => Ok(response),
+            Err(error @ Error::ValidationRejected) => Err(error),
+            Err(error) => {
+                self.retain_failed_commit(session, request, fingerprint, controlled)
+                    .await?;
+                Err(error)
+            }
+        }
+    }
+
+    async fn retain_terminal(
+        &mut self,
+        session: [u8; 16],
+        request: [u8; 16],
+        fingerprint: [u8; 32],
+        outcome: DispatchOutcome,
+    ) -> Result<()> {
+        // A request has exactly one retained terminal (REQUEST-1 step 5). The
+        // synchronous error arm runs after complete_application has already
+        // retained an uncertain rollback; it must not overwrite that terminal
+        // with a proven Failure (ACCEPTANCE Gate D).
+        if self
+            .requests
+            .get(&(session, request))
+            .is_some_and(|record| record.terminal.is_some())
+        {
+            return Ok(());
+        }
         let locally_admitted = self.requests.contains_key(&(session, request));
-        let failure = DispatchOutcome {
-            outcome: FrameOutcome::Accepted,
-            response: Some(Envelope {
-                request: Some(request),
-                watch: None,
-                message: Message::Result {
-                    status: ResultStatus::Failure,
-                    value: None,
-                    fingerprint,
-                    diagnostic: None,
-                },
-                extensions: BTreeMap::new(),
-            }),
-        };
         if self.runtime.is_some() {
             let lease = self.writer_lease().await?;
             let runtime = self.runtime.as_ref().ok_or(Error::RuntimeUnavailable)?;
@@ -4678,7 +4814,7 @@ impl LiveHost {
                     },
                     fingerprint,
                     lease,
-                    self.terminal_outcome(&failure)?,
+                    self.terminal_outcome(&outcome)?,
                     SafeDiagnostic {
                         code: DiagnosticCode::ExecutionRejected,
                         class: DiagnosticClass::Permanent,
@@ -4693,7 +4829,7 @@ impl LiveHost {
         if self.serving.complete_request(session, request).is_ok()
             && let Some(record) = self.requests.get_mut(&(session, request))
         {
-            record.terminal = Some(failure);
+            record.terminal = Some(outcome);
             return Ok(());
         }
         let _ = self.serving.cancel_request(session, request);
