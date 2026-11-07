@@ -104,9 +104,8 @@ fn stored_blob_metadata(encoded: &[u8]) -> BlobMetadata {
     )
 }
 
-#[tokio::test]
-async fn edit_entrypoint_admits_valid_row_and_retains_invalid_candidate() {
-    let initial = "{ title: \"before\", }\n";
+/// Admits the `london` row of `Music` with `source_row` as its committed baseline.
+async fn commit_london_row(source_row: &str) -> (TempDir, Repository, [u8; 16]) {
     let (repository_directory, repository, relation_id, format_context) =
         format3::format3_repository_with_context(NOTES_SOURCE, "Music");
     let (identity, digest) = format3::cli_runtime_identity(&repository);
@@ -126,13 +125,20 @@ async fn edit_entrypoint_admits_valid_row_and_retains_invalid_candidate() {
         &[media_commit::SourceCaptureRow {
             key: "london",
             blob_fields: &[],
-            source_row: initial,
+            source_row,
             ordinal: 0x90,
             insert_only: true,
         }],
     )
     .await;
     drop(state);
+    (repository_directory, repository, relation_id)
+}
+
+#[tokio::test]
+async fn edit_entrypoint_admits_valid_row_and_retains_invalid_candidate() {
+    let (repository_directory, repository, relation_id) =
+        commit_london_row("{ title: \"before\", }\n").await;
     let before = current_row(&repository, relation_id, "Music", b"london")
         .await
         .expect("the source row is admitted before editing");
@@ -184,6 +190,63 @@ async fn edit_entrypoint_admits_valid_row_and_retains_invalid_candidate() {
     assert_eq!(
         rejected_row, after,
         "rejection leaves accepted row unchanged"
+    );
+}
+
+/// A REPL write issued while `orna edit` is in its editor is refused by the runtime owner lock
+/// the edit holds (ORNA-REPL-EFFECT; cf. the `sys.admin.busy` clause for an incompatible active
+/// owner or lease, reference/Orna-1.1.0/Orna-1.1.0.md). The REPL change never lands, so the
+/// edit's candidate is admitted against the unchanged row. If the owner lock stopped being held
+/// during the edit, the REPL write would succeed and this test fails.
+#[tokio::test]
+async fn repl_change_during_orna_edit_is_refused_by_owner_lock() {
+    let (repository_directory, repository, relation_id) =
+        commit_london_row("{ title: \"before\", }\n").await;
+
+    let scripts = TempDir::new().unwrap();
+    let repl_output = scripts.path().join("repl-output");
+    let repl_status = scripts.path().join("repl-status");
+    let repl_expression = r#"main.Music.update("london", { title: "Repl change" })"#;
+    let candidate = r#"{ title: "after", }"#;
+    let writer = editor(
+        &scripts,
+        "repl-writer-editor",
+        &format!(
+            "'{bin}' --db '{db}' repl '{repl_expression}' > '{output}' 2>&1\necho $? > '{status}'\nprintf '%s\\n' '{candidate}' > \"$1\"",
+            bin = env!("CARGO_BIN_EXE_orna"),
+            db = repository_directory.path().display(),
+            output = repl_output.display(),
+            status = repl_status.display(),
+        ),
+    );
+    let edit_output = edit(
+        &repository_directory,
+        &writer,
+        &["--debug", "edit", "--row", ROW_PATH],
+    );
+    let repl_diagnostics = fs::read_to_string(&repl_output).unwrap_or_default();
+    let repl_exit = fs::read_to_string(&repl_status).expect("the editor ran the REPL write");
+    assert_ne!(
+        repl_exit.trim(),
+        "0",
+        "the REPL write is refused while orna edit holds the owner lock: {repl_diagnostics}"
+    );
+    assert!(
+        repl_diagnostics.contains("ORNA-REPL-EFFECT") && repl_diagnostics.contains("writer lease"),
+        "the refusal names the held writer lease: {repl_diagnostics}"
+    );
+    let stderr = String::from_utf8_lossy(&edit_output.stderr);
+    assert!(
+        edit_output.status.success(),
+        "the candidate is admitted because the refused REPL change never landed: {stderr}"
+    );
+    let row = current_row(&repository, relation_id, "Music", b"london")
+        .await
+        .expect("the edited row is admitted");
+    let row = String::from_utf8_lossy(&row);
+    assert!(
+        row.contains("after") && !row.contains("Repl change"),
+        "the admitted row is the edit candidate, not the refused REPL change: {row}"
     );
 }
 
