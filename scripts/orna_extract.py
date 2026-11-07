@@ -286,13 +286,14 @@ def make_map(pairs: list, where: str) -> CborMap:
 
 
 class _Reader:
-    __slots__ = ("data", "position", "items", "where")
+    __slots__ = ("data", "position", "items", "where", "tags")
 
-    def __init__(self, data: bytes, where: str) -> None:
+    def __init__(self, data: bytes, where: str, tags: frozenset = REGISTERED_TAGS) -> None:
         self.data = data
         self.position = 0
         self.items = 0
         self.where = where
+        self.tags = tags
 
     def take(self, count: int) -> bytes:
         end = self.position + count
@@ -364,7 +365,7 @@ class _Reader:
                 pairs.append((key, self.item(depth + 1)))
             return CborMap(tuple(pairs))
         # Major type 6: a tag.
-        if argument not in REGISTERED_TAGS:
+        if argument not in self.tags:
             fail(f"{self.where}: unregistered CBOR tag {argument}")
         payload = self.item(depth + 1)
         if argument in (2, 3):
@@ -375,8 +376,8 @@ class _Reader:
         return Tag(argument, payload)
 
 
-def decode_canonical(data: bytes, where: str) -> object:
-    reader = _Reader(data, where)
+def decode_canonical(data: bytes, where: str, tags: frozenset = REGISTERED_TAGS) -> object:
+    reader = _Reader(data, where, tags)
     value = reader.item(0)
     if reader.position != len(data):
         fail(f"{where}: trailing bytes after the CBOR item")
