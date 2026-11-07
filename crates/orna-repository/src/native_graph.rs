@@ -2825,6 +2825,7 @@ impl NativeGraphContext {
             for byte in &input[..count] {
                 if let Some(chunk) = chunker.push(*byte) {
                     index.push_chunk_bytes(chunk)?;
+                    crate::publication_crash_pause_until_released("capture-chunk-unrooted");
                 }
             }
             total = next_total;
