@@ -8,9 +8,18 @@ The byte layout follows the draft chapter source/37 that accompanies the
 1.1.0 compatibility archive and is cross-checked against the golden vectors in
 scripts/golden/ogb1-blob-vectors.json. It is independent of the Rust engine.
 
-Row units: `parse_row_unit` tokenizes one loose row unit from its committed bytes
-(ORNA-ROW-001); `row_blob_field` reads an ORR-2 Blob field of that row. Only
-literal values are admitted; any expression is refused, never evaluated.
+Row units: `parse_row_unit` tokenizes one loose row unit from its committed bytes;
+`row_blob_field` reads an ORR-2 Blob field of that row. The grammar basis is the
+1.0.0 frozen syntactic grammar `reference/Orna-1.1.0/grammar/orna.ebnf`
+(`row_unit = record_expression , [ ";" ]`, with `record_fields`, `string_literal`
+and `escape_sequence`), together with ORNA-SOURCE-003 (one record expression, no
+declarations). No 1.1.0 clause defines the legacy loose row-unit grammar, so this
+reader is written from the EBNF and from the engine's own row parser, not from an
+independent conformance vector. Deliberate deviation: the reader admits only
+literal values, while the EBNF `record_expression` admits any expression; an
+expression is refused and never evaluated. Unverified: whether the engine accepts
+a raw newline inside a string literal, which the EBNF's `string_character` permits,
+and whether it accepts the `\0` escape. The reader accepts both as the EBNF reads.
 """
 
 from __future__ import annotations
@@ -505,11 +514,13 @@ class _RowUnitParser:
 
 
 def parse_row_unit(data: bytes, where: str = "row unit") -> dict[str, object]:
-    """Tokenizes one loose row unit from its committed bytes (ORNA-ROW-001).
+    """Tokenizes one loose row unit from its committed bytes.
 
-    A row unit is exactly one record of literal values, with an optional
-    trailing comma, an optional trailing `;`, and only whitespace and comments
-    around it. Strict UTF-8 is required; any non-literal expression is refused.
+    The grammar is `row_unit = record_expression , [ ";" ]` from
+    grammar/orna.ebnf, narrowed to literal values as a deliberate deviation: the
+    record holds only literals, with an optional trailing comma and an optional
+    trailing `;`, and only whitespace and comments around it. Strict UTF-8 is
+    required; any non-literal expression is refused, never evaluated.
     """
     try:
         text = data.decode("utf-8")
