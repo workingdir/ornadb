@@ -19,7 +19,9 @@
 //! refused before recovery, runtime access or any freeze (ORNA-UPGRADE-003).
 
 use super::assertion_gate::{AssertionGate, GatedCommand, refusal_diagnostic};
-use orna_repository::{CandidateAssertionGate, publication_crash_barrier};
+use orna_repository::{
+    CandidateAssertionGate, FormatContextError, GraphError, publication_crash_barrier,
+};
 use orna_runtime::{RuntimeState, TableMutation};
 use orna_storage::RuntimePublicationCoordinator;
 
@@ -271,25 +273,37 @@ fn validate_candidate_source_rows(
         let row_map = format.load_row_map(table_id.bytes()).map_err(|error| {
             publish_error(
                 "format-3 row map could not be loaded",
-                format!("{error:?}; the pending range was preserved"),
+                format!(
+                    "{}; the pending range was preserved",
+                    format_context_detail(&error)
+                ),
             )
         })?;
         let graph = format.open_native_graph(&row_map).map_err(|error| {
             publish_error(
                 "format-3 native graph could not be opened",
-                format!("{error:?}; the pending range was preserved"),
+                format!(
+                    "{}; the pending range was preserved",
+                    format_context_detail(&error)
+                ),
             )
         })?;
         let scope = graph.open_read_scope().map_err(|error| {
             publish_error(
                 "format-3 native graph read scope could not be opened",
-                format!("{error:?}; the pending range was preserved"),
+                format!(
+                    "{}; the pending range was preserved",
+                    graph_error_detail(error)
+                ),
             )
         })?;
         let committed_descriptor = graph.read_schema_descriptor(&scope).map_err(|error| {
             publish_error(
                 "format-3 committed table binding could not be read",
-                format!("{error:?}; the pending range was preserved"),
+                format!(
+                    "{}; the pending range was preserved",
+                    graph_error_detail(error)
+                ),
             )
         })?;
         if &committed_descriptor != binding.descriptor() {
@@ -609,6 +623,23 @@ fn legacy_read_only_refusal(
     )
 }
 
+/// Renders a format-context fault for a publish diagnostic: its message and
+/// stable code, never a Debug dump of the error enum.
+fn format_context_detail(error: &FormatContextError) -> String {
+    format!("{error} ({})", error.code())
+}
+
+/// Renders a native-graph fault for a publish diagnostic. A malformed graph is
+/// reported under the format-context code its storage error carries; every
+/// other graph fault keeps its own message.
+fn graph_error_detail(error: GraphError) -> String {
+    if error.is_malformed() {
+        format_context_detail(&FormatContextError::GraphMalformed(error))
+    } else {
+        error.to_string()
+    }
+}
+
 /// ORNA-PUB-012: name the condition that paused publication and keep the
 /// remedy actionable, without implying the pending tail was discarded.
 pub(super) fn describe_storage_failure(
@@ -650,6 +681,7 @@ pub(super) fn describe_storage_failure(
         }
         E::RuntimeUnavailable => "local runtime state is unavailable".to_owned(),
         E::RepositoryUnavailable => "the backing repository is unavailable".to_owned(),
+        E::RepositoryMalformed(error) => format_context_detail(error),
         other => format!("{other}"),
     };
     publish_error(title, detail)
@@ -662,6 +694,28 @@ mod tests {
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
     }
+
+    /// A malformed native graph reaches the publish diagnostic under its stable
+    /// format-context code, never as a Debug dump of the storage error.
+    #[test]
+    fn malformed_native_graph_publish_error_renders_its_typed_code() {
+        let diagnostic = describe_storage_failure(
+            "publication candidate could not be prepared",
+            &orna_storage::Error::RepositoryMalformed(
+                orna_repository::FormatContextError::GraphMalformed(
+                    orna_repository::GraphError::GitObjectHashMismatch,
+                ),
+            ),
+        );
+        let rendered = diagnostic.to_string();
+        assert!(rendered.starts_with(
+            "error[E2300]: publication candidate could not be prepared\n  native graph repository data is malformed: "
+        ));
+        assert!(rendered.contains("(ORNA-REPO-CONTEXT-017)"));
+        assert!(!rendered.contains("GraphMalformed"));
+        assert!(!rendered.contains("RepositoryMalformed"));
+    }
+
     #[test]
     fn canonical_string_mutation_key_matches_native_typed_key() {
         let encoded_key = orna_foundation::CanonicalValue::new(orna_foundation::OvbRaw::Text(
