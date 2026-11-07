@@ -23,9 +23,10 @@ use orna_syntax::{
     PatternField, ReplInput, Statement, StringSegment, parse_expression, parse_repl,
 };
 use orna_value::{
-    CANONICAL_NAN_BITS, ContextValue, Error as ValueError, ErrorValue as CanonicalErrorValue,
-    Format3Context, OVB2_BLOB_TAG, ROV3_BLOB_TAG, Raw, SOV3_BLOB_TAG, ValueFormat, domain_digest,
-    float_max, float_min, float_ordinary_eq, float_total_cmp,
+    CANONICAL_NAN_BITS, ContentIdentity, ContextValue, Error as ValueError,
+    ErrorValue as CanonicalErrorValue, Format3Context, MediaAnnotation, OVB2_BLOB_TAG,
+    ROV3_BLOB_TAG, Raw, SOV3_BLOB_TAG, ValueFormat, domain_digest, float_max, float_min,
+    float_ordinary_eq, float_total_cmp, ovb2_blob_fingerprint,
 };
 use serde::{
     Deserialize,
@@ -3003,6 +3004,11 @@ fn error(code: &'static str) -> EvaluationError {
     EvaluationError::redacted(SafeText::new(code).expect("static safe code"))
 }
 
+/// The annotation and content identity of one inline OVB-2 Blob. Two inline
+/// Blobs that `==` relates always share this pair, so a pair whose pairs differ
+/// is unequal and needs no comparison of content bytes.
+type BlobFingerprint = (MediaAnnotation, ContentIdentity);
+
 /// Equality key for collection and relation distinct folds. Values that `==`
 /// relates always share a key, so the key only narrows the candidates that
 /// `DistinctValueFold::insert` decides with `==`.
@@ -3018,56 +3024,154 @@ struct DistinctKey {
     blob_positions: Vec<usize>,
 }
 
-/// Encodes the distinct key of `value`. Floats are unsupported in distinct folds.
-fn distinct_key(value: &Value) -> Result<DistinctKey, EvaluationError> {
+/// The distinct identity of one value. `fingerprints` lists the fingerprint of
+/// each Blob in `key.blob_positions` order; it is `None` when any Blob is not an
+/// inline OVB-2 Blob with a readable fingerprint, so `==` must decide that value
+/// against every candidate of its key.
+struct DistinctIdentity {
+    key: DistinctKey,
+    fingerprints: Option<Vec<BlobFingerprint>>,
+}
+
+/// Encodes the distinct identity of `value`. Floats are unsupported in distinct folds.
+fn distinct_identity(value: &Value) -> Result<DistinctIdentity, EvaluationError> {
     if value.contains_float() {
         return Err(error("ORNA-EVAL-UNSUPPORTED"));
     }
-    let mut blob_positions = Vec::new();
+    // Blobs are replaced by placeholders before `raw()` runs, so the content
+    // bytes of inline Blobs are never copied into the skeleton.
+    let mut blobs = Vec::new();
+    let stripped = strip_blobs(value, &mut blobs);
+    let mut slots = Vec::new();
     let mut next_index = 0;
-    let skeleton = identity_skeleton(value.raw()?, &mut next_index, &mut blob_positions);
+    let skeleton = identity_skeleton(stripped.raw()?, &mut next_index, &mut slots);
     let skeleton = CanonicalValue::new(skeleton)
         .map_err(|_| error("ORNA-EVAL-VALUE"))?
         .encode()
         .map_err(|_| error("ORNA-EVAL-VALUE"))?;
-    Ok(DistinctKey {
-        skeleton,
-        blob_positions,
+    let blob_positions = slots.iter().map(|&(position, _)| position).collect();
+    let fingerprints = slots
+        .iter()
+        .map(|&(_, slot)| {
+            slot.and_then(|slot| blobs.get(slot))
+                .and_then(|raw| ovb2_blob_fingerprint(raw).ok())
+        })
+        .collect::<Option<Vec<_>>>();
+    Ok(DistinctIdentity {
+        key: DistinctKey {
+            skeleton,
+            blob_positions,
+        },
+        fingerprints,
     })
 }
 
-/// Replaces every Blob node with `null` and records its pre-order index in
-/// `blob_positions`.
-fn identity_skeleton(raw: Raw, next_index: &mut usize, blob_positions: &mut Vec<usize>) -> Raw {
+/// Returns `value` with each inline OVB-2 Blob replaced by a placeholder whose
+/// integer payload is the Blob's index in `blobs`. Every other node is copied
+/// as it is; a Blob in another form keeps its own raw node and so has no slot.
+fn strip_blobs<'a>(value: &'a Value, blobs: &mut Vec<&'a Raw>) -> Value {
+    match value {
+        Value::AnnotatedBlob(raw) => {
+            let slot = blobs.len();
+            blobs.push(raw);
+            Value::AnnotatedBlob(Raw::Tag(OVB2_BLOB_TAG, Box::new(Raw::Int(slot.into()))))
+        }
+        Value::List(values) => Value::List(List::from(
+            values
+                .as_slice()
+                .iter()
+                .map(|value| strip_blobs(value, blobs))
+                .collect::<Vec<_>>(),
+        )),
+        Value::Tuple(values) => Value::Tuple(
+            values
+                .iter()
+                .map(|value| strip_blobs(value, blobs))
+                .collect(),
+        ),
+        Value::Option(payload) => Value::Option(
+            payload
+                .as_deref()
+                .map(|value| Box::new(strip_blobs(value, blobs))),
+        ),
+        Value::Record(fields) => Value::Record(
+            fields
+                .iter()
+                .map(|(key, value)| (key.clone(), strip_blobs(value, blobs)))
+                .collect(),
+        ),
+        Value::NominalRecord { type_id, fields } => Value::NominalRecord {
+            type_id: type_id.clone(),
+            fields: fields
+                .iter()
+                .map(|(key, value)| (key.clone(), strip_blobs(value, blobs)))
+                .collect(),
+        },
+        Value::Enum {
+            type_id,
+            variant_id,
+            payload,
+        } => Value::Enum {
+            type_id: type_id.clone(),
+            variant_id: variant_id.clone(),
+            payload: payload
+                .as_deref()
+                .map(|value| Box::new(strip_blobs(value, blobs))),
+        },
+        other => other.clone(),
+    }
+}
+
+/// Replaces every Blob node with `null`. Each Blob node records its pre-order
+/// index and the placeholder slot it carries, `None` when it is not a placeholder.
+fn identity_skeleton(
+    raw: Raw,
+    next_index: &mut usize,
+    slots: &mut Vec<(usize, Option<usize>)>,
+) -> Raw {
     let index = *next_index;
     *next_index += 1;
     match raw {
-        Raw::Tag(OVB2_BLOB_TAG | ROV3_BLOB_TAG | SOV3_BLOB_TAG, _) => {
-            blob_positions.push(index);
+        Raw::Tag(OVB2_BLOB_TAG | ROV3_BLOB_TAG | SOV3_BLOB_TAG, payload) => {
+            let slot = match *payload {
+                Raw::Int(slot) => slot.to_usize(),
+                _ => None,
+            };
+            slots.push((index, slot));
             Raw::Null
         }
         Raw::Array(items) => Raw::Array(
             items
                 .into_iter()
-                .map(|item| identity_skeleton(item, next_index, blob_positions))
+                .map(|item| identity_skeleton(item, next_index, slots))
                 .collect(),
         ),
         Raw::Map(entries) => Raw::Map(
             entries
                 .into_iter()
                 .map(|(key, value)| {
-                    let key = identity_skeleton(key, next_index, blob_positions);
-                    let value = identity_skeleton(value, next_index, blob_positions);
+                    let key = identity_skeleton(key, next_index, slots);
+                    let value = identity_skeleton(value, next_index, slots);
                     (key, value)
                 })
                 .collect(),
         ),
         Raw::Tag(tag, payload) => Raw::Tag(
             tag,
-            Box::new(identity_skeleton(*payload, next_index, blob_positions)),
+            Box::new(identity_skeleton(*payload, next_index, slots)),
         ),
         other => other,
     }
+}
+
+/// The kept values of one distinct key. `all` lists them in insertion order;
+/// a kept value with fingerprints sits in `by_fingerprint`, and any other kept
+/// value sits in `undecided`. Both lists are in insertion order.
+#[derive(Clone, Default)]
+struct DistinctBucket {
+    all: Vec<usize>,
+    by_fingerprint: HashMap<Vec<BlobFingerprint>, Vec<usize>>,
+    undecided: Vec<usize>,
 }
 
 /// Keeps the first original value of each equality class under `==`. Values
@@ -3078,26 +3182,32 @@ fn identity_skeleton(raw: Raw, next_index: &mut usize, blob_positions: &mut Vec<
 /// paired recursive queries cannot suppress one another's rows.
 #[derive(Clone, Default)]
 struct DistinctValueFold {
-    /// Indices into `values` for each key, in insertion order.
-    buckets: HashMap<DistinctKey, Vec<usize>>,
+    buckets: HashMap<DistinctKey, DistinctBucket>,
     values: Vec<Value>,
 }
 
 impl DistinctValueFold {
     fn insert(&mut self, value: Value) -> Result<bool, EvaluationError> {
-        let key = distinct_key(&value)?;
+        let DistinctIdentity { key, fingerprints } = distinct_identity(&value)?;
         let has_blobs = !key.blob_positions.is_empty();
         let bucket = self.buckets.entry(key).or_default();
-        if has_blobs {
-            for &index in bucket.iter() {
-                if blob_aware_eq(&self.values[index], &value)? {
-                    return Ok(false);
-                }
+        if !has_blobs {
+            if !bucket.all.is_empty() {
+                return Ok(false);
             }
-        } else if !bucket.is_empty() {
+        } else if blob_candidate_equal(&self.values, bucket, fingerprints.as_deref(), &value)? {
             return Ok(false);
         }
-        bucket.push(self.values.len());
+        let index = self.values.len();
+        bucket.all.push(index);
+        match fingerprints {
+            Some(fingerprints) => bucket
+                .by_fingerprint
+                .entry(fingerprints)
+                .or_default()
+                .push(index),
+            None => bucket.undecided.push(index),
+        }
         self.values.push(value);
         Ok(true)
     }
@@ -3108,6 +3218,57 @@ impl DistinctValueFold {
 
     fn into_values(self) -> Vec<Value> {
         self.values
+    }
+}
+
+/// Whether `==` relates `value` to a kept value of `bucket`. Without
+/// fingerprints every kept value is a candidate. With them, the candidates are
+/// the kept values with the same fingerprints and the undecided ones, merged in
+/// insertion order: a kept inline Blob with other fingerprints is unequal to
+/// `value` and cannot change the result or its first error.
+fn blob_candidate_equal(
+    values: &[Value],
+    bucket: &DistinctBucket,
+    fingerprints: Option<&[BlobFingerprint]>,
+    value: &Value,
+) -> Result<bool, EvaluationError> {
+    let Some(fingerprints) = fingerprints else {
+        for &index in &bucket.all {
+            if blob_aware_eq(&values[index], value)? {
+                return Ok(true);
+            }
+        }
+        return Ok(false);
+    };
+    let same: &[usize] = bucket
+        .by_fingerprint
+        .get(fingerprints)
+        .map_or(&[], Vec::as_slice);
+    let undecided = bucket.undecided.as_slice();
+    let (mut same_at, mut undecided_at) = (0, 0);
+    loop {
+        let index = match (same.get(same_at), undecided.get(undecided_at)) {
+            (Some(&same_index), Some(&undecided_index)) if same_index < undecided_index => {
+                same_at += 1;
+                same_index
+            }
+            (Some(_), Some(&undecided_index)) => {
+                undecided_at += 1;
+                undecided_index
+            }
+            (Some(&same_index), None) => {
+                same_at += 1;
+                same_index
+            }
+            (None, Some(&undecided_index)) => {
+                undecided_at += 1;
+                undecided_index
+            }
+            (None, None) => return Ok(false),
+        };
+        if blob_aware_eq(&values[index], value)? {
+            return Ok(true);
+        }
     }
 }
 
@@ -20013,6 +20174,82 @@ mod blob_equality_tests {
                     assert_eq!(failure.code(), equality.code());
                 }
             }
+        }
+    }
+
+    #[test]
+    fn distinct_fold_matches_brute_force_equality_over_mixed_sequences() {
+        // The fold keeps a value exactly when `==` finds it unequal to every
+        // value already kept. The reference below compares each value with all
+        // kept values using `==` only, with no keys or fingerprints, so a bucket
+        // or fingerprint shortcut that skips a pair `==` relates changes the
+        // kept rows and fails here.
+        let ovb2 = |bytes: &[u8]| {
+            annotated_ovb2(
+                &orna_value::Blob::from_bytes_with_annotation(
+                    bytes.to_vec(),
+                    "application/octet-stream",
+                    None,
+                )
+                .unwrap(),
+            )
+        };
+        let audio = annotated_ovb2(
+            &orna_value::Blob::from_bytes_with_annotation(
+                b"payload".to_vec(),
+                "audio/mp4",
+                Some("m4b"),
+            )
+            .unwrap(),
+        );
+        // Format-3 Blobs are left to the dedicated tests: `==` cannot decide some
+        // pairs with them here, and this reference must decide every pair.
+        let sequence = vec![
+            ovb2(b"payload"),
+            ovb2(b"paylaod"),
+            audio,
+            ovb2(b"payload"),
+            ovb2(b"other!!"),
+            ovb2(b""),
+            Value::Tuple(vec![ovb2(b"payload")]),
+            Value::Tuple(vec![ovb2(b"payload"), ovb2(b"other!!")]),
+            Value::Tuple(vec![ovb2(b"other!!"), ovb2(b"payload")]),
+            Value::Int(1.into()),
+            Value::Int(1.into()),
+        ];
+        // Repeating the sequence makes later values meet several kept candidates.
+        let values: Vec<Value> = sequence
+            .iter()
+            .cloned()
+            .chain(sequence.iter().cloned())
+            .chain(sequence.iter().cloned())
+            .collect();
+        let mut expected: Vec<Value> = Vec::new();
+        for value in &values {
+            let mut duplicate = false;
+            for kept in &expected {
+                if blob_aware_eq(kept, value).unwrap() {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if !duplicate {
+                expected.push(value.clone());
+            }
+        }
+        assert!(expected.len() > 1 && expected.len() < values.len());
+
+        let mut fold = DistinctValueFold::default();
+        let mut kept = Vec::new();
+        for value in values {
+            if fold.insert(value.clone()).unwrap() {
+                kept.push(value);
+            }
+        }
+        assert_eq!(fold.len(), expected.len());
+        assert_eq!(kept.len(), expected.len());
+        for (left, right) in kept.iter().zip(&expected) {
+            assert!(blob_aware_eq(left, right).unwrap());
         }
     }
 
