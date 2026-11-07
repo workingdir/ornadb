@@ -444,17 +444,6 @@ fn activated_golden_copy(parent: &Path) -> PathBuf {
     destination
 }
 
-/// Drops the golden snapshot's legacy gitlink with a plain commit. The
-/// complete-copy export pins no legacy dependency only after this step; the
-/// shipped golden snapshot fails export with E2000 (no recorded origin).
-fn drop_legacy_dependency(copy: &Path) {
-    git(copy, &["rm", "--quiet", "--", LEGACY_DEPENDENCY]);
-    git(
-        copy,
-        &["commit", "--quiet", "-m", "drop legacy dependency gitlink"],
-    );
-}
-
 /// A migrated golden copy, exported with the real `orna export`, restored,
 /// and removed from the disk: the extractor's rows, schema, modules and Blob
 /// records must match what the real reader reports for the same copy, and
@@ -465,7 +454,9 @@ fn drop_legacy_dependency(copy: &Path) {
 fn extractor_matches_the_real_reader_on_a_migrated_golden_copy() {
     let parent = TempDir::new().unwrap();
     let copy = activated_golden_copy(parent.path());
-    drop_legacy_dependency(&copy);
+    let dependency = parent.path().join("source");
+    record_legacy_dependency_origin(&copy);
+    let pinned = legacy_dependency_pin(&copy);
     let snapshot = String::from_utf8(git_output(&copy, &["rev-parse", "HEAD"], None))
         .unwrap()
         .trim()
@@ -490,7 +481,18 @@ fn extractor_matches_the_real_reader_on_a_migrated_golden_copy() {
     let outside = TempDir::new().unwrap();
     let archive = outside.path().join("archive");
     let archive_path = archive.to_str().unwrap();
-    let exported = run(&copy, &["export", archive_path, "--at", "HEAD"]);
+    let dependency_arg = format!("{LEGACY_DEPENDENCY}={}", dependency.to_str().unwrap());
+    let exported = run(
+        &copy,
+        &[
+            "export",
+            archive_path,
+            "--at",
+            "HEAD",
+            "--dependency",
+            &dependency_arg,
+        ],
+    );
     assert_eq!(
         exported.status.code(),
         Some(0),
@@ -533,6 +535,11 @@ fn extractor_matches_the_real_reader_on_a_migrated_golden_copy() {
         report["snapshot"]["commit"],
         snapshot.as_str(),
         "the extracted snapshot"
+    );
+    assert_eq!(
+        report["snapshot"]["dependencies"],
+        serde_json::json!([{"commit": pinned, "path": LEGACY_DEPENDENCY, "verified": true}]),
+        "the pinned dependency is verified and recorded without its contents"
     );
 
     let relations = report["snapshot"]["relations"].as_array().unwrap();
@@ -614,12 +621,16 @@ fn extractor_matches_the_real_reader_on_a_migrated_golden_copy() {
     }
 }
 
-/// The extractor reads format 3 only. A migrated copy that still pins the
-/// legacy dependency is refused with exit 1, not read partially.
+/// The extractor verifies each gitlink pin in the repository it can reach. A
+/// dependency repository that is present but lacks the pinned commit refuses
+/// extraction with exit 1 and prints no partial report.
 #[test]
-fn extractor_refuses_a_migrated_copy_that_pins_an_unreadable_legacy_dependency() {
+fn extractor_refuses_a_pinned_dependency_whose_commit_is_unavailable() {
     let parent = TempDir::new().unwrap();
     let copy = activated_golden_copy(parent.path());
+    let dependency = copy.join(LEGACY_DEPENDENCY);
+    std::fs::create_dir_all(&dependency).unwrap();
+    git(&dependency, &["init", "--quiet"]);
     let output = parent.path().join("extracted");
     let extracted = extract(&copy, &output);
     let stderr = String::from_utf8_lossy(&extracted.stderr);
@@ -630,7 +641,7 @@ fn extractor_refuses_a_migrated_copy_that_pins_an_unreadable_legacy_dependency()
     );
     assert!(
         stderr.contains("vendor/stdlib") && stderr.contains("is unavailable"),
-        "the refusal names the unreadable dependency: {stderr}"
+        "the refusal names the unavailable dependency: {stderr}"
     );
 }
 
@@ -667,9 +678,9 @@ fn record_legacy_dependency_origin(copy: &Path) {
 /// The golden copy as shipped, gitlink kept. Export refuses the missing origin
 /// (ORNA-GIT-001). With the origin recorded and the pinned dependency supplied,
 /// export and restore carry the dependency at its exact pin (ORNA-GIT-003,
-/// ORNA-GIT-007). The independent extractor still refuses the restored copy,
-/// because the pinned dependency is a legacy format-1/2 snapshot it does not
-/// read; the refusal is defined and names the dependency.
+/// ORNA-GIT-007). The independent extractor verifies the restored pin against
+/// the restored dependency repository and records it without reading the
+/// dependency's contents.
 #[test]
 fn migrated_golden_copy_exports_and_restores_its_pinned_legacy_dependency() {
     let parent = TempDir::new().unwrap();
@@ -740,14 +751,12 @@ fn migrated_golden_copy_exports_and_restores_its_pinned_legacy_dependency() {
     let output = outside.path().join("extracted");
     let extracted = extract(&restored, &output);
     let stderr = String::from_utf8_lossy(&extracted.stderr);
-    assert_eq!(extracted.status.code(), Some(1), "{stderr}");
-    assert!(
-        extracted.stdout.is_empty(),
-        "a refused extraction prints no partial report"
-    );
-    assert!(
-        stderr.contains("vendor/stdlib") && stderr.contains("legacy format-1/2 snapshot"),
-        "the refusal names the legacy dependency: {stderr}"
+    assert_eq!(extracted.status.code(), Some(0), "{stderr}");
+    let report: Value = serde_json::from_slice(&extracted.stdout).unwrap();
+    assert_eq!(
+        report["snapshot"]["dependencies"],
+        serde_json::json!([{"commit": pinned, "path": LEGACY_DEPENDENCY, "verified": true}]),
+        "the pinned dependency is verified and recorded without its contents"
     );
 }
 
