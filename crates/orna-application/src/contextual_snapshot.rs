@@ -126,6 +126,11 @@ impl ContextValueEffectHandler for ContextualSnapshotEffectHandler {
         Ok(None)
     }
 
+    // Scope is deliberately not consulted here. This handler serves one
+    // immutable snapshot per read, so every scan of a table sees the same
+    // rows. The cursor is a position in the table's key order (BTreeMap
+    // order). A scope only distinguishes independent continuations in the
+    // canonical streaming path, which the contextual page read does not use.
     fn scan_context_relation_page_scoped(
         &mut self,
         source: &str,
@@ -192,6 +197,8 @@ impl ContextValueEffectHandler for SourceMutationEffectHandler {
         Ok(None)
     }
 
+    // Same as the handler above: one immutable snapshot per read, so the
+    // scope is not consulted (see `ContextualSnapshotEffectHandler`).
     fn scan_context_relation_page_scoped(
         &mut self,
         source: &str,
@@ -341,6 +348,126 @@ mod tests {
         .expect("format-3 context")
     }
 
+    fn owner_blob_row(
+        context: &Format3Context,
+        payload: &[u8],
+        media_type: &str,
+        descriptor: [u8; 20],
+    ) -> ContextValue {
+        let reference = context
+            .reference(
+                orna_value::ContentIdentity::from_bytes(payload),
+                orna_value::NativeOid::from_bytes(&descriptor).expect("descriptor"),
+            )
+            .expect("owner-scoped reference");
+        let blob = orna_value::Blob::from_reference_with_annotation(reference, media_type, None)
+            .expect("owner-scoped blob");
+        ContextValue::from_blob(&blob, ValueFormat::Rov3).expect("contextual row")
+    }
+
+    /// Dereferences a served ROV-3 row to its committed blob descriptor.
+    fn assert_blob_descriptor(
+        row: &ContextValue,
+        media_type: &str,
+        length: u64,
+        descriptor: [u8; 20],
+    ) {
+        let blob = row.blob().expect("ROV-3 blob");
+        let metadata = blob.metadata();
+        assert_eq!(metadata.media_type(), media_type);
+        assert_eq!(metadata.length(), length);
+        assert_eq!(
+            metadata.descriptor_oid(),
+            Some(&orna_value::NativeOid::from_bytes(&descriptor).expect("descriptor"))
+        );
+    }
+
+    #[test]
+    fn each_blob_table_page_dereferences_its_own_owner_descriptor() {
+        let context = context();
+        let key = orna_foundation::Value::int(1.into())
+            .encode()
+            .expect("key bytes");
+        let handler = ContextualSnapshotEffectHandler {
+            tables: BTreeMap::from([
+                (
+                    "Media".to_owned(),
+                    BTreeMap::from([(
+                        key.clone(),
+                        owner_blob_row(&context, b"photo", "image/png", [0x31; 20]),
+                    )]),
+                ),
+                (
+                    "Clip".to_owned(),
+                    BTreeMap::from([(
+                        key,
+                        owner_blob_row(&context, b"clip", "video/mp4", [0x32; 20]),
+                    )]),
+                ),
+            ]),
+        };
+        for (table, length, media_type, descriptor) in [
+            ("Media", 5, "image/png", [0x31; 20]),
+            ("Clip", 4, "video/mp4", [0x32; 20]),
+        ] {
+            let mut budget = StepBudget::new(100);
+            let page = handler
+                .scan_page(table, None, 10, &mut budget)
+                .expect("scan")
+                .expect("admitted table");
+            assert_eq!(page.rows.len(), 1);
+            assert_blob_descriptor(&page.rows[0], media_type, length, descriptor);
+        }
+        // Each entry reads one table. `Clip` holds two rows and `Media` one,
+        // so a read of `Clip` served from the `Media` rows would count one.
+        let key_one = orna_foundation::Value::int(1.into())
+            .encode()
+            .expect("key bytes");
+        let key_two = orna_foundation::Value::int(2.into())
+            .encode()
+            .expect("key bytes");
+        let context_rows = || {
+            BTreeMap::from([
+                (
+                    "Media".to_owned(),
+                    vec![(
+                        key_one.clone(),
+                        owner_blob_row(&context, b"photo", "image/png", [0x31; 20]),
+                    )],
+                ),
+                (
+                    "Clip".to_owned(),
+                    vec![
+                        (
+                            key_one.clone(),
+                            owner_blob_row(&context, b"clip", "video/mp4", [0x32; 20]),
+                        ),
+                        (
+                            key_two.clone(),
+                            owner_blob_row(&context, b"clip two", "video/mp4", [0x33; 20]),
+                        ),
+                    ],
+                ),
+            ])
+        };
+        for (source, expected) in [(TWO_BLOB_SOURCE, 1), (TWO_BLOB_CLIP_SOURCE, 2)] {
+            let result = evaluate_contextual_page_read(
+                &admit(source),
+                &BTreeMap::new(),
+                RuntimeTableRows::from([
+                    ("Media".to_owned(), Vec::new()),
+                    ("Clip".to_owned(), Vec::new()),
+                ]),
+                context_rows(),
+            )
+            .expect("two-table contextual page read");
+            assert_eq!(
+                result.raw(),
+                orna_foundation::Value::int(expected.into()).raw()
+            );
+        }
+    }
+
     #[test]
     fn contextual_blob_row_keeps_its_owner_context_through_the_scan() {
         let context = context();
@@ -387,6 +514,8 @@ mod tests {
     const BLOB_SOURCE: &str = "pub table Media(id: Int) { payload: Blob, }\n\npub fn main(): Int {\n  Media | count()\n}\n";
     const NOTE_SOURCE: &str =
         "pub table Note(id: Int) { text: Str, }\n\npub fn main(): Int {\n  Note | count()\n}\n";
+    const TWO_BLOB_SOURCE: &str = "pub table Media(id: Int) { payload: Blob, }\npub table Clip(id: Int) { payload: Blob, }\n\npub fn main(): Int {\n  Media | count()\n}\n";
+    const TWO_BLOB_CLIP_SOURCE: &str = "pub table Media(id: Int) { payload: Blob, }\npub table Clip(id: Int) { payload: Blob, }\n\npub fn main(): Int {\n  Clip | count()\n}\n";
 
     fn admit(source: &str) -> AdmittedApplication {
         ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default())
@@ -397,14 +526,6 @@ mod tests {
     #[test]
     fn blob_table_page_is_read_from_its_owner_context_rows() {
         let context = context();
-        let reference = context
-            .reference(
-                orna_value::ContentIdentity::from_bytes(b"served payload"),
-                orna_value::NativeOid::from_bytes(&[0x26; 20]).expect("descriptor"),
-            )
-            .expect("owner-scoped reference");
-        let blob = orna_value::Blob::from_reference(reference).expect("owner-scoped blob");
-        let row = ContextValue::from_blob(&blob, ValueFormat::Rov3).expect("contextual row");
         let key = orna_foundation::Value::int(1.into())
             .encode()
             .expect("key bytes");
@@ -412,10 +533,33 @@ mod tests {
             &admit(BLOB_SOURCE),
             &BTreeMap::new(),
             RuntimeTableRows::from([("Media".to_owned(), Vec::new())]),
-            BTreeMap::from([("Media".to_owned(), vec![(key, row)])]),
+            BTreeMap::from([(
+                "Media".to_owned(),
+                vec![(
+                    key.clone(),
+                    owner_blob_row(&context, b"served payload", "audio/mpeg", [0x26; 20]),
+                )],
+            )]),
         )
         .expect("contextual page read");
         assert_eq!(result.raw(), orna_foundation::Value::int(1.into()).raw());
+
+        let handler = ContextualSnapshotEffectHandler {
+            tables: BTreeMap::from([(
+                "Media".to_owned(),
+                BTreeMap::from([(
+                    key,
+                    owner_blob_row(&context, b"served payload", "audio/mpeg", [0x26; 20]),
+                )]),
+            )]),
+        };
+        let mut budget = StepBudget::new(100);
+        let page = handler
+            .scan_page("Media", None, 10, &mut budget)
+            .expect("scan")
+            .expect("admitted table");
+        assert_eq!(page.rows.len(), 1);
+        assert_blob_descriptor(&page.rows[0], "audio/mpeg", 14, [0x26; 20]);
     }
 
     #[test]
@@ -449,7 +593,22 @@ mod tests {
         let application = authority
             .admit_module("main.orna", NOTE_SOURCE, "main")
             .expect("module admitted");
-        let rows = RuntimeTableRows::from([("Note".to_owned(), Vec::new())]);
+        // A non-empty table: one stored tuple, so the compared read sees a row.
+        let key = orna_foundation::Value::int(1.into())
+            .encode()
+            .expect("key bytes");
+        let tuple = orna_value::encode_canonical_storage_value(&orna_value::Raw::Map(vec![
+            (
+                orna_value::Raw::Text("id".to_owned()),
+                orna_value::Raw::Int(1.into()),
+            ),
+            (
+                orna_value::Raw::Text("text".to_owned()),
+                orna_value::Raw::Text("hello".to_owned()),
+            ),
+        ]))
+        .expect("stored row");
+        let rows = RuntimeTableRows::from([("Note".to_owned(), vec![(key, tuple)])]);
         let staged = authority
             .evaluate_staged_over_table_rows(
                 &application,
@@ -462,6 +621,14 @@ mod tests {
         let contextual =
             evaluate_contextual_page_read(&application, &BTreeMap::new(), rows, BTreeMap::new())
                 .expect("contextual read");
-        assert_eq!(contextual.raw(), staged.value().raw());
+        assert_eq!(
+            contextual.raw(),
+            orna_foundation::Value::int(1.into()).raw()
+        );
+        let canonical_bytes =
+            orna_value::encode_canonical_storage_value(staged.value().raw()).expect("bytes");
+        let contextual_bytes =
+            orna_value::encode_canonical_storage_value(contextual.raw()).expect("bytes");
+        assert_eq!(contextual_bytes, canonical_bytes);
     }
 }
