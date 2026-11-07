@@ -738,6 +738,156 @@ fn publish_copy_noreplace(
     })
 }
 
+/// The head of the activated copy at `destination` when an in-place activation
+/// finished but its exchange did not: an owned copy with no publication journal
+/// and an activated format-3 store. Any other copy yields `None`.
+pub fn finished_activation_head(
+    destination: &Path,
+) -> Result<Option<GitCommitRef>, RepositoryError> {
+    let Some(copy) = owned_copy_repository(destination)? else {
+        return Ok(None);
+    };
+    if copy.read_publication_journal()?.is_some() || !is_activated_format3_copy(&copy)? {
+        return Ok(None);
+    }
+    copy.head()
+}
+
+/// Publishes the activated copy in place of its source worktree (the one-step
+/// `orna upgrade --to-format 3`). `verified` must be the copy's preparation and
+/// `activated` must be the copy activation published: it must hold the verified
+/// candidate as head with no publication journal, as an activated format-3
+/// store, and must carry the reviewed-result record activation wrote for that
+/// candidate. The source must still match what was verified: a source that
+/// moved since is refused and left untouched.
+///
+/// The two directories swap with one `renameat2(RENAME_EXCHANGE)`, so the
+/// worktree path holds either the source or the activated copy, never a mix.
+/// The source snapshot then sits at the copy's path, as the rollback copy.
+///
+/// Only a standalone worktree (a `.git` directory) is exchanged; a linked
+/// worktree's administrative directory would be orphaned by the swap.
+pub fn exchange_activated_copy(
+    source: &Repository,
+    verified: &MigratedCopy,
+    activated: &Path,
+) -> Result<(), RepositoryError> {
+    let destination = canonical_destination(activated)?;
+    let source_root = source
+        .worktree()
+        .canonicalize()
+        .map_err(|_| RepositoryError::NotAWorktree)?;
+    if destination == source_root
+        || destination.starts_with(&source_root)
+        || source_root.starts_with(&destination)
+    {
+        return Err(RepositoryError::InvalidSelector);
+    }
+    let git_metadata = fs::symlink_metadata(source_root.join(".git"))
+        .map_err(|_| RepositoryError::NotAWorktree)?;
+    if !git_metadata.is_dir() {
+        return Err(RepositoryError::NotAWorktree);
+    }
+    let parent = source_root
+        .parent()
+        .ok_or(RepositoryError::LocalStateUnavailable)?;
+    if destination.parent() != Some(parent) {
+        return Err(RepositoryError::InvalidSelector);
+    }
+    if source.head()?.as_ref() != Some(&verified.source_commit)
+        || source.index_generation()? != verified.source_index_generation
+        || working_tree_identity(source)?.0 != verified.working_tree_identity
+    {
+        return Err(RepositoryError::PublicationRecoveryConflict);
+    }
+    require_directory(&destination)?;
+    let copy =
+        owned_copy_repository(&destination)?.ok_or(RepositoryError::PublicationRecoveryConflict)?;
+    if copy.read_publication_journal()?.is_some()
+        || copy.head()?.as_ref() != Some(verified.candidate_journal.new_head())
+        || !is_activated_format3_copy(&copy)?
+    {
+        return Err(RepositoryError::PublicationRecoveryConflict);
+    }
+    require_reviewed_result(&copy, verified)?;
+    let source_name = source_root
+        .file_name()
+        .ok_or(RepositoryError::LocalStateUnavailable)?;
+    let copy_name = destination
+        .file_name()
+        .ok_or(RepositoryError::LocalStateUnavailable)?;
+    // Boundary: the copy is activated; the worktree path still holds the source.
+    crate::publication_crash_barrier("upgrade-exchanging");
+    exchange_directories(parent, Path::new(source_name), Path::new(copy_name))?;
+    // Boundary: the worktree path holds the activated copy; the copy's path
+    // holds the source snapshot.
+    crate::publication_crash_barrier("upgrade-exchanged");
+    sync_directory(parent)
+}
+
+/// Requires the reviewed-result record activation wrote into `copy`'s runtime
+/// for the verified candidate. The record names the runtime intent, which binds
+/// the source's index tree and working-tree identity, the message digest and the
+/// candidate commit; a copy activated from another source state is refused.
+fn require_reviewed_result(
+    copy: &Repository,
+    verified: &MigratedCopy,
+) -> Result<(), RepositoryError> {
+    let intent = verified
+        .candidate_journal
+        .runtime_intent_id()
+        .ok_or(RepositoryError::PublicationRecoveryConflict)?;
+    let intent_hex = hex(&intent);
+    let message = candidate_message(
+        verified.source_format,
+        verified.annotation_defaults,
+        &verified.continuity,
+    );
+    let expected = format!(
+        "{intent_hex}\n{}\n{}",
+        hex(Sha256::digest(message.as_bytes()).as_slice()),
+        verified.candidate_journal.new_head().as_str()
+    );
+    let result_path = copy
+        .runtime_paths()
+        .root()
+        .join(format!("reviewed-result-{intent_hex}"));
+    match fs::read_to_string(&result_path) {
+        Ok(recorded) if recorded == expected => Ok(()),
+        _ => Err(RepositoryError::PublicationRecoveryConflict),
+    }
+}
+
+/// Atomically swaps the entries `first` and `second` of `parent`.
+#[cfg(target_os = "linux")]
+fn exchange_directories(parent: &Path, first: &Path, second: &Path) -> Result<(), RepositoryError> {
+    use rustix::fs::{RenameFlags, renameat_with};
+
+    let parent_file = fs::File::open(parent).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+    renameat_with(
+        &parent_file,
+        first,
+        &parent_file,
+        second,
+        RenameFlags::EXCHANGE,
+    )
+    .map_err(|error| match error {
+        rustix::io::Errno::NOSYS | rustix::io::Errno::INVAL | rustix::io::Errno::OPNOTSUPP => {
+            RepositoryError::PlatformUnsupported
+        }
+        _ => RepositoryError::LocalStateUnavailable,
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn exchange_directories(
+    _parent: &Path,
+    _first: &Path,
+    _second: &Path,
+) -> Result<(), RepositoryError> {
+    Err(RepositoryError::PlatformUnsupported)
+}
+
 /// Reads the journal of a copy that is its own repository. A path with no Git
 /// metadata has no journal. So does a repository without a runtime directory:
 /// that directory is not created here, because opening the journal would.
