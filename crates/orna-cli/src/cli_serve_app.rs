@@ -12,7 +12,7 @@
 //! Git transport, installs no page at `/`, and reports the absence once at
 //! startup.
 
-use super::is_allowlisted_media;
+use super::apply_payload_policy;
 use super::{
     CommittedRowsError, CommittedTableIdentity, Diagnostic, Limits, Mutex, PinnedCommittedRows,
     PinnedCommittedTables, Request, Response, RuntimeState, admitted_table_schemas,
@@ -20,7 +20,7 @@ use super::{
     legacy_bare_module_candidates, legacy_bare_module_table, runtime_identity,
     unavailable_response,
 };
-use crate::media_range::{MediaMethod, MediaReply, media_reply};
+use crate::media_range::{MediaMethod, MediaReply, media_reply, plan_media_response};
 use orna_application::{ApplicationAuthority, ApplicationError, StagedActivation};
 use orna_evaluator::Environment;
 use orna_repository::{GitHashAlgorithm, KeyRange, NativeOid};
@@ -366,6 +366,7 @@ impl ServeApp {
                         .map_err(|_| unavailable)?;
                     let length = metadata.length();
                     let media_type = metadata.media_type().to_owned();
+                    check_media_span(method, range, length, MEDIA_MAX_BODY_BYTES)?;
                     let reply = media_reply(method, range, length, |start, end| {
                         let mut out = Vec::new();
                         let mut cursor = start;
@@ -415,9 +416,7 @@ pub(super) fn serving_entry_route(
     request: &Request,
 ) -> Option<Response> {
     let mut response = serving_entry_route_inner(app, request)?;
-    response
-        .headers
-        .push(("X-Content-Type-Options".to_owned(), "nosniff".to_owned()));
+    super::ensure_header(&mut response, "X-Content-Type-Options", "nosniff");
     Some(response)
 }
 
@@ -496,11 +495,32 @@ fn media_error(status: u16, code: &str) -> Response {
     )
 }
 
+/// Largest media body one response buffers (64 MiB). A selected span above it
+/// is refused with `413 media.response_too_large` before any byte is read; the
+/// client reads a larger payload as several `Range` requests.
+const MEDIA_MAX_BODY_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Refuses a response whose planned body is larger than `cap`. The plan is
+/// computed from the range alone, so an oversized span costs no read.
+fn check_media_span(
+    method: MediaMethod,
+    range: Option<&str>,
+    length: u64,
+    cap: u64,
+) -> Result<(), (u16, &'static str)> {
+    let plan = plan_media_response(method, range, length);
+    if plan.send_body && plan.content_length > cap {
+        return Err((413, "media.response_too_large"));
+    }
+    Ok(())
+}
+
 /// Builds the media response from the plan: the status and range headers, the
-/// descriptor OID as the validator, and an attachment sandbox unless the media
-/// type is allowlisted for inline display.
+/// descriptor OID as the validator, and the payload policy (an attachment with
+/// `nosniff` and a sandbox unless the media type is allowlisted for inline).
 fn media_response(reply: MediaReply, media_type: &str, descriptor: &NativeOid) -> Response {
     let mut response = Response::new(reply.plan.status, media_type, reply.body);
+    apply_payload_policy(&mut response, media_type);
     response
         .headers
         .push(("accept-ranges".into(), "bytes".into()));
@@ -516,17 +536,6 @@ fn media_response(reply: MediaReply, media_type: &str, descriptor: &NativeOid) -
     response
         .headers
         .push(("etag".into(), format!("\"{}\"", descriptor.to_hex())));
-    if !is_allowlisted_media(media_type) {
-        response
-            .headers
-            .push(("content-disposition".into(), "attachment".into()));
-        response
-            .headers
-            .push(("x-content-type-options".into(), "nosniff".into()));
-        response
-            .headers
-            .push(("content-security-policy".into(), "sandbox".into()));
-    }
     response
 }
 
@@ -548,4 +557,68 @@ pub(super) fn missing_entry_diagnostic() -> Diagnostic {
         "no serving entry: main.orna does not declare `pub fn serve()`",
         "add `pub fn serve()` to main.orna to serve `/`; Git transport remains available",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn span_above_the_cap_is_refused_before_any_read() {
+        assert_eq!(
+            check_media_span(MediaMethod::Get, None, 100, 64),
+            Err((413, "media.response_too_large"))
+        );
+        assert_eq!(
+            check_media_span(MediaMethod::Get, Some("bytes=0-63"), 100, 64),
+            Ok(()),
+            "a 64-byte span is exactly at the cap"
+        );
+        assert_eq!(
+            check_media_span(MediaMethod::Get, Some("bytes=0-63"), 100, 63),
+            Err((413, "media.response_too_large")),
+        );
+    }
+
+    #[test]
+    fn head_carries_no_body_so_the_cap_does_not_apply() {
+        assert_eq!(check_media_span(MediaMethod::Head, None, 100, 64), Ok(()));
+    }
+
+    #[test]
+    fn payload_policy_sets_every_header_on_a_fresh_non_inline_response() {
+        let mut response = Response::new(200, "image/svg+xml", Vec::new());
+        apply_payload_policy(&mut response, "image/svg+xml");
+        assert_eq!(response.content_type, "application/octet-stream");
+        let value = |name: &str| {
+            response
+                .headers
+                .iter()
+                .find(|(existing, _)| existing.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(value("content-disposition"), Some("attachment"));
+        assert_eq!(value("x-content-type-options"), Some("nosniff"));
+        assert_eq!(value("content-security-policy"), Some("sandbox"));
+    }
+
+    #[test]
+    fn payload_policy_attaches_non_inline_types_once() {
+        let mut response = Response::new(200, "image/svg+xml", Vec::new());
+        response
+            .headers
+            .push(("x-content-type-options".into(), "nosniff".into()));
+        apply_payload_policy(&mut response, "image/svg+xml");
+        assert_eq!(response.content_type, "application/octet-stream");
+        let count = |name: &str| {
+            response
+                .headers
+                .iter()
+                .filter(|(existing, _)| existing.eq_ignore_ascii_case(name))
+                .count()
+        };
+        assert_eq!(count("x-content-type-options"), 1);
+        assert_eq!(count("content-disposition"), 1);
+        assert_eq!(count("content-security-policy"), 1);
+    }
 }
