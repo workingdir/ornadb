@@ -923,19 +923,58 @@ fn inspect_raw(raw: &Raw, depth: usize) -> (String, &'static str) {
         Raw::Tag(37, value) => inspect_uuid(value),
         Raw::Tag(tag, value) => {
             let (text, _) = inspect_raw(value, depth + 1);
-            (format!("Tag<{tag}>({text})"), "Tagged")
+            match registered_tag_name(*tag) {
+                Some(name) => (format!("{name}({text})"), name),
+                None => (format!("Tag<{tag}>({text})"), "Tagged"),
+            }
         }
     }
 }
 
 fn inspect_uuid(value: &Raw) -> (String, &'static str) {
     let Raw::Bytes(bytes) = value else {
-        return ("Tag<37>(<invalid>)".into(), "Tagged");
+        return ("Uuid(<invalid>)".into(), "Uuid");
     };
     let Ok(bytes) = <[u8; 16]>::try_from(bytes.as_slice()) else {
-        return ("Tag<37>(<invalid>)".into(), "Tagged");
+        return ("Uuid(<invalid>)".into(), "Uuid");
     };
     (canonical_uuid_text(bytes), "Uuid")
+}
+
+/// Type name of each OVB 1.1 registered tag (60000..=60027). Such a value is
+/// shown by its type name, never as `Tag<n>`.
+fn registered_tag_name(tag: u64) -> Option<&'static str> {
+    Some(match tag {
+        60000 => "Decimal",
+        60001 => "Date",
+        60002 => "Instant",
+        60003 => "LocalDateTime",
+        60004 => "TimeZone",
+        60005 => "Duration",
+        60006 => "Quantity",
+        60007 => "Money",
+        60008 => "Enum",
+        60009 => "Record",
+        60010 => "RowRef",
+        60011 => "Diagnostic",
+        60012 => "Present",
+        60013 => "Option",
+        60014 => "Unit",
+        60015 => "Tuple",
+        60016 => "Error",
+        60017 => "TimeOfDay",
+        60018 => "ZonedDateTime",
+        60019 => "Range",
+        60020 => "Refined",
+        60021 => "TableRef",
+        60022 => "LiveHandle",
+        60023 => "SystemId",
+        60024 => "Path",
+        60025 => "Digest",
+        60026 => "sys.Value",
+        60027 => "Relation",
+        _ => return None,
+    })
 }
 
 fn inspect_sequence(values: &[Raw], depth: usize) -> String {
@@ -1190,6 +1229,25 @@ mod tests {
                 0xbb, 0xcc, 0xdd, 0xee, 0xff
             ]
         );
+    }
+
+    #[test]
+    fn inspect_names_registered_tags_instead_of_tag_numbers() {
+        let decimal = Raw::Tag(
+            60000,
+            Box::new(Raw::Array(vec![
+                Raw::Int(125.into()),
+                Raw::Int((-2).into()),
+            ])),
+        );
+        let date = Raw::Tag(60001, Box::new(Raw::Text("2026-11-07".into())));
+        for (raw, expected) in [
+            (decimal, "Decimal([125, -2]) : Decimal"),
+            (date, "Date(\"2026-11-07\") : Date"),
+        ] {
+            let value = CanonicalValue::new(raw).expect("registered tag is canonical");
+            assert_eq!(inspect(&value), expected);
+        }
     }
 
     #[test]
