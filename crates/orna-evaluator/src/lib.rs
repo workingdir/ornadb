@@ -7,7 +7,7 @@
 //! or host-call capability.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     fmt,
     fmt::Write as _,
     sync::Arc,
@@ -3003,211 +3003,101 @@ fn error(code: &'static str) -> EvaluationError {
     EvaluationError::redacted(SafeText::new(code).expect("static safe code"))
 }
 
-/// Lawful equality identity for collection and relation distinct folds.
+/// Equality key for collection and relation distinct folds. Values that `==`
+/// relates always share a key, so the key only narrows the candidates that
+/// `DistinctValueFold::insert` decides with `==`.
 ///
 /// `skeleton` is the canonical form of the value with every Blob node replaced
-/// by `null`; the canonical encoder rejects Blob tags, so Blob payloads travel
-/// beside it. `blobs` records each replaced Blob with its pre-order index in
-/// the skeleton, so the same Blobs at different positions stay distinct. Blob
-/// payloads are compared exactly, so inline OVB-2 content needs no witness.
-/// `witnesses` are the admitted contexts of the non-empty descriptor-backed
-/// Blobs, in traversal order. Two values share an equality class only when the
-/// skeleton, the Blob positions and payloads match, and each descriptor-backed
-/// Blob pair shares its admitted context: the witness that ORNA-BLOB-005
-/// requires before equal content may be decided without streaming. Holding the
-/// contexts keeps their instances alive while the set does, so the pointer
-/// comparison cannot alias a freed context.
-#[derive(Clone)]
-struct DistinctIdentity {
+/// by `null`; the canonical encoder rejects Blob tags, so Blob payloads are not
+/// encoded. `blob_positions` records each replaced Blob's pre-order index in the
+/// skeleton, so Blobs at different positions never become candidates for one
+/// another.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct DistinctKey {
     skeleton: Vec<u8>,
-    blobs: Vec<(usize, Raw)>,
-    witnesses: Vec<Format3Context>,
+    blob_positions: Vec<usize>,
 }
 
-impl PartialEq for DistinctIdentity {
-    fn eq(&self, other: &Self) -> bool {
-        self.skeleton == other.skeleton
-            && self.blobs == other.blobs
-            && self.witnesses.len() == other.witnesses.len()
-            && self
-                .witnesses
-                .iter()
-                .zip(&other.witnesses)
-                .all(|(left, right)| left.is_same_admitted_context(right))
-    }
-}
-
-impl Eq for DistinctIdentity {}
-
-impl std::hash::Hash for DistinctIdentity {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        // Equal identities have equal skeletons, so hashing those alone is
-        // consistent with `eq`.
-        self.skeleton.hash(state);
-    }
-}
-
-/// Encodes the lawful equality identity used by collection and relation
-/// distinct folds. The set stores this identity while the stream retains its
-/// first original value and therefore its stable order.
-fn distinct_identity(value: &Value) -> Result<DistinctIdentity, EvaluationError> {
+/// Encodes the distinct key of `value`. Floats are unsupported in distinct folds.
+fn distinct_key(value: &Value) -> Result<DistinctKey, EvaluationError> {
     if value.contains_float() {
         return Err(error("ORNA-EVAL-UNSUPPORTED"));
     }
-    let mut blobs = Vec::new();
+    let mut blob_positions = Vec::new();
     let mut next_index = 0;
-    let skeleton = identity_skeleton(value.raw()?, &mut next_index, &mut blobs);
+    let skeleton = identity_skeleton(value.raw()?, &mut next_index, &mut blob_positions);
     let skeleton = CanonicalValue::new(skeleton)
         .map_err(|_| error("ORNA-EVAL-VALUE"))?
         .encode()
         .map_err(|_| error("ORNA-EVAL-VALUE"))?;
-    let mut witnesses = Vec::new();
-    collect_blob_witnesses(value, &mut witnesses);
-    Ok(DistinctIdentity {
+    Ok(DistinctKey {
         skeleton,
-        blobs,
-        witnesses,
+        blob_positions,
     })
 }
 
-/// Replaces every Blob node with `null` and records it in `blobs` with its
-/// pre-order index. Empty descriptor-backed Blobs are recorded as their OVB-2
-/// wire form, because ORNA-BLOB-005 decides equality of empty content from the
-/// annotation alone, so all representations of one empty annotated Blob share
-/// one identity.
-fn identity_skeleton(raw: Raw, next_index: &mut usize, blobs: &mut Vec<(usize, Raw)>) -> Raw {
+/// Replaces every Blob node with `null` and records its pre-order index in
+/// `blob_positions`.
+fn identity_skeleton(raw: Raw, next_index: &mut usize, blob_positions: &mut Vec<usize>) -> Raw {
     let index = *next_index;
     *next_index += 1;
     match raw {
-        Raw::Tag(tag @ (OVB2_BLOB_TAG | ROV3_BLOB_TAG | SOV3_BLOB_TAG), payload) => {
-            let blob = Raw::Tag(tag, payload);
-            blobs.push((index, empty_format3_blob_wire(&blob).unwrap_or(blob)));
+        Raw::Tag(OVB2_BLOB_TAG | ROV3_BLOB_TAG | SOV3_BLOB_TAG, _) => {
+            blob_positions.push(index);
             Raw::Null
         }
         Raw::Array(items) => Raw::Array(
             items
                 .into_iter()
-                .map(|item| identity_skeleton(item, next_index, blobs))
+                .map(|item| identity_skeleton(item, next_index, blob_positions))
                 .collect(),
         ),
         Raw::Map(entries) => Raw::Map(
             entries
                 .into_iter()
                 .map(|(key, value)| {
-                    let key = identity_skeleton(key, next_index, blobs);
-                    let value = identity_skeleton(value, next_index, blobs);
+                    let key = identity_skeleton(key, next_index, blob_positions);
+                    let value = identity_skeleton(value, next_index, blob_positions);
                     (key, value)
                 })
                 .collect(),
         ),
         Raw::Tag(tag, payload) => Raw::Tag(
             tag,
-            Box::new(identity_skeleton(*payload, next_index, blobs)),
+            Box::new(identity_skeleton(*payload, next_index, blob_positions)),
         ),
         other => other,
     }
 }
 
-/// The OVB-2 wire form of an empty ROV-3 or SOV-3 Blob, or `None` when the raw
-/// value is not an empty format-3 Blob.
-fn empty_format3_blob_wire(raw: &Raw) -> Option<Raw> {
-    let Raw::Tag(tag, payload) = raw else {
-        return None;
-    };
-    if *tag != ROV3_BLOB_TAG && *tag != SOV3_BLOB_TAG {
-        return None;
-    }
-    let Raw::Array(fields) = payload.as_ref() else {
-        return None;
-    };
-    let [Raw::Int(length), _, media @ Raw::Text(_), suffix, ..] = fields.as_slice() else {
-        return None;
-    };
-    if !length.is_zero() {
-        return None;
-    }
-    Some(Raw::Tag(
-        OVB2_BLOB_TAG,
-        Box::new(Raw::Array(vec![
-            Raw::Bytes(Vec::new()),
-            media.clone(),
-            suffix.clone(),
-        ])),
-    ))
-}
-
-/// Collects the admitted context of each non-empty format-3 Blob in traversal
-/// order. Empty Blobs need no witness: their equality reads no content.
-fn collect_blob_witnesses(value: &Value, witnesses: &mut Vec<Format3Context>) {
-    match value {
-        Value::ContextualBlob(blob) => {
-            if empty_format3_blob_wire(blob.raw()).is_none()
-                && let Some(context) = blob.context()
-            {
-                witnesses.push(context.clone());
-            }
-        }
-        Value::List(values) => {
-            for value in values.iter() {
-                collect_blob_witnesses(value, witnesses);
-            }
-        }
-        Value::Tuple(values) => {
-            for value in values {
-                collect_blob_witnesses(value, witnesses);
-            }
-        }
-        Value::Stream {
-            values, provider, ..
-        } => {
-            for value in values {
-                collect_blob_witnesses(value, witnesses);
-            }
-            if let Some(recover) = provider
-                .as_ref()
-                .and_then(|provider| provider.recover.as_deref())
-            {
-                collect_blob_witnesses(recover, witnesses);
-            }
-        }
-        Value::Record(values) => {
-            for value in values.values() {
-                collect_blob_witnesses(value, witnesses);
-            }
-        }
-        Value::NominalRecord { fields, .. } => {
-            for (_, value) in fields {
-                collect_blob_witnesses(value, witnesses);
-            }
-        }
-        Value::Enum { payload, .. } | Value::Option(payload) => {
-            if let Some(payload) = payload.as_deref() {
-                collect_blob_witnesses(payload, witnesses);
-            }
-        }
-        Value::Range { lower, upper, .. } => {
-            for bound in [lower, upper].into_iter().flatten() {
-                collect_blob_witnesses(bound, witnesses);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Keeps the first original value for each canonical collection identity.
-/// Each query invocation constructs its own fold so paired recursive queries
-/// cannot suppress one another's anchor or recursive rows.
-#[derive(Default)]
+/// Keeps the first original value of each equality class under `==`. Values
+/// that share a `DistinctKey` are decided with `blob_aware_eq`, the relation
+/// `==` uses, so a value is kept exactly when `==` finds it unequal to every
+/// kept value. Content that `==` cannot decide without the bytes fails with the
+/// same error (ORNA-BLOB-005). Each query invocation constructs its own fold so
+/// paired recursive queries cannot suppress one another's rows.
+#[derive(Clone, Default)]
 struct DistinctValueFold {
-    identities: HashSet<DistinctIdentity>,
+    /// Indices into `values` for each key, in insertion order.
+    buckets: HashMap<DistinctKey, Vec<usize>>,
     values: Vec<Value>,
 }
 
 impl DistinctValueFold {
     fn insert(&mut self, value: Value) -> Result<bool, EvaluationError> {
-        if !self.identities.insert(distinct_identity(&value)?) {
+        let key = distinct_key(&value)?;
+        let has_blobs = !key.blob_positions.is_empty();
+        let bucket = self.buckets.entry(key).or_default();
+        if has_blobs {
+            for &index in bucket.iter() {
+                if blob_aware_eq(&self.values[index], &value)? {
+                    return Ok(false);
+                }
+            }
+        } else if !bucket.is_empty() {
             return Ok(false);
         }
+        bucket.push(self.values.len());
         self.values.push(value);
         Ok(true)
     }
@@ -7242,7 +7132,7 @@ impl Context<'_, '_> {
             else {
                 unreachable!("sort_by returns a list");
             };
-            let mut distinct_seen = vec![HashSet::new(); plan.stages.len()];
+            let mut distinct_seen = vec![DistinctValueFold::default(); plan.stages.len()];
             let mut pair_previous = vec![None; plan.stages.len()];
             let mut window_states = (0..plan.stages.len())
                 .map(|_| None)
@@ -7259,7 +7149,7 @@ impl Context<'_, '_> {
             );
         }
         let mut counters = vec![0usize; plan.stages.len()];
-        let mut distinct_seen = vec![HashSet::new(); plan.stages.len()];
+        let mut distinct_seen = vec![DistinctValueFold::default(); plan.stages.len()];
         let mut pair_previous = vec![None; plan.stages.len()];
         let mut window_states = (0..plan.stages.len())
             .map(|_| None)
@@ -7650,7 +7540,7 @@ impl Context<'_, '_> {
             return Ok(());
         }
         let mut counters = vec![0usize; plan.stages.len()];
-        let mut distinct_seen = vec![HashSet::new(); plan.stages.len()];
+        let mut distinct_seen = vec![DistinctValueFold::default(); plan.stages.len()];
         let mut pair_previous = vec![None; plan.stages.len()];
         let mut window_states = (0..plan.stages.len())
             .map(|_| None)
@@ -7778,16 +7668,12 @@ impl Context<'_, '_> {
     /// these from the plan they are walking.
     /// One relation stage's rows, counters and visitor: the stage callers pass
     #[allow(clippy::too_many_arguments)]
-    // DistinctIdentity's Hash and Eq read only the skeleton, the Blob payloads
-    // and context pointer identity, never the atomic state inside
-    // Format3ContextInner, so interior mutability cannot change a key's hash.
-    #[allow(clippy::mutable_key_type)]
     fn apply_relation_stages(
         &mut self,
         mut value: Value,
         stages: &[RelationStage],
         counters: &mut [usize],
-        distinct_seen: &mut [HashSet<DistinctIdentity>],
+        distinct_seen: &mut [DistinctValueFold],
         pair_previous: &mut [Option<Value>],
         window_states: &mut [Option<RelationWindowState>],
         stage_offset: usize,
@@ -7830,7 +7716,7 @@ impl Context<'_, '_> {
                 RelationStage::BucketBy(_) => return Err(error("ORNA-EVAL-UNSUPPORTED")),
                 RelationStage::Distinct => {
                     let seen = &mut distinct_seen[index];
-                    if !seen.insert(distinct_identity(&value)?) {
+                    if !seen.insert(value.clone())? {
                         return Ok(rejected_relation_rows(stages, counters, stage_offset));
                     }
                     self.items(seen.len())?;
@@ -7888,7 +7774,7 @@ impl Context<'_, '_> {
         stages: &[RelationStage],
         suffix: &[RelationStage],
         counters: &mut [usize],
-        distinct_seen: &mut [HashSet<DistinctIdentity>],
+        distinct_seen: &mut [DistinctValueFold],
         pair_previous: &mut [Option<Value>],
         window_states: &mut [Option<RelationWindowState>],
         stage_offset: usize,
@@ -8004,7 +7890,7 @@ impl Context<'_, '_> {
             unreachable!("sort_by returns a list")
         };
         let suffix = &plan.stages[sort_index + 1..];
-        let mut distinct_seen = vec![HashSet::new(); plan.stages.len()];
+        let mut distinct_seen = vec![DistinctValueFold::default(); plan.stages.len()];
         let mut pair_previous = vec![None; plan.stages.len()];
         let mut window_states = (0..plan.stages.len())
             .map(|_| None)
@@ -8030,7 +7916,7 @@ impl Context<'_, '_> {
         stages: &[RelationStage],
         stage_offset: usize,
         depth: usize,
-        distinct_seen: &mut [HashSet<DistinctIdentity>],
+        distinct_seen: &mut [DistinctValueFold],
         pair_previous: &mut [Option<Value>],
         window_states: &mut [Option<RelationWindowState>],
         visit: impl FnMut(&mut Self, Value) -> Result<bool, EvaluationError>,
@@ -8094,7 +7980,7 @@ impl Context<'_, '_> {
         stages: &[RelationStage],
         stage_offset: usize,
         depth: usize,
-        distinct_seen: &mut [HashSet<DistinctIdentity>],
+        distinct_seen: &mut [DistinctValueFold],
         pair_previous: &mut [Option<Value>],
         window_states: &mut [Option<RelationWindowState>],
         mut visit: impl FnMut(&mut Self, Value) -> Result<bool, EvaluationError>,
@@ -20072,32 +19958,71 @@ mod blob_equality_tests {
     }
 
     #[test]
-    fn distinct_fold_keeps_equal_format3_bytes_from_distinct_contexts() {
-        // Identical wire forms from two admitted contexts share no witness, so
-        // equal content cannot be decided without one and both rows survive.
-        let mut fold = DistinctValueFold::default();
-        assert!(fold.insert(rov3_blob_value(b"payload")).unwrap());
-        assert!(fold.insert(rov3_blob_value(b"payload")).unwrap());
-        assert_eq!(fold.values.len(), 2);
-    }
-
-    #[test]
-    fn distinct_fold_keeps_blobs_at_different_positions_apart() {
-        // Both tuples hold the same Blob beside a null, so their skeletons
-        // match. Only the Blob's pre-order position separates the two rows.
-        let blob = rov3_blob_value(b"payload");
-        let mut fold = DistinctValueFold::default();
-        assert!(
-            fold.insert(Value::Tuple(vec![blob.clone(), Value::Null]))
-                .unwrap()
+    fn distinct_fold_agrees_with_equality_over_blob_pairs() {
+        // For each pair the fold keeps the second value exactly when `==` finds
+        // it unequal to the first, and fails with the same code when `==`
+        // cannot decide the pair.
+        let ovb2 = |bytes: &[u8]| {
+            annotated_ovb2(
+                &orna_value::Blob::from_bytes_with_annotation(
+                    bytes.to_vec(),
+                    "application/octet-stream",
+                    None,
+                )
+                .unwrap(),
+            )
+        };
+        let other_annotation = annotated_ovb2(
+            &orna_value::Blob::from_bytes_with_annotation(
+                b"payload".to_vec(),
+                "audio/mp4",
+                Some("m4b"),
+            )
+            .unwrap(),
         );
-        assert!(fold.insert(Value::Tuple(vec![Value::Null, blob])).unwrap());
-        assert_eq!(fold.values.len(), 2);
+        let pairs = vec![
+            (ovb2(b"payload"), ovb2(b"payload")),
+            (ovb2(b"payload"), ovb2(b"paylaod")),
+            (ovb2(b"payload"), other_annotation),
+            (ovb2(b""), ovb2(b"")),
+            (rov3_blob_value(b""), ovb2(b"")),
+            (rov3_blob_value(b"payload"), rov3_blob_value(b"payload")),
+            (rov3_blob_value(b"payload"), ovb2(b"payload")),
+            (rov3_blob_value(b"payload"), ovb2(b"other!!")),
+            (
+                Value::Tuple(vec![ovb2(b"payload")]),
+                Value::Tuple(vec![ovb2(b"payload")]),
+            ),
+            (Value::Int(1.into()), Value::Int(1.into())),
+            (Value::Int(1.into()), Value::Int(2.into())),
+        ];
+        for (left, right) in pairs {
+            let mut fold = DistinctValueFold::default();
+            assert!(fold.insert(left.clone()).unwrap());
+            match blob_aware_eq(&left, &right) {
+                Ok(true) => {
+                    assert!(!fold.insert(right).unwrap());
+                    assert_eq!(fold.len(), 1);
+                }
+                Ok(false) => {
+                    assert!(fold.insert(right).unwrap());
+                    assert_eq!(fold.len(), 2);
+                }
+                Err(equality) => {
+                    let failure = fold.insert(right).unwrap_err();
+                    assert_eq!(failure.code(), equality.code());
+                }
+            }
+        }
     }
 
     #[test]
-    fn distinct_fold_keeps_nonempty_format3_and_ovb2_content_apart() {
-        let ovb2 = annotated_ovb2(
+    fn distinct_fold_reports_unavailable_descriptor_content_like_equality() {
+        // A descriptor-only ROV-3 value has no admitted bytes here, so `==`
+        // against inline content is undecidable; the fold reports the same
+        // unavailability instead of silently keeping both rows.
+        let descriptor_only = rov3_blob_value(b"payload");
+        let inline = annotated_ovb2(
             &orna_value::Blob::from_bytes_with_annotation(
                 b"payload".to_vec(),
                 "application/octet-stream",
@@ -20105,10 +20030,26 @@ mod blob_equality_tests {
             )
             .unwrap(),
         );
+        let equality = blob_aware_eq(&descriptor_only, &inline).unwrap_err();
+        assert_eq!(equality.code(), "sys.blob.unavailable");
         let mut fold = DistinctValueFold::default();
-        assert!(fold.insert(rov3_blob_value(b"payload")).unwrap());
-        assert!(fold.insert(ovb2).unwrap());
-        assert_eq!(fold.values.len(), 2);
+        assert!(fold.insert(descriptor_only).unwrap());
+        let failure = fold.insert(inline).unwrap_err();
+        assert_eq!(failure.code(), "sys.blob.unavailable");
+    }
+
+    #[test]
+    fn distinct_fold_keeps_blobs_at_different_positions_apart() {
+        // Both tuples hold the same Blob beside a null, so the Blob's pre-order
+        // position is the only thing that separates the two keys.
+        let blob = rov3_blob_value(b"payload");
+        let mut fold = DistinctValueFold::default();
+        assert!(
+            fold.insert(Value::Tuple(vec![blob.clone(), Value::Null]))
+                .unwrap()
+        );
+        assert!(fold.insert(Value::Tuple(vec![Value::Null, blob])).unwrap());
+        assert_eq!(fold.len(), 2);
     }
 
     fn rov3_context(payload: &[u8]) -> Format3Context {
