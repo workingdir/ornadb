@@ -1171,6 +1171,15 @@ impl RuntimePublicationCoordinator {
         _path_for: impl Fn(&TableMutation) -> Result<LoosePath, Error>,
         message: &str,
     ) -> Result<Option<Self>, Error> {
+        // ORNA-CAP-006: candidate objects written below stay unreferenced until
+        // the journal anchors them, so a maintenance boundary (GC or repack) must
+        // not run while this prepare is in flight. The shared lease is held to return.
+        let _maintenance = repository
+            .hold_maintenance_lease()
+            .map_err(|error| match error {
+                RepositoryError::RepositoryBusy => Error::RepositoryBusy,
+                _ => Error::RepositoryUnavailable,
+            })?;
         let format = writable_snapshot_context(repository, expected_head)?;
         let mutations = runtime
             .pending_table_mutations_through(freeze)
@@ -1517,6 +1526,8 @@ pub enum Error {
     InvalidTransition,
     RuntimeUnavailable,
     RepositoryUnavailable,
+    /// Another owner holds the declared maintenance boundary (ORNA-CAP-006).
+    RepositoryBusy,
     RepositoryMalformed(orna_repository::FormatContextError),
 }
 impl fmt::Display for Error {
@@ -1547,6 +1558,7 @@ impl fmt::Display for Error {
             Self::InvalidTransition => "invalid publication transition",
             Self::RuntimeUnavailable => "runtime contract unavailable",
             Self::RepositoryUnavailable => "repository projection is unavailable",
+            Self::RepositoryBusy => "repository maintenance boundary is held by another owner",
             Self::RepositoryMalformed(error) => {
                 return write!(f, "repository projection is malformed: {error}");
             }

@@ -9173,6 +9173,78 @@ impl Repository {
             .map_err(|_| RepositoryError::LocalStateUnavailable)
     }
 
+    /// Runs `operation` inside the declared maintenance boundary (ORNA-CAP-006).
+    ///
+    /// Locks are taken in one fixed order: the exclusive maintenance lease, then
+    /// the coordination lock. Capture and prepare hold the shared maintenance
+    /// lease while they write objects that no ref names yet, so a Git `gc` or
+    /// `repack` run here cannot prune them. A held boundary or lease, in this
+    /// process or another, is reported as `RepositoryBusy` once the bounded wait
+    /// elapses; the call never blocks indefinitely.
+    ///
+    /// Git GC and repack are supported only through this entry. Concurrent
+    /// destructive prune that bypasses the boundary, such as `git prune --expire
+    /// now` run by another tool, is unsupported and is not advertised as safe.
+    pub fn with_maintenance_boundary<T, E>(
+        &self,
+        operation: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, E>
+    where
+        E: From<RepositoryError>,
+    {
+        let _maintenance = self
+            .acquire_maintenance_lease(MaintenanceMode::Exclusive)
+            .map_err(E::from)?;
+        let _coordination = self
+            .acquire_coordination_lock_for_publication()
+            .map_err(E::from)?;
+        operation()
+    }
+
+    /// Holds the shared maintenance lease for the duration of a capture or a
+    /// prepare. Shared leases coexist with each other; a held exclusive boundary
+    /// is reported as `RepositoryBusy` once the bounded wait elapses (ORNA-CAP-006).
+    pub fn hold_maintenance_lease(&self) -> Result<MaintenanceLease, RepositoryError> {
+        self.acquire_maintenance_lease(MaintenanceMode::Shared)
+    }
+
+    fn acquire_maintenance_lease(
+        &self,
+        mode: MaintenanceMode,
+    ) -> Result<MaintenanceLease, RepositoryError> {
+        let locks = self.runtime.locks();
+        fs::create_dir_all(&locks).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(locks.join("maintenance.lock"))
+            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        let deadline = std::time::Instant::now() + self.coordination_lock_wait;
+        loop {
+            let attempt = match mode {
+                MaintenanceMode::Shared => FileExt::try_lock_shared(&file),
+                MaintenanceMode::Exclusive => file.try_lock_exclusive(),
+            };
+            match attempt {
+                Ok(()) => return Ok(MaintenanceLease { file }),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(RepositoryError::RepositoryBusy);
+                    }
+                    std::thread::sleep(COORDINATION_LOCK_POLL);
+                }
+                Err(_) => return Err(RepositoryError::LocalStateUnavailable),
+            }
+        }
+    }
+
     /// Acquires the process-lifetime owner lock for this worktree's local
     /// runtime. The lock is separate from short-lived repository coordination
     /// locks and remains held for the runtime lifetime.
@@ -9650,6 +9722,25 @@ struct CoordinationLock {
 }
 
 impl Drop for CoordinationLock {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
+
+/// The maintenance-boundary mode requested from `maintenance.lock`.
+#[derive(Clone, Copy)]
+enum MaintenanceMode {
+    Shared,
+    Exclusive,
+}
+
+/// A shared or exclusive hold on the declared maintenance boundary
+/// (ORNA-CAP-006). The lease is released when it is dropped.
+pub struct MaintenanceLease {
+    file: fs::File,
+}
+
+impl Drop for MaintenanceLease {
     fn drop(&mut self) {
         let _ = self.file.unlock();
     }
