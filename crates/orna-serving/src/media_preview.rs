@@ -15,7 +15,10 @@ pub enum PreviewError {
     UnsupportedMediaType,
     InputTooLarge,
     ContentUnavailable,
-    MalformedOrOverLimit,
+    /// The bytes do not conform to the declared format (ORNA-MEDIA-002).
+    Malformed,
+    /// Well-formed content that exceeds a pinned decoder bound (ORNA-MEDIA-005).
+    ResourceLimit,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DecodedImage {
@@ -44,17 +47,19 @@ pub fn decode_image_preview(blob: &Blob) -> Result<DecodedImage, PreviewError> {
     limits.max_image_height = Some(MAX_PREVIEW_DIMENSION);
     limits.max_alloc = Some(MAX_DECODER_ALLOCATION);
     reader.limits(limits);
-    let decoded = reader
-        .decode()
-        .map_err(|_| PreviewError::MalformedOrOverLimit)?;
+    let decoded = reader.decode().map_err(|error| match error {
+        image::ImageError::Limits(_) => PreviewError::ResourceLimit,
+        _ => PreviewError::Malformed,
+    })?;
     let (width, height) = (decoded.width(), decoded.height());
-    if width == 0
-        || height == 0
-        || width > MAX_PREVIEW_DIMENSION
+    if width == 0 || height == 0 {
+        return Err(PreviewError::Malformed);
+    }
+    if width > MAX_PREVIEW_DIMENSION
         || height > MAX_PREVIEW_DIMENSION
         || u64::from(width) * u64::from(height) > MAX_PREVIEW_PIXELS
     {
-        return Err(PreviewError::MalformedOrOverLimit);
+        return Err(PreviewError::ResourceLimit);
     }
     Ok(DecodedImage {
         width,
