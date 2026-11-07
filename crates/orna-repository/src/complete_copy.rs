@@ -57,7 +57,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt, fs,
-    io::{Read, Write},
+    io::Write,
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
@@ -68,8 +68,8 @@ use std::{
 use sha1::{Digest as Sha1Digest, Sha1};
 use sha2::{Digest as Sha2Digest, Sha256};
 
-use crate::native_graph::{GitHashAlgorithm, NodeData, parse_git_tree};
-use crate::object_reader::ObjectReader;
+use crate::native_graph::{GitHashAlgorithm, NODE_DATA_LIMIT, NodeData};
+use crate::object_reader::{ObjectKind, ObjectReader, TreeEntryMode};
 use crate::{
     GitCommitRef, Repository, RepositoryError, RepositoryFormat, scrub_git_routing_environment,
 };
@@ -1553,11 +1553,14 @@ fn verify_closure(
             });
         }
     }
+    // One reader serves the whole closure, so its blobs and descriptors share a
+    // single Git process.
+    let reader = ObjectReader::new(directory.to_path_buf());
     for object in expected
         .iter()
         .filter(|object| object.kind == CompleteCopyObjectKind::Blob)
     {
-        verify_blob(directory, &object.oid, object.size).map_err(|error| match error {
+        verify_blob(&reader, &object.oid, object.size).map_err(|error| match error {
             CompleteCopyError::IntegrityMismatch { .. } => CompleteCopyError::IntegrityMismatch {
                 scope: format!("{scope}: blob {}", object.oid),
             },
@@ -1568,53 +1571,87 @@ fn verify_closure(
         .iter()
         .filter(|object| object.kind == CompleteCopyObjectKind::Tree)
     {
-        verify_descriptor(directory, &object.oid, scope)?;
+        verify_descriptor(&reader, &object.oid, scope)?;
     }
     Ok(())
+}
+
+/// Maps a failed object read: a missing Git process stays unavailable, and any
+/// other read failure is the integrity mismatch that names the object.
+fn read_error(error: RepositoryError, mismatch: CompleteCopyError) -> CompleteCopyError {
+    match error {
+        RepositoryError::GitUnavailable => CompleteCopyError::GitUnavailable,
+        _ => mismatch,
+    }
 }
 
 /// Reads a format-3 node envelope: a tree whose entries are exactly `data`, a
 /// blob, and an optional `refs` tree. Returns `None` for any tree that is not a
 /// node, or whose `data` blob does not decode as a node payload.
 fn read_format3_node(
-    directory: &Path,
+    reader: &ObjectReader,
     oid: &str,
     algorithm: GitHashAlgorithm,
+    scope: &str,
 ) -> Result<Option<NodeData>, CompleteCopyError> {
-    let tree = git_output(directory, &["cat-file", "tree", oid])?;
-    let Ok(entries) = parse_git_tree(&tree, algorithm, 2) else {
+    let mismatch = || CompleteCopyError::IntegrityMismatch {
+        scope: format!("{scope}: node {oid}"),
+    };
+    let entries = reader
+        .tree_entries(oid)
+        .map_err(|error| read_error(error, mismatch()))?;
+    let Some(data) = entries.iter().find(|entry| entry.name() == b"data") else {
         return Ok(None);
     };
-    let mut data = None;
-    let mut has_refs = false;
-    for entry in &entries {
-        match (entry.name.as_slice(), entry.mode.as_slice()) {
-            (b"data", b"100644") if data.is_none() => data = Some(entry.oid.to_hex()),
-            (b"refs", b"40000") if !has_refs => has_refs = true,
-            _ => return Ok(None),
-        }
+    if data.mode() != TreeEntryMode::File {
+        return Ok(None);
     }
-    let Some(data_oid) = data else {
+    let Some(header) = reader
+        .info(data.oid())
+        .map_err(|error| read_error(error, mismatch()))?
+    else {
         return Ok(None);
     };
-    let payload = git_output(directory, &["cat-file", "blob", data_oid.as_str()])?;
-    Ok(NodeData::decode_canonical(&payload, algorithm).ok())
+    if header.kind() != ObjectKind::Blob || header.size() > NODE_DATA_LIMIT as u64 {
+        return Ok(None);
+    }
+    let payload = reader
+        .read_blob(data.oid(), NODE_DATA_LIMIT)
+        .map_err(|error| read_error(error, mismatch()))?;
+    let Ok(node) = NodeData::decode_canonical(&payload, algorithm) else {
+        return Ok(None);
+    };
+    // A tree whose `data` entry is a canonical node payload is a node, and must
+    // be exactly that payload, optionally beside one `refs` tree.
+    let exact = entries.len() <= 2
+        && entries.iter().all(|entry| {
+            entry.name() == b"data"
+                || (entry.name() == b"refs" && entry.mode() == TreeEntryMode::Tree)
+        });
+    if !exact {
+        return Err(mismatch());
+    }
+    Ok(Some(node))
 }
 
 /// Recomputes the raw SHA-256 of the Blob that a format-3 descriptor tree
 /// names, by streaming its byte index. A tree that is not a descriptor passes.
-fn verify_descriptor(directory: &Path, oid: &str, scope: &str) -> Result<(), CompleteCopyError> {
+fn verify_descriptor(
+    reader: &ObjectReader,
+    oid: &str,
+    scope: &str,
+) -> Result<(), CompleteCopyError> {
     let algorithm = node_algorithm(oid)?;
     let Some(NodeData::BlobDescriptor {
         length,
         raw_sha256,
         byte_root,
-    }) = read_format3_node(directory, oid, algorithm)?
+    }) = read_format3_node(reader, oid, algorithm, scope)?
     else {
         return Ok(());
     };
     let mut walk = ByteIndexWalk {
-        directory,
+        reader,
         algorithm,
         descriptor: oid,
         scope,
@@ -1638,7 +1675,7 @@ fn verify_descriptor(directory: &Path, oid: &str, scope: &str) -> Result<(), Com
 /// state. Each node must decode as a byte index whose entries span exactly its
 /// declared length; each leaf must match its recorded length and chunk digest.
 struct ByteIndexWalk<'a> {
-    directory: &'a Path,
+    reader: &'a ObjectReader,
     algorithm: GitHashAlgorithm,
     descriptor: &'a str,
     scope: &'a str,
@@ -1666,7 +1703,7 @@ impl ByteIndexWalk<'_> {
             height,
             total_length,
             entries,
-        }) = read_format3_node(self.directory, oid, self.algorithm)?
+        }) = read_format3_node(self.reader, oid, self.algorithm, self.scope)?
         else {
             return Err(self.mismatch(oid));
         };
@@ -1703,13 +1740,20 @@ impl ByteIndexWalk<'_> {
         if span_length > crate::blob_store::GEAR_MAXIMUM as u64 {
             return Err(self.mismatch(parent));
         }
-        let chunk = git_output(self.directory, &["cat-file", "blob", oid])?;
+        let limit = usize::try_from(span_length).map_err(|_| self.mismatch(parent))?;
+        let chunk = self
+            .reader
+            .read_blob(oid, limit)
+            .map_err(|error| read_error(error, self.mismatch(parent)))?;
         let digest = crate::blob_store::digest_bytes(&chunk).sha256();
         if chunk.len() as u64 != span_length || chunk_sha256 != Some(digest) {
             return Err(self.mismatch(parent));
         }
         Sha2Digest::update(&mut self.hasher, &chunk);
-        self.hashed += span_length;
+        self.hashed = self
+            .hashed
+            .checked_add(span_length)
+            .ok_or_else(|| self.mismatch(parent))?;
         Ok(())
     }
 }
@@ -1838,62 +1882,23 @@ fn snapshot_roots_admitted(format: &crate::RepositoryFormatContext) -> bool {
 }
 
 /// Streams one blob out of the object database and re-hashes it.
-fn verify_blob(directory: &Path, oid: &str, size: u64) -> Result<(), CompleteCopyError> {
+fn verify_blob(reader: &ObjectReader, oid: &str, size: u64) -> Result<(), CompleteCopyError> {
     if size > MAX_VERIFY_PAYLOAD_BYTES {
         return Err(CompleteCopyError::ClosureTooLarge);
     }
-    let mut command = Command::new("git");
-    command
-        .current_dir(directory)
-        .args(["cat-file", "blob", oid]);
-    scrub_git_routing_environment(&mut command);
-    crate::bind_git_discovery_to_worktree(&mut command, directory);
-    // A recovery export is deliberately local-only: never lazily fetch missing
-    // objects from a promisor remote recorded by the source repository.
-    command.env("GIT_NO_LAZY_FETCH", "1");
-    // Replacement refs can redirect a snapshot walk away from its committed
-    // native graph, silently dropping secondary row-map roots from the copy.
-    command.env("GIT_NO_REPLACE_OBJECTS", "1");
-    command.stdout(Stdio::piped()).stderr(Stdio::null());
-    let mut child = command
-        .spawn()
-        .map_err(|_| CompleteCopyError::GitUnavailable)?;
+    let mismatch = || CompleteCopyError::IntegrityMismatch {
+        scope: format!("blob {oid}"),
+    };
     let mut hasher = object_hasher(oid)?;
     hasher.update(format!("blob {size}\0").as_bytes());
-    let mut stream = child
-        .stdout
-        .take()
-        .ok_or(CompleteCopyError::GitUnavailable)?;
-    let mut buffer = vec![0_u8; 64 * 1024];
-    let mut read = 0_u64;
-    loop {
-        let count = stream
-            .read(&mut buffer)
-            .map_err(|_| CompleteCopyError::GitUnavailable)?;
-        if count == 0 {
-            break;
-        }
-        read += count as u64;
-        if read > size {
-            return Err(CompleteCopyError::IntegrityMismatch {
-                scope: format!("blob {oid}"),
-            });
-        }
-        hasher.update(&buffer[..count]);
-    }
-    drop(stream);
-    let status = child
-        .wait()
-        .map_err(|_| CompleteCopyError::GitUnavailable)?;
-    if !status.success() || read != size {
-        return Err(CompleteCopyError::IntegrityMismatch {
-            scope: format!("blob {oid}"),
-        });
-    }
+    reader
+        .stream_blob(oid, size, |chunk| {
+            hasher.update(chunk);
+            Ok(())
+        })
+        .map_err(|error| read_error(error, mismatch()))?;
     if encode_oid(&hasher.finalize()) != oid {
-        return Err(CompleteCopyError::IntegrityMismatch {
-            scope: format!("blob {oid}"),
-        });
+        return Err(mismatch());
     }
     Ok(())
 }
@@ -2465,6 +2470,7 @@ mod git_binding_tests {
         is_repository, verify_blob, verify_closure, verify_descriptor,
     };
     use crate::native_graph::{ByteIndexEntry, GitHashAlgorithm, NativeOid, NodeData};
+    use crate::object_reader::ObjectReader;
     use sha2::{Digest as Sha2Digest, Sha256};
     use std::io::Write;
     use std::path::{Path, PathBuf};
@@ -2498,8 +2504,8 @@ mod git_binding_tests {
     #[test]
     fn verify_blob_does_not_read_an_enclosing_repository() {
         let (parent, child, oid) = corrupt_child_of_repository_with_blob();
-        verify_blob(parent.path(), &oid, 6).unwrap();
-        assert!(verify_blob(&child, &oid, 6).is_err());
+        verify_blob(&reader(parent.path()), &oid, 6).unwrap();
+        assert!(verify_blob(&reader(&child), &oid, 6).is_err());
     }
 
     #[test]
@@ -2663,12 +2669,16 @@ mod git_binding_tests {
         directory
     }
 
+    fn reader(directory: &Path) -> ObjectReader {
+        ObjectReader::new(directory.to_path_buf())
+    }
+
     #[test]
     fn descriptor_whose_byte_index_matches_its_raw_digest_verifies() {
         let directory = repository();
         let chunks: [&[u8]; 2] = [b"first chunk, ", b"second chunk"];
         let oid = write_descriptor(directory.path(), &chunks, raw_digest(&chunks), false);
-        verify_descriptor(directory.path(), &oid, "closure").unwrap();
+        verify_descriptor(&reader(directory.path()), &oid, "closure").unwrap();
     }
 
     #[test]
@@ -2677,7 +2687,7 @@ mod git_binding_tests {
         let chunks: [&[u8]; 2] = [b"first chunk, ", b"second chunk"];
         let forged = raw_digest(&[b"other content"]);
         let oid = write_descriptor(directory.path(), &chunks, forged, false);
-        let error = verify_descriptor(directory.path(), &oid, "closure").unwrap_err();
+        let error = verify_descriptor(&reader(directory.path()), &oid, "closure").unwrap_err();
         let CompleteCopyError::IntegrityMismatch { scope } = error else {
             panic!("a forged raw digest is an integrity mismatch");
         };
@@ -2690,7 +2700,7 @@ mod git_binding_tests {
         let chunks: [&[u8]; 1] = [b"only chunk"];
         let oid = write_descriptor(directory.path(), &chunks, raw_digest(&chunks), true);
         assert!(matches!(
-            verify_descriptor(directory.path(), &oid, "closure"),
+            verify_descriptor(&reader(directory.path()), &oid, "closure"),
             Err(CompleteCopyError::IntegrityMismatch { .. })
         ));
     }
@@ -2731,5 +2741,145 @@ mod git_binding_tests {
             size,
         }];
         verify_closure(directory.path(), &expected, "closure").unwrap();
+    }
+
+    /// Writes a height-0 byte index whose leaves are `chunks`, and returns its
+    /// object ID with the total length it spans.
+    fn write_leaf_index(root: &Path, chunks: &[&[u8]]) -> (String, u64) {
+        let entries = chunks
+            .iter()
+            .map(|chunk| ByteIndexEntry {
+                span_length: chunk.len() as u64,
+                target: NativeOid::from_hex(GitHashAlgorithm::Sha1, &write_blob(root, chunk))
+                    .unwrap(),
+                chunk_sha256: Some(crate::blob_store::digest_bytes(chunk).sha256()),
+            })
+            .collect();
+        let length = chunks.iter().map(|chunk| chunk.len() as u64).sum();
+        let index = write_node(
+            root,
+            &NodeData::ByteIndex {
+                height: 0,
+                total_length: length,
+                entries,
+            },
+        );
+        (index, length)
+    }
+
+    /// Writes a descriptor whose height-1 root index names two height-0 leaf
+    /// indexes, so verification must descend through a branch node.
+    fn write_two_level_descriptor(root: &Path, chunks: &[&[u8]], raw_sha256: [u8; 32]) -> String {
+        let split = chunks.len() / 2;
+        let (left, left_length) = write_leaf_index(root, &chunks[..split]);
+        let (right, right_length) = write_leaf_index(root, &chunks[split..]);
+        let entries = [(left, left_length), (right, right_length)]
+            .into_iter()
+            .map(|(index, span_length)| ByteIndexEntry {
+                span_length,
+                target: NativeOid::from_hex(GitHashAlgorithm::Sha1, &index).unwrap(),
+                chunk_sha256: None,
+            })
+            .collect();
+        let length = left_length + right_length;
+        let index = write_node(
+            root,
+            &NodeData::ByteIndex {
+                height: 1,
+                total_length: length,
+                entries,
+            },
+        );
+        write_node(
+            root,
+            &NodeData::BlobDescriptor {
+                length,
+                raw_sha256,
+                byte_root: Some(NativeOid::from_hex(GitHashAlgorithm::Sha1, &index).unwrap()),
+            },
+        )
+    }
+
+    #[test]
+    fn two_level_descriptor_whose_byte_index_matches_its_raw_digest_verifies() {
+        let directory = repository();
+        let chunks: [&[u8]; 3] = [b"first, ", b"second, ", b"third"];
+        let oid = write_two_level_descriptor(directory.path(), &chunks, raw_digest(&chunks));
+        verify_descriptor(&reader(directory.path()), &oid, "closure").unwrap();
+    }
+
+    #[test]
+    fn two_level_descriptor_with_a_forged_raw_digest_is_refused() {
+        let directory = repository();
+        let chunks: [&[u8]; 3] = [b"first, ", b"second, ", b"third"];
+        let oid = write_two_level_descriptor(directory.path(), &chunks, raw_digest(&[b"other"]));
+        assert!(matches!(
+            verify_descriptor(&reader(directory.path()), &oid, "closure"),
+            Err(CompleteCopyError::IntegrityMismatch { .. })
+        ));
+    }
+
+    /// The `data` blob of the descriptor `oid`, so a test can wrap it in another
+    /// envelope.
+    fn descriptor_data(directory: &Path, oid: &str) -> String {
+        git(directory, &["rev-parse", &format!("{oid}:data")])
+    }
+
+    #[test]
+    fn descriptor_envelope_with_an_extra_entry_is_refused() {
+        let directory = repository();
+        let chunks: [&[u8]; 1] = [b"extra entry"];
+        let oid = write_descriptor(directory.path(), &chunks, raw_digest(&chunks), false);
+        let data = descriptor_data(directory.path(), &oid);
+        let extra = write_blob(directory.path(), b"unlisted");
+        let wrapped = mktree(
+            directory.path(),
+            &format!("100644 blob {data}\tdata\n100644 blob {extra}\textra\n"),
+        );
+        assert!(matches!(
+            verify_descriptor(&reader(directory.path()), &wrapped, "closure"),
+            Err(CompleteCopyError::IntegrityMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn descriptor_payload_under_another_name_is_not_a_node() {
+        let directory = repository();
+        let chunks: [&[u8]; 1] = [b"renamed entry"];
+        let oid = write_descriptor(directory.path(), &chunks, raw_digest(&chunks), false);
+        let data = descriptor_data(directory.path(), &oid);
+        let wrapped = mktree(directory.path(), &format!("100644 blob {data}\tdatum\n"));
+        verify_descriptor(&reader(directory.path()), &wrapped, "closure").unwrap();
+    }
+
+    #[test]
+    fn non_canonical_data_blob_is_not_a_node_and_passes() {
+        let directory = repository();
+        let data = write_blob(directory.path(), b"not a canonical node payload");
+        let wrapped = mktree(directory.path(), &format!("100644 blob {data}\tdata\n"));
+        verify_descriptor(&reader(directory.path()), &wrapped, "closure").unwrap();
+    }
+
+    #[test]
+    fn ordinary_tree_with_a_data_file_beside_other_files_passes() {
+        let directory = repository();
+        let data = write_blob(directory.path(), b"plain data");
+        let notes = write_blob(directory.path(), b"notes");
+        let tree = mktree(
+            directory.path(),
+            &format!("100644 blob {data}\tdata\n100644 blob {notes}\tnotes.txt\n"),
+        );
+        verify_descriptor(&reader(directory.path()), &tree, "closure").unwrap();
+    }
+
+    #[test]
+    fn ordinary_tree_is_not_treated_as_a_descriptor() {
+        let directory = repository();
+        let blob = write_blob(directory.path(), b"ordinary file");
+        let tree = mktree(
+            directory.path(),
+            &format!("100644 blob {blob}\tnotes.txt\n"),
+        );
+        verify_descriptor(&reader(directory.path()), &tree, "closure").unwrap();
     }
 }
