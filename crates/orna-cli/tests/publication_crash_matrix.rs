@@ -454,7 +454,7 @@ async fn format3_publication_recovers_when_gc_prunes_candidate_before_publish() 
 /// ORNA-GIT-010: a Prepared journal is a recovery authority for the candidate commit and the base
 /// index tree it names. The publisher is SIGKILLed after the journal is durable and before the ref
 /// moves, so neither object is reachable from any ref. Coordinated `git gc --prune=now` and
-/// `git repack -a -d` run under the Orna coordination lock. Both journal objects must survive, and
+/// `git repack -a -d` run inside the Orna maintenance boundary. Both journal objects must survive, and
 /// recovery must complete from the journal without pruning them. HEAD never moved, so recovery
 /// discards the pre-ref journal and republishes a fresh candidate; it does not reuse the candidate.
 #[tokio::test]
@@ -511,12 +511,12 @@ async fn cli_publication_prepared_journal_objects_survive_coordinated_gc() {
     assert_ne!(candidate, base.as_str());
 
     repository
-        .with_coordination_lock(|| {
+        .with_maintenance_boundary(|| {
             git(root, &["gc", "--prune=now", "--quiet"]);
             git(root, &["repack", "-a", "-d", "--quiet"]);
             Ok::<(), orna_repository::RepositoryError>(())
         })
-        .expect("coordination lock is free once the publisher is killed");
+        .expect("maintenance boundary is free once the publisher is killed");
     assert!(
         object_exists(root, &candidate),
         "gc pruned the journal's candidate commit"
@@ -769,8 +769,9 @@ async fn cli_publication_reopens_after_process_kill_at_each_reachable_boundary()
 
 /// Gate D (ACCEPTANCE.md): coordinated GC/repack inside the kill window. After the
 /// publisher is SIGKILLed at each reachable boundary and before recovery runs,
-/// `git gc --prune=now` and `git repack -a -d` execute while holding the Orna
-/// coordination lock, the declared maintenance boundary (ORNA-CAP-006). Pinned,
+/// `git gc --prune=now` and `git repack -a -d` execute inside the declared
+/// maintenance boundary (ORNA-CAP-006), entered through
+/// `Repository::with_maintenance_boundary`. Pinned,
 /// staged and unstaged content must survive and recovery must still publish. This
 /// is coordinated GC only; it claims nothing for uncoordinated `git prune --expire
 /// now` (ORNA-GIT-010).
@@ -781,12 +782,12 @@ async fn cli_publication_reopens_after_coordinated_gc_and_repack_in_kill_window(
 
 fn coordinated_gc_and_repack(repository: &Repository, root: &Path) {
     repository
-        .with_coordination_lock(|| {
+        .with_maintenance_boundary(|| {
             git(root, &["gc", "--prune=now", "--quiet"]);
             git(root, &["repack", "-a", "-d", "--quiet"]);
             Ok::<(), orna_repository::RepositoryError>(())
         })
-        .expect("coordination lock is free once the publisher is killed");
+        .expect("maintenance boundary is free once the publisher is killed");
 }
 
 // The repository observer fires after each ref/index stage is durable;
@@ -1308,7 +1309,7 @@ async fn abandoned_publication_owner_loses_the_index_lock_and_its_pins_after_a_k
 ///
 /// The publisher is SIGKILLed at `index`, an external edit lands on a tracked
 /// file that Orna does not manage, and `git gc --prune=now` plus
-/// `git repack -a -d` run under the Orna coordination lock, the declared
+/// `git repack -a -d` run under the Orna maintenance boundary, the declared
 /// maintenance boundary (ORNA-CAP-006). Recovery must still publish, keep the
 /// external edit in the worktree, and leave no journal, lock or pin behind.
 #[tokio::test]
