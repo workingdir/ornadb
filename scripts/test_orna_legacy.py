@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from scripts import orna_legacy as legacy
-from scripts.orna_extract import ExtractionError, Tag, UnavailableObject, decode_canonical, encode
+from scripts.orna_extract import CborMap, ExtractionError, Tag, UnavailableObject, decode_canonical, encode
 
 GOLDEN = Path(__file__).resolve().parent / "golden" / "ogb1-blob-vectors.json"
 
@@ -425,7 +425,7 @@ class TreeTests(unittest.TestCase):
 
 class Rov1Rov2Tests(unittest.TestCase):
     def test_ovb1_accepts_registered_value_tag(self) -> None:
-        self.assertEqual(legacy.decode_ovb1(b"\xd9\xea\x60\x01"), Tag(60000, 1))
+        self.assertEqual(legacy.decode_ovb1(encode(Tag(60000, [1, 0]))), Tag(60000, [1, 0]))
 
     def test_ovb1_rejects_profile_and_storage_tags(self) -> None:
         for number in (60100, 60110, 60111, 60112, 60113):
@@ -451,6 +451,120 @@ class Rov1Rov2Tests(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaises(ExtractionError):
                     legacy.decode_rov2(encode(value))
+
+
+def cwd_snapshot_digest(database: Tag, runtime: Tag, generation: int) -> bytes:
+    """SHA-256 of 'orna.snapshot.v1', a zero byte and the structural encoding of a CWD descriptor."""
+    return hashlib.sha256(b"orna.snapshot.v1\x00" + encode([0, database, runtime, generation])).digest()
+
+
+class RegistryValueTests(unittest.TestCase):
+    """Per-tag registry shapes and constraints for decode_ovb1 (ROV-1 value codec)."""
+
+    UU = Tag(37, bytes(16))
+    VALID_VALUES = [
+        Tag(37, bytes(16)),
+        Tag(60000, [0, 0]),
+        Tag(60000, [-15, -1]),
+        Tag(60001, "2024-02-29"),
+        Tag(60002, [0, 0]),
+        Tag(60002, [-1, 999999999]),
+        Tag(60003, "2024-02-29T23:59:59.123456789"),
+        Tag(60004, "Europe/London"),
+        Tag(60005, [-1, 5]),
+        Tag(60006, [Tag(60000, [1, 0]), Tag(37, bytes(16))]),
+        Tag(60007, [Tag(60000, [5, -2]), Tag(37, bytes(16))]),
+        Tag(60008, [Tag(37, bytes(16)), Tag(37, bytes(16)), None]),
+        Tag(60008, [Tag(37, bytes(16)), Tag(37, bytes(16)), Tag(60009, [None, []])]),
+        Tag(60009, [None, []]),
+        Tag(60009, [Tag(37, bytes(16)), [["name", Tag(60000, [1, 0])]]]),
+        Tag(60010, [Tag(37, bytes(16)), Tag(37, bytes(16)), 7, [0, Tag(37, bytes(16)), Tag(37, bytes(16)), 1, cwd_snapshot_digest(Tag(37, bytes(16)), Tag(37, bytes(16)), 1)]]),
+        Tag(60010, [Tag(37, bytes(16)), Tag(37, bytes(16)), 7, [1, Tag(37, bytes(16)), "sha256", bytes(32)]]),
+        Tag(60011, CborMap(())),
+        Tag(60012, [1, None, CborMap(()), []]),
+        Tag(60013, [0]),
+        Tag(60013, [1, 7]),
+        Tag(60014, []),
+        Tag(60015, [1, "x"]),
+        Tag(60016, CborMap(((0, "code"), (1, "msg"), (2, []), (3, CborMap((("k", 1),)))))),
+        Tag(60017, 0),
+        Tag(60017, 86399999999999),
+        Tag(60018, [Tag(60002, [0, 0]), Tag(60004, "UTC"), 0]),
+        Tag(60019, [Tag(60013, [0]), Tag(60013, [1, Tag(60000, [1, 0])]), True]),
+        Tag(60020, [Tag(37, bytes(16)), 5]),
+        Tag(60021, [Tag(37, bytes(16)), Tag(37, bytes(16)), "k"]),
+        Tag(60022, [Tag(37, bytes(16)), Tag(37, bytes(16)), "k", False]),
+        Tag(60023, ["sys.DatabaseId", Tag(37, bytes(16))]),
+        Tag(60023, ["sys.RevisionId", bytes(32)]),
+        Tag(60023, ["sys.CheckpointVersion", 0]),
+        Tag(60023, ["sys.GitOid", ["sha1", bytes(20)]]),
+        Tag(60023, ["sys.GitOid", ["sha256", bytes(32)]]),
+        Tag(60024, ["repo", "src/main.rs"]),
+        Tag(60024, ["posix", "/etc/hosts"]),
+        Tag(60024, ["windows", "C:\\Users"]),
+        Tag(60025, ["sha256", bytes(32)]),
+    ]
+    INVALID_VALUES = [
+        Tag(37, bytes(15)),
+        Tag(60000, [1]),
+        Tag(60000, [True, 0]),
+        Tag(60000, [0, 1]),
+        Tag(60000, [10, 0]),
+        Tag(60001, "2023-02-29"),
+        Tag(60001, "20240101"),
+        Tag(60002, [0, 1000000000]),
+        Tag(60002, [0, -1]),
+        Tag(60003, "2024-01-01T00:00:00"),
+        Tag(60003, "2024-01-01T00:00:00.12345678"),
+        Tag(60003, "2024-01-01T00:00:60.000000000"),
+        Tag(60003, "2024-01-01T00:00:00.000000000Z"),
+        Tag(60004, ""),
+        Tag(60005, [0, 1000000000]),
+        Tag(60006, [Tag(60000, [1, 0]), b"x"]),
+        Tag(60007, [1, Tag(37, bytes(16))]),
+        Tag(60008, [Tag(37, bytes(16)), Tag(37, bytes(16)), 1]),
+        Tag(60009, [None, [[1]]]),
+        Tag(60010, [Tag(37, bytes(16)), Tag(37, bytes(16)), 1, [0]]),
+        Tag(60011, [1]),
+        Tag(60012, [1, None, CborMap(()), "x"]),
+        Tag(60013, [2]),
+        Tag(60013, [False]),
+        Tag(60014, [0]),
+        Tag(60015, []),
+        Tag(60016, CborMap(((0, "code"),))),
+        Tag(60017, 86400000000000),
+        Tag(60018, [Tag(60002, [0, 0]), Tag(60002, [0, 0]), 0]),
+        Tag(60019, [Tag(60013, [0]), Tag(60013, [0]), 1]),
+        Tag(60020, [b"x", 1]),
+        Tag(60021, [Tag(37, bytes(16)), Tag(37, bytes(16))]),
+        Tag(60022, [Tag(37, bytes(16)), Tag(37, bytes(16)), "k", True]),
+        Tag(60023, ["sys.Unknown", Tag(37, bytes(16))]),
+        Tag(60023, ["sys.RevisionId", Tag(37, bytes(16))]),
+        Tag(60023, ["sys.CheckpointVersion", -1]),
+        Tag(60023, ["sys.GitOid", ["sha1", bytes(32)]]),
+        Tag(60024, ["unknown", "x"]),
+        Tag(60024, ["repo", "/abs"]),
+        Tag(60024, ["repo", "a/../b"]),
+        Tag(60024, ["repo", "a//b"]),
+        Tag(60024, ["repo", "a\\b"]),
+        Tag(60025, ["sha1", bytes(32)]),
+        Tag(60025, ["sha256", bytes(31)]),
+        Tag(60013, [1, Tag(60000, [0, 1])]),
+        Tag(60010, [Tag(37, bytes(16)), Tag(37, bytes(16)), 7, [0, Tag(37, bytes(16)), Tag(37, bytes(16)), 1, bytes(32)]]),
+        Tag(60009, [None, [["name", Tag(60000, [1, 0])], ["name", Tag(60000, [2, 0])]]]),
+        Tag(60009, [None, [["e\u0301", Tag(60000, [1, 0])]]]),
+    ]
+
+    def test_valid_registered_values_are_accepted(self) -> None:
+        for value in self.VALID_VALUES:
+            with self.subTest(value=value):
+                self.assertEqual(legacy.decode_ovb1(encode(value)), value)
+
+    def test_invalid_registered_values_are_rejected(self) -> None:
+        for value in self.INVALID_VALUES:
+            with self.subTest(value=value):
+                with self.assertRaises(legacy.LegacyBlobError):
+                    legacy.decode_ovb1(encode(value))
 
 
 class Orr2Tests(unittest.TestCase):
