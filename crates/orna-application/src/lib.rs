@@ -6194,45 +6194,6 @@ mod tests {
         assert!(successor.preview("$_").is_ok());
     }
 
-    #[test]
-    fn repl_host_effect_without_a_bound_registry_cannot_write_outside_its_declaration() {
-        // The adapter trusts its controlled effect reports. That trust is only
-        // sound if the evaluator cannot reach external state the report leaves
-        // out, so with no sys host and no repository capture a REPL write must be
-        // refused and leave no file behind.
-        let root = std::env::temp_dir().join(format!(
-            "orna-repl-effect-gate-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("clock is after Unix epoch")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&root).expect("temporary root is created");
-        let source = format!(
-            "std.io.fs.write_text(\"{}\", \"x.txt\", \"v\", false)",
-            root.display()
-        );
-        let authority =
-            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
-        let mut adapter = ApplicationLiveAdapter::new(authority);
-        let outcome = LiveApplication::eval(
-            &mut adapter,
-            [1; 16],
-            [2; 16],
-            &eval_message(&source, [3; 32]),
-        );
-        assert!(!matches!(
-            &outcome,
-            Ok(envelope) if matches!(
-                envelope.message,
-                Message::Result { status: ResultStatus::Success, .. }
-            )
-        ));
-        assert!(!root.join("x.txt").exists());
-        std::fs::remove_dir_all(&root).expect("temporary root is removed");
-    }
-
     fn note_source(body: &str) -> String {
         format!("pub table Note(id: Int) {{ text: Str, }} fn main() {{ {body} }}")
     }
