@@ -1,0 +1,494 @@
+"""Unit tests for scripts/orna_legacy.py (python3 -m unittest scripts.test_orna_legacy).
+
+The golden vectors in scripts/golden/ogb1-blob-vectors.json pin the OGB-1 meta
+bytes, the blob root, and the chunk object identities. A reference writer in
+this file rebuilds each vector from its input, so a passing reader is checked
+against the golden bytes and not only against its own output. Tamper hooks
+let the tests produce structurally wrong roots and assert that the reader
+rejects every one of them.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import unittest
+from dataclasses import dataclass
+from pathlib import Path
+
+from scripts import orna_legacy as legacy
+from scripts.orna_extract import ExtractionError, Tag, UnavailableObject, decode_canonical, encode
+
+GOLDEN = Path(__file__).resolve().parent / "golden" / "ogb1-blob-vectors.json"
+
+
+def deterministic_bytes(count: int) -> bytes:
+    """The golden generator: SHA-256 counter expansion with a fixed seed."""
+    blocks = (count + 31) // 32
+    return b"".join(
+        hashlib.sha256(b"orna.blob.fixture.v1\0" + i.to_bytes(8, "big")).digest()
+        for i in range(blocks)
+    )[:count]
+
+
+def git_tree_bytes(entries: dict[str, tuple[str, str]]) -> bytes:
+    """Independent Git tree serializer (names sort with a trailing slash for subtrees)."""
+    ordered = sorted(
+        entries.items(),
+        key=lambda item: item[0].encode("ascii") + (b"/" if item[1][0] == "tree" else b"\0"),
+    )
+    out = b""
+    for name, (kind, oid) in ordered:
+        mode = b"40000" if kind == "tree" else b"100644"
+        out += mode + b" " + name.encode("ascii") + b"\0" + bytes.fromhex(oid)
+    return out
+
+
+class MemStore:
+    """Git object store with a read log, satisfying the reader's ObjectSource protocol."""
+
+    def __init__(self) -> None:
+        self.objects: dict[str, tuple[str, bytes]] = {}
+        self.reads: list[str] = []
+
+    def put(self, kind: str, data: bytes) -> str:
+        oid = legacy.git_oid(kind, data)
+        self.objects[oid] = (kind, data)
+        return oid
+
+    def tree(self, entries: dict[str, tuple[str, str]]) -> str:
+        return self.put("tree", git_tree_bytes(entries))
+
+    def get(self, oid: str) -> tuple[str, bytes]:
+        self.reads.append(oid)
+        if oid not in self.objects:
+            raise UnavailableObject(f"object {oid} is absent")
+        return self.objects[oid]
+
+
+@dataclass
+class Built:
+    root: str
+    digest: str
+    length: int
+    data_oid: str
+    meta: bytes
+    chunks: list[str]
+
+
+def build(store: MemStore, parts: list[bytes], tamper=None) -> Built:
+    """Reference OGB-1 writer. tamper(stage, value) may alter a stage; the default is identity."""
+    tamper = tamper or (lambda stage, value: value)
+    digest = hashlib.sha256()
+    length = 0
+    leaves: list[tuple[int, str, bytes | None]] = []
+    chunk_oids: list[str] = []
+    for part in parts:
+        oid = store.put("blob", part)
+        chunk_oids.append(oid)
+        leaves.append((len(part), oid, hashlib.sha256(part).digest()))
+        digest.update(part)
+        length += len(part)
+
+    def node(group, height):
+        end = 0
+        index = []
+        tree: dict[str, tuple[str, str]] = {}
+        for ordinal, (size, oid, chunk_digest) in enumerate(group):
+            end += size
+            index.append([end, bytes.fromhex(oid), chunk_digest])
+            tree[f"{ordinal:03x}"] = ("blob" if height == 0 else "tree", oid)
+        node_height, node_total, node_index = tamper("index", [height, end, index])
+        tree["index"] = ("blob", store.put("blob", encode([1, node_height, node_total, node_index])))
+        return end, store.tree(tamper("node_tree", tree)), None
+
+    level = [node(leaves[i : i + legacy.FANOUT], 0) for i in range(0, len(leaves), legacy.FANOUT)]
+    level = level or [node([], 0)]
+    height = 0
+    while len(level) > 1:
+        height += 1
+        level = [node(level[i : i + legacy.FANOUT], height) for i in range(0, len(level), legacy.FANOUT)]
+    _, data_oid, _ = level[0]
+    meta = encode(
+        tamper(
+            "meta",
+            [1, digest.digest(), length, bytes.fromhex(data_oid)],
+        )
+    )
+    meta_oid = store.put("blob", meta)
+    root = store.tree(
+        tamper("root_tree", {"meta": ("blob", meta_oid), "data": ("tree", data_oid)})
+    )
+    return Built(root, digest.hexdigest(), length, data_oid, meta, chunk_oids)
+
+
+def split(data: bytes, size: int) -> list[bytes]:
+    return [data[i : i + size] for i in range(0, len(data), size)]
+
+
+def vector_input(vector: dict) -> bytes:
+    spec = vector["input"]
+    prefix = "deterministic_bytes("
+    if spec.startswith(prefix):
+        return deterministic_bytes(int(spec[len(prefix) : -1]))
+    return bytes.fromhex(spec)
+
+
+class GoldenVectorTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.vectors = json.loads(GOLDEN.read_text())["vectors"]
+
+    def test_every_vector_reproduces_the_golden_root(self) -> None:
+        self.assertGreaterEqual(len(self.vectors), 4)
+        for vector in self.vectors:
+            with self.subTest(vector=vector["name"]):
+                data = vector_input(vector)
+                self.assertEqual(hashlib.sha256(data).hexdigest(), vector["sha256"])
+                parts, pos = [], 0
+                for chunk in vector["chunks"]:
+                    parts.append(data[pos : pos + chunk["length"]])
+                    pos += chunk["length"]
+                self.assertEqual(pos, len(data))
+                store = MemStore()
+                built = build(store, parts)
+                self.assertEqual(built.meta.hex(), vector["meta_hex"])
+                self.assertEqual(built.root, vector["ogb_root_sha1"])
+                self.assertEqual(built.chunks, [chunk["git_oid"] for chunk in vector["chunks"]])
+                self.assertEqual(legacy.OgbReader(store).verify(built.root), vector["sha256"])
+                self.assertEqual(
+                    legacy.decode_rov2(bytes.fromhex(vector["stored_reference_cbor"])),
+                    legacy.StoredBlob(vector["sha256"], vector["length"]),
+                )
+
+
+class ReaderTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.data = deterministic_bytes(300000)
+        self.store = MemStore()
+        self.built = build(self.store, split(self.data, 65536))
+        self.reader = legacy.OgbReader(self.store)
+
+    def test_range_matches_plain_slices(self) -> None:
+        for start, count in [(0, 1), (65530, 100), (300000, 100), (299999, 500), (0, 0), (131072, 65536)]:
+            with self.subTest(start=start, count=count):
+                self.assertEqual(
+                    self.reader.read_range(self.built.root, start, count),
+                    self.data[start : start + count],
+                )
+
+    def test_range_rejects_out_of_bounds_and_oversized_reads(self) -> None:
+        for start, count in [(-1, 0), (300001, 0), (0, -1), (0, legacy.MAX_READ + 1)]:
+            with self.subTest(start=start, count=count):
+                with self.assertRaises(legacy.LegacyBlobError):
+                    self.reader.read_range(self.built.root, start, count)
+
+    def test_range_reads_only_overlapping_chunks(self) -> None:
+        self.store.reads.clear()
+        self.assertEqual(self.reader.read_range(self.built.root, 65530, 20), self.data[65530:65550])
+        fetched = set(self.store.reads) & set(self.built.chunks)
+        self.assertEqual(fetched, {self.built.chunks[0], self.built.chunks[1]})
+
+    def test_descriptor_reads_no_chunks(self) -> None:
+        self.store.reads.clear()
+        descriptor = self.reader.descriptor(self.built.root)
+        self.assertEqual((descriptor.digest, descriptor.length), (self.built.digest, 300000))
+        self.assertFalse(set(self.store.reads) & set(self.built.chunks))
+
+    def test_verify_returns_the_content_digest(self) -> None:
+        self.assertEqual(self.reader.verify(self.built.root), hashlib.sha256(self.data).hexdigest())
+
+    def test_empty_blob(self) -> None:
+        store = MemStore()
+        built = build(store, [])
+        reader = legacy.OgbReader(store)
+        self.assertEqual(reader.read_range(built.root, 0, 10), b"")
+        self.assertEqual(reader.verify(built.root), hashlib.sha256(b"").hexdigest())
+
+    def test_two_level_index_round_trips(self) -> None:
+        data = deterministic_bytes(257 * 1024)
+        store = MemStore()
+        built = build(store, split(data, 1024))
+        index_oid = legacy.parse_git_tree(store.objects[built.data_oid][1], 20)["index"][1]
+        root_index = decode_canonical(store.objects[index_oid][1], "root index", frozenset())
+        self.assertEqual(root_index[1], 1)
+        reader = legacy.OgbReader(store)
+        self.assertEqual(reader.verify(built.root), hashlib.sha256(data).hexdigest())
+        self.assertEqual(
+            reader.read_range(built.root, 256 * 1024 - 5, 20),
+            data[256 * 1024 - 5 : 256 * 1024 + 15],
+        )
+
+    def test_missing_chunk_is_unavailable_not_empty(self) -> None:
+        store = MemStore()
+        built = build(store, [b"abc"])
+        store.objects.pop(built.chunks[0])
+        reader = legacy.OgbReader(store)
+        self.assertEqual(reader.descriptor(built.root).length, 3)
+        with self.assertRaises(UnavailableObject):
+            reader.read_range(built.root, 0, 3)
+        with self.assertRaises(UnavailableObject):
+            reader.verify(built.root)
+
+    def test_substituted_chunk_is_rejected(self) -> None:
+        store = MemStore()
+        built = build(store, [b"abc"])
+        store.objects[built.chunks[0]] = ("blob", b"xyz")
+        with self.assertRaises(legacy.LegacyBlobError):
+            legacy.OgbReader(store).read_range(built.root, 0, 3)
+
+    def test_wrong_object_kind_is_rejected(self) -> None:
+        store = MemStore()
+        built = build(store, [b"abc"])
+        store.objects[built.chunks[0]] = ("tree", store.objects[built.chunks[0]][1])
+        with self.assertRaises(legacy.LegacyBlobError):
+            legacy.OgbReader(store).verify(built.root)
+
+
+class TamperTests(unittest.TestCase):
+    """Each case builds a structurally wrong root and requires a rejection."""
+
+    PARTS = [b"abcdef", b"ghi"]
+
+    def expect_rejected(self, tamper, reader_call=lambda reader, root: reader.verify(root)) -> None:
+        store = MemStore()
+        built = build(store, self.PARTS, tamper=tamper)
+        with self.assertRaises(legacy.LegacyBlobError):
+            reader_call(legacy.OgbReader(store), built.root)
+
+    def test_meta_length_wrong(self) -> None:
+        def tamper(stage, value):
+            if stage == "meta":
+                value[2] += 1
+            return value
+
+        self.expect_rejected(tamper)
+
+    def test_meta_digest_wrong_width(self) -> None:
+        def tamper(stage, value):
+            if stage == "meta":
+                value[1] = bytes(31)
+            return value
+
+        self.expect_rejected(tamper)
+
+    def test_meta_length_above_limit(self) -> None:
+        def tamper(stage, value):
+            if stage == "meta":
+                value[2] = legacy.MAX_LENGTH + 1
+            return value
+
+        self.expect_rejected(tamper)
+
+    def test_meta_not_version_one(self) -> None:
+        def tamper(stage, value):
+            if stage == "meta":
+                value[0] = 2
+            return value
+
+        self.expect_rejected(tamper)
+
+    def test_meta_data_oid_does_not_match_data_tree(self) -> None:
+        def tamper(stage, value):
+            if stage == "meta":
+                value[3] = bytes(20)
+            return value
+
+        self.expect_rejected(tamper)
+
+    def test_chunk_digest_wrong(self) -> None:
+        def tamper(stage, value):
+            if stage == "index" and value[0] == 0:
+                value[2][0][2] = bytes(32)
+            return value
+
+        self.expect_rejected(tamper)
+
+    def test_index_offsets_not_increasing(self) -> None:
+        def tamper(stage, value):
+            if stage == "index" and value[0] == 0:
+                value[2][1][0] = value[2][0][0]
+            return value
+
+        self.expect_rejected(tamper)
+
+    def test_index_total_does_not_reach_entries(self) -> None:
+        def tamper(stage, value):
+            if stage == "index" and value[0] == 0:
+                value[1] += 1
+            return value
+
+        self.expect_rejected(tamper)
+
+    def test_node_total_checked_without_parent_expectation(self) -> None:
+        # The parent length check (_node expected_length) would catch a wrong total first, so
+        # call _node with no expectation to prove the node's own entries-vs-total check fires.
+        def tamper(stage, value):
+            if stage == "index" and value[0] == 0:
+                value[1] += 1
+            return value
+
+        store = MemStore()
+        built = build(store, self.PARTS, tamper=tamper)
+        with self.assertRaises(legacy.LegacyBlobError):
+            legacy.OgbReader(store)._node(built.data_oid, None, None)
+
+    def test_index_entry_oid_not_the_child(self) -> None:
+        def tamper(stage, value):
+            if stage == "index" and value[0] == 0:
+                value[2][0][1] = bytes(20)
+            return value
+
+        self.expect_rejected(tamper)
+
+    def test_height_above_limit(self) -> None:
+        def tamper(stage, value):
+            if stage == "index" and value[0] == 0:
+                return [9, value[1], value[2]]
+            return value
+
+        self.expect_rejected(tamper)
+
+    def test_extra_child_name(self) -> None:
+        def tamper(stage, value):
+            if stage == "node_tree":
+                value["zzz"] = value["000"]
+            return value
+
+        self.expect_rejected(tamper)
+
+    def test_missing_child_name(self) -> None:
+        def tamper(stage, value):
+            if stage == "node_tree":
+                del value["001"]
+            return value
+
+        self.expect_rejected(tamper)
+
+    def test_extra_root_entry(self) -> None:
+        def tamper(stage, value):
+            if stage == "root_tree":
+                value["x"] = value["meta"]
+            return value
+
+        self.expect_rejected(tamper)
+
+    def test_internal_entry_digest_must_be_null(self) -> None:
+        parts = [bytes([i % 256]) for i in range(257)]
+
+        def tamper(stage, value):
+            if stage == "index" and value[0] == 1:
+                value[2][0][2] = bytes(32)
+            return value
+
+        store = MemStore()
+        built = build(store, parts, tamper=tamper)
+        with self.assertRaises(legacy.LegacyBlobError):
+            legacy.OgbReader(store).verify(built.root)
+
+    def test_chunk_above_one_mebibyte_is_rejected(self) -> None:
+        store = MemStore()
+        built = build(store, [bytes(legacy.MAX_CHUNK + 1)])
+        with self.assertRaises(legacy.LegacyBlobError):
+            legacy.OgbReader(store).verify(built.root)
+
+
+class TreeTests(unittest.TestCase):
+    def test_canonical_tree_parses(self) -> None:
+        data = b"100644 a\0" + bytes(20) + b"100644 b\0" + bytes(20)
+        self.assertEqual(sorted(legacy.parse_git_tree(data, 20)), ["a", "b"])
+
+    def test_non_canonical_tree_order_is_rejected(self) -> None:
+        data = b"100644 b\0" + bytes(20) + b"100644 a\0" + bytes(20)
+        with self.assertRaises(legacy.LegacyBlobError):
+            legacy.parse_git_tree(data, 20)
+
+    def test_subtree_sorts_with_trailing_slash(self) -> None:
+        # "a.b" sorts before the subtree "a" (compared as "a/"), so the reverse is non-canonical.
+        ordered = b"100644 a.b\0" + bytes(20) + b"40000 a\0" + bytes(20)
+        self.assertEqual(sorted(legacy.parse_git_tree(ordered, 20)), ["a", "a.b"])
+        with self.assertRaises(legacy.LegacyBlobError):
+            legacy.parse_git_tree(b"40000 a\0" + bytes(20) + b"100644 a.b\0" + bytes(20), 20)
+
+    def test_duplicate_and_unadmitted_modes_are_rejected(self) -> None:
+        for data in (
+            b"100644 a\0" + bytes(20) + b"100644 a\0" + bytes(20),
+            b"100755 a\0" + bytes(20),
+            b"100644 \0" + bytes(20),
+        ):
+            with self.subTest(data=data[:12]):
+                with self.assertRaises(legacy.LegacyBlobError):
+                    legacy.parse_git_tree(data, 20)
+
+
+class Rov1Rov2Tests(unittest.TestCase):
+    def test_ovb1_accepts_registered_value_tag(self) -> None:
+        self.assertEqual(legacy.decode_ovb1(b"\xd9\xea\x60\x01"), Tag(60000, 1))
+
+    def test_ovb1_rejects_profile_and_storage_tags(self) -> None:
+        for number in (60100, 60110, 60111, 60112, 60113):
+            with self.subTest(tag=number):
+                with self.assertRaises(ExtractionError):
+                    legacy.decode_ovb1(encode(Tag(number, 1)))
+
+    def test_rov2_slot_accepts_only_storage_tag_payload(self) -> None:
+        self.assertEqual(
+            legacy.decode_rov2(encode(Tag(60100, [bytes(32), 5]))),
+            legacy.StoredBlob("00" * 32, 5),
+        )
+        bad_slots = [
+            Tag(60100, [bytes(31), 5]),
+            Tag(60100, [bytes(32), -1]),
+            Tag(60100, [bytes(32), 2**63]),
+            Tag(60100, [bytes(32)]),
+            Tag(60100, [bytes(32), 5, 0]),
+            Tag(60000, 1),
+            b"abc",
+        ]
+        for value in bad_slots:
+            with self.subTest(value=value):
+                with self.assertRaises(ExtractionError):
+                    legacy.decode_rov2(encode(value))
+
+
+class Orr2Tests(unittest.TestCase):
+    DIGEST = "sha256:" + "ab" * 32
+
+    def test_valid_record(self) -> None:
+        self.assertEqual(
+            legacy.orr2_reference([("blob", self.DIGEST), ("length", 7)]),
+            legacy.StoredBlob("ab" * 32, 7),
+        )
+
+    def test_malformed_records_are_rejected(self) -> None:
+        cases = {
+            "missing length": [("blob", self.DIGEST)],
+            "extra field": [("blob", self.DIGEST), ("length", 1), ("x", 1)],
+            "duplicate field": [("blob", self.DIGEST), ("blob", self.DIGEST), ("length", 1)],
+            "uppercase digest": [("blob", "sha256:" + "AB" * 32), ("length", 1)],
+            "wrong algorithm": [("blob", "sha1:" + "ab" * 32), ("length", 1)],
+            "short digest": [("blob", "sha256:" + "ab" * 31), ("length", 1)],
+            "negative length": [("blob", self.DIGEST), ("length", -1)],
+            "boolean length": [("blob", self.DIGEST), ("length", True)],
+            "text length": [("blob", self.DIGEST), ("length", "7")],
+            "length above limit": [("blob", self.DIGEST), ("length", 2**63)],
+        }
+        for name, pairs in cases.items():
+            with self.subTest(case=name):
+                with self.assertRaises(legacy.LegacyBlobError):
+                    legacy.orr2_reference(pairs)
+
+    def test_inline_blob_is_canonical_padded_base64(self) -> None:
+        self.assertEqual(legacy.orr2_inline_bytes("YWJj"), b"abc")
+        self.assertEqual(legacy.orr2_inline_bytes("YQ=="), b"a")
+        self.assertEqual(legacy.orr2_inline_bytes(""), b"")
+
+    def test_non_canonical_inline_blob_is_rejected(self) -> None:
+        for text in ("YQ", "YR==", "YQ==\n", "Y Q==", "YWJj="):
+            with self.subTest(text=text):
+                with self.assertRaises(legacy.LegacyBlobError):
+                    legacy.orr2_inline_bytes(text)
+
+
+if __name__ == "__main__":
+    unittest.main()
