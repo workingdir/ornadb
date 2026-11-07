@@ -11,9 +11,9 @@ use std::{
 use orna_evaluator::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
 use orna_repository::Repository;
 use orna_runtime::{
-    ActivationEffectReport, FaultInjector, FaultPoint, NoFault, RecoveryDisposition,
-    RequestIdentity, RequestOwner, RequestState, RuntimeError, RuntimeState, TableMutation,
-    TableObjectId, TerminalOutcome, WriterLease,
+    ActivationEffectReport, DeclaredEffectSet, FaultInjector, FaultPoint, NoFault,
+    RecoveryDisposition, RequestIdentity, RequestOwner, RequestState, RuntimeError, RuntimeState,
+    TableMutation, TableObjectId, TerminalOutcome, WriterLease,
 };
 use orna_storage::RuntimePublicationCoordinator;
 use orna_sys::{EnvironmentProvider, FilesystemProvider};
@@ -1643,8 +1643,8 @@ async fn managed_store_edit_in_kill_window_is_retained_and_not_rewound() {
         );
         let stderr = String::from_utf8_lossy(&rejected.stderr);
         assert!(
-            stderr.contains("E2300"),
-            "managed edit at {boundary} not reported as E2300: {stderr}"
+            stderr.contains("E2300") && stderr.contains("a managed path was edited after capture"),
+            "managed edit at {boundary} not reported as the managed-worktree conflict: {stderr}"
         );
         assert_eq!(
             head(&repository),
@@ -2642,36 +2642,32 @@ async fn publication_recovery_keeps_uncertain_external_effects_uncertain() {
     }
 }
 
-/// S10 (ORNA-PUB row-commit, Gate D): the real `orna run` process is killed at
-/// the row-commit barrier, after its table activation commits. Recovery through
-/// `orna publish` must leave exactly one row with its committed bytes, and a
-/// subsequent run must see that row. The CLI mints a fresh request identity per
-/// invocation, so a same-identity retry is not reachable through this surface.
-/// Unrelated staged and unstaged work must survive the kill and recovery (P4).
-#[test]
-fn cli_run_row_commit_kill_recovers_the_committed_row_exactly_once() {
-    const SOURCE: &str = concat!(
-        "pub table Widget(id: Str) {\n",
-        "    label: Str,\n",
-        "}\n",
-        "\n",
-        "pub fn seed() {\n",
-        "    Widget.insert({ id: \"w-1\", label: \"first\" });\n",
-        "}\n",
-        "\n",
-        "pub fn verify() {\n",
-        "    assert (Widget | filter(widget => widget.label == \"first\") | count()) == 1;\n",
-        "}\n",
-    );
-    let directory = TempDir::new().unwrap();
-    let root = directory.path();
+/// The widget project the CLI row-commit kill tests drive. `seed` and `verify`
+/// are committed entry points; `verify` asserts the row written before the kill.
+const WIDGET_SOURCE: &str = concat!(
+    "pub table Widget(id: Str) {\n",
+    "    label: Str,\n",
+    "}\n",
+    "\n",
+    "pub fn seed() {\n",
+    "    Widget.insert({ id: \"w-1\", label: \"first\" });\n",
+    "}\n",
+    "\n",
+    "pub fn verify() {\n",
+    "    assert (Widget | filter(widget => widget.label == \"first\") | count()) == 1;\n",
+    "}\n",
+);
+
+/// Initialises and commits the widget project, then leaves unrelated staged and
+/// unstaged work in the worktree. Returns HEAD and both diffs before any run.
+fn widget_project_with_unrelated_work(root: &Path) -> (String, Vec<u8>, Vec<u8>) {
     assert!(
         cli(root, &["init", root.to_str().unwrap()])
             .status
             .success(),
         "init"
     );
-    std::fs::write(root.join("main.orna"), SOURCE).unwrap();
+    std::fs::write(root.join("main.orna"), WIDGET_SOURCE).unwrap();
     std::fs::write(root.join("notes.txt"), "committed notes\n").unwrap();
     git(root, &["init", "-q"]);
     // `orna commit` records the configured identity (16-administration) and the
@@ -2688,6 +2684,20 @@ fn cli_run_row_commit_kill_recovers_the_committed_row_exactly_once() {
     let staged_before = git_output(root, &["diff", "--cached", "--binary"], None);
     let unstaged_before = git_output(root, &["diff", "--binary"], None);
     assert!(!staged_before.is_empty() && !unstaged_before.is_empty());
+    (before, staged_before, unstaged_before)
+}
+
+/// S10 (ORNA-PUB row-commit, Gate D): the real `orna run` process is killed at
+/// the row-commit barrier, after its table activation commits. Recovery through
+/// `orna publish` must leave exactly one row with its committed bytes, and a
+/// subsequent run must see that row. The CLI mints a fresh request identity per
+/// invocation, so a same-identity retry is not reachable through this surface.
+/// Unrelated staged and unstaged work must survive the kill and recovery (P4).
+#[test]
+fn cli_run_row_commit_kill_recovers_the_committed_row_exactly_once() {
+    let directory = TempDir::new().unwrap();
+    let root = directory.path();
+    let (before, staged_before, unstaged_before) = widget_project_with_unrelated_work(root);
 
     let crash = TempDir::new().unwrap();
     let marker = crash.path().join(MARKER_FILE);
@@ -2725,6 +2735,69 @@ fn cli_run_row_commit_kill_recovers_the_committed_row_exactly_once() {
         git_output(root, &["diff", "--binary"], None),
         unstaged_before,
         "the run and publish must leave unrelated unstaged work untouched"
+    );
+}
+
+/// S10 (ORNA-PUB row-commit, Gate D), REPL add path: the real `orna repl`
+/// process is killed at the row-commit barrier of its staged table commit. The
+/// parked insert is never acknowledged, so recovery through `orna publish` must
+/// leave exactly one row with the committed bytes, which `main.verify` asserts.
+/// Unrelated staged and unstaged work must survive the kill and recovery (P4).
+/// The CLI mints a fresh request identity per invocation, so a same-identity
+/// retry is not reachable through this surface; the runtime test covers it.
+#[test]
+fn cli_repl_add_row_commit_kill_recovers_the_committed_row_exactly_once() {
+    let directory = TempDir::new().unwrap();
+    let root = directory.path();
+    let (before, staged_before, unstaged_before) = widget_project_with_unrelated_work(root);
+
+    let crash = TempDir::new().unwrap();
+    let marker = crash.path().join(MARKER_FILE);
+    let mut child = launch_with_arguments(
+        root,
+        "row-commit",
+        crash.path(),
+        &[
+            "repl",
+            r#"main.Widget.insert({ id: "w-1", label: "first" })"#,
+        ],
+    );
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !marker.exists() {
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!("the REPL add exited ({status}) without parking at the row-commit barrier");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the REPL add never reached the row-commit barrier"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(std::fs::read(&marker).unwrap(), b"row-commit");
+    child.kill().expect("kill the parked REPL add");
+    child.wait().expect("reap the killed REPL add");
+    assert_eq!(
+        head_of(root),
+        before,
+        "a REPL add killed before publication must not move HEAD"
+    );
+
+    let published = cli(root, &["publish"]);
+    assert!(published.status.success(), "publish: {published:?}");
+    let verified = cli(root, &["run", "main.verify"]);
+    assert!(
+        verified.status.success(),
+        "the committed row must survive the kill exactly once: {verified:?}"
+    );
+    assert_eq!(
+        git_output(root, &["diff", "--cached", "--binary"], None),
+        staged_before,
+        "the REPL add and publish must leave unrelated staged work untouched"
+    );
+    assert_eq!(
+        git_output(root, &["diff", "--binary"], None),
+        unstaged_before,
+        "the REPL add and publish must leave unrelated unstaged work untouched"
     );
 }
 
@@ -2809,5 +2882,164 @@ async fn kill_at_the_activation_row_commit_barrier_keeps_the_committed_row() {
             .unwrap(),
         Some(vec![ROW_PAYLOAD]),
         "the row committed before the barrier must survive the kill exactly once"
+    );
+}
+
+/// S10 (ORNA-PUB row-commit, Gate D), runtime layer: the request-scoped
+/// activation is killed at the row-commit barrier, after its table transaction
+/// has committed the row, the request identity and its terminal outcome. The
+/// parent reopens the repository and checks that the row survives once, that a
+/// retry of the same request identity observes the recorded outcome and issues
+/// no new capability, and that unrelated staged and unstaged work is
+/// byte-identical (P4). A child that returns without parking means the barrier
+/// is absent, so the parent fails rather than passing silently.
+#[tokio::test]
+async fn kill_at_the_request_row_commit_barrier_keeps_the_row_and_its_recorded_outcome() {
+    const CHILD_REPOSITORY: &str = "ORNA_TEST_REQUEST_ROW_COMMIT_CHILD_REPOSITORY";
+    const REQUEST: RequestIdentity = RequestIdentity {
+        session_id: [71; 16],
+        request_id: [72; 16],
+    };
+    const FINGERPRINT: [u8; 32] = [73; 32];
+    const ROW_KEY: u8 = 74;
+    const ROW_PAYLOAD: u8 = 75;
+    const OUTCOME: u8 = 76;
+    if let Some(repository_root) = std::env::var_os(CHILD_REPOSITORY) {
+        let repository = Repository::discover(Path::new(&repository_root)).unwrap();
+        let (identity, digest) = cli_runtime_identity(&repository);
+        let state = RuntimeState::open(&repository, identity, digest)
+            .await
+            .unwrap();
+        let lease = state.acquire_lease(identity.repository_id).await.unwrap();
+        let (_, capability) = state
+            .reserve_request_with_admission(REQUEST, FINGERPRINT)
+            .await
+            .unwrap();
+        let capability = capability.expect("a fresh reservation issues one capability");
+        state
+            .start_request_with_owner_and_admission(REQUEST, FINGERPRINT, lease, capability)
+            .await
+            .unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutation =
+            TableMutation::insert([77; 16], "records", vec![ROW_KEY], vec![ROW_PAYLOAD]).unwrap();
+        // Returns here only when the barrier is absent; the parent then fails.
+        state
+            .commit_table_request_activation(
+                lease,
+                REQUEST,
+                FINGERPRINT,
+                &context,
+                &[mutation],
+                [78; 32],
+                TerminalOutcome::new(vec![OUTCOME]).unwrap(),
+                &NoFault,
+                ActivationEffectReport::declare(DeclaredEffectSet::None),
+            )
+            .await
+            .unwrap();
+        return;
+    }
+
+    let (directory, _source, repository, state, _base, _relation_id, _format_context) =
+        seeded_project().await;
+    let root = directory.path();
+    let (identity, digest) = cli_runtime_identity(&repository);
+    drop(state);
+    // Unrelated work: a committed tracked file modified unstaged, and a new file
+    // staged. The runtime commit must leave both byte-identical.
+    std::fs::write(root.join("notes.txt"), "committed notes\n").unwrap();
+    git(root, &["add", "notes.txt"]);
+    git(
+        root,
+        &[
+            "-c",
+            "user.name=Orna Test",
+            "-c",
+            "user.email=orna-test@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "notes",
+        ],
+    );
+    std::fs::write(root.join("notes.txt"), "unstaged before run\n").unwrap();
+    std::fs::write(root.join("staged.txt"), "staged before run\n").unwrap();
+    git(root, &["add", "staged.txt"]);
+    let staged_before = git_output(root, &["diff", "--cached", "--binary"], None);
+    let unstaged_before = git_output(root, &["diff", "--binary"], None);
+    assert!(!staged_before.is_empty() && !unstaged_before.is_empty());
+
+    let crash = TempDir::new().unwrap();
+    let marker = crash.path().join(MARKER_FILE);
+    let child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "kill_at_the_request_row_commit_barrier_keeps_the_row_and_its_recorded_outcome",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(CRASH_AT, "row-commit")
+        .env(CRASH_DIR, crash.path())
+        .env(CHILD_REPOSITORY, root)
+        .spawn()
+        .unwrap();
+    let mut child = ChildGuard(child);
+    let deadline = Instant::now() + Duration::from_mins(1);
+    while !marker.exists() {
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!("the child exited ({status}) without parking at the row-commit barrier");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the child never reached the row-commit barrier"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(std::fs::read(&marker).unwrap(), b"row-commit");
+    child.kill().expect("kill the parked child");
+    child.wait().expect("reap the killed child");
+
+    let reopened = RuntimeState::open(&repository, identity, digest)
+        .await
+        .unwrap();
+    assert_eq!(
+        reopened
+            .committed_table_row("records", &[ROW_KEY])
+            .await
+            .unwrap(),
+        Some(vec![ROW_PAYLOAD]),
+        "the row committed before the barrier must survive the kill exactly once"
+    );
+    assert_eq!(
+        git_output(root, &["diff", "--cached", "--binary"], None),
+        staged_before,
+        "the killed activation must leave unrelated staged work untouched"
+    );
+    assert_eq!(
+        git_output(root, &["diff", "--binary"], None),
+        unstaged_before,
+        "the killed activation must leave unrelated unstaged work untouched"
+    );
+
+    // The request committed with its terminal outcome, so a retry of the same
+    // identity observes that outcome and must not be granted a new capability.
+    let (status, capability) = reopened
+        .reserve_request_with_admission(REQUEST, FINGERPRINT)
+        .await
+        .unwrap();
+    assert_eq!(
+        status.state,
+        RequestState::Completed,
+        "the committed activation completes its request"
+    );
+    assert_eq!(
+        status.terminal_outcome,
+        Some(TerminalOutcome::new(vec![OUTCOME]).unwrap()),
+        "a retry must observe the recorded terminal outcome"
+    );
+    assert!(
+        capability.is_none(),
+        "a recorded request must not issue a new admission capability"
     );
 }
