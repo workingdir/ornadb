@@ -26,15 +26,9 @@ fn runtime_rejects_legacy_ovb1_annotation_with_declared_code() {
         .expect_err("OVB-1 source must not satisfy the annotated Blob interface");
     assert_eq!(error.code(), CODE);
 
-    let declared: Value = serde_json::from_str(&system_api_json()).expect("reflection JSON");
-    let codes: Vec<&str> = declared["failure_codes"]
-        .as_array()
-        .expect("failure_codes array")
-        .iter()
-        .map(|code| code.as_str().expect("failure code string"))
-        .collect();
+    let codes = declared_failure_codes();
     assert!(
-        codes.contains(&error.code()),
+        codes.iter().any(|code| code == error.code()),
         "runtime code must be the one reflection declares"
     );
 }
@@ -55,6 +49,16 @@ fn runtime_annotation_is_identical_through_ovb2_for_same_call() {
     assert_eq!(annotated_blob.read_to_end().expect("read Blob"), bytes);
 }
 
+fn declared_failure_codes() -> Vec<String> {
+    let declared: Value = serde_json::from_str(&system_api_json()).expect("reflection JSON");
+    declared["failure_codes"]
+        .as_array()
+        .expect("failure_codes array")
+        .iter()
+        .map(|code| code.as_str().expect("failure code string").to_owned())
+        .collect()
+}
+
 /// Value-layer export refusal. This is the only OVB-1 export boundary exercised
 /// here; it returns `InvalidProfile`, whose stable code is the sys code above.
 #[test]
@@ -72,5 +76,16 @@ fn value_layer_ovb1_export_refuses_annotated_blob_with_invalid_profile() {
             .map(orna_value::ErrorCode::as_str),
         Some(CODE),
         "the export refusal must carry the declared sys code"
+    );
+    let export_code = ValueError::InvalidProfile
+        .code()
+        .map(orna_value::ErrorCode::as_str)
+        .expect("export refusal has a stable code");
+    assert_eq!(export_code, CODE);
+    assert!(
+        declared_failure_codes()
+            .iter()
+            .any(|code| code == export_code),
+        "the export refusal code must be one reflection declares"
     );
 }
