@@ -3927,7 +3927,13 @@ fn settlement_cause(failure: &repl::ReplFailure) -> String {
 fn table_activation_cause(error: &TableActivationError) -> String {
     match error {
         TableActivationError::Runtime(runtime) => runtime.to_string(),
-        TableActivationError::ValidationFailed(diagnostic) => format!("{diagnostic:?}"),
+        TableActivationError::ValidationFailed(diagnostic) => {
+            if orna_conformance::is_table_assertion_false(*diagnostic) {
+                "ORNA-A091-009".to_owned()
+            } else {
+                format!("{diagnostic:?}")
+            }
+        }
     }
 }
 
