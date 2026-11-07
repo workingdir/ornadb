@@ -3850,6 +3850,12 @@ fn source_error_location(source: &str) -> (u64, u64) {
 }
 
 impl LiveApplication for ApplicationLiveAdapter {
+    // This adapter's effect reports come from `declared_effects`, which reads the
+    // evaluator's own sys-host bindings (REQUEST-1 step 5), so they are trusted.
+    fn trusts_controlled_effect_reports(&self) -> bool {
+        true
+    }
+
     fn eval(
         &mut self,
         session: [u8; 16],
