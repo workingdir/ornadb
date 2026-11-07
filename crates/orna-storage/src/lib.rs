@@ -698,7 +698,7 @@ pub use publication_policy::{
 };
 pub use scan_planner::{CompactKeyRange, CompactScanPlan, CompactScanPlanError, plan_compact_scan};
 
-use std::{collections::BTreeMap, fmt};
+use std::{collections::BTreeMap, fmt, sync::Arc};
 
 use orna_foundation::{OvbRaw, SchemaDescriptor};
 use orna_repository::{
@@ -1109,6 +1109,27 @@ fn build_frozen_publication_store_root(
     Ok((graph, store_root, logical_rekeys))
 }
 
+/// The shared maintenance lease a prepared publication holds from preparation
+/// until its candidate is anchored (ORNA-CAP-006). An exclusive maintenance
+/// boundary (GC or repack) is refused while it is held, so the unreferenced
+/// candidate objects cannot be pruned. Cloned handles share one lease.
+#[derive(Clone)]
+struct PreparedMaintenanceLease(Arc<orna_repository::MaintenanceLease>);
+
+impl fmt::Debug for PreparedMaintenanceLease {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("PreparedMaintenanceLease")
+    }
+}
+
+impl PartialEq for PreparedMaintenanceLease {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for PreparedMaintenanceLease {}
+
 /// A prepared, runtime-bound publication. Preparation creates only private
 /// Git objects and a durable journal; `publish` and `complete` are separate so
 /// a crash can be recovered at each PUB-1 boundary.
@@ -1120,6 +1141,9 @@ pub struct RuntimePublicationCoordinator {
     // Retain protected transfer evidence across publication until both runtime
     // and journal completion have succeeded.
     protected_source_mutations: Vec<TableMutation>,
+    // Held from preparation until publication succeeds; see
+    // `PreparedMaintenanceLease`. `None` once the candidate is anchored.
+    maintenance: Option<PreparedMaintenanceLease>,
 }
 
 impl RuntimePublicationCoordinator {
@@ -1173,8 +1197,9 @@ impl RuntimePublicationCoordinator {
     ) -> Result<Option<Self>, Error> {
         // ORNA-CAP-006: candidate objects written below stay unreferenced until
         // the journal anchors them, so a maintenance boundary (GC or repack) must
-        // not run while this prepare is in flight. The shared lease is held to return.
-        let _maintenance = repository
+        // not run while this prepare is in flight. The shared lease is kept on the
+        // returned coordinator until publication anchors the candidate.
+        let maintenance = repository
             .hold_maintenance_lease()
             .map_err(|error| match error {
                 RepositoryError::RepositoryBusy => Error::RepositoryBusy,
@@ -1249,6 +1274,7 @@ impl RuntimePublicationCoordinator {
             candidate,
             journal,
             protected_source_mutations,
+            maintenance: Some(PreparedMaintenanceLease(Arc::new(maintenance))),
         }))
     }
 
@@ -1272,14 +1298,18 @@ impl RuntimePublicationCoordinator {
         repository: &Repository,
         on_stage: impl FnMut(orna_repository::PublicationJournalStage),
     ) -> Result<IndexGeneration, Error> {
-        repository
+        let generation = repository
             .publish_candidate_with_stage_hook(
                 &self.expected_index,
                 &self.candidate,
                 &mut self.journal,
                 on_stage,
             )
-            .map_err(map_publication_repository_error)
+            .map_err(map_publication_repository_error)?;
+        // The ref and journal now anchor the candidate, so the lease taken at
+        // preparation is no longer needed (ORNA-CAP-006).
+        self.maintenance = None;
+        Ok(generation)
     }
 
     /// Completes the runtime transaction first, then advances and clears the
@@ -1444,6 +1474,7 @@ fn map_publication_repository_error(error: RepositoryError) -> Error {
         RepositoryError::StaleHead => Error::RefConflict,
         RepositoryError::ManagedContentConflict => Error::ManagedWorktreeConflict,
         RepositoryError::LegacyPathChanged(path) => Error::LegacyPathChanged { path },
+        RepositoryError::PublicationObjectUnavailable => Error::PublicationObjectUnavailable,
         RepositoryError::PublicationPending => Error::PublicationPending,
         RepositoryError::RuntimeCompletionRequired => Error::InvalidTransition,
         _ => Error::RepositoryUnavailable,
@@ -1528,6 +1559,10 @@ pub enum Error {
     RepositoryUnavailable,
     /// Another owner holds the declared maintenance boundary (ORNA-CAP-006).
     RepositoryBusy,
+    /// A publish step names a candidate or base object that Git no longer
+    /// holds. The publish is refused before any ref or journal state changes
+    /// (ORNA-CAP-006, ORNA-GIT-010).
+    PublicationObjectUnavailable,
     RepositoryMalformed(orna_repository::FormatContextError),
 }
 impl fmt::Display for Error {
@@ -1559,6 +1594,9 @@ impl fmt::Display for Error {
             Self::RuntimeUnavailable => "runtime contract unavailable",
             Self::RepositoryUnavailable => "repository projection is unavailable",
             Self::RepositoryBusy => "repository maintenance boundary is held by another owner",
+            Self::PublicationObjectUnavailable => {
+                "a publication object is no longer held by the repository"
+            }
             Self::RepositoryMalformed(error) => {
                 return write!(f, "repository projection is malformed: {error}");
             }
