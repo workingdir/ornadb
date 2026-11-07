@@ -583,6 +583,129 @@ async fn stale_document_save_refreshes_the_row_instead_of_trapping_unmount() {
     assert_stored_title(&session.repository, session.relation_id, "paris", "Paris").await;
 }
 
+/// Runs one REPL update of `Music/<key>` against the repository while the mount
+/// is live: a writer outside the mount, like `orna edit` in `edit_elsewhere`.
+fn repl_update(repository: &Path, key: &str, title: &str) -> Output {
+    let expression =
+        format!("main.Music.update(\"{key}\", {{ title: \"{title}\", artist: \"Kieran\" }})");
+    orna(repository, &["repl", &expression])
+}
+
+/// ACCEPTANCE.md Gate E (concurrent REPL changes against captured file-write
+/// baselines), ORNA-TURSO-005 and ORNA-VFS-009: a REPL write issued while the
+/// mount holds its captured baseline is refused for the writer lease, so it
+/// never advances the row the mount compares against. The mount's save against
+/// that baseline is then accepted rather than stale, and the refused value never
+/// lands in the row.
+#[tokio::test]
+async fn repl_change_refused_under_mount_baseline_leaves_mount_save_accepted() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let mut session = Session::start(&[("london", "London"), ("paris", "Paris")]).await;
+    assert!(session.read("london").contains("London"));
+
+    let refused = repl_update(session.repository_directory.path(), "london", "Repl change");
+    let diagnostics = format!(
+        "stdout={}, stderr={}",
+        String::from_utf8_lossy(&refused.stdout),
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(
+        !refused.status.success(),
+        "a REPL write is refused while the mount holds the writer lease: {diagnostics}"
+    );
+    assert!(
+        diagnostics.contains("ORNA-REPL-EFFECT") && diagnostics.contains("writer lease"),
+        "the refusal names the held writer lease: {diagnostics}"
+    );
+    let mounted = session.read("london");
+    assert!(
+        mounted.contains("London") && !mounted.contains("Repl change"),
+        "the refused REPL value never lands in the mounted row: {mounted}"
+    );
+
+    write_and_sync(&session.document("london"), &music_row("Mount save"))
+        .expect("a save against the unchanged baseline is accepted, not stale");
+    await_draft_guard(
+        &session.mountpoint(),
+        b'0',
+        "the accepted save leaves no draft",
+    );
+
+    session.finish();
+    assert_stored_title(
+        &session.repository,
+        session.relation_id,
+        "london",
+        "Mount save",
+    )
+    .await;
+    assert_stored_title(&session.repository, session.relation_id, "paris", "Paris").await;
+}
+
+/// ACCEPTANCE.md Gate E (strong `orna edit` read baselines), ORNA-VFS-011: a REPL
+/// write issued from inside a live `orna edit` session on a mounted repository
+/// must not land. The writer lease refuses it, and the edit candidate is then
+/// admitted against the row the REPL write never changed.
+#[tokio::test]
+async fn repl_write_inside_orna_edit_on_live_mount_is_refused_and_edit_admits() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let mut session = Session::start(&[("london", "London")]).await;
+    let repl_output = session.scripts.path().join("repl-output");
+    let repl_status = session.scripts.path().join("repl-status");
+    let editor = session.scripts.path().join("repl-writer-editor");
+    let expression =
+        "main.Music.update(\"london\", { title: \"Repl change\", artist: \"Kieran\" })";
+    fs::write(
+        &editor,
+        format!(
+            "#!/bin/sh\n'{bin}' --db '{db}' repl '{expression}' > '{output}' 2>&1\necho $? > '{status}'\nprintf '%s\\n' '{candidate}' > \"$1\"\n",
+            bin = env!("CARGO_BIN_EXE_orna"),
+            db = session.repository_directory.path().display(),
+            output = repl_output.display(),
+            status = repl_status.display(),
+            candidate = music_row("Edit candidate").trim_end(),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&editor, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let edit = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .arg("--db")
+        .arg(session.repository_directory.path())
+        .args(["edit", "Music/london/data.orna"])
+        .env("EDITOR", &editor)
+        .output()
+        .expect("run orna edit on a live mount");
+    let repl_diagnostics = fs::read_to_string(&repl_output).unwrap_or_default();
+    let repl_exit = fs::read_to_string(&repl_status).expect("the editor ran the REPL write");
+    assert_ne!(
+        repl_exit.trim(),
+        "0",
+        "the REPL write is refused while orna edit holds the writer lease: {repl_diagnostics}"
+    );
+    assert!(
+        repl_diagnostics.contains("ORNA-REPL-EFFECT") && repl_diagnostics.contains("writer lease"),
+        "the refusal names the held writer lease: {repl_diagnostics}"
+    );
+    assert_success(
+        &edit,
+        "the edit candidate is admitted because the refused REPL change never landed",
+    );
+
+    session.finish();
+    assert_stored_title(
+        &session.repository,
+        session.relation_id,
+        "london",
+        "Edit candidate",
+    )
+    .await;
+}
+
 /// W15-03, ORNA-VFS-009/011: a temp-file rename made stale by another writer is
 /// refused, the scratch can then be removed because its candidate is retained,
 /// and the mount shows the current row.
