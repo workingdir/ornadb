@@ -1674,12 +1674,19 @@ impl MountWriter {
                 )
             })?;
         let source = substituted.as_str();
-        validate_blob_descriptors(source, &blob_fields).map_err(|error| {
-            eprintln!("mounted row document was refused: {error}");
-            orna_runtime::TableActivationError::Runtime(
-                orna_runtime::RuntimeError::InvalidTableMutation,
-            )
-        })?;
+        let absent_blob_fields =
+            validate_blob_descriptors(source, &blob_fields).map_err(|error| {
+                eprintln!("mounted row document was refused: {error}");
+                orna_runtime::TableActivationError::Runtime(
+                    orna_runtime::RuntimeError::InvalidTableMutation,
+                )
+            })?;
+        // An optional Blob written as `null` is absent: its binding is retired and
+        // `null` stays in the source, as the unlink path commits it.
+        let blob_fields: Vec<BlobField> = blob_fields
+            .into_iter()
+            .filter(|field| !absent_blob_fields.contains(&field.name))
+            .collect();
         let omitted_blob_fields = blob_fields
             .iter()
             .map(|field| field.name.clone())
@@ -9821,14 +9828,16 @@ fn key_component(key: &TypedKey) -> Result<String, String> {
 /// Checks every captured Blob field of a candidate `data.orna` before its
 /// descriptors are replaced by owner bindings (A15-04, ORNA-VFS-004,
 /// ORNA-VFS-012). `data.orna` is a complete document, so a missing Blob field
-/// fails like any missing stored field. The descriptor must stay exactly as
-/// projected: its path names the field's own sibling file and its media type
-/// describes the captured content. Content changes by renaming a file over the
-/// sibling, so any other descriptor is refused instead of acknowledged and then
-/// dropped.
-fn validate_blob_descriptors(source: &str, fields: &[BlobField]) -> Result<(), String> {
+/// fails like any missing stored field. An optional Blob written as an explicit
+/// `null` is absent instead (profiles/vfs-1.md:82,110; ORNA-VFS-013). The
+/// descriptor must stay exactly as projected: its path names the field's own
+/// sibling file and its media type describes the captured content. Content
+/// changes by renaming a file over the sibling, so any other descriptor is
+/// refused instead of acknowledged and then dropped. Returns the names of the
+/// optional Blob fields set to `null`.
+fn validate_blob_descriptors(source: &str, fields: &[BlobField]) -> Result<Vec<String>, String> {
     if fields.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let parsed = parse_row(source);
     if !parsed.diagnostics.is_empty() {
@@ -9840,6 +9849,7 @@ fn validate_blob_descriptors(source: &str, fields: &[BlobField]) -> Result<(), S
     else {
         return Err("mounted row document is not a record".into());
     };
+    let mut absent = Vec::new();
     for field in fields {
         let name = &field.name;
         let Some(entry) = entries.iter().find(|entry| &entry.name == name) else {
@@ -9847,6 +9857,18 @@ fn validate_blob_descriptors(source: &str, fields: &[BlobField]) -> Result<(), S
                 "Blob field {name} is missing; data.orna must keep its descriptor"
             ));
         };
+        if !field.required
+            && matches!(
+                entry.value,
+                Expr::Literal {
+                    kind: LiteralKind::Null,
+                    ..
+                }
+            )
+        {
+            absent.push(name.clone());
+            continue;
+        }
         let Expr::Record {
             fields: descriptor, ..
         } = &entry.value
@@ -9885,7 +9907,7 @@ fn validate_blob_descriptors(source: &str, fields: &[BlobField]) -> Result<(), S
             ));
         }
     }
-    Ok(())
+    Ok(absent)
 }
 
 /// The value of a string literal written without escapes, the only spelling a
