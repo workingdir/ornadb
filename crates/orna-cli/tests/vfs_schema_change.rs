@@ -58,6 +58,9 @@ const V2_GENRE_FIRST: &str = "pub table Music(id: Str) {\n    title: Str,\n    a
 const V3_GENRE_SECOND: &str = "pub table Music(id: Str) {\n    title: Str,\n    artist: Str,\n    genre: Str = \"second\",\n}\n";
 const V2_REQUIRED_NOTE: &str =
     "pub table Music(id: Str) {\n    title: Str,\n    artist: Str,\n    note: Str,\n}\n";
+const TITLE_ONLY: &str = "pub table Music(id: Str) {\n    title: Str,\n}\n";
+const ADMITTED_TITLE_ONLY: &str = "{\n    title: \"Original\",\n}\n";
+const ADMITTED_TITLE_REWRITTEN: &str = "{\n    title: \"Admitted\",\n}\n";
 
 fn sorted_names(directory: &Path) -> Vec<String> {
     let mut names = fs::read_dir(directory)
@@ -221,6 +224,96 @@ fn vfs_019_remount_after_schema_change_shows_new_shape() {
             NOTED
         ),
         "the admitted v2 row carries the written field"
+    );
+    run_orna_unmount(&root, &mountpoint);
+    let status = remounted
+        .wait_for_exit(Duration::from_secs(10))
+        .expect("the remounted process exits after unmount");
+    assert!(status.success(), "remounted process exited with {status}");
+}
+
+/// ORNA-EVOL-002, ORNA-EVOL-003 and ORNA-VFS-019: an owner commit that removes `artist` from Music
+/// is a schema change. The live mount keeps its pinned v1 generation: an open handle keeps its
+/// captured bytes, and the attribute size and listing match them. A remounted mount admits the v1
+/// row to the title-only generation: `title` keeps its accepted value, the removed field is absent,
+/// and a write through the admitted generation commits.
+#[test]
+fn vfs_019_field_removal_under_live_mount_pins_handles_then_remount_admits_row() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let directory = TempDir::new().expect("create the test directory");
+    let root = seed_library(&directory);
+
+    let mount_parent = TempDir::new().expect("create the mount parent");
+    let mountpoint = mount_parent.path().join("library");
+    let music = mountpoint.join("Music");
+    let london = music.join("london/data.orna");
+
+    let mut mounted = spawn_mount_process(&root, &mountpoint);
+    mounted.await_path(&london);
+    let listing_before = sorted_names(&music);
+    let baseline = fs::read_to_string(&london).expect("read the pinned row");
+    assert!(
+        same_row(&baseline, ORIGINAL),
+        "the mount shows the accepted v1 row: {baseline:?}"
+    );
+    let mut read_handle = File::open(&london).expect("open a read handle before the change");
+
+    // The owner commits the removal while the mount is live.
+    let before_change = head(&root);
+    fs::write(root.join("main.orna"), TITLE_ONLY).expect("write the title-only declaration");
+    commit_source(&root, "Remove artist from Music");
+    assert_ne!(head(&root), before_change, "the field removal is committed");
+
+    read_handle
+        .seek(SeekFrom::Start(0))
+        .expect("rewind the read handle");
+    let mut through_handle = String::new();
+    read_handle
+        .read_to_string(&mut through_handle)
+        .expect("read through the old handle");
+    assert_eq!(
+        through_handle, baseline,
+        "an open handle does not retarget to the title-only shape"
+    );
+    assert_eq!(
+        fs::metadata(&london).expect("stat the live row").len(),
+        baseline.len() as u64,
+        "the live attribute size matches the pinned generation"
+    );
+    assert_eq!(
+        sorted_names(&music),
+        listing_before,
+        "the live listing keeps its row set"
+    );
+    drop(read_handle);
+    run_orna_unmount(&root, &mountpoint);
+    let status = mounted
+        .wait_for_exit(Duration::from_secs(10))
+        .expect("the mount process exits after unmount");
+    assert!(status.success(), "mount exited with {status}");
+    drop(mounted);
+
+    // A remounted mount admits the v1 row to the title-only generation.
+    let mut remounted = wait_for_mount(start_mount_process(&root, &mountpoint));
+    remounted.await_path(&london);
+    assert!(
+        same_row(
+            &fs::read_to_string(&london).expect("read the remounted row"),
+            ADMITTED_TITLE_ONLY
+        ),
+        "the remounted row keeps title and drops the removed field; mount stderr: {}",
+        remounted.stderr_text()
+    );
+    write_and_sync(&london, ADMITTED_TITLE_REWRITTEN)
+        .expect("the remounted title-only generation admits a write");
+    assert!(
+        same_row(
+            &fs::read_to_string(&london).expect("read the admitted row"),
+            ADMITTED_TITLE_REWRITTEN
+        ),
+        "the admitted row carries the written title"
     );
     run_orna_unmount(&root, &mountpoint);
     let status = remounted
