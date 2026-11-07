@@ -499,7 +499,11 @@ async fn captured_files_keep_the_octet_stream_fallback_until_annotated() {
     let (directory, repository, relation_id) = empty_format3_repository();
     let root = directory.path();
     let payload = include_bytes!("fixtures/media/tone.wav");
-    let names = ["tone.wav", "pixel.png", "clip.mp4", "notes"];
+    // `tone.mp3` has a uniquely mapped suffix, but sys.blob.capture_file's
+    // spec fallback is application/octet-stream with no suffix (API text for
+    // sys.blob.capture_file); the suffix mapping applies only to import
+    // resolution (ORNA-MIME-006), so capture must keep the fallback.
+    let names = ["tone.wav", "tone.mp3", "pixel.png", "clip.mp4", "notes"];
     for name in names {
         std::fs::write(root.join(name), payload).unwrap();
     }
