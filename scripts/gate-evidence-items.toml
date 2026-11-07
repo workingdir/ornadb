@@ -520,7 +520,7 @@ gate = "G"
 id = "G6"
 title = "An invalid mutation stays invalid from REPL, edit and mount"
 select = [{ record = "workspace-cli", package = "orna-cli", target = "test:invalid_mutation_parity", test = "invalid_table_assertion_is_refused_identically_from_repl_edit_and_mount" }]
-limitations = ["The UI leg is not part of G6: served std.ui controls submit no mutation (no page action path; ornadb-xddv6), so the served page's table-assertion path is unproven (ornadb-5il1.384). The mount leg proves only EINVAL and unchanged row bytes, since the mount channel carries no diagnostic code. The rename-over temporary-save rejection mapping in fuse_mount.rs has no test. Only the table-assertion class is exercised."]
+limitations = ["The UI leg is not part of G6: served std.ui controls submit no mutation (no page action path; ornadb-xddv6), so the served page's table-assertion path is unproven (ornadb-5il1.384). The mount leg proves only EINVAL and unchanged row bytes, since the mount channel carries no diagnostic code. Untested mappings: the three rename-over temporary-save rejections in fuse_mount.rs, and the REPL external-binding refusal in main.rs (table_activation_cause, reached only when an external binding dispatched); no test reaches either with a false assertion. Only the table-assertion class is exercised."]
 
 [[item]]
 gate = "G"
