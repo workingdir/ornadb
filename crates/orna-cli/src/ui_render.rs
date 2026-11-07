@@ -78,7 +78,7 @@ fn render_node(raw: &OvbRaw, out: &mut String, depth: usize, media: Option<&str>
             out.push_str("<img src=\"");
             push_escaped(&href, out);
             out.push_str("\" alt=\"");
-            push_escaped(&field(properties, "alt").and_then(value_text)?, out);
+            push_value(properties, "alt", out)?;
             out.push_str("\">");
         }
         "audio" => {
