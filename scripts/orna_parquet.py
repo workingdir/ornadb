@@ -557,3 +557,15 @@ def read_parquet(data: bytes) -> ParquetTable:
         for leaf in leaves
     )
     return ParquetTable(columns=table_columns, rows=tuple(rows))
+
+
+def key_value_metadata(data: bytes) -> dict[str, str]:
+    """The footer's key-value metadata as text; a duplicate key is rejected."""
+    meta = _footer(data)
+    out: dict[str, str] = {}
+    for pair in meta.get(5, []):  # type: ignore[union-attr]
+        key = _utf8(_get(pair, 1, "metadata key"), "metadata key")  # type: ignore[arg-type]
+        if key in out:
+            raise ParquetError(f"duplicate footer metadata key {key}")
+        out[key] = _utf8(_get(pair, 2, "metadata value"), "metadata value")  # type: ignore[arg-type]
+    return out
