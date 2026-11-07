@@ -999,27 +999,7 @@ fn graph_context_error(error: crate::native_graph::GraphError) -> FormatContextE
         | GraphError::PromisedObjectNotMaterialized { .. } => {
             FormatContextError::GraphContextUnavailable
         }
-        GraphError::MalformedOid
-        | GraphError::UnknownNodeKind(_)
-        | GraphError::NonCanonicalData
-        | GraphError::NodeDataTooLarge(_)
-        | GraphError::FanoutExceeded(_)
-        | GraphError::HeightExceeded(_)
-        | GraphError::InvalidLength(_)
-        | GraphError::InvalidCount(_)
-        | GraphError::InvalidDomain
-        | GraphError::OverlappingChildRange
-        | GraphError::UncollapsedRoot
-        | GraphError::InvalidDigestLength
-        | GraphError::InvalidEmptyBlob
-        | GraphError::DuplicateRowKey
-        | GraphError::WrongNodeKind { .. }
-        | GraphError::InvalidTreeEnvelope
-        | GraphError::MissingNodeData
-        | GraphError::GitObjectMalformed
-        | GraphError::GitObjectHashMismatch
-        | GraphError::ContentIdentityMismatch
-        | GraphError::ChunkDigestMismatch => FormatContextError::GraphMalformed(error),
+        _ if error.is_malformed() => FormatContextError::GraphMalformed(error),
         _ => FormatContextError::GraphContextInvalid,
     }
 }
@@ -6269,6 +6249,28 @@ mod graph_bridge_tests {
             assert!(
                 !matches!(mapped, FormatContextError::GraphMalformed(_)),
                 "operational graph error must not be GraphMalformed: {error:?} -> {mapped:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn graph_shape_faults_are_classified_as_malformed() {
+        use crate::native_graph::GraphError;
+        for error in [
+            GraphError::OverlappingChildRange,
+            GraphError::UncollapsedRoot,
+            GraphError::DuplicateRowKey,
+            GraphError::InvalidCount(8),
+            GraphError::ContentIdentityMismatch,
+        ] {
+            assert!(
+                error.is_malformed(),
+                "shape fault must report malformed: {error:?}"
+            );
+            let mapped = super::graph_context_error(error.clone());
+            assert!(
+                matches!(mapped, FormatContextError::GraphMalformed(_)),
+                "shape fault must be GraphMalformed: {error:?} -> {mapped:?}"
             );
         }
     }
