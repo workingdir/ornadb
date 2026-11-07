@@ -54114,6 +54114,136 @@ mod tests {
         );
     }
 
+    /// Yields only the delivery that follows the snapshot's committed position. Any
+    /// other committed position is exhausted, so a second poll must find nothing.
+    struct SnapshotTailSource {
+        key: CheckpointKey,
+        polls: usize,
+    }
+
+    impl StreamSource for SnapshotTailSource {
+        type NextFuture<'a>
+            = Ready<Result<StreamSourcePoll, SafeDiagnostic>>
+        where
+            Self: 'a;
+        type WaitFuture<'a>
+            = Ready<Result<(), SafeDiagnostic>>
+        where
+            Self: 'a;
+
+        fn descriptor(&self) -> StreamSourceDescriptor {
+            StreamSourceDescriptor {
+                kind: StreamSourceKind::Finite,
+                replayable: true,
+            }
+        }
+
+        fn checkpoint_key(&self) -> CheckpointKey {
+            self.key.clone()
+        }
+
+        fn next<'a>(&'a mut self, checkpoint: &'a StreamCheckpoint) -> Self::NextFuture<'a> {
+            self.polls += 1;
+            let resumes_after_snapshot = checkpoint
+                .committed
+                .as_ref()
+                .is_some_and(|position| position.token.as_str() == "offset:0001/β");
+            let poll = if resumes_after_snapshot {
+                StreamSourcePoll::Item(Box::new(StreamItem {
+                    delivery: DeliveryIdentity {
+                        consumer: self.key.consumer.clone(),
+                        source_format: self.key.source_format.clone(),
+                        source: self.key.source.clone(),
+                        partition_format: self.key.partition_format.clone(),
+                        partition: self.key.partition.clone(),
+                        position_format: self.key.position_format.clone(),
+                        position: Position {
+                            token: Component::new("offset:0001/β").unwrap(),
+                        },
+                        successor: Position {
+                            token: Component::new("offset:0002/β").unwrap(),
+                        },
+                    },
+                    payload: b"after-snapshot".to_vec(),
+                }))
+            } else {
+                StreamSourcePoll::Exhausted
+            };
+            ready(Ok(poll))
+        }
+
+        fn failure_payload(&self, item: &StreamItem) -> StreamFailurePayload {
+            StreamFailurePayload::Plaintext(item.payload.clone())
+        }
+
+        fn wait<'a>(&'a mut self, _: &'a dyn StreamRunControl) -> Self::WaitFuture<'a> {
+            ready(Ok(()))
+        }
+    }
+
+    /// A bootstrapped snapshot consumer resumes delivery after the selected position:
+    /// the first delivery commits to version 43 and the next poll finds nothing left.
+    #[tokio::test]
+    async fn stream_bootstrap_delivery_resumes_after_selected_snapshot_position() {
+        let (_temp, repo) = repository();
+        let fixture = include_str!("../tests/fixtures/checkpoint_snapshot_v1.orna");
+        write_checkpoint_snapshot_file(&repo, "selected.orna", fixture.as_bytes());
+        let selected_commit = commit_checkpoint_snapshot(&repo, "selected checkpoint snapshot");
+        let state = open_state(&repo).await;
+        let key = checkpoint_snapshot_key(Some("tenant:west/17"));
+        let writer = state.acquire_lease(id(224)).await.unwrap();
+
+        let seeded = state
+            .bootstrap_stream_from_selected_snapshot(writer, &repo, &selected_commit, &key)
+            .await
+            .unwrap();
+        assert_eq!(seeded.version, 42);
+
+        let mut source = SnapshotTailSource {
+            key: key.clone(),
+            polls: 0,
+        };
+        let current_digest = state.capture().await.unwrap().generation_digest();
+        let mut handler = TestHandler {
+            result: Some(StreamHandlerResult::Commit(StreamMutationBatch {
+                mutations: Vec::new(),
+                next_digest: current_digest,
+            })),
+            calls: 0,
+        };
+        let step = state
+            .run_stream_once(writer, &key, &mut source, &mut handler)
+            .await
+            .unwrap();
+        assert!(matches!(step, StreamStep::Committed { .. }));
+        assert_eq!(handler.calls, 1);
+        assert_eq!(source.polls, 1);
+
+        let resumed = state.stream_checkpoint(&key).await.unwrap();
+        assert_eq!(resumed.version, 43);
+        assert_eq!(
+            resumed
+                .committed
+                .as_ref()
+                .map(|position| position.token.as_str()),
+            Some("offset:0002/β")
+        );
+
+        let mut handler = TestHandler {
+            result: None,
+            calls: 0,
+        };
+        assert_eq!(
+            state
+                .run_stream_once(writer, &key, &mut source, &mut handler)
+                .await
+                .unwrap(),
+            StreamStep::Exhausted
+        );
+        assert_eq!(handler.calls, 0);
+        assert_eq!(source.polls, 2);
+    }
+
     #[tokio::test]
     async fn staged_table_activation_keeps_one_context_and_source_work_unit() {
         let (_temp, repository) = repository();
