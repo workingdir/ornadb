@@ -5357,9 +5357,18 @@ impl Repository {
         for entry in journal.entries() {
             let target = self.managed_target(&entry.path)?;
             let current = self.read_managed_file(&target)?;
-            if current.as_deref() != entry.expected() && current.as_deref() != entry.next() {
-                return Err(RepositoryError::ManagedContentConflict);
+            if current.as_deref() == entry.expected() || current.as_deref() == entry.next() {
+                continue;
             }
+            // A retired legacy file the migration deletes must still hold the
+            // committed bytes it was read from. A local edit to it is not an
+            // unrelated change the migration may replace, so it is named.
+            if permit_legacy_migration && entry.next().is_none() {
+                return Err(RepositoryError::LegacyPathChanged(
+                    entry.path().as_path().display().to_string(),
+                ));
+            }
+            return Err(RepositoryError::ManagedContentConflict);
         }
         self.reconcile_store_worktree_transition(expected_index, candidate, false)?;
         self.write_publication_journal_locked(journal)?;
@@ -5770,6 +5779,57 @@ impl Repository {
         journal: &mut PublicationJournal,
         index: usize,
     ) -> Result<(), RepositoryError> {
+        let (path, removes_file) = {
+            let entry = journal
+                .entries()
+                .get(index)
+                .ok_or(RepositoryError::InvalidPublicationJournal)?;
+            (entry.path().clone(), entry.next().is_none())
+        };
+        self.materialize_publication_entry_phases_locked(journal, index)?;
+        if removes_file {
+            self.prune_empty_parents(&self.managed_target(&path)?);
+        }
+        Ok(())
+    }
+
+    /// Removes the directories a deleted managed file left empty, from its
+    /// parent up to, never including, the worktree root. `remove_dir` only
+    /// removes an empty directory, so a directory another file still uses ends
+    /// the walk, and a symlink is never followed.
+    fn prune_empty_parents(&self, target: &Path) {
+        let mut directory = target.parent();
+        while let Some(current) = directory {
+            if current == self.worktree.as_path()
+                || !current.starts_with(&self.worktree)
+                || fs::remove_dir(current).is_err()
+            {
+                break;
+            }
+            directory = current.parent();
+        }
+    }
+
+    /// The error for a managed file whose bytes changed under the publication.
+    /// A migration-retired legacy file the migration deletes is named as
+    /// `LegacyPathChanged`; any other managed file stays a managed-content
+    /// conflict.
+    fn managed_content_conflict(
+        journal: &PublicationJournal,
+        entry: &PublicationJournalEntry,
+    ) -> RepositoryError {
+        if entry.next().is_none() && journal.migration_continuity().is_some() {
+            RepositoryError::LegacyPathChanged(entry.path().as_path().display().to_string())
+        } else {
+            RepositoryError::ManagedContentConflict
+        }
+    }
+
+    fn materialize_publication_entry_phases_locked(
+        &self,
+        journal: &mut PublicationJournal,
+        index: usize,
+    ) -> Result<(), RepositoryError> {
         let entry = journal
             .entries()
             .get(index)
@@ -5795,7 +5855,7 @@ impl Repository {
                 return Ok(());
             }
             if current.as_deref() != entry.expected() {
-                return Err(RepositoryError::ManagedContentConflict);
+                return Err(Self::managed_content_conflict(journal, &entry));
             }
             journal.set_materialization(
                 index,
@@ -5820,13 +5880,13 @@ impl Repository {
                 return Ok(());
             }
             if current.is_some() {
-                return Err(RepositoryError::ManagedContentConflict);
+                return Err(Self::managed_content_conflict(journal, &entry));
             }
             if entry.next().is_none() {
                 if self.read_managed_file(&target)?.is_some()
                     || self.read_managed_file(&quarantine)?.as_deref() != entry.expected()
                 {
-                    return Err(RepositoryError::ManagedContentConflict);
+                    return Err(Self::managed_content_conflict(journal, &entry));
                 }
                 journal.set_materialization(
                     index,
@@ -5846,7 +5906,7 @@ impl Repository {
                 if self.read_managed_file(&target)?.as_deref() != entry.next()
                     || self.read_managed_file(&quarantine)?.as_deref() != entry.expected()
                 {
-                    return Err(RepositoryError::ManagedContentConflict);
+                    return Err(Self::managed_content_conflict(journal, &entry));
                 }
                 journal.set_materialization(
                     index,
@@ -5872,7 +5932,7 @@ impl Repository {
         } else if phase != PublicationMaterializationPhase::QuarantinePrepared
             || current.as_deref() != entry.expected()
         {
-            return Err(RepositoryError::ManagedContentConflict);
+            return Err(Self::managed_content_conflict(journal, &entry));
         }
 
         let mut after_boundary = |phase| {
@@ -11024,6 +11084,9 @@ pub enum RepositoryError {
     /// (`sys.admin.assertion_failed`).
     InvalidCommitCandidate,
     ManagedContentConflict,
+    /// A legacy file the migration retires changed after capture. The file
+    /// holds local edits that the migration would otherwise delete.
+    LegacyPathChanged(String),
     /// Recovery found a pathname or private quarantine state that changed
     /// while it was being reconciled. The unexpected bytes remain on disk.
     PublicationRecoveryConflict,
@@ -11115,6 +11178,9 @@ impl fmt::Display for RepositoryError {
             }
             Self::ManagedContentConflict => {
                 f.write_str("managed worktree content changed since capture")
+            }
+            Self::LegacyPathChanged(path) => {
+                write!(f, "legacy file {path} changed since capture; it is not retired")
             }
             Self::PublicationRecoveryConflict => {
                 f.write_str("publication recovery found unexpected local state")
