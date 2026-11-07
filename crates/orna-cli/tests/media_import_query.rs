@@ -2578,12 +2578,17 @@ const GATE_B_LARGE_PAYLOAD_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 struct CountingReader<R> {
     reader: R,
     bytes_read: u64,
+    /// Reads that returned data: each is one fetch from the network source.
+    fetches: u64,
 }
 
 #[cfg(target_os = "linux")]
 impl<R: std::io::Read> std::io::Read for CountingReader<R> {
     fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
         let count = self.reader.read(output)?;
+        if count > 0 {
+            self.fetches = self.fetches.checked_add(1).expect("fetch counter fits u64");
+        }
         self.bytes_read = self
             .bytes_read
             .checked_add(u64::try_from(count).expect("read count fits u64"))
@@ -2803,6 +2808,7 @@ async fn run_gate_b_import_and_metadata_update(payload_bytes: u64) {
     let mut network_source = CountingReader {
         reader: socket,
         bytes_read: 0,
+        fetches: 0,
     };
     let started = Instant::now();
     // Capture completes before an activation request is opened: the long read
@@ -2811,6 +2817,7 @@ async fn run_gate_b_import_and_metadata_update(payload_bytes: u64) {
         .capture_blob_candidate(&mut network_source, payload_bytes)
         .expect("stream the network payload into the owned OGB-2 writer");
     let network_bytes_read = network_source.bytes_read;
+    let network_fetches = network_source.fetches;
     let graph_payload_bytes_read = capability.payload_bytes_read();
     let graph_payload_bytes_written = capability.payload_bytes_written();
     let graph_objects_read = capability.objects_read();
@@ -2885,6 +2892,8 @@ async fn run_gate_b_import_and_metadata_update(payload_bytes: u64) {
     .await;
     assert_eq!(scope.payload_bytes_read(), 0);
     assert_eq!(scope.payload_bytes_written(), 0);
+    let update_payload_read = scope.payload_bytes_read();
+    let update_payload_written = scope.payload_bytes_written();
     let update_metadata_bytes = scope.structured_metadata_bytes_read();
     let update_objects = scope.objects_read();
     // Control: this scope charges a real payload read, so the zero above is a
@@ -2896,7 +2905,7 @@ async fn run_gate_b_import_and_metadata_update(payload_bytes: u64) {
         "the control range read must charge payload bytes to this scope"
     );
     eprintln!(
-        "Gate B: metadata-only update payload bytes read=0, written=0; structured metadata bytes read={update_metadata_bytes}; native objects read={update_objects}; control payload bytes read={}",
+        "Gate B: metadata-only update payload bytes read={update_payload_read}; written={update_payload_written}; structured metadata bytes read={update_metadata_bytes}; native objects read={update_objects}; control payload bytes read={}",
         scope.payload_bytes_read()
     );
 
@@ -2938,7 +2947,7 @@ async fn run_gate_b_import_and_metadata_update(payload_bytes: u64) {
         "scratch storage exceeded source + owned content + bounded metadata: {scratch_bytes}"
     );
     eprintln!(
-        "Gate B: small fixture rows=2; large network bytes={network_bytes_read}; graph payload bytes read={graph_payload_bytes_read}, written={graph_payload_bytes_written}; native objects read={graph_objects_read}; remote Git objects=0; new Git objects={}; elapsed_ms={}; peak_rss_bytes={peak_rss}; scratch_storage_bytes={scratch_bytes}",
+        "Gate B: small fixture rows=2; large network bytes={network_bytes_read}; remote fetches={network_fetches}; graph payload bytes read={graph_payload_bytes_read}; graph payload bytes written={graph_payload_bytes_written}; native objects read={graph_objects_read}; new Git objects={}; elapsed_ms={}; peak_rss_bytes={peak_rss}; scratch_storage_bytes={scratch_bytes}",
         object_count_after.saturating_sub(object_count_before),
         import_elapsed.as_millis(),
     );
