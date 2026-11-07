@@ -3672,6 +3672,26 @@ fn noncandidate_ack(
     Ok(())
 }
 
+/// Whether a refused candidate is kept in recovery storage (`draft` is set) while its document can
+/// no longer be opened: the committed table schema is unavailable, the same condition on which a
+/// document open returns EIO (profiles/vfs-1.md:134). Such a draft cannot be resolved through the
+/// mount, and its retained copy is the explicit retention profiles/vfs-1.md:144 asks unmount to
+/// accept.
+fn refusal_is_unservable_retained(state: &FsBuilder, inode: u64, refusal: &DraftRefusal) -> bool {
+    if refusal.draft.is_none() {
+        return false;
+    }
+    let Some(NodeKind::Document { save, .. }) = state.nodes.get(&inode).map(|node| &node.kind)
+    else {
+        return false;
+    };
+    crate::table_schema::committed_table_schema_identity(
+        &save.writer.repository,
+        save.table.object_id(),
+    )
+    .is_err()
+}
+
 struct WorkspaceFilesystem {
     state: Mutex<FsBuilder>,
     open_files: Mutex<HashMap<u64, OpenFile>>,
@@ -4774,7 +4794,11 @@ impl WorkspaceFilesystem {
     /// The unresolved drafts of this mount, one per path. Both draft-list xattrs
     /// render these, so the unmount refusal and `mount status` name the same drafts.
     #[allow(clippy::too_many_lines)]
-    fn unresolved_drafts_of(draft_state: &DraftState, state: &FsBuilder) -> Vec<UnresolvedDraft> {
+    fn unresolved_drafts_of(
+        draft_state: &DraftState,
+        state: &FsBuilder,
+        for_unmount: bool,
+    ) -> Vec<UnresolvedDraft> {
         // The `sys.vfs.*` code of an internal cause, when the cause has one.
         fn spec_code(cause: &'static str) -> Option<&'static str> {
             cause.starts_with("sys.").then_some(cause)
@@ -4786,6 +4810,12 @@ impl WorkspaceFilesystem {
         // The path each refusal captured when recorded; the refused node may leave the tree first.
         let mut captured: HashMap<u64, String> = HashMap::new();
         for (inode, refusal) in &draft_state.rejected_documents {
+            // Unmount refuses only drafts the mount can still resolve (profiles/vfs-1.md:144). A
+            // candidate recovery storage kept whose document can no longer be opened is already
+            // explicitly retained there, and the mount cannot serve its row to resolve it.
+            if for_unmount && refusal_is_unservable_retained(state, *inode, refusal) {
+                continue;
+            }
             let code = spec_code(refusal.cause)
                 .or_else(|| refusal.draft.as_ref().map(|_| DRAFT_RETAINED))
                 .unwrap_or("");
@@ -4905,7 +4935,7 @@ impl WorkspaceFilesystem {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Self::unresolved_drafts_of(&draft_state, &state)
+        Self::unresolved_drafts_of(&draft_state, &state, false)
     }
 
     /// One `path<TAB>detail` line per unresolved draft, for an unmount refusal.
@@ -5369,7 +5399,7 @@ impl Filesystem for WorkspaceFilesystem {
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if !Self::unresolved_drafts_of(&draft_state, &state).is_empty() {
+            if !Self::unresolved_drafts_of(&draft_state, &state, true).is_empty() {
                 reply.error(Errno::EBUSY);
                 return;
             }

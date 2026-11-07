@@ -5850,3 +5850,96 @@ async fn cwd_mount_optional_text_unlink_commits_null() {
     );
     row.unmount();
 }
+
+/// Retyped declaration committed at HEAD while the mount is live: `title` becomes optional and
+/// `note` is added as an optional field.
+const RETYPED_AND_ADDED_SOURCE: &str = "pub table Music(id: Str) { title: Str?, note: Str?, }\n";
+
+/// ORNA-VFS-019 field add and retype: after an owner-committed HEAD change retypes `title` and adds
+/// `note`, an open read handle keeps its captured bytes and a fresh open is refused with EIO
+/// (profiles/vfs-1.md:134), as in `cwd_mount_edit_row_refused_after_head_changes_music_schema`. A
+/// write whose open captured the old generation is refused with EAGAIN (profiles/vfs-1.md:138) and
+/// leaves the pinned handle unchanged. The refused candidate is retained in recovery storage, and
+/// unmount accepts it because the mount can no longer open the row to resolve it
+/// (profiles/vfs-1.md:144).
+#[tokio::test]
+async fn field_add_and_retype_at_head_keep_pinned_handles_and_reject_stale_saves() {
+    let Some(mut row) = mount_music_row("{ title: \"before\", }\n").await else {
+        return;
+    };
+    let document = row.row_path.join("data.orna");
+    let baseline = std::fs::read(&document).expect("read the pinned row before the change");
+    let mut read_handle = File::open(&document).expect("open a read handle before the change");
+    let mut write_handle = OpenOptions::new()
+        .write(true)
+        .open(&document)
+        .expect("a write-intent open captures the v1 generation");
+
+    let repository = row.repository_directory.path().to_path_buf();
+    std::fs::write(repository.join("main.orna"), RETYPED_AND_ADDED_SOURCE)
+        .expect("write the retyped declaration");
+    format3::git(&repository, &["add", "main.orna"]);
+    format3::git(
+        &repository,
+        &[
+            "commit",
+            "--quiet",
+            "-m",
+            "retype title and add note at HEAD",
+        ],
+    );
+
+    read_handle
+        .seek(SeekFrom::Start(0))
+        .expect("rewind the read handle");
+    let mut through_handle = Vec::new();
+    read_handle
+        .read_to_end(&mut through_handle)
+        .expect("read through the pre-change handle");
+    assert_eq!(
+        through_handle, baseline,
+        "an open handle keeps its captured bytes after the retype and field add"
+    );
+    // A fresh open after the committed schema change is refused with EIO, as in
+    // cwd_mount_edit_row_refused_after_head_changes_music_schema: the row's committed schema
+    // identity is unavailable, which profiles/vfs-1.md:134 defines as EIO.
+    let fresh =
+        std::fs::read(&document).expect_err("a fresh open after the schema change is refused");
+    assert_eq!(
+        fresh.raw_os_error(),
+        Some(5),
+        "a fresh open on a row whose committed schema changed is EIO: {fresh}",
+    );
+
+    write_handle
+        .set_len(0)
+        .expect("truncate the private candidate");
+    write_handle
+        .write_all(b"{ title: \"stale\", }\n")
+        .expect("the bytes are accepted into the handle");
+    let refused = write_handle
+        .sync_all()
+        .expect_err("a write captured before the retype is stale");
+    assert_eq!(
+        refused.raw_os_error(),
+        Some(11),
+        "a stale-generation save after the retype is EAGAIN: {refused}",
+    );
+    drop(write_handle);
+    read_handle
+        .seek(SeekFrom::Start(0))
+        .expect("rewind the pinned handle after the refusal");
+    let mut after_refusal = Vec::new();
+    read_handle
+        .read_to_end(&mut after_refusal)
+        .expect("the pinned handle still reads after the refused save");
+    assert_eq!(
+        after_refusal, baseline,
+        "a stale-generation save leaves the pinned handle's captured bytes unchanged"
+    );
+    drop(read_handle);
+
+    // The refused candidate is retained in recovery storage and names its draft. Its row can no
+    // longer be opened, so the remedy cannot resolve it from the mount; unmount must accept it.
+    row.unmount();
+}
