@@ -12,17 +12,19 @@
 //! import verifies that before the destination runtime is opened or any row is
 //! written.
 //!
-//! Live or per-attempt stream state (leases, claims, failures, receipts,
-//! bootstrap pins, pending pause requests) is not carried. A source holding such
-//! rows is refused rather than reset silently. Stream control (running or
-//! paused), the pause reason and the checkpoint reset audit are carried
-//! verbatim. The reset audit is durable history: each row keeps its sequence,
-//! old and new typed positions and reason, so historical reads stay exact.
-//! Run and stream observations (`sys_run_observation`, `sys_stream_observation`)
-//! are carried verbatim, runs before streams, because a stream references its
-//! run. A source holding a live run (Starting or Running) is refused: its
-//! terminal state is not yet known. `live` is never stored; it is derived at
-//! read time.
+//! Live or per-attempt stream state (leases, claims, pending pause requests, and
+//! in-flight failures and receipts) is not carried. A source holding such rows
+//! is refused rather than reset silently. Failure records that are not in flight
+//! are carried verbatim with their payload, assertion-detail, legacy and provider
+//! companion rows. Settled provider effect receipts (statuses 2, 3 and 4) are
+//! carried verbatim. Stream control (running or paused), the pause reason, the
+//! checkpoint bootstrap pin and the checkpoint reset audit are carried verbatim.
+//! The reset audit is durable history: each row keeps its sequence, old and new
+//! typed positions and reason, so historical reads stay exact. Run and stream
+//! observations (`sys_run_observation`, `sys_stream_observation`) are carried
+//! verbatim, runs before streams, because a stream references its run. A source
+//! holding a live run (Starting or Running) is refused: its terminal state is not
+//! yet known. `live` is never stored; it is derived at read time.
 
 use std::collections::{BTreeSet, HashSet};
 use std::fs;
@@ -38,15 +40,8 @@ use crate::{RuntimeError, RuntimeState, migration_copy_runtime_identity};
 
 /// Stream tables whose rows a migration does not carry.
 const NON_CARRIABLE_TABLES: &[&str] = &[
-    "stream_checkpoint_bootstrap",
-    "stream_failure",
-    "stream_failure_assertion_detail",
-    "stream_failure_payload",
-    "stream_failure_payload_legacy",
     "stream_lease",
     "stream_pause_pending",
-    "stream_provider_effect_receipt",
-    "stream_provider_failure",
     "stream_replay_claim",
     "stream_retry_claim",
 ];
@@ -57,12 +52,22 @@ const INSERT_ARCHIVE: &str = "INSERT INTO stream_checkpoint_migration_archive (k
 const INSERT_CONTROL: &str = "INSERT INTO stream_control (key_id, status) VALUES (?1, ?2)";
 const INSERT_PAUSE_REASON: &str =
     "INSERT INTO stream_pause_reason (key_id, reason) VALUES (?1, ?2)";
+const INSERT_BOOTSTRAP: &str =
+    "INSERT INTO stream_checkpoint_bootstrap (key_id, selected_commit) VALUES (?1, ?2)";
 const INSERT_RESET_AUDIT: &str = "INSERT INTO stream_checkpoint_reset_audit (sequence, key_id, observed_generation, old_version, old_position, new_version, new_position, reason, redacted) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)";
 /// `sys_run_observation` status codes for a run that has not reached a terminal state.
 const RUN_STATUS_STARTING: i64 = 1;
 const RUN_STATUS_RUNNING: i64 = 2;
 const INSERT_RUN: &str = "INSERT INTO sys_run_observation (run_id, session_id, request_id, consumer_identity, function_name, source_identity, invocation_id, snapshot, generation_digest, runtime_id, runtime_generation, started_ms, ended_ms, observed_ms, status, checkpoint_count, diagnostic_code, diagnostic_class) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)";
 const INSERT_STREAM: &str = "INSERT INTO sys_stream_observation (stream_id, run_id, checkpoint_key_id, producer, consumer_name, consumer_identity, source_identity, partition, status, items_seen, items_committed, items_failed, checkpoint_version, last_failure_identity, last_item_ms, diagnostic_code, diagnostic_class, observed_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)";
+
+const INSERT_FAILURE: &str = "INSERT INTO stream_failure (identity_id, key_id, consumer_principal, consumer_root, consumer_function, consumer_binding, source_format, source, partition_format, partition, position_format, delivery_position, successor_position, version, attempts, status, diagnostic_code, diagnostic_class) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)";
+const INSERT_FAILURE_PAYLOAD: &str = "INSERT INTO stream_failure_payload (identity_id, payload, payload_reference, payload_digest, retention) VALUES (?1, ?2, ?3, ?4, ?5)";
+const INSERT_FAILURE_LEGACY: &str =
+    "INSERT INTO stream_failure_payload_legacy (identity_id) VALUES (?1)";
+const INSERT_ASSERTION_DETAIL: &str = "INSERT INTO stream_failure_assertion_detail (identity_id, code, assertion_ref, owner_ref, owner_kind, predicate_ref, source_file_ref, start_byte, end_byte, start_line, start_column, end_line, end_column, safe_witness) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)";
+const INSERT_PROVIDER_FAILURE: &str = "INSERT INTO stream_provider_failure (key_id, checkpoint_version, committed_position, attempts, diagnostic_code, diagnostic_class) VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
+const INSERT_RECEIPT: &str = "INSERT INTO stream_provider_effect_receipt (effect_identity, request_digest, idempotency_key, lease_fence, attempts_in_fence, total_attempts, status, receipt) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CheckpointRow {
@@ -110,6 +115,12 @@ struct ControlRow {
 struct PauseReasonRow {
     key_id: String,
     reason: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BootstrapRow {
+    key_id: String,
+    selected_commit: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -169,6 +180,92 @@ struct StreamRow {
     observed_ms: i64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ReceiptRow {
+    effect_identity: Vec<u8>,
+    request_digest: Vec<u8>,
+    idempotency_key: Vec<u8>,
+    lease_fence: i64,
+    attempts_in_fence: i64,
+    total_attempts: i64,
+    status: i64,
+    receipt: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FailureRow {
+    identity_id: String,
+    key_id: String,
+    consumer_principal: String,
+    consumer_root: String,
+    consumer_function: String,
+    consumer_binding: String,
+    source_format: String,
+    source: String,
+    partition_format: String,
+    partition: Option<String>,
+    position_format: String,
+    delivery_position: String,
+    successor_position: String,
+    version: i64,
+    attempts: i64,
+    status: i64,
+    diagnostic_code: i64,
+    diagnostic_class: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FailurePayloadRow {
+    identity_id: String,
+    payload: Option<Vec<u8>>,
+    payload_reference: Option<String>,
+    payload_digest: Option<Vec<u8>>,
+    retention: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FailureLegacyRow {
+    identity_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AssertionDetailRow {
+    identity_id: String,
+    code: String,
+    assertion_ref: Vec<u8>,
+    owner_ref: Vec<u8>,
+    owner_kind: i64,
+    predicate_ref: Vec<u8>,
+    source_file_ref: Vec<u8>,
+    start_byte: Vec<u8>,
+    end_byte: Vec<u8>,
+    start_line: Vec<u8>,
+    start_column: Vec<u8>,
+    end_line: Vec<u8>,
+    end_column: Vec<u8>,
+    safe_witness: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ProviderFailureRow {
+    key_id: String,
+    checkpoint_version: i64,
+    committed_position: Option<String>,
+    attempts: i64,
+    diagnostic_code: i64,
+    diagnostic_class: i64,
+}
+
+/// Failure records and their companion rows, carried verbatim.
+#[derive(Clone, Debug, Eq, PartialEq, Default)]
+struct FailureCarry {
+    failures: Vec<FailureRow>,
+    payloads: Vec<FailurePayloadRow>,
+    legacy: Vec<FailureLegacyRow>,
+    assertion_details: Vec<AssertionDetailRow>,
+    provider_failures: Vec<ProviderFailureRow>,
+}
+
 /// Exact stream checkpoint state read from a source repository for carry.
 #[derive(Clone, Debug, Eq, PartialEq, Default)]
 pub struct StreamCarry {
@@ -177,9 +274,12 @@ pub struct StreamCarry {
     history: Vec<HistoryRow>,
     controls: Vec<ControlRow>,
     pause_reasons: Vec<PauseReasonRow>,
+    bootstraps: Vec<BootstrapRow>,
     reset_audits: Vec<ResetAuditRow>,
     runs: Vec<RunRow>,
     streams: Vec<StreamRow>,
+    failures: FailureCarry,
+    receipts: Vec<ReceiptRow>,
 }
 
 /// Why a source's stream state could not be carried.
@@ -295,6 +395,22 @@ pub async fn read_stream_carry(source: &Repository) -> Result<StreamCarry, Strea
             refused.push(*table);
         }
     }
+    if tables.contains("stream_failure")
+        && in_flight_failure_count(&connection)
+            .await
+            .map_err(StreamCarryError::Runtime)?
+            > 0
+    {
+        refused.push("stream_failure");
+    }
+    if tables.contains("stream_provider_effect_receipt")
+        && in_flight_receipt_count(&connection)
+            .await
+            .map_err(StreamCarryError::Runtime)?
+            > 0
+    {
+        refused.push("stream_provider_effect_receipt");
+    }
     if !refused.is_empty() {
         return Err(StreamCarryError::NotCarriable(refused));
     }
@@ -344,6 +460,13 @@ pub async fn read_stream_carry(source: &Repository) -> Result<StreamCarry, Strea
     } else {
         Vec::new()
     };
+    let bootstraps = if tables.contains("stream_checkpoint_bootstrap") {
+        read_bootstraps(&connection)
+            .await
+            .map_err(StreamCarryError::Runtime)?
+    } else {
+        Vec::new()
+    };
     let reset_audits = if tables.contains("stream_checkpoint_reset_audit") {
         read_reset_audits(&connection)
             .await
@@ -377,9 +500,16 @@ pub async fn read_stream_carry(source: &Repository) -> Result<StreamCarry, Strea
         history,
         controls,
         pause_reasons,
+        bootstraps,
         reset_audits,
         runs,
         streams,
+        failures: read_failure_carry(&connection)
+            .await
+            .map_err(StreamCarryError::Runtime)?,
+        receipts: read_receipt_carry(&connection)
+            .await
+            .map_err(StreamCarryError::Runtime)?,
     })
 }
 
@@ -475,6 +605,17 @@ pub async fn import_stream_carry(
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
     }
+    for row in &carry.bootstraps {
+        transaction
+            .execute(
+                INSERT_BOOTSTRAP,
+                params![row.key_id.as_str(), row.selected_commit.as_str()],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+    }
+    insert_failure_carry(&transaction, &carry.failures).await?;
+    insert_receipt_carry(&transaction, &carry.receipts).await?;
     for row in &carry.history {
         transaction
             .execute(
@@ -695,9 +836,12 @@ async fn read_carry_target(connection: &Connection) -> Result<StreamCarry, Runti
         history: read_history(connection, "stream_checkpoint_migration_archive").await?,
         controls: read_controls(connection).await?,
         pause_reasons: read_pause_reasons(connection).await?,
+        bootstraps: read_bootstraps(connection).await?,
         reset_audits: read_reset_audits(connection).await?,
         runs: read_run_rows(connection).await?,
         streams: read_stream_rows(connection).await?,
+        failures: read_failure_carry(connection).await?,
+        receipts: read_receipt_carry(connection).await?,
     })
 }
 
@@ -768,6 +912,410 @@ async fn read_pause_reasons(connection: &Connection) -> Result<Vec<PauseReasonRo
         });
     }
     Ok(reasons)
+}
+
+async fn read_bootstraps(connection: &Connection) -> Result<Vec<BootstrapRow>, RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT key_id, selected_commit FROM stream_checkpoint_bootstrap ORDER BY key_id",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let mut bootstraps = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    {
+        bootstraps.push(BootstrapRow {
+            key_id: row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            selected_commit: row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        });
+    }
+    Ok(bootstraps)
+}
+
+/// Reads the provider effect receipts that a carry copies verbatim. A source
+/// without the table carries none. Receipts in flight (status 1) are refused
+/// before this read runs.
+async fn read_receipt_carry(connection: &Connection) -> Result<Vec<ReceiptRow>, RuntimeError> {
+    if !table_names(connection)
+        .await?
+        .contains("stream_provider_effect_receipt")
+    {
+        return Ok(Vec::new());
+    }
+    let mut rows = connection
+        .query(
+            "SELECT effect_identity, request_digest, idempotency_key, lease_fence, attempts_in_fence, total_attempts, status, receipt FROM stream_provider_effect_receipt ORDER BY effect_identity",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let mut receipts = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    {
+        receipts.push(ReceiptRow {
+            effect_identity: row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            request_digest: row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            idempotency_key: row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            lease_fence: row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            attempts_in_fence: row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            total_attempts: row.get(5).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            status: row.get(6).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            receipt: row.get(7).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        });
+    }
+    Ok(receipts)
+}
+
+/// Counts receipts in flight (status 1, the lease-fenced attempt). Such a receipt
+/// names a provider effect claim that is not carried, so the carry refuses it.
+async fn in_flight_receipt_count(connection: &Connection) -> Result<i64, RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT COUNT(*) FROM stream_provider_effect_receipt WHERE status = 1",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+        .ok_or(RuntimeError::RecoveryInvalid)?;
+    row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)
+}
+
+/// Reads every failure table that exists in `connection`. The source may not
+/// have the tables; the destination always has them after its runtime opens.
+async fn read_failure_carry(connection: &Connection) -> Result<FailureCarry, RuntimeError> {
+    let tables = table_names(connection).await?;
+    Ok(FailureCarry {
+        failures: if tables.contains("stream_failure") {
+            read_failures(connection).await?
+        } else {
+            Vec::new()
+        },
+        payloads: if tables.contains("stream_failure_payload") {
+            read_failure_payloads(connection).await?
+        } else {
+            Vec::new()
+        },
+        legacy: if tables.contains("stream_failure_payload_legacy") {
+            read_failure_legacy(connection).await?
+        } else {
+            Vec::new()
+        },
+        assertion_details: if tables.contains("stream_failure_assertion_detail") {
+            read_assertion_details(connection).await?
+        } else {
+            Vec::new()
+        },
+        provider_failures: if tables.contains("stream_provider_failure") {
+            read_provider_failures(connection).await?
+        } else {
+            Vec::new()
+        },
+    })
+}
+
+/// Counts failure rows in an in-flight claim state (`Retrying`, `Replaying`).
+/// Those rows name a claim that is not carried, so the carry refuses them.
+async fn in_flight_failure_count(connection: &Connection) -> Result<i64, RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT COUNT(*) FROM stream_failure WHERE status IN (2, 5)",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+        .ok_or(RuntimeError::RecoveryInvalid)?;
+    row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)
+}
+
+async fn read_failures(connection: &Connection) -> Result<Vec<FailureRow>, RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT identity_id, key_id, consumer_principal, consumer_root, consumer_function, consumer_binding, source_format, source, partition_format, partition, position_format, delivery_position, successor_position, version, attempts, status, diagnostic_code, diagnostic_class FROM stream_failure ORDER BY identity_id",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let mut failures = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    {
+        failures.push(FailureRow {
+            identity_id: row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            key_id: row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            consumer_principal: row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            consumer_root: row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            consumer_function: row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            consumer_binding: row.get(5).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            source_format: row.get(6).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            source: row.get(7).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            partition_format: row.get(8).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            partition: row.get(9).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            position_format: row.get(10).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            delivery_position: row.get(11).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            successor_position: row.get(12).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            version: row.get(13).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            attempts: row.get(14).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            status: row.get(15).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            diagnostic_code: row.get(16).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            diagnostic_class: row.get(17).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        });
+    }
+    Ok(failures)
+}
+
+async fn read_failure_payloads(
+    connection: &Connection,
+) -> Result<Vec<FailurePayloadRow>, RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT identity_id, payload, payload_reference, payload_digest, retention FROM stream_failure_payload ORDER BY identity_id",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let mut payloads = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    {
+        payloads.push(FailurePayloadRow {
+            identity_id: row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            payload: row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            payload_reference: row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            payload_digest: row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            retention: row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        });
+    }
+    Ok(payloads)
+}
+
+async fn read_failure_legacy(
+    connection: &Connection,
+) -> Result<Vec<FailureLegacyRow>, RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT identity_id FROM stream_failure_payload_legacy ORDER BY identity_id",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let mut legacy = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    {
+        legacy.push(FailureLegacyRow {
+            identity_id: row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        });
+    }
+    Ok(legacy)
+}
+
+async fn read_assertion_details(
+    connection: &Connection,
+) -> Result<Vec<AssertionDetailRow>, RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT identity_id, code, assertion_ref, owner_ref, owner_kind, predicate_ref, source_file_ref, start_byte, end_byte, start_line, start_column, end_line, end_column, safe_witness FROM stream_failure_assertion_detail ORDER BY identity_id",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let mut details = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    {
+        details.push(AssertionDetailRow {
+            identity_id: row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            code: row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            assertion_ref: row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            owner_ref: row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            owner_kind: row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            predicate_ref: row.get(5).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            source_file_ref: row.get(6).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            start_byte: row.get(7).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            end_byte: row.get(8).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            start_line: row.get(9).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            start_column: row.get(10).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            end_line: row.get(11).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            end_column: row.get(12).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            safe_witness: row.get(13).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        });
+    }
+    Ok(details)
+}
+
+async fn read_provider_failures(
+    connection: &Connection,
+) -> Result<Vec<ProviderFailureRow>, RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT key_id, checkpoint_version, committed_position, attempts, diagnostic_code, diagnostic_class FROM stream_provider_failure ORDER BY key_id",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let mut failures = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    {
+        failures.push(ProviderFailureRow {
+            key_id: row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            checkpoint_version: row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            committed_position: row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            attempts: row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            diagnostic_code: row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            diagnostic_class: row.get(5).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        });
+    }
+    Ok(failures)
+}
+
+/// Inserts provider effect receipts verbatim. A receipt references no other
+/// carried row, so the order of insertion does not matter.
+async fn insert_receipt_carry(
+    connection: &Connection,
+    receipts: &[ReceiptRow],
+) -> Result<(), RuntimeError> {
+    for row in receipts {
+        connection
+            .execute(
+                INSERT_RECEIPT,
+                params![
+                    row.effect_identity.as_slice(),
+                    row.request_digest.as_slice(),
+                    row.idempotency_key.as_slice(),
+                    row.lease_fence,
+                    row.attempts_in_fence,
+                    row.total_attempts,
+                    row.status,
+                    row.receipt.as_deref()
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+    }
+    Ok(())
+}
+
+/// Inserts failure rows parent-first: a failure precedes its companion rows.
+async fn insert_failure_carry(
+    connection: &Connection,
+    carry: &FailureCarry,
+) -> Result<(), RuntimeError> {
+    for row in &carry.failures {
+        connection
+            .execute(
+                INSERT_FAILURE,
+                params![
+                    row.identity_id.as_str(),
+                    row.key_id.as_str(),
+                    row.consumer_principal.as_str(),
+                    row.consumer_root.as_str(),
+                    row.consumer_function.as_str(),
+                    row.consumer_binding.as_str(),
+                    row.source_format.as_str(),
+                    row.source.as_str(),
+                    row.partition_format.as_str(),
+                    row.partition.as_deref(),
+                    row.position_format.as_str(),
+                    row.delivery_position.as_str(),
+                    row.successor_position.as_str(),
+                    row.version,
+                    row.attempts,
+                    row.status,
+                    row.diagnostic_code,
+                    row.diagnostic_class
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+    }
+    for row in &carry.payloads {
+        connection
+            .execute(
+                INSERT_FAILURE_PAYLOAD,
+                params![
+                    row.identity_id.as_str(),
+                    row.payload.as_deref(),
+                    row.payload_reference.as_deref(),
+                    row.payload_digest.as_deref(),
+                    row.retention
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+    }
+    for row in &carry.legacy {
+        connection
+            .execute(INSERT_FAILURE_LEGACY, params![row.identity_id.as_str()])
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+    }
+    for row in &carry.assertion_details {
+        connection
+            .execute(
+                INSERT_ASSERTION_DETAIL,
+                params![
+                    row.identity_id.as_str(),
+                    row.code.as_str(),
+                    row.assertion_ref.as_slice(),
+                    row.owner_ref.as_slice(),
+                    row.owner_kind,
+                    row.predicate_ref.as_slice(),
+                    row.source_file_ref.as_slice(),
+                    row.start_byte.as_slice(),
+                    row.end_byte.as_slice(),
+                    row.start_line.as_slice(),
+                    row.start_column.as_slice(),
+                    row.end_line.as_slice(),
+                    row.end_column.as_slice(),
+                    row.safe_witness.as_deref()
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+    }
+    for row in &carry.provider_failures {
+        connection
+            .execute(
+                INSERT_PROVIDER_FAILURE,
+                params![
+                    row.key_id.as_str(),
+                    row.checkpoint_version,
+                    row.committed_position.as_deref(),
+                    row.attempts,
+                    row.diagnostic_code,
+                    row.diagnostic_class
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+    }
+    Ok(())
 }
 
 async fn read_reset_audits(connection: &Connection) -> Result<Vec<ResetAuditRow>, RuntimeError> {
