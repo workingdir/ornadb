@@ -4309,10 +4309,10 @@ fn reserve_atomic(counter: &AtomicU64, amount: u64, limit: u64) -> Result<(), ()
 }
 
 #[derive(Clone, Debug)]
-struct ParsedGitTreeEntry {
-    mode: Vec<u8>,
-    name: Vec<u8>,
-    oid: NativeOid,
+pub(crate) struct ParsedGitTreeEntry {
+    pub(crate) mode: Vec<u8>,
+    pub(crate) name: Vec<u8>,
+    pub(crate) oid: NativeOid,
 }
 
 struct GearCutState {
@@ -4589,7 +4589,7 @@ fn encode_git_tree(mut entries: Vec<ParsedGitTreeEntry>) -> Result<Vec<u8>, Grap
 
 const MAX_VERIFY_EDGES: u64 = 4_000_000;
 
-fn parse_git_tree(
+pub(crate) fn parse_git_tree(
     bytes: &[u8],
     algorithm: GitHashAlgorithm,
     maximum_entries: usize,
