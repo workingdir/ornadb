@@ -47,10 +47,7 @@ pub fn decode_image_preview(blob: &Blob) -> Result<DecodedImage, PreviewError> {
     limits.max_image_height = Some(MAX_PREVIEW_DIMENSION);
     limits.max_alloc = Some(MAX_DECODER_ALLOCATION);
     reader.limits(limits);
-    let decoded = reader.decode().map_err(|error| match error {
-        image::ImageError::Limits(_) => PreviewError::ResourceLimit,
-        _ => PreviewError::Malformed,
-    })?;
+    let decoded = reader.decode().map_err(preview_error)?;
     let (width, height) = (decoded.width(), decoded.height());
     if width == 0 || height == 0 {
         return Err(PreviewError::Malformed);
@@ -66,6 +63,21 @@ pub fn decode_image_preview(blob: &Blob) -> Result<DecodedImage, PreviewError> {
         height,
         rgba: decoded.into_rgba8().into_raw(),
     })
+}
+
+/// Classifies a decoder failure. A truncated stream surfaces as an I/O `UnexpectedEof`
+/// and is malformed content; other I/O failures are unavailable content, not a verdict on
+/// the bytes. `Unsupported` names a valid feature the pinned decoder declines (not malformed).
+fn preview_error(error: image::ImageError) -> PreviewError {
+    match error {
+        image::ImageError::Limits(_) => PreviewError::ResourceLimit,
+        image::ImageError::Unsupported(_) => PreviewError::UnsupportedMediaType,
+        image::ImageError::IoError(io) if io.kind() == std::io::ErrorKind::UnexpectedEof => {
+            PreviewError::Malformed
+        }
+        image::ImageError::IoError(_) => PreviewError::ContentUnavailable,
+        _ => PreviewError::Malformed,
+    }
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WaveInspectionError {
