@@ -1434,6 +1434,7 @@ fn map_publication_repository_error(error: RepositoryError) -> Error {
         RepositoryError::StaleIndex { .. } => Error::RecoveryIndexConflict,
         RepositoryError::StaleHead => Error::RefConflict,
         RepositoryError::ManagedContentConflict => Error::ManagedWorktreeConflict,
+        RepositoryError::LegacyPathChanged(path) => Error::LegacyPathChanged { path },
         RepositoryError::PublicationPending => Error::PublicationPending,
         RepositoryError::RuntimeCompletionRequired => Error::InvalidTransition,
         _ => Error::RepositoryUnavailable,
@@ -1506,6 +1507,11 @@ pub enum Error {
     RecoveryIndexConflict,
     RefConflict,
     ManagedWorktreeConflict,
+    /// A legacy loose row file the migration retires was edited after capture.
+    /// The file is kept on disk and named so the edit is not lost.
+    LegacyPathChanged {
+        path: String,
+    },
     PublicationPending,
     InvalidPublicationJournal,
     InvalidTransition,
@@ -1530,6 +1536,12 @@ impl fmt::Display for Error {
             Self::RecoveryIndexConflict => "recovery index conflict",
             Self::RefConflict => "publication ref conflict",
             Self::ManagedWorktreeConflict => "managed worktree content conflict",
+            Self::LegacyPathChanged { path } => {
+                return write!(
+                    f,
+                    "legacy file {path} was edited after capture; the migration retires it and kept the edit on disk"
+                );
+            }
             Self::PublicationPending => "publication remains pending before ref advance",
             Self::InvalidPublicationJournal => "invalid publication journal",
             Self::InvalidTransition => "invalid publication transition",
