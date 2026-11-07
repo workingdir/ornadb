@@ -1439,7 +1439,12 @@ async fn failed_write_then_fsync_is_ok_and_not_dirty() {
 /// child's stdin is a duplicate of that handle: the same open file description, so the same
 /// draft. Without it, the child opens the path itself, a second handle. The probe prints the
 /// bytes its mapping shows before a copy-on-write store.
-fn private_mapping_view(fixture: &EditorMount, handle: Option<&File>) -> String {
+///
+/// The returned `Command` owns the parent's copy of that duplicate and must stay alive while the
+/// caller asserts. Dropping it closes a descriptor of the dirty handle inside the opener process,
+/// which is a close-time flush that may commit the draft (EDIT-1 step 5). That commit is the
+/// spec-permitted close path, not a leak through the mapping (ORNA-VFS-008).
+fn private_mapping_view(fixture: &EditorMount, handle: Option<&File>) -> (String, Command) {
     let probe = r##"import mmap, os, sys
 path, mode = sys.argv[1], sys.argv[2]
 fd = 0 if mode == "dirty" else os.open(path, os.O_RDONLY)
@@ -1467,14 +1472,16 @@ sys.stdout.write(seen.decode("utf-8"))
         "MAP_PRIVATE probe failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    String::from_utf8(output.stdout).expect("probe output is UTF-8")
+    (
+        String::from_utf8(output.stdout).expect("probe output is UTF-8"),
+        command,
+    )
 }
 
 /// profiles/vfs-1.md:124-130 (no cross-generation kernel page-cache sharing of
 /// incompatible contents): a `MAP_PRIVATE` mapping through the dirty handle populates
 /// the inode's pages first, so a second handle's mapping must not show that draft.
 /// Copy-on-write stores stay private and never reach the row (Gate E T4, S14).
-#[ignore = "ornadb-391g: MAP_PRIVATE second-handle mapping shows the dirty handle's draft (profiles/vfs-1.md:126-130)"]
 #[tokio::test]
 async fn map_private_mappings_keep_per_handle_drafts_and_never_persist() {
     if !require_fuse_or_skip() {
@@ -1485,12 +1492,12 @@ async fn map_private_mappings_keep_per_handle_drafts_and_never_persist() {
     replace_draft(&mut dirty, &row("Private draft"));
     assert_view_lacks(&fixture, "Private draft");
 
-    let through_dirty = private_mapping_view(&fixture, Some(&dirty));
+    let (through_dirty, _dirty_duplicate) = private_mapping_view(&fixture, Some(&dirty));
     assert!(
         through_dirty.contains("Private draft"),
         "a MAP_PRIVATE mapping on the dirty handle shows its own draft, got {through_dirty:?}",
     );
-    let through_second = private_mapping_view(&fixture, None);
+    let (through_second, _) = private_mapping_view(&fixture, None);
     assert!(
         through_second.contains("Original") && !through_second.contains("Private draft"),
         "a MAP_PRIVATE mapping on a second handle shows accepted state, got {through_second:?}",
