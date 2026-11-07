@@ -5,10 +5,10 @@
 //! application (`fixtures/second-app/serve.orna`) are separate projects with
 //! their own tables and their own `pub fn serve()`. Both are served by one
 //! `orna` binary through one route, `serving_entry_route`
-//! (`crates/orna-cli/src/cli_serve_app.rs:286`); the request reaches
+//! (`crates/orna-cli/src/cli_serve_app.rs`); the request reaches
 //! `ServeApp::respond`, whose only presentation step is
-//! `crate::ui_render::render_ui_html` (`crates/orna-cli/src/ui_render.rs:13`,
-//! called at `crates/orna-cli/src/cli_serve_app.rs:104`). Nothing in the
+//! `crate::ui_render::render_value_html` (`crates/orna-cli/src/ui_render.rs`,
+//! called from `respond` in `crates/orna-cli/src/cli_serve_app.rs`). Nothing in the
 //! route or the renderer names an application, so this test drives both and
 //! pins the emitted markup to the renderer's own fragments.
 //!
@@ -34,7 +34,7 @@ const SECOND_APP_SOURCE: &str = include_str!("fixtures/second-app/serve.orna");
 const STANDARD_ROOT: &str = include_str!("fixtures/second-app/standard-root.orna");
 const STANDARD_UI: &str = include_str!("../../../stdlib/std/ui.orna");
 
-/// Every fragment `render_ui_html` emits around the devtools application's
+/// Every fragment `render_value_html` emits around the devtools application's
 /// table node, in the order its `Cols` children declare them.
 const DEVTOOLS_PREFIX: &str = concat!(
     "<div><p>Devtools</p>",
@@ -370,7 +370,7 @@ fn second_ordinary_app_uses_the_same_renderer_and_routes() {
         );
     }
 
-    // Both pages are exactly the fragments `render_ui_html` emits for their
+    // Both pages are exactly the fragments `render_value_html` emits for their
     // declared node trees, and each lists only its own admitted tables.
     assert_page_is_renderer_output(
         &devtools.page.body,
