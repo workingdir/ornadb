@@ -2624,6 +2624,17 @@ mod tests {
         let tree = content_page(directory.path(), &format!("/tree/{commit_id}/"));
         assert_eq!(tree.status, 404, "the native tree listing is removed");
 
+        let blob = content_page(directory.path(), &format!("/blob/{commit_id}/README.txt"));
+        assert_eq!(blob.status, 404, "the native blob listing is removed");
+        assert_eq!(
+            blob.content_type, "application/json",
+            "a removed listing returns no HTML page"
+        );
+        assert!(
+            !String::from_utf8_lossy(&blob.body).contains("<html"),
+            "a removed listing must not render document markup"
+        );
+
         let nested = content_page(
             directory.path(),
             &format!("/content/{commit_id}/src/nested.orna"),
