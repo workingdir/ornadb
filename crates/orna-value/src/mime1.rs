@@ -319,6 +319,51 @@ mod tests {
         }
     }
 
+    /// ORNA-MIME-002 (bead .422): 49 differential vectors generated from
+    /// `reference/Orna-1.1.0/tools/final_model.py` (`annotation` and
+    /// `selected_suffix`). Accepted pairs must normalise, hint-check and select
+    /// their suffix exactly as the model does; rejected pairs must raise the
+    /// model's `sys.blob.*` code.
+    #[test]
+    fn media_type_normalisation_matches_normative_model() {
+        const CASES_JSON: &str =
+            include_str!("fixtures/reference/tests/media-normalisation-vectors.json");
+        let document: serde_json::Value =
+            serde_json::from_str(CASES_JSON).expect("the normalisation vectors are JSON");
+        let cases = document["cases"].as_array().expect("normalisation cases");
+        assert!(cases.len() >= 20, "MIME-002 requires at least 20 cases");
+        let registry = MimeRegistry::mime1();
+        for case in cases {
+            let input = text(&case["input"]);
+            let hint = case["hint"].as_str();
+            if let Some(expected_code) = case["error"].as_str() {
+                let error = registry
+                    .canonical_annotation(input, hint)
+                    .expect_err("the model rejects this pair");
+                // The value layer carries media failures as variants; the
+                // `sys.blob.*` codes are assigned at the evaluator boundary.
+                let expected = match expected_code {
+                    "sys.blob.invalid_media_type" => crate::Error::InvalidMediaType,
+                    "sys.blob.invalid_suffix" => crate::Error::InvalidSuffix,
+                    "sys.blob.incompatible_suffix" => crate::Error::IncompatibleSuffix,
+                    other => panic!("the model raises an unmapped code {other}"),
+                };
+                assert_eq!(error, expected, "{case}");
+            } else {
+                let annotation = registry
+                    .canonical_annotation(input, hint)
+                    .expect("the model accepts this pair");
+                assert_eq!(annotation.media_type(), text(&case["media_type"]), "{case}");
+                assert_eq!(annotation.suffix(), case["suffix"].as_str(), "{case}");
+                assert_eq!(
+                    annotation.selected_suffix(),
+                    text(&case["selected_suffix"]),
+                    "{case}"
+                );
+            }
+        }
+    }
+
     /// ORNA-MIME-003/-004 (A08-08): octet-stream and unknown essences admit any
     /// safe hint, a known essence admits only a compatible one, and the
     /// preferred suffix is stored as no hint.
