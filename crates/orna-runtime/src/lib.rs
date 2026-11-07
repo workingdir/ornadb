@@ -7067,6 +7067,7 @@ impl RuntimeState {
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         faults.check(FaultPoint::AfterCommit)?;
+        orna_repository::publication_crash_barrier("row-commit");
         Ok(next)
     }
 
@@ -7328,6 +7329,7 @@ impl RuntimeState {
         if let Err(error) = faults.check(FaultPoint::AfterCommit) {
             return Err(TableActivationError::Runtime(error));
         }
+        orna_repository::publication_crash_barrier("row-commit");
         Ok(next)
     }
 
