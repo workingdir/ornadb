@@ -1309,8 +1309,6 @@ fn recover_prepared_copy(
     let source_index_generation = source.index_generation()?;
     require_index_tree(&source_index_generation)?;
     let source_tree_identity = source_tree_identity(source, &source_commit)?;
-    let (source_working_tree_identity, source_working_tree_entries) =
-        working_tree_identity(source)?;
 
     let metadata =
         fs::symlink_metadata(destination).map_err(|_| RepositoryError::LocalStateUnavailable)?;
@@ -1392,12 +1390,14 @@ fn recover_prepared_copy(
     if !entries_match {
         return Err(RepositoryError::InvalidFormatMigration);
     }
+    let mut absent_retired = BTreeSet::new();
     if let Some(store_for) = store_for {
         // The recovered candidate must be exactly what a fresh preparation of
         // this source builds: same store, same entries, same commit object.
         let store = store_for(&repository, database_id)?;
         require_retired_paths(source, &source_commit, &store.retired)?;
         refuse_edited_retired_loose_rows(&repository, &store.retired)?;
+        absent_retired = absent_retired_loose_rows(&repository, &store.retired)?;
         let database_bytes = canonical_database_bytes(&database_id);
         let expected = migration_entries(
             committed_database.as_deref(),
@@ -1425,7 +1425,10 @@ fn recover_prepared_copy(
             return Err(RepositoryError::PublicationRecoveryConflict);
         }
     }
-    let (working_tree_identity, working_tree_entries) = working_tree_identity(&repository)?;
+    let (source_working_tree_identity, source_working_tree_entries) =
+        working_tree_identity_excluding(source, &absent_retired)?;
+    let (working_tree_identity, working_tree_entries) =
+        working_tree_identity_excluding(&repository, &absent_retired)?;
     if working_tree_identity != source_working_tree_identity
         || working_tree_entries != source_working_tree_entries
     {
@@ -1672,10 +1675,21 @@ fn refuse_edited_retired_loose_rows(
         if entry.kind != RetiredLegacyKind::LooseRowUnit {
             continue;
         }
-        match fs::read(repository.worktree().join(&entry.path)) {
+        let path = repository.worktree().join(&entry.path);
+        // `symlink_metadata` does not follow a link: a symlink in place of the
+        // row file is a changed path even when its target holds equal bytes.
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return Err(RepositoryError::LocalStateUnavailable),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(RepositoryError::LegacyPathChanged(entry.path.clone()));
+        }
+        match fs::read(&path) {
             Ok(bytes) if bytes == entry.committed => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Ok(_) | Err(_) => return Err(RepositoryError::LegacyPathChanged(entry.path.clone())),
+            Ok(_) => return Err(RepositoryError::LegacyPathChanged(entry.path.clone())),
+            Err(_) => return Err(RepositoryError::LocalStateUnavailable),
         }
     }
     Ok(())
@@ -2280,17 +2294,56 @@ fn dependency_entries(
 /// Main `.git` metadata is excluded; nested HEADs and indexes are included so
 /// prepared-copy recovery detects dirty submodule changes.
 fn working_tree_identity(copy: &Repository) -> Result<([u8; 32], usize), RepositoryError> {
+    working_tree_identity_excluding(copy, &BTreeSet::new())
+}
+
+/// Like [`working_tree_identity`], but the `excluded` paths are left out.
+fn working_tree_identity_excluding(
+    copy: &Repository,
+    excluded: &BTreeSet<String>,
+) -> Result<([u8; 32], usize), RepositoryError> {
     let mut hash = Sha256::new();
     hash.update(b"orna.migration.working-tree-identity.v3\0");
     let mut entries = 0;
-    hash_working_tree(copy.worktree(), Path::new(""), &mut hash, &mut entries)?;
+    hash_working_tree(
+        copy.worktree(),
+        Path::new(""),
+        &mut hash,
+        &mut entries,
+        excluded,
+    )?;
     Ok((hash.finalize().into(), entries))
 }
+
+/// The retired loose-row files `copy` no longer holds. A row the user deleted
+/// already has the state activation would make, so only these paths leave the
+/// identity comparison; every file that remains is still compared.
+fn absent_retired_loose_rows(
+    copy: &Repository,
+    retired: &[RetiredLegacyPath],
+) -> Result<BTreeSet<String>, RepositoryError> {
+    let mut absent = BTreeSet::new();
+    for entry in retired {
+        if entry.kind != RetiredLegacyKind::LooseRowUnit {
+            continue;
+        }
+        match fs::symlink_metadata(copy.worktree().join(&entry.path)) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                absent.insert(entry.path.clone());
+            }
+            Err(_) => return Err(RepositoryError::LocalStateUnavailable),
+        }
+    }
+    Ok(absent)
+}
+
 fn hash_working_tree(
     root: &Path,
     relative: &Path,
     hash: &mut Sha256,
     entry_count: &mut usize,
+    excluded: &BTreeSet<String>,
 ) -> Result<(), RepositoryError> {
     let directory = root.join(relative);
     let mut entries = fs::read_dir(&directory)
@@ -2313,6 +2366,9 @@ fn hash_working_tree(
             continue;
         }
         let child = relative.join(name);
+        if child.to_str().is_some_and(|path| excluded.contains(path)) {
+            continue;
+        }
         let metadata = fs::symlink_metadata(entry.path())
             .map_err(|_| RepositoryError::LocalStateUnavailable)?;
         let file_type = metadata.file_type();
@@ -2339,7 +2395,7 @@ fn hash_working_tree(
             hash.update(target_bytes);
         } else if file_type.is_dir() {
             hash.update(b"directory\0");
-            hash_working_tree(root, &child, hash, entry_count)?;
+            hash_working_tree(root, &child, hash, entry_count, excluded)?;
         } else {
             hash.update(b"file\0");
             hash.update(metadata.len().to_be_bytes());
@@ -2776,7 +2832,14 @@ mod git_metadata_tests {
     fn digest_and_entries(root: &Path) -> ([u8; 32], usize) {
         let mut hash = Sha256::new();
         let mut entries = 0;
-        hash_working_tree(root, Path::new(""), &mut hash, &mut entries).unwrap();
+        hash_working_tree(
+            root,
+            Path::new(""),
+            &mut hash,
+            &mut entries,
+            &BTreeSet::new(),
+        )
+        .unwrap();
         (hash.finalize().into(), entries)
     }
 
