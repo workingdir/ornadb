@@ -702,8 +702,8 @@ use std::{collections::BTreeMap, fmt, sync::Arc};
 
 use orna_foundation::{OvbRaw, SchemaDescriptor};
 use orna_repository::{
-    GitCommitRef, HistoricalFormatContext, IndexGeneration, ManagedPath, NativeGraphContext,
-    NativeOid, PrivateCommit, PublicationJournal, PublicationJournalEntry,
+    GitCommitRef, HistoricalFormatContext, IndexGeneration, IndexMaintenance, ManagedPath,
+    NativeGraphContext, NativeOid, PrivateCommit, PublicationJournal, PublicationJournalEntry,
     PublicationLogicalRowRekey, Repository, RepositoryError, RepositoryFormat, RowIndexMutation,
     TypedKey,
 };
@@ -954,6 +954,7 @@ fn build_frozen_publication_store_root(
         NativeGraphContext,
         NativeOid,
         Vec<PublicationLogicalRowRekey>,
+        PublicationChurn,
     ),
     Error,
 > {
@@ -1102,11 +1103,48 @@ fn build_frozen_publication_store_root(
     let store_root = base_graph
         .maintain_relations_rows(&candidates, &scope)
         .map_err(|_| Error::RepositoryUnavailable)?;
+    let mut churn = PublicationChurn::default();
+    for (_, maintenance) in &candidates {
+        churn.add(maintenance);
+    }
     let store_root = repository
         .append_rekey_log(&format, &store_root, &logical_rekeys)
         .map_err(|_| Error::RepositoryUnavailable)?;
     let (_, graph, _) = relation_candidates.swap_remove(0);
-    Ok((graph, store_root, logical_rekeys))
+    Ok((graph, store_root, logical_rekeys, churn))
+}
+
+/// Index churn and reuse one publication measured while maintaining the row
+/// index. Index nodes and stored payload objects are counted apart, so index
+/// churn is never read as media reuse (ORP-1 Gate C).
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct PublicationChurn {
+    index_objects_created: usize,
+    index_objects_reused: usize,
+    payload_objects_reused: usize,
+}
+
+impl PublicationChurn {
+    /// New index nodes this publication wrote.
+    pub const fn index_objects_created(&self) -> usize {
+        self.index_objects_created
+    }
+
+    /// Previous index nodes the publication's root still names unchanged.
+    pub const fn index_objects_reused(&self) -> usize {
+        self.index_objects_reused
+    }
+
+    /// Stored value and Blob-descriptor objects reused unchanged.
+    pub const fn payload_objects_reused(&self) -> usize {
+        self.payload_objects_reused
+    }
+
+    fn add(&mut self, maintenance: &IndexMaintenance) {
+        self.index_objects_created += maintenance.index_objects_created().len();
+        self.index_objects_reused += maintenance.index_objects_reused().len();
+        self.payload_objects_reused += maintenance.payload_objects_reused().len();
+    }
 }
 
 /// The shared maintenance lease a prepared publication holds from preparation
@@ -1144,6 +1182,8 @@ pub struct RuntimePublicationCoordinator {
     // Held from preparation until publication succeeds; see
     // `PreparedMaintenanceLease`. `None` once the candidate is anchored.
     maintenance: Option<PreparedMaintenanceLease>,
+    // Index churn of the frozen prefix's row-index maintenance.
+    churn: PublicationChurn,
 }
 
 impl RuntimePublicationCoordinator {
@@ -1224,7 +1264,7 @@ impl RuntimePublicationCoordinator {
             .version()
             .store_root()
             .clone();
-        let (graph, store_root, logical_rekeys) =
+        let (graph, store_root, logical_rekeys, churn) =
             build_frozen_publication_store_root(repository, expected_head, &mutations)?;
         if store_root == current_store_root && logical_rekeys.is_empty() {
             return Ok(None);
@@ -1275,6 +1315,7 @@ impl RuntimePublicationCoordinator {
             journal,
             protected_source_mutations,
             maintenance: Some(PreparedMaintenanceLease(Arc::new(maintenance))),
+            churn,
         }))
     }
 
@@ -1284,6 +1325,13 @@ impl RuntimePublicationCoordinator {
 
     pub fn journal(&self) -> &PublicationJournal {
         &self.journal
+    }
+
+    /// Index churn and payload reuse measured while this publication's row
+    /// index was maintained. Index nodes and stored payloads are reported
+    /// apart, so index churn is never read as media reuse.
+    pub fn churn(&self) -> &PublicationChurn {
+        &self.churn
     }
 
     /// Executes repository ref, index, and worktree boundaries. The journal
