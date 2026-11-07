@@ -106,9 +106,15 @@ fn assert_success(output: &Output, step: &str) {
     );
 }
 
-/// Commits `Object`, stores one annotated WAV payload through the REPL, and
-/// publishes it to HEAD. Returns the project root and the table's relation id.
-fn committed_blob_project(directory: &TempDir) -> (PathBuf, String) {
+/// Commits `Object`, stores `payload` as a blob annotated `media_type` from the
+/// worktree file `source_name` through the REPL, and publishes it to HEAD.
+/// Returns the project root and the table's relation id.
+fn committed_payload_project(
+    directory: &TempDir,
+    source_name: &str,
+    payload: &[u8],
+    media_type: &str,
+) -> (PathBuf, String) {
     let root = directory.path().join("library");
     let init = orna(
         directory.path(),
@@ -134,13 +140,9 @@ fn committed_blob_project(directory: &TempDir) -> (PathBuf, String) {
         .expect("commit reports the admitted relation");
 
     // The blob source must lie inside the repository worktree (the capture root).
-    fs::copy(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join(TONE_FIXTURE),
-        root.join("tone.wav"),
-    )
-    .expect("copy the WAV fixture into the worktree");
+    fs::write(root.join(source_name), payload).expect("write the payload into the worktree");
     let input = format!(
-        "main.Object.insert({{ id: \"a\", payload: sys.blob.annotate(sys.blob.capture_file(\"{}\", \"tone.wav\", 65536), \"audio/wav\"), content: \"x\" }})",
+        "main.Object.insert({{ id: \"a\", payload: sys.blob.annotate(sys.blob.capture_file(\"{}\", \"{source_name}\", 65536), \"{media_type}\"), content: \"x\" }})",
         root.to_str().expect("UTF-8 test path")
     );
     let inserted = orna_repl(&root, &input);
@@ -208,8 +210,15 @@ fn request(
     extra: &[(&str, &str)],
 ) -> std::io::Result<Reply> {
     let mut stream = TcpStream::connect(address)?;
-    let mut head = format!("{method} {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n");
-    for (name, value) in extra {
+    let host = extra
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("host"))
+        .map_or(address, |(_, value)| *value);
+    let mut head = format!("{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n");
+    for (name, value) in extra
+        .iter()
+        .filter(|(name, _)| !name.eq_ignore_ascii_case("host"))
+    {
         head.push_str(name);
         head.push_str(": ");
         head.push_str(value);
@@ -269,7 +278,7 @@ fn start_server(root: &Path) -> (RunningServer, String) {
 
 /// A running server over a committed blob, with the bytes it must serve.
 struct Served {
-    _directory: TempDir,
+    directory: TempDir,
     _server: RunningServer,
     address: String,
     media_path: String,
@@ -277,21 +286,28 @@ struct Served {
     expected: Vec<u8>,
 }
 
-fn served_blob() -> Served {
+/// A running server over `payload` committed as `media_type` from the worktree
+/// file `source_name`.
+fn served_payload(source_name: &str, payload: &[u8], media_type: &str) -> Served {
     let directory = TempDir::new().expect("temporary project directory");
-    let (root, relation) = committed_blob_project(&directory);
+    let (root, relation) = committed_payload_project(&directory, source_name, payload, media_type);
     let commit = git_stdout(&root, &["rev-parse", "HEAD"]);
     let descriptor = committed_descriptor(&root, &relation);
-    let expected = fs::read(root.join("tone.wav")).expect("read the committed payload source");
     let (server, address) = start_server(&root);
     Served {
-        _directory: directory,
+        directory,
         _server: server,
         media_path: format!("/media/{commit}/{descriptor}"),
         address,
         descriptor,
-        expected,
+        expected: payload.to_vec(),
     }
+}
+
+fn served_blob() -> Served {
+    let payload = fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join(TONE_FIXTURE))
+        .expect("read the WAV fixture");
+    served_payload("tone.wav", &payload, "audio/wav")
 }
 
 #[test]
@@ -424,4 +440,212 @@ fn same_origin_writes_are_refused_with_method_not_allowed() {
         unauthenticated.status, 403,
         "a write without same origin is denied first"
     );
+}
+
+fn header_count(reply: &Reply, name: &str) -> usize {
+    reply
+        .headers
+        .iter()
+        .filter(|(candidate, _)| candidate == name)
+        .count()
+}
+
+/// The loose object files under the project's `.git/objects` fan-out.
+fn loose_objects(root: &Path) -> Vec<PathBuf> {
+    let mut objects = Vec::new();
+    for fan_out in fs::read_dir(root.join(".git/objects"))
+        .expect("read the object store")
+        .flatten()
+    {
+        let name = fan_out.file_name();
+        let name = name.to_string_lossy();
+        if name.len() != 2 || !name.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            continue;
+        }
+        for object in fs::read_dir(fan_out.path())
+            .expect("read a fan-out directory")
+            .flatten()
+        {
+            objects.push(object.path());
+        }
+    }
+    objects
+}
+
+fn rewrite_object(object: &Path, bytes: &[u8]) {
+    // Git stores loose objects read-only; the directory is writable, so the
+    // file is replaced rather than made writable.
+    fs::remove_file(object).expect("remove a loose object");
+    fs::write(object, bytes).expect("rewrite a loose object");
+}
+
+/// A damaged object fails closed: the response is a `media.*` error, and no
+/// partial payload bytes leave the server.
+fn assert_refused_without_payload(served: &Served) {
+    let reply = request(&served.address, "GET", &served.media_path, &[])
+        .expect("GET succeeds at transport");
+    assert_eq!(reply.status, 500, "a damaged object is refused");
+    let body = String::from_utf8_lossy(&reply.body).into_owned();
+    assert!(
+        body.starts_with(r#"{"error":"media."#),
+        "a stable media error code: {body}"
+    );
+    assert!(
+        reply.body.len() < served.expected.len(),
+        "no payload bytes accompany the refusal"
+    );
+}
+
+#[test]
+fn non_inline_payloads_are_attachments_under_the_sandbox() {
+    let cases: [(&str, &str, &str); 3] = [
+        (
+            "drawing.svg",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><script>alert(1)</script></svg>",
+            "image/svg+xml",
+        ),
+        (
+            "page.html",
+            "<!doctype html><script>alert(1)</script>",
+            "text/html",
+        ),
+        ("blob.bin", "opaque bytes", "application/x-orna-opaque"),
+    ];
+    for (source_name, payload, media_type) in cases {
+        let served = served_payload(source_name, payload.as_bytes(), media_type);
+        let reply = request(&served.address, "GET", &served.media_path, &[]).expect("GET succeeds");
+        assert_eq!(reply.status, 200, "{media_type} is served");
+        assert_eq!(
+            reply.body,
+            payload.as_bytes().to_vec(),
+            "{media_type} bytes are the committed payload"
+        );
+        assert_eq!(
+            reply.header("content-type"),
+            Some("application/octet-stream"),
+            "{media_type} is never rendered as its own type"
+        );
+        assert_eq!(reply.header("content-disposition"), Some("attachment"));
+        assert_eq!(reply.header("content-security-policy"), Some("sandbox"));
+        assert_eq!(
+            header_count(&reply, "x-content-type-options"),
+            1,
+            "{media_type} carries nosniff exactly once"
+        );
+        assert_eq!(
+            header_count(&reply, "content-length"),
+            1,
+            "{media_type} carries one Content-Length"
+        );
+        assert_eq!(
+            reply.header("content-length"),
+            Some(payload.len().to_string().as_str())
+        );
+    }
+}
+
+#[test]
+fn foreign_host_is_refused_before_the_payload() {
+    let served = served_blob();
+    let reply = request(
+        &served.address,
+        "GET",
+        &served.media_path,
+        &[("Host", "evil.example")],
+    )
+    .expect("GET succeeds at transport");
+    assert_eq!(reply.status, 403);
+    assert_eq!(reply.body, br#"{"error":"host_denied"}"#.to_vec());
+}
+
+#[test]
+fn foreign_origin_cannot_read_a_media_payload() {
+    let served = served_blob();
+    let same = format!("http://{}", served.address);
+    let allowed = request(
+        &served.address,
+        "GET",
+        &served.media_path,
+        &[("Origin", &same)],
+    )
+    .expect("GET succeeds");
+    assert_eq!(allowed.status, 200, "the serving origin reads its media");
+
+    let foreign = request(
+        &served.address,
+        "GET",
+        &served.media_path,
+        &[("Origin", "http://evil.example")],
+    )
+    .expect("GET succeeds at transport");
+    assert_eq!(foreign.status, 403);
+    assert_eq!(foreign.body, br#"{"error":"origin_denied"}"#.to_vec());
+}
+
+#[test]
+fn multi_range_returns_the_full_payload() {
+    let served = served_blob();
+    let reply = request(
+        &served.address,
+        "GET",
+        &served.media_path,
+        &[("Range", "bytes=0-9,20-29")],
+    )
+    .expect("GET succeeds");
+    assert_eq!(reply.status, 200, "a multi-range request is not assembled");
+    assert_eq!(reply.body, served.expected);
+    assert_eq!(reply.header("content-range"), None);
+}
+
+#[test]
+fn head_with_a_range_carries_partial_headers_and_no_body() {
+    let served = served_blob();
+    let reply = request(
+        &served.address,
+        "HEAD",
+        &served.media_path,
+        &[("Range", "bytes=100-199")],
+    )
+    .expect("HEAD succeeds");
+    assert_eq!(reply.status, 206);
+    assert!(reply.body.is_empty(), "HEAD never carries a body");
+    assert_eq!(reply.header("content-length"), Some("100"));
+    assert_eq!(
+        reply.header("content-range"),
+        Some(format!("bytes 100-199/{}", served.expected.len()).as_str())
+    );
+}
+
+#[test]
+fn tampered_loose_objects_fail_closed_without_payload_bytes() {
+    let served = served_blob();
+    let root = served.directory.path().join("library");
+    let objects = loose_objects(&root);
+    assert!(
+        !objects.is_empty(),
+        "the committed payload is stored as loose objects"
+    );
+    for object in &objects {
+        let mut bytes = fs::read(object).expect("read a loose object");
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xff;
+        rewrite_object(object, &bytes);
+    }
+    assert_refused_without_payload(&served);
+}
+
+#[test]
+fn truncated_loose_objects_fail_closed_without_payload_bytes() {
+    let served = served_blob();
+    let root = served.directory.path().join("library");
+    let objects = loose_objects(&root);
+    assert!(
+        !objects.is_empty(),
+        "the committed payload is stored as loose objects"
+    );
+    for object in &objects {
+        let bytes = fs::read(object).expect("read a loose object");
+        rewrite_object(object, &bytes[..bytes.len() / 2]);
+    }
+    assert_refused_without_payload(&served);
 }
