@@ -68,8 +68,14 @@ title = "Unknown and mixed formats fail early"
 select = [
   { record = "workspace-rest", package = "orna-repository", target = "test:format_context", test = "fails_closed_on_unknown_mixed_malformed_and_unavailable_metadata" },
   { record = "workspace-cli", package = "orna-cli", target = "test:migration_copy_cli", test = "cli_migration_copy_rejects_mixed_worktree_metadata" },
+  { record = "workspace-rest", package = "orna-repository", target = "test:format_context", test = "dispatches_legacy_formats_as_explicit_read_only_inputs" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:migration_copy_cli", test = "cli_migration_copy_prepares_a_candidate_from_recorded_legacy_metadata" },
+  { record = "workspace-rest", package = "orna-repository", target = "test:format_context", test = "dispatches_recorded_legacy_metadata_as_read_only_inputs" },
+  { record = "workspace-rest", package = "orna-repository", target = "test:format_context", test = "legacy_marker_beside_store_is_mixed_formats" },
 ]
-limitations = ["Real 1.0 records are rejected as malformed rather than read (ornadb-5il1.191)."]
+limitations = [
+  "A3 maps the fail-early refusals and the read-only dispatch of recorded legacy format-1/2 metadata only. Reading their rows is A4 and is not mapped here.",
+]
 
 [[item]]
 gate = "A"
@@ -377,7 +383,7 @@ limitations = ["Covers rename-over and owner-write replacement through the mount
 [[item]]
 gate = "E"
 id = "E8"
-title = "Schema changes, renamed MIME suffix, key and namespace collisions, long and composite keys (empty keys: test ignored, ornadb-5il1.462.1), nested collections, large Str, multi-file source edits, permissions and unsupported operations"
+title = "Schema changes, renamed MIME suffix, key and namespace collisions (reserved data.orna / Blob data+orna collision only), long and composite keys (empty keys: test ignored, ornadb-5il1.462.1), nested collections, large Str, multi-file source edits, permissions and unsupported operations"
 select = [
   { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_integration", test = "cwd_mount_save_after_head_renames_table_keeps_pinned_declaration" },
   { record = "workspace-cli", package = "orna-cli", target = "test:vfs_schema_change", test = "vfs_019_schema_change_under_live_mount_pins_handles_and_listing" },
@@ -409,8 +415,10 @@ select = [
   { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_integration", test = "cwd_mount_chmod_of_document_fails_eperm_without_row_change" },
   { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_integration", test = "cwd_mount_blob_compatible_suffix_rename_keeps_bytes" },
   { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_integration", test = "cwd_mount_blob_suffix_round_trip_keeps_bytes" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_integration", test = "cwd_mount_blob_field_data_with_orna_suffix_escapes_beside_row_document" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_paths", test = "data_orna_key_escapes_first_byte_and_round_trips" },
 ]
-limitations = ["Only the selectors above are claimed. Reserved-name escapes beyond the literal profiles/vfs-1.md:46 text are a conservative, spec-silent selector, not a spec requirement. The renamed MIME suffix clause is carried by the two Blob suffix-rename selectors: a compatible suffix moves only the descriptor's suffix hint and keeps the bytes, an incompatible one is refused with EPERM, and a suffix round trip keeps the bytes. Schema change is carried by the vfs_019 live-mount selectors: head table rename, field add and retype at head, field removal by owner commit, a default frozen at introduction, stale generation saves and refused commits. Not covered: empty keys (test ignored: vfs_projection_features 'empty text key cannot be stored', ornadb-5il1.462.1); namespace collisions have no selector; a field rename has no live-mount selector (it is reachable only through the LSP rename path); the composite-key selector is one fixture; grouped source edits do not assert no-evaluation during speculative writes (ORNA-VFS-020 proper, ornadb-9npn) (ornadb-5il1.63)."]
+limitations = ["Only the selectors above are claimed. Reserved-name escapes beyond the literal profiles/vfs-1.md:46 text are a conservative, spec-silent selector, not a spec requirement. Namespace collisions are claimed only for the Blob field data with suffix orna (projects as %64ata.orna beside the row document data.orna, exact-path resolution only) and the row key data.orna; other generated-collision spellings have no selector here. The renamed MIME suffix clause is carried by the two Blob suffix-rename selectors: a compatible suffix moves only the descriptor's suffix hint and keeps the bytes, an incompatible one is refused with EPERM, and a suffix round trip keeps the bytes. Schema change is carried by the vfs_019 live-mount selectors: head table rename, field add and retype at head, field removal by owner commit, a default frozen at introduction, stale generation saves and refused commits. Not covered: empty keys (test ignored: vfs_projection_features 'empty text key cannot be stored', ornadb-5il1.462.1); a field rename has no live-mount selector (it is reachable only through the LSP rename path); the composite-key selector is one fixture; grouped source edits do not assert no-evaluation during speculative writes (ORNA-VFS-020 proper, ornadb-9npn) (ornadb-5il1.63)."]
 
 [[item]]
 gate = "E"
@@ -447,7 +455,7 @@ select = [
   { record = "workspace-rest", package = "orna-repository", target = "test:migration_copy", test = "populated_format2_dirty_workspace_is_preserved_in_copy" },
 ]
 limitations = [
-  "The fixture has no rows and uses an invented format marker, and real 1.0 records are rejected (ornadb-5il1.191, ornadb-5il1.184, ornadb-5il1.193).",
+  "The fixture has no rows; the legacy format-1/2 records it opens dispatch read-only (mapped under A3). Full migration of a populated real 1.0 workspace is not yet proven (ornadb-5il1.184, ornadb-5il1.192, ornadb-5il1.193).",
 ]
 
 [[item]]
