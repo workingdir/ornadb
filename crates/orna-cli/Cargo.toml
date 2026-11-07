@@ -62,6 +62,7 @@ orna-application = { path = "../orna-application", features = ["test-support"] }
 # `legacy_fixture_bundle` rebuilds the committed bundle from it, so the test
 # target needs the feature while the `orna` binary does not.
 orna-repository = { path = "../orna-repository", features = ["legacy-fixture-writer"] }
+orna-stream = { path = "../orna-stream" }
 [target.'cfg(target_os = "linux")'.dependencies]
 fuser = { version = "0.18.0", default-features = false }
 libc = "0.2"

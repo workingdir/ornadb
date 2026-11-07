@@ -705,6 +705,64 @@ class EndToEndTests(unittest.TestCase):
             self.assertNotEqual(self.run_main(argv), 0)
             self.assertFalse(gate_out.exists())
 
+    def test_gate_document_state_follows_its_only_item_when_it_fails_or_does_not_run(self) -> None:
+        # The passing fixture above cannot tell a derived document state from a constant one; these cases can.
+        cases = (
+            ("failed", {"copy_round_trip": "failed"}, "failed"),
+            ("not-executed", {"other_test": "passed"}, "not-executed"),
+        )
+        for record_state, tests, expected in cases:
+            with self.subTest(expected=expected), TemporaryDirectory() as directory:
+                root = Path(directory)
+                records = root / "records"
+                records.mkdir()
+                log = records / "gate-f.log"
+                log.write_text("ORP-1 phase label=run_case rows=3 ms=1\n", encoding="utf-8")
+                value = record("gate-f", record_state, [target("orna-repository", "test:migration_copy", tests)])
+                value.update(
+                    schema="ornadb-gate-evidence/1",
+                    commit="b" * 40,
+                    totals={state: list(tests.values()).count(state) for state in ("passed", "failed")},
+                    failures={"new": [], "known": []},
+                    baseline=[],
+                    exit_status=1,
+                )
+                value["log"]["sha256"] = hashlib.sha256(log.read_bytes()).hexdigest()
+                (records / "gate-f.record.json").write_text(json.dumps(value), encoding="utf-8")
+                items = root / "items.toml"
+                items.write_text(
+                    textwrap.dedent(
+                        """\
+                        [publication]
+                        version = "1.1.0"
+                        revision = "final-2026-10-05"
+                        archive_sha256 = "fe4a35dc81c2c2994e0a18d7c7931ea0bbd298ab23248496cbe880f264c5db56"
+
+                        [records]
+                        expected = ["gate-f"]
+
+                        [[item]]
+                        gate = "F"
+                        id = "F2"
+                        title = "Copy round trip keeps every row"
+                        select = [
+                          { record = "gate-f", package = "orna-repository", target = "test:migration_copy", test = "copy_round_trip" },
+                        ]
+                        """
+                    ),
+                    encoding="utf-8",
+                )
+                baseline = root / "baseline.toml"
+                baseline.write_text("", encoding="utf-8")
+                gate_out = root / "gate-f-evidence.json"
+                argv = ["summarize", "--records", str(records), "--out", str(root / "summary.json"), "--items", str(items), "--baseline", str(baseline), "--gate", "F", "--gate-out", str(gate_out)]
+
+                self.run_main(argv)
+                document = json.loads(gate_out.read_text(encoding="utf-8"))
+                self.assertEqual(document["state"], expected)
+                self.assertEqual(document["items"][expected], ["F2"])
+                self.assertEqual(document["rows"][0]["state"], expected)
+
 
 class ReviewFindingTests(unittest.TestCase):
     """Regression tests for the independent review of PR 9186 (W53)."""
