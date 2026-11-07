@@ -1405,11 +1405,14 @@ fn published_payload(repository: &Repository, relation_id: [u8; 16]) -> Vec<u8> 
 }
 
 /// W76 S5 / ORNA-PUB-007/008/016: a later mutation captured after the SIGKILL at every
-/// boundary stays pending. Recovery publishes only the frozen range where a journal exists,
-/// and the later tail is published by the next publish, never folded into the frozen batch.
+/// boundary stays pending. Where a journal names the frozen range and HEAD already names the
+/// candidate, recovery publishes only that frozen range and leaves exactly the later tail
+/// pending. At `prepared` HEAD still names the base, so recovery publishes nothing and keeps
+/// both the frozen range and the later tail pending (22-publication.md, "Ref still at H").
 #[tokio::test]
 async fn publication_later_tail_is_retained_at_every_kill_boundary() {
-    const JOURNALED: [&str; 7] = [
+    const JOURNALED: [&str; 8] = [
+        "ref-cas-pre-journal",
         "ref-cas",
         "store-worktree",
         "index-install",
@@ -1539,9 +1542,36 @@ async fn publication_later_tail_is_retained_at_every_kill_boundary() {
                 initial_payload,
                 "frozen range not recovered at {boundary}"
             );
+            assert_eq!(
+                recovered.pending_count().await.unwrap(),
+                1,
+                "recovery did not leave exactly the later tail pending at {boundary}"
+            );
+            drop(recovered);
+        } else if boundary == "prepared" {
+            let recovered = RuntimeState::open(&repository, identity, digest)
+                .await
+                .unwrap();
             assert!(
-                recovered.pending_count().await.unwrap() > 0,
-                "later tail consumed by frozen recovery at {boundary}"
+                repository.read_publication_journal().unwrap().is_some(),
+                "journal missing before recovery at {boundary}"
+            );
+            RuntimePublicationCoordinator::recover(&repository, &recovered)
+                .await
+                .unwrap_or_else(|error| panic!("prepared recovery at {boundary}: {error:?}"));
+            assert!(
+                repository.read_publication_journal().unwrap().is_none(),
+                "journal left after prepared recovery"
+            );
+            assert_eq!(
+                head(&repository),
+                base.as_str(),
+                "recovery advanced the ref for an unpublished candidate at {boundary}"
+            );
+            assert_eq!(
+                recovered.pending_count().await.unwrap(),
+                2,
+                "recovery consumed the frozen range or tail at {boundary}"
             );
             drop(recovered);
         }
