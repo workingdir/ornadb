@@ -792,6 +792,47 @@ fn devtools_lists_exactly_the_admitted_table_names() {
     );
 }
 
+/// Gate G / ORNA-APP-003: with no stylesheet, the served page's native input and
+/// Run button still submit. The form is read from the served markup and posted
+/// the way a browser posts it: the button's `formaction` is the target, and the
+/// input's `name` is the one urlencoded field.
+#[test]
+// Specified: Gate G / ORNA-APP-003; native semantic controls remain usable without a stylesheet.
+fn native_controls_submit_the_served_page_without_a_stylesheet() {
+    let snapshot = standard_snapshot();
+    let project = devtools_project(snapshot.path());
+    let (_server, address) = start(project.path());
+    let origin = format!("http://{address}");
+
+    let page = get(&address, "/").expect("read the devtools page");
+    assert_eq!(page.status, 200, "{}", page.body);
+    for marker in ["stylesheet", "<style", "<link"] {
+        assert!(
+            !page.body.contains(marker),
+            "the served page depends on no stylesheet, found {marker}\n{}",
+            page.body
+        );
+    }
+    assert!(
+        page.body.contains("<form method=\"post\">"),
+        "the page is one POST form\n{}",
+        page.body
+    );
+
+    let input = between(&page.body, "<input", ">").expect("the page carries an input");
+    let field = between(input, "name=\"", "\"").expect("the input posts under a name");
+    let action =
+        between(&page.body, "formaction=\"", "\"").expect("the Run button names its action");
+
+    let submitted = post_form(&address, action, Some(&origin), &format!("{field}=1+%2B+1"));
+    assert_eq!(submitted.status, 200, "{}", submitted.body);
+    assert!(
+        submitted.body.contains("<pre><code>2 : Int</code></pre>"),
+        "the native submit evaluates the input\n{}",
+        submitted.body
+    );
+}
+
 /// A project whose admitted module binds `page`, and whose served page shows
 /// that binding.
 fn shadow_project(snapshot: &Path) -> tempfile::TempDir {

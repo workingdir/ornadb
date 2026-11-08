@@ -597,8 +597,8 @@ limitations = ["The UI leg is not part of G6: served std.ui controls submit no m
 gate = "G"
 id = "G7"
 title = "CSS removal leaves usable native controls"
-select = [{ record = "workspace-cli", package = "orna-cli", target = "bin:orna", test = "renders_text_field_button_and_input_as_native_controls" }]
-limitations = ["The test checks rendered markup only; no served page loses its stylesheet (ornadb-5il1.497)."]
+select = [{ record = "workspace-cli", package = "orna-cli", target = "bin:orna", test = "renders_text_field_button_and_input_as_native_controls" }, { record = "workspace-cli", package = "orna-cli", target = "test:devtools_app", test = "native_controls_submit_the_served_page_without_a_stylesheet" }]
+limitations = ["The served page never links a stylesheet, so the removal is checked as an absence in a real `orna serve` process rather than by deleting a link. The submit is a plain HTTP POST built from the served form's action and input name; no browser engine executes the click, so the button's native activation is not exercised (ornadb-5il1.497)."]
 
 [[item]]
 gate = "G"
