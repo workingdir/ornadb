@@ -573,8 +573,11 @@ select = [
   { record = "workspace-cli", package = "orna-cli", target = "test:served_image_media", test = "served_page_reads_a_blob_table_and_a_plain_table_in_one_evaluation" },
   { record = "workspace-cli", package = "orna-cli", target = "test:serve_table_reads", test = "committed_blob_rows_are_served_as_contextual_values" },
   { record = "workspace-cli", package = "orna-cli", target = "test:serve_table_reads", test = "uncommitted_blob_row_is_refused_without_a_value" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:served_image_media", test = "served_audio_node_plays_committed_bytes_with_range_and_head" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:served_image_media", test = "served_download_node_links_a_committed_blob_as_an_attachment" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:served_image_media", test = "served_page_serves_two_blob_tables_each_by_its_own_descriptor" },
 ]
-limitations = ["Proves an image over a committed Blob is served as a page node whose source is the committed /media/ route, that the route answers the stored bytes, and that a plain table and a Blob table read in one evaluation. Audio playback, the download node and HEAD and range requests on the media route are not proven through the pinned route (ornadb-5il1.495.1.1)."]
+limitations = ["Proves an image, an audio node and a download node over committed Blobs are served as page nodes whose sources name the committed /media/ route. The route answers the stored bytes, a byte range with 206, and HEAD with the same headers and no body. A payload that is not inline-renderable is an attachment with nosniff and a sandbox. One page reads two Blob tables, and each source is served by its own descriptor. Not proven: browser playback of the audio element and a click on the download link, since no browser runs in these tests; two Blob columns inside one table (ornadb-5il1.495.1.1)."]
 
 [[item]]
 gate = "G"
