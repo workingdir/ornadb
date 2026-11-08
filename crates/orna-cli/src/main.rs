@@ -192,13 +192,13 @@ impl Diagnostic {
     }
     fn target_with_detail(
         code: &'static str,
-        title: &'static str,
+        title: impl Into<Cow<'static, str>>,
         help: &'static str,
         detail: impl Into<String>,
     ) -> Self {
         Self {
             code,
-            title: Cow::Borrowed(title),
+            title: title.into(),
             help,
             exit: Exit::Target,
             detail: Some(detail.into()),

@@ -351,16 +351,35 @@ pub(super) fn run_mount_cwd(endpoint: &Endpoint, mountpoint: &Path) -> Result<()
 
 #[cfg(target_os = "linux")]
 fn edit_refusal(error: crate::fuse_mount::EditError) -> Diagnostic {
+    use crate::fuse_mount::EditError;
+    // The retained draft is the recovery handle, so its location is part of the title that default
+    // output prints; the technical cause stays in the detail shown under --debug (ORNA-UX-004).
     match error {
-        crate::fuse_mount::EditError::Stale(detail) => Diagnostic::target_with_detail(
+        EditError::Stale { message, draft } => Diagnostic::target_with_detail(
             "E2000",
-            "Edit is stale against the mounted baseline",
+            format!(
+                "Edit is stale against the mounted baseline; draft retained at {}",
+                draft.display()
+            ),
             "run mount DIR --cwd to read the current row, then reapply the retained draft",
-            detail,
+            message,
         ),
-        crate::fuse_mount::EditError::Failed(detail) => {
-            mount_error("Edit was not accepted", detail)
-        }
+        EditError::Failed {
+            message,
+            draft: Some(draft),
+        } => Diagnostic::target_with_detail(
+            "E2000",
+            format!(
+                "Edit was not accepted; draft retained at {}",
+                draft.display()
+            ),
+            "correct the retained draft, then run orna edit --row again",
+            message,
+        ),
+        EditError::Failed {
+            message,
+            draft: None,
+        } => mount_error("Edit was not accepted", message),
     }
 }
 
@@ -458,10 +477,13 @@ fn settle_owner_reply(
         Err(error) => error,
     };
     if error == rustix::io::Errno::STALE {
-        return Err(edit_refusal(crate::fuse_mount::EditError::Stale(format!(
-            "the mounted baseline is stale against the durable row; nothing was written; draft retained at {}",
-            draft.display()
-        ))));
+        return Err(edit_refusal(crate::fuse_mount::EditError::Stale {
+            message: format!(
+                "the mounted baseline is stale against the durable row; nothing was written; draft retained at {}",
+                draft.display()
+            ),
+            draft: draft.to_path_buf(),
+        }));
     }
     let definite_refusal = [
         rustix::io::Errno::BUSY,
@@ -471,20 +493,23 @@ fn settle_owner_reply(
     ]
     .contains(&error);
     if definite_refusal {
-        return Err(mount_error(
-            "Edit was not accepted",
-            format!(
+        return Err(edit_refusal(crate::fuse_mount::EditError::Failed {
+            message: format!(
                 "mounted workspace refused the edit ({error}); draft retained at {}",
                 draft.display()
             ),
-        ));
+            draft: Some(draft.to_path_buf()),
+        }));
     }
     if !draft.exists() {
         return Ok(());
     }
     Err(Diagnostic::target_with_detail(
         "E2010",
-        "Edit outcome is unknown",
+        format!(
+            "Edit outcome is unknown; draft retained at {}",
+            draft.display()
+        ),
         "run `orna status` to inspect the durable row before retrying the retained draft",
         format!(
             "the mount connection ended before the owner replied ({error}); the draft at {} is still present, so the edit may or may not have been accepted",
