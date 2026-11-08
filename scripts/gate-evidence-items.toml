@@ -101,7 +101,7 @@ select = [
   { record = "workspace-evaluator", package = "orna-evaluator", target = "test:evaluator_ovb2_boundary" },
 ]
 limitations = [
-  "Runtime and export report different rejection codes for the same value (ornadb-5il1.98, ornadb-5il1.100).",
+  "Live wire rejects OVB-2/ROV-3/SOV-3 tags as wire.invalid_message while runtime, export and reflection report sys.codec.unsupported_value_profile; the spec's closed wire.* set (30-protocol.md) and the 'wire context' wording (34-system-reference.md) conflict, pending spec owner (ornadb-5il1.420).",
 ]
 
 [[item]]
