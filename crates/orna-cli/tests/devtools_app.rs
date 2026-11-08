@@ -18,6 +18,14 @@ use std::{
 
 const BINARY: &str = env!("CARGO_BIN_EXE_orna");
 const DEVTOOLS_SOURCE: &str = include_str!("fixtures/devtools/serve.orna");
+const NOTES_SOURCE: &str = r#"use std.ui.{Button, Cols, Table, Text};
+
+pub fn serve(): UI = Cols([
+    Text("Notes"),
+    Table(Note | filter(note => true)),
+    Button("Refresh", std.ui.action("notes.refresh", as: Text))
+]);
+"#;
 const STANDARD_ROOT: &str = include_str!("fixtures/devtools/standard-root.orna");
 const STANDARD_UI: &str = include_str!("../../../stdlib/std/ui.orna");
 
@@ -355,13 +363,20 @@ fn run_action_refuses_a_body_over_its_limit_before_reading_it() {
     assert_eq!(reply.body, r#"{"error":"payload_too_large"}"#);
 }
 
-/// A Run of 1,000 `heavy(60)` terms: each is 60 nested `quad(50)` calls, each
-/// of which is four `spin(50)` calls, under the call-depth limit. The list
-/// literal keeps the parse shallow and the query stays under the body limit
-/// (a 4,000-term query is refused with 413 before it runs). The page request
-/// below is sent 100 ms after the Run starts; the Run is sized to keep
-/// evaluating well past that point, with margin for a slow CI runner.
-const SPIN_DECLARATION: &str = "pub fn spin(n: Int): Int = if n == 0 { 0 } else { 1 + spin(n - 1) };\npub fn quad(n: Int): Int = spin(n) + spin(n) + spin(n) + spin(n);\npub fn heavy(n: Int): Int = if n == 0 { 0 } else { quad(50) + heavy(n - 1) };\n";
+/// Declarations for the long Run. Each `tree(6, i)` term is 64 `spin(40, tag)`
+/// leaves whose tags are unique to that term, so the activation memo cannot
+/// collapse the work across terms: every term costs real evaluation. One term
+/// is about 1.8 s in a debug build; the step budget (`DEFAULT_STEPS`) admits
+/// eight terms and refuses sixteen, so the Run below uses four.
+const SPIN_DECLARATION: &str = "pub fn spin(n: Int, tag: Int): Int = if n == 0 { 0 } else { 1 + spin(n - 1, tag) };\npub fn tree(depth: Int, tag: Int): Int = if depth == 0 { spin(40, tag) } else { tree(depth - 1, tag * 2) + tree(depth - 1, tag * 2 + 1) };\n";
+
+/// A Run body of `terms` distinct `tree(6, i)` terms.
+fn spin_run_body(terms: usize) -> String {
+    let terms: Vec<String> = (1..=terms)
+        .map(|index| format!("main.tree(6, {index})"))
+        .collect();
+    format!("query=[{}, 0]", terms.join(", "))
+}
 
 #[test]
 // Specified: Gate G / DESIGN S5a; the page answers while a Run is still evaluating.
@@ -370,23 +385,63 @@ fn get_root_answers_while_a_long_run_evaluates() {
     let project = devtools_project_declaring(snapshot.path(), SPIN_DECLARATION);
     let (_server, address) = start(project.path());
     let origin = format!("http://{address}");
-    let query = format!("[{}0]", "main.heavy(60), ".repeat(1_000));
-    let body = format!("query={query}");
 
+    // Calibration: one term sets the unit of work on this machine.
+    let probe_started = Instant::now();
+    let probe = post_form(
+        &address,
+        "/action/devtools.run",
+        Some(&origin),
+        &spin_run_body(1),
+    );
+    let unit = probe_started.elapsed();
+    assert_eq!(probe.status, 200, "{}", probe.body);
+
+    let run_started = Instant::now();
     let run = thread::spawn({
         let address = address.clone();
-        move || post_form(&address, "/action/devtools.run", Some(&origin), &body)
+        let origin = origin.clone();
+        move || {
+            let reply = post_form(
+                &address,
+                "/action/devtools.run",
+                Some(&origin),
+                &spin_run_body(4),
+            );
+            (reply, Instant::now())
+        }
     });
-    thread::sleep(Duration::from_millis(100));
-    let page = get(&address, "/").expect("read the page during the run");
-    assert_eq!(page.status, 200, "{}", page.body);
-    assert!(
-        !run.is_finished(),
-        "the page must answer while the Run is still evaluating"
-    );
-    let reply = run.join().expect("the Run thread");
+
+    // Latencies of GETs that complete while the Run has not yet finished.
+    let mut in_flight = Vec::new();
+    while !run.is_finished() {
+        let began = Instant::now();
+        let page = get(&address, "/").expect("read the page during the run");
+        let latency = began.elapsed();
+        assert_eq!(page.status, 200, "{}", page.body);
+        if !run.is_finished() {
+            in_flight.push(latency);
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let (reply, finished) = run.join().expect("the Run thread");
+    let run_elapsed = finished.duration_since(run_started);
     assert_eq!(reply.status, 200, "{}", reply.body);
     assert!(reply.body.contains("Array"), "{}", reply.body);
+
+    assert!(
+        run_elapsed >= unit * 3,
+        "the Run ({run_elapsed:?}) must last at least three probe terms ({unit:?})"
+    );
+    assert!(
+        !in_flight.is_empty(),
+        "the page must answer while the Run is still evaluating"
+    );
+    let slowest = in_flight.iter().max().expect("an in-flight GET");
+    assert!(
+        *slowest < run_elapsed / 4,
+        "an in-flight GET took {slowest:?} against a Run of {run_elapsed:?}"
+    );
 }
 
 #[test]
@@ -550,6 +605,39 @@ fn project_with_source(snapshot: &Path, source: &str) -> tempfile::TempDir {
 /// devtools page.
 fn devtools_project(snapshot: &Path) -> tempfile::TempDir {
     devtools_project_declaring(snapshot, "pub table Note(id: Int) {\n    body: Str,\n}\n")
+}
+
+/// Creates a project that pins `snapshot`, declares `Note`, and serves its
+/// rows as a table.
+fn notes_project(snapshot: &Path) -> tempfile::TempDir {
+    project_with_source(
+        snapshot,
+        &format!("pub table Note(id: Int) {{\n    body: Str,\n}}\n\n{NOTES_SOURCE}"),
+    )
+}
+
+/// Inserts through the product REPL of the project at `project`, as a
+/// developer does, and asserts the REPL accepted the input.
+fn repl_insert(project: &Path, input: &str) {
+    let mut child = Command::new(BINARY)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args(["--db", project.to_str().expect("UTF-8 path"), "repl"])
+        .current_dir(project)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start the REPL");
+    child
+        .stdin
+        .take()
+        .expect("REPL stdin")
+        .write_all(format!("{input}\n:quit\n").as_bytes())
+        .expect("write REPL input");
+    let output = child.wait_with_output().expect("the REPL exits");
+    let transcript = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{transcript}");
+    assert!(!transcript.contains("error["), "{transcript}");
 }
 
 fn free_port() -> u16 {
@@ -742,5 +830,49 @@ fn native_controls_submit_the_served_page_without_a_stylesheet() {
         submitted.body.contains("<pre><code>2 : Int</code></pre>"),
         "the native submit evaluates the input\n{}",
         submitted.body
+    );
+}
+
+#[test]
+// Specified: Gate G3 / implementation/ACCEPTANCE.md Gate G; a page request after
+// a REPL insert shows the new row, and the pre-change page did not. The served
+// process holds the runtime owner lock (ORNA-APP-011), so the REPL write runs
+// only once the served process has stopped; the post-change request is served
+// by a fresh process that overlays the working-directory rows on committed HEAD.
+fn explicit_refresh_shows_a_row_inserted_through_the_repl() {
+    let snapshot = standard_snapshot();
+    let project = notes_project(snapshot.path());
+    let (server, address) = start(project.path());
+
+    let before = get(&address, "/").expect("read the page before the change");
+    assert_eq!(before.status, 200);
+    assert!(
+        before.body.contains("<table"),
+        "the page lists rows\n{}",
+        before.body
+    );
+    assert!(
+        !before.body.contains("<td>first</td>"),
+        "the pre-change page holds no row\n{}",
+        before.body
+    );
+    drop(server);
+
+    repl_insert(
+        project.path(),
+        r#"main.Note.insert({ id: 1, body: "first" })"#,
+    );
+
+    let (_server, address) = start(project.path());
+    let refreshed = get(&address, "/").expect("request the page after the change");
+    assert_eq!(refreshed.status, 200);
+    assert!(
+        refreshed.body.contains("<td>first</td>"),
+        "the refreshed page shows the inserted row\n{}",
+        refreshed.body
+    );
+    assert_ne!(
+        refreshed.body, before.body,
+        "the refresh reflects the change"
     );
 }
