@@ -1781,6 +1781,12 @@ impl<S> TemporarySave<S> {
         self.state.lock().await.draft.candidate_bytes().await
     }
 
+    /// A streaming view of the candidate for the replay fallback that retains it.
+    /// No candidate bytes are copied; see [`EditDraft::candidate_snapshot`].
+    pub async fn candidate_snapshot(&self) -> Result<CandidateSnapshot, EditDraftError> {
+        self.state.lock().await.draft.candidate_snapshot().await
+    }
+
     /// The candidate's length in bytes.
     pub async fn candidate_len(&self) -> u64 {
         self.state.lock().await.draft.candidate_len().await
@@ -2041,6 +2047,13 @@ impl<S> EditDraft<S> {
     pub async fn candidate_bytes(&self) -> Result<Arc<[u8]>, EditDraftError> {
         let state = self.state.lock().await;
         state.candidate_arc()
+    }
+
+    /// A streaming view of the candidate that may be retained past the commit. A
+    /// spool is shared through a duplicate handle, so no candidate bytes are copied.
+    pub async fn candidate_snapshot(&self) -> Result<CandidateSnapshot, EditDraftError> {
+        let state = self.state.lock().await;
+        state.candidate_snapshot()
     }
 
     /// The candidate's length in bytes.
@@ -4005,7 +4018,7 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
         faults: &dyn FaultInjector,
     ) -> Result<TemporaryRenameOutcome<S>, VfsSaveError<TableActivationError>>
     where
-        A: FnOnce(VfsSaveCoordinates, Arc<[u8]>) -> AFut,
+        A: FnOnce(VfsSaveCoordinates, CandidateSnapshot) -> AFut,
         AFut: Future<Output = Result<VfsSaveCandidate, TableActivationError>>,
     {
         self.commit_durable_temporary_save(
@@ -4013,9 +4026,6 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
             runtime,
             save,
             move |coordinates, bytes| async move {
-                let bytes = bytes
-                    .to_arc()
-                    .map_err(|_| VfsSaveAdmissionError::Backing(EditDraftError::BackingIo))?;
                 admit(coordinates, bytes)
                     .await
                     .map_err(VfsSaveAdmissionError::Activation)
@@ -6115,17 +6125,23 @@ mod tests {
             .with_expected_baseline_row(None);
         let identity_for_admit = identity.clone();
         let accepted_for_validation = accepted_for_admit.clone();
+        let admitted_from_spool = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let admitted_from_spool_output = Arc::clone(&admitted_from_spool);
         let applied = target
             .commit_durable_temporary_rename(
                 &scratch,
                 &state,
                 save,
                 move |coordinates, bytes| async move {
+                    admitted_from_spool_output.store(
+                        matches!(bytes.source, CandidateSource::Spool(_)),
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
                     let replacement = VfsTableRowReplacement::new(
                         [7; 16],
                         identity_for_admit.clone(),
                         coordinates.key().to_vec(),
-                        Some(bytes.to_vec()),
+                        Some(bytes.to_arc().unwrap().to_vec()),
                     )
                     .map_err(TableActivationError::Runtime)?;
                     Ok(VfsSaveCandidate::new(
@@ -6147,6 +6163,10 @@ mod tests {
             applied,
             TemporaryRenameOutcome::Applied { generation: 1, .. }
         ));
+        assert!(
+            admitted_from_spool.load(std::sync::atomic::Ordering::SeqCst),
+            "the admission callback must receive the spool-backed candidate, not a RAM copy"
+        );
         assert_eq!(state.pending().await.unwrap().len(), 1);
         let replay = target
             .commit_durable_temporary_rename(
@@ -6187,7 +6207,7 @@ mod tests {
                         [12; 16],
                         identical_identity.clone(),
                         coordinates.key().to_vec(),
-                        Some(bytes.to_vec()),
+                        Some(bytes.to_arc().unwrap().to_vec()),
                     )
                     .map_err(TableActivationError::Runtime)?;
                     Ok(VfsSaveCandidate::new(
@@ -6229,7 +6249,7 @@ mod tests {
                         [8; 16],
                         stale_identity.clone(),
                         coordinates.key().to_vec(),
-                        Some(bytes.to_vec()),
+                        Some(bytes.to_arc().unwrap().to_vec()),
                     )
                     .map_err(TableActivationError::Runtime)?;
                     Ok(VfsSaveCandidate::new(
@@ -6269,7 +6289,7 @@ mod tests {
                         [9; 16],
                         retry_identity.clone(),
                         coordinates.key().to_vec(),
-                        Some(bytes.to_vec()),
+                        Some(bytes.to_arc().unwrap().to_vec()),
                     )
                     .map_err(TableActivationError::Runtime)?;
                     Ok(VfsSaveCandidate::new(
