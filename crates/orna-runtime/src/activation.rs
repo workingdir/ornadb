@@ -399,3 +399,20 @@ where
     .map_err(ActivationError::Runtime)?;
     Ok(result)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::ActivationWork;
+    use crate::ActivationEffectReport;
+
+    #[test]
+    fn third_party_work_defaults_to_external_possible() {
+        // ORNA-CAP-005: work that never passes through `EffectGate::admit` must
+        // not present the controlled marker, so its rollback stays uncertain.
+        let work = ActivationWork::new(Vec::new(), [0; 32], ());
+        assert!(matches!(
+            work.effects,
+            ActivationEffectReport::ExternalPossible
+        ));
+    }
+}

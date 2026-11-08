@@ -3856,10 +3856,12 @@ fn source_error_location(source: &str) -> (u64, u64) {
 }
 
 impl LiveApplication for ApplicationLiveAdapter {
-    // This adapter's effect reports come from `EffectGate::admit`, which reads the
-    // evaluator's own sys-host bindings (REQUEST-1 step 5), so they are trusted.
+    // The sync Eval handler carries no sys-host attachment, so its report is
+    // `ControlledOnly` whatever the authority binds. That is only true when the
+    // authority binds no sys host; a bound host can reach state the handler does
+    // not observe, so its reports are downgraded at the commit boundary.
     fn trusts_controlled_effect_reports(&self) -> bool {
-        true
+        self.authority.sys_host.is_none()
     }
 
     fn eval(

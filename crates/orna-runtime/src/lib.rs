@@ -2760,7 +2760,7 @@ pub struct RuntimeActivationContext {
 /// keeps struct literals outside this module impossible, and no public
 /// constructor exists; [`EffectGate::admit`] is the only minter.
 ///
-/// ```compile_fail
+/// ```compile_fail,E0603
 /// // Outside the gate the marker cannot be minted: the field is private.
 /// let _ = orna_runtime::ControlledEffectToken(());
 /// ```
