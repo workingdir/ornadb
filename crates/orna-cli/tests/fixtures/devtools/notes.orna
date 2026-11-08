@@ -1,0 +1,7 @@
+use std.ui.{Button, Cols, Table, Text};
+
+pub fn serve(): UI = Cols([
+    Text("Notes"),
+    Table(Note | filter(note => true)),
+    Button("Refresh", std.ui.action("notes.refresh", as: Text))
+]);

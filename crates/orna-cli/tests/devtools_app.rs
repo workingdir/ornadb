@@ -18,6 +18,7 @@ use std::{
 
 const BINARY: &str = env!("CARGO_BIN_EXE_orna");
 const DEVTOOLS_SOURCE: &str = include_str!("fixtures/devtools/serve.orna");
+const NOTES_SOURCE: &str = include_str!("fixtures/devtools/notes.orna");
 const STANDARD_ROOT: &str = include_str!("fixtures/devtools/standard-root.orna");
 const STANDARD_UI: &str = include_str!("../../../stdlib/std/ui.orna");
 
@@ -552,6 +553,39 @@ fn devtools_project(snapshot: &Path) -> tempfile::TempDir {
     devtools_project_declaring(snapshot, "pub table Note(id: Int) {\n    body: Str,\n}\n")
 }
 
+/// Creates a project that pins `snapshot`, declares `Note`, and serves its
+/// rows as a table.
+fn notes_project(snapshot: &Path) -> tempfile::TempDir {
+    project_with_source(
+        snapshot,
+        &format!("pub table Note(id: Int) {{\n    body: Str,\n}}\n\n{NOTES_SOURCE}"),
+    )
+}
+
+/// Inserts through the product REPL of the project at `project`, as a
+/// developer does, and asserts the REPL accepted the input.
+fn repl_insert(project: &Path, input: &str) {
+    let mut child = Command::new(BINARY)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args(["--db", project.to_str().expect("UTF-8 path"), "repl"])
+        .current_dir(project)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start the REPL");
+    child
+        .stdin
+        .take()
+        .expect("REPL stdin")
+        .write_all(format!("{input}\n:quit\n").as_bytes())
+        .expect("write REPL input");
+    let output = child.wait_with_output().expect("the REPL exits");
+    let transcript = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{transcript}");
+    assert!(!transcript.contains("error["), "{transcript}");
+}
+
 fn free_port() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").expect("reserve loopback port");
     let port = listener.local_addr().unwrap().port();
@@ -701,5 +735,49 @@ fn devtools_lists_exactly_the_admitted_table_names() {
         ["Note", "Task"],
         "the list is the admitted catalogue, with no extra or missing table\n{}",
         reply.body
+    );
+}
+
+#[test]
+// Specified: Gate G3 / implementation/ACCEPTANCE.md Gate G; a page request after
+// a REPL insert shows the new row, and the pre-change page did not. The served
+// process holds the runtime owner lock (ORNA-APP-011), so the REPL write runs
+// only once the served process has stopped; the post-change request is served
+// by a fresh process that overlays the working-directory rows on committed HEAD.
+fn explicit_refresh_shows_a_row_inserted_through_the_repl() {
+    let snapshot = standard_snapshot();
+    let project = notes_project(snapshot.path());
+    let (server, address) = start(project.path());
+
+    let before = get(&address, "/").expect("read the page before the change");
+    assert_eq!(before.status, 200);
+    assert!(
+        before.body.contains("<table"),
+        "the page lists rows\n{}",
+        before.body
+    );
+    assert!(
+        !before.body.contains("<td>first</td>"),
+        "the pre-change page holds no row\n{}",
+        before.body
+    );
+    drop(server);
+
+    repl_insert(
+        project.path(),
+        r#"main.Note.insert({ id: 1, body: "first" })"#,
+    );
+
+    let (_server, address) = start(project.path());
+    let refreshed = get(&address, "/").expect("request the page after the change");
+    assert_eq!(refreshed.status, 200);
+    assert!(
+        refreshed.body.contains("<td>first</td>"),
+        "the refreshed page shows the inserted row\n{}",
+        refreshed.body
+    );
+    assert_ne!(
+        refreshed.body, before.body,
+        "the refresh reflects the change"
     );
 }
