@@ -244,10 +244,11 @@ select = [
   { record = "workspace-rest", package = "orna-repository", target = "test:row_store_scale", test = "orp1_row_store_ten_rows" },
   { record = "workspace-rest", package = "orna-repository", target = "test:row_store_scale", test = "orp1_index_churn_multi_page" },
   { record = "gate-c-million-rows", package = "orna-repository", target = "test:row_store_scale", test = "orp1_row_store_one_million_rows" },
+  { record = "workspace-rest", package = "orna-repository", target = "test:overflow_text_row_publication", test = "overflow_text_rows_publish_and_read_back_through_production_writer" },
 ]
 counters = ["^ORP-1 index_churn "]
 limitations = [
-  "The large row is a 7.7 KB inline row. The harness measures an overflowing row on the write side only: a maintenance pass rewrites the graph it was handed, so reading the new root back needs the relation record pointed at the successor root, which this harness does not do. The read path itself is covered elsewhere: large_row_publish_e2e::a_row_over_8_kib_publishes_through_the_overflow_graph queries the published row by key and by diff, and format_context::pinned_orp_loader_issues_lazy_snapshot_and_reads_verified_overflow_by_point_and_range reads a verified overflow row by point and by range without fetching payload bytes.",
+  "The large row in the ORP-1 fixture is a 7.7 KB inline row. The harness measures an overflowing row on the write side only: a maintenance pass rewrites the graph it was handed, so reading the new root back needs the relation record pointed at the successor root, which this harness does not do. The production writer's overflow path is covered end to end by overflow_text_row_publication::overflow_text_rows_publish_and_read_back_through_production_writer, which publishes a tuple-overflow row, a child-overflow row and an inline row through RuntimePublicationCoordinator and reads each back by key and by range. The read path is also covered by large_row_publish_e2e::a_row_over_8_kib_publishes_through_the_overflow_graph and format_context::pinned_orp_loader_issues_lazy_snapshot_and_reads_verified_overflow_by_point_and_range, which reads a verified overflow row by point and by range without fetching payload bytes.",
 ]
 
 [[item]]
