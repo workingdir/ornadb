@@ -1449,6 +1449,7 @@ fn blob_read_failure(error: ValueError) -> EvaluationError {
         ValueError::ContentCollision => "sys.blob.collision",
         ValueError::InvalidRange => "sys.blob.bounds",
         ValueError::Limit | ValueError::QuotaExceeded => "sys.blob.limit",
+        ValueError::InvalidProfile => "sys.codec.unsupported_value_profile",
         ValueError::Truncated
         | ValueError::TrailingBytes
         | ValueError::Unsupported
@@ -1466,7 +1467,6 @@ fn blob_read_failure(error: ValueError) -> EvaluationError {
         | ValueError::InvalidMediaType
         | ValueError::InvalidSuffix
         | ValueError::IncompatibleSuffix
-        | ValueError::InvalidProfile
         | ValueError::InvalidOid
         | ValueError::ContentDigestMismatch
         | ValueError::RoleMismatch { .. }
@@ -1587,6 +1587,16 @@ fn redacted_error(code: &'static str) -> EvaluationError {
 mod tests {
     use super::*;
     use orna_value::Blob;
+
+    #[test]
+    fn blob_read_and_annotate_report_the_same_profile_code() {
+        // The export refusal (`ValueError::InvalidProfile`) must surface as the
+        // declared sys code on every Blob path, not as `sys.blob.corrupt`.
+        let read = blob_read_failure(ValueError::InvalidProfile);
+        let annotate = blob_value_failure(ValueError::InvalidProfile);
+        assert_eq!(read.code(), "sys.codec.unsupported_value_profile");
+        assert_eq!(annotate.as_str(), "sys.codec.unsupported_value_profile");
+    }
 
     #[test]
     fn every_generated_host_operation_reaches_its_native_dispatch_arm() {
