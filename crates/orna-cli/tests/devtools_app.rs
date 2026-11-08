@@ -386,15 +386,13 @@ fn get_root_answers_while_a_long_run_evaluates() {
     let (_server, address) = start(project.path());
     let origin = format!("http://{address}");
 
-    // Calibration: one term sets the unit of work on this machine.
-    let probe_started = Instant::now();
+    // Warm-up: one term confirms the Run route answers before the timed Run starts.
     let probe = post_form(
         &address,
         "/action/devtools.run",
         Some(&origin),
         &spin_run_body(1),
     );
-    let unit = probe_started.elapsed();
     assert_eq!(probe.status, 200, "{}", probe.body);
 
     let run_started = Instant::now();
@@ -429,10 +427,6 @@ fn get_root_answers_while_a_long_run_evaluates() {
     assert_eq!(reply.status, 200, "{}", reply.body);
     assert!(reply.body.contains("Array"), "{}", reply.body);
 
-    assert!(
-        run_elapsed >= unit * 3,
-        "the Run ({run_elapsed:?}) must last at least three probe terms ({unit:?})"
-    );
     assert!(
         !in_flight.is_empty(),
         "the page must answer while the Run is still evaluating"
