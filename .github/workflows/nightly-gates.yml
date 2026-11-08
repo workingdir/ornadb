@@ -190,6 +190,45 @@ jobs:
           path: ${{ runner.temp }}/gate-evidence
           if-no-files-found: error
 
+  gate-h-browser-wasm:
+    needs: revision
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Check out the tested revision
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.revision.outputs.sha }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Install Rust with the Wasm target
+        uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Check Node.js is available
+        run: node --version
+
+      # The same ignored test browser-profile-wasm-parity.yml runs on push and
+      # pull requests. The recorder requires it listed and reported as passing.
+      - name: Run the browser-profile Wasm parity test
+        run: >-
+          python3 scripts/gate_evidence.py run
+          --record gate-h-browser-wasm
+          --title "Gate H: browser-profile Wasm output matches native canonical output"
+          --out "$RUNNER_TEMP/gate-evidence"
+          --timeout-minutes 100
+          -- cargo test --locked --no-fail-fast -p orna-application --test browser_profile_wasm_parity -- --ignored --exact browser_profile_wasm_matches_native_canonical_output
+
+      - name: Upload the evidence record and log
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: evidence-gate-h-browser-wasm
+          path: ${{ runner.temp }}/gate-evidence
+          if-no-files-found: error
+
   claims:
     needs: revision
     runs-on: ubuntu-latest
@@ -279,7 +318,7 @@ jobs:
           if-no-files-found: error
 
   evidence:
-    needs: [revision, workspace, gate-d-crash-matrix, claims, gate-c-million]
+    needs: [revision, workspace, gate-d-crash-matrix, claims, gate-c-million, gate-h-browser-wasm]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
