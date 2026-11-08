@@ -18,7 +18,14 @@ use std::{
 
 const BINARY: &str = env!("CARGO_BIN_EXE_orna");
 const DEVTOOLS_SOURCE: &str = include_str!("fixtures/devtools/serve.orna");
-const NOTES_SOURCE: &str = include_str!("fixtures/devtools/notes.orna");
+const NOTES_SOURCE: &str = r#"use std.ui.{Button, Cols, Table, Text};
+
+pub fn serve(): UI = Cols([
+    Text("Notes"),
+    Table(Note | filter(note => true)),
+    Button("Refresh", std.ui.action("notes.refresh", as: Text))
+]);
+"#;
 const STANDARD_ROOT: &str = include_str!("fixtures/devtools/standard-root.orna");
 const STANDARD_UI: &str = include_str!("../../../stdlib/std/ui.orna");
 
