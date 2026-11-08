@@ -303,9 +303,7 @@ pub fn evaluate_contextual_page_read(
     )
     .map_err(|error| ApplicationError::Evaluation(error.code().to_owned()))?;
     if !handler.mutations.is_empty() {
-        return Err(ApplicationError::Runtime(
-            "a contextual read staged a mutation".into(),
-        ));
+        return Err(ApplicationError::ReadStagedMutation);
     }
     Ok(value)
 }
@@ -584,6 +582,48 @@ mod tests {
             BTreeMap::from([("Note".to_owned(), Vec::new())]),
         );
         assert!(matches!(result, Err(ApplicationError::Runtime(_))));
+    }
+
+    /// A contextual page read never returns a value for a body that writes a
+    /// plain table. The same source stages a real mutation on the canonical
+    /// path, so the refusal is not vacuous. `SourceMutationEffectHandler`
+    /// declines every effect on the context dispatch (`handle_context` returns
+    /// `None`), so the insert is refused as an unhandled evaluation error before
+    /// any mutation is staged. The `ReadStagedMutation` guard in
+    /// `evaluate_contextual_page_read` is therefore unreachable through this
+    /// entry point; it is kept as defence in depth and is a documented
+    /// non-kill for mutation testing.
+    #[test]
+    fn contextual_read_of_a_plain_table_write_returns_no_value() {
+        const STAGED_WRITE_SOURCE: &str = "pub table Note(id: Int) { text: Str, }\n\nfn main() {\n    Note.insert({ id: 7, text: \"written\" })\n}\n";
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let admitted = authority
+            .admit_module("main.orna", STAGED_WRITE_SOURCE, "main")
+            .expect("module admitted");
+        let canonical = authority
+            .evaluate_staged_over_table_rows(
+                &admitted,
+                &Environment::new(),
+                RuntimeTableRows::from([("Note".to_owned(), Vec::new())]),
+                None,
+                None,
+            )
+            .expect("the canonical path stages the write");
+        assert!(
+            !canonical.mutations().is_empty(),
+            "the source must really stage a mutation"
+        );
+        let result = evaluate_contextual_page_read(
+            &admitted,
+            &BTreeMap::new(),
+            RuntimeTableRows::from([("Note".to_owned(), Vec::new())]),
+            BTreeMap::new(),
+        );
+        assert!(
+            matches!(result, Err(ApplicationError::Evaluation(_))),
+            "a contextual read of a write is declined by the context dispatch"
+        );
     }
 
     #[test]
