@@ -591,14 +591,14 @@ gate = "G"
 id = "G6"
 title = "An invalid mutation stays invalid from REPL, edit and mount"
 select = [{ record = "workspace-cli", package = "orna-cli", target = "test:invalid_mutation_parity", test = "invalid_table_assertion_is_refused_identically_from_repl_edit_and_mount" }, { record = "workspace-cli", package = "orna-cli", target = "test:devtools_app", test = "run_action_refuses_an_invalid_table_mutation_without_writing" }]
-limitations = ["The UI leg refuses the mutation (invalid stays invalid) with a different diagnostic identity: the served console answers ORNA-REPL-EFFECT, not the ORNA-A091-009 the REPL and edit legs give, and the served page and stored rows are unchanged; the writable serve path is not implemented (ornadb-rheqi). The mount leg proves only EINVAL and unchanged row bytes, since the mount channel carries no diagnostic code. Untested mappings: the three rename-over temporary-save rejections in fuse_mount.rs, and the REPL external-binding refusal in main.rs (table_activation_cause, reached only when an external binding dispatched); no test reaches either with a false assertion. Only the table-assertion class is exercised."]
+limitations = ["The UI leg refuses the mutation (invalid stays invalid) with a different diagnostic identity: the served console answers ORNA-REPL-EFFECT, not the ORNA-A091-009 the REPL and edit legs give, and the served page and stored rows are unchanged. The refusal is the `is_effectful` guard in `orna-evaluator` `admitted_repl.rs` `submit` (the console path through `AdmittedReplSession::submit`); the `orna-application` ORNA-REPL-EFFECT arm is the project `eval_with_transaction` path and is not the guard this test reaches. The writable serve path is not implemented (ornadb-rheqi). The mount leg proves only EINVAL and unchanged row bytes, since the mount channel carries no diagnostic code. Untested mappings: the three rename-over temporary-save rejections in fuse_mount.rs, and the REPL external-binding refusal in main.rs (table_activation_cause, reached only when an external binding dispatched); no test reaches either with a false assertion. Only the table-assertion class is exercised."]
 
 [[item]]
 gate = "G"
 id = "G7"
 title = "CSS removal leaves usable native controls"
-select = [{ record = "workspace-cli", package = "orna-cli", target = "bin:orna", test = "renders_text_field_button_and_input_as_native_controls" }]
-limitations = ["The test checks rendered markup only; no served page loses its stylesheet (ornadb-5il1.497)."]
+select = [{ record = "workspace-cli", package = "orna-cli", target = "bin:orna", test = "renders_text_field_button_and_input_as_native_controls" }, { record = "workspace-cli", package = "orna-cli", target = "test:devtools_app", test = "native_controls_submit_the_served_page_without_a_stylesheet" }]
+limitations = ["The served page never links a stylesheet, so the removal is checked as an absence in a real `orna serve` process rather than by deleting a link. The submit is a plain HTTP POST built from the served form's action and input name; no browser engine executes the click, so the button's native activation is not exercised (ornadb-5il1.497)."]
 
 [[item]]
 gate = "G"
