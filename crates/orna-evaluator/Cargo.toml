@@ -12,7 +12,7 @@ crate-type = ["rlib", "cdylib"]
 [features]
 default = ["project-repl", "system-host-bindings"]
 project-repl = ["dep:orna-project", "system-host-bindings"]
-system-host-bindings = ["dep:orna-sys", "dep:orna-repository"]
+system-host-bindings = ["dep:orna-sys", "dep:orna-repository", "dep:orna-runtime"]
 browser-wasm = ["getrandom/wasm_js", "dep:uuid", "uuid/js"]
 
 [dependencies]
@@ -29,6 +29,7 @@ stacker = "0.1.25"
 orna-foundation = { path = "../orna-foundation" }
 orna-project = { path = "../orna-project", optional = true }
 orna-repository = { path = "../orna-repository", optional = true }
+orna-runtime = { path = "../orna-runtime", optional = true }
 orna-standard-sources = { path = "../orna-standard-sources" }
 orna-semantic = { path = "../orna-semantic" }
 orna-sys = { path = "../orna-sys", optional = true }
