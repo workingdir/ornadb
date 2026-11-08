@@ -33,7 +33,7 @@ use orna_foundation::{
 use orna_project::{LoadedProject, ProjectLoader, ResolvedTableSchema, admit_format3_row};
 use orna_repository::Repository;
 use orna_runtime::{
-    ActivationEffectReport, CheckpointResetRequest, DeclaredEffectSet, FaultInjector, FaultPoint,
+    ActivationEffectReport, CheckpointResetRequest, EffectGate, FaultInjector, FaultPoint,
     ListStreamSource, NoFault, RequestIdentity, RequestStatus, RunObservationRegistration,
     RunningTableRequestContinuation, RuntimeError, RuntimeIdentity, RuntimePublicationMetadataRows,
     RuntimeState, StreamFailurePayload, StreamHandler, StreamHandlerResult, StreamItem,
@@ -2771,7 +2771,7 @@ impl DurableTransactionalEvaluator {
                 outcome: success_terminal.unwrap_or(request_terminal(&StageOutcome::Passed)?),
                 validator: &mut validator,
                 faults: &NoFault,
-                effects: declared_effect_report(self.sys_host.is_some()),
+                effects: declared_effect_report(self.sys_host.as_deref()),
             })
             .await
         {
@@ -2947,7 +2947,7 @@ impl DurableTransactionalEvaluator {
                 outcome: success_terminal,
                 validator: &mut validator,
                 faults,
-                effects: declared_effect_report(self.sys_host.is_some()),
+                effects: declared_effect_report(self.sys_host.as_deref()),
             })
             .await
         {
@@ -4165,7 +4165,7 @@ impl DurableTransactionalEvaluator {
                 outcome: terminal,
                 validator: &mut validator,
                 faults: &NoFault,
-                effects: declared_effect_report(self.sys_host.is_some()),
+                effects: declared_effect_report(self.sys_host.as_deref()),
             })
             .await
         {
@@ -7335,16 +7335,14 @@ fn is_standard_source(unit: &SourceUnit) -> bool {
     unit.source_id.starts_with("std/")
 }
 
-/// Declares the effect set of a semantic activation (REQUEST-1 step 5). A
-/// system host may reach effects outside the table transaction, so its
-/// presence declares them possible; otherwise the activation performs only
-/// Orna table writes.
-fn declared_effect_report(sys_host_attached: bool) -> ActivationEffectReport {
-    ActivationEffectReport::declare(if sys_host_attached {
-        DeclaredEffectSet::ExternalPossible
-    } else {
-        DeclaredEffectSet::None
-    })
+/// Declares the effect set of a semantic activation (REQUEST-1 step 5) through
+/// [`EffectGate::admit`]. A system host attachment may reach effects outside the
+/// table transaction, so the gate reports them possible; a detached activation
+/// performs only Orna table writes and receives the controlled marker.
+fn declared_effect_report(sys_host: Option<&SysHostAttachment>) -> ActivationEffectReport {
+    EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::bound(
+        sys_host, None,
+    ))
 }
 
 fn controlled_table_effects(summary: &EffectSummary) -> bool {
@@ -14929,4 +14927,43 @@ fn admit_recorded_rows(
         admitted.push(replacement.with_table_object_id(identity));
     }
     Ok(admitted)
+}
+
+#[cfg(test)]
+mod effect_report_tests {
+    use super::{
+        ActivationEffectReport, SysHostAttachment, SysHostContext, declared_effect_report,
+    };
+    use orna_sys::{RuntimeMode, StdSnapshotPin};
+
+    fn host_context() -> SysHostContext {
+        SysHostContext {
+            database_id: [1; 16],
+            repository_id: [2; 16],
+            runtime_id: [0x11; 16],
+            root: std::path::PathBuf::new(),
+            read_only: true,
+            mode: RuntimeMode::Run,
+            repository_layout_version: "layout-1".to_owned(),
+            storage_manifest_version: "store-3".to_owned(),
+            std_snapshot: StdSnapshotPin::Unpinned,
+        }
+    }
+
+    #[test]
+    fn attached_system_host_declares_external_effects() {
+        let attachment = SysHostAttachment::new(host_context());
+        assert!(matches!(
+            declared_effect_report(Some(&attachment)),
+            ActivationEffectReport::ExternalPossible
+        ));
+    }
+
+    #[test]
+    fn detached_activation_declares_controlled_effects() {
+        assert!(matches!(
+            declared_effect_report(None),
+            ActivationEffectReport::ControlledOnly(_)
+        ));
+    }
 }
