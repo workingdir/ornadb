@@ -176,8 +176,11 @@ impl VfsRepositoryCache {
     }
 
     /// As [`Self::in_runtime_root`], but every spool in this view is charged
-    /// to `quota`. The mount passes the production budget in the default
-    /// build; only the orna-cli `test-seams` feature substitutes a smaller one.
+    /// to `quota`. It is `pub` because the orna-cli mount (a separate crate)
+    /// builds its view from an already-constructed budget. The mount passes the
+    /// production budget in the default build; only the orna-cli `test-seams`
+    /// feature substitutes a smaller one. No other caller passes a non-default
+    /// budget.
     pub fn in_runtime_root_with_quota(root: &Path, quota: Arc<DraftQuota>) -> io::Result<Self> {
         Ok(Self {
             epoch: SharedCacheEpoch::default(),
