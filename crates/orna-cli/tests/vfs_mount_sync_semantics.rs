@@ -542,18 +542,43 @@ async fn close_flush_accepts_dirty_draft_once() {
     assert_view_contains(&fixture, "After close");
 }
 
-/// ORNA-VFS-007/009: a close flush whose acceptance is refused has its error
-/// ignored by the application. The durable row stays unchanged and the refused
-/// candidate is retained as a recoverable draft that holds the draft guard.
+/// Runs `dd` as an external writer on the mount file. dd opens it with `O_TRUNC`, writes the
+/// candidate, and closes it; a failed close(2) is reported on stderr as "closing output file" and
+/// makes dd exit 1, so dd's exit status observes the mount's close(2) result.
+fn dd_write(candidate: &std::path::Path, target: &std::path::Path) -> std::process::Output {
+    Command::new("dd")
+        .arg(format!("if={}", candidate.display()))
+        .arg(format!("of={}", target.display()))
+        .arg("status=none")
+        .env("LC_ALL", "C")
+        .output()
+        .expect("run dd")
+}
+
+/// ORNA-VFS-007/009: a close flush whose acceptance is refused makes close(2) fail, dd reports it
+/// and exits 1, and the application has ignored the error. The durable row stays unchanged and
+/// the refused candidate is retained as a recoverable draft that holds the draft guard.
 #[tokio::test]
 async fn ignored_close_error_leaves_row_unchanged_and_draft_retained() {
     if !require_fuse_or_skip() {
         return;
     }
     let fixture = start_editor_mount(false).await;
-    let mut file = open_rw(&fixture);
-    replace_draft(&mut file, &invalid_row("Refused on close"));
-    drop(file);
+    let scratch = TempDir::new().expect("create the candidate directory");
+    let candidate = scratch.path().join("refused.orna");
+    std::fs::write(&candidate, invalid_row("Refused on close"))
+        .expect("write the refused candidate");
+    let refused = dd_write(&candidate, &fixture.data_path);
+    let stderr = String::from_utf8_lossy(&refused.stderr).into_owned();
+    assert_eq!(
+        refused.status.code(),
+        Some(1),
+        "dd observes the refused close(2): {stderr}"
+    );
+    assert!(
+        stderr.contains("closing output file") && stderr.contains("Invalid argument"),
+        "dd reports the refused close with EINVAL: {stderr}"
+    );
     assert!(
         fresh_view(&fixture).contains("Original"),
         "a refused close flush leaves the accepted row unchanged",
@@ -566,6 +591,32 @@ async fn ignored_close_error_leaves_row_unchanged_and_draft_retained() {
         "the refused candidate is retained in recovery storage",
     );
     await_draft_guard(&fixture, b'1', "the retained refusal holds the draft guard").await;
+}
+
+/// Positive control for the dd closer: an accepted close flush makes dd exit 0 and the candidate
+/// visible to a new open, so the refused-close test observes a real refusal rather than a dead
+/// writer.
+#[tokio::test]
+async fn dd_close_of_valid_candidate_exits_zero_and_is_accepted() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let scratch = TempDir::new().expect("create the candidate directory");
+    let candidate = scratch.path().join("accepted.orna");
+    std::fs::write(&candidate, row("Dd accepted")).expect("write the accepted candidate");
+    let accepted = dd_write(&candidate, &fixture.data_path);
+    assert!(
+        accepted.status.success(),
+        "dd closes an accepted candidate cleanly: {}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    assert_view_contains(&fixture, "Dd accepted");
+    await_draft_guard(&fixture, b'0', "an accepted dd close leaves no draft guard").await;
+    // Known defect (ornadb-bqa69): an O_TRUNC open lets the close FLUSH overtake the WRITE, so
+    // an empty candidate is refused and retained before the real row is accepted. The accepted
+    // content and the cleared guard above are the proven guarantees; the retained-record check
+    // is not asserted until that bead lands.
 }
 
 /// ORNA-VFS-008/009: a dirty handle whose baseline a peer has since accepted is
