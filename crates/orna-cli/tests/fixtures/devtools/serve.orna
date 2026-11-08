@@ -3,6 +3,7 @@ use std.ui.{Button, Cols, Input, Table, Text};
 pub fn serve(): UI = Cols([
     Text("Devtools"),
     Input("query", "Query", null, std.ui.action("devtools.query", as: Text)),
+    Button("Run", std.ui.action("devtools.run", as: Text)),
     Table(sys.catalog.tables),
     Button("Refresh", std.ui.action("devtools.refresh", as: Text))
 ]);

@@ -37,16 +37,18 @@ const STANDARD_UI: &str = include_str!("../../../stdlib/std/ui.orna");
 /// Every fragment `render_value_html` emits around the devtools application's
 /// table node, in the order its `Cols` children declare them.
 const DEVTOOLS_PREFIX: &str = concat!(
-    "<div><p>Devtools</p>",
-    "<label for=\"query\">Query</label><input id=\"query\" name=\"query\" type=\"text\">"
+    "<form method=\"post\"><div><p>Devtools</p>",
+    "<label for=\"query\">Query</label><input id=\"query\" name=\"query\" type=\"text\">",
+    "<button type=\"submit\" formaction=\"/action/devtools.run\">Run</button>"
 );
-const DEVTOOLS_SUFFIX: &str = "<button type=\"submit\">Refresh</button></div>";
+const DEVTOOLS_SUFFIX: &str =
+    "<button type=\"submit\" formaction=\"/action/devtools.refresh\">Refresh</button></div></form>";
 
 /// The same for the second application. Its `Cols` children are a text, a
 /// field, the table, a details group, an input and a button, so the fragments
 /// around the table exercise renderer branches the devtools page never emits.
 const SECOND_PREFIX: &str = concat!(
-    "<div><p>Ledger</p>",
+    "<form method=\"post\"><div><p>Ledger</p>",
     "<div><span class=\"label\">mode</span> <span class=\"value\">serve</span></div>"
 );
 const SECOND_SUFFIX: &str = concat!(
@@ -55,8 +57,8 @@ const SECOND_SUFFIX: &str = concat!(
     "<pre><code>pub fn serve(): UI</code></pre>",
     "</dl>",
     "<label for=\"filter\">Filter</label><input id=\"filter\" name=\"filter\" type=\"text\">",
-    "<button type=\"submit\">Reload</button>",
-    "</div>"
+    "<button type=\"submit\" formaction=\"/action/ledger.reload\">Reload</button>",
+    "</div></form>"
 );
 
 struct RunningServer(Child);
