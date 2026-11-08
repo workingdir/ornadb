@@ -2102,8 +2102,8 @@ def module_namespace(path: str) -> str:
 # Repository-format-1 dependencies: key-path-v1 row paths, loose row units and
 # storage placements (ORNA-PATH-001..011, ORNA-ROW-001..004). This is a second,
 # standard-library reading of the same bytes, so the orna crates and the
-# orna_legacy / orna_compact readers are not the oracle for these rows. Compact
-# table contents and Blob values are not read; they are recorded as unread.
+# orna_legacy / orna_compact readers are not the oracle for these rows. Compact table contents are read by
+# scripts/orna_compact.py, which verifies every declared digest; Blob values are reported by length and SHA-256.
 LEGACY_REPOSITORY_FORMAT = 1
 KEY_COMPONENT_LIMIT = 200
 _KEY_READABLE = frozenset(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-")
@@ -2409,6 +2409,55 @@ def _row_fields(record: dict, fields: dict[str, str], where: str) -> dict:
     return {name: record[name] for name in fields}
 
 
+def _compact_rows(objects: GitObjects, files: dict[str, TreeEntry], storage: str, table: str, where: str) -> list[dict]:
+    """Reads one compact-storage-v1 table with scripts/orna_compact.py over its files in the object store.
+
+    orna_compact verifies every digest the table declares and resolves the winner per key. Blob values are
+    reported by length and SHA-256, never by content.
+    """
+    if storage != table:
+        fail(f"{where}: storage directory {storage} holds table {table}")
+    # This file also runs as a script, where the repository root is not on sys.path; the scripts package lives there.
+    repository_root = str(Path(__file__).resolve().parent.parent)
+    if repository_root not in sys.path:
+        sys.path.insert(0, repository_root)
+    from scripts import orna_compact
+
+    prefix = f".orna/storage/{storage}/"
+    with tempfile.TemporaryDirectory(prefix="orna-compact-") as scratch:
+        root = Path(scratch)
+        for child in sorted(files):
+            if child.startswith(prefix):
+                target = root / child
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(objects.read(files[child].oid, "blob", SOURCE_BYTES_LIMIT, f"{where}: {child}"))
+        try:
+            resolved = orna_compact.read_table(root, table)
+        except (orna_compact.CompactError, OSError) as error:
+            fail(f"{where}: compact table {table}: {error}")
+
+    def value(item: object) -> object:
+        if item is None or isinstance(item, (bool, int, str)):
+            return item
+        if isinstance(item, bytes):
+            return {"blob": {"length": len(item), "sha256": hashlib.sha256(item).hexdigest()}}
+        if isinstance(item, list):
+            return [value(element) for element in item]
+        if isinstance(item, orna_compact.Tag):
+            return {"tag": item.number, "value": value(item.value)}
+        fail(f"{where}: compact table {table} holds a value with no JSON form")
+        raise AssertionError("unreachable")
+
+    return [
+        {
+            "key": value(row.key),
+            "deleted": row.fields is None,
+            "fields": None if row.fields is None else {name: value(item) for name, item in sorted(row.fields.items())},
+        }
+        for row in resolved.rows
+    ]
+
+
 def legacy_dependency(objects: GitObjects, commit_data: bytes, path: str) -> dict | None:
     """The repository-format-1 record of one dependency commit; None when it is not a legacy repository."""
     where = f"dependency {path}"
@@ -2454,9 +2503,12 @@ def legacy_dependency(objects: GitObjects, commit_data: bytes, path: str) -> dic
                     "storage": parts[2],
                     "table": policy["table"],
                     "placement": policy["placement"],
-                    "contents": "unread" if policy["placement"] == "compact" else "editable-policy-only",
+                    "contents": "extracted" if policy["placement"] == "compact" else "editable-policy-only",
                 }
             )
+    for entry in storage:
+        if entry["placement"] == "compact":
+            entry["rows"] = _compact_rows(objects, files, entry["storage"], entry["table"], where)
     tables: list[dict] = []
     schemas: dict[str, dict] = {}
     for child in sorted(files):
