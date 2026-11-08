@@ -2961,21 +2961,32 @@ pub(super) fn spawn_editor(
 
 /// Why an explicit edit was not accepted. `Stale` means the mounted baseline no
 /// longer matches the durable row: nothing was written and the draft is retained.
+/// `draft` names the retained candidate so the CLI can report its location by
+/// default (ORNA-UX-004; profiles/vfs-1.md:101-102).
 #[derive(Debug)]
 pub(super) enum EditError {
-    Stale(String),
-    Failed(String),
+    Stale {
+        message: String,
+        draft: PathBuf,
+    },
+    Failed {
+        message: String,
+        draft: Option<PathBuf>,
+    },
 }
 
 impl From<String> for EditError {
     fn from(error: String) -> Self {
-        Self::Failed(error)
+        Self::Failed {
+            message: error,
+            draft: None,
+        }
     }
 }
 
 impl From<&str> for EditError {
     fn from(error: &str) -> Self {
-        Self::Failed(error.to_owned())
+        Self::from(error.to_owned())
     }
 }
 
@@ -3016,44 +3027,62 @@ pub(super) fn run_editor_on_draft(
     file.write_all(initial)
         .and_then(|()| file.sync_all())
         .map_err(|error| {
-            format!(
-                "explicit edit draft could not be initialized: {error}; retained at {}",
-                draft_path.display()
+            retained_draft_failure(
+                format!(
+                    "explicit edit draft could not be initialized: {error}; retained at {}",
+                    draft_path.display()
+                ),
+                &draft_path,
             )
         })?;
     drop(file);
     let Some(editor) = std::env::var_os("EDITOR") else {
-        return Err(format!(
-            "EDITOR is not set; initial draft retained at {}",
-            draft_path.display()
-        )
-        .into());
+        return Err(retained_draft_failure(
+            format!(
+                "EDITOR is not set; initial draft retained at {}",
+                draft_path.display()
+            ),
+            &draft_path,
+        ));
     };
     let status = std::process::Command::new(editor)
         .arg(&draft_path)
         .status()
         .map_err(|error| {
-            format!(
-                "editor could not be started: {error}; draft retained at {}",
-                draft_path.display()
+            retained_draft_failure(
+                format!(
+                    "editor could not be started: {error}; draft retained at {}",
+                    draft_path.display()
+                ),
+                &draft_path,
             )
         })?;
     if !status.success() {
-        return Err(format!(
-            "editor exited unsuccessfully; draft retained at {}",
-            draft_path.display()
-        )
-        .into());
+        return Err(retained_draft_failure(
+            format!(
+                "editor exited unsuccessfully; draft retained at {}",
+                draft_path.display()
+            ),
+            &draft_path,
+        ));
     }
     Ok(draft_path)
 }
 
 #[allow(clippy::items_after_statements)]
 fn retained_edit_error(detail: &str, draft_path: &Path) -> EditError {
-    EditError::Failed(format!(
-        "{detail}; draft retained at {}",
-        draft_path.display()
-    ))
+    retained_draft_failure(
+        format!("{detail}; draft retained at {}", draft_path.display()),
+        draft_path,
+    )
+}
+
+/// Refuses an edit whose candidate stays at `draft_path` for recovery.
+fn retained_draft_failure(message: String, draft_path: &Path) -> EditError {
+    EditError::Failed {
+        message,
+        draft: Some(draft_path.to_path_buf()),
+    }
 }
 
 /// Maps a durable admission result to the explicit edit outcome. An accepted
@@ -3077,14 +3106,20 @@ fn admit_edit_result(
             }
             Ok(())
         }
-        Err(DocumentCommitError::Stale) => Err(EditError::Stale(format!(
-            "the mounted baseline is stale against the durable row; nothing was written; draft retained at {}",
-            draft_path.display()
-        ))),
-        Err(error) => Err(EditError::Failed(format!(
-            "edit candidate was rejected: {error}; draft retained at {}",
-            draft_path.display()
-        ))),
+        Err(DocumentCommitError::Stale) => Err(EditError::Stale {
+            message: format!(
+                "the mounted baseline is stale against the durable row; nothing was written; draft retained at {}",
+                draft_path.display()
+            ),
+            draft: draft_path.to_path_buf(),
+        }),
+        Err(error) => Err(retained_draft_failure(
+            format!(
+                "edit candidate was rejected: {error}; draft retained at {}",
+                draft_path.display()
+            ),
+            draft_path,
+        )),
     }
 }
 
@@ -3345,10 +3380,13 @@ impl WorkspaceFilesystem {
         // 41-vfs.md:75-77: the editor was seeded from the bytes the CLI read. If the mounted row
         // moved since, that read is stale: nothing is written and the draft stays retained.
         if edit_view_digest(&prepared.initial_bytes).as_bytes() != *digest {
-            return Err(EditError::Stale(format!(
-                "the mounted row changed after orna edit read it; nothing was written; draft retained at {}",
-                draft.display()
-            )));
+            return Err(EditError::Stale {
+                message: format!(
+                    "the mounted row changed after orna edit read it; nothing was written; draft retained at {}",
+                    draft.display()
+                ),
+                draft: draft.to_path_buf(),
+            });
         }
         let reproject = prepared.reproject.clone();
         prepared.commit(&candidate, draft, grouped_row)?;
@@ -5460,7 +5498,7 @@ impl Filesystem for WorkspaceFilesystem {
             // with the FUSE operations that take it (ORNA-VFS-015).
             match self.commit_requested_edit(value) {
                 Ok(()) => reply.ok(),
-                Err(EditError::Stale(message)) => {
+                Err(EditError::Stale { message, .. }) => {
                     eprintln!("explicit edit refused: {message}");
                     // ESTALE is the stale signal on this xattr path. profiles/vfs-1.md:138 names
                     // EAGAIN, but the kernel rewrites an EAGAIN setxattr reply to EOPNOTSUPP
@@ -5472,7 +5510,7 @@ impl Filesystem for WorkspaceFilesystem {
                     // `prepared.commit`), so the retry refuses again and writes nothing.
                     reply.error(Errno::ESTALE);
                 }
-                Err(EditError::Failed(message)) => {
+                Err(EditError::Failed { message, .. }) => {
                     eprintln!("explicit edit failed: {message}");
                     reply.error(Errno::EIO);
                 }
