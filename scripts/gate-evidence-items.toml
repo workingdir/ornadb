@@ -623,7 +623,7 @@ gate = "H"
 id = "H1"
 title = "Structured local drafts: FUSE editor drafts are listed with their code and removed only by an accepted edit"
 select = [{ record = "workspace-cli", package = "orna-cli", target = "bin:orna", test = "draft_list_lines_carry_the_code_and_draft_id" }, { record = "workspace-cli", package = "orna-cli", target = "bin:orna", test = "accepted_edit_removes_its_draft_and_refusals_retain_it" }]
-limitations = ["Covers FUSE editor drafts only. Typed client drafts and their recovery after a reconnect or restart have no executed test (ornadb-jf1z1)."]
+limitations = ["Covers FUSE editor drafts only. The Orna-authored browser profile is not claimed (ACCEPTANCE.md Gate H, lines 79-85), and no client draft store exists, so typed client drafts and their recovery after a reconnect or restart are not covered (ORNA-APP-018, source/39-source-hosted-apps.md:46; ornadb-jf1z1)."]
 
 [[item]]
 gate = "H"

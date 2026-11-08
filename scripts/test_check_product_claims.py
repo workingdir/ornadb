@@ -8,6 +8,7 @@ from tempfile import TemporaryDirectory
 
 from scripts.check_product_claims import (
     CLAIMS,
+    client_draft_claim,
     fixed_row_batching_claim,
     main,
     prune_expire_claim,
@@ -16,6 +17,7 @@ from scripts.check_product_claims import (
 
 FIXED_ROW_STATEMENT = CLAIMS["fixed-row-batching"].required
 PRUNE_STATEMENT = CLAIMS["prune-expire"].required
+CLIENT_DRAFTS_STATEMENT = CLAIMS["client-drafts"].required
 
 
 def make_root(root: Path, changelog: str, documents: dict[str, str] | None = None) -> None:
@@ -53,6 +55,19 @@ class PruneExpirePredicateTest(unittest.TestCase):
         self.assertFalse(prune_expire_claim("The maintenance command runs git prune --expire now."))
 
 
+class ClientDraftPredicateTest(unittest.TestCase):
+    def test_unnegated_client_draft_recovery_claim_is_detected(self) -> None:
+        self.assertTrue(client_draft_claim("Typed client drafts survive a reconnect."))
+        self.assertTrue(client_draft_claim("The client keeps its unsent drafts after a restart."))
+
+    def test_negated_statement_is_not_a_claim(self) -> None:
+        self.assertFalse(client_draft_claim(CLIENT_DRAFTS_STATEMENT))
+        self.assertFalse(client_draft_claim("Typed client drafts are never preserved across a reconnect."))
+
+    def test_fuse_editor_draft_sentence_is_not_a_client_claim(self) -> None:
+        self.assertFalse(client_draft_claim("FUSE editor drafts are retained until an accepted edit."))
+
+
 class RunTest(unittest.TestCase):
     def check(self, name: str, root: Path) -> tuple[int, str]:
         err = io.StringIO()
@@ -65,12 +80,24 @@ class RunTest(unittest.TestCase):
             root = Path(tmp)
             make_root(
                 root,
-                f"# Changelog\n\n## Unreleased\n- Limit. {FIXED_ROW_STATEMENT} {PRUNE_STATEMENT}\n",
+                f"# Changelog\n\n## Unreleased\n- Limit. {FIXED_ROW_STATEMENT} {PRUNE_STATEMENT} {CLIENT_DRAFTS_STATEMENT}\n",
                 {"docs/product.md": "Fixed-row batching is not content-stable.\n"},
             )
             for name in CLAIMS:
                 status, err = self.check(name, root)
                 self.assertEqual(status, 0, err)
+
+    def test_fails_when_product_document_makes_client_draft_claim(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            make_root(
+                root,
+                f"## Unreleased\n- {CLIENT_DRAFTS_STATEMENT}\n",
+                {"docs/product.md": "Typed client drafts survive a reconnect.\n"},
+            )
+            status, err = self.check("client-drafts", root)
+            self.assertEqual(status, 1)
+            self.assertIn("docs/product.md", err)
 
     def test_fails_when_product_document_makes_prohibited_claim(self) -> None:
         with TemporaryDirectory() as tmp:
