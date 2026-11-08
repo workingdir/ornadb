@@ -373,6 +373,9 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
             };
             publish_error("local runtime could not be opened", detail)
         })?;
+    // Publication is coordinated by the repository publication lock (PUB-3 step 7),
+    // not by the runtime writer lease. A secondary publisher may admit the durable
+    // tail while a live owner holds the runtime owner lock (ORNA-TURSO-005).
     // Reconcile an interrupted publication before reading or freezing the tail.
     runtime
         .block_on(RuntimePublicationCoordinator::recover(&repository, &state))
