@@ -2099,6 +2099,420 @@ def module_namespace(path: str) -> str:
     return ".".join(directories if stem == "main" else directories + [stem])
 
 
+# Repository-format-1 dependencies: key-path-v1 row paths, loose row units and
+# storage placements (ORNA-PATH-001..011, ORNA-ROW-001..004). This is a second,
+# standard-library reading of the same bytes, so the orna crates and the
+# orna_legacy / orna_compact readers are not the oracle for these rows. Compact
+# table contents and Blob values are not read; they are recorded as unread.
+LEGACY_REPOSITORY_FORMAT = 1
+KEY_COMPONENT_LIMIT = 200
+_KEY_READABLE = frozenset(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-")
+_KEY_DEVICE_NAMES = frozenset({"CON", "PRN", "AUX", "NUL", "CLOCK$", "CONIN$", "CONOUT$"} | {f"COM{number}" for number in range(1, 10)} | {f"LPT{number}" for number in range(1, 10)})
+_KEY_ESCAPE = re.compile(r"~([0-9a-f]{2})")
+_TABLE_DECLARATION = re.compile(r"(?:^|\n)[ \t]*(?:pub[ \t]+)?table[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]*\(([^()\n]*)\)[ \t]*\{([^{}]*)\}")
+_KEY_DECLARATION = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)[ \t]*:[ \t]*([A-Za-z_][A-Za-z0-9_]*)")
+_FIELD_DECLARATION = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)[ \t]*:[ \t]*(.+)")
+_EXTRACTED_FIELD_TYPES = frozenset({"Str", "Int", "Bool", "List<Str>"})
+_ROW_IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_ROW_INT = re.compile(r"-?(?:0|[1-9][0-9]*)")
+_ROW_KEYWORDS = {"true": True, "false": False, "null": None}
+_ROW_ESCAPES = {'"': '"', "\\": "\\", "n": "\n", "r": "\r", "t": "\t", "0": "\0"}
+_ROW_WHITESPACE = " \t\r\n"
+_ROW_HEX = frozenset("0123456789abcdefABCDEF")
+
+
+def key_path_encode(key: str) -> str:
+    """The key-path-v1 component of a Str key (ORNA-PATH-001..005)."""
+    if key == "":
+        return "~ff"
+    raw = key.encode("utf-8")
+    literal_end = len(raw.rstrip(b"."))
+    reserved = _key_reserved(key)
+    parts = []
+    for index, byte in enumerate(raw):
+        if index < literal_end and byte in _KEY_READABLE and not (index == 0 and reserved):
+            parts.append(chr(byte))
+        else:
+            parts.append(f"~{byte:02x}")
+    return "".join(parts)
+
+
+def _key_reserved(key: str) -> bool:
+    """The host-independent reserved-name predicate (ORNA-PATH-005)."""
+    if key in (".", ".."):
+        return True
+    trimmed = key.rstrip(" .")
+    if not trimmed.isascii():
+        return False
+    folded = trimmed.upper()
+    return folded == ".GIT" or folded.split(".", 1)[0] in _KEY_DEVICE_NAMES
+
+
+def key_path_decode(component: str, where: str) -> str:
+    """The Str key a component names; anything key_path_encode would not produce is refused (ORNA-PATH-003, -004, -011)."""
+    if len(component.encode("utf-8")) > KEY_COMPONENT_LIMIT:
+        fail(f"{where}: key component exceeds {KEY_COMPONENT_LIMIT} bytes")
+    if component == "~ff":
+        return ""
+    data = bytearray()
+    position = 0
+    while position < len(component):
+        if component[position] == "~":
+            match = _KEY_ESCAPE.match(component, position)
+            if match is None:
+                fail(f"{where}: malformed escape in key component {component!r}")
+            byte = int(match.group(1), 16)
+            if byte == 0xFF:
+                fail(f"{where}: ~ff is valid only as the whole empty key component")
+            data.append(byte)
+            position = match.end()
+        elif ord(component[position]) in _KEY_READABLE:
+            data.append(ord(component[position]))
+            position += 1
+        else:
+            fail(f"{where}: key component {component!r} holds an unescaped byte")
+    try:
+        key = data.decode("utf-8")
+    except UnicodeDecodeError:
+        fail(f"{where}: key component {component!r} is not UTF-8")
+    if key_path_encode(key) != component:
+        fail(f"{where}: key component {component!r} is not the canonical encoding of its key")
+    return key
+
+
+class _RowParser:
+    """Literal-only parser for one loose row unit: optional trailing comma and ';', comments allowed."""
+
+    def __init__(self, text: str, where: str) -> None:
+        self.text = text
+        self.position = 0
+        self.where = where
+
+    def fail(self, message: str) -> None:
+        fail(f"{self.where}: {message} at offset {self.position}")
+
+    def skip(self) -> None:
+        text = self.text
+        while self.position < len(text):
+            if text[self.position] in _ROW_WHITESPACE:
+                self.position += 1
+            elif text.startswith("//", self.position):
+                end = text.find("\n", self.position)
+                self.position = len(text) if end < 0 else end + 1
+            elif text.startswith("/*", self.position):
+                self._block_comment()
+            else:
+                return
+
+    def _block_comment(self) -> None:
+        # Block comments nest, as in the engine lexer.
+        depth = 0
+        while True:
+            if self.text.startswith("/*", self.position):
+                depth += 1
+                self.position += 2
+            elif self.text.startswith("*/", self.position):
+                depth -= 1
+                self.position += 2
+                if depth == 0:
+                    return
+            elif self.position < len(self.text):
+                self.position += 1
+            else:
+                self.fail("unterminated block comment")
+
+    def peek(self) -> str:
+        self.skip()
+        return self.text[self.position] if self.position < len(self.text) else ""
+
+    def expect(self, char: str) -> None:
+        if self.peek() != char:
+            self.fail(f"expected {char!r}")
+        self.position += 1
+
+    def value(self) -> object:
+        char = self.peek()
+        if char == "{":
+            return self.record()
+        if char == "[":
+            return self.array()
+        if char == '"':
+            return self.string()
+        if char and (char == "-" or "0" <= char <= "9"):
+            match = _ROW_INT.match(self.text, self.position)
+            if match is None:
+                self.fail("malformed integer")
+            self.position = match.end()
+            return int(match.group(0))
+        match = _ROW_IDENT.match(self.text, self.position) if char else None
+        if match is not None and match.group(0) in _ROW_KEYWORDS:
+            self.position = match.end()
+            return _ROW_KEYWORDS[match.group(0)]
+        self.fail("expression is not a literal value")
+        raise AssertionError("unreachable")
+
+    def record(self) -> dict:
+        self.expect("{")
+        out: dict = {}
+        if self.peek() == "}":
+            self.position += 1
+            return out
+        while True:
+            self.skip()
+            match = _ROW_IDENT.match(self.text, self.position)
+            if match is None or match.group(0) in _ROW_KEYWORDS:
+                self.fail("expected a field name")
+            name = match.group(0)
+            self.position = match.end()
+            if name in out:
+                self.fail(f"duplicate field {name}")
+            self.expect(":")
+            out[name] = self.value()
+            separator = self.peek()
+            if separator == "}":
+                self.position += 1
+                return out
+            if separator != ",":
+                self.fail("expected ',' or '}'")
+            self.position += 1
+            if self.peek() == "}":
+                self.position += 1
+                return out
+
+    def array(self) -> list:
+        self.expect("[")
+        out: list = []
+        if self.peek() == "]":
+            self.position += 1
+            return out
+        while True:
+            out.append(self.value())
+            separator = self.peek()
+            if separator == "]":
+                self.position += 1
+                return out
+            if separator != ",":
+                self.fail("expected ',' or ']'")
+            self.position += 1
+            if self.peek() == "]":
+                self.position += 1
+                return out
+
+    def string(self) -> str:
+        self.expect('"')
+        chars: list[str] = []
+        text = self.text
+        while self.position < len(text):
+            char = text[self.position]
+            self.position += 1
+            if char == '"':
+                return "".join(chars)
+            if char == "{":
+                self.fail("string interpolation is not admitted in a row value")
+            if char != "\\":
+                chars.append(char)
+                continue
+            if self.position >= len(text):
+                self.fail("unterminated string escape")
+            escape = text[self.position]
+            self.position += 1
+            if escape in _ROW_ESCAPES:
+                chars.append(_ROW_ESCAPES[escape])
+            elif escape == "u":
+                chars.append(self._unicode_escape())
+            else:
+                self.fail("invalid string escape")
+        self.fail("unterminated string")
+        raise AssertionError("unreachable")
+
+    def _unicode_escape(self) -> str:
+        text = self.text
+        if self.position >= len(text) or text[self.position] != "{":
+            self.fail("unicode escape requires '{'")
+        end = text.find("}", self.position)
+        digits = text[self.position + 1 : end] if end >= 0 else ""
+        if not (1 <= len(digits) <= 6 and all(char in _ROW_HEX for char in digits)):
+            self.fail("invalid unicode scalar escape")
+        scalar = int(digits, 16)
+        if scalar > 0x10FFFF or 0xD800 <= scalar <= 0xDFFF:
+            self.fail("invalid unicode scalar escape")
+        self.position = end + 1
+        return chr(scalar)
+
+
+def parse_row_unit(data: bytes, where: str) -> dict:
+    """One loose row unit: `{ field: literal, ... }` with an optional trailing `;`."""
+    text = _decode_text(data, where)
+    parser = _RowParser(text, where)
+    if parser.peek() != "{":
+        parser.fail("row unit must contain one record")
+    record = parser.record()
+    if parser.peek() == ";":
+        parser.position += 1
+    if parser.peek() != "":
+        parser.fail("trailing content after the row record")
+    return record
+
+
+def _decode_text(data: bytes, where: str) -> str:
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        fail(f"{where} is not UTF-8")
+
+
+def _table_schema(key_text: str, body: str, where: str) -> tuple[dict | None, str]:
+    """The extracted schema of one declared table, or None with the reason it is not extracted."""
+    if "," in key_text:
+        return None, "composite keys are not extracted"
+    key = _KEY_DECLARATION.fullmatch(key_text.strip())
+    if key is None:
+        return None, "key declaration is not extracted"
+    if key.group(2) != "Str":
+        return None, f"key type {key.group(2)} is not extracted"
+    fields: dict[str, str] = {}
+    for piece in body.split(","):
+        piece = piece.strip()
+        if not piece:
+            continue
+        field = _FIELD_DECLARATION.fullmatch(piece)
+        if field is None:
+            return None, "field declaration is not extracted"
+        name, kind = field.group(1), re.sub(r"\s+", "", field.group(2))
+        if name in fields or name == key.group(1):
+            fail(f"{where}: field {name} is declared twice")
+        if kind not in _EXTRACTED_FIELD_TYPES:
+            return None, f"field {name} of type {kind} is not extracted"
+        fields[name] = kind
+    return {"key": key.group(1), "fields": fields}, ""
+
+
+def _row_fields(record: dict, fields: dict[str, str], where: str) -> dict:
+    """Validates a row's non-key fields against the schema (ORNA-ROW-001..004)."""
+    for name in record:
+        if name not in fields:
+            fail(f"{where}: unknown field {name}")
+    for name, kind in fields.items():
+        if name not in record:
+            fail(f"{where}: missing field {name}")
+        value = record[name]
+        if kind == "Str":
+            valid = isinstance(value, str)
+        elif kind == "Int":
+            valid = isinstance(value, int) and not isinstance(value, bool)
+        elif kind == "Bool":
+            valid = isinstance(value, bool)
+        else:
+            valid = isinstance(value, list) and all(isinstance(item, str) for item in value)
+        if not valid:
+            fail(f"{where}: field {name} is not {kind}")
+    return {name: record[name] for name in fields}
+
+
+def legacy_dependency(objects: GitObjects, commit_data: bytes, path: str) -> dict | None:
+    """The repository-format-1 record of one dependency commit; None when it is not a legacy repository."""
+    where = f"dependency {path}"
+    tree = commit_tree(commit_data, objects.width, where)
+    files: dict[str, TreeEntry] = {}
+    directories: set[str] = set()
+    pending = [(tree, "", 0)]
+    while pending:
+        tree_oid, directory, level = pending.pop()
+        if level > MAX_DIRECTORY_DEPTH:
+            fail(f"{where}: directories nest deeper than {MAX_DIRECTORY_DEPTH} levels")
+        listing = f"{where}: tree {directory or '/'}"
+        for entry in parse_tree(objects.read(tree_oid, "tree", SOURCE_TREE_BYTES_LIMIT, listing), objects.width, listing):
+            try:
+                name = entry.name.decode("utf-8")
+            except UnicodeDecodeError:
+                if entry.name.endswith(b".orna"):
+                    fail(f"{where}: path {entry.name!r} under {directory or '/'} is not UTF-8")
+                continue
+            child = f"{directory}{name}"
+            if entry.mode == b"40000":
+                directories.add(child)
+                pending.append((entry.oid, f"{child}/", level + 1))
+            elif entry.mode in (b"100644", b"100755"):
+                files[child] = entry
+            elif name.endswith(".orna"):
+                fail(f"{where}: {child} is not a regular file")
+    format_entry = files.get(".orna/format.orna")
+    if format_entry is None:
+        return None
+    format_record = parse_row_unit(objects.read(format_entry.oid, "blob", SOURCE_BYTES_LIMIT, f"{where}: .orna/format.orna"), f"{where}: .orna/format.orna")
+    if format_record.get("repository_format") != LEGACY_REPOSITORY_FORMAT:
+        fail(f"{where}: .orna/format.orna is not repository format {LEGACY_REPOSITORY_FORMAT}")
+    storage = []
+    for child in sorted(files):
+        parts = child.split("/")
+        if len(parts) == 4 and parts[0] == ".orna" and parts[1] == "storage" and parts[3] == "policy.orna":
+            policy = parse_row_unit(objects.read(files[child].oid, "blob", SOURCE_BYTES_LIMIT, f"{where}: {child}"), f"{where}: {child}")
+            if set(policy) != {"placement", "table"} or policy["placement"] not in ("compact", "editable") or not isinstance(policy["table"], str):
+                fail(f"{where}: {child} is not a storage policy")
+            storage.append(
+                {
+                    "storage": parts[2],
+                    "table": policy["table"],
+                    "placement": policy["placement"],
+                    "contents": "unread" if policy["placement"] == "compact" else "editable-policy-only",
+                }
+            )
+    tables: list[dict] = []
+    schemas: dict[str, dict] = {}
+    for child in sorted(files):
+        if child.startswith(".orna/") or not child.endswith(".orna"):
+            continue
+        module_directory = child.rsplit("/", 1)[0] if "/" in child else ""
+        text = _decode_text(objects.read(files[child].oid, "blob", SOURCE_BYTES_LIMIT, f"{where}: module {child}"), f"{where}: module {child}")
+        for declaration in _TABLE_DECLARATION.finditer(text):
+            name, key_text, body = declaration.groups()
+            directory = f"{module_directory}/{name}" if module_directory else name
+            if directory in schemas or any(table["row_directory"] == directory for table in tables):
+                fail(f"{where}: row directory {directory} is declared twice")
+            schema, reason = _table_schema(key_text, body, where)
+            table = {"module": child, "name": name, "row_directory": directory, "status": "extracted" if schema else "unextracted"}
+            if schema is None:
+                table["reason"] = reason
+            else:
+                table["key"] = {"name": schema["key"], "type": "Str"}
+                table["fields"] = dict(schema["fields"])
+                schemas[directory] = schema
+            tables.append(table)
+    for table in tables:
+        prefix = f"{table['row_directory']}/"
+        if any(item.startswith(prefix) and "/" in item[len(prefix) :] for item in [*files, *directories]):
+            fail(f"{where}: {table['row_directory']} nests directories, which a single-key table does not allow")
+        members = sorted(item for item in files if item.startswith(prefix))
+        table["loose_row_files"] = len(members)
+        if table["status"] != "extracted":
+            continue
+        rows = []
+        folded_seen: dict[bytes, str] = {}
+        for member in members:
+            if not member.endswith(".orna"):
+                fail(f"{where}: {member} is not a row unit")
+            component = member[len(prefix) : -len(".orna")]
+            folded = component.encode("utf-8").lower()
+            if folded_seen.get(folded, component) != component:
+                fail(f"{where}: {member} collides with a sibling that differs only in ASCII case (ORNA-PATH-006)")
+            folded_seen[folded] = component
+            key = key_path_decode(component, where)
+            data = objects.read(files[member].oid, "blob", SOURCE_BYTES_LIMIT, f"{where}: row {member}")
+            record = parse_row_unit(data, f"{where}: row {member}")
+            rows.append(
+                {
+                    "key": key,
+                    "path": member,
+                    "object": files[member].oid,
+                    "sha256": hashlib.sha256(data).hexdigest(),
+                    "fields": _row_fields(record, schemas[table["row_directory"]]["fields"], f"{where}: row {member}"),
+                }
+            )
+        table["rows"] = sorted(rows, key=lambda row: row["key"].encode("utf-8"))
+    return {"path": path, "repository_format": LEGACY_REPOSITORY_FORMAT, "storage": storage, "tables": tables}
+
+
+
 class Extraction:
     def __init__(self, output: Path, dependencies: dict[str, Path]) -> None:
         self.blobs = BlobOutput(output)
@@ -2154,9 +2568,11 @@ class Extraction:
         if orna_tree is None:
             fail(f"{where}: commit has no .orna directory; it is not an Orna database snapshot")
         report.update(self.database(objects, graph, orna_tree, where))
-        report["dependencies"] = [
+        dependencies = [
             self.dependency(repository, objects.width, path, oid, where) for path, oid in sorted(gitlinks, key=lambda item: item[0].encode("utf-8"))
         ]
+        report["dependencies"] = [record for record, _ in dependencies]
+        report["legacy_dependencies"] = [legacy for _, legacy in dependencies if legacy is not None]
         return report
 
     def database(self, objects: GitObjects, graph: Graph, orna_tree: str, where: str) -> dict:
@@ -2185,7 +2601,7 @@ class Extraction:
             "store_root": store.oid,
         }
 
-    def dependency(self, repository: Path, width: int, path: str, commit: str, where: str) -> dict:
+    def dependency(self, repository: Path, width: int, path: str, commit: str, where: str) -> tuple[dict, dict | None]:
         candidates = []
         if path in self.dependency_paths:
             candidates.append(self.dependency_paths[path])
@@ -2199,11 +2615,12 @@ class Extraction:
             objects = GitObjects(candidate, f"dependency {path}", width)
             try:
                 try:
-                    objects.read(commit, "commit", SOURCE_TREE_BYTES_LIMIT, f"dependency {path}")
+                    commit_data = objects.read(commit, "commit", SOURCE_TREE_BYTES_LIMIT, f"dependency {path}")
                 except UnavailableObject:
                     continue
+                legacy = legacy_dependency(objects, commit_data, path)
                 self.objects_verified += len(objects.verified)
-                return {"commit": commit, "path": path, "verified": True}
+                return {"commit": commit, "path": path, "verified": True}, legacy
             finally:
                 objects.close()
         fail(
