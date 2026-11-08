@@ -34,7 +34,7 @@ use orna_serving::media_preview::{
 };
 use orna_value::ContextValue;
 use std::collections::BTreeMap;
-use std::sync::TryLockError;
+use std::sync::{PoisonError, TryLockError};
 
 /// Repository-relative module that hosts the serving entry.
 pub(super) const SERVE_MODULE_PATH: &str = "main.orna";
@@ -477,6 +477,16 @@ pub(super) fn serving_entry_route(
     Some(response)
 }
 
+/// Answers the page from the entry's authority. A poisoned lock is recovered
+/// rather than reported unavailable, and a panic inside `respond` answers 500
+/// instead of unwinding past the lock, so one failed serve cannot disable
+/// `GET /` for the rest of the process.
+fn respond_recovering(app: &Mutex<ServeApp>) -> (Response, Vec<String>) {
+    let app = app.lock().unwrap_or_else(PoisonError::into_inner);
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| app.respond()))
+        .unwrap_or_else(|_| (serve_error("serve.evaluation_failed"), Vec::new()))
+}
+
 fn serving_entry_route_inner(entry: Option<&ServingEntry>, request: &Request) -> Option<Response> {
     let entry = entry?;
     let app = &entry.app;
@@ -501,16 +511,11 @@ fn serving_entry_route_inner(entry: Option<&ServingEntry>, request: &Request) ->
     }
     // RFC 9110 9.3.2: HEAD answers exactly as GET but sends no content.
     let head = request.method == "HEAD";
-    Some(match app.lock() {
-        Ok(app) => {
-            let (mut response, _) = app.respond();
-            if head {
-                response.body.clear();
-            }
-            response
-        }
-        Err(_) => unavailable_response(),
-    })
+    let (mut response, _) = respond_recovering(app);
+    if head {
+        response.body.clear();
+    }
+    Some(response)
 }
 
 /// Answers `/media/<commit>/<descriptor>` at HEAD (ORNA-APP-013, ORNA-APP-014).
@@ -994,10 +999,7 @@ fn action_route(entry: &ServingEntry, request: &Request, action_id: &str) -> Res
 /// substring of the page text, so page content cannot forge an offer. An action
 /// the page does not offer is not an input the console accepts.
 fn page_offers_action(entry: &ServingEntry, action_id: &str) -> bool {
-    let Ok(app) = entry.app.lock() else {
-        return false;
-    };
-    let (response, actions) = app.respond();
+    let (response, actions) = respond_recovering(&entry.app);
     response.status == 200 && actions.iter().any(|offered| offered == action_id)
 }
 
@@ -1009,7 +1011,9 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
 
 /// Evaluates one console input under the session lock. A session another
 /// request holds is refused visibly instead of queueing the input behind an
-/// evaluation that is still running.
+/// evaluation that is still running. The evaluation carries no wall-clock
+/// deadline: its bound is the evaluator's default step limit and the
+/// 16 KiB input cap, and the session lock is held until that bound is reached.
 fn submit_console(console: &Mutex<Result<AdmittedReplSession, String>>, source: &str) -> Response {
     match console.try_lock() {
         Ok(mut session) => console_submit(&mut session, source),
@@ -1235,13 +1239,40 @@ mod serving_entry_tests {
     #[test]
     fn a_busy_console_refuses_the_input_at_once() {
         let entry = entry(Err("serve.test".into()));
-        let _held = entry.console.lock().expect("console lock");
-        let response = submit_console(&entry.console, "1 + 1");
-        assert_eq!(response.status, 409);
-        assert_eq!(
-            response.body,
-            b"<p class=\"diagnostic\">serve.session_busy</p>"
-        );
+        let held = entry.console.lock().expect("console lock");
+        let (sender, receiver) = mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let _ = sender.send(submit_console(&entry.console, "1 + 1"));
+            });
+            // A lock-waiting submit (mutation) blocks here and is reported by the timeout.
+            let answered = receiver.recv_timeout(Duration::from_secs(30));
+            drop(held);
+            let response = answered.expect("a busy console must answer without waiting");
+            assert_eq!(response.status, 409);
+            assert_eq!(
+                response.body,
+                b"<p class=\"diagnostic\">serve.session_busy</p>"
+            );
+        });
+    }
+
+    #[test]
+    fn a_poisoned_page_authority_still_answers_the_page() {
+        let entry = entry(Err("serve.test".into()));
+        let before = serving_entry_route(Some(&entry), &get_root()).expect("the page route");
+        std::thread::scope(|scope| {
+            let panicked = scope.spawn(|| {
+                let _held = entry.app.lock().expect("page lock");
+                panic!("serve panicked while holding the page authority");
+            });
+            assert!(panicked.join().is_err());
+        });
+        assert!(entry.app.is_poisoned());
+        let after = serving_entry_route(Some(&entry), &get_root()).expect("the page route");
+        assert_ne!(after.status, 503, "a poisoned page lock is not unavailable");
+        assert_eq!(after.status, before.status);
+        assert_eq!(after.body, before.body);
     }
 
     #[test]
