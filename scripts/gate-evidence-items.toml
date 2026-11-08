@@ -520,7 +520,7 @@ select = [
 ]
 limitations = [
   "Both snapshots are format-3 commits whose store is a text file, and the extractor checks Git object IDs only (ornadb-5il1.193, ornadb-5il1.192).",
-  "Legacy repository-format-1 dependencies are read by a standard-library walker in scripts/orna_extract.py and recorded under legacy_dependencies. Loose rows, storage placements and compact table rows are checked by scripts.test_orna_extract (LegacyDependencyTests) and by extractor_matches_the_real_reader_on_a_migrated_golden_copy in crates/orna-cli/tests/independent_extractor_cli.rs; neither is a selected record. Compact rows are read through scripts/orna_compact.py, which verifies each declared digest; Blob values are reported by length and SHA-256, not by content. No selected test exercises the legacy path, so F5 is not mapped to it (ornadb-v18eb.3).",
+  "Legacy repository-format-1 dependencies are read by a standard-library walker in scripts/orna_extract.py and recorded under legacy_dependencies. Loose rows, storage placements and compact table rows are checked by scripts.test_orna_extract (LegacyDependencyTests) and by extractor_matches_the_real_reader_on_a_migrated_golden_copy in crates/orna-cli/tests/independent_extractor_cli.rs; neither is a selected record. Compact table Blob values are written to blobs/ under their SHA-256 and checked against the golden bytes by scripts.test_orna_extract; loose-row Blob payloads (ORR-2 sha256 references to OGB-1 roots) are not extracted. No selected test exercises the legacy path, so F5 is not mapped to it (ornadb-v18eb.3).",
 ]
 
 [[item]]
