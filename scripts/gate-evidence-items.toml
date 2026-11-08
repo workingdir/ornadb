@@ -37,6 +37,7 @@ expected = [
   "claims-prune-expire",
   "claims-retired-row-writers",
   "gate-c-million-rows",
+  "gate-h-browser-wasm",
 ]
 
 # Gate A: format and existing behaviour.
@@ -593,7 +594,7 @@ gate = "H"
 id = "H4"
 title = "The browser-profile renderer and client run through the shared evaluator"
 select = [{ record = "workspace-rest", package = "orna-application", target = "test:browser_profile", test = "selected_ordinary_orna_client_and_renderer_execute_through_shared_evaluator" }]
-limitations = ["Native execution only; the Wasm build is not run by any nightly record (ornadb-ahk9y)."]
+limitations = ["Native execution only. The Wasm build of the same evaluator is checked by H7, not by this item."]
 
 [[item]]
 gate = "H"
@@ -611,7 +612,8 @@ limitations = ["The typed event tests are in orna-live. The nightly rest shard e
 gate = "H"
 id = "H7"
 title = "Wasm renderer and client output match native canonical output"
-limitations = ["browser_profile_wasm_matches_native_canonical_output is #[ignore] and runs only in browser-profile-wasm-parity.yml, which no nightly record reads (ornadb-ahk9y)."]
+select = [{ record = "gate-h-browser-wasm", package = "orna-application", target = "test:browser_profile_wasm_parity", test = "browser_profile_wasm_matches_native_canonical_output" }]
+limitations = ["Covers the Wasm build of the shared evaluator for the browser-profile fixture's client selection only. The renderer selection is not compared to Wasm output."]
 
 [[item]]
 gate = "H"
