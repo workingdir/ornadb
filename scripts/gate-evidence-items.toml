@@ -571,8 +571,8 @@ limitations = ["Covers FUSE editor drafts only. Typed client drafts and their re
 gate = "H"
 id = "H2"
 title = "Reconnect fences old watch deltas and installs a replacement snapshot"
-select = [{ record = "workspace-cli", package = "orna-cli", target = "test:watch_command", test = "reconnect_fences_old_deltas_and_installs_replacement_snapshot" }]
-limitations = ["Covers the watch command only. Status recovery after a lost reply is not run by any nightly record: orna-live is excluded from the nightly rest shard, and its reconnect and durable status tests run in live-v1-tests.yml (ornadb-rt9zj)."]
+select = [{ record = "workspace-cli", package = "orna-cli", target = "test:watch_command", test = "reconnect_fences_old_deltas_and_installs_replacement_snapshot" }, { record = "workspace-rest", package = "orna-live", target = "test:live_host", test = "watch_resync_replaces_the_complete_identity_bearing_tree_at_a_new_revision" }, { record = "workspace-rest", package = "orna-live", target = "test:live_host", test = "watch_resync_rejects_changed_same_revision_and_regressed_snapshots" }, { record = "workspace-rest", package = "orna-live", target = "test:live_host", test = "status_snapshots_survive_successful_reconnect_storm" }, { record = "workspace-rest", package = "orna-live", target = "test:live_host", test = "durable_status_retry_replays_unknown_after_target_completes_and_host_recovers" }]
+limitations = ["Covers the watch command, and the host-side watch resync and status snapshots across reconnects that the rest shard records. Other reconnect and status-recovery paths in orna-live are not selected here, and the host runs only in the live-host test binary (ornadb-rt9zj)."]
 
 [[item]]
 gate = "H"
@@ -598,7 +598,8 @@ limitations = ["No executed test covers generated host-only JS, and none is mapp
 gate = "H"
 id = "H6"
 title = "Typed events are admitted and diagnosed by executed tests"
-limitations = ["The typed event tests are in orna-live. The nightly rest shard excludes orna-live, so no nightly record executes them (ornadb-rt9zj)."]
+select = [{ record = "workspace-rest", package = "orna-live", target = "test:live_host", test = "synchronous_event_diagnostic_replays_after_watch_closure" }, { record = "workspace-rest", package = "orna-live", target = "test:live_host", test = "durable_event_diagnostic_status_and_replay_keep_closed_watch_correlation" }, { record = "workspace-rest", package = "orna-live", target = "test:live_host", test = "durable_event_diagnostic_replays_after_host_recovery_without_restored_watch" }, { record = "workspace-rest", package = "orna-live", target = "test:live_host", test = "durable_transactional_event_commits_through_synchronous_dispatch" }, { record = "workspace-rest", package = "orna-live", target = "test:live_host", test = "mutating_event_invalidates_only_its_owning_watch" }, { record = "workspace-rest", package = "orna-live", target = "test:live_host", test = "pure_rejected_and_rolled_back_events_preserve_their_watch" }, { record = "workspace-rest", package = "orna-live", target = "test:live_host", test = "cancelled_event_preserves_its_watch" }, { record = "workspace-rest", package = "orna-live", target = "test:live_host", test = "durable_stale_event_is_rejected_before_request_admission" }]
+limitations = ["Covers the orna-live host event admission and diagnostic tests listed here. Events are exercised through the host test binary, not through a served browser or CLI route."]
 
 [[item]]
 gate = "H"
