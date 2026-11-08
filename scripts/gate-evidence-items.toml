@@ -290,7 +290,7 @@ select = [
   { record = "workspace-rest", package = "orna-runtime", target = "test:owner_fence_gate_d" },
 ]
 limitations = [
-  "Owner fencing is shown only after the test calls takeover_lease itself; live writers are not fenced (ornadb-5il1.127, ornadb-5il1.58).",
+  "Dead owners are fenced after real SIGKILL of a lease-holding child (owner_fence_gate_d.rs); a live writer is not fenced from outside its own process, and a second participant is refused only by the runtime owner lock (ornadb-5il1.127, ornadb-5il1.58).",
 ]
 
 [[item]]
@@ -314,17 +314,19 @@ gate = "D"
 id = "D4"
 title = "No production claim of arbitrary concurrent uncoordinated git prune --expire now"
 select = [{ record = "claims-prune-expire", package = "workspace", target = "check:prune-expire" }]
+limitations = ["The claim is checked lexically by scripts/check_product_claims.py (prune-expire), not by a runtime test: no production command runs git prune and only test code enters Repository::with_maintenance_boundary (ornadb-20ac), so there is no product path to exercise."]
 
 [[item]]
 gate = "D"
 id = "D5"
 title = "Recovery of uncertain external effects never fabricates proven rollback"
 select = [
+  { record = "gate-d-crash-matrix", package = "orna-cli", target = "test:publication_crash_matrix", test = "publication_recovery_keeps_uncertain_external_effects_uncertain" },
   { record = "workspace-rest", package = "orna-runtime", target = "lib", test = "external_effect_marker_keeps_fault_recovery_uncertain" },
   { record = "workspace-rest", package = "orna-runtime", target = "lib", test = "legacy_running_request_recovers_as_uncertain_after_takeover" },
   { record = "workspace-rest", package = "orna-runtime", target = "lib", test = "recovery_retains_uncertainty_and_clears_old_owner_evidence" },
 ]
-limitations = ["Library tests only; no process-kill test covers uncertain effects (ornadb-5il1.59)."]
+limitations = ["Process kill covers only the ref-cas and tail publication boundaries; the other external-effect boundaries are covered by library tests only."]
 
 # Gate E: actual writable mount. The workspace-cli record runs with ORNA_REQUIRE_FUSE=1.
 
@@ -455,9 +457,10 @@ select = [
   { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_isolation", test = "unsynced_draft_is_invisible_to_second_open_and_after_child_exec_and_sigkill_remount" },
   { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_isolation", test = "repeated_observer_reads_never_show_private_draft_and_read_handles_pin_generation" },
   { record = "workspace-cli", package = "orna-cli", target = "bin:orna", test = "editor_open_flags_bypass_kernel_cache_without_writeback_capability" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_integration", test = "cwd_mount_read_only_blob_opens_share_no_cached_pages_across_generations" },
   { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_isolation", test = "read_only_text_opens_share_no_cached_pages_across_generations" },
 ]
-limitations = ["Mount-level selectors above are claimed. read_only_text_opens_share_no_cached_pages_across_generations carries the page-cache clause of profiles/vfs-1.md:129-130: a projected Str over the 64 KiB bound is a Text node whose read-only opens reply with FopenFlags::empty(), so the kernel caches its pages; a same-length replacement must be published under a fresh inode, and the superseded inode's handle keeps the generation it captured. The row document itself is not a page-cached case: every document open requests FOPEN_DIRECT_IO (EDITABLE_OPEN_FLAGS), so the reused document inode cannot share pages across generations. The bin:orna selector is a constant check of the editable open flags and init capabilities (fuse_mount.rs), not an observation of kernel caching through a mount; it is named here, not counted as mount-level evidence (ornadb-5il1.64)."]
+limitations = ["Mount-level selectors above are claimed. read_only_text_opens_share_no_cached_pages_across_generations carries the page-cache clause of profiles/vfs-1.md:129-130 for the Text shape: a projected Str over the 64 KiB bound is a Text node whose read-only opens reply with FopenFlags::empty(), so the kernel caches its pages; a same-length replacement must be published under a fresh inode, and the superseded inode's handle keeps the generation it captured. cwd_mount_read_only_blob_opens_share_no_cached_pages_across_generations carries the same clause for the Blob shape through a live cwd mount: a Blob read-only open also replies with FopenFlags::empty(), and the test checks that a same-length temp-and-rename replacement gets a fresh inode, that read-only opens return the replacement bytes, and that a pinned handle keeps the captured generation. It observes the bytes and inode a mount serves, not the kernel page cache itself. Mutation (exit 0 on the Blob test, the Text test and both draft-isolation selectors): changing the read-only Blob and Text reply flags in fuse_mount.rs to FopenFlags::FOPEN_KEEP_CACHE leaves every run E9 selector passing, so no E9 selector discriminates a keep-cache regression and the page-cache clause has no mutation proof. The bin:orna selector was not run under the mutation. The mount never rewrites a committed inode in place, so a stale-page regression on an unchanged inode is not reachable through a mount test here. The row document itself is not a page-cached case: every document open requests FOPEN_DIRECT_IO (EDITABLE_OPEN_FLAGS), so the reused document inode cannot share pages across generations. The bin:orna selector is a constant check of the editable open flags and init capabilities (fuse_mount.rs), not an observation of kernel caching through a mount; it is named here, not counted as mount-level evidence (ornadb-5il1.64)."]
 
 [[item]]
 gate = "E"
