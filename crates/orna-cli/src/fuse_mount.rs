@@ -2222,6 +2222,20 @@ fn save_failure(
     }
 }
 
+/// Classifies a temporary commit that the runtime refused to finish. A backing I/O
+/// failure while reading the candidate is a failed commit (EIO), never a malformed
+/// draft (EINVAL): the candidate was not shown to be invalid.
+fn temporary_commit_failure(
+    backing_io_failed: bool,
+    error: VfsSaveError<orna_runtime::TableActivationError>,
+) -> DocumentCommitError {
+    if backing_io_failed {
+        DocumentCommitError::Failed("temporary mounted row save failed: backing I/O failure".into())
+    } else {
+        save_failure("temporary mounted row save failed", error)
+    }
+}
+
 impl From<String> for DocumentCommitError {
     fn from(error: String) -> Self {
         Self::Failed(error)
@@ -2776,6 +2790,8 @@ impl RowSaveContext {
         let accepted_row_output = Arc::clone(&accepted_row);
         let accepted_snapshot: Arc<Mutex<Option<CandidateSnapshot>>> = Arc::new(Mutex::new(None));
         let accepted_snapshot_output = Arc::clone(&accepted_snapshot);
+        let backing_io_failure = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let backing_io_failure_output = Arc::clone(&backing_io_failure);
         let outcome = self
             .writer
             .runtime
@@ -2785,6 +2801,7 @@ impl RowSaveContext {
                 save,
                 move |coordinates, bytes| async move {
                     let document = candidate_document_bytes(&bytes).map_err(|_| {
+                        backing_io_failure_output.store(true, std::sync::atomic::Ordering::Relaxed);
                         orna_runtime::TableActivationError::Runtime(
                             orna_runtime::RuntimeError::InvalidTableMutation,
                         )
@@ -2801,6 +2818,7 @@ impl RowSaveContext {
                         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(row_bytes);
                     // The retained view shares the spool handle; no RAM copy outlives the callback.
                     let retained = bytes.duplicate().map_err(|_| {
+                        backing_io_failure_output.store(true, std::sync::atomic::Ordering::Relaxed);
                         orna_runtime::TableActivationError::Runtime(
                             orna_runtime::RuntimeError::InvalidTableMutation,
                         )
@@ -2847,7 +2865,10 @@ impl RowSaveContext {
                 )))
             }
             Ok(TemporaryRenameOutcome::Stale { .. }) => Err(DocumentCommitError::Stale),
-            Err(error) => Err(save_failure("temporary mounted row save failed", error)),
+            Err(error) => Err(temporary_commit_failure(
+                backing_io_failure.load(std::sync::atomic::Ordering::Relaxed),
+                error,
+            )),
         }
     }
 }
@@ -10344,6 +10365,31 @@ mod tests {
             VfsSaveError::<orna_runtime::TableActivationError>::Backing(EditDraftError::BackingIo),
         );
         assert_eq!(io.errno().code(), 5, "{io:?}");
+    }
+
+    #[test]
+    fn temporary_commit_backing_io_failure_is_eio_and_malformed_draft_is_einval() {
+        use orna_runtime::vfs::{EditDraftError, VfsSaveError};
+        use orna_runtime::{RuntimeError, TableActivationError};
+        let malformed = || {
+            VfsSaveError::<TableActivationError>::Activation(TableActivationError::Runtime(
+                RuntimeError::InvalidTableMutation,
+            ))
+        };
+        let cases: [(bool, VfsSaveError<TableActivationError>, i32); 3] = [
+            (true, malformed(), 5),
+            (false, malformed(), 22),
+            (false, VfsSaveError::Backing(EditDraftError::BackingIo), 5),
+        ];
+        for (backing_io_failed, error, errno) in cases {
+            let failure = super::temporary_commit_failure(backing_io_failed, error);
+            assert_eq!(failure.errno().code(), errno, "{failure:?}");
+        }
+        let io = super::temporary_commit_failure(true, malformed());
+        assert!(
+            format!("{io:?}").contains("backing I/O failure"),
+            "the I/O cause is distinct from a malformed draft: {io:?}"
+        );
     }
 
     use std::ffi::OsStr;
