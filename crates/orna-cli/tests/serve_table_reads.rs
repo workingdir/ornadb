@@ -490,3 +490,44 @@ fn committed_blob_rows_are_served_as_contextual_values() {
     assert_eq!(status, 200, "body: {body}");
     assert_eq!(body.trim(), "1 : Int", "the committed blob row counts once");
 }
+
+/// Stores one pixel blob row through the REPL. The row is CWD state until a
+/// publish commits it.
+fn store_pixel_blob(root: &Path, id: &str) {
+    let pixel = fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/media/pixel.png"
+    ))
+    .expect("read the pixel fixture");
+    fs::write(root.join("pixel.png"), &pixel).expect("place the captured file");
+    let root_text = root.to_string_lossy();
+    let stored = orna_repl(
+        root,
+        &format!(
+            "let raw = sys.blob.capture_file({root_text:?}, \"pixel.png\", 65536);\nlet image = sys.blob.annotate(raw, \"image/png\");\nmain.store(\"{id}\", image).id"
+        ),
+    );
+    assert_success(&stored, "REPL blob insert");
+    assert!(
+        !transcript(&stored).contains("error["),
+        "the REPL accepts the blob row\n{}",
+        transcript(&stored)
+    );
+}
+
+/// A Blob row inserted and never published is CWD-tail state. Its descriptor has
+/// no committed media authority, so the page is refused without any value.
+#[test]
+fn uncommitted_blob_row_is_refused_without_a_value() {
+    let directory = TempDir::new().expect("create the test directory");
+    let root = committed_project(&directory, BLOB_SOURCE);
+    store_pixel_blob(&root, "one");
+    let (_server, address) = start_server(&root);
+    let (status, body) = http_get(&address, "/").expect("GET /");
+    assert_eq!(status, 500, "body: {body}");
+    assert_eq!(
+        body.trim(),
+        r#"{"error":"serve.table_read_unsupported"}"#,
+        "the uncommitted Blob row names the refusal and carries no value"
+    );
+}

@@ -584,6 +584,43 @@ mod tests {
         assert!(matches!(result, Err(ApplicationError::Runtime(_))));
     }
 
+    /// A contextual page read never returns a value for a body that writes a
+    /// plain table. The same source stages a real mutation on the canonical
+    /// path, so the refusal is not vacuous. The contextual dispatch refuses the
+    /// insert before the `ReadStagedMutation` guard is reached.
+    #[test]
+    fn contextual_read_of_a_plain_table_write_returns_no_value() {
+        const STAGED_WRITE_SOURCE: &str = "pub table Note(id: Int) { text: Str, }\n\nfn main() {\n    Note.insert({ id: 7, text: \"written\" })\n}\n";
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let admitted = authority
+            .admit_module("main.orna", STAGED_WRITE_SOURCE, "main")
+            .expect("module admitted");
+        let canonical = authority
+            .evaluate_staged_over_table_rows(
+                &admitted,
+                &Environment::new(),
+                RuntimeTableRows::from([("Note".to_owned(), Vec::new())]),
+                None,
+                None,
+            )
+            .expect("the canonical path stages the write");
+        assert!(
+            !canonical.mutations().is_empty(),
+            "the source must really stage a mutation"
+        );
+        let result = evaluate_contextual_page_read(
+            &admitted,
+            &BTreeMap::new(),
+            RuntimeTableRows::from([("Note".to_owned(), Vec::new())]),
+            BTreeMap::new(),
+        );
+        assert!(
+            result.is_err(),
+            "a contextual read of a write returns no value"
+        );
+    }
+
     #[test]
     fn non_blob_page_matches_the_canonical_read() {
         let authority =
