@@ -538,6 +538,7 @@ async fn cli_publication_prepared_journal_objects_survive_coordinated_gc() {
 
     let crash = TempDir::new().unwrap();
     let marker = crash.path().join(MARKER_FILE);
+    drop(state);
     let mut child = launch(root, "prepared", crash.path());
     let deadline = Instant::now() + Duration::from_secs(30);
     while !marker.exists() && Instant::now() < deadline {
@@ -553,7 +554,6 @@ async fn cli_publication_prepared_journal_objects_survive_coordinated_gc() {
     assert!(!status.success(), "child unexpectedly returned at prepared");
     assert_eq!(std::fs::read_to_string(&marker).unwrap(), "prepared");
     std::fs::remove_file(&marker).unwrap();
-    drop(state);
 
     let journal = repository
         .read_publication_journal()
@@ -916,6 +916,7 @@ async fn publish_kill_matrix(between_kill_and_recovery: fn(&Repository, &Path)) 
         let base_tree = String::from_utf8_lossy(&git_output(root, &["write-tree"], None))
             .trim()
             .to_owned();
+        drop(state);
         let mut child = launch(root, boundary, crash.path());
         let deadline = Instant::now() + Duration::from_secs(30);
         while !marker.exists() && Instant::now() < deadline {
@@ -1000,7 +1001,6 @@ async fn publish_kill_matrix(between_kill_and_recovery: fn(&Repository, &Path)) 
         }
         // A SIGKILL between adoption and the Prepared write leaves orphan pins with no
         // journal. Recovery sweeps them (asserted after recovery below).
-        drop(state);
         between_kill_and_recovery(&repository, root);
 
         let resumed = cli(root, &["--debug", "publish"]);
@@ -1133,6 +1133,7 @@ async fn publish_kill_matrix(between_kill_and_recovery: fn(&Repository, &Path)) 
             0,
             "pending range remains after {boundary}"
         );
+        drop(reopened);
         let second = cli(root, &["publish"]);
         assert!(
             second.status.success(),
@@ -1166,6 +1167,11 @@ async fn publish_kill_matrix(between_kill_and_recovery: fn(&Repository, &Path)) 
         // .127 and .220). `orna publish` acquires no writer lease, so the seeded lease must be
         // untouched by the killed publish or its recovery, and the publisher's own runtime-owner
         // and coordination locks must be released and acquirable afterwards.
+        let reopened = RuntimeState::open(&repository, identity, digest)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("runtime reopen after the second publish at {boundary}: {error:?}")
+            });
         assert_eq!(
             reopened.current_lease().await.unwrap(),
             Some(seeded_lease),
@@ -1206,6 +1212,7 @@ async fn cli_publication_reopens_after_external_edit_in_kill_window() {
 
     let crash = TempDir::new().unwrap();
     let marker = crash.path().join(MARKER_FILE);
+    drop(state);
     let mut child = launch(root, "index", crash.path());
     let deadline = Instant::now() + Duration::from_secs(30);
     while !marker.exists() && Instant::now() < deadline {
@@ -1221,7 +1228,6 @@ async fn cli_publication_reopens_after_external_edit_in_kill_window() {
     assert!(!status.success(), "child unexpectedly returned at index");
     assert_eq!(std::fs::read_to_string(&marker).unwrap(), "index");
     std::fs::remove_file(&marker).unwrap();
-    drop(state);
 
     let external = b"external edit during kill window\n";
     std::fs::write(root.join("unrelated-tracked.txt"), external).unwrap();
@@ -1304,6 +1310,7 @@ async fn abandoned_publication_owner_loses_the_index_lock_and_its_pins_after_a_k
 
     let crash = TempDir::new().unwrap();
     let marker = crash.path().join(MARKER_FILE);
+    drop(state);
     let mut child = launch(root, "index-lock", crash.path());
     let deadline = Instant::now() + Duration::from_secs(30);
     while !marker.exists() && Instant::now() < deadline {
@@ -1329,7 +1336,6 @@ async fn abandoned_publication_owner_loses_the_index_lock_and_its_pins_after_a_k
         "the killed owner did not leave the index lock it held"
     );
     assert_attempt_pins(root, &base_head, &base_tree, "index-lock");
-    drop(state);
 
     let resumed = cli(root, &["--debug", "publish"]);
     assert!(
@@ -1389,6 +1395,7 @@ async fn cli_publication_reopens_after_coordinated_gc_with_external_edit_in_kill
 
     let crash = TempDir::new().unwrap();
     let marker = crash.path().join(MARKER_FILE);
+    drop(state);
     let mut child = launch(root, "index", crash.path());
     let deadline = Instant::now() + Duration::from_secs(30);
     while !marker.exists() && Instant::now() < deadline {
@@ -1404,7 +1411,6 @@ async fn cli_publication_reopens_after_coordinated_gc_with_external_edit_in_kill
     assert!(!status.success(), "child unexpectedly returned at index");
     assert_eq!(std::fs::read_to_string(&marker).unwrap(), "index");
     std::fs::remove_file(&marker).unwrap();
-    drop(state);
 
     let external = b"external edit during coordinated maintenance\n";
     std::fs::write(root.join("unrelated-tracked.txt"), external).unwrap();
@@ -1573,6 +1579,7 @@ async fn publication_later_tail_is_retained_across_kill_boundaries() {
 
         let crash = TempDir::new().unwrap();
         let marker = crash.path().join(MARKER_FILE);
+        drop(state);
         let mut child = launch(root, boundary, crash.path());
         let deadline = Instant::now() + Duration::from_secs(30);
         while !marker.exists() && Instant::now() < deadline {
@@ -1591,7 +1598,6 @@ async fn publication_later_tail_is_retained_across_kill_boundaries() {
         );
         assert_eq!(std::fs::read_to_string(&marker).unwrap(), boundary);
         std::fs::remove_file(&marker).unwrap();
-        drop(state);
 
         // The later mutation lands inside the kill window, before any recovery runs.
         std::fs::copy(
@@ -1791,6 +1797,7 @@ async fn managed_store_edit_in_kill_window_is_retained_and_not_rewound() {
 
         let crash = TempDir::new().unwrap();
         let marker = crash.path().join(MARKER_FILE);
+        drop(state);
         let mut child = launch(root, boundary, crash.path());
         let deadline = Instant::now() + Duration::from_secs(30);
         while !marker.exists() && Instant::now() < deadline {
@@ -1809,7 +1816,6 @@ async fn managed_store_edit_in_kill_window_is_retained_and_not_rewound() {
         );
         assert_eq!(std::fs::read_to_string(&marker).unwrap(), boundary);
         std::fs::remove_file(&marker).unwrap();
-        drop(state);
 
         let store_path = root.join(".orna/store/data");
         let original = std::fs::read(&store_path).expect("store data exists after kill");
@@ -1889,6 +1895,7 @@ async fn managed_store_payload_edit_in_kill_window_is_retained_and_not_rewound()
 
         let crash = TempDir::new().unwrap();
         let marker = crash.path().join(MARKER_FILE);
+        drop(state);
         let mut child = launch(root, boundary, crash.path());
         let deadline = Instant::now() + Duration::from_secs(30);
         while !marker.exists() && Instant::now() < deadline {
@@ -1906,7 +1913,6 @@ async fn managed_store_payload_edit_in_kill_window_is_retained_and_not_rewound()
             "child unexpectedly returned at {boundary}"
         );
         std::fs::remove_file(&marker).unwrap();
-        drop(state);
 
         let mut payloads = Vec::new();
         store_payload_leaves(&root.join(".orna/store"), &mut payloads);
@@ -1970,6 +1976,8 @@ async fn managed_store_discard_remedy_restores_payload_and_publishes() {
 
         let crash = TempDir::new().unwrap();
         let marker = crash.path().join(MARKER_FILE);
+        // The child publish is a second live writer while this owner lock is held (ORNA-TURSO-005).
+        drop(state);
         let mut child = launch(root, boundary, crash.path());
         let deadline = Instant::now() + Duration::from_secs(30);
         while !marker.exists() && Instant::now() < deadline {
@@ -1987,7 +1995,6 @@ async fn managed_store_discard_remedy_restores_payload_and_publishes() {
             "child unexpectedly returned at {boundary}"
         );
         std::fs::remove_file(&marker).unwrap();
-        drop(state);
 
         let payload = root.join(".orna/store/data");
         exercised += 1;
@@ -2216,6 +2223,8 @@ async fn recovery_consumes_only_frozen_range_and_preserves_unrelated_work() {
 
     let crash = TempDir::new().unwrap();
     let marker = crash.path().join(MARKER_FILE);
+    let (identity, digest) = cli_runtime_identity(&repository);
+    drop(state);
     let mut child = launch(root, "ref-cas", crash.path());
     let deadline = Instant::now() + Duration::from_secs(30);
     while !marker.exists() && Instant::now() < deadline {
@@ -2226,6 +2235,11 @@ async fn recovery_consumes_only_frozen_range_and_preserves_unrelated_work() {
         "child never reached ref-cas; status: {:?}",
         child.try_wait().unwrap()
     );
+    child.kill().expect("SIGKILL publication child");
+    let status = child.wait().expect("wait for killed publication child");
+    assert!(!status.success(), "child unexpectedly returned at ref-cas");
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "ref-cas");
+    std::fs::remove_file(&marker).unwrap();
     let tail_payload = std::fs::read(Path::new(MEDIA_FIXTURES).join("pixel2.png")).unwrap();
     assert_ne!(
         initial_payload, tail_payload,
@@ -2237,7 +2251,9 @@ async fn recovery_consumes_only_frozen_range_and_preserves_unrelated_work() {
     )
     .unwrap();
 
-    let (identity, _) = cli_runtime_identity(&repository);
+    let state = RuntimeState::open(&repository, identity, digest)
+        .await
+        .unwrap_or_else(|error| panic!("runtime reopen after the crashed child: {error:?}"));
     let source_format_context = format_context;
     let writer = state.acquire_lease(identity.repository_id).await.unwrap();
     let capability = repository.capture_capability(relation_id).unwrap();
@@ -2271,11 +2287,6 @@ async fn recovery_consumes_only_frozen_range_and_preserves_unrelated_work() {
     .await;
     drop(bindings);
 
-    child.kill().expect("SIGKILL publication child");
-    let status = child.wait().expect("wait for killed publication child");
-    assert!(!status.success(), "child unexpectedly returned at ref-cas");
-    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "ref-cas");
-    std::fs::remove_file(&marker).unwrap();
     drop(state);
 
     let (identity, digest) = cli_runtime_identity(&repository);
