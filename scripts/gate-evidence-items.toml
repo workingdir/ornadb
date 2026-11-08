@@ -147,18 +147,21 @@ id = "B2"
 title = "Record peak RSS, bytes read and written, network objects and elapsed time"
 select = [
   { record = "workspace-cli", package = "orna-cli", target = "test:media_import_query", test = "gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:media_import_query", test = "gate_b_metadata_update_reads_zero_payload_bytes_at_mib_scale" },
 ]
 counters = ["^Gate B: "]
 
 [[item]]
 gate = "B"
 id = "B3"
-title = "Title, MIME and hint-only update, row lookup and summary read touch zero media-payload bytes; metadata counted separately"
+title = "MIME and hint-only update, row lookup and summary read touch zero media-payload bytes; metadata counted separately"
 select = [
   { record = "workspace-cli", package = "orna-cli", target = "test:media_import_query", test = "gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:media_import_query", test = "gate_b_metadata_update_reads_zero_payload_bytes_at_mib_scale" },
 ]
+counters = ["^Gate B: metadata-only update "]
 limitations = [
-  "There is no title-only update, metadata bytes are not reported, and the zero-read checks cannot see the commit or publish path (ornadb-5il1.8).",
+  "There is no title-only update: the zero-read update re-pins a blob's MIME and hint, not a title column. The zero-read checks cannot see the commit or publish path (ornadb-5il1.8).",
 ]
 
 [[item]]
@@ -172,9 +175,14 @@ counters = ["^Gate B: range "]
 gate = "B"
 id = "B5"
 title = "Full export verifies raw hashes"
-select = [{ record = "workspace-cli", package = "orna-cli", target = "test:complete_copy_export" }]
+select = [
+  { record = "workspace-cli", package = "orna-cli", target = "test:complete_copy_export" },
+  { record = "workspace-rest", package = "orna-repository", target = "lib", test = "closure_refuses_a_descriptor_whose_raw_digest_is_forged" },
+  { record = "workspace-rest", package = "orna-repository", target = "lib", test = "closure_accepts_a_descriptor_whose_raw_digest_is_consistent" },
+  { record = "workspace-rest", package = "orna-repository", target = "lib", test = "two_level_descriptor_with_a_forged_raw_digest_is_refused" },
+]
 limitations = [
-  "The Blob's raw SHA-256 is not recomputed against its descriptor, and the 10 GiB row is never exported (ornadb-5il1.193).",
+  "The raw SHA-256 check runs through verify_closure, which export calls on every member, and is proven by unit tests that forge a descriptor in a hand-built repository, one at the root and one through a two-level byte index. No CLI export carries a forged descriptor: export only admits a whole format-3 graph, and descriptors are built only by the production writer, so a forged descriptor needs a test seam in production code. Byte indexes deeper than two levels are untested, and the 10 GiB row is never exported (ornadb-5il1.193).",
 ]
 
 [[item]]
@@ -204,10 +212,12 @@ select = [
   { record = "workspace-rest", package = "orna-repository", target = "test:row_store_scale", test = "orp1_row_store_ten_rows" },
   { record = "workspace-cli", package = "orna-cli", target = "test:partial_clone_publication_race" },
   { record = "workspace-rest", package = "orna-repository", target = "test:row_store_scale", test = "orp1_production_publication_race" },
+  { record = "workspace-rest", package = "orna-repository", target = "test:row_store_scale", test = "orp1_partial_clone_cold_publication_race" },
+  { record = "workspace-rest", package = "orna-repository", target = "test:row_store_scale", test = "orp1_partial_clone_warm_publication_race" },
   { record = "gate-c-million-rows", package = "orna-repository", target = "test:row_store_scale", test = "orp1_row_store_one_million_rows" },
 ]
 limitations = [
-  "Concurrent publication is raced three ways: two publishers on one local repository (orp1_production_publication_race), and a cold and a warm partial clone that each publish their own row and then race the push to a shared bare remote (partial_clone_publication_race). The clone race asserts one push wins, the remote branch reaches only the winner commit, a fresh product reader over the remote reads the winner row and not the loser row, and the losing clone keeps its own publication as a local commit after fetching the published snapshot. It does not merge the two publications: both rewrite one store file and the format has no merge rule for two publications of one store. Still not covered: exercise_concurrent_writes computes the row index on two threads without publishing, so it does not race two publications. That driver now runs nightly, because the ignored one-million-row case runs in the nightly gates job and C2 selects its record; what it does not do is publish concurrently, which the two race tests above cover on their own (ornadb-mmsa.13).",
+  "Concurrent publication is raced four ways: two publishers on one local repository (orp1_production_publication_race); the same two-publisher race in a cold and a warm promisor clone (orp1_partial_clone_cold_publication_race, orp1_partial_clone_warm_publication_race); and a cold and a warm partial clone that each publish their own row and then race the push to a shared bare remote (partial_clone_publication_race). The clone race asserts one push wins, the remote branch reaches only the winner commit, a fresh product reader over the remote reads the winner row and not the loser row, and the losing clone keeps its own publication as a local commit after fetching the published snapshot. It does not merge the two publications: both rewrite one store file and the format has no merge rule for two publications of one store. Still not covered: exercise_concurrent_writes computes the row index on two threads without publishing, so it does not race two publications. That driver now runs nightly, because the ignored one-million-row case runs in the nightly gates job and C2 selects its record; what it does not do is publish concurrently, which the race tests above cover on their own (ornadb-mmsa.13).",
 ]
 
 [[item]]
@@ -244,6 +254,8 @@ id = "C5"
 title = "Malformed overlapping ranges, broken counts, giant fanout and wrong schema domains fail"
 select = [
   { record = "workspace-rest", package = "orna-repository", target = "test:row_store_scale", test = "orp1_malformed_graphs_report_specific_diagnostics" },
+  { record = "workspace-rest", package = "orna-repository", target = "test:row_store_scale", test = "orp1_nested_overlap_reports_diagnostic_on_descent" },
+  { record = "workspace-rest", package = "orna-repository", target = "test:row_store_scale", test = "orp1_interior_count_mismatch_reports_diagnostic_on_descent" },
 ]
 
 [[item]]
