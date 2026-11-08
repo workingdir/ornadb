@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [features]
 crash-barriers = ["orna-repository/crash-barriers", "orna-runtime/crash-barriers"]
+test-seams = []
 
 [lints.rust]
 unsafe_code = "forbid"
@@ -52,6 +53,11 @@ required-features = ["crash-barriers"]
 name = "migration_kill_matrix"
 path = "tests/migration_kill_matrix.rs"
 required-features = ["crash-barriers"]
+[[test]]
+name = "vfs_mount_aggregate_quota"
+path = "tests/vfs_mount_aggregate_quota.rs"
+required-features = ["test-seams"]
+
 
 [dev-dependencies]
 bytes = "1.11.1"
