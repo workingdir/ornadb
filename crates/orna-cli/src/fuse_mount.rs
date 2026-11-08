@@ -2774,8 +2774,8 @@ impl RowSaveContext {
         let row_context = Arc::clone(self);
         let accepted_row = Arc::new(Mutex::new(None));
         let accepted_row_output = Arc::clone(&accepted_row);
-        let accepted_bytes: Arc<Mutex<Option<Arc<[u8]>>>> = Arc::new(Mutex::new(None));
-        let accepted_bytes_output = Arc::clone(&accepted_bytes);
+        let accepted_snapshot: Arc<Mutex<Option<CandidateSnapshot>>> = Arc::new(Mutex::new(None));
+        let accepted_snapshot_output = Arc::clone(&accepted_snapshot);
         let outcome = self
             .writer
             .runtime
@@ -2784,19 +2784,30 @@ impl RowSaveContext {
                 &self.writer.state,
                 save,
                 move |coordinates, bytes| async move {
+                    let document = candidate_document_bytes(&bytes).map_err(|_| {
+                        orna_runtime::TableActivationError::Runtime(
+                            orna_runtime::RuntimeError::InvalidTableMutation,
+                        )
+                    })?;
                     let (candidate, row_bytes) = row_context.writer.candidate(
                         &row_context,
                         &coordinates,
-                        &bytes,
+                        &document,
                         None,
                         None,
                     )?;
                     *accepted_row_output
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(row_bytes);
-                    *accepted_bytes_output
+                    // The retained view shares the spool handle; no RAM copy outlives the callback.
+                    let retained = bytes.duplicate().map_err(|_| {
+                        orna_runtime::TableActivationError::Runtime(
+                            orna_runtime::RuntimeError::InvalidTableMutation,
+                        )
+                    })?;
+                    *accepted_snapshot_output
                         .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(bytes);
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(retained);
                     Ok(candidate)
                 },
                 &NoFault,
@@ -2810,19 +2821,19 @@ impl RowSaveContext {
                 if record_baseline {
                     self.record_accepted_row(accepted_row);
                 }
-                // A replayed save publishes no callback, so the accepted bytes are the
-                // scratch's own candidate, read once here.
-                match accepted_bytes
+                // A replayed save publishes no callback, so the retained view is the
+                // scratch's own candidate, shared through its spool handle.
+                match accepted_snapshot
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .take()
                 {
-                    Some(bytes) => Ok(Arc::new(CandidateSnapshot::from(bytes))),
+                    Some(snapshot) => Ok(Arc::new(snapshot)),
                     None => self
                         .writer
                         .runtime
-                        .block_on(scratch.candidate_bytes())
-                        .map(|bytes| Arc::new(CandidateSnapshot::from(bytes)))
+                        .block_on(scratch.candidate_snapshot())
+                        .map(Arc::new)
                         .map_err(|error| DocumentCommitError::Failed(candidate_unreadable(error))),
                 }
             }
