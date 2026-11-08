@@ -24,6 +24,7 @@ use crate::media_range::{MediaMethod, MediaReply, media_reply, plan_media_respon
 use orna_application::{
     AdmittedApplication, ApplicationAuthority, ApplicationError, StagedActivation,
 };
+use orna_conformance::AdmittedReplSession;
 use orna_evaluator::Environment;
 use orna_repository::{GitHashAlgorithm, KeyRange, NativeOid, RepositoryFormatContext};
 use orna_semantic::TableSchema;
@@ -33,6 +34,7 @@ use orna_serving::media_preview::{
 };
 use orna_value::ContextValue;
 use std::collections::BTreeMap;
+use std::sync::TryLockError;
 
 /// Repository-relative module that hosts the serving entry.
 pub(super) const SERVE_MODULE_PATH: &str = "main.orna";
@@ -53,6 +55,9 @@ pub(super) struct ServeApp {
     authority: ApplicationAuthority,
     /// Project root whose committed `HEAD` supplies the module and rows.
     root: String,
+    /// The console session the page's Run control evaluates against. Its
+    /// admission failure is kept as the stable code every action answers with.
+    console: Result<AdmittedReplSession, String>,
 }
 
 impl ServeApp {
@@ -90,6 +95,7 @@ impl ServeApp {
             Ok(_) if serve_is_public(&project.modules()[index].source) => Ok(Some(Self {
                 authority,
                 root: root.to_owned(),
+                console: console_session(project),
             })),
             // A private `serve` is not the serving entry (ORNA-APP-001 explicit root `pub fn serve()`).
             Ok(_) | Err(ApplicationError::MissingEntry(_)) => Ok(None),
@@ -462,6 +468,9 @@ fn serving_entry_route_inner(app: Option<&Mutex<ServeApp>>, request: &Request) -
     }
     if let Some(suffix) = request.path.strip_prefix(PREVIEW_PREFIX) {
         return Some(preview_route(app, request, suffix));
+    }
+    if let Some(action_id) = request.path.strip_prefix(ACTION_PREFIX) {
+        return Some(action_route(app, request, action_id));
     }
     if request.path != "/" {
         return None;
@@ -904,6 +913,149 @@ fn refuse_uncommitted_blobs(
         }
     }
     Ok(())
+}
+
+/// Path prefix of the console action route. The page's Run control posts its
+/// single form field here as one console input (ORNA-APP-012).
+const ACTION_PREFIX: &str = "/action/";
+/// Largest decoded console input one action request may evaluate.
+const MAX_CONSOLE_INPUT_BYTES: usize = 16 * 1024;
+
+/// Admits the console session the Run control evaluates against. A failure is
+/// kept as its stable code rather than stopping the server.
+fn console_session(project: &orna_project::LoadedProject) -> Result<AdmittedReplSession, String> {
+    AdmittedReplSession::from_loaded_project(
+        project,
+        project.standard_sources().iter().cloned(),
+        Limits::default(),
+    )
+    .map_err(|error| error.code().to_owned())
+}
+
+/// Answers `POST /action/<id>`: the form's one field is evaluated as one
+/// console input and its value rendered. Only POST is served.
+fn action_route(app: &Mutex<ServeApp>, request: &Request, action_id: &str) -> Response {
+    if request.method != "POST" {
+        return Response::new(
+            405,
+            "application/json",
+            br#"{"error":"method_not_allowed"}"#.to_vec(),
+        );
+    }
+    if !valid_action_id(action_id) {
+        return Response::new(
+            404,
+            "application/json",
+            br#"{"error":"action.not_found"}"#.to_vec(),
+        );
+    }
+    let source = match console_input(request) {
+        Ok(source) => source,
+        Err((status, code)) => return action_error(status, code),
+    };
+    // A session that another request holds is refused visibly instead of
+    // queueing the input behind an evaluation that is still running.
+    match app.try_lock() {
+        Ok(mut app) => app.console_submit(&source),
+        Err(TryLockError::WouldBlock) => action_error(409, "serve.session_busy"),
+        Err(TryLockError::Poisoned(_)) => unavailable_response(),
+    }
+}
+
+/// An action identifier is a short run of ASCII letters, digits, `.`, `_` or
+/// `-`, so it is safe as a path segment and an attribute value.
+fn valid_action_id(action_id: &str) -> bool {
+    !action_id.is_empty()
+        && action_id.len() <= 128
+        && action_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+/// Reads the console input from the form's one field, which must be
+/// `application/x-www-form-urlencoded`.
+fn console_input(request: &Request) -> Result<String, (u16, &'static str)> {
+    let content_type = request
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+        .map_or("", |(_, value)| value.as_str());
+    let media_type = content_type.split(';').next().unwrap_or_default().trim();
+    if !media_type.eq_ignore_ascii_case("application/x-www-form-urlencoded") {
+        return Err((415, "action.unsupported_media_type"));
+    }
+    let body = std::str::from_utf8(&request.body).map_err(|_| (400, "action.invalid_form"))?;
+    let mut pairs = body.split('&');
+    let (Some(pair), None) = (pairs.next(), pairs.next()) else {
+        return Err((400, "action.invalid_form"));
+    };
+    let (_, value) = pair.split_once('=').ok_or((400, "action.invalid_form"))?;
+    let source = form_decode(value).ok_or((400, "action.invalid_form"))?;
+    if source.len() > MAX_CONSOLE_INPUT_BYTES {
+        return Err((413, "action.input_too_large"));
+    }
+    Ok(source)
+}
+
+/// Decodes one form value: `+` is a space and `%XX` is one byte. Returns
+/// `None` for a malformed escape or text that is not UTF-8.
+fn form_decode(value: &str) -> Option<String> {
+    let mut bytes = Vec::with_capacity(value.len());
+    let mut rest = value.bytes();
+    while let Some(byte) = rest.next() {
+        match byte {
+            b'+' => bytes.push(b' '),
+            b'%' => {
+                let high = hex_digit(rest.next()?)?;
+                let low = hex_digit(rest.next()?)?;
+                bytes.push((high << 4) | low);
+            }
+            other => bytes.push(other),
+        }
+    }
+    String::from_utf8(bytes).ok()
+}
+
+fn hex_digit(byte: u8) -> Option<u8> {
+    char::from(byte)
+        .to_digit(16)
+        .and_then(|digit| u8::try_from(digit).ok())
+}
+
+/// A console failure as an HTML fragment. Only stable codes reach this
+/// function, so the text needs no escaping.
+fn action_error(status: u16, code: &str) -> Response {
+    Response::new(
+        status,
+        "text/html; charset=utf-8",
+        format!("<p class=\"diagnostic\">{code}</p>").into_bytes(),
+    )
+}
+
+impl ServeApp {
+    /// Evaluates one console input and renders its value. The session is
+    /// pure: `submit` refuses an effectful input before it runs, and that
+    /// refusal is rendered like any other diagnostic.
+    fn console_submit(&mut self, source: &str) -> Response {
+        let session = match &mut self.console {
+            Ok(session) => session,
+            Err(code) => return action_error(503, code),
+        };
+        match session.submit(source) {
+            Ok(Some(value)) => {
+                let html =
+                    crate::ui_render::render_value_html(value.raw(), None).unwrap_or_else(|| {
+                        let mut text = String::from("<pre><code>");
+                        crate::ui_render::push_escaped(&crate::repl::inspect(&value), &mut text);
+                        text.push_str("</code></pre>");
+                        text
+                    });
+                Response::new(200, "text/html; charset=utf-8", html.into_bytes())
+            }
+            Ok(None) => Response::new(200, "text/html; charset=utf-8", b"<p>no value</p>".to_vec()),
+            Err(error) => action_error(422, error.code()),
+        }
+    }
 }
 
 #[cfg(test)]
