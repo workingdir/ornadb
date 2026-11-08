@@ -227,6 +227,12 @@ jobs:
       # The highlighter test runs each generated grammar in its real host and
       # fails, instead of skipping, when ORNA_REQUIRE_EDITORS=1 and a host is
       # missing.
+      - name: Restore the editor tools cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/editor-tools
+          key: editor-tools-tree-sitter-cli-0.26.5-textmate-9.3.2-oniguruma-2.0.1
+
       - name: Install editor hosts for the highlighter test
         timeout-minutes: 15
         run: |
@@ -241,14 +247,20 @@ jobs:
                 return 0
               fi
               echo "::warning::Attempt $n of $attempts failed: $*"
-              sleep 5
+              sleep $((n * 15))
             done
             echo "::error::Giving up after $attempts attempts: $*"
             return 1
           }
           bash scripts/install_editor_hosts.sh emacs-nox vim
-          retry 2 timeout -k 10 120 npm install --prefix "$RUNNER_TEMP/editor-tools" --no-audit --no-fund \
-            tree-sitter-cli@0.26.5 vscode-textmate@9.3.2 vscode-oniguruma@2.0.1
+          # tree-sitter-cli downloads its binary from a GitHub release during the
+          # install and that download returned HTTP 504 on three runs in a row
+          # (ornadb-geois), so the install gets more attempts with a longer cap and
+          # a back-off, and a restored cache skips the download entirely.
+          if [ ! -x "$RUNNER_TEMP/editor-tools/node_modules/.bin/tree-sitter" ]; then
+            retry 5 timeout -k 10 300 npm install --prefix "$RUNNER_TEMP/editor-tools" --no-audit --no-fund \
+              tree-sitter-cli@0.26.5 vscode-textmate@9.3.2 vscode-oniguruma@2.0.1
+          fi
           echo "ORNA_EDITOR_TOOLS=$RUNNER_TEMP/editor-tools" >> "$GITHUB_ENV"
           echo "$RUNNER_TEMP/editor-tools/node_modules/.bin" >> "$GITHUB_PATH"
 
