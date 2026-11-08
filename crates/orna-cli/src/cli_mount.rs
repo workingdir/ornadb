@@ -485,14 +485,9 @@ fn settle_owner_reply(
             draft: draft.to_path_buf(),
         }));
     }
-    let definite_refusal = [
-        rustix::io::Errno::BUSY,
-        rustix::io::Errno::IO,
-        rustix::io::Errno::INVAL,
-        rustix::io::Errno::NODATA,
-    ]
-    .contains(&error);
-    if definite_refusal {
+    // BUSY, IO, INVAL and NODATA are definite refusals; the owner has retained the draft.
+    if error == rustix::io::Errno::INVAL {
+        // EINVAL is a malformed candidate (ORNA-VFS spec, profiles/vfs-1.md), so the retained draft is the content to correct.
         return Err(edit_refusal(crate::fuse_mount::EditError::Failed {
             message: format!(
                 "mounted workspace refused the edit ({error}); draft retained at {}",
@@ -500,6 +495,22 @@ fn settle_owner_reply(
             ),
             draft: Some(draft.to_path_buf()),
         }));
+    }
+    if [
+        rustix::io::Errno::BUSY,
+        rustix::io::Errno::IO,
+        rustix::io::Errno::NODATA,
+    ]
+    .contains(&error)
+    {
+        // BUSY, IO and NODATA are mount or backing conditions, not content errors, so they keep the generic mount help.
+        return Err(mount_error(
+            "Edit was not accepted",
+            format!(
+                "mounted workspace refused the edit ({error}); draft retained at {}",
+                draft.display()
+            ),
+        ));
     }
     if !draft.exists() {
         return Ok(());
@@ -1962,6 +1973,35 @@ mod tests {
                         diagnostic.title
                     );
                 }
+            }
+        }
+
+        #[test]
+        fn owner_refusal_help_matches_the_errno_class() {
+            let directory = tempfile::tempdir().unwrap();
+            let draft = retained_draft(directory.path());
+            // INVAL is malformed content, so it asks for the draft to be corrected.
+            let invalid = settle_owner_reply(Err(Errno::INVAL), &draft)
+                .expect_err("INVAL is a definite refusal");
+            assert!(
+                invalid.help.contains("correct the retained draft"),
+                "{}",
+                invalid.help
+            );
+            // BUSY, IO and NODATA are mount or backing conditions, not content, so they keep the generic mount help.
+            for errno in [Errno::BUSY, Errno::IO, Errno::NODATA] {
+                let diagnostic = settle_owner_reply(Err(errno), &draft)
+                    .expect_err("a definite refusal is an error");
+                assert!(
+                    !diagnostic.help.contains("correct the retained draft"),
+                    "{errno}: {}",
+                    diagnostic.help
+                );
+                assert!(
+                    diagnostic.help.contains("run mount DIR --cwd"),
+                    "{errno}: {}",
+                    diagnostic.help
+                );
             }
         }
 
