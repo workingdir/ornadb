@@ -561,8 +561,8 @@ limitations = ["Proven over a real serve process: input 1 + 1 is served as 2, a 
 gate = "G"
 id = "G3"
 title = "Explicit refresh re-reads the table after a change"
-select = [{ record = "workspace-cli", package = "orna-cli", target = "test:devtools_app", test = "devtools_lists_tables_runs_input_and_refreshes" }]
-limitations = ["Refresh is checked only with no change between reads; a change is never re-read (ornadb-5il1.494)."]
+select = [{ record = "workspace-cli", package = "orna-cli", target = "test:devtools_app", test = "devtools_lists_tables_runs_input_and_refreshes" }, { record = "workspace-cli", package = "orna-cli", target = "test:devtools_app", test = "explicit_refresh_shows_a_row_inserted_through_the_repl" }]
+limitations = ["Proven: a page request after a REPL insert shows the inserted row and the pre-change page did not. The change is made while the served process is stopped, because a running serve holds the runtime owner lock (ORNA-APP-011); the post-change page is therefore served by a fresh process, not by the process that served the first page. Not proven: an in-process refresh of a running serve after a change made by another writer while it runs (the lock forbids that writer path), and the Refresh control as a click in a browser (ornadb-5il1.494)."]
 
 [[item]]
 gate = "G"
