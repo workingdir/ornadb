@@ -69,13 +69,14 @@ jobs:
         run: |
           bash scripts/install_editor_hosts.sh emacs-nox mpv vim
 
-      # The 10 GiB Gate B streaming test takes about an hour on its own (3611 s of a
-      # 69 minute job in run 39996328261) and runs in cli-gate-b.yml instead.
+      # The 10 GiB Gate B streaming tests take about an hour each. The network test
+      # runs in cli-gate-b.yml; the production file import runs in the nightly
+      # workspace-cli shard. Neither runs per PR.
       # publication_crash_matrix and migration_kill_matrix need the crash-barriers
       # feature. Their jobs below run them with that feature, so this step skips
       # them and names those jobs (--covered-by).
       - name: Test the orna-cli integration suite
-        run: python3 scripts/gate_evidence.py test -p orna-cli --timeout-minutes 40 --skip-test gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata --exclude-target test:vfs_media_reader --covered-by test:publication_crash_matrix=publication-crash-matrix --covered-by test:migration_kill_matrix=migration-kill-matrix --covered-by test:vfs_mount_aggregate_quota=aggregate-quota
+        run: python3 scripts/gate_evidence.py test -p orna-cli --timeout-minutes 40 --skip-test gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata --skip-test gate_b_production_import_of_10_gib_file_with_bounded_rss --exclude-target test:vfs_media_reader --covered-by test:publication_crash_matrix=publication-crash-matrix --covered-by test:migration_kill_matrix=migration-kill-matrix --covered-by test:vfs_mount_aggregate_quota=aggregate-quota
 
       # Gate E media reader: the crate-wide step above excludes this suite, and the record below runs it once
       # under its own diagnostic record (command, kernel, FUSE, mpv and editor versions), uploaded as an artifact.
