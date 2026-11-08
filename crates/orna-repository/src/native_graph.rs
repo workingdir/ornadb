@@ -2925,6 +2925,7 @@ impl NativeGraphContext {
             return Err(GraphError::ContentIdentityMismatch);
         }
         let mut bytes = Vec::with_capacity(requested_len as usize);
+        let mut chunks_read = 0u64;
         let verification = if requested_len == 0 {
             if descriptor.identity.length() == 0
                 && descriptor.identity.sha256() == crate::blob_store::digest_bytes(&[]).sha256()
@@ -2938,7 +2939,7 @@ impl NativeGraphContext {
                 .byte_root
                 .as_ref()
                 .ok_or(GraphError::InvalidEmptyBlob)?;
-            self.read_index_range(
+            chunks_read = self.read_index_range(
                 root,
                 descriptor.identity.length(),
                 None,
@@ -2962,8 +2963,13 @@ impl NativeGraphContext {
             }
         };
         scope.check_cancelled()?;
-        let output =
-            VerifiedBlobRange::after_chunk_verification(reference, range, bytes, verification)?;
+        let output = VerifiedBlobRange::after_chunk_verification(
+            reference,
+            range,
+            bytes,
+            verification,
+            chunks_read,
+        )?;
         Ok(output)
     }
 
@@ -3556,6 +3562,7 @@ impl NativeGraphContext {
     }
 
     /// The parameters describe one record; each caller passes them straight through.
+    /// Returns the number of payload chunks read beneath this node.
     #[allow(clippy::too_many_arguments)]
     fn read_index_range(
         &self,
@@ -3568,7 +3575,7 @@ impl NativeGraphContext {
         scope: &RepositoryReadScope,
         objects: &mut ObjectBudget,
         output: &mut Vec<u8>,
-    ) -> Result<u8, GraphError> {
+    ) -> Result<u64, GraphError> {
         scope.check_cancelled()?;
         let node = self.read_native_node(oid, scope, objects)?;
         let NodeData::ByteIndex {
@@ -3588,6 +3595,7 @@ impl NativeGraphContext {
             return Err(GraphError::InvalidByteIndex);
         }
         let mut local = 0u64;
+        let mut chunks_read = 0u64;
         for entry in entries {
             let child_start = base_offset
                 .checked_add(local)
@@ -3629,8 +3637,9 @@ impl NativeGraphContext {
                     .map_err(|_| GraphError::InvalidRange)?;
                 output.extend_from_slice(chunk.get(from..to).ok_or(GraphError::InvalidRange)?);
                 reservation.commit(entry.span_length);
+                chunks_read += 1;
             } else {
-                self.read_index_range(
+                chunks_read += self.read_index_range(
                     &entry.target,
                     entry.span_length,
                     Some(height - 1),
@@ -3646,7 +3655,7 @@ impl NativeGraphContext {
         if local != total_length {
             return Err(GraphError::InvalidByteIndex);
         }
-        Ok(height)
+        Ok(chunks_read)
     }
 
     fn verify_full_blob(
@@ -5490,6 +5499,7 @@ pub struct VerifiedBlobRange {
     requested: Range<u64>,
     bytes: Vec<u8>,
     verification: RangeVerification,
+    chunks_read: u64,
     identity: crate::blob_store::ContentIdentity,
     context: ContextIdentity,
     owner_id: [u8; 16],
@@ -5502,6 +5512,7 @@ impl VerifiedBlobRange {
         requested: Range<u64>,
         bytes: Vec<u8>,
         verification: RangeVerification,
+        chunks_read: u64,
     ) -> Result<Self, GraphError> {
         if requested.start > requested.end
             || requested.end > reference.identity.length()
@@ -5513,6 +5524,7 @@ impl VerifiedBlobRange {
             requested,
             bytes,
             verification,
+            chunks_read,
             identity: reference.identity,
             context: reference.context,
             owner_id: reference.owner_id,
@@ -5530,6 +5542,12 @@ impl VerifiedBlobRange {
 
     pub const fn verification(&self) -> RangeVerification {
         self.verification
+    }
+
+    /// Payload chunks whose native objects were read and verified for this
+    /// range, including the whole-chunk overhang at either end.
+    pub const fn chunks_read(&self) -> u64 {
+        self.chunks_read
     }
 
     pub const fn content_identity(&self) -> crate::blob_store::ContentIdentity {
