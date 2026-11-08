@@ -3,7 +3,7 @@ name = "orna-repository"
 version = "1.0.0"
 edition = "2024"
 rust-version = "1.95"
-license = "MPL-2.0"
+license.workspace = true
 description = "Git-backed repository, CWD, index, and local runtime boundary for Orna"
 
 [features]

@@ -3,7 +3,7 @@ name = "orna-runtime"
 version.workspace = true
 edition = "2024"
 rust-version = "1.95"
-license = "MPL-2.0"
+license.workspace = true
 description = "Private, single-writer local runtime state for Orna 1.0"
 publish = false
 
