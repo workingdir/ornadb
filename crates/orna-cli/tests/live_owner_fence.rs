@@ -1,10 +1,10 @@
-//! Gate D live-writer fence (ORNA-TURSO-004/005, D2) against the real `orna` executable.
+//! Gate D live-writer coexistence (ORNA-TURSO-004/005, D2) against the real `orna` executable.
 //!
-//! A live process that holds a worktree's runtime owner lock keeps publication authority
-//! for as long as it lives, even while it is paused (SIGSTOP). A second `orna publish`
-//! started during that window must be refused with the fence diagnostic and must change
-//! nothing: the owner's durable runtime change stays unpublished and HEAD does not move.
-//! Once the owner exits, publication proceeds and commits that change.
+//! A live process that holds a worktree's runtime owner lock stays the only writer
+//! of the runtime lease, even while it is paused (SIGSTOP). Publication is not a
+//! lease operation (22-publication PUB-3 step 7 excludes cooperating mutators with
+//! the publication lock), so a second `orna publish` started during that window
+//! admits the durable tail and leaves the paused owner's lock intact.
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -29,7 +29,6 @@ const CHILD_DIR: &str = "ORNA_LIVE_OWNER_DIR";
 const READY_FILE: &str = "owner-ready";
 const RELEASE_FILE: &str = "owner-release";
 const WAIT_LIMIT: Duration = Duration::from_mins(1);
-const REFUSAL_TITLE: &str = "another live writer owns this worktree's runtime";
 
 /// Child role: holds the runtime owner lock until the parent writes the release file.
 /// Inert when run by the normal test harness (the environment selects the role).
@@ -56,12 +55,15 @@ async fn live_owner_child_holds_runtime() {
     );
 }
 
+/// A paused owner keeps its runtime owner lock; an outside `orna publish` still
+/// admits the durable tail through the publication lock, and the owner is
+/// unaffected: it still holds the lock after it resumes and exits cleanly.
 #[test]
-fn paused_live_owner_refuses_outside_publish_until_it_exits() {
+fn paused_live_owner_admits_outside_publish() {
     let (directory, repository, _relation_id) = format3_repository_for_table(SOURCE, "music");
     let root = directory.path().to_path_buf();
 
-    // Leave a durable runtime change that an unfenced publish would commit.
+    // Leave a durable runtime change for the outside publish to admit.
     let seed = orna(&root, &["run", "seed"]);
     assert_eq!(
         seed.status.code(),
@@ -76,40 +78,34 @@ fn paused_live_owner_refuses_outside_publish_until_it_exits() {
     wait_for(&owner_directory.path().join(READY_FILE));
 
     signal(&owner, "STOP");
-    let refused = orna(&root, &["publish"]);
-    let refused_text = combined(&refused);
-    assert!(
-        !refused.status.success(),
-        "publish from a second process must be refused while the owner is paused: {refused_text}"
+    let published = orna(
+        &root,
+        &["publish", "--message", "Publish behind a paused owner"],
     );
     assert!(
-        refused_text.contains(REFUSAL_TITLE),
-        "refusal must carry the live-writer fence diagnostic: {refused_text}"
+        published.status.success(),
+        "publish behind a paused live owner must admit the tail: {}",
+        combined(&published)
     );
-    assert_eq!(head(&repository), head_before, "refused publish moved HEAD");
+    assert_ne!(
+        head(&repository),
+        head_before,
+        "publish behind a paused live owner must commit the durable tail"
+    );
     assert!(
         repository
             .read_publication_journal()
             .expect("journal readable")
             .is_none(),
-        "refused publish left a publication journal"
+        "completed publish left a publication journal"
     );
 
     signal(&owner, "CONT");
     fs::write(owner_directory.path().join(RELEASE_FILE), b"release").expect("release marker");
     let status = owner.0.wait().expect("owner exits");
-    assert!(status.success(), "owner exited with {status}");
-
-    let resumed = orna(&root, &["publish"]);
     assert!(
-        resumed.status.success(),
-        "publish after the owner exits must succeed: {}",
-        combined(&resumed)
-    );
-    assert_ne!(
-        head(&repository),
-        head_before,
-        "publish after the owner exits must commit the seeded change"
+        status.success(),
+        "owner must still hold the runtime after the outside publish: {status}"
     );
 }
 
