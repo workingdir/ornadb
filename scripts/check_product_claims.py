@@ -7,7 +7,7 @@ Rust doc comments; copies of the specification under tests/fixtures are not
 product prose) for a sentence that makes the prohibited claim without a
 negation, and requires the statement that replaces it to appear in CHANGELOG.md.
 
-Usage: check_product_claims.py fixed-row-batching | prune-expire
+Usage: check_product_claims.py fixed-row-batching | prune-expire | client-drafts
 
 Sentence detection is lexical. A claim split across a paragraph boundary, or
 phrased without the words the predicate looks for, is not detected; the
@@ -30,6 +30,14 @@ CONTENT_STABLE = re.compile(r"content[- ]stable", re.IGNORECASE)
 BATCH = re.compile(r"\bbatch", re.IGNORECASE)
 PRUNE = re.compile(r"\bprune\b|--expire\b|--prune\b", re.IGNORECASE)
 ADVERTISED_SAFE = re.compile(r"\b(?:safe|safely|supported|guarantee[sd]?|advertis\w*)\b", re.IGNORECASE)
+CLIENT_DRAFT = re.compile(
+    r"\b(?:typed|client|browser|unsent|offline)\b[^.;]{0,40}?\bdrafts?\b"
+    r"|\bdrafts?\b[^.;]{0,40}?\b(?:typed|client|browser|unsent|offline)\b",
+    re.IGNORECASE,
+)
+DRAFT_RECOVERY = re.compile(
+    r"\b(?:preserv\w*|recover\w*|surviv\w*|retain\w*|restor\w*|keeps?|kept|store[sd]?|replay\w*)\b", re.IGNORECASE
+)
 BLOCK_START = re.compile(r"(?:[-*+]\s|\d+\.\s|#|\||>)")
 DOC_COMMENT = re.compile(r"^\s*//[/!] ?(.*)$")
 SENTENCE_END = re.compile(r"(?<=[.!?;])\s+")
@@ -43,6 +51,10 @@ def fixed_row_batching_claim(sentence: str) -> bool:
 
 def prune_expire_claim(sentence: str) -> bool:
     return bool(PRUNE.search(sentence) and ADVERTISED_SAFE.search(sentence)) and not NEGATION.search(sentence)
+
+
+def client_draft_claim(sentence: str) -> bool:
+    return bool(CLIENT_DRAFT.search(sentence) and DRAFT_RECOVERY.search(sentence)) and not NEGATION.search(sentence)
 
 
 @dataclass(frozen=True)
@@ -64,6 +76,13 @@ CLAIMS = {
         prune_expire_claim,
         "Concurrent uncoordinated `git prune --expire now` is unsupported and is not advertised as safe "
         "(ORNA-CAP-006); this build exposes no `prune` command.",
+    ),
+    "client-drafts": Claim(
+        "client-drafts",
+        client_draft_claim,
+        "Typed client drafts and their recovery after a reconnect or restart are not implemented: no client draft "
+        "store exists and the browser profile is not claimed (ACCEPTANCE.md Gate H; ORNA-APP-018); only FUSE editor "
+        "drafts are covered (ornadb-jf1z1).",
     ),
 }
 

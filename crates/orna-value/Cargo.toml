@@ -3,7 +3,7 @@ name = "orna-value"
 version.workspace = true
 edition = "2024"
 rust-version = "1.95"
-license = "Apache-2.0"
+license.workspace = true
 description = "Orna OVB-1 compatibility and format-3 canonical values"
 
 [dependencies]

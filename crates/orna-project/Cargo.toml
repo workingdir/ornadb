@@ -3,7 +3,7 @@ name = "orna-project"
 version = "1.0.0"
 edition = "2024"
 rust-version = "1.95"
-license = "Apache-2.0"
+license.workspace = true
 description = "Bounded Git-worktree source loader for Orna 1.0 projects"
 
 [dependencies]

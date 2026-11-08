@@ -3,7 +3,7 @@ name = "orna-protocol"
 version = "1.0.0"
 edition = "2024"
 rust-version = "1.95"
-license = "Apache-2.0"
+license.workspace = true
 description = "Bounded canonical Orna 1.0 live-protocol envelope codec"
 
 [dependencies]

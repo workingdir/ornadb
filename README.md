@@ -89,4 +89,13 @@ canonical specification and its publication digest are kept in
 
 ## License
 
-OrnaDB is licensed under the [Apache License 2.0](LICENSE).
+The OrnaDB source code in this repository is licensed under the
+[Mozilla Public License 2.0](LICENSE) (`MPL-2.0`). MPL-2.0 is a file-level
+copyleft licence: modified MPL-covered files you distribute must remain under
+MPL-2.0, while larger works that combine them with code under other licences
+may be distributed under those licences. Versions released before this change
+remain Apache-2.0.
+
+The Orna standard library (`stdlib/std`) is a separate repository,
+[ornadb-std](https://github.com/workingdir/ornadb-std), with its own licence.
+This repository's licence does not change it.

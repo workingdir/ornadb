@@ -721,7 +721,7 @@ fn render_tree_sitter_package() -> String {
 
 fn render_tree_sitter_metadata() -> String {
     format!(
-        "{{\n  \"grammars\": [{{\n    \"name\": {},\n    \"camelcase\": \"Orna\",\n    \"scope\": {},\n    \"path\": \".\",\n    \"file-types\": [\"{}\"],\n    \"highlights\": \"queries/highlights.scm\"\n  }}],\n  \"metadata\": {{\n    \"version\": {},\n    \"license\": \"MIT\",\n    \"description\": \"Generated Tree-sitter grammar for Orna\",\n    \"authors\": [{{ \"name\": \"OrnaDB\" }}],\n    \"links\": {{ \"repository\": \"https://github.com/workingdir/ornadb\" }}\n  }}\n}}\n",
+        "{{\n  \"grammars\": [{{\n    \"name\": {},\n    \"camelcase\": \"Orna\",\n    \"scope\": {},\n    \"path\": \".\",\n    \"file-types\": [\"{}\"],\n    \"highlights\": \"queries/highlights.scm\"\n  }}],\n  \"metadata\": {{\n    \"version\": {},\n    \"license\": \"MPL-2.0\",\n    \"description\": \"Generated Tree-sitter grammar for Orna\",\n    \"authors\": [{{ \"name\": \"OrnaDB\" }}],\n    \"links\": {{ \"repository\": \"https://github.com/workingdir/ornadb\" }}\n  }}\n}}\n",
         json_string(LANGUAGE_ID),
         json_string(SOURCE_SCOPE),
         SOURCE_EXTENSION,
