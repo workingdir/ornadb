@@ -24,6 +24,7 @@ use crate::media_range::{MediaMethod, MediaReply, media_reply, plan_media_respon
 use orna_application::{
     AdmittedApplication, ApplicationAuthority, ApplicationError, StagedActivation,
 };
+use orna_conformance::AdmittedReplSession;
 use orna_evaluator::Environment;
 use orna_repository::{GitHashAlgorithm, KeyRange, NativeOid, RepositoryFormatContext};
 use orna_semantic::TableSchema;
@@ -33,6 +34,7 @@ use orna_serving::media_preview::{
 };
 use orna_value::ContextValue;
 use std::collections::BTreeMap;
+use std::sync::{PoisonError, TryLockError};
 
 /// Repository-relative module that hosts the serving entry.
 pub(super) const SERVE_MODULE_PATH: &str = "main.orna";
@@ -53,6 +55,25 @@ pub(super) struct ServeApp {
     authority: ApplicationAuthority,
     /// Project root whose committed `HEAD` supplies the module and rows.
     root: String,
+}
+
+/// The admitted serving entry. The page's authority and the console session
+/// the Run control evaluates against have separate locks, so a long Run never
+/// blocks `GET /`, and a Run that finds the console busy is refused at once.
+pub(super) struct ServingEntry {
+    app: Mutex<ServeApp>,
+    /// The console session. Its admission failure is kept as the stable code
+    /// every action answers with.
+    console: Mutex<Result<AdmittedReplSession, String>>,
+}
+
+impl ServingEntry {
+    pub(super) fn new(app: ServeApp, console: Result<AdmittedReplSession, String>) -> Self {
+        Self {
+            app: Mutex::new(app),
+            console: Mutex::new(console),
+        }
+    }
 }
 
 impl ServeApp {
@@ -108,22 +129,23 @@ impl ServeApp {
         }
     }
 
-    /// Invokes `serve` read-only and renders its value as the `GET /` body.
-    /// A `serve` that stages any table mutation is refused.
-    fn respond(&self) -> Response {
+    /// Invokes `serve` read-only and renders its value as the `GET /` body,
+    /// with the action identifiers the page's Run controls submit to. A
+    /// `serve` that stages any table mutation is refused.
+    fn respond(&self) -> (Response, Vec<String>) {
         let (served, commit) = match self.stage_at_head() {
             Ok(served) => served,
-            Err(code) => return serve_error(code),
+            Err(code) => return (serve_error(code), Vec::new()),
         };
         // A `std.ui` node tree renders as semantic HTML; every other value
         // keeps the Inspect text fallback.
         match served {
             ServedValue::Canonical(staged) => {
                 if !staged.mutations().is_empty() {
-                    return serve_error("serve.write_refused");
+                    return (serve_error("serve.write_refused"), Vec::new());
                 }
                 page(
-                    crate::ui_render::render_value_html(
+                    crate::ui_render::render_value_page(
                         staged.value().raw(),
                         Some(commit.as_str()),
                     ),
@@ -131,7 +153,7 @@ impl ServeApp {
                 )
             }
             ServedValue::Contextual(value) => page(
-                crate::ui_render::render_ui_html(&value, Some(commit.as_str())),
+                crate::ui_render::render_ui_page(&value, Some(commit.as_str())),
                 || crate::repl::inspect_context(&value),
             ),
         }
@@ -447,21 +469,35 @@ fn serve_error(code: &str) -> Response {
 /// Every response this route produces (including 405 and 500) carries
 /// `X-Content-Type-Options: nosniff`.
 pub(super) fn serving_entry_route(
-    app: Option<&Mutex<ServeApp>>,
+    entry: Option<&ServingEntry>,
     request: &Request,
 ) -> Option<Response> {
-    let mut response = serving_entry_route_inner(app, request)?;
+    let mut response = serving_entry_route_inner(entry, request)?;
     super::ensure_header(&mut response, "X-Content-Type-Options", "nosniff");
     Some(response)
 }
 
-fn serving_entry_route_inner(app: Option<&Mutex<ServeApp>>, request: &Request) -> Option<Response> {
-    let app = app?;
+/// Answers the page from the entry's authority. A poisoned lock is recovered
+/// rather than reported unavailable, and a panic inside `respond` answers 500
+/// instead of unwinding past the lock, so one failed serve cannot disable
+/// `GET /` for the rest of the process.
+fn respond_recovering(app: &Mutex<ServeApp>) -> (Response, Vec<String>) {
+    let app = app.lock().unwrap_or_else(PoisonError::into_inner);
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| app.respond()))
+        .unwrap_or_else(|_| (serve_error("serve.evaluation_failed"), Vec::new()))
+}
+
+fn serving_entry_route_inner(entry: Option<&ServingEntry>, request: &Request) -> Option<Response> {
+    let entry = entry?;
+    let app = &entry.app;
     if let Some(suffix) = request.path.strip_prefix(MEDIA_PREFIX) {
         return Some(media_route(app, request, suffix));
     }
     if let Some(suffix) = request.path.strip_prefix(PREVIEW_PREFIX) {
         return Some(preview_route(app, request, suffix));
+    }
+    if let Some(action_id) = request.path.strip_prefix(ACTION_PREFIX) {
+        return Some(action_route(entry, request, action_id));
     }
     if request.path != "/" {
         return None;
@@ -475,16 +511,11 @@ fn serving_entry_route_inner(app: Option<&Mutex<ServeApp>>, request: &Request) -
     }
     // RFC 9110 9.3.2: HEAD answers exactly as GET but sends no content.
     let head = request.method == "HEAD";
-    Some(match app.lock() {
-        Ok(app) => {
-            let mut response = app.respond();
-            if head {
-                response.body.clear();
-            }
-            response
-        }
-        Err(_) => unavailable_response(),
-    })
+    let (mut response, _) = respond_recovering(app);
+    if head {
+        response.body.clear();
+    }
+    Some(response)
 }
 
 /// Answers `/media/<commit>/<descriptor>` at HEAD (ORNA-APP-013, ORNA-APP-014).
@@ -808,12 +839,22 @@ enum ServedValue {
     Contextual(ContextValue),
 }
 
-/// Renders the body as HTML when the value is a `std.ui` tree, otherwise as the
-/// Inspect text fallback.
-fn page(html: Option<String>, text: impl FnOnce() -> String) -> Response {
-    match html {
-        Some(html) => Response::new(200, "text/html; charset=utf-8", html.into_bytes()),
-        None => Response::new(200, "text/plain; charset=utf-8", text().into_bytes()),
+/// Renders the body as HTML when the value is a `std.ui` tree, with the
+/// actions its controls submit to, otherwise as the Inspect text fallback
+/// that offers none.
+fn page(
+    rendered: Option<crate::ui_render::RenderedPage>,
+    text: impl FnOnce() -> String,
+) -> (Response, Vec<String>) {
+    match rendered {
+        Some(page) => (
+            Response::new(200, "text/html; charset=utf-8", page.html.into_bytes()),
+            page.actions,
+        ),
+        None => (
+            Response::new(200, "text/plain; charset=utf-8", text().into_bytes()),
+            Vec::new(),
+        ),
     }
 }
 
@@ -906,6 +947,186 @@ fn refuse_uncommitted_blobs(
     Ok(())
 }
 
+/// Path prefix of the console action route. The page's Run control posts its
+/// single form field here as one console input (ORNA-APP-012).
+pub(super) const ACTION_PREFIX: &str = "/action/";
+/// Largest decoded console input one action request may evaluate.
+const MAX_CONSOLE_INPUT_BYTES: usize = 16 * 1024;
+/// Largest form body one action request may carry: every input byte may be
+/// percent-encoded to three bytes, plus the field name and separator.
+pub(super) const ACTION_REQUEST_BODY_BYTES: usize = 3 * MAX_CONSOLE_INPUT_BYTES + 1024;
+
+/// Admits the console session the Run control evaluates against. A failure is
+/// kept as its stable code rather than stopping the server.
+pub(super) fn console_session(
+    project: &orna_project::LoadedProject,
+) -> Result<AdmittedReplSession, String> {
+    AdmittedReplSession::from_loaded_project(
+        project,
+        project.standard_sources().iter().cloned(),
+        Limits::default(),
+    )
+    .map_err(|error| error.code().to_owned())
+}
+
+/// Answers `POST /action/<id>`: the form's one field is evaluated as one
+/// console input and its value rendered. Only POST is served, and only for an
+/// action identifier the page `GET /` currently offers.
+fn action_route(entry: &ServingEntry, request: &Request, action_id: &str) -> Response {
+    if request.method != "POST" {
+        return Response::new(
+            405,
+            "application/json",
+            br#"{"error":"method_not_allowed"}"#.to_vec(),
+        );
+    }
+    if !valid_action_id(action_id) || !page_offers_action(entry, action_id) {
+        return Response::new(
+            404,
+            "application/json",
+            br#"{"error":"action.not_found"}"#.to_vec(),
+        );
+    }
+    let source = match console_input(request) {
+        Ok(source) => source,
+        Err((status, code)) => return action_error(status, code),
+    };
+    submit_console(&entry.console, &source)
+}
+
+/// True when the page answered by `GET /` offers `action_id` as a Run control.
+/// The offer is the identifier a rendered activate button emitted, not a
+/// substring of the page text, so page content cannot forge an offer. An action
+/// the page does not offer is not an input the console accepts.
+fn page_offers_action(entry: &ServingEntry, action_id: &str) -> bool {
+    let (response, actions) = respond_recovering(&entry.app);
+    response.status == 200 && actions.iter().any(|offered| offered == action_id)
+}
+
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
+/// Evaluates one console input under the session lock. A session another
+/// request holds is refused visibly instead of queueing the input behind an
+/// evaluation that is still running. The evaluation carries no wall-clock
+/// deadline: its bound is the evaluator's default step limit and the
+/// 16 KiB input cap, and the session lock is held until that bound is reached.
+fn submit_console(console: &Mutex<Result<AdmittedReplSession, String>>, source: &str) -> Response {
+    match console.try_lock() {
+        Ok(mut session) => console_submit(&mut session, source),
+        Err(TryLockError::WouldBlock) => action_error(409, "serve.session_busy"),
+        Err(TryLockError::Poisoned(_)) => unavailable_response(),
+    }
+}
+
+/// An action identifier is a short run of ASCII letters, digits, `.`, `_` or
+/// `-`, so it is safe as a path segment and an attribute value.
+fn valid_action_id(action_id: &str) -> bool {
+    !action_id.is_empty()
+        && action_id.len() <= 128
+        && action_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+/// Reads the console input from the form's one field, which must be
+/// `application/x-www-form-urlencoded`.
+fn console_input(request: &Request) -> Result<String, (u16, &'static str)> {
+    let content_type = request
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+        .map_or("", |(_, value)| value.as_str());
+    let media_type = content_type.split(';').next().unwrap_or_default().trim();
+    if !media_type.eq_ignore_ascii_case("application/x-www-form-urlencoded") {
+        return Err((415, "action.unsupported_media_type"));
+    }
+    let body = std::str::from_utf8(&request.body).map_err(|_| (400, "action.invalid_form"))?;
+    let mut pairs = body.split('&');
+    let (Some(pair), None) = (pairs.next(), pairs.next()) else {
+        return Err((400, "action.invalid_form"));
+    };
+    let (_, value) = pair.split_once('=').ok_or((400, "action.invalid_form"))?;
+    let source = form_decode(value).ok_or((400, "action.invalid_form"))?;
+    if source.len() > MAX_CONSOLE_INPUT_BYTES {
+        return Err((413, "action.input_too_large"));
+    }
+    Ok(source)
+}
+
+/// Decodes one form value: `+` is a space and `%XX` is one byte. Returns
+/// `None` for a malformed escape or text that is not UTF-8.
+fn form_decode(value: &str) -> Option<String> {
+    let mut bytes = Vec::with_capacity(value.len());
+    let mut rest = value.bytes();
+    while let Some(byte) = rest.next() {
+        match byte {
+            b'+' => bytes.push(b' '),
+            b'%' => {
+                let high = hex_digit(rest.next()?)?;
+                let low = hex_digit(rest.next()?)?;
+                bytes.push((high << 4) | low);
+            }
+            other => bytes.push(other),
+        }
+    }
+    String::from_utf8(bytes).ok()
+}
+
+fn hex_digit(byte: u8) -> Option<u8> {
+    char::from(byte)
+        .to_digit(16)
+        .and_then(|digit| u8::try_from(digit).ok())
+}
+
+/// A console failure as an HTML fragment. Only stable codes reach this
+/// function, so the text needs no escaping.
+fn action_error(status: u16, code: &str) -> Response {
+    Response::new(
+        status,
+        "text/html; charset=utf-8",
+        format!("<p class=\"diagnostic\">{code}</p>").into_bytes(),
+    )
+}
+
+/// Evaluates one console input and renders its value. The session is pure:
+/// `submit` refuses an effectful input before it runs, and that refusal is
+/// rendered like any other diagnostic. A session that failed to admit answers
+/// with its stable code.
+fn console_submit(console: &mut Result<AdmittedReplSession, String>, source: &str) -> Response {
+    contained(|| {
+        let session = match console {
+            Ok(session) => session,
+            Err(code) => return action_error(503, code),
+        };
+        match session.submit(source) {
+            Ok(Some(value)) => {
+                let html =
+                    crate::ui_render::render_value_html(value.raw(), None).unwrap_or_else(|| {
+                        let mut text = String::from("<pre><code>");
+                        crate::ui_render::push_escaped(&crate::repl::inspect(&value), &mut text);
+                        text.push_str("</code></pre>");
+                        text
+                    });
+                Response::new(200, "text/html; charset=utf-8", html.into_bytes())
+            }
+            Ok(None) => Response::new(200, "text/html; charset=utf-8", b"<p>no value</p>".to_vec()),
+            Err(error) => action_error(422, error.code()),
+        }
+    })
+}
+
+/// Runs one evaluation so that a panic inside it answers 500 and returns
+/// without poisoning the console lock. The session stays available to the next
+/// input.
+fn contained(evaluate: impl FnOnce() -> Response) -> Response {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(evaluate))
+        .unwrap_or_else(|_| action_error(500, "serve.evaluation_failed"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -967,5 +1188,109 @@ mod tests {
         assert_eq!(count("x-content-type-options"), 1);
         assert_eq!(count("content-disposition"), 1);
         assert_eq!(count("content-security-policy"), 1);
+    }
+}
+
+#[cfg(test)]
+mod serving_entry_tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    fn entry(console: Result<AdmittedReplSession, String>) -> ServingEntry {
+        let app = ServeApp {
+            authority: ApplicationAuthority::new(
+                orna_semantic::Catalogue::default(),
+                Limits::default(),
+            ),
+            root: String::new(),
+        };
+        ServingEntry::new(app, console)
+    }
+
+    fn get_root() -> Request {
+        Request {
+            method: "GET".into(),
+            path: "/".into(),
+            query: String::new(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn get_root_answers_while_the_console_is_held() {
+        let entry = entry(Err("serve.test".into()));
+        let _held = entry.console.lock().expect("console lock");
+        let (sender, receiver) = mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let answered = serving_entry_route(Some(&entry), &get_root()).is_some();
+                let _ = sender.send(answered);
+            });
+            assert_eq!(
+                receiver.recv_timeout(Duration::from_secs(30)),
+                Ok(true),
+                "GET / must not wait on the console session's lock"
+            );
+        });
+    }
+
+    #[test]
+    fn a_busy_console_refuses_the_input_at_once() {
+        let entry = entry(Err("serve.test".into()));
+        let held = entry.console.lock().expect("console lock");
+        let (sender, receiver) = mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let _ = sender.send(submit_console(&entry.console, "1 + 1"));
+            });
+            // A lock-waiting submit (mutation) blocks here and is reported by the timeout.
+            let answered = receiver.recv_timeout(Duration::from_secs(30));
+            drop(held);
+            let response = answered.expect("a busy console must answer without waiting");
+            assert_eq!(response.status, 409);
+            assert_eq!(
+                response.body,
+                b"<p class=\"diagnostic\">serve.session_busy</p>"
+            );
+        });
+    }
+
+    #[test]
+    fn a_poisoned_page_authority_still_answers_the_page() {
+        let entry = entry(Err("serve.test".into()));
+        let before = serving_entry_route(Some(&entry), &get_root()).expect("the page route");
+        std::thread::scope(|scope| {
+            let panicked = scope.spawn(|| {
+                let _held = entry.app.lock().expect("page lock");
+                panic!("serve panicked while holding the page authority");
+            });
+            assert!(panicked.join().is_err());
+        });
+        assert!(entry.app.is_poisoned());
+        let after = serving_entry_route(Some(&entry), &get_root()).expect("the page route");
+        assert_ne!(after.status, 503, "a poisoned page lock is not unavailable");
+        assert_eq!(after.status, before.status);
+        assert_eq!(after.body, before.body);
+    }
+
+    #[test]
+    fn an_unadmitted_console_answers_its_stable_code() {
+        let entry = entry(Err("serve.session_unavailable".into()));
+        let response = submit_console(&entry.console, "1");
+        assert_eq!(response.status, 503);
+        assert!(contains_bytes(&response.body, b"serve.session_unavailable"));
+    }
+
+    #[test]
+    fn a_panic_during_evaluation_answers_500_without_poisoning_the_console() {
+        let entry = entry(Err("serve.test".into()));
+        let response = {
+            let _session = entry.console.lock().expect("console lock");
+            contained(|| panic!("evaluation panicked"))
+        };
+        assert_eq!(response.status, 500);
+        assert!(!entry.console.is_poisoned());
     }
 }
