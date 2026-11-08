@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import base64
 import hashlib
 import io
 import json
@@ -843,7 +844,7 @@ class LegacyDependencyTests(unittest.TestCase):
         self.assertEqual(contact["module"], "contacts/main.orna")
         self.assertEqual(contact["row_directory"], "contacts/Contact")
         self.assertEqual(contact["key"], {"name": "id", "type": "Str"})
-        self.assertEqual(contact["fields"], {"name": "Str", "emails": "List<Str>"})
+        self.assertEqual(contact["fields"], {"name": "Str", "emails": "List<Str>", "avatar": "Blob"})
         self.assertEqual(contact["loose_row_files"], 2)
         self.assertEqual(
             contact["rows"],
@@ -851,16 +852,24 @@ class LegacyDependencyTests(unittest.TestCase):
                 {
                     "key": "alice-smith",
                     "path": "contacts/Contact/alice-smith.orna",
-                    "object": "fc9ea74140d01f6c80ce5779e3de8a0978c81c3b",
-                    "sha256": "e9d2eb3c9624d42620dbb3614802f8f1ed1fd8e1d69560929ee6919c858a43ca",
-                    "fields": {"name": "Alice Smith", "emails": ["alice@example.com"]},
+                    "object": "c9238d545286d874ebdc2227e345671bd718486b",
+                    "sha256": "c33fac35c1b2547442e34771d7b9e3f653a050faf969967a39ebf4ecc1589759",
+                    "fields": {
+                        "name": "Alice Smith",
+                        "emails": ["alice@example.com"],
+                        "avatar": {"blob": {"length": 13, "sha256": hashlib.sha256(base64.b64decode("b3JuYS1hdmF0YXIA/w==")).hexdigest()}},
+                    },
                 },
                 {
                     "key": "bob-jones",
                     "path": "contacts/Contact/bob-jones.orna",
-                    "object": "52ba0e1dc0ee7b9a4f49bd5b404c4e259e848beb",
-                    "sha256": "458164a9d9c8128232454860e5ffef74e2cab246ae7517d99accfb6b26b674fa",
-                    "fields": {"name": "Bob Jones", "emails": []},
+                    "object": "72bcae80a5f86b0b4239e7de5921401a64aba70a",
+                    "sha256": "821de098475785391cd85a1377712c386b67e676d1ec9dbc994153a82ca71fd9",
+                    "fields": {
+                        "name": "Bob Jones",
+                        "emails": [],
+                        "avatar": {"blob": {"length": 10, "sha256": "d08ae293e4aa72d847e276acb6ffb23ccc0fa106319173df4536a3dac84b964e"}},
+                    },
                 },
             ],
         )

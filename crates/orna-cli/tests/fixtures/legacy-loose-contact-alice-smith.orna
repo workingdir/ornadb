@@ -1,4 +1,5 @@
 {
     name: "Alice Smith",
     emails: ["alice@example.com"],
+    avatar: "b3JuYS1hdmF0YXIA/w==",
 }
