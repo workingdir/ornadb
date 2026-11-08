@@ -703,3 +703,70 @@ fn devtools_lists_exactly_the_admitted_table_names() {
         reply.body
     );
 }
+
+/// A project whose admitted module binds `page`, and whose served page shows
+/// that binding.
+fn shadow_project(snapshot: &Path) -> tempfile::TempDir {
+    project_with_source(
+        snapshot,
+        "use std.ui.{Button, Cols, Input, Text};\n\n\
+         pub fn page(): Str = \"admitted\";\n\n\
+         pub fn serve(): UI = Cols([\n    \
+         Text(page()),\n    \
+         Input(\"query\", \"Query\", null, std.ui.action(\"devtools.query\", as: Text)),\n    \
+         Button(\"Run\", std.ui.action(\"devtools.run\", as: Text))\n]);\n",
+    )
+}
+
+#[test]
+// Specified: Gate G5 / ORNA-APP-017; a console `let` that reuses a page binding's
+// name does not change the page. The console session keeps its own value, and the
+// served page still shows the admitted module value.
+fn console_let_does_not_shadow_the_served_page_environment() {
+    let snapshot = standard_snapshot();
+    let project = shadow_project(snapshot.path());
+    let (_server, address) = start(project.path());
+    let origin = format!("http://{address}");
+
+    let before = get(&address, "/").expect("read the page before the console runs");
+    assert_eq!(before.status, 200, "{}", before.body);
+    assert!(
+        before.body.contains("admitted"),
+        "the page shows the admitted binding\n{}",
+        before.body
+    );
+
+    // The console is a session: the `let` and the reference are two inputs.
+    let bind = post_form(
+        &address,
+        "/action/devtools.run",
+        Some(&origin),
+        "query=let+page+%3D+%22console%22%3B",
+    );
+    assert_eq!(bind.status, 200, "{}", bind.body);
+    let run = post_form(
+        &address,
+        "/action/devtools.run",
+        Some(&origin),
+        "query=page",
+    );
+    assert_eq!(run.status, 200, "{}", run.body);
+    assert!(
+        run.body.contains("console"),
+        "the console let is live in the console session\n{}",
+        run.body
+    );
+
+    let after = get(&address, "/").expect("read the page after the console runs");
+    assert_eq!(after.status, 200, "{}", after.body);
+    assert!(
+        after.body.contains("admitted"),
+        "the console let does not shadow the page\n{}",
+        after.body
+    );
+    assert!(
+        !after.body.contains("console"),
+        "the page does not show the console value\n{}",
+        after.body
+    );
+}
