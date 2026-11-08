@@ -258,6 +258,53 @@ async fn edit_row_rejection_reports_diagnostic_and_retains_distinct_drafts() {
     );
 }
 
+/// Default `orna edit --row` output names the retained draft in its title (ORNA-UX-004), so a
+/// rejected candidate is recoverable without `--debug`. The admission cause stays behind `--debug`.
+#[tokio::test]
+async fn edit_row_default_output_names_retained_draft() {
+    let (repository_directory, _repository, _relation_id) =
+        commit_london_row("{ title: \"before\", }\n").await;
+    let scripts = TempDir::new().unwrap();
+    let invalid = editor(
+        &scripts,
+        "invalid-editor",
+        r#"printf '%s\n' '{ title: }' > "$1""#,
+    );
+
+    let rejected = edit(
+        &repository_directory,
+        &invalid,
+        &["edit", "--row", ROW_PATH],
+    );
+    assert!(
+        !rejected.status.success(),
+        "invalid candidate must be rejected"
+    );
+    let stderr = String::from_utf8_lossy(&rejected.stderr).into_owned();
+    let title = stderr
+        .lines()
+        .find(|line| line.contains("draft retained at "))
+        .unwrap_or_else(|| panic!("default output names the retained draft: {stderr}"));
+    assert!(
+        title.starts_with("error[E2000]: Edit was not accepted; draft retained at "),
+        "retained draft is part of the default title: {stderr}"
+    );
+    assert!(
+        !stderr.contains("malformed draft"),
+        "default output hides the admission cause: {stderr}"
+    );
+    assert!(
+        stderr.contains("help: correct the retained draft"),
+        "default output gives a recovery remedy: {stderr}"
+    );
+    let draft = title
+        .split("draft retained at ")
+        .nth(1)
+        .expect("draft path follows the marker")
+        .trim();
+    assert_eq!(fs::read(draft).unwrap(), b"{ title: }\n");
+}
+
 /// A REPL write issued while `orna edit` is in its editor is refused by the runtime owner lock
 /// the edit holds (ORNA-REPL-EFFECT; cf. the `sys.admin.busy` clause for an incompatible active
 /// owner or lease, reference/Orna-1.1.0/Orna-1.1.0.md). The REPL change never lands, so the
