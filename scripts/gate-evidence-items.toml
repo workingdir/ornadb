@@ -671,7 +671,8 @@ limitations = ["Covers the Wasm build of the shared evaluator for the browser-pr
 gate = "H"
 id = "H8"
 title = "Media decoders use pinned implementations with bounded malformed-input tests"
-limitations = ["No pinned decoder or decoder malformed-input test is mapped (ornadb-yl8p)."]
+select = [{ record = "workspace-rest", package = "orna-serving", target = "test:media_preview", test = "media_decoders_are_exact_pins_resolved_in_cargo_lock" }, { record = "workspace-rest", package = "orna-serving", target = "test:media_preview", test = "each_declared_decoder_rejects_its_own_malformed_header_as_malformed" }, { record = "workspace-rest", package = "orna-serving", target = "test:media_preview", test = "malformed_inputs_and_oversized_dimensions_are_rejected_without_panicking" }, { record = "workspace-rest", package = "orna-serving", target = "test:media_preview", test = "truncated_png_stream_is_malformed_content" }, { record = "workspace-rest", package = "orna-serving", target = "lib", test = "media_preview::preview_error_tests::unsupported_decoder_feature_is_unsupported_media_not_malformed" }]
+limitations = ["Covers the exact image 0.25.9 pin (with its gif, image-webp, png and zune-jpeg decoders) and bounded malformed-input tests per declared format. No input reaches the decoders' Unsupported path: the mapping of that error is a unit test, not a decoder-level proof (ornadb-yl8p)."]
 
 [[item]]
 gate = "H"

@@ -148,6 +148,25 @@ fn total_pixel_cap_refuses_images_within_each_dimension_limit() {
     );
 }
 
+/// ORNA-MEDIA-005: each declared decoder fails closed on its own malformed header. The
+/// shared PNG-decoded fixtures above do not reach the GIF, JPEG or WebP decoders.
+#[test]
+fn each_declared_decoder_rejects_its_own_malformed_header_as_malformed() {
+    let cases: [(ImageFormat, &[u8]); 4] = [
+        (ImageFormat::Gif, b"GIF89a\xff\xff\xff\xff"),
+        (ImageFormat::Jpeg, b"\xff\xd8\xff\xe0\x00\x10JFIF\x00"),
+        (ImageFormat::WebP, b"RIFF\xff\xff\xff\xffWEBPVP8 "),
+        (ImageFormat::Png, b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0"),
+    ];
+    for (format, bytes) in cases {
+        assert_eq!(
+            decode_image_preview(format, bytes.to_vec()),
+            Err(PreviewError::Malformed),
+            "{format:?} header must fail closed as malformed content"
+        );
+    }
+}
+
 /// ORNA-MEDIA-003: decoding a copy of a Blob's bytes changes neither the bytes
 /// nor the recorded identity of the stored Blob.
 #[test]
@@ -165,4 +184,32 @@ fn successful_preview_leaves_blob_identity_and_bytes_unchanged() {
         blob.read(0, length).expect("raw bytes still readable"),
         stored
     );
+}
+
+/// ORNA-MEDIA-002 (pinned implementations): the decoder that reads declared media is an exact
+/// version pin, and Cargo.lock resolves that pin and its decoder crates to the same versions.
+/// A decoder bump is deliberate: it must change this pin and the lock together.
+#[test]
+fn media_decoders_are_exact_pins_resolved_in_cargo_lock() {
+    let manifest = include_str!("../Cargo.toml");
+    assert!(
+        manifest.contains(
+            r#"image = { version = "=0.25.9", default-features = false, features = ["gif", "jpeg", "png", "webp"] }"#
+        ),
+        "orna-serving must pin image to exactly 0.25.9 with the four declared decoders"
+    );
+    let lock = include_str!("../../../Cargo.lock");
+    for (name, version) in [
+        ("image", "0.25.9"),
+        ("gif", "0.14.2"),
+        ("image-webp", "0.2.4"),
+        ("png", "0.18.1"),
+        ("zune-jpeg", "0.5.15"),
+    ] {
+        let entry = format!("name = \"{name}\"\nversion = \"{version}\"\n");
+        assert!(
+            lock.contains(&entry),
+            "Cargo.lock must resolve {name} {version}"
+        );
+    }
 }
