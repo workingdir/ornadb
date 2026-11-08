@@ -168,7 +168,7 @@ limitations = [
 gate = "B"
 id = "B4"
 title = "Seek and range reads verify bytes and report whole-object overfetch"
-select = [{ record = "workspace-rest", package = "orna-repository", target = "lib", test = "range_reads_report_whole_chunk_overfetch_against_requested_bytes" }]
+select = [{ record = "workspace-rest", package = "orna-repository", target = "lib", test = "range_reads_report_whole_chunk_overfetch_against_requested_bytes" }, { record = "workspace-cli", package = "orna-cli", target = "bin:orna", test = "mount_blob_window_reads_charge_only_intersecting_chunks" }]
 counters = ["^Gate B: range "]
 
 [[item]]

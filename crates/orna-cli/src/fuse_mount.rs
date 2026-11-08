@@ -29,6 +29,7 @@ use orna_repository::{
     AdmittedBlobReference, CommittedTableBinding, ContentIdentity, GitCommitRef, GitHashAlgorithm,
     GraphError, HistoricalFormatContext, KeyRange, MountRowBaselines, NativeGraphContext,
     NativeOid, OrpBlobBinding, Repository, RepositoryReadScope, RowMapSnapshot, TypedKey,
+    VerifiedBlobRange,
 };
 use orna_runtime::{
     NoFault, RuntimeState, RuntimeTableActivationSnapshot, RuntimeTableIdentity, RuntimeTableRows,
@@ -6721,12 +6722,11 @@ impl Filesystem for WorkspaceFilesystem {
             reply.data(&[]);
             return;
         }
-        let end = offset.saturating_add(u64::from(size)).min(length);
         let Ok(scope) = graph.open_read_scope() else {
             reply.error(Errno::EIO);
             return;
         };
-        match graph.read_blob_range(&reference, offset..end, &scope) {
+        match read_blob_window(&graph, &reference, offset, size, &scope) {
             Ok(range) => reply.data(range.bytes()),
             Err(_) => reply.error(Errno::EIO),
         }
@@ -8897,6 +8897,22 @@ fn read_blob_bytes(
         .to_vec())
 }
 
+/// Reads the window `[offset, offset + size)`, clamped to the Blob's length, through
+/// `scope`. Every mount Blob read takes this path, so the scope charges the chunks
+/// the window intersects and no more (ORNA-BLOB-012).
+fn read_blob_window(
+    graph: &NativeGraphContext,
+    reference: &AdmittedBlobReference,
+    offset: u64,
+    size: u32,
+    scope: &RepositoryReadScope,
+) -> Result<VerifiedBlobRange, GraphError> {
+    let length = reference.content_identity().length();
+    let start = offset.min(length);
+    let end = offset.saturating_add(u64::from(size)).min(length);
+    graph.read_blob_range(reference, start..end, scope)
+}
+
 struct FsNode {
     parent: u64,
     kind: NodeKind,
@@ -10663,6 +10679,122 @@ mod tests {
         assert!(EDITOR_INIT_CAPABILITIES.contains(fuser::InitFlags::FUSE_ATOMIC_O_TRUNC));
         assert!(!EDITOR_INIT_CAPABILITIES.contains(fuser::InitFlags::FUSE_WRITEBACK_CACHE));
         assert_eq!(EDITABLE_OPEN_FLAGS, fuser::FopenFlags::FOPEN_DIRECT_IO);
+    }
+
+    /// Upper bound on one stored chunk, mirroring orna-repository's private
+    /// `blob_store::GEAR_MAXIMUM`. A window intersects at most two chunks.
+    const BLOB_CHUNK_MAXIMUM_BYTES: u64 = 1_048_576;
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn mount_blob_window_reads_charge_only_intersecting_chunks() {
+        const PAYLOAD_BYTES: u64 = 4 << 20;
+        const WINDOW_OFFSET: u64 = 2 << 20;
+        const WINDOW_BYTES: u32 = 4096;
+        let payload_len = usize::try_from(PAYLOAD_BYTES).unwrap();
+        let mut xorshift = 0x9e37_79b9_7f4a_7c15_u64;
+        let payload: Vec<u8> = (0..payload_len)
+            .map(|_| {
+                xorshift ^= xorshift << 13;
+                xorshift ^= xorshift >> 7;
+                xorshift ^= xorshift << 17;
+                xorshift.to_le_bytes()[0]
+            })
+            .collect();
+        let source = tempfile::TempDir::new().unwrap();
+        std::fs::write(source.path().join("payload.bin"), &payload).unwrap();
+
+        let (_repository_directory, repository, relation_id, format_context) =
+            crate::format3::format3_repository_with_context(
+                include_str!("../tests/fixtures/media/empty-media-main.orna"),
+                "media",
+            );
+        let (identity, digest) = crate::format3::cli_runtime_identity(&repository);
+        let runtime = orna_runtime::RuntimeState::open(&repository, identity, digest)
+            .await
+            .unwrap();
+        let writer = runtime.acquire_lease(identity.repository_id).await.unwrap();
+        let capability = repository.capture_capability(relation_id).unwrap();
+        let mut provider = orna_sys::FilesystemProvider::with_limits(payload_len, 16).unwrap();
+        provider.allow_root(source.path()).unwrap();
+        let mut bindings =
+            orna_evaluator::SysHostBindingRegistry::new(orna_sys::EnvironmentProvider::default())
+                .with_filesystem_provider(provider)
+                .with_repository_capture_capability(capability);
+        let root = format!("{:?}", source.path().to_string_lossy().as_ref());
+        let capture = format!("sys.blob.capture_file({root}, \"payload.bin\", {PAYLOAD_BYTES})");
+        crate::media_commit::commit_source_captures_for_table(
+            &repository,
+            &runtime,
+            writer,
+            &mut bindings,
+            relation_id,
+            &format_context,
+            "media",
+            &[crate::media_commit::SourceCaptureRow {
+                key: "payload",
+                blob_fields: &[("content", &capture)],
+                source_row: "{ }\n",
+                ordinal: 0,
+                insert_only: true,
+            }],
+        )
+        .await;
+        drop(runtime);
+
+        let context = repository.open_format_context_at_selector("HEAD").unwrap();
+        let mount =
+            WorkspaceFilesystem::from_snapshot(&repository, context.commit(), &context, None)
+                .unwrap();
+        let (graph, reference) = {
+            let mut builder = mount.state.lock().unwrap();
+            let table = builder
+                .directory(ROOT_INODE)
+                .unwrap()
+                .entry(OsStr::new("media"))
+                .unwrap()
+                .inode;
+            let row = builder
+                .lookup_child(table, OsStr::new(&project_component("payload")))
+                .unwrap()
+                .expect("the committed payload key is a row of the media table");
+            let blob = builder
+                .lookup_child(row, OsStr::new("content.bin"))
+                .unwrap()
+                .expect("the committed row projects its content.bin Blob");
+            match &builder.nodes.get(&blob).unwrap().kind {
+                NodeKind::Blob {
+                    graph, reference, ..
+                } => (std::sync::Arc::clone(graph), reference.clone()),
+                _ => panic!("the content field of a committed Blob row is a Blob node"),
+            }
+        };
+        let length = reference.content_identity().length();
+        assert_eq!(length, PAYLOAD_BYTES);
+
+        let scope = graph.open_read_scope().unwrap();
+        let window =
+            super::read_blob_window(&graph, &reference, WINDOW_OFFSET, WINDOW_BYTES, &scope)
+                .unwrap();
+        let start = usize::try_from(WINDOW_OFFSET).unwrap();
+        let end = start + usize::try_from(WINDOW_BYTES).unwrap();
+        assert_eq!(window.bytes(), &payload[start..end]);
+        let charged = scope.payload_bytes_read();
+        assert!(
+            charged >= u64::from(WINDOW_BYTES),
+            "the window's bytes are charged: {charged}"
+        );
+        assert!(
+            charged <= 2 * BLOB_CHUNK_MAXIMUM_BYTES,
+            "a window intersects at most two chunks: charged {charged}"
+        );
+        assert!(
+            charged < length,
+            "the read does not fetch the whole Blob: charged {charged} of {length}"
+        );
+        eprintln!(
+            "Gate B: range mount window requested={WINDOW_BYTES} charged={charged} length={length}"
+        );
     }
 
     #[tokio::test]
