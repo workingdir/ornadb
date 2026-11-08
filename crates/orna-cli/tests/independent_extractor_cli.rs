@@ -9,10 +9,12 @@
 //! removed. Each Blob's bytes come back from the extractor's `blobs/` output and
 //! must hash to the recorded (length, SHA-256) and equal the source payload.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use orna_evaluator::SysHostBindingRegistry;
+use orna_repository::Repository;
 use orna_runtime::RuntimeState;
 use orna_sys::{EnvironmentProvider, FilesystemProvider};
 use serde_json::Value;
@@ -26,6 +28,9 @@ use format3::*;
 #[path = "support/media_commit.rs"]
 mod media_commit;
 use media_commit::commit_capture;
+#[path = "support/product.rs"]
+mod product;
+use product::{admitted_relations, commit_source, initialized_database, query_rows, repl_writes};
 
 const MEDIA_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/media");
 const SONG_IMPORT_FIXTURE: &str = concat!(
@@ -50,15 +55,15 @@ fn run(directory: &Path, arguments: &[&str]) -> Output {
         .expect("CLI process starts")
 }
 
-/// Runs the standard-library extractor over `repository` at HEAD, writing Blob
-/// bytes under `output`.
-fn extract(repository: &Path, output: &Path) -> Output {
+/// Runs the standard-library extractor over `repository` at `revision`, writing
+/// Blob bytes under `output`.
+fn extract(repository: &Path, revision: &str, output: &Path) -> Output {
     let mut command = Command::new("python3");
     isolate_git(&mut command, repository);
     command
         .arg(EXTRACTOR)
         .arg(repository)
-        .arg("HEAD")
+        .arg(revision)
         .arg("--output")
         .arg(output)
         .output()
@@ -258,7 +263,7 @@ async fn extractor_recovers_modules_schema_rows_and_blob_bytes_from_an_export() 
 
     // The extractor reads only the copy's Git objects.
     let output = outside.path().join("extracted");
-    let extracted = extract(&restored, &output);
+    let extracted = extract(&restored, "HEAD", &output);
     assert_eq!(
         extracted.status.code(),
         Some(0),
@@ -359,6 +364,620 @@ async fn extractor_recovers_modules_schema_rows_and_blob_bytes_from_an_export() 
             content.as_slice(),
             "{path}: the module text matches the tree"
         );
+    }
+}
+
+/// Drops the legacy identity sidecar the format-3 fixture commits, so each
+/// snapshot this file exports satisfies ORNA-META-001 (see the walkthrough).
+fn drop_legacy_identity_sidecar(directory: &Path) {
+    git(
+        directory,
+        &["rm", "--quiet", "--", ".orna/object-identities.cbor"],
+    );
+    git(
+        directory,
+        &["commit", "--quiet", "-m", "drop legacy identity sidecar"],
+    );
+}
+
+/// Admits each `(key, fixture, ordinal)` import as one insert-only row of the
+/// relation, the way a production run does, and releases the runtime.
+async fn admit_imports(
+    repository: &Repository,
+    relation_id: [u8; 16],
+    source: &Path,
+    imports: &[(&str, &str, u8)],
+) {
+    let (runtime_identity, initial_digest) = cli_runtime_identity(repository);
+    let state = RuntimeState::open(repository, runtime_identity, initial_digest)
+        .await
+        .unwrap();
+    let writer = state.acquire_lease([0x64; 16]).await.unwrap();
+    let capability = repository.capture_capability(relation_id).unwrap();
+    let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
+    filesystem.allow_root(source).unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_filesystem_provider(filesystem)
+        .with_repository_capture_capability(capability);
+    for (key, fixture, ordinal) in imports {
+        let expression = import_expression(fixture, source);
+        commit_capture(
+            repository,
+            &state,
+            writer,
+            &mut bindings,
+            &expression,
+            key,
+            *ordinal,
+            true,
+            relation_id,
+        )
+        .await;
+    }
+}
+
+/// Publishes the admitted rows with the CLI verb and requires success.
+fn publish(project: &Path) {
+    let publication = run(project, &["publish"]);
+    assert_eq!(
+        publication.status.code(),
+        Some(0),
+        "publish failed: {}",
+        String::from_utf8_lossy(&publication.stderr)
+    );
+}
+
+/// The commit `HEAD` names in `project`.
+fn head(project: &Path) -> String {
+    String::from_utf8(git_output(project, &["rev-parse", "HEAD"], None))
+        .unwrap()
+        .trim()
+        .to_owned()
+}
+
+/// The Blob listings the source reports for `relation`, which must list `count`.
+fn source_listings(project: &Path, relation: &str, count: usize) -> Vec<Value> {
+    let query = run(project, &["query", relation, "--format", "json"]);
+    assert_eq!(
+        query.status.code(),
+        Some(0),
+        "source query failed: {}",
+        String::from_utf8_lossy(&query.stderr)
+    );
+    let report: Value = serde_json::from_slice(&query.stdout).unwrap();
+    let listings = report["listings"].as_array().unwrap().clone();
+    assert_eq!(
+        listings.len(),
+        count,
+        "the source lists {count} Blob values"
+    );
+    listings
+}
+
+/// Checks one extracted snapshot against what the source reported for it. The
+/// relation holds `rows` rows; each listed Blob's descriptor, length, media
+/// type, suffix and SHA-256 equal the source's, and its extracted bytes equal
+/// the payload; every module is the blob the snapshot's tree holds.
+#[allow(clippy::too_many_arguments)]
+fn assert_extracted_snapshot(
+    restored: &Path,
+    output: &Path,
+    commit: &str,
+    report: &Value,
+    relation: &str,
+    listings: &[Value],
+    expected: &[(&str, Vec<u8>)],
+    rows: usize,
+) {
+    let relations = report["snapshot"]["relations"].as_array().unwrap();
+    let relation_report = relations
+        .iter()
+        .find(|entry| entry["relation_id"] == relation)
+        .unwrap_or_else(|| panic!("{commit}: the extractor recovers relation {relation}"));
+    let extracted_rows = relation_report["rows"].as_array().unwrap();
+    assert_eq!(
+        extracted_rows.len(),
+        rows,
+        "{commit}: every committed row of the relation is recovered"
+    );
+    assert_eq!(relation_report["row_count"].as_u64(), Some(rows as u64));
+    assert!(
+        !relation_report["schema"]["definitions"].is_null(),
+        "{commit}: the relation's schema definitions are recovered"
+    );
+    let blobs = report["blobs"].as_array().unwrap();
+    for listing in listings {
+        let key = listing["key"].as_str().unwrap();
+        let field = listing["field"].as_u64().unwrap();
+        let row = extracted_row(extracted_rows, key);
+        let blob = &extracted_field(row, field)["blob"];
+        for name in ["descriptor", "length", "media_type", "suffix", "sha256"] {
+            assert_eq!(blob[name], listing[name], "{commit} {key}: {name}");
+        }
+        let (_, bytes) = expected
+            .iter()
+            .find(|(name, _)| *name == key)
+            .unwrap_or_else(|| panic!("the source payload for {key} is known"));
+        let path = blob["path"].as_str().unwrap();
+        let recovered = std::fs::read(output.join(path)).unwrap();
+        assert_eq!(
+            &recovered, bytes,
+            "{commit} {key}: the recovered payload equals the source"
+        );
+        assert_eq!(
+            hex(Sha256::digest(&recovered).as_slice()),
+            blob["sha256"].as_str().unwrap(),
+            "{commit} {key}: the recovered bytes hash to the recorded SHA-256"
+        );
+        assert!(
+            blobs.iter().any(|record| record["path"] == path),
+            "{commit} {key}: the Blob is listed in the report's blob table"
+        );
+    }
+    for module in report["snapshot"]["modules"].as_array().unwrap() {
+        let path = module["path"].as_str().unwrap();
+        let content = git_output(restored, &["show", &format!("{commit}:{path}")], None);
+        assert_eq!(
+            module["text"].as_str().unwrap().as_bytes(),
+            content.as_slice(),
+            "{commit} {path}: the module text matches the tree"
+        );
+    }
+}
+
+/// Gate F across two snapshots: each snapshot publishes its own format-3 native
+/// `.orna/store` graph. Both are exported as one copy, reconstructed without the
+/// source, and the extractor walks each snapshot's store and recovers exactly
+/// that snapshot's rows, schema, modules and Blob bytes.
+#[allow(clippy::too_many_lines)]
+#[tokio::test]
+async fn extractor_walks_the_native_store_of_each_snapshot_in_a_two_snapshot_copy() {
+    let (directory, repository, relation_id) = empty_format3_repository();
+    drop_legacy_identity_sidecar(directory.path());
+    let source = TempDir::new().unwrap();
+    for name in ["tone.wav", "pixel.png"] {
+        std::fs::copy(
+            Path::new(MEDIA_FIXTURES).join(name),
+            source.path().join(name),
+        )
+        .unwrap();
+    }
+    let tone = std::fs::read(Path::new(MEDIA_FIXTURES).join("tone.wav")).unwrap();
+    let pixel = std::fs::read(Path::new(MEDIA_FIXTURES).join("pixel.png")).unwrap();
+    let expected = vec![("song", tone.clone()), ("image", pixel), ("song-b", tone)];
+    let project = directory.path().to_path_buf();
+    let relation = relation_hex(relation_id);
+
+    // First snapshot: a song and an image.
+    admit_imports(
+        &repository,
+        relation_id,
+        source.path(),
+        &[
+            ("song", SONG_IMPORT_FIXTURE, 0x90),
+            ("image", IMAGE_IMPORT_FIXTURE, 0xa0),
+        ],
+    )
+    .await;
+    publish(&project);
+    let first = head(&project);
+    let first_listings = source_listings(&project, &relation, 2);
+
+    // Second snapshot: the same store plus one more song row.
+    admit_imports(
+        &repository,
+        relation_id,
+        source.path(),
+        &[("song-b", SONG_IMPORT_FIXTURE, 0xb0)],
+    )
+    .await;
+    publish(&project);
+    let second = head(&project);
+    assert_ne!(first, second, "the second publish makes a new snapshot");
+    let second_listings = source_listings(&project, &relation, 3);
+
+    // Export both snapshots into one archive, the newer one first, and
+    // reconstruct it into a copy that is not the source.
+    let outside = TempDir::new().unwrap();
+    let archive = outside.path().join("archive");
+    let archive_path = archive.to_str().unwrap();
+    let exported = run(
+        &project,
+        &[
+            "export",
+            archive_path,
+            "--at",
+            second.as_str(),
+            "--at",
+            first.as_str(),
+        ],
+    );
+    assert_eq!(
+        exported.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&exported.stderr)
+    );
+    let restored: PathBuf = outside.path().join("restored");
+    let restored_path = restored.to_str().unwrap();
+    let reconstructed = run(
+        &project,
+        &[
+            "export",
+            archive_path,
+            "--restore",
+            restored_path,
+            "--worktree",
+        ],
+    );
+    assert_eq!(
+        reconstructed.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&reconstructed.stderr)
+    );
+
+    // The source repository and its worktree are gone before the extractor runs.
+    drop(repository);
+    drop(directory);
+    drop(source);
+    assert!(!project.exists(), "the source worktree is removed");
+
+    // The extractor reads each snapshot's native store from the copy alone.
+    for (commit, listings, rows) in [
+        (&second, &second_listings, 3_usize),
+        (&first, &first_listings, 2_usize),
+    ] {
+        let output = outside.path().join(format!("extracted-{}", &commit[..12]));
+        let extracted = extract(&restored, commit, &output);
+        assert_eq!(
+            extracted.status.code(),
+            Some(0),
+            "{commit}: extractor failed: {}",
+            String::from_utf8_lossy(&extracted.stderr)
+        );
+        let report: Value = serde_json::from_slice(&extracted.stdout).unwrap();
+        assert_eq!(report["snapshot"]["commit"], commit.as_str());
+        assert_extracted_snapshot(
+            &restored, &output, commit, &report, &relation, listings, &expected, rows,
+        );
+    }
+}
+
+/// The product's `main.orna` for the scalar walkthrough: a `Note` table with
+/// two `Str` fields.
+const NOTE_MAIN: &str = "pub table Note {\n    text: Str,\n    label: Str,\n}\n";
+/// A second module in `lib/`, declaring its own table as a second relation.
+const LABEL_MODULE: &str = "pub table Label {\n    name: Str,\n}\n";
+
+/// The declared `(field, type)` pairs of `table` in a module source, in
+/// declaration order. This is the source's own declaration: the oracle the
+/// extractor's schema is checked against.
+fn declared_fields(source: &str, table: &str) -> Vec<(String, String)> {
+    let (_, after_header) = source
+        .split_once(&format!("pub table {table} {{"))
+        .unwrap_or_else(|| panic!("the source declares table {table}"));
+    let (body, _) = after_header
+        .split_once('}')
+        .expect("the declaration closes");
+    body.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let (name, ty) = line
+                .trim_end_matches(',')
+                .split_once(": ")
+                .expect("a field is `name: Type`");
+            (name.to_owned(), ty.to_owned())
+        })
+        .collect()
+}
+
+/// The extractor's JSON rendering of a declared scalar type.
+fn rendered_type(declared: &str) -> serde_json::Value {
+    match declared {
+        "Str" => serde_json::json!([0, "Str"]),
+        "Int" => serde_json::json!([0, "Int"]),
+        other => panic!("the test declares no rendering for {other}"),
+    }
+}
+
+/// Inserts each `(text, label)` as a `Note` through one REPL session and
+/// returns the automatic id the REPL printed for each insert, in order.
+fn insert_note_rows(root: &Path, rows: &[(&str, &str)]) -> Vec<u64> {
+    let input = rows
+        .iter()
+        .map(|(text, label)| {
+            format!("main.Note.insert({{ text: \"{text}\", label: \"{label}\" }})")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let output = repl_writes(root, &input);
+    let ids: Vec<u64> = output
+        .match_indices("\"id\": ")
+        .map(|(at, prefix)| {
+            output[at + prefix.len()..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+                .parse::<u64>()
+                .expect("an automatic id is an integer")
+        })
+        .collect();
+    assert_eq!(ids.len(), rows.len(), "{output}");
+    ids
+}
+
+/// The stored field called `name` of an extracted row.
+fn named_field<'a>(row: &'a Value, name: &str) -> &'a Value {
+    row["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|field| field["name"] == name)
+        .map_or_else(
+            || panic!("the extracted row holds field {name}: {row}"),
+            |field| &field["value"],
+        )
+}
+
+/// Checks one extracted snapshot of the `Note` relation. The schema must match
+/// the declaration in that snapshot's own `main.orna`, and the rows must be the
+/// rows the REPL reported inserting into it, with every field value equal.
+/// `source_count` is the row count the source reported for the snapshot.
+fn assert_note_snapshot(
+    report: &Value,
+    commit: &str,
+    note: &str,
+    committed_main: &str,
+    expected: &[(u64, &str, &str)],
+    source_count: u64,
+) {
+    let relation = report["snapshot"]["relations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["relation_id"] == note)
+        .unwrap_or_else(|| panic!("{commit}: the extractor recovers the Note relation"));
+    let declared = declared_fields(committed_main, "Note");
+    let schema = &relation["schema"];
+    assert_eq!(
+        schema["key"],
+        serde_json::json!(["id"]),
+        "{commit}: the automatic key is id"
+    );
+    let fields = schema["fields"].as_array().unwrap();
+    let keys: Vec<&Value> = fields
+        .iter()
+        .filter(|field| field["role"] == "key")
+        .collect();
+    assert_eq!(keys.len(), 1, "{commit}: the schema holds one key field");
+    assert_eq!(keys[0]["name"], "id", "{commit}: the key field is id");
+    let stored: Vec<&Value> = fields
+        .iter()
+        .filter(|field| field["role"] == "stored")
+        .collect();
+    assert_eq!(
+        stored.len(),
+        declared.len(),
+        "{commit}: the schema holds the declared fields"
+    );
+    let extracted: BTreeMap<String, Value> = stored
+        .iter()
+        .map(|field| {
+            (
+                field["name"].as_str().unwrap().to_owned(),
+                field["type"].clone(),
+            )
+        })
+        .collect();
+    let expected_fields: BTreeMap<String, Value> = declared
+        .iter()
+        .map(|(name, ty)| (name.clone(), rendered_type(ty)))
+        .collect();
+    assert_eq!(
+        extracted, expected_fields,
+        "{commit}: declared fields and types"
+    );
+    let rows = relation["rows"].as_array().unwrap();
+    assert_eq!(
+        rows.len(),
+        expected.len(),
+        "{commit}: every committed row is recovered"
+    );
+    assert_eq!(
+        rows.len() as u64,
+        source_count,
+        "{commit}: the source counts the same rows"
+    );
+    assert_eq!(relation["row_count"].as_u64(), Some(expected.len() as u64));
+    for (id, text, label) in expected {
+        let row = extracted_row(rows, &id.to_string());
+        assert_eq!(
+            named_field(row, "text"),
+            &serde_json::json!(text),
+            "{commit} row {id}: text"
+        );
+        assert_eq!(
+            named_field(row, "label"),
+            &serde_json::json!(label),
+            "{commit} row {id}: label"
+        );
+    }
+}
+
+/// The modules of `commit` are the `.orna` paths its Git tree holds outside
+/// the `.orna/` metadata directory, which the extractor reports as modules.
+fn assert_modules(report: &Value, repository: &Path, commit: &str) {
+    let tree = String::from_utf8(git_output(
+        repository,
+        &["ls-tree", "-r", "--name-only", commit],
+        None,
+    ))
+    .unwrap();
+    let mut expected: Vec<&str> = tree
+        .lines()
+        .filter(|path| {
+            Path::new(path).extension().is_some_and(|ext| ext == "orna")
+                && !path.starts_with(".orna/")
+        })
+        .collect();
+    expected.sort_unstable();
+    assert!(!expected.is_empty(), "{commit}: the snapshot holds modules");
+    let mut extracted: Vec<&str> = report["snapshot"]["modules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|module| module["path"].as_str().unwrap())
+        .collect();
+    extracted.sort_unstable();
+    assert_eq!(
+        extracted, expected,
+        "{commit}: the extracted module set equals the tree's"
+    );
+}
+
+/// Runs the extractor with its network namespace unshared when the host allows
+/// unprivileged user namespaces, so it cannot reach any remote. Where they are
+/// refused it runs without isolation, and says so on stderr.
+fn extract_offline(repository: &Path, revision: &str, output: &Path) -> Output {
+    let isolated = Command::new("unshare")
+        .args(["-rn", "true"])
+        .output()
+        .is_ok_and(|probe| probe.status.success());
+    if !isolated {
+        eprintln!("unshare -rn is refused: the extractor runs with network access");
+        return extract(repository, revision, output);
+    }
+    let mut command = Command::new("unshare");
+    isolate_git(&mut command, repository);
+    command
+        .args(["-rn", "python3"])
+        .arg(EXTRACTOR)
+        .arg(repository)
+        .arg(revision)
+        .arg("--output")
+        .arg(output)
+        .output()
+        .expect("unshare starts the extractor")
+}
+
+/// Gate F for the product's own scalar tables: `orna commit`, the REPL and
+/// `orna publish` create two snapshots. The copy is exported, restored with no
+/// remote, and the source removed. The extractor must recover each snapshot's
+/// declared schema, its rows field for field, and its module set, with neither
+/// snapshot's content leaking into the other.
+#[allow(clippy::too_many_lines)]
+#[test]
+fn extractor_recovers_declared_schema_scalar_rows_and_modules_of_product_snapshots() {
+    let directory = TempDir::new().unwrap();
+    let root = initialized_database(&directory, NOTE_MAIN);
+    std::fs::create_dir_all(root.join("lib")).unwrap();
+    std::fs::write(root.join("lib/labels.orna"), LABEL_MODULE).unwrap();
+    git(&root, &["add", "lib/labels.orna"]);
+    let note = admitted_relations(&commit_source(&root, "Declare Note and Label"))["Note"].clone();
+
+    // First snapshot: three rows, one with empty text and one with non-ASCII text.
+    let first_rows = [("alpha beta", "one"), ("", "two"), ("café", "three")];
+    let first_ids = insert_note_rows(&root, &first_rows);
+    publish(&root);
+    let first = head(&root);
+    let first_count = query_rows(&root, &["query", &note, "--format", "json"]);
+
+    // Second snapshot: one more row.
+    let second_row = ("delta", "four");
+    let second_id = insert_note_rows(&root, &[second_row])[0];
+    publish(&root);
+    let second = head(&root);
+    assert_ne!(first, second, "the second publish makes a new snapshot");
+    let second_count = query_rows(&root, &["query", &note, "--format", "json"]);
+    assert_eq!((first_count, second_count), (3, 4), "the source row counts");
+
+    let first_expected: Vec<(u64, &str, &str)> = first_ids
+        .iter()
+        .zip(first_rows)
+        .map(|(id, (text, label))| (*id, text, label))
+        .collect();
+    let mut second_expected = first_expected.clone();
+    second_expected.push((second_id, second_row.0, second_row.1));
+
+    // Export both snapshots into one archive and reconstruct a copy that is not
+    // the source. The copy's Git repository has no remote.
+    let outside = TempDir::new().unwrap();
+    let archive = outside.path().join("archive");
+    let archive_path = archive.to_str().unwrap();
+    let exported = run(
+        &root,
+        &[
+            "export",
+            archive_path,
+            "--at",
+            second.as_str(),
+            "--at",
+            first.as_str(),
+        ],
+    );
+    assert_eq!(
+        exported.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&exported.stderr)
+    );
+    let restored = outside.path().join("restored");
+    let reconstructed = run(
+        &root,
+        &[
+            "export",
+            archive_path,
+            "--restore",
+            restored.to_str().unwrap(),
+            "--worktree",
+        ],
+    );
+    assert_eq!(
+        reconstructed.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&reconstructed.stderr)
+    );
+    assert!(
+        git_output(&restored, &["remote"], None).is_empty(),
+        "the restored copy has no remote"
+    );
+
+    // The source repository and its worktree are gone before the extractor runs.
+    drop(directory);
+    assert!(!root.exists(), "the source worktree is removed");
+
+    for (commit, expected, source_count) in [
+        (&second, &second_expected, second_count),
+        (&first, &first_expected, first_count),
+    ] {
+        let output = outside.path().join(format!("extracted-{}", &commit[..12]));
+        let extracted = extract_offline(&restored, commit, &output);
+        assert_eq!(
+            extracted.status.code(),
+            Some(0),
+            "{commit}: extractor failed: {}",
+            String::from_utf8_lossy(&extracted.stderr)
+        );
+        let report: Value = serde_json::from_slice(&extracted.stdout).unwrap();
+        assert_eq!(report["snapshot"]["commit"], commit.as_str());
+        let committed_main = String::from_utf8(git_output(
+            &restored,
+            &["show", &format!("{commit}:main.orna")],
+            None,
+        ))
+        .unwrap();
+        assert_note_snapshot(
+            &report,
+            commit,
+            &note,
+            &committed_main,
+            expected,
+            source_count,
+        );
+        assert_modules(&report, &restored, commit);
     }
 }
 
@@ -528,7 +1147,7 @@ fn extractor_matches_the_real_reader_on_a_migrated_golden_copy() {
     assert!(!copy.exists(), "the migrated copy is removed");
 
     let output = outside.path().join("extracted");
-    let extracted = extract(&restored, &output);
+    let extracted = extract(&restored, "HEAD", &output);
     assert_eq!(
         extracted.status.code(),
         Some(0),
@@ -774,7 +1393,7 @@ fn extractor_refuses_a_pinned_dependency_whose_commit_is_unavailable() {
     std::fs::create_dir_all(&dependency).unwrap();
     git(&dependency, &["init", "--quiet"]);
     let output = parent.path().join("extracted");
-    let extracted = extract(&copy, &output);
+    let extracted = extract(&copy, "HEAD", &output);
     let stderr = String::from_utf8_lossy(&extracted.stderr);
     assert_eq!(extracted.status.code(), Some(1), "{stderr}");
     assert!(
@@ -891,7 +1510,7 @@ fn migrated_golden_copy_exports_and_restores_its_pinned_legacy_dependency() {
     // The copy and the dependency source are gone before the extractor runs.
     drop(parent);
     let output = outside.path().join("extracted");
-    let extracted = extract(&restored, &output);
+    let extracted = extract(&restored, "HEAD", &output);
     let stderr = String::from_utf8_lossy(&extracted.stderr);
     assert_eq!(extracted.status.code(), Some(0), "{stderr}");
     let report: Value = serde_json::from_slice(&extracted.stdout).unwrap();
