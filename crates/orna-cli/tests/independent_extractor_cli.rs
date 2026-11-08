@@ -660,13 +660,27 @@ fn extractor_matches_the_real_reader_on_a_migrated_golden_copy() {
     assert_eq!(contact_rows[0]["path"], "contacts/Contact/alice-smith.orna");
     assert_eq!(
         contact_rows[0]["fields"],
-        serde_json::json!({"name": "Alice Smith", "emails": ["alice@example.com"]}),
+        serde_json::json!({
+            "name": "Alice Smith",
+            "emails": ["alice@example.com"],
+            "avatar": {"blob": {
+                "length": 13,
+                "sha256": "b7e7adaa0ea44e7837b92f9ae3c5c3ed72f950597c11218b9d6be42c864213a9"
+            }}
+        }),
         "alice-smith: the committed fields"
     );
     assert_eq!(contact_rows[1]["path"], "contacts/Contact/bob-jones.orna");
     assert_eq!(
         contact_rows[1]["fields"],
-        serde_json::json!({"name": "Bob Jones", "emails": []}),
+        serde_json::json!({
+            "name": "Bob Jones",
+            "emails": [],
+            "avatar": {"blob": {
+                "length": 10,
+                "sha256": "d08ae293e4aa72d847e276acb6ffb23ccc0fa106319173df4536a3dac84b964e"
+            }}
+        }),
         "bob-jones: the committed fields"
     );
 
