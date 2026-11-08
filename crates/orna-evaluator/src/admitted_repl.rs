@@ -666,14 +666,19 @@ fn admitted_runtime_sources(
         }
     }
     for (namespace, module) in &parsed_modules {
-        let Some(namespace) = namespace else {
-            continue;
+        // The root module executes as `main` only when no source `main` module
+        // exists. Its imports resolve under that same qualified key, so a bare
+        // call inside a root function reaches the imported module function.
+        let import_namespace = match namespace.as_deref() {
+            Some(namespace) => namespace,
+            None if !has_main_module => "main",
+            None => continue,
         };
         for item in &module.items {
             if let Declaration::Use { path, tail } = &item.declaration {
                 add_module_import_aliases(
                     &mut module_aliases,
-                    namespace,
+                    import_namespace,
                     path,
                     tail,
                     &function_names,
@@ -1274,6 +1279,27 @@ mod tests {
             with_main.submit("main.add(1)"),
             Ok(Some(Value::int(2.into())))
         );
+    }
+
+    #[test]
+    fn root_module_imports_resolve_under_main_without_a_source_main_module() {
+        let mut root = admitted_runtime_sources(
+            vec![
+                (
+                    None,
+                    "use library.local;\npub fn run(): Int = local(40);".into(),
+                ),
+                (
+                    Some("library".into()),
+                    "pub fn local(value: Int): Int = value + 1;".into(),
+                ),
+            ],
+            Vec::new(),
+            Vec::new(),
+            Limits::default(),
+        )
+        .expect("root module with import loads");
+        assert_eq!(root.submit("main.run()"), Ok(Some(Value::int(41.into()))));
     }
 
     #[test]
