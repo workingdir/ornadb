@@ -290,7 +290,7 @@ select = [
   { record = "workspace-rest", package = "orna-runtime", target = "test:owner_fence_gate_d" },
 ]
 limitations = [
-  "Owner fencing is shown only after the test calls takeover_lease itself; live writers are not fenced (ornadb-5il1.127, ornadb-5il1.58).",
+  "Dead owners are fenced after real SIGKILL of a lease-holding child (owner_fence_gate_d.rs); a live writer is not fenced from outside its own process, and a second participant is refused only by the runtime owner lock (ornadb-5il1.127, ornadb-5il1.58).",
 ]
 
 [[item]]
@@ -314,17 +314,19 @@ gate = "D"
 id = "D4"
 title = "No production claim of arbitrary concurrent uncoordinated git prune --expire now"
 select = [{ record = "claims-prune-expire", package = "workspace", target = "check:prune-expire" }]
+limitations = ["The claim is checked lexically by scripts/check_product_claims.py (prune-expire), not by a runtime test: no production command runs git prune and only test code enters Repository::with_maintenance_boundary (ornadb-20ac), so there is no product path to exercise."]
 
 [[item]]
 gate = "D"
 id = "D5"
 title = "Recovery of uncertain external effects never fabricates proven rollback"
 select = [
+  { record = "gate-d-crash-matrix", package = "orna-cli", target = "test:publication_crash_matrix", test = "publication_recovery_keeps_uncertain_external_effects_uncertain" },
   { record = "workspace-rest", package = "orna-runtime", target = "lib", test = "external_effect_marker_keeps_fault_recovery_uncertain" },
   { record = "workspace-rest", package = "orna-runtime", target = "lib", test = "legacy_running_request_recovers_as_uncertain_after_takeover" },
   { record = "workspace-rest", package = "orna-runtime", target = "lib", test = "recovery_retains_uncertainty_and_clears_old_owner_evidence" },
 ]
-limitations = ["Library tests only; no process-kill test covers uncertain effects (ornadb-5il1.59)."]
+limitations = ["Process kill covers only the ref-cas and tail publication boundaries; the other external-effect boundaries are covered by library tests only."]
 
 # Gate E: actual writable mount. The workspace-cli record runs with ORNA_REQUIRE_FUSE=1.
 
