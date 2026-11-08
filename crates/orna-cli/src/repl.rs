@@ -5,7 +5,7 @@ use orna_conformance::AdmittedReplSession;
 use orna_evaluator::{ReplDetail, ReplError};
 use orna_foundation::{CanonicalValue, canonical_uuid_text};
 use orna_live::live_presentation::{LivePresentationUpdate, ResyncRequest, WatchPresentation};
-use orna_value::Raw;
+use orna_value::{ContextValue, Raw};
 
 const MAX_INPUT_BYTES: usize = 65_536;
 const MAX_INSPECT_DEPTH: usize = 4;
@@ -888,7 +888,17 @@ fn drain_line<R: BufRead>(reader: &mut R) -> io::Result<()> {
 }
 
 pub fn inspect(value: &CanonicalValue) -> String {
-    let (text, ty) = inspect_raw(value.raw(), 0);
+    inspect_text(value.raw())
+}
+
+/// Inspect text of a contextual (ROV-3) value, for a page served without a
+/// portable evaluator value.
+pub fn inspect_context(value: &ContextValue) -> String {
+    inspect_text(value.raw())
+}
+
+fn inspect_text(raw: &Raw) -> String {
+    let (text, ty) = inspect_raw(raw, 0);
     format!("{text} : {ty}")
 }
 
