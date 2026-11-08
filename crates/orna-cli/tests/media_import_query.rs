@@ -13,6 +13,7 @@ use std::{
 use orna_evaluator::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
 use orna_repository::{
     KeyRange, NativeObjectKind, OrpBlobBinding, Repository, RowRevision, TypedKey,
+    raw_content_bytes_digested,
 };
 use orna_runtime::{
     NoFault, RequestIdentity, RequestState, RuntimeIdentity, RuntimeState, TableMutation,
@@ -2811,11 +2812,19 @@ async fn run_gate_b_import_and_metadata_update(payload_bytes: u64) {
         fetches: 0,
     };
     let started = Instant::now();
+    let rehash_before_capture = raw_content_bytes_digested();
     // Capture completes before an activation request is opened: the long read
     // only produces a protected candidate; the row is installed afterwards.
     let candidate = capability
         .capture_blob_candidate(&mut network_source, payload_bytes)
         .expect("stream the network payload into the owned OGB-2 writer");
+    // ORNA-VFS-010: the binary save streams the resulting bytes to establish
+    // the raw SHA-256; this thread's digest counter must report that cost.
+    let binary_rehashed = raw_content_bytes_digested() - rehash_before_capture;
+    assert!(
+        binary_rehashed >= payload_bytes,
+        "the binary save must digest the full payload: digested {binary_rehashed} of {payload_bytes} bytes"
+    );
     let network_bytes_read = network_source.bytes_read;
     let network_fetches = network_source.fetches;
     let graph_payload_bytes_read = capability.payload_bytes_read();
@@ -2870,6 +2879,7 @@ async fn run_gate_b_import_and_metadata_update(payload_bytes: u64) {
     let reference = graph
         .admit_blob_reference(&row, &descriptor, &scope)
         .unwrap();
+    let rehash_before_metadata = raw_content_bytes_digested();
     let pin = graph
         .protect_admitted_blob_reference(&reference, &scope)
         .unwrap();
@@ -2890,6 +2900,21 @@ async fn run_gate_b_import_and_metadata_update(payload_bytes: u64) {
         false,
     )
     .await;
+    // ORNA-VFS-010: a metadata-only save MUST not rehash the payload. The save
+    // digests small structural bytes (354 bytes observed on this path); it never
+    // digests the MiB-scale payload, which would cost at least payload_bytes.
+    let metadata_rehashed = raw_content_bytes_digested() - rehash_before_metadata;
+    assert!(
+        metadata_rehashed < payload_bytes,
+        "a metadata-only save must not rehash payload-scale content: digested {metadata_rehashed} of {payload_bytes} bytes"
+    );
+    eprintln!(
+        "Gate B: rehash binary-save digested bytes={binary_rehashed}; blob bytes={payload_bytes}"
+    );
+    eprintln!(
+        "Gate B: rehash metadata-save digested bytes={metadata_rehashed}; payload bytes fetched={}; blob bytes={payload_bytes}",
+        scope.payload_bytes_read()
+    );
     assert_eq!(scope.payload_bytes_read(), 0);
     assert_eq!(scope.payload_bytes_written(), 0);
     let update_payload_read = scope.payload_bytes_read();

@@ -348,9 +348,9 @@ thread_local! {
 
 /// Raw-content bytes this thread has digested so far: the rehash cost that
 /// ORNA-VFS-010 requires to be measured. Callers measure a delta around the
-/// operation they observe.
-#[cfg(test)]
-pub(crate) fn raw_content_bytes_digested() -> u64 {
+/// operation they observe. The counter is thread-local, so a caller observes
+/// only digests performed on its own thread.
+pub fn raw_content_bytes_digested() -> u64 {
     RAW_CONTENT_BYTES_DIGESTED.with(Cell::get)
 }
 
