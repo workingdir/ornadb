@@ -22,8 +22,8 @@ use orna_repository::{GitCommitRef, KeyRange, PrivateCommit, Repository, Reposit
 use orna_runtime::TableObjectId;
 use orna_semantic::{ModuleHeader, SymbolKind, TableSchema, Type};
 use orna_value::{
-    BlobMetadata, ROV3_BLOB_TAG, Raw, Value, decode_canonical_storage_value,
-    encode_canonical_storage_value,
+    BlobMetadata, ContextValue, ROV3_BLOB_TAG, Raw, Value, ValueFormat,
+    decode_canonical_storage_value, encode_canonical_storage_value,
 };
 
 use crate::{ProjectLoadError, ProjectLoader, ResolvedTableSchema};
@@ -359,6 +359,69 @@ fn present_blob<'a>(ty: &Type, value: &'a Raw) -> Result<Option<&'a Raw>, TableS
         [Raw::Int(state), present] if *state == BigInt::from(1) => Ok(Some(present)),
         _ => Err(TableStorageError),
     }
+}
+
+/// Decodes one committed table's rows as format-3 records in the snapshot's
+/// owner context, so a stored Blob reference keeps the capability context it
+/// was minted under. Unlike [`evaluator_rows`], no Blob is replaced by its
+/// placeholder: the committed ROV-3 reference is kept.
+///
+/// Returns `(evaluator key, record)` pairs in ascending key order. A row whose
+/// record does not decode as a ROV-3 value, or whose key repeats, is refused.
+pub fn contextual_table_rows(
+    format_context: &RepositoryFormatContext,
+    object_id: TableObjectId,
+    table: &CommittedTable,
+    schema: &TableSchema,
+) -> Result<Vec<(Vec<u8>, ContextValue)>, TableStorageError> {
+    let (key_names, text_primary_key) = evaluator_keying(schema)?;
+    let context = format_context
+        .open_value_context(object_id.bytes())
+        .map_err(|_| TableStorageError)?;
+    let mut rows = BTreeMap::new();
+    for (runtime_key, storage_row) in &table.rows {
+        let key_bytes = evaluator_key_from_runtime(runtime_key, text_primary_key)?;
+        let record = contextual_record(&key_names, &key_bytes, &table.storage_order, storage_row)?;
+        let row = ContextValue::decode_in_context(&record, ValueFormat::Rov3, &context)
+            .map_err(|_| TableStorageError)?;
+        if rows.insert(key_bytes, row).is_some() {
+            return Err(TableStorageError);
+        }
+    }
+    Ok(rows.into_iter().collect())
+}
+
+/// Builds the canonical evaluator record of one stored tuple without
+/// placeholdering its Blob fields. Mirrors [`evaluator_record`], which rejects
+/// ROV-3 tags because it decodes the tuple as an OVB-1 value.
+fn contextual_record(
+    key_names: &[String],
+    key_bytes: &[u8],
+    storage_order: &[String],
+    storage_row: &[u8],
+) -> Result<Vec<u8>, TableStorageError> {
+    let key_value = Value::decode(key_bytes).map_err(|_| TableStorageError)?;
+    let key_parts = key_values(key_names.len(), key_value.raw())?;
+    let Raw::Array(stored_values) =
+        decode_canonical_storage_value(storage_row).map_err(|_| TableStorageError)?
+    else {
+        return Err(TableStorageError);
+    };
+    if stored_values.len() != storage_order.len() {
+        return Err(TableStorageError);
+    }
+    let mut fields = Vec::with_capacity(key_names.len() + stored_values.len());
+    for (name, value) in key_names.iter().zip(key_parts) {
+        fields.push((Raw::Text(name.clone()), value));
+    }
+    for (name, value) in storage_order.iter().zip(stored_values) {
+        fields.push((Raw::Text(name.clone()), value));
+    }
+    fields.sort_by(|(left, _), (right, _)| match (left, right) {
+        (Raw::Text(left), Raw::Text(right)) => canonical_text_key_order(left, right),
+        _ => Ordering::Equal,
+    });
+    encode_canonical_storage_value(&Raw::Map(fields)).map_err(|_| TableStorageError)
 }
 
 /// Whether any stored tuple of `rows` holds a present Blob reference. Such a
