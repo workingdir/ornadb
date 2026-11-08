@@ -580,8 +580,11 @@ limitations = ["Proves an image over a committed Blob is served as a page node w
 gate = "G"
 id = "G5"
 title = "Console bindings do not alter the page environment"
-select = [{ record = "workspace-rest", package = "orna-application", target = "lib", test = "page_watches_read_the_admitted_module_not_the_console_repl" }]
-limitations = ["Proven at the engine level only; no served page is requested over HTTP (ornadb-5il1.496)."]
+select = [
+  { record = "workspace-rest", package = "orna-application", target = "lib", test = "page_watches_read_the_admitted_module_not_the_console_repl" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:devtools_app", test = "console_let_does_not_shadow_the_served_page_environment" },
+]
+limitations = ["Mutation-proven at the engine seam only: the watch path (orna-application watch_value) reads the admitted page environment, and reading the session REPL there fails page_watches_read_the_admitted_module_not_the_console_repl. The served-page HTTP test console_let_does_not_shadow_the_served_page_environment is a regression guard, not a mutation proof: GET / evaluates the admitted module with a fresh environment under its own lock and has no route from console bindings, so no production mutation of that path exists short of a structural rewrite. Live watches over the socket with console-referenced names are not covered by a test (ornadb-5il1.496)."]
 
 [[item]]
 gate = "G"
