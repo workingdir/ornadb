@@ -610,8 +610,8 @@ class RowUnitTests(unittest.TestCase):
     REPO = Path(__file__).resolve().parent.parent
     FIXTURES = REPO / "crates" / "orna-cli" / "tests" / "fixtures"
     BUNDLE = FIXTURES / "legacy-format1.bundle"
-    ALICE = {"name": "Alice Smith", "emails": ["alice@example.com"]}
-    BOB = {"name": "Bob Jones", "emails": []}
+    ALICE = {"name": "Alice Smith", "emails": ["alice@example.com"], "avatar": "b3JuYS1hdmF0YXIA/w=="}
+    BOB = {"name": "Bob Jones", "emails": [], "avatar": "Ym9iLWF2YXRhcg=="}
 
     def test_golden_contact_rows_from_the_committed_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
