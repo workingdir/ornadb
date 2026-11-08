@@ -24,6 +24,7 @@ const BINARY: &str = env!("CARGO_BIN_EXE_orna");
 const STANDARD_ROOT: &str = include_str!("fixtures/second-app/standard-root.orna");
 const STANDARD_UI: &str = include_str!("../../../stdlib/std/ui.orna");
 const PIXEL: &[u8] = include_bytes!("fixtures/media/pixel.png");
+const TONE: &[u8] = include_bytes!("fixtures/media/tone.wav");
 
 const IMAGE_SOURCE: &str = "use std.ui.{Image};\n\npub table media(id: Str) { content: Blob, }\n\npub fn store(id: Str, content: Blob) = media.insert({ id: id, content: content });\n\npub fn serve(): UI = Image((media | one()).content, \"Pixel\");\n";
 
@@ -51,12 +52,27 @@ impl Reply {
     }
 }
 
-/// Sends one GET and returns the status, headers and the exact body bytes.
-fn get(address: &str, path: &str) -> std::io::Result<Reply> {
+/// Sends one `method` request with extra `headers` and returns the status,
+/// headers and the exact body bytes.
+fn send(
+    address: &str,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+) -> std::io::Result<Reply> {
     let mut stream = TcpStream::connect(address)?;
+    let extra = headers
+        .iter()
+        .fold(String::new(), |mut extra, (name, value)| {
+            extra.push_str(name);
+            extra.push_str(": ");
+            extra.push_str(value);
+            extra.push_str("\r\n");
+            extra
+        });
     write!(
         stream,
-        "GET {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n"
+        "{method} {path} HTTP/1.1\r\nHost: {address}\r\n{extra}Connection: close\r\n\r\n"
     )?;
     let mut raw = Vec::new();
     stream.read_to_end(&mut raw)?;
@@ -80,6 +96,11 @@ fn get(address: &str, path: &str) -> std::io::Result<Reply> {
         headers,
         body: raw.get(split..).unwrap_or_default().to_vec(),
     })
+}
+
+/// Sends one GET and returns the status, headers and the exact body bytes.
+fn get(address: &str, path: &str) -> std::io::Result<Reply> {
+    send(address, "GET", path, &[])
 }
 
 fn free_port() -> u16 {
@@ -238,18 +259,34 @@ fn first_src(html: &str) -> &str {
     &html[start..end]
 }
 
-/// Captures the pixel fixture into `root` and stores it as `id` through the REPL.
-/// The next publish commits the row.
-fn store_pixel(root: &Path, id: &str) {
-    fs::write(root.join("pixel.png"), PIXEL).expect("place the captured file");
+/// The values of every `attribute="..."` in `html`, in document order.
+fn attribute_values<'a>(html: &'a str, attribute: &str) -> Vec<&'a str> {
+    let marker = format!("{attribute}=\"");
+    html.split(marker.as_str())
+        .skip(1)
+        .filter_map(|rest| rest.split('"').next())
+        .collect()
+}
+
+/// Captures `bytes` into `root` as `name`, annotates them with `media_type`, and
+/// stores them as `id` through `store` (`main.store` or `main.clip`). The next
+/// publish commits the row.
+fn capture_blob(root: &Path, name: &str, bytes: &[u8], media_type: &str, store: &str, id: &str) {
+    fs::write(root.join(name), bytes).expect("place the captured file");
     let root_text = root.to_string_lossy();
     let stored = orna_repl(
         root,
         &format!(
-            "let raw = sys.blob.capture_file({root_text:?}, \"pixel.png\", 65536);\nlet image = sys.blob.annotate(raw, \"image/png\");\nmain.store(\"{id}\", image).id"
+            "let raw = sys.blob.capture_file({root_text:?}, {name:?}, 65536);\nlet image = sys.blob.annotate(raw, {media_type:?});\n{store}(\"{id}\", image).id"
         ),
     );
     assert_repl_accepts(&stored, "REPL blob insert");
+}
+
+/// Captures the pixel fixture into `root` and stores it as `id` through the REPL.
+/// The next publish commits the row.
+fn store_pixel(root: &Path, id: &str) {
+    capture_blob(root, "pixel.png", PIXEL, "image/png", "main.store", id);
 }
 
 /// Stores one `notes` row through the REPL. The next publish commits the row.
@@ -357,5 +394,216 @@ fn served_page_reads_a_blob_table_and_a_plain_table_in_one_evaluation() {
     assert_eq!(
         media.body, PIXEL,
         "the media route answers the committed bytes unchanged"
+    );
+}
+
+const AUDIO_SOURCE: &str = "use std.ui.{Audio};\n\npub table media(id: Str) { content: Blob, }\n\npub fn store(id: Str, content: Blob) = media.insert({ id: id, content: content });\n\npub fn serve(): UI = Audio((media | one()).content);\n";
+
+#[test]
+// Specified: Orna-1.1.0 std.ui Audio links a committed blob through the explicit media
+// route. The route answers the stored bytes, a byte range with 206, and HEAD with the
+// same headers and no body.
+fn served_audio_node_plays_committed_bytes_with_range_and_head() {
+    let snapshot = standard_snapshot();
+    let directory = project(snapshot.path(), AUDIO_SOURCE);
+    let root = directory.path();
+    capture_blob(root, "tone.wav", TONE, "audio/wav", "main.store", "one");
+    let published = orna(root, &["publish", "--message", "Add the audio"]);
+    assert_eq!(
+        published.status.code(),
+        Some(0),
+        "orna publish\n{}",
+        String::from_utf8_lossy(&published.stderr)
+    );
+    let commit = git_output_at(root, &["rev-parse", "HEAD"]);
+    let (_server, address) = start(root);
+    let page = get(&address, "/").expect("GET /");
+    assert_eq!(page.status, 200, "page body: {:?}", page.body);
+    let html = String::from_utf8(page.body).expect("UTF-8 page");
+    assert!(
+        html.starts_with("<audio controls src=\"/media/"),
+        "the page is the rendered Audio node: {html}"
+    );
+    let href = first_src(&html).to_owned();
+    assert!(
+        href.starts_with(&format!("/media/{commit}/")),
+        "the source names HEAD: {href}"
+    );
+
+    let whole = get(&address, &href).expect("GET the media route");
+    assert_eq!(whole.status, 200, "media body: {:?}", whole.body);
+    assert_eq!(
+        whole.body, TONE,
+        "the media route answers the committed bytes unchanged"
+    );
+    assert!(
+        whole
+            .header("content-type")
+            .is_some_and(|value| value.starts_with("audio/wav")),
+        "the media route answers the annotated media type: {:?}",
+        whole.header("content-type")
+    );
+
+    let ranged =
+        send(&address, "GET", &href, &[("Range", "bytes=0-99")]).expect("GET a byte range");
+    assert_eq!(ranged.status, 206, "range body: {:?}", ranged.body);
+    assert_eq!(
+        ranged.body,
+        &TONE[..100],
+        "the range is the first 100 stored bytes"
+    );
+    let expected_range = format!("bytes 0-99/{}", TONE.len());
+    assert_eq!(
+        ranged.header("content-range"),
+        Some(expected_range.as_str())
+    );
+
+    let head = send(&address, "HEAD", &href, &[]).expect("HEAD the media route");
+    assert_eq!(head.status, 200, "HEAD status");
+    assert!(
+        head.body.is_empty(),
+        "HEAD carries no body: {:?}",
+        head.body
+    );
+    let expected_length = TONE.len().to_string();
+    assert_eq!(
+        head.header("content-length"),
+        Some(expected_length.as_str())
+    );
+    assert!(
+        head.header("content-type")
+            .is_some_and(|value| value.starts_with("audio/wav")),
+        "HEAD answers the media type: {:?}",
+        head.header("content-type")
+    );
+}
+
+const DOWNLOAD_SOURCE: &str = "use std.ui.{Download};\n\npub table media(id: Str) { content: Blob, }\n\npub fn store(id: Str, content: Blob) = media.insert({ id: id, content: content });\n\npub fn serve(): UI = Download((media | one()).content, \"Save capture\");\n";
+
+#[test]
+// Specified: Orna-1.1.0 std.ui Download links a committed blob. A payload whose media
+// type is not inline-renderable is served as an attachment with nosniff and a sandbox.
+fn served_download_node_links_a_committed_blob_as_an_attachment() {
+    let snapshot = standard_snapshot();
+    let directory = project(snapshot.path(), DOWNLOAD_SOURCE);
+    let root = directory.path();
+    capture_blob(
+        root,
+        "pixel.png",
+        PIXEL,
+        "application/octet-stream",
+        "main.store",
+        "one",
+    );
+    let published = orna(root, &["publish", "--message", "Add the download"]);
+    assert_eq!(
+        published.status.code(),
+        Some(0),
+        "orna publish\n{}",
+        String::from_utf8_lossy(&published.stderr)
+    );
+    let commit = git_output_at(root, &["rev-parse", "HEAD"]);
+    let (_server, address) = start(root);
+    let page = get(&address, "/").expect("GET /");
+    assert_eq!(page.status, 200, "page body: {:?}", page.body);
+    let html = String::from_utf8(page.body).expect("UTF-8 page");
+    assert!(
+        html.starts_with("<a download href=\"/media/"),
+        "the page is the rendered Download node: {html}"
+    );
+    assert!(html.ends_with(">Save capture</a>"), "{html}");
+    let hrefs = attribute_values(&html, "href");
+    assert_eq!(hrefs.len(), 1, "one download link: {html}");
+    let href = hrefs[0].to_owned();
+    assert!(
+        href.starts_with(&format!("/media/{commit}/")),
+        "the link names HEAD: {href}"
+    );
+
+    let media = get(&address, &href).expect("GET the media route");
+    assert_eq!(media.status, 200, "media body: {:?}", media.body);
+    assert_eq!(
+        media.body, PIXEL,
+        "the download answers the committed bytes unchanged"
+    );
+    assert!(
+        media
+            .header("content-type")
+            .is_some_and(|value| value.starts_with("application/octet-stream")),
+        "a non-inline payload is an octet stream: {:?}",
+        media.header("content-type")
+    );
+    assert_eq!(media.header("content-disposition"), Some("attachment"));
+    assert_eq!(media.header("x-content-type-options"), Some("nosniff"));
+    assert_eq!(media.header("content-security-policy"), Some("sandbox"));
+}
+
+const TWO_BLOB_SOURCE: &str = "use std.ui.{Audio, Image, Stack};\n\npub table media(id: Str) { content: Blob, }\n\npub table clips(id: Str) { content: Blob, }\n\npub fn store(id: Str, content: Blob) = media.insert({ id: id, content: content });\n\npub fn clip(id: Str, content: Blob) = clips.insert({ id: id, content: content });\n\npub fn serve(): UI = Stack([Image((media | one()).content, \"Pixel\"), Audio((clips | one()).content)]);\n";
+
+#[test]
+// Specified: Orna-1.1.0 one served page may render two Blob tables. Each source is the
+// committed descriptor of its own row, and the media route answers each one's bytes.
+fn served_page_serves_two_blob_tables_each_by_its_own_descriptor() {
+    let snapshot = standard_snapshot();
+    let directory = project(snapshot.path(), TWO_BLOB_SOURCE);
+    let root = directory.path();
+    store_pixel(root, "one");
+    capture_blob(root, "tone.wav", TONE, "audio/wav", "main.clip", "one");
+    let published = orna(
+        root,
+        &["publish", "--message", "Add the image and the clip"],
+    );
+    assert_eq!(
+        published.status.code(),
+        Some(0),
+        "orna publish\n{}",
+        String::from_utf8_lossy(&published.stderr)
+    );
+    let commit = git_output_at(root, &["rev-parse", "HEAD"]);
+    let (_server, address) = start(root);
+    let page = get(&address, "/").expect("GET /");
+    assert_eq!(page.status, 200, "page body: {:?}", page.body);
+    let html = String::from_utf8(page.body).expect("UTF-8 page");
+    assert!(
+        html.contains("<img src=\"/media/") && html.contains("<audio controls src=\"/media/"),
+        "the page renders both Blob nodes: {html}"
+    );
+    let sources = attribute_values(&html, "src");
+    assert_eq!(sources.len(), 2, "one source per Blob table: {html}");
+    let image_source = sources[0].to_owned();
+    let audio_source = sources[1].to_owned();
+    assert!(
+        image_source.starts_with(&format!("/media/{commit}/"))
+            && audio_source.starts_with(&format!("/media/{commit}/")),
+        "both Blob sources name HEAD: {html}"
+    );
+    assert_ne!(
+        image_source, audio_source,
+        "each Blob names its own descriptor"
+    );
+
+    let image = get(&address, &image_source).expect("GET the image source");
+    assert_eq!(image.status, 200, "image body: {:?}", image.body);
+    assert_eq!(
+        image.body, PIXEL,
+        "the image source answers the pixel bytes"
+    );
+    assert!(
+        image
+            .header("content-type")
+            .is_some_and(|value| value.starts_with("image/png")),
+        "the image source answers image/png: {:?}",
+        image.header("content-type")
+    );
+
+    let audio = get(&address, &audio_source).expect("GET the audio source");
+    assert_eq!(audio.status, 200, "audio body: {:?}", audio.body);
+    assert_eq!(audio.body, TONE, "the audio source answers the tone bytes");
+    assert!(
+        audio
+            .header("content-type")
+            .is_some_and(|value| value.starts_with("audio/wav")),
+        "the audio source answers audio/wav: {:?}",
+        audio.header("content-type")
     );
 }
