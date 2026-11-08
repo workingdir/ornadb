@@ -38,6 +38,7 @@ expected = [
   "claims-retired-row-writers",
   "gate-c-million-rows",
   "gate-h-browser-wasm",
+  "workspace-cli-aggregate-quota",
 ]
 
 # Gate A: format and existing behaviour.
@@ -377,9 +378,9 @@ title = "fsync/fdatasync, repeated flush, dup/fork, temp sync/rename, writes aft
 select = [
   { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_sync_semantics" },
   { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_truncate_sparse" },
-  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_aggregate_quota", test = "open_candidates_share_one_draft_quota_across_documents" },
+  { record = "workspace-cli-aggregate-quota", package = "orna-cli", target = "test:vfs_mount_aggregate_quota", test = "open_candidates_share_one_draft_quota_across_documents" },
 ]
-limitations = ["fork is simulated with an inherited handle. close(2) errno is observed only through dd (ignored_close_error_leaves_row_unchanged_and_draft_retained: a refused flush exits dd with EINVAL and leaves the row unchanged with a retained draft; dd_close_of_valid_candidate_exits_zero_and_is_accepted is its positive control), not through a fork or a non-dd closer (ornadb-5il1.60, ornadb-5il1.61). The positive control proves the accepted content and the cleared draft guard, not the retained-record check: an O_TRUNC open lets the close FLUSH overtake the WRITE, so an empty candidate is refused and retained before the real row is accepted (ornadb-bqa69). The aggregate draft quota selector (vfs_mount_aggregate_quota) needs the test-seams feature and runs in the aggregate-quota CI job; it proves one shared budget across open candidates of one mount released by truncate and by a synced replacement (accept is not isolated from the truncate that precedes it; release by bare close and accept without a prior truncate are unproven here), and nothing about the copy-free or bounded-RSS items of ornadb-5il1.366."]
+limitations = ["fork is simulated with an inherited handle. close(2) errno is observed only through dd (ignored_close_error_leaves_row_unchanged_and_draft_retained: a refused flush exits dd with EINVAL and leaves the row unchanged with a retained draft; dd_close_of_valid_candidate_exits_zero_and_is_accepted is its positive control), not through a fork or a non-dd closer (ornadb-5il1.60, ornadb-5il1.61). The positive control proves the accepted content and the cleared draft guard, not the retained-record check: an O_TRUNC open lets the close FLUSH overtake the WRITE, so an empty candidate is refused and retained before the real row is accepted (ornadb-bqa69). The aggregate draft quota selector (vfs_mount_aggregate_quota) needs the test-seams feature and runs in the nightly record workspace-cli-aggregate-quota (gate-e-aggregate-quota) and in the aggregate-quota CI job; it proves one shared budget across open candidates of one mount released by truncate and by a synced replacement (accept is not isolated from the truncate that precedes it; release by bare close and accept without a prior truncate are unproven here), and nothing about the copy-free or bounded-RSS items of ornadb-5il1.366."]
 
 [[item]]
 gate = "E"
