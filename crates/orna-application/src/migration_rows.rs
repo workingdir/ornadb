@@ -498,6 +498,8 @@ fn lower_rows(
 /// lowered against a provisional blob reference; every other value is lowered
 /// to its final stored form here. With `format2_blobs`, a Blob slot whose value
 /// is ORR-2 text (inline padded Base64 or a storage record) is read through it.
+/// Without it, a format-1 loose Blob holds its quoted padded Base64 text, which
+/// is decoded to the payload here.
 fn lower_row_fields(
     schema: &StoredSchema<'_>,
     relation: &str,
@@ -528,6 +530,14 @@ fn lower_row_fields(
                 ));
             }
             (Raw::Bytes(bytes), None) if field.is_blob() => Some(bytes.clone()),
+            (Raw::Text(text), None) if field.is_blob() => {
+                Some(orna_value::base64_decode(text).map_err(|_| {
+                    invalid(format!(
+                        "Blob field `{}` is not padded Base64",
+                        field.name()
+                    ))
+                })?)
+            }
             (_, Some(read)) if field.is_blob() => match orr2_slot_text(value) {
                 Some(text) => Some(read(&text).map_err(&invalid)?),
                 None => None,
@@ -649,7 +659,7 @@ mod tests {
 
     use super::{
         LegacyTable, MigrationBlobDescriptors, MigrationRowError, MigrationRowInput, blob_identity,
-        migration_row_input,
+        blob_tuple, migration_row_input,
     };
     use crate::format3_store::StagedRelations;
     use crate::legacy_store::{
@@ -1008,8 +1018,14 @@ mod tests {
     }
 
     /// The stored tuple a legacy row lowers to: its role-1 field values in
-    /// descriptor order, read from the legacy row by stored field.
-    fn stored_values(relation: &StagedRelation, row: &LegacyRow) -> Raw {
+    /// descriptor order, read from the legacy row by stored field. A format-1
+    /// loose Blob holds its padded Base64 text, which lowers to the reference
+    /// of its decoded payload, named by the descriptor the repository wrote.
+    fn stored_values(
+        relation: &StagedRelation,
+        row: &LegacyRow,
+        descriptors: &MigrationBlobDescriptors,
+    ) -> Raw {
         let schema = StoredSchema::new(relation.descriptor()).expect("the descriptor reads");
         Raw::Array(
             schema
@@ -1017,15 +1033,27 @@ mod tests {
                 .iter()
                 .filter(|stored| stored.role() == 1)
                 .map(|stored| {
-                    row.fields()
+                    let value = row
+                        .fields()
                         .iter()
                         .find(|field| match field.name() {
                             LegacyFieldName::Declared(name) => name == stored.name(),
                             LegacyFieldName::ObjectId(id) => id == stored.id(),
                         })
                         .unwrap_or_else(|| panic!("the row has field {}", stored.name()))
-                        .value()
-                        .clone()
+                        .value();
+                    match value {
+                        Raw::Text(text) if stored.is_blob() => {
+                            let bytes = orna_value::base64_decode(text)
+                                .expect("the legacy Blob is padded Base64");
+                            let identity = blob_identity(&bytes).expect("the blob identity");
+                            let oid = descriptors
+                                .descriptor(&identity)
+                                .expect("the blob descriptor was written");
+                            blob_tuple(&identity, oid.as_bytes())
+                        }
+                        other => other.clone(),
+                    }
                 })
                 .collect(),
         )
@@ -1037,11 +1065,12 @@ mod tests {
         relation: &StagedRelation,
         admitted: &[(TypedKey, Vec<u8>)],
         legacy: &LegacyTableRows,
+        descriptors: &MigrationBlobDescriptors,
     ) {
         assert_eq!(admitted.len(), legacy.rows().len());
         for ((key, tuple), row) in admitted.iter().zip(legacy.rows()) {
             assert_eq!(key, row.key(), "the admitted key is the legacy key");
-            let values = stored_values(relation, row);
+            let values = stored_values(relation, row, descriptors);
             assert_eq!(
                 decode_canonical_storage_value(tuple).expect("the tuple decodes"),
                 values
@@ -1073,7 +1102,7 @@ mod tests {
             let rows = relation
                 .encoded_rows(&descriptors)
                 .expect("the golden compact rows encode");
-            assert_rows_match_legacy(&declared.relations()[0], &rows, &legacy);
+            assert_rows_match_legacy(&declared.relations()[0], &rows, &legacy, &descriptors);
         }
     }
 
@@ -1084,7 +1113,7 @@ mod tests {
         let legacy = read_legacy_table_rows(&repository, &commit, &address)
             .expect("the legacy loose table decodes");
         assert_eq!(legacy.rows().len(), 2, "the golden holds two contacts");
-        let declared = declared();
+        let declared = blob_declared();
         let input = migration_row_input(&declared, &[LegacyTable::new(&address, &legacy)])
             .expect("the golden contacts map onto the declared Contact table");
         let relation = input
@@ -1092,11 +1121,17 @@ mod tests {
             .iter()
             .find(|relation| relation.relation_id() == &TABLE)
             .expect("the declared Contact table is in the input");
+        let alice_avatar = b"orna-avatar\0\xff".to_vec();
+        let bob_avatar = b"bob-avatar".to_vec();
+        let blob_bytes: Vec<&Vec<u8>> = input.blobs().values().collect();
+        assert_eq!(blob_bytes.len(), 2, "each contact holds one avatar");
+        assert!(blob_bytes.contains(&&alice_avatar), "alice's avatar bytes");
+        assert!(blob_bytes.contains(&&bob_avatar), "bob's avatar bytes");
         let descriptors = write_blobs(&repository, &input);
         let rows = relation
             .encoded_rows(&descriptors)
             .expect("the golden contacts encode");
-        assert_rows_match_legacy(&declared.relations()[0], &rows, &legacy);
+        assert_rows_match_legacy(&declared.relations()[0], &rows, &legacy, &descriptors);
     }
 
     /// Sets the commit identity the candidate's commit objects need in the
@@ -1218,7 +1253,7 @@ mod tests {
         let address = LegacyTableAddress::TablePath(PATH.to_owned());
         let legacy = read_legacy_table_rows(&repository, &commit, &address)
             .expect("the legacy loose table decodes");
-        let declared_set = declared();
+        let declared_set = blob_declared();
         let input = migration_row_input(&declared_set, &[LegacyTable::new(&address, &legacy)])
             .expect("the golden contacts map onto the declared Contact table");
         let descriptors = write_blobs(&repository, &input);
