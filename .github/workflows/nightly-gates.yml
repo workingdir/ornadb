@@ -14,6 +14,9 @@ name: Nightly gates
 #   ORNA_ORP1_MILLION_ROWS). It writes its own record, so the C items can select
 #   it here instead of depending on gate-c-scale.yml, which never writes into
 #   this evidence directory (ornadb-5il1.6).
+# - The Gate E aggregate draft quota (vfs_mount_aggregate_quota, feature test-seams).
+#   The cli shard skips it because the target has required-features, so
+#   gate-e-aggregate-quota runs it with the feature and writes its own record.
 # - cargo fmt and Clippy, which do not pass on main yet.
 # Every job writes an evidence record with scripts/gate_evidence.py: commit,
 # command, host and tool versions, inputs, exit status, per-test outcomes and
@@ -229,6 +232,43 @@ jobs:
           path: ${{ runner.temp }}/gate-evidence
           if-no-files-found: error
 
+  # Gate E aggregate draft quota. The test is a [[test]] with required-features test-seams, so the
+  # cli shard skips it; this job runs it with the feature and writes its own record.
+  gate-e-aggregate-quota:
+    needs: revision
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out the tested revision
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.revision.outputs.sha }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Run the aggregate draft quota mount test
+        env:
+          ORNA_REQUIRE_FUSE: "1"
+        run: >-
+          python3 scripts/gate_evidence.py run
+          --record workspace-cli-aggregate-quota
+          --title "Gate E: one draft quota across the open candidates of one mount"
+          --out "$RUNNER_TEMP/gate-evidence"
+          --timeout-minutes 50
+          --input-env ORNA_REQUIRE_FUSE
+          -- cargo test --locked --no-fail-fast -p orna-cli --features test-seams --test vfs_mount_aggregate_quota
+
+      - name: Upload the evidence record and log
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: evidence-workspace-cli-aggregate-quota
+          path: ${{ runner.temp }}/gate-evidence
+          if-no-files-found: error
+
   claims:
     needs: revision
     runs-on: ubuntu-latest
@@ -318,7 +358,7 @@ jobs:
           if-no-files-found: error
 
   evidence:
-    needs: [revision, workspace, gate-d-crash-matrix, claims, gate-c-million, gate-h-browser-wasm]
+    needs: [revision, workspace, gate-d-crash-matrix, claims, gate-c-million, gate-h-browser-wasm, gate-e-aggregate-quota]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
