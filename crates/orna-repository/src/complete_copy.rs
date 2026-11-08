@@ -2819,6 +2819,74 @@ mod git_binding_tests {
         ));
     }
 
+    /// Writes one byte-index branch of `height` over `children`, each a
+    /// `(index, length)` pair, and returns its object ID with the total length.
+    fn write_branch(root: &Path, height: u8, children: &[(String, u64)]) -> (String, u64) {
+        let entries = children
+            .iter()
+            .map(|(index, span_length)| ByteIndexEntry {
+                span_length: *span_length,
+                target: NativeOid::from_hex(GitHashAlgorithm::Sha1, index).unwrap(),
+                chunk_sha256: None,
+            })
+            .collect();
+        let length = children.iter().map(|(_, span_length)| span_length).sum();
+        let index = write_node(
+            root,
+            &NodeData::ByteIndex {
+                height,
+                total_length: length,
+                entries,
+            },
+        );
+        (index, length)
+    }
+
+    /// Writes a descriptor whose height-2 root names two height-1 branches, each
+    /// naming height-0 leaves, so verification must descend two levels below
+    /// the root.
+    fn write_height_two_descriptor(root: &Path, chunks: &[&[u8]], raw_sha256: [u8; 32]) -> String {
+        let split = chunks.len() / 2;
+        let branches: Vec<(String, u64)> = [&chunks[..split], &chunks[split..]]
+            .into_iter()
+            .map(|half| {
+                let leaves: Vec<(String, u64)> = half
+                    .iter()
+                    .map(|chunk| write_leaf_index(root, &[*chunk]))
+                    .collect();
+                write_branch(root, 1, &leaves)
+            })
+            .collect();
+        let (index, length) = write_branch(root, 2, &branches);
+        write_node(
+            root,
+            &NodeData::BlobDescriptor {
+                length,
+                raw_sha256,
+                byte_root: Some(NativeOid::from_hex(GitHashAlgorithm::Sha1, &index).unwrap()),
+            },
+        )
+    }
+
+    #[test]
+    fn height_two_descriptor_whose_byte_index_matches_its_raw_digest_verifies() {
+        let directory = repository();
+        let chunks: [&[u8]; 4] = [b"alpha, ", b"beta, ", b"gamma, ", b"delta"];
+        let oid = write_height_two_descriptor(directory.path(), &chunks, raw_digest(&chunks));
+        verify_descriptor(&reader(directory.path()), &oid, "closure").unwrap();
+    }
+
+    #[test]
+    fn height_two_descriptor_with_a_forged_raw_digest_is_refused() {
+        let directory = repository();
+        let chunks: [&[u8]; 4] = [b"alpha, ", b"beta, ", b"gamma, ", b"delta"];
+        let oid = write_height_two_descriptor(directory.path(), &chunks, raw_digest(&[b"other"]));
+        assert!(matches!(
+            verify_descriptor(&reader(directory.path()), &oid, "closure"),
+            Err(CompleteCopyError::IntegrityMismatch { .. })
+        ));
+    }
+
     /// The `data` blob of the descriptor `oid`, so a test can wrap it in another
     /// envelope.
     fn descriptor_data(directory: &Path, oid: &str) -> String {

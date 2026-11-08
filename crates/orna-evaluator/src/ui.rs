@@ -441,4 +441,20 @@ mod tests {
         let malformed = Raw::Tag(ROV3_BLOB_TAG, Box::new(Raw::Array(Vec::new())));
         assert!(!ui_blob_forms_are_references(&malformed));
     }
+
+    #[test]
+    fn committed_rov3_reference_is_admitted_in_a_property() {
+        let reference = Raw::Tag(
+            ROV3_BLOB_TAG,
+            Box::new(Raw::Array(vec![
+                Raw::Int(3.into()),
+                Raw::Bytes(vec![1; 32]),
+                Raw::Text("image/jpeg".to_owned()),
+                Raw::Null,
+                Raw::Bytes(vec![7; 20]),
+            ])),
+        );
+        assert!(ui_blob_forms_are_references(&reference));
+        assert!(ui_property_is_canonical(&Value::AnnotatedBlob(reference)).is_ok());
+    }
 }
