@@ -124,6 +124,8 @@ pub enum ApplicationError {
     UnsupportedSourceEffectPlacement,
     /// An import names a public declaration kind this route cannot bind yet.
     UnsupportedImport(String),
+    /// A contextual read (`evaluate_contextual_page_read`) staged a table mutation.
+    ReadStagedMutation,
 }
 
 impl fmt::Display for ApplicationError {
@@ -157,6 +159,9 @@ impl fmt::Display for ApplicationError {
                 "runtime-backed source effects must be the activation's terminal result",
             ),
             Self::UnsupportedImport(message) => formatter.write_str(message),
+            Self::ReadStagedMutation => {
+                formatter.write_str("a read staged a table mutation; reads never write")
+            }
         }
     }
 }

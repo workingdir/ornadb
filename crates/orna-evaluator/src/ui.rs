@@ -180,7 +180,7 @@ impl Context<'_, '_> {
             .iter()
             .map(|(name, value)| {
                 self.string(name.clone())?;
-                value.clone().canonical()?;
+                ui_property_is_canonical(value)?;
                 let type_name = type_overrides
                     .get(name)
                     .cloned()
@@ -285,6 +285,18 @@ pub(super) fn ui_property_type_matches(type_name: &str, value: &Value) -> bool {
     }
 }
 
+/// Checks that a node property is canonical data. The canonical encoder refuses
+/// a Blob reference, so the property is checked through its skeleton with every
+/// Blob node replaced by null; the reference was validated when it was decoded.
+fn ui_property_is_canonical(value: &Value) -> Result<(), EvaluationError> {
+    let mut blob_positions = Vec::new();
+    let mut next_index = 0;
+    let skeleton = identity_skeleton(value.raw()?, &mut next_index, &mut blob_positions);
+    CanonicalValue::new(skeleton)
+        .map(drop)
+        .map_err(|_| error("ORNA-EVAL-VALUE"))
+}
+
 fn ui_type_name_is_well_formed(type_name: &str) -> bool {
     if let Some(inner) = type_name
         .strip_prefix("std.option<")
@@ -338,7 +350,7 @@ pub(super) fn is_ui_presentation_node(
         };
         !name.is_empty()
             && ui_property_type_matches(type_name, value)
-            && value.clone().canonical().is_ok()
+            && ui_property_is_canonical(value).is_ok()
     }) {
         return Ok(false);
     }
