@@ -119,10 +119,10 @@ impl<T> ActivationWork<T> {
     }
 
     /// Declares the effect report the commit boundary records for this work.
-    /// Callers declare the activation's effect set with
-    /// [`ActivationEffectReport::declare`]. Only a declaration of no external
-    /// effects yields the Orna-controlled token; every other activation keeps
-    /// the conservative `ExternalPossible` default from [`ActivationWork::new`].
+    /// Callers pass the activation's effect report built by [`EffectGate::admit`].
+    /// Only an evaluation admitted with no external reach yields the
+    /// Orna-controlled token; every other activation keeps the conservative
+    /// `ExternalPossible` default from [`ActivationWork::new`].
     pub fn with_effects(mut self, effects: ActivationEffectReport) -> Self {
         self.effects = effects;
         self
@@ -398,4 +398,21 @@ where
     }
     .map_err(ActivationError::Runtime)?;
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ActivationWork;
+    use crate::ActivationEffectReport;
+
+    #[test]
+    fn third_party_work_defaults_to_external_possible() {
+        // ORNA-CAP-005: work that never passes through `EffectGate::admit` must
+        // not present the controlled marker, so its rollback stays uncertain.
+        let work = ActivationWork::new(Vec::new(), [0; 32], ());
+        assert!(matches!(
+            work.effects,
+            ActivationEffectReport::ExternalPossible
+        ));
+    }
 }

@@ -29,5 +29,6 @@ all = { level = "deny", priority = -1 }
 pedantic = { level = "deny", priority = -1 }
 
 [dev-dependencies]
+orna-evaluator = { path = "../orna-evaluator" }
 orna-repository = { path = "../orna-repository" }
 orna-live = { path = ".", features = ["test-support"] }

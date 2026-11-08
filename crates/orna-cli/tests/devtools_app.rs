@@ -149,13 +149,13 @@ fn standard_snapshot() -> tempfile::TempDir {
     module
 }
 
-/// Creates a project that pins `snapshot`, declares `Note`, and serves the
-/// devtools page.
-fn devtools_project(snapshot: &Path) -> tempfile::TempDir {
+/// Creates a project that pins `snapshot`, declares `declarations`, and serves
+/// the devtools page.
+fn devtools_project_declaring(snapshot: &Path, declarations: &str) -> tempfile::TempDir {
     let directory = tempfile::tempdir().expect("devtools project");
     initialize_project(directory.path());
     configure_git(directory.path());
-    let source = format!("pub table Note(id: Int) {{\n    body: Str,\n}}\n\n{DEVTOOLS_SOURCE}");
+    let source = format!("{declarations}\n{DEVTOOLS_SOURCE}");
     std::fs::write(directory.path().join("main.orna"), source).expect("project source");
     // A local clone needs the file protocol; the submodule must be checked out
     // on disk for the standard sources to bind.
@@ -173,6 +173,12 @@ fn devtools_project(snapshot: &Path) -> tempfile::TempDir {
     );
     commit_orna(directory.path(), "Declare Note and the devtools page");
     directory
+}
+
+/// Creates a project that pins `snapshot`, declares `Note`, and serves the
+/// devtools page.
+fn devtools_project(snapshot: &Path) -> tempfile::TempDir {
+    devtools_project_declaring(snapshot, "pub table Note(id: Int) {\n    body: Str,\n}\n")
 }
 
 fn free_port() -> u16 {
@@ -244,5 +250,62 @@ fn devtools_lists_tables_runs_input_and_refreshes() {
     assert_eq!(
         refreshed.body, reply.body,
         "a refresh renders the same page"
+    );
+}
+
+/// The text between the first `open` and the next `close` after it.
+fn between<'a>(text: &'a str, open: &str, close: &str) -> Option<&'a str> {
+    let start = text.find(open)? + open.len();
+    let end = start + text[start..].find(close)?;
+    Some(&text[start..end])
+}
+
+/// The `name` column of the served table, in row order. The column is found
+/// by its header, so a page with other columns still yields only table names.
+fn served_table_names(body: &str) -> Vec<String> {
+    let head = between(body, "<thead><tr>", "</tr></thead>").expect("the table has a header");
+    let columns = head
+        .split("<th>")
+        .skip(1)
+        .map(|cell| cell.split("</th>").next().unwrap_or_default())
+        .collect::<Vec<_>>();
+    let name = columns
+        .iter()
+        .position(|column| *column == "name")
+        .expect("the table has a name column");
+    let rows = between(body, "<tbody>", "</tbody>").expect("the table has a body");
+    rows.split("<tr>")
+        .skip(1)
+        .map(|row| {
+            row.split("<td>")
+                .skip(1)
+                .nth(name)
+                .and_then(|cell| cell.split("</td>").next())
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .collect()
+}
+
+#[test]
+// Specified: Gate G / DESIGN S5a and implementation/ACCEPTANCE.md Gate G; the
+// served table list is the admitted catalogue, asserted by exact name.
+fn devtools_lists_exactly_the_admitted_table_names() {
+    let snapshot = standard_snapshot();
+    let project = devtools_project_declaring(
+        snapshot.path(),
+        "pub table Note(id: Int) {\n    body: Str,\n}\n\npub table Task(id: Int) {\n    title: Str,\n}\n",
+    );
+    let (_server, address) = start(project.path());
+
+    let reply = get(&address, "/").expect("read the devtools page");
+    assert_eq!(reply.status, 200);
+    let mut names = served_table_names(&reply.body);
+    names.sort();
+    assert_eq!(
+        names,
+        ["Note", "Task"],
+        "the list is the admitted catalogue, with no extra or missing table\n{}",
+        reply.body
     );
 }
