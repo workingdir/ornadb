@@ -34,7 +34,9 @@ use editor_mount::{
     MountedProcess, assert_errno, require_fuse_or_skip, run_orna_unmount, spawn_mount_process,
     start_mount_process, wait_for_mount, write_and_sync,
 };
-use product::{commit_source, git, head, initialized_database, orna, publish, repl_writes};
+use product::{
+    assert_success, commit_source, git, head, initialized_database, orna, publish, repl_writes,
+};
 use tempfile::TempDir;
 
 const EAGAIN: i32 = 11;
@@ -61,6 +63,7 @@ const V2_REQUIRED_NOTE: &str =
 const TITLE_ONLY: &str = "pub table Music(id: Str) {\n    title: Str,\n}\n";
 const ADMITTED_TITLE_ONLY: &str = "{\n    title: \"Original\",\n}\n";
 const ADMITTED_TITLE_REWRITTEN: &str = "{\n    title: \"Admitted\",\n}\n";
+const RENAMED_ROW: &str = "{\n    artist: \"Kieran\",\n    name: \"Original\",\n}\n";
 
 fn sorted_names(directory: &Path) -> Vec<String> {
     let mut names = fs::read_dir(directory)
@@ -224,6 +227,83 @@ fn vfs_019_remount_after_schema_change_shows_new_shape() {
             NOTED
         ),
         "the admitted v2 row carries the written field"
+    );
+    run_orna_unmount(&root, &mountpoint);
+    let status = remounted
+        .wait_for_exit(Duration::from_secs(10))
+        .expect("the remounted process exits after unmount");
+    assert!(status.success(), "remounted process exited with {status}");
+}
+
+/// ORNA-EVOL-001 / ORNA-OBJECT-003 live half: an owner field rename, made with `orna mv` and
+/// committed while a `--cwd` mount is live, keeps the open handle on its captured v1 bytes and
+/// keeps the live listing on the pinned generation. A remount exposes the renamed field with the
+/// value the stable field identity carried across the rename.
+#[test]
+fn vfs_field_rename_under_live_mount_pins_handle_and_remount_shows_new_name() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let directory = TempDir::new().expect("create the test directory");
+    let root = seed_library(&directory);
+
+    let mount_parent = TempDir::new().expect("create the mount parent");
+    let mountpoint = mount_parent.path().join("library");
+    let mut mounted = spawn_mount_process(&root, &mountpoint);
+    let london = mountpoint.join("Music/london/data.orna");
+    mounted.await_path(&london);
+    let baseline = fs::read_to_string(&london).expect("read the pinned row");
+    assert!(
+        same_row(&baseline, ORIGINAL),
+        "the mount shows the accepted v1 row: {baseline:?}"
+    );
+    let mut read_handle = File::open(&london).expect("open a read handle before the rename");
+
+    // The owner renames the field with `orna mv` (staged identity move) and commits the
+    // declaration, which rewrites the committed row under the same field identity.
+    let before_rename = head(&root);
+    let moved = orna(&root, &["mv", "Music.title", "name"]);
+    assert_success(&moved, "orna mv");
+    commit_source(&root, "Rename Music.title to name");
+    assert_ne!(head(&root), before_rename, "the rename is committed");
+
+    // The open handle keeps its captured bytes, and a fresh open stays on the pinned v1 shape.
+    read_handle
+        .seek(SeekFrom::Start(0))
+        .expect("rewind the read handle");
+    let mut through_handle = String::new();
+    read_handle
+        .read_to_string(&mut through_handle)
+        .expect("read through the old handle");
+    assert_eq!(
+        through_handle, baseline,
+        "an open handle keeps the pre-rename bytes"
+    );
+    assert!(
+        same_row(
+            &fs::read_to_string(&london).expect("read the live row"),
+            ORIGINAL
+        ),
+        "the live mount stays on its pinned generation before remount"
+    );
+    drop(read_handle);
+    run_orna_unmount(&root, &mountpoint);
+    let status = mounted
+        .wait_for_exit(Duration::from_secs(10))
+        .expect("the mount process exits after unmount");
+    assert!(status.success(), "mount exited with {status}");
+    drop(mounted);
+
+    // The remounted generation exposes the renamed field, carrying the value across the rename.
+    let mut remounted = wait_for_mount(start_mount_process(&root, &mountpoint));
+    remounted.await_path(&london);
+    assert!(
+        same_row(
+            &fs::read_to_string(&london).expect("read the remounted row"),
+            RENAMED_ROW
+        ),
+        "the remounted row shows the renamed field with its value; mount stderr: {}",
+        remounted.stderr_text()
     );
     run_orna_unmount(&root, &mountpoint);
     let status = remounted
