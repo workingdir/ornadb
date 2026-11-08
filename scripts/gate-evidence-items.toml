@@ -359,8 +359,9 @@ select = [
   { record = "workspace-cli", package = "orna-cli", target = "test:vfs_editor_compat", test = "speculative_source_writes_validate_on_sync_and_reject_stale_generation" },
   { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_sessions", test = "sigterm_retains_unresolved_drafts_instead_of_discarding_them" },
   { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_sync_semantics", test = "rejected_candidates_with_identical_bytes_retain_distinct_draft_ids" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:edit_cli", test = "edit_row_rejection_reports_diagnostic_and_retains_distinct_drafts" },
 ]
-limitations = ["The rejected candidate is kept by the unmount-time retain request, and the tests assert the listed draft id names a retained record holding the exact candidate bytes (profiles/vfs-1.md:101-102). rejected_candidates_with_identical_bytes_retain_distinct_draft_ids covers the unique-ID clause on two rows whose rejected documents are byte-identical: the ids differ, each record's header names its own projected path, and a second retain keeps each first record. The SIGTERM selector shows unresolved drafts are retained in general, not that the rejected candidate specifically is. The orna edit --row draft admission and report path is not covered by this item (ornadb-5il1.140)."]
+limitations = ["The rejected candidate is kept by the unmount-time retain request, and the tests assert the listed draft id names a retained record holding the exact candidate bytes (profiles/vfs-1.md:101-102). rejected_candidates_with_identical_bytes_retain_distinct_draft_ids covers the unique-ID clause on two rows whose rejected documents are byte-identical: the ids differ, each record's header names its own projected path, and a second retain keeps each first record. The SIGTERM selector shows unresolved drafts are retained in general, not that the rejected candidate specifically is. edit_row_rejection_reports_diagnostic_and_retains_distinct_drafts drives the production orna edit --row entrypoint with --debug; it proves the admission reason and draft path are reported and that two byte-identical rejected candidates keep distinct draft records. Without --debug the E2000 detail (including the retained draft path) is not rendered (ORNA-UX-004 treats it as technical detail), so a default-mode user is not shown where the rejected draft is; this item does not claim default-mode draft visibility."]
 
 [[item]]
 gate = "E"
@@ -529,8 +530,8 @@ limitations = [
 gate = "G"
 id = "G1"
 title = "Table list over the production API, read from the admitted catalogue"
-select = [{ record = "workspace-cli", package = "orna-cli", target = "test:devtools_app", test = "devtools_lists_tables_runs_input_and_refreshes" }]
-limitations = ["The test asserts that a table element is present, not the admitted table names (ornadb-5il1.492)."]
+select = [{ record = "workspace-cli", package = "orna-cli", target = "test:devtools_app", test = "devtools_lists_exactly_the_admitted_table_names" }]
+limitations = ["The served table list is checked for user tables only; system tables in the catalogue are not asserted."]
 
 [[item]]
 gate = "G"
