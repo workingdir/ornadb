@@ -316,6 +316,60 @@ fn run_action_refuses_an_effectful_input() {
     );
 }
 
+#[test]
+// Specified: Gate G / DESIGN S5a; an action identifier outside the valid format is not found, never routed.
+fn run_action_answers_a_malformed_action_id_with_not_found() {
+    let snapshot = standard_snapshot();
+    let project = devtools_project(snapshot.path());
+    let (_server, address) = start(project.path());
+    let origin = format!("http://{address}");
+
+    for path in [
+        "/action/bad*id".to_owned(),
+        format!("/action/{}", "a".repeat(129)),
+    ] {
+        let reply = post_form(&address, &path, Some(&origin), "query=1");
+        assert_eq!(reply.status, 404, "{path}: {}", reply.body);
+        assert!(
+            reply.body.contains(r#""error":"action.not_found""#),
+            "{path}: {}",
+            reply.body
+        );
+    }
+}
+
+#[test]
+// Specified: Gate G / DESIGN S5a; text that spells a formaction is not an offered action.
+fn run_action_refuses_an_action_only_spelled_in_page_text() {
+    let snapshot = standard_snapshot();
+    let source = concat!(
+        "use std.ui.{Cols, Text};\n",
+        "\n",
+        "pub fn serve(): UI = Cols([\n",
+        "    Text(\"formaction=\\\"/action/devtools.spoof\\\"\")\n",
+        "]);\n",
+    );
+    let project = project_with_source(snapshot.path(), source);
+    let (_server, address) = start(project.path());
+    let origin = format!("http://{address}");
+
+    let page = get(&address, "/").expect("read the page");
+    assert_eq!(page.status, 200, "{}", page.body);
+    assert!(
+        !page.body.contains("<form"),
+        "text alone offers no form: {}",
+        page.body
+    );
+
+    let reply = post_form(&address, "/action/devtools.spoof", Some(&origin), "query=1");
+    assert_eq!(reply.status, 404, "{}", reply.body);
+    assert!(
+        reply.body.contains(r#""error":"action.not_found""#),
+        "{}",
+        reply.body
+    );
+}
+
 fn initialize_project(directory: &Path) {
     let output = Command::new(BINARY)
         .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -392,10 +446,14 @@ fn standard_snapshot() -> tempfile::TempDir {
 /// Creates a project that pins `snapshot`, declares `declarations`, and serves
 /// the devtools page.
 fn devtools_project_declaring(snapshot: &Path, declarations: &str) -> tempfile::TempDir {
+    project_with_source(snapshot, &format!("{declarations}\n{DEVTOOLS_SOURCE}"))
+}
+
+/// Creates a project that pins `snapshot` and whose `main.orna` is `source`.
+fn project_with_source(snapshot: &Path, source: &str) -> tempfile::TempDir {
     let directory = tempfile::tempdir().expect("devtools project");
     initialize_project(directory.path());
     configure_git(directory.path());
-    let source = format!("{declarations}\n{DEVTOOLS_SOURCE}");
     std::fs::write(directory.path().join("main.orna"), source).expect("project source");
     // A local clone needs the file protocol; the submodule must be checked out
     // on disk for the standard sources to bind.
@@ -411,7 +469,7 @@ fn devtools_project_declaring(snapshot: &Path, declarations: &str) -> tempfile::
             "stdlib/std",
         ],
     );
-    commit_orna(directory.path(), "Declare Note and the devtools page");
+    commit_orna(directory.path(), "Declare the project source");
     directory
 }
 
