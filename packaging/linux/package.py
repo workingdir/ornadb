@@ -684,7 +684,7 @@ def verify_rpm(
         "version": version,
         "release": "1",
         "arch": "x86_64",
-        "license": "Apache-2.0",
+        "license": "MPL-2.0",
         "group": "Applications/Databases",
     }
     if observed != expected_header:

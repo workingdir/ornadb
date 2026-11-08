@@ -3,7 +3,7 @@ name = "orna-live"
 version = "1.0.0"
 edition = "2024"
 rust-version = "1.95"
-license = "Apache-2.0"
+license.workspace = true
 description = "Transport-facing live-session adapter for orna.present.v1"
 
 [features]

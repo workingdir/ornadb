@@ -3,7 +3,7 @@ name = "orna-foundation"
 version.workspace = true
 edition = "2024"
 rust-version = "1.95"
-license = "Apache-2.0"
+license.workspace = true
 description = "Shared Orna 1.0 source, diagnostic, value, and repository contracts"
 
 [dependencies]
