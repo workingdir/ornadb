@@ -363,9 +363,11 @@ id = "E5"
 title = "Concurrent REPL changes against captured file-write baselines and strong orna edit read baselines"
 select = [
   { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_integration", test = "cwd_mount_save_after_another_writer_advances_head_is_stale" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_sessions", test = "repl_write_refused_by_live_mount_writer_lease_leaves_mount_save_accepted" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_sessions", test = "repl_write_inside_orna_edit_on_live_mount_is_refused_and_edit_admits" },
   { record = "workspace-cli", package = "orna-cli", target = "test:edit_cli" },
 ]
-limitations = ["No live REPL runs alongside a mount, and the workspace mount is not the CWD (ornadb-5il1.64)."]
+limitations = ["While the writer lease is held no competing change lands, so the live E2000 stale-baseline path is not exercised here; the workspace mount is not the CWD (ornadb-5il1.64)."]
 
 [[item]]
 gate = "E"
