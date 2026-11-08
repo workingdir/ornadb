@@ -1,4 +1,5 @@
 pub table Contact(id: Str) {
     name: Str,
     emails: List<Str>,
+    avatar: Blob,
 }
