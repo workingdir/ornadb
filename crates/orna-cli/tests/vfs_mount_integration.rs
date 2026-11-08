@@ -4007,6 +4007,58 @@ async fn cwd_mount_open_blob_handle_keeps_captured_generation_across_replacement
 }
 
 #[tokio::test]
+/// profiles/vfs-1.md:129-130 and ACCEPTANCE Gate E: read-only Blob opens reply without direct I/O, so the kernel may cache their pages. A same-length replacement is published under a fresh inode, and no read-only open reads the superseded generation's cached pages.
+async fn cwd_mount_read_only_blob_opens_share_no_cached_pages_across_generations() {
+    let original = lcg_bytes(0x0123_4567_89ab_cdef, 1_048_576 + 12_345);
+    let replacement = lcg_bytes(0xfedc_ba98_7654_3210, original.len());
+    let Some(mut row) = mount_captured_blob(&original).await else {
+        return;
+    };
+    let blob_path = row.mounted.mountpoint.join("Music/london/content.mp3");
+    let first_inode = std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&blob_path).unwrap());
+
+    // Populate the kernel page cache for the first generation through read-only opens, and pin a
+    // read-only handle to it.
+    let mut pinned = File::open(&blob_path).unwrap();
+    for _ in 0..3 {
+        assert_eq!(
+            std::fs::read(&blob_path).unwrap(),
+            original,
+            "repeated cached reads of one generation are stable"
+        );
+    }
+
+    // Replace the Blob with different bytes of exactly the same length through a temp-and-rename
+    // save: only the content changes, so a shared cached page of the superseded generation would
+    // be served for the new one.
+    let scratch_path = blob_path.with_file_name(".content.mp3.replace");
+    std::fs::write(&scratch_path, &replacement).unwrap();
+    std::fs::rename(&scratch_path, &blob_path).unwrap();
+
+    let fresh_inode = std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&blob_path).unwrap());
+    assert_ne!(
+        fresh_inode, first_inode,
+        "the replacement is published under a fresh inode; a reused one would share the cached pages"
+    );
+    assert_eq!(
+        std::fs::read(&blob_path).unwrap(),
+        replacement,
+        "a read-only open reads the replacement, never the superseded generation's cached pages"
+    );
+
+    pinned.seek(SeekFrom::Start(0)).unwrap();
+    let mut pinned_bytes = Vec::new();
+    pinned.read_to_end(&mut pinned_bytes).unwrap();
+    assert_eq!(
+        pinned_bytes, original,
+        "the pinned handle keeps the generation it captured"
+    );
+    drop(pinned);
+
+    unmount_and_reap(row.repository_directory.path(), &mut row.mounted);
+}
+
+#[tokio::test]
 /// profiles/vfs-1.md Blob fields and ACCEPTANCE Gate E: the acknowledged replacement survives a restart of the mount process.
 async fn cwd_mount_rename_replacement_survives_remount() {
     let original = lcg_bytes(0x0123_4567_89ab_cdef, 1_048_576 + 12_345);
