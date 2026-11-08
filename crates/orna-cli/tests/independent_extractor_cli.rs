@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use orna_evaluator::SysHostBindingRegistry;
+use orna_repository::Repository;
 use orna_runtime::RuntimeState;
 use orna_sys::{EnvironmentProvider, FilesystemProvider};
 use serde_json::Value;
@@ -50,15 +51,15 @@ fn run(directory: &Path, arguments: &[&str]) -> Output {
         .expect("CLI process starts")
 }
 
-/// Runs the standard-library extractor over `repository` at HEAD, writing Blob
-/// bytes under `output`.
-fn extract(repository: &Path, output: &Path) -> Output {
+/// Runs the standard-library extractor over `repository` at `revision`, writing
+/// Blob bytes under `output`.
+fn extract(repository: &Path, revision: &str, output: &Path) -> Output {
     let mut command = Command::new("python3");
     isolate_git(&mut command, repository);
     command
         .arg(EXTRACTOR)
         .arg(repository)
-        .arg("HEAD")
+        .arg(revision)
         .arg("--output")
         .arg(output)
         .output()
@@ -258,7 +259,7 @@ async fn extractor_recovers_modules_schema_rows_and_blob_bytes_from_an_export() 
 
     // The extractor reads only the copy's Git objects.
     let output = outside.path().join("extracted");
-    let extracted = extract(&restored, &output);
+    let extracted = extract(&restored, "HEAD", &output);
     assert_eq!(
         extracted.status.code(),
         Some(0),
@@ -358,6 +359,283 @@ async fn extractor_recovers_modules_schema_rows_and_blob_bytes_from_an_export() 
             module["text"].as_str().unwrap().as_bytes(),
             content.as_slice(),
             "{path}: the module text matches the tree"
+        );
+    }
+}
+
+/// Drops the legacy identity sidecar the format-3 fixture commits, so each
+/// snapshot this file exports satisfies ORNA-META-001 (see the walkthrough).
+fn drop_legacy_identity_sidecar(directory: &Path) {
+    git(
+        directory,
+        &["rm", "--quiet", "--", ".orna/object-identities.cbor"],
+    );
+    git(
+        directory,
+        &["commit", "--quiet", "-m", "drop legacy identity sidecar"],
+    );
+}
+
+/// Admits each `(key, fixture, ordinal)` import as one insert-only row of the
+/// relation, the way a production run does, and releases the runtime.
+async fn admit_imports(
+    repository: &Repository,
+    relation_id: [u8; 16],
+    source: &Path,
+    imports: &[(&str, &str, u8)],
+) {
+    let (runtime_identity, initial_digest) = cli_runtime_identity(repository);
+    let state = RuntimeState::open(repository, runtime_identity, initial_digest)
+        .await
+        .unwrap();
+    let writer = state.acquire_lease([0x64; 16]).await.unwrap();
+    let capability = repository.capture_capability(relation_id).unwrap();
+    let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
+    filesystem.allow_root(source).unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_filesystem_provider(filesystem)
+        .with_repository_capture_capability(capability);
+    for (key, fixture, ordinal) in imports {
+        let expression = import_expression(fixture, source);
+        commit_capture(
+            repository,
+            &state,
+            writer,
+            &mut bindings,
+            &expression,
+            key,
+            *ordinal,
+            true,
+            relation_id,
+        )
+        .await;
+    }
+}
+
+/// Publishes the admitted rows with the CLI verb and requires success.
+fn publish(project: &Path) {
+    let publication = run(project, &["publish"]);
+    assert_eq!(
+        publication.status.code(),
+        Some(0),
+        "publish failed: {}",
+        String::from_utf8_lossy(&publication.stderr)
+    );
+}
+
+/// The commit `HEAD` names in `project`.
+fn head(project: &Path) -> String {
+    String::from_utf8(git_output(project, &["rev-parse", "HEAD"], None))
+        .unwrap()
+        .trim()
+        .to_owned()
+}
+
+/// The Blob listings the source reports for `relation`, which must list `count`.
+fn source_listings(project: &Path, relation: &str, count: usize) -> Vec<Value> {
+    let query = run(project, &["query", relation, "--format", "json"]);
+    assert_eq!(
+        query.status.code(),
+        Some(0),
+        "source query failed: {}",
+        String::from_utf8_lossy(&query.stderr)
+    );
+    let report: Value = serde_json::from_slice(&query.stdout).unwrap();
+    let listings = report["listings"].as_array().unwrap().clone();
+    assert_eq!(
+        listings.len(),
+        count,
+        "the source lists {count} Blob values"
+    );
+    listings
+}
+
+/// Checks one extracted snapshot against what the source reported for it. The
+/// relation holds `rows` rows; each listed Blob's descriptor, length, media
+/// type, suffix and SHA-256 equal the source's, and its extracted bytes equal
+/// the payload; every module is the blob the snapshot's tree holds.
+#[allow(clippy::too_many_arguments)]
+fn assert_extracted_snapshot(
+    restored: &Path,
+    output: &Path,
+    commit: &str,
+    report: &Value,
+    relation: &str,
+    listings: &[Value],
+    expected: &[(&str, Vec<u8>)],
+    rows: usize,
+) {
+    let relations = report["snapshot"]["relations"].as_array().unwrap();
+    let relation_report = relations
+        .iter()
+        .find(|entry| entry["relation_id"] == relation)
+        .unwrap_or_else(|| panic!("{commit}: the extractor recovers relation {relation}"));
+    let extracted_rows = relation_report["rows"].as_array().unwrap();
+    assert_eq!(
+        extracted_rows.len(),
+        rows,
+        "{commit}: every committed row of the relation is recovered"
+    );
+    assert_eq!(relation_report["row_count"].as_u64(), Some(rows as u64));
+    assert!(
+        !relation_report["schema"]["definitions"].is_null(),
+        "{commit}: the relation's schema definitions are recovered"
+    );
+    let blobs = report["blobs"].as_array().unwrap();
+    for listing in listings {
+        let key = listing["key"].as_str().unwrap();
+        let field = listing["field"].as_u64().unwrap();
+        let row = extracted_row(extracted_rows, key);
+        let blob = &extracted_field(row, field)["blob"];
+        for name in ["descriptor", "length", "media_type", "suffix", "sha256"] {
+            assert_eq!(blob[name], listing[name], "{commit} {key}: {name}");
+        }
+        let (_, bytes) = expected
+            .iter()
+            .find(|(name, _)| *name == key)
+            .unwrap_or_else(|| panic!("the source payload for {key} is known"));
+        let path = blob["path"].as_str().unwrap();
+        let recovered = std::fs::read(output.join(path)).unwrap();
+        assert_eq!(
+            &recovered, bytes,
+            "{commit} {key}: the recovered payload equals the source"
+        );
+        assert_eq!(
+            hex(Sha256::digest(&recovered).as_slice()),
+            blob["sha256"].as_str().unwrap(),
+            "{commit} {key}: the recovered bytes hash to the recorded SHA-256"
+        );
+        assert!(
+            blobs.iter().any(|record| record["path"] == path),
+            "{commit} {key}: the Blob is listed in the report's blob table"
+        );
+    }
+    for module in report["snapshot"]["modules"].as_array().unwrap() {
+        let path = module["path"].as_str().unwrap();
+        let content = git_output(restored, &["show", &format!("{commit}:{path}")], None);
+        assert_eq!(
+            module["text"].as_str().unwrap().as_bytes(),
+            content.as_slice(),
+            "{commit} {path}: the module text matches the tree"
+        );
+    }
+}
+
+/// Gate F across two snapshots: each snapshot publishes its own format-3 native
+/// `.orna/store` graph. Both are exported as one copy, reconstructed without the
+/// source, and the extractor walks each snapshot's store and recovers exactly
+/// that snapshot's rows, schema, modules and Blob bytes.
+#[allow(clippy::too_many_lines)]
+#[tokio::test]
+async fn extractor_walks_the_native_store_of_each_snapshot_in_a_two_snapshot_copy() {
+    let (directory, repository, relation_id) = empty_format3_repository();
+    drop_legacy_identity_sidecar(directory.path());
+    let source = TempDir::new().unwrap();
+    for name in ["tone.wav", "pixel.png"] {
+        std::fs::copy(
+            Path::new(MEDIA_FIXTURES).join(name),
+            source.path().join(name),
+        )
+        .unwrap();
+    }
+    let tone = std::fs::read(Path::new(MEDIA_FIXTURES).join("tone.wav")).unwrap();
+    let pixel = std::fs::read(Path::new(MEDIA_FIXTURES).join("pixel.png")).unwrap();
+    let expected = vec![("song", tone.clone()), ("image", pixel), ("song-b", tone)];
+    let project = directory.path().to_path_buf();
+    let relation = relation_hex(relation_id);
+
+    // First snapshot: a song and an image.
+    admit_imports(
+        &repository,
+        relation_id,
+        source.path(),
+        &[
+            ("song", SONG_IMPORT_FIXTURE, 0x90),
+            ("image", IMAGE_IMPORT_FIXTURE, 0xa0),
+        ],
+    )
+    .await;
+    publish(&project);
+    let first = head(&project);
+    let first_listings = source_listings(&project, &relation, 2);
+
+    // Second snapshot: the same store plus one more song row.
+    admit_imports(
+        &repository,
+        relation_id,
+        source.path(),
+        &[("song-b", SONG_IMPORT_FIXTURE, 0xb0)],
+    )
+    .await;
+    publish(&project);
+    let second = head(&project);
+    assert_ne!(first, second, "the second publish makes a new snapshot");
+    let second_listings = source_listings(&project, &relation, 3);
+
+    // Export both snapshots into one archive, the newer one first, and
+    // reconstruct it into a copy that is not the source.
+    let outside = TempDir::new().unwrap();
+    let archive = outside.path().join("archive");
+    let archive_path = archive.to_str().unwrap();
+    let exported = run(
+        &project,
+        &[
+            "export",
+            archive_path,
+            "--at",
+            second.as_str(),
+            "--at",
+            first.as_str(),
+        ],
+    );
+    assert_eq!(
+        exported.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&exported.stderr)
+    );
+    let restored: PathBuf = outside.path().join("restored");
+    let restored_path = restored.to_str().unwrap();
+    let reconstructed = run(
+        &project,
+        &[
+            "export",
+            archive_path,
+            "--restore",
+            restored_path,
+            "--worktree",
+        ],
+    );
+    assert_eq!(
+        reconstructed.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&reconstructed.stderr)
+    );
+
+    // The source repository and its worktree are gone before the extractor runs.
+    drop(repository);
+    drop(directory);
+    drop(source);
+    assert!(!project.exists(), "the source worktree is removed");
+
+    // The extractor reads each snapshot's native store from the copy alone.
+    for (commit, listings, rows) in [
+        (&second, &second_listings, 3_usize),
+        (&first, &first_listings, 2_usize),
+    ] {
+        let output = outside.path().join(format!("extracted-{}", &commit[..12]));
+        let extracted = extract(&restored, commit, &output);
+        assert_eq!(
+            extracted.status.code(),
+            Some(0),
+            "{commit}: extractor failed: {}",
+            String::from_utf8_lossy(&extracted.stderr)
+        );
+        let report: Value = serde_json::from_slice(&extracted.stdout).unwrap();
+        assert_eq!(report["snapshot"]["commit"], commit.as_str());
+        assert_extracted_snapshot(
+            &restored, &output, commit, &report, &relation, listings, &expected, rows,
         );
     }
 }
@@ -528,7 +806,7 @@ fn extractor_matches_the_real_reader_on_a_migrated_golden_copy() {
     assert!(!copy.exists(), "the migrated copy is removed");
 
     let output = outside.path().join("extracted");
-    let extracted = extract(&restored, &output);
+    let extracted = extract(&restored, "HEAD", &output);
     assert_eq!(
         extracted.status.code(),
         Some(0),
@@ -774,7 +1052,7 @@ fn extractor_refuses_a_pinned_dependency_whose_commit_is_unavailable() {
     std::fs::create_dir_all(&dependency).unwrap();
     git(&dependency, &["init", "--quiet"]);
     let output = parent.path().join("extracted");
-    let extracted = extract(&copy, &output);
+    let extracted = extract(&copy, "HEAD", &output);
     let stderr = String::from_utf8_lossy(&extracted.stderr);
     assert_eq!(extracted.status.code(), Some(1), "{stderr}");
     assert!(
@@ -891,7 +1169,7 @@ fn migrated_golden_copy_exports_and_restores_its_pinned_legacy_dependency() {
     // The copy and the dependency source are gone before the extractor runs.
     drop(parent);
     let output = outside.path().join("extracted");
-    let extracted = extract(&restored, &output);
+    let extracted = extract(&restored, "HEAD", &output);
     let stderr = String::from_utf8_lossy(&extracted.stderr);
     assert_eq!(extracted.status.code(), Some(0), "{stderr}");
     let report: Value = serde_json::from_slice(&extracted.stdout).unwrap();
