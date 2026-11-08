@@ -191,7 +191,7 @@ limitations = [
 gate = "B"
 id = "B6"
 title = "Binary edit rehash cost is measured rather than hidden"
-select = [{ record = "workspace-rest", package = "orna-repository", target = "lib", test = "binary_save_and_metadata_save_report_rehash_cost" }, { record = "workspace-cli", package = "orna-cli", target = "test:media_import_query", test = "gate_b_metadata_update_reads_zero_payload_bytes_at_mib_scale" }]
+select = [{ record = "workspace-rest", package = "orna-repository", target = "lib", test = "graph_bridge_tests::binary_save_and_metadata_save_report_rehash_cost" }, { record = "workspace-cli", package = "orna-cli", target = "test:media_import_query", test = "gate_b_metadata_update_reads_zero_payload_bytes_at_mib_scale" }]
 counters = ["^Gate B: rehash "]
 
 # Gate C: indexed rows at scale.
