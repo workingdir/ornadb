@@ -238,6 +238,37 @@ fn first_src(html: &str) -> &str {
     &html[start..end]
 }
 
+/// Captures the pixel fixture into `root` and stores it as `id` through the REPL.
+/// The next publish commits the row.
+fn store_pixel(root: &Path, id: &str) {
+    fs::write(root.join("pixel.png"), PIXEL).expect("place the captured file");
+    let root_text = root.to_string_lossy();
+    let stored = orna_repl(
+        root,
+        &format!(
+            "let raw = sys.blob.capture_file({root_text:?}, \"pixel.png\", 65536);\nlet image = sys.blob.annotate(raw, \"image/png\");\nmain.store(\"{id}\", image).id"
+        ),
+    );
+    assert_repl_accepts(&stored, "REPL blob insert");
+}
+
+/// Stores one `notes` row through the REPL. The next publish commits the row.
+fn store_note(root: &Path, id: &str, title: &str) {
+    let stored = orna_repl(root, &format!("main.note(\"{id}\", \"{title}\").id"));
+    assert_repl_accepts(&stored, "REPL note insert");
+}
+
+/// The REPL exits cleanly and reports no error for the input it was given.
+fn assert_repl_accepts(output: &Output, step: &str) {
+    let transcript = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.status.code(), Some(0), "{step}\n{transcript}");
+    assert!(!transcript.contains("error["), "{step}\n{transcript}");
+}
+
 #[test]
 // Specified: Orna-1.1.0 std.ui Image links a committed blob through the explicit
 // media route and never inlines its bytes; the route answers the stored bytes.
@@ -245,20 +276,7 @@ fn served_image_links_committed_blob_bytes_through_the_media_route() {
     let snapshot = standard_snapshot();
     let directory = project(snapshot.path(), IMAGE_SOURCE);
     let root = directory.path();
-    fs::write(root.join("pixel.png"), PIXEL).expect("place the captured file");
-    let root_text = root.to_string_lossy();
-    let stored = orna_repl(
-        root,
-        &format!(
-            "let raw = sys.blob.capture_file({root_text:?}, \"pixel.png\", 65536);\nlet image = sys.blob.annotate(raw, \"image/png\");\nmain.store(\"one\", image).id"
-        ),
-    );
-    assert_eq!(
-        stored.status.code(),
-        Some(0),
-        "REPL blob insert\n{}",
-        String::from_utf8_lossy(&stored.stderr)
-    );
+    store_pixel(root, "one");
     let published = orna(root, &["publish", "--message", "Add the image"]);
     assert_eq!(
         published.status.code(),
@@ -295,5 +313,49 @@ fn served_image_links_committed_blob_bytes_through_the_media_route() {
             .is_some_and(|value| value.starts_with("image/png")),
         "the media route answers the annotated media type: {:?}",
         media.header("content-type")
+    );
+}
+
+const TWO_TABLE_SOURCE: &str = "use std.ui.{Image, Stack, Text};\n\npub table media(id: Str) { content: Blob, }\n\npub table notes(id: Str) { title: Str, }\n\npub fn store(id: Str, content: Blob) = media.insert({ id: id, content: content });\n\npub fn note(id: Str, title: Str) = notes.insert({ id: id, title: title });\n\npub fn serve(): UI = Stack([Text((notes | one()).title), Image((media | one()).content, \"Pixel\")]);\n";
+
+#[test]
+// Specified: Orna-1.1.0 ORNA-APP-013: one served evaluation reads a Blob table and a
+// plain table together. The plain row is served by value and the Blob by its
+// committed descriptor, whose bytes the media route answers unchanged.
+fn served_page_reads_a_blob_table_and_a_plain_table_in_one_evaluation() {
+    let snapshot = standard_snapshot();
+    let directory = project(snapshot.path(), TWO_TABLE_SOURCE);
+    let root = directory.path();
+    store_pixel(root, "one");
+    store_note(root, "one", "Pixel caption");
+    let published = orna(
+        root,
+        &["publish", "--message", "Add the image and its caption"],
+    );
+    assert_eq!(
+        published.status.code(),
+        Some(0),
+        "orna publish\n{}",
+        String::from_utf8_lossy(&published.stderr)
+    );
+    let commit = git_output_at(root, &["rev-parse", "HEAD"]);
+    let (_server, address) = start(root);
+    let page = get(&address, "/").expect("GET /");
+    assert_eq!(page.status, 200, "page body: {:?}", page.body);
+    let html = String::from_utf8(page.body).expect("UTF-8 page");
+    assert!(
+        html.contains("Pixel caption"),
+        "the plain table row is served by value: {html}"
+    );
+    let href = first_src(&html).to_owned();
+    assert!(
+        href.starts_with(&format!("/media/{commit}/")),
+        "the Blob names HEAD: {href}"
+    );
+    let media = get(&address, &href).expect("GET the media route");
+    assert_eq!(media.status, 200, "media body: {:?}", media.body);
+    assert_eq!(
+        media.body, PIXEL,
+        "the media route answers the committed bytes unchanged"
     );
 }
