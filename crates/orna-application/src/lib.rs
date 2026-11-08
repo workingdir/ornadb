@@ -1926,6 +1926,13 @@ impl SourceMutationEffectHandler {
     }
 
     /// The effect report for this handler's evaluation: see [`EffectGate::admit`].
+    ///
+    /// Invariant: this handler carries no `SysHostBindingRegistry`, so the
+    /// evidence passes `bindings: None`. The only registry-bound evaluation is
+    /// the REPL path (`repl_declared_effects` in `repl_transaction.rs`), which
+    /// admits its registry itself and never reaches this method. A handler
+    /// with a sys host attached reports `ExternalPossible` from the attachment
+    /// alone. Adding a registry field here requires passing it as `bindings`.
     pub(crate) fn effect_report(&self) -> ActivationEffectReport {
         EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::bound(
             self.sys_host.as_ref(),

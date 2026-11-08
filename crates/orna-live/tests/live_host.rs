@@ -873,6 +873,26 @@ impl LiveApplication for ThirdPartyHostEffectApplication {
     }
 }
 
+/// A third-party application that overrides nothing about trust. Its
+/// `trusts_controlled_effect_reports` must be the trait default, `false`, so
+/// any controlled report it declares is downgraded (REQUEST-1 step 5).
+struct DefaultTrustApplication;
+
+impl LiveApplication for DefaultTrustApplication {
+    fn eval(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope, Error> {
+        Err(Error::UnsupportedOperation)
+    }
+
+    fn watch(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope, Error> {
+        Err(Error::UnsupportedOperation)
+    }
+}
+
+#[test]
+fn third_party_trust_defaults_to_untrusted() {
+    assert!(!DefaultTrustApplication.trusts_controlled_effect_reports());
+}
+
 /// Applies its effects inside a plain Eval and answers with a response that
 /// does not correlate to the request. The host must retain the terminal
 /// without a value and never re-invoke the application for that request.
