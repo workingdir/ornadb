@@ -3,7 +3,7 @@ name = "orna-security"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
-license = "MPL-2.0"
+license.workspace = true
 description = "Security boundaries and encrypted secret provider for Orna"
 
 [dependencies]

@@ -3,7 +3,7 @@ name = "orna-application"
 version = "1.0.0"
 edition = "2024"
 rust-version = "1.95"
-license = "MPL-2.0"
+license.workspace = true
 description = "Authoritative source admission and activation seam for Orna applications"
 publish = false
 

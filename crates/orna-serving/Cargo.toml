@@ -3,7 +3,7 @@ name = "orna-serving"
 version = "1.0.0"
 edition = "2024"
 rust-version = "1.95"
-license = "MPL-2.0"
+license.workspace = true
 description = "Bounded, fail-closed serving session state for Orna 1.0"
 
 [dependencies]
