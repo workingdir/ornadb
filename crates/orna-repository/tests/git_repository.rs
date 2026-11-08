@@ -5348,6 +5348,96 @@ fn legacy_format_migration_preserves_protected_pin_refs_across_publication() {
 }
 
 #[test]
+fn legacy_format_migration_names_an_edited_retired_file_at_publication() {
+    let format = include_str!("fixtures/format-context/format-1-ornadb-1.0.orna");
+    let root = repository_with_legacy_format(format);
+    let repo = Repository::discover(root.path()).unwrap();
+    let old_head = repo.head().unwrap().unwrap();
+    let expected_index = repo.index_generation().unwrap();
+    let database = include_str!("fixtures/format-context/database-final.orna");
+    let candidate = repo
+        .build_private_commit(
+            &old_head,
+            &[
+                ManagedFileChange::new(
+                    ManagedPath::new(".orna/database.orna").unwrap(),
+                    Some(database.as_bytes().to_vec()),
+                ),
+                ManagedFileChange::new(ManagedPath::new(".orna/format.orna").unwrap(), None),
+                ManagedFileChange::new(
+                    ManagedPath::new(".orna/store/root").unwrap(),
+                    Some(b"verified candidate store root".to_vec()),
+                ),
+            ],
+            "explicit format 3 migration",
+        )
+        .unwrap();
+    let journal_entries = vec![
+        PublicationJournalEntry::new(
+            ManagedPath::new(".orna/database.orna").unwrap(),
+            None,
+            Some(database.as_bytes().to_vec()),
+        ),
+        PublicationJournalEntry::new(
+            ManagedPath::new(".orna/format.orna").unwrap(),
+            Some(format.as_bytes().to_vec()),
+            None,
+        ),
+        PublicationJournalEntry::new(
+            ManagedPath::new(".orna/store/root").unwrap(),
+            None,
+            Some(b"verified candidate store root".to_vec()),
+        ),
+    ];
+    let continuity = MigrationContinuityRecord::new(vec![
+        StreamCheckpointIdentityPredecessor::new(
+            [41; 32],
+            b"legacy-source".to_vec(),
+            None,
+            [42; 32],
+            b"format3-source".to_vec(),
+            None,
+        )
+        .unwrap(),
+    ])
+    .unwrap();
+    let mut journal = PublicationJournal::new_with_runtime_intent(
+        old_head.clone(),
+        candidate.commit().clone(),
+        expected_index.tree().unwrap().clone(),
+        [73; 16],
+        journal_entries,
+    )
+    .unwrap()
+    .with_migration_continuity(continuity)
+    .unwrap()
+    .with_migration_annotation_defaults(MigrationAnnotationDefaults::new(0).unwrap())
+    .unwrap();
+
+    // The retired legacy record changes after capture. The migration deletes
+    // only the committed bytes it read, so the edit must be named, not replaced.
+    let edited = b"format 1\nedited after capture\n";
+    let format_path = root.path().join(".orna/format.orna");
+    fs::write(&format_path, edited).unwrap();
+
+    let result = repo.publish_legacy_format_migration(&expected_index, &candidate, &mut journal);
+    assert!(
+        matches!(
+            &result,
+            Err(RepositoryError::LegacyPathChanged(path)) if path == ".orna/format.orna"
+        ),
+        "an edited retired legacy file must be named at publication, got {result:?}"
+    );
+    assert_eq!(
+        repo.head().unwrap().unwrap(),
+        old_head,
+        "a refused migration must not advance the ref"
+    );
+    assert!(repo.read_publication_journal().unwrap().is_none());
+    assert_eq!(fs::read(&format_path).unwrap(), edited);
+}
+
+#[test]
 fn recovery_refuses_to_finish_an_unstarted_legacy_migration_and_keeps_its_pin() {
     let format = include_str!("fixtures/format-context/format-1-ornadb-1.0.orna");
     let root = repository_with_legacy_format(format);
