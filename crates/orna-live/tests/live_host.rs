@@ -24,9 +24,9 @@ use orna_protocol::{
 };
 use orna_repository::Repository;
 use orna_runtime::{
-    ActivationEffectReport, DeclaredEffectSet, FaultInjector, FaultPoint, RequestIdentity,
-    RequestOwner, RequestState, RunObservationStatus, RuntimeActivationContext, RuntimeError,
-    RuntimeIdentity, RuntimeState, TableMutation, TerminalOutcome,
+    ActivationEffectReport, EffectGate, FaultInjector, FaultPoint, RequestIdentity, RequestOwner,
+    RequestState, RunObservationStatus, RuntimeActivationContext, RuntimeError, RuntimeIdentity,
+    RuntimeState, TableMutation, TerminalOutcome,
 };
 use orna_security::{
     AttachmentId, BoundaryError, CredentialIssuer, Origin, OriginPolicy, SessionBoundary,
@@ -575,7 +575,7 @@ impl LiveApplication for CompetingTerminalApplication {
         let transaction = LiveEvalTransaction::new(
             vec![TableMutation::new([8; 16], "books", vec![8], Some(vec![9])).unwrap()],
             [4; 32],
-            ActivationEffectReport::declare(DeclaredEffectSet::None),
+            EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
             Arc::new(NoFault),
         )
         .for_request(RequestIdentity {
@@ -650,7 +650,7 @@ impl LiveApplication for TransactionalApplication {
         let transaction = LiveEvalTransaction::new(
             self.mutations.clone(),
             [3; 32],
-            ActivationEffectReport::declare(DeclaredEffectSet::None),
+            EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
             Arc::clone(&self.faults),
         )
         .for_request(RequestIdentity {
@@ -696,7 +696,7 @@ impl LiveApplication for TransactionalApplication {
         let transaction = LiveEvalTransaction::new(
             self.mutations.clone(),
             [3; 32],
-            ActivationEffectReport::declare(DeclaredEffectSet::None),
+            EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
             Arc::clone(&self.faults),
         )
         .for_request(RequestIdentity {
@@ -835,7 +835,7 @@ impl LiveApplication for ThirdPartyHostEffectApplication {
         let transaction = LiveEvalTransaction::new(
             self.mutations.clone(),
             [3; 32],
-            ActivationEffectReport::declare(DeclaredEffectSet::ExternalPossible),
+            ActivationEffectReport::ExternalPossible,
             Arc::clone(&self.faults),
         )
         .for_request(RequestIdentity {
@@ -1107,7 +1107,7 @@ impl LiveApplication for WatchEventApplication {
                                 .unwrap(),
                         ],
                         [201; 32],
-                        ActivationEffectReport::declare(DeclaredEffectSet::None),
+                        EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
                         Arc::new(FailAt(FaultPoint::AfterTableWrite)),
                     )
                     .for_request(RequestIdentity {
@@ -1123,7 +1123,7 @@ impl LiveApplication for WatchEventApplication {
                                 .unwrap(),
                         ],
                         [202; 32],
-                        ActivationEffectReport::declare(DeclaredEffectSet::None),
+                        EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
                         Arc::new(NoFault),
                     )
                     .for_request(RequestIdentity {
@@ -11577,7 +11577,7 @@ fn durable_live_host_replays_proven_rollback_without_reexecution() {
             [3; 32],
             TerminalOutcome::new(vec![4]).unwrap(),
             &FailAt(FaultPoint::AfterTerminalClaim),
-            ActivationEffectReport::declare(DeclaredEffectSet::None),
+            EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
         )),
         Err(RuntimeError::FaultInjected(FaultPoint::AfterTerminalClaim))
     );
@@ -11666,7 +11666,7 @@ fn durable_replay_rejects_an_uncertain_payload_for_a_proven_rollback() {
             [3; 32],
             TerminalOutcome::new(vec![4]).unwrap(),
             &FailAt(FaultPoint::AfterTerminalClaim),
-            ActivationEffectReport::declare(DeclaredEffectSet::None),
+            EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
         )),
         Err(RuntimeError::FaultInjected(FaultPoint::AfterTerminalClaim))
     );
@@ -11824,7 +11824,7 @@ fn durable_runtime_replays_proven_rollback_as_redacted_orphaned_failure() {
             [3; 32],
             TerminalOutcome::new(vec![4]).unwrap(),
             &FailAt(FaultPoint::AfterTerminalClaim),
-            ActivationEffectReport::declare(DeclaredEffectSet::None),
+            EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
         )),
         Err(RuntimeError::FaultInjected(FaultPoint::AfterTerminalClaim))
     );

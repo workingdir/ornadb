@@ -20,9 +20,9 @@ use std::{
 
 use orna_repository::Repository;
 use orna_runtime::{
-    ActivationEffectReport, ControlledEffectToken, DeclaredEffectSet, FaultInjector, FaultPoint,
-    RecoveryDisposition, RequestIdentity, RequestOwner, RequestState, RuntimeError,
-    RuntimeIdentity, RuntimeState, TableMutation, TerminalOutcome,
+    ActivationEffectReport, EffectGate, FaultInjector, FaultPoint, RecoveryDisposition,
+    RequestIdentity, RequestOwner, RequestState, RuntimeError, RuntimeIdentity, RuntimeState,
+    TableMutation, TerminalOutcome,
 };
 use tempfile::{Builder, TempDir};
 
@@ -214,7 +214,7 @@ fn external_effect_child(repository_path: &Path) {
                 [8; 32],
                 outcome(EFFECTS_UNCERTAIN),
                 &AbortAt(FaultPoint::AfterTableWrite),
-                ActivationEffectReport::declare(DeclaredEffectSet::None),
+                EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
             )
             .await;
         unreachable!("the table-write seam must abort the child process");
@@ -245,8 +245,12 @@ fn controlled_rollback_child(repository_path: &Path) {
                 request(),
                 FINGERPRINT,
                 owner,
-                &ControlledEffectToken::from_declaration(DeclaredEffectSet::None)
-                    .expect("a None declaration yields the controlled token"),
+                &match EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()) {
+                    ActivationEffectReport::ControlledOnly(token) => token,
+                    ActivationEffectReport::ExternalPossible => {
+                        unreachable!("an unbound evaluation is admitted as controlled")
+                    }
+                },
             )
             .await
             .expect("record controlled transaction");
@@ -263,7 +267,7 @@ fn controlled_rollback_child(repository_path: &Path) {
                 [8; 32],
                 outcome(ROLLBACK_PROVEN),
                 &RefuseAt(FaultPoint::AfterTableWrite),
-                ActivationEffectReport::declare(DeclaredEffectSet::None),
+                EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
             )
             .await;
         assert!(
@@ -310,7 +314,7 @@ fn unreported_rollback_child(repository_path: &Path) {
                 [8; 32],
                 outcome(ROLLBACK_PROVEN),
                 &RefuseAt(FaultPoint::AfterTableWrite),
-                ActivationEffectReport::declare(DeclaredEffectSet::ExternalPossible),
+                ActivationEffectReport::ExternalPossible,
             )
             .await;
         assert!(
