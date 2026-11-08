@@ -1274,10 +1274,40 @@ def command_summarize(arguments: argparse.Namespace) -> int:
     return 1 if new_failures or problems else 0
 
 
+def missing_selected_tests(items: list[dict], root: Path) -> list[str]:
+    """Return each `test` selector whose module path or function name is absent from its package source.
+
+    This is a text check, not a compile: it proves the named `mod` and `fn` exist under
+    `crates/<package>`, so a renamed or removed test cannot leave a selector naming nothing.
+    """
+    sources: dict[str, str] = {}
+    missing: list[str] = []
+    for item in items:
+        for selector in item.get("select", []):
+            if "test" not in selector:
+                continue
+            package = selector["package"]
+            if package not in sources:
+                crate = root / "crates" / package
+                sources[package] = "\n".join(path.read_text(encoding="utf-8") for path in sorted(crate.rglob("*.rs")))
+            *modules, function = selector["test"].split("::")
+            text = sources[package]
+            if not re.search(rf"\bfn {re.escape(function)}\b", text) or any(
+                not re.search(rf"\bmod {re.escape(module)}\b", text) for module in modules
+            ):
+                missing.append(f"{item['id']}: {package} {selector['test']}")
+    return missing
+
+
 def command_check(arguments: argparse.Namespace) -> int:
     baseline = load_baseline(Path(arguments.baseline))
     manifest = load_items(Path(arguments.items))
-    print(f"known-failure baseline lists {len(baseline)} entries; manifest maps {len(manifest.items)} gate items")
+    missing = missing_selected_tests(manifest.items, WORKSPACE_ROOT)
+    if missing:
+        for entry in missing:
+            print(f"selector names no test in its package source: {entry}", file=sys.stderr)
+        return 1
+    print(f"known-failure baseline lists {len(baseline)} entries; manifest maps {len(manifest.items)} gate items; every test selector resolves")
     return 0
 
 
