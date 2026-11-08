@@ -2900,13 +2900,16 @@ async fn run_gate_b_import_and_metadata_update(payload_bytes: u64) {
         false,
     )
     .await;
-    // ORNA-VFS-010: a metadata-only save MUST not rehash the payload. The save
-    // digests small structural bytes (354 bytes observed on this path); it never
-    // digests the MiB-scale payload, which would cost at least payload_bytes.
+    // ORNA-VFS-010 / B6: a metadata-only save MUST NOT digest sibling payload
+    // bytes. The digested bytes are structural only: the sealed schema
+    // descriptor's chunk verifications on the publish path (3 x 118 bytes on
+    // this fixture; attribution recorded in CHANGELOG). A payload-scale
+    // re-digest is at least one full payload chunk and exceeds this bound.
+    const STRUCTURAL_DIGEST_BOUND: u64 = 4096;
     let metadata_rehashed = raw_content_bytes_digested() - rehash_before_metadata;
     assert!(
-        metadata_rehashed < payload_bytes,
-        "a metadata-only save must not rehash payload-scale content: digested {metadata_rehashed} of {payload_bytes} bytes"
+        metadata_rehashed <= STRUCTURAL_DIGEST_BOUND,
+        "a metadata-only save must digest only structural bytes: digested {metadata_rehashed} bytes (bound {STRUCTURAL_DIGEST_BOUND}) of a {payload_bytes}-byte payload"
     );
     eprintln!(
         "Gate B: rehash binary-save digested bytes={binary_rehashed}; blob bytes={payload_bytes}"
