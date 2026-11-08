@@ -530,9 +530,11 @@ select = [
   { record = "workspace-rest", package = "orna-repository", target = "test:complete_copy", test = "complete_copy_reconstructs_both_snapshots_offline_with_an_independent_extractor" },
   { record = "workspace-cli", package = "orna-cli", target = "test:independent_extractor_cli", test = "extractor_matches_the_real_reader_on_a_migrated_golden_copy" },
   { record = "workspace-cli", package = "orna-cli", target = "test:independent_extractor_cli", test = "extractor_walks_the_native_store_of_each_snapshot_in_a_two_snapshot_copy" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:independent_extractor_cli", test = "extractor_recovers_declared_schema_scalar_rows_and_modules_of_product_snapshots" },
 ]
 limitations = [
   "The complete_copy test's snapshots are format-3 commits whose store is a text file, and the extractor checks Git object IDs only (ornadb-5il1.193, ornadb-5il1.192).",
+  "No selected F5 test exports or rebuilds a format-3 snapshot with a pinned dependency: the golden test covers only the migrated legacy gitlink `vendor/stdlib` (ornadb-v18eb.3). The new product-snapshot test checks only Str rows; no Blob, Int or other scalar column is recovered by it (ornadb-v18eb.3).",
 ]
 
 [[item]]
