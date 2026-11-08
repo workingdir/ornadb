@@ -7,7 +7,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use crate::cli_dispatch::{
@@ -1411,6 +1411,26 @@ fn declare_historical_commit(
     }))
 }
 
+/// Test seam: `ORNA_DRAFT_QUOTA_BYTES` replaces the aggregate draft quota of a
+/// mounted editor so an end-to-end test can exhaust it with small candidates.
+/// Unset selects the production default. The value is parsed once per process,
+/// so every editor opened by one mount shares one budget; a malformed value is
+/// an error, never a silent fallback.
+const DRAFT_QUOTA_ENV: &str = "ORNA_DRAFT_QUOTA_BYTES";
+
+fn mount_draft_quota() -> Result<Arc<orna_runtime::vfs::DraftQuota>, String> {
+    static MOUNT_DRAFT_QUOTA: LazyLock<Result<Arc<orna_runtime::vfs::DraftQuota>, String>> =
+        LazyLock::new(|| match std::env::var(DRAFT_QUOTA_ENV) {
+            Err(std::env::VarError::NotPresent) => Ok(orna_runtime::vfs::default_draft_quota()),
+            Err(error) => Err(format!("{DRAFT_QUOTA_ENV} is not valid: {error}")),
+            Ok(value) => value
+                .parse::<u64>()
+                .map(|bytes| Arc::new(orna_runtime::vfs::DraftQuota::new(bytes)))
+                .map_err(|error| format!("{DRAFT_QUOTA_ENV} is not a byte count: {error}")),
+        });
+    MOUNT_DRAFT_QUOTA.clone()
+}
+
 impl MountWriter {
     fn open(
         repository: &Repository,
@@ -1443,8 +1463,11 @@ impl MountWriter {
             .map_err(|error| format!("committed source project could not be loaded: {error:?}"))?;
         let scratch_store = VfsScratchStore::open(repository.runtime_paths().root())?;
         let cache = Arc::new(
-            VfsRepositoryCache::in_runtime_root(repository.runtime_paths().root())
-                .map_err(|error| format!("draft spool unavailable: {error}"))?,
+            VfsRepositoryCache::in_runtime_root_with_quota(
+                repository.runtime_paths().root(),
+                mount_draft_quota()?,
+            )
+            .map_err(|error| format!("draft spool unavailable: {error}"))?,
         );
         let retained_drafts =
             VfsRetainedDraftStore::open(repository.runtime_paths().root(), cache.draft_quota())?;

@@ -20,8 +20,10 @@ mod media_commit;
 mod editor_mount;
 use editor_mount::{
     EDQUOT, ENOSPC, EditorMount, assert_errno, await_draft_guard, draft_guard, fresh_view, open_rw,
-    require_fuse_or_skip, run_orna_unmount, spawn_editor_mount, start_editor_mount,
+    repository_with_music_rows, require_fuse_or_skip, run_orna_unmount, spawn_editor_mount,
+    spawn_mount_process_with_env, start_editor_mount,
 };
+use tempfile::TempDir;
 
 /// profiles/vfs-1 errno table: EINVAL for malformed candidates.
 const EINVAL: i32 = 22;
@@ -373,4 +375,79 @@ async fn path_truncate_past_file_quota_is_refused_and_records_no_pending_truncat
     );
     drop(file);
     await_draft_guard(&fixture, b'0', "a refused path truncate leaves no draft").await;
+}
+
+/// Mount-level aggregate draft budget (profiles/vfs-1): every open candidate in
+/// one mounted editor draws on a single quota, not one quota per document. The
+/// mount runs with a 1 MiB budget through `ORNA_DRAFT_QUOTA_BYTES`. The first
+/// candidate grows to exactly that budget and stays open, so the second
+/// document's one-byte candidate is refused EDQUOT and its accepted row is
+/// unchanged. Truncating the first candidate releases its charge, after which
+/// the second write is admitted.
+#[tokio::test]
+async fn open_candidates_share_one_draft_quota_across_documents() {
+    const BUDGET_BYTES: u64 = 1 << 20;
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let first_row = row("first");
+    let second_row = row("second");
+    let (repository_directory, _repository, _relation_id) = repository_with_music_rows(&[
+        ("row-00", first_row.as_str()),
+        ("row-01", second_row.as_str()),
+    ])
+    .await;
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    let budget = BUDGET_BYTES.to_string();
+    let mut mounted = spawn_mount_process_with_env(
+        repository_directory.path(),
+        &mountpoint,
+        &[("ORNA_DRAFT_QUOTA_BYTES", budget.as_str())],
+    );
+    let document = |key: &str| mountpoint.join(format!("Music/{key}/data.orna"));
+    mounted.await_path(&document("row-00"));
+    let second_accepted =
+        std::fs::read_to_string(document("row-01")).expect("read the accepted second row");
+
+    // The first candidate stays open, so its charge is held while the second opens.
+    let first = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(document("row-00"))
+        .expect("open the first candidate read-write");
+    first
+        .write_at(b"X", BUDGET_BYTES - 1)
+        .expect("the first candidate fills the shared budget exactly");
+
+    let second = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(document("row-01"))
+        .expect("open the second candidate read-write");
+    assert_errno(
+        second.write_at(b"x", 0).map(|_| ()),
+        &[EDQUOT],
+        "a one-byte candidate is refused once an open candidate holds the shared budget",
+    );
+    drop(second);
+    assert_eq!(
+        std::fs::read_to_string(document("row-01")).expect("read the second row"),
+        second_accepted,
+        "the refused candidate leaves its accepted row unchanged",
+    );
+
+    first
+        .set_len(0)
+        .expect("truncating the first candidate releases its charge");
+    drop(first);
+    let second = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(document("row-01"))
+        .expect("reopen the second candidate read-write");
+    second
+        .write_at(b"x", 0)
+        .expect("the released budget admits the second candidate");
+    drop(second);
 }
