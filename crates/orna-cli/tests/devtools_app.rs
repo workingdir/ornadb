@@ -53,6 +53,39 @@ fn get(address: &str, path: &str) -> std::io::Result<Reply> {
     )?;
     let mut raw = Vec::new();
     stream.read_to_end(&mut raw)?;
+    Ok(parse_reply(&raw))
+}
+
+/// Posts one form to `path` the way a browser does, with `origin` as the
+/// request's Origin header when given.
+fn post_form(address: &str, path: &str, origin: Option<&str>, body: &str) -> Reply {
+    let origin = origin
+        .map(|origin| format!("Origin: {origin}\r\n"))
+        .unwrap_or_default();
+    post_request(
+        address,
+        path,
+        &format!("{origin}Content-Type: application/x-www-form-urlencoded\r\n"),
+        body,
+    )
+}
+
+/// Sends one POST with the given extra header lines (each ending in CRLF).
+fn post_request(address: &str, path: &str, headers: &str, body: &str) -> Reply {
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: {address}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let mut stream = TcpStream::connect(address).expect("connect to the serving process");
+    stream
+        .write_all(request.as_bytes())
+        .expect("send the action request");
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).expect("read the action reply");
+    parse_reply(&raw)
+}
+
+fn parse_reply(raw: &[u8]) -> Reply {
     let split = raw
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
@@ -69,11 +102,113 @@ fn get(address: &str, path: &str) -> std::io::Result<Reply> {
         .filter_map(|line| line.split_once(':'))
         .map(|(key, value)| (key.trim().to_ascii_lowercase(), value.trim().to_owned()))
         .collect();
-    Ok(Reply {
+    Reply {
         status,
         headers,
         body,
-    })
+    }
+}
+
+/// The Run control evaluates its form field as one console input: `1 + 1` is
+/// served as its value, `2 : Int`, through the real `orna serve` process.
+#[test]
+// Specified: Gate G / DESIGN S5a; the served page's Run control evaluates through the production API.
+fn run_action_evaluates_the_form_input_over_http() {
+    let snapshot = standard_snapshot();
+    let project = devtools_project(snapshot.path());
+    let (_server, address) = start(project.path());
+    let origin = format!("http://{address}");
+
+    let reply = post_form(
+        &address,
+        "/action/devtools.run",
+        Some(&origin),
+        "query=1+%2B+1",
+    );
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(
+        reply.header("content-type"),
+        Some("text/html; charset=utf-8")
+    );
+    assert!(
+        reply.body.contains("<pre><code>2 : Int</code></pre>"),
+        "the input's value is served: {}",
+        reply.body
+    );
+}
+
+#[test]
+// Specified: Gate G / DESIGN S5a; a failing console input is answered with its diagnostic code.
+fn run_action_renders_an_input_error_as_its_code() {
+    let snapshot = standard_snapshot();
+    let project = devtools_project(snapshot.path());
+    let (_server, address) = start(project.path());
+    let origin = format!("http://{address}");
+
+    let reply = post_form(
+        &address,
+        "/action/devtools.run",
+        Some(&origin),
+        "query=use%0A",
+    );
+    assert_eq!(reply.status, 422, "{}", reply.body);
+    assert!(
+        reply
+            .body
+            .contains("<p class=\"diagnostic\">ORNA-EVAL-PARSE</p>"),
+        "the diagnostic is rendered with its stable code: {}",
+        reply.body
+    );
+}
+
+#[test]
+// Specified: Gate G / DESIGN S5a; the action route refuses foreign and originless writes and serves only POST.
+fn run_action_refuses_cross_origin_and_serves_only_post() {
+    let snapshot = standard_snapshot();
+    let project = devtools_project(snapshot.path());
+    let (_server, address) = start(project.path());
+
+    let foreign = post_form(
+        &address,
+        "/action/devtools.run",
+        Some("http://evil.example"),
+        "query=1+%2B+1",
+    );
+    assert_eq!(foreign.status, 403, "{}", foreign.body);
+    assert_eq!(foreign.body, r#"{"error":"origin_denied"}"#);
+
+    let originless = post_form(&address, "/action/devtools.run", None, "query=1+%2B+1");
+    assert_eq!(originless.status, 403, "{}", originless.body);
+
+    let read = get(&address, "/action/devtools.run").expect("read the action route");
+    assert_eq!(read.status, 405, "an action is not a read: {}", read.body);
+}
+
+#[test]
+// Specified: Gate G / DESIGN S5a; a served string value is escaped, not interpreted as markup.
+fn run_action_escapes_the_rendered_value() {
+    let snapshot = standard_snapshot();
+    let project = devtools_project(snapshot.path());
+    let (_server, address) = start(project.path());
+    let origin = format!("http://{address}");
+
+    let reply = post_form(
+        &address,
+        "/action/devtools.run",
+        Some(&origin),
+        "query=%22%3Cb%3E%22",
+    );
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert!(
+        reply.body.contains("&lt;b&gt;"),
+        "the value's markup is escaped: {}",
+        reply.body
+    );
+    assert!(
+        !reply.body.contains("<b>"),
+        "no raw markup reaches the page: {}",
+        reply.body
+    );
 }
 
 fn initialize_project(directory: &Path) {
@@ -236,8 +371,14 @@ fn devtools_lists_tables_runs_input_and_refreshes() {
         "the input is labelled and reachable"
     );
     assert!(
-        reply.body.contains("<button type=\"submit\">"),
-        "the page carries a submit control"
+        reply
+            .body
+            .contains("<button type=\"submit\" formaction=\"/action/devtools.run\">Run</button>"),
+        "the Run control posts its input to the console action"
+    );
+    assert!(
+        reply.body.contains("<form method=\"post\">"),
+        "the page is one POST form so its controls submit"
     );
     assert!(
         reply.body.contains("Refresh"),
@@ -251,6 +392,23 @@ fn devtools_lists_tables_runs_input_and_refreshes() {
         refreshed.body, reply.body,
         "a refresh renders the same page"
     );
+}
+
+#[test]
+// Specified: Gate G / DESIGN S5a; a Run form posts one field and the route refuses other content types.
+fn run_action_requires_a_form_body() {
+    let snapshot = standard_snapshot();
+    let project = devtools_project(snapshot.path());
+    let (_server, address) = start(project.path());
+    let origin = format!("http://{address}");
+
+    let reply = post_request(
+        &address,
+        "/action/devtools.run",
+        &format!("Origin: {origin}\r\nContent-Type: application/json\r\n"),
+        "{}",
+    );
+    assert_eq!(reply.status, 415, "{}", reply.body);
 }
 
 /// The text between the first `open` and the next `close` after it.

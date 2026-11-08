@@ -26,6 +26,16 @@ pub fn render_ui_html(value: &ContextValue, media_commit: Option<&str>) -> Optio
 pub fn render_value_html(raw: &OvbRaw, media_commit: Option<&str>) -> Option<String> {
     let mut html = String::new();
     render_node(raw, &mut html, 0, media_commit)?;
+    // An activate button names its action in `formaction`. Such buttons submit
+    // the enclosing form, so a page that has any becomes one POST form. A page
+    // that already holds a `form` node cannot nest a second form; it falls back
+    // to Inspect rather than emit markup a browser would split.
+    if html.contains("formaction=\"") {
+        if html.contains("<form ") {
+            return None;
+        }
+        return Some(format!("<form method=\"post\">{html}</form>"));
+    }
     Some(html)
 }
 
@@ -100,11 +110,7 @@ fn render_node(raw: &OvbRaw, out: &mut String, depth: usize, media: Option<&str>
             push_value(properties, "source", out)?;
             out.push_str("</code></pre>");
         }
-        "button" => {
-            out.push_str("<button type=\"submit\">");
-            push_value(properties, "label", out)?;
-            out.push_str("</button>");
-        }
+        "button" => render_button(node, properties, out)?,
         "form" => {
             out.push_str("<form method=\"get\">");
             for child in children {
@@ -129,6 +135,26 @@ fn render_node(raw: &OvbRaw, out: &mut String, depth: usize, media: Option<&str>
     Some(())
 }
 
+/// An activate button submits to its action through `formaction`; a button with
+/// no activate action is a plain submit button.
+fn render_button(
+    node: &[(OvbRaw, OvbRaw)],
+    properties: &[(OvbRaw, OvbRaw)],
+    out: &mut String,
+) -> Option<()> {
+    match activate_action_id(node) {
+        Some(action_id) => {
+            out.push_str("<button type=\"submit\" formaction=\"/action/");
+            push_escaped(&action_id, out);
+            out.push_str("\">");
+        }
+        None => out.push_str("<button type=\"submit\">"),
+    }
+    push_value(properties, "label", out)?;
+    out.push_str("</button>");
+    Some(())
+}
+
 /// The name a form input posts under: the node's declared input name when the
 /// node carries one, otherwise its label.
 fn properties_field_name(node: &[(OvbRaw, OvbRaw)]) -> Option<String> {
@@ -137,6 +163,15 @@ fn properties_field_name(node: &[(OvbRaw, OvbRaw)]) -> Option<String> {
         return Some(name);
     }
     field(properties, "label").and_then(value_text)
+}
+
+/// The identifier of the node's `activate` action, the one a button submits to.
+fn activate_action_id(node: &[(OvbRaw, OvbRaw)]) -> Option<String> {
+    let actions = as_map(field(node, "actions")?)?;
+    let action = as_map(field(actions, "activate")?)?;
+    field(action, "action_id")
+        .and_then(as_text)
+        .map(str::to_owned)
 }
 
 fn push_value(properties: &[(OvbRaw, OvbRaw)], name: &str, out: &mut String) -> Option<()> {
@@ -299,7 +334,7 @@ fn field<'a>(entries: &'a [(OvbRaw, OvbRaw)], name: &str) -> Option<&'a OvbRaw> 
 }
 
 /// Escapes text for HTML element content and attribute values.
-fn push_escaped(text: &str, out: &mut String) {
+pub(crate) fn push_escaped(text: &str, out: &mut String) {
     for character in text.chars() {
         match character {
             '&' => out.push_str("&amp;"),
@@ -352,6 +387,15 @@ mod tests {
     }
 
     fn node(kind: &str, properties: Vec<(&str, OvbRaw)>, children: Vec<OvbRaw>) -> OvbRaw {
+        node_with_actions(kind, properties, children, Vec::new())
+    }
+
+    fn node_with_actions(
+        kind: &str,
+        properties: Vec<(&str, OvbRaw)>,
+        children: Vec<OvbRaw>,
+        actions: Vec<(&str, OvbRaw)>,
+    ) -> OvbRaw {
         ordered(vec![
             ("kind", OvbRaw::Text("node".into())),
             (
@@ -360,7 +404,7 @@ mod tests {
             ),
             ("properties", ordered(properties.into_iter().collect())),
             ("slots", ordered(vec![("content", OvbRaw::Array(children))])),
-            ("actions", OvbRaw::Map(Vec::new())),
+            ("actions", ordered(actions)),
         ])
     }
 
@@ -388,6 +432,26 @@ mod tests {
         assert_eq!(
             render(button).as_deref(),
             Some("<button type=\"submit\">Run</button>")
+        );
+    }
+
+    #[test]
+    // Specified: Gate G / DESIGN S5a; an activate button submits the page as one POST form to its action.
+    fn activate_button_submits_the_enclosing_post_form() {
+        let button = node_with_actions(
+            "button",
+            vec![("label", entry("Run"))],
+            Vec::new(),
+            vec![(
+                "activate",
+                ordered(vec![("action_id", OvbRaw::Text("devtools.run".into()))]),
+            )],
+        );
+        assert_eq!(
+            render(button).as_deref(),
+            Some(
+                "<form method=\"post\"><button type=\"submit\" formaction=\"/action/devtools.run\">Run</button></form>"
+            )
         );
     }
 
