@@ -180,9 +180,11 @@ select = [
   { record = "workspace-rest", package = "orna-repository", target = "lib", test = "closure_refuses_a_descriptor_whose_raw_digest_is_forged" },
   { record = "workspace-rest", package = "orna-repository", target = "lib", test = "closure_accepts_a_descriptor_whose_raw_digest_is_consistent" },
   { record = "workspace-rest", package = "orna-repository", target = "lib", test = "two_level_descriptor_with_a_forged_raw_digest_is_refused" },
+  { record = "workspace-rest", package = "orna-repository", target = "lib", test = "height_two_descriptor_with_a_forged_raw_digest_is_refused" },
+  { record = "workspace-rest", package = "orna-repository", target = "lib", test = "height_two_descriptor_whose_byte_index_matches_its_raw_digest_verifies" },
 ]
 limitations = [
-  "The raw SHA-256 check runs through verify_closure, which export calls on every member, and is proven by unit tests that forge a descriptor in a hand-built repository, one at the root and one through a two-level byte index. No CLI export carries a forged descriptor: export only admits a whole format-3 graph, and descriptors are built only by the production writer, so a forged descriptor needs a test seam in production code. Byte indexes deeper than two levels are untested, and the 10 GiB row is never exported (ornadb-5il1.193).",
+  "The raw SHA-256 check runs through verify_closure, which export calls on every member, and is proven by unit tests that forge a descriptor in a hand-built repository: at the root, through a two-level byte index, and through a height-2 root (three index levels, four chunks). Both forged-descriptor tests refuse, and both valid-descriptor tests verify. No CLI or integration export carries a forged descriptor: export only admits a whole format-3 graph, `NodeData` is not reachable from integration tests, and descriptors are built only by the production writer, so an export-level forged-descriptor test needs a test seam in production code (not built here). The 10 GiB row is never exported (ornadb-5il1.193).",
 ]
 
 [[item]]
@@ -367,8 +369,9 @@ title = "fsync/fdatasync, repeated flush, dup/fork, temp sync/rename, writes aft
 select = [
   { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_sync_semantics" },
   { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_truncate_sparse" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_aggregate_quota", test = "open_candidates_share_one_draft_quota_across_documents" },
 ]
-limitations = ["fork is simulated with an inherited handle and close(2) errors are not observed (ornadb-5il1.60, ornadb-5il1.61)."]
+limitations = ["fork is simulated with an inherited handle and close(2) errors are not observed (ornadb-5il1.60, ornadb-5il1.61). The aggregate draft quota selector (vfs_mount_aggregate_quota) needs the test-seams feature and runs in the aggregate-quota CI job; it proves one shared budget across open candidates of one mount released by truncate and by a synced replacement (accept is not isolated from the truncate that precedes it; release by bare close and accept without a prior truncate are unproven here), and nothing about the copy-free or bounded-RSS items of ornadb-5il1.366."]
 
 [[item]]
 gate = "E"
@@ -515,9 +518,11 @@ id = "F5"
 title = "With original remotes disabled, rebuild both snapshots from a complete superproject and dependency export with an independent extractor"
 select = [
   { record = "workspace-rest", package = "orna-repository", target = "test:complete_copy", test = "complete_copy_reconstructs_both_snapshots_offline_with_an_independent_extractor" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:independent_extractor_cli", test = "extractor_matches_the_real_reader_on_a_migrated_golden_copy" },
 ]
 limitations = [
   "Both snapshots are format-3 commits whose store is a text file, and the extractor checks Git object IDs only (ornadb-5il1.193, ornadb-5il1.192).",
+  "The legacy repository-format-1 dependency is read by a standard-library walker in scripts/orna_extract.py, with its decoders in scripts/orna_legacy.py and scripts/orna_compact.py. The selected golden test checks that dependency's compact table rows, their keys and deletion flags, and the Blob length and SHA-256 of compact-table Blob values, against the real reader's golden values. It also checks the committed loose rows of contacts/Contact (row count, keys, paths, and Str and List<Str> fields). It does not check the Blob payloads of loose rows (ORR-2 sha256 references, resolved through the OGB-1 root at .orna/blobs/<2>/<62>): the golden bundle has no loose-row Blob field, and the real Rust reader's loose-row decoder does not resolve format-1 loose-row Blob references. Those payloads are checked only by scripts.test_orna_extract (LegacyDependencyTests, LooseRowBlobTests), which is not a selected record. The walker and its decoders are shared with the extractor's own tests, so no independent second decoder checks them (ornadb-v18eb.3.2, ornadb-v18eb.3.4).",
 ]
 
 [[item]]

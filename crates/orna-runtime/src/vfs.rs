@@ -166,11 +166,25 @@ impl VfsRepositoryCache {
     }
 
     /// A view whose EDIT-1 spools live in the runtime root's private draft
-    /// directory, created `0700` when absent.
+    /// directory, created `0700` when absent, charged to the process-wide
+    /// default aggregate quota.
     pub fn in_runtime_root(root: &Path) -> io::Result<Self> {
         Ok(Self {
             epoch: SharedCacheEpoch::default(),
-            draft_storage: DraftStorage::in_runtime_root(root)?,
+            draft_storage: DraftStorage::in_runtime_root(root, default_draft_quota())?,
+        })
+    }
+
+    /// As [`Self::in_runtime_root`], but every spool in this view is charged
+    /// to `quota`. It is `pub` because the orna-cli mount (a separate crate)
+    /// builds its view from an already-constructed budget. The mount passes the
+    /// production budget in the default build; only the orna-cli `test-seams`
+    /// feature substitutes a smaller one. No other caller passes a non-default
+    /// budget.
+    pub fn in_runtime_root_with_quota(root: &Path, quota: Arc<DraftQuota>) -> io::Result<Self> {
+        Ok(Self {
+            epoch: SharedCacheEpoch::default(),
+            draft_storage: DraftStorage::in_runtime_root(root, quota)?,
         })
     }
 
@@ -951,6 +965,12 @@ const DEFAULT_DRAFT_QUOTA_BYTES: u64 = 1 << 30;
 static DEFAULT_DRAFT_QUOTA: LazyLock<Arc<DraftQuota>> =
     LazyLock::new(|| Arc::new(DraftQuota::new(DEFAULT_DRAFT_QUOTA_BYTES)));
 
+/// The process-wide default aggregate draft quota that
+/// [`VfsRepositoryCache::in_runtime_root`] charges when no budget is supplied.
+pub fn default_draft_quota() -> Arc<DraftQuota> {
+    Arc::clone(&DEFAULT_DRAFT_QUOTA)
+}
+
 /// Where EDIT-1 candidate spools are created and which aggregate quota charges
 /// them. Production routes through the runtime root's private draft directory.
 #[derive(Clone)]
@@ -983,7 +1003,7 @@ impl DraftStorage {
     /// A pre-existing path is accepted only if it is a real directory (not a
     /// symlink) owned by the same user this process creates files as; stale
     /// spool files left by an earlier crash are removed.
-    fn in_runtime_root(root: &Path) -> io::Result<Self> {
+    fn in_runtime_root(root: &Path, quota: Arc<DraftQuota>) -> io::Result<Self> {
         use std::os::unix::fs::MetadataExt as _;
         let directory = root.join(DRAFT_SPOOL_DIRECTORY);
         match fs::DirBuilder::new().mode(0o700).create(&directory) {
@@ -1028,7 +1048,7 @@ impl DraftStorage {
                 }
             }
         }
-        Ok(Self::new(&directory, Arc::clone(&DEFAULT_DRAFT_QUOTA)))
+        Ok(Self::new(&directory, quota))
     }
 }
 

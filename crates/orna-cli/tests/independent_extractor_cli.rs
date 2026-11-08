@@ -379,6 +379,11 @@ const GOLDEN_RELATIONS: [&str; 5] = [
 ];
 /// The golden copy lists two Blob values, both in relation ...05.
 const GOLDEN_BLOB_LISTINGS: usize = 2;
+const COUNTER: &str = "018f0000-0000-7100-0000-000000000001";
+const LABEL: &str = "018f0000-0000-7100-0000-000000000002";
+const DAY: &str = "018f0000-0000-7100-0000-000000000003";
+const ASSET: &str = "018f0000-0000-7100-0000-000000000005";
+const ASSET_BLOB_COLUMN: &str = "018f0000000072008000000000000005";
 
 /// Clones the golden bundle into `parent/source`.
 fn clone_golden_bundle(parent: &Path) -> PathBuf {
@@ -540,6 +545,129 @@ fn extractor_matches_the_real_reader_on_a_migrated_golden_copy() {
         report["snapshot"]["dependencies"],
         serde_json::json!([{"commit": pinned, "path": LEGACY_DEPENDENCY, "verified": true}]),
         "the pinned dependency is verified and recorded without its contents"
+    );
+
+    // The pinned dependency is the legacy format-1 golden bundle. Its compact tables are read
+    // through scripts/orna_compact.py and carry the values the golden vectors declare.
+    let legacy = report["snapshot"]["legacy_dependencies"]
+        .as_array()
+        .unwrap();
+    assert_eq!(
+        legacy.len(),
+        1,
+        "the pinned dependency is one legacy repository"
+    );
+    assert_eq!(legacy[0]["path"], LEGACY_DEPENDENCY);
+    assert_eq!(legacy[0]["repository_format"], serde_json::json!(1));
+    let legacy_storage = legacy[0]["storage"].as_array().unwrap();
+    let storage_rows = |name: &str| -> Vec<Value> {
+        let entry = legacy_storage
+            .iter()
+            .find(|entry| entry["storage"] == name)
+            .unwrap_or_else(|| panic!("the legacy dependency records storage {name}"));
+        assert_eq!(
+            entry["contents"],
+            serde_json::json!("extracted"),
+            "{name}: compact contents are read"
+        );
+        entry["rows"].as_array().unwrap().clone()
+    };
+    let keys = |name: &str| -> Vec<Value> {
+        storage_rows(name)
+            .iter()
+            .map(|row| row["key"].clone())
+            .collect()
+    };
+    assert_eq!(
+        keys(COUNTER),
+        vec![
+            serde_json::json!(1),
+            serde_json::json!(2),
+            serde_json::json!(3),
+            serde_json::json!(4)
+        ]
+    );
+    assert_eq!(
+        keys(LABEL),
+        vec![
+            serde_json::json!("alpha"),
+            serde_json::json!("beta"),
+            serde_json::json!("gamma")
+        ]
+    );
+    assert_eq!(
+        keys(DAY),
+        vec![
+            serde_json::json!({"tag": 60001, "value": "1969-12-31"}),
+            serde_json::json!({"tag": 60001, "value": "1970-01-01"}),
+            serde_json::json!({"tag": 60001, "value": "1970-01-02"}),
+        ]
+    );
+    assert_eq!(
+        keys(ASSET),
+        vec![serde_json::json!(1), serde_json::json!(2)]
+    );
+    for row in storage_rows(COUNTER)
+        .iter()
+        .chain(&storage_rows(LABEL))
+        .chain(&storage_rows(DAY))
+    {
+        assert_eq!(
+            row["deleted"],
+            serde_json::json!(false),
+            "no tombstone is expected in the golden bundle"
+        );
+    }
+    // Blob values are reported by length and SHA-256; the expected digests come from the Blob bytes themselves.
+    let asset = storage_rows(ASSET);
+    let expected_blobs: [(&[u8], usize); 2] = [(b"\x00\xff\x80orna", 0), (b"", 1)];
+    for (bytes, index) in expected_blobs {
+        let digest = hex(Sha256::digest(bytes).as_slice());
+        assert_eq!(
+            asset[index]["fields"][ASSET_BLOB_COLUMN]["blob"],
+            serde_json::json!({"length": bytes.len(), "sha256": digest}),
+            "legacy Asset row {index}: the Blob length and SHA-256"
+        );
+    }
+
+    // The editable table is read from its committed loose row units (ORNA-ROW-001..004). The golden
+    // bundle commits two rows of `contacts/Contact`, each with Str and List<Str> fields and no Blob field.
+    let contacts = legacy[0]["tables"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|table| table["row_directory"] == "contacts/Contact")
+        .expect("the legacy dependency reports contacts/Contact");
+    assert_eq!(
+        contacts["status"], "extracted",
+        "contacts/Contact: the schema is read"
+    );
+    assert_eq!(
+        contacts["loose_row_files"],
+        serde_json::json!(2),
+        "contacts/Contact: both row units are listed"
+    );
+    let contact_rows = contacts["rows"].as_array().unwrap();
+    let contact_keys: Vec<Value> = contact_rows.iter().map(|row| row["key"].clone()).collect();
+    assert_eq!(
+        contact_keys,
+        vec![
+            serde_json::json!("alice-smith"),
+            serde_json::json!("bob-jones")
+        ],
+        "contacts/Contact: the row keys"
+    );
+    assert_eq!(contact_rows[0]["path"], "contacts/Contact/alice-smith.orna");
+    assert_eq!(
+        contact_rows[0]["fields"],
+        serde_json::json!({"name": "Alice Smith", "emails": ["alice@example.com"]}),
+        "alice-smith: the committed fields"
+    );
+    assert_eq!(contact_rows[1]["path"], "contacts/Contact/bob-jones.orna");
+    assert_eq!(
+        contact_rows[1]["fields"],
+        serde_json::json!({"name": "Bob Jones", "emails": []}),
+        "bob-jones: the committed fields"
     );
 
     let relations = report["snapshot"]["relations"].as_array().unwrap();
