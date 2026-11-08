@@ -334,6 +334,71 @@ fn run_action_refuses_an_effectful_input() {
     );
 }
 
+/// A `Music` table whose assertion refuses any title of `Forbidden`, served beside the
+/// console controls, so a refused write is visible in the page's rows.
+const MUSIC_SOURCE: &str = "pub table Music(id: Str) {\n    title: Str,\n    artist: Str,\n    assert every(row => row.title != \"Forbidden\");\n}\n";
+const MUSIC_PAGE: &str = r#"use std.ui.{Button, Cols, Input, Table, Text};
+
+pub fn serve(): UI = Cols([
+    Text("Music"),
+    Input("query", "Query", null, std.ui.action("devtools.query", as: Text)),
+    Button("Run", std.ui.action("devtools.run", as: Text)),
+    Table(Music | filter(music => true))
+]);
+"#;
+
+#[test]
+// Specified: Gate G; an invalid table mutation typed in the served page is refused and changes neither the page nor the stored rows. The refusal carries ORNA-REPL-EFFECT, a different identity from the REPL and edit legs (ORNA-A091-009); the writable serve path is not implemented (ornadb-rheqi).
+fn run_action_refuses_an_invalid_table_mutation_without_writing() {
+    let snapshot = standard_snapshot();
+    let project = project_with_source(snapshot.path(), &format!("{MUSIC_SOURCE}\n{MUSIC_PAGE}"));
+    repl_insert(
+        project.path(),
+        r#"main.Music.insert({ id: "1", title: "Original", artist: "Kieran" })"#,
+    );
+    let (_server, address) = start(project.path());
+    let origin = format!("http://{address}");
+
+    let before = get(&address, "/").expect("read the page before the input");
+    assert_eq!(before.status, 200, "{}", before.body);
+    assert!(
+        before.body.contains("<td>Original</td>"),
+        "the seeded row is served\n{}",
+        before.body
+    );
+
+    // The invalid row: its title violates the table assertion.
+    let reply = post_form(
+        &address,
+        "/action/devtools.run",
+        Some(&origin),
+        "query=main.Music.insert%28%7B+id%3A+%222%22%2C+title%3A+%22Forbidden%22%2C+artist%3A+%22Kieran%22+%7D%29",
+    );
+    assert_eq!(reply.status, 422, "{}", reply.body);
+    assert!(
+        reply.body.contains("ORNA-REPL-EFFECT"),
+        "the served console refuses the mutation with its typed refusal: {}",
+        reply.body
+    );
+    assert!(
+        !reply.body.contains("ORNA-A091-009"),
+        "the UI refusal does not claim the REPL assertion identity: {}",
+        reply.body
+    );
+
+    let after = get(&address, "/").expect("read the page after the input");
+    assert_eq!(after.status, 200, "{}", after.body);
+    assert_eq!(
+        after.body, before.body,
+        "a refused mutation leaves the served rows unchanged"
+    );
+    assert!(
+        !after.body.contains("Forbidden"),
+        "the invalid row is not stored\n{}",
+        after.body
+    );
+}
+
 #[test]
 // Specified: Gate G / DESIGN S5a; an action body over its route limit is refused from the declared length, before the body is read.
 fn run_action_refuses_a_body_over_its_limit_before_reading_it() {
