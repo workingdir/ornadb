@@ -379,6 +379,11 @@ const GOLDEN_RELATIONS: [&str; 5] = [
 ];
 /// The golden copy lists two Blob values, both in relation ...05.
 const GOLDEN_BLOB_LISTINGS: usize = 2;
+const COUNTER: &str = "018f0000-0000-7100-0000-000000000001";
+const LABEL: &str = "018f0000-0000-7100-0000-000000000002";
+const DAY: &str = "018f0000-0000-7100-0000-000000000003";
+const ASSET: &str = "018f0000-0000-7100-0000-000000000005";
+const ASSET_BLOB_COLUMN: &str = "018f0000000072008000000000000005";
 
 /// Clones the golden bundle into `parent/source`.
 fn clone_golden_bundle(parent: &Path) -> PathBuf {
@@ -544,12 +549,9 @@ fn extractor_matches_the_real_reader_on_a_migrated_golden_copy() {
 
     // The pinned dependency is the legacy format-1 golden bundle. Its compact tables are read
     // through scripts/orna_compact.py and carry the values the golden vectors declare.
-    const COUNTER: &str = "018f0000-0000-7100-0000-000000000001";
-    const LABEL: &str = "018f0000-0000-7100-0000-000000000002";
-    const DAY: &str = "018f0000-0000-7100-0000-000000000003";
-    const ASSET: &str = "018f0000-0000-7100-0000-000000000005";
-    const ASSET_BLOB_COLUMN: &str = "018f0000000072008000000000000005";
-    let legacy = report["legacy_dependencies"].as_array().unwrap();
+    let legacy = report["snapshot"]["legacy_dependencies"]
+        .as_array()
+        .unwrap();
     assert_eq!(
         legacy.len(),
         1,
