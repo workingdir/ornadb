@@ -5710,9 +5710,14 @@ mod graph_bridge_tests {
                 expected_verification,
                 "range {range:?} verification"
             );
+            assert_eq!(
+                read.chunks_read(),
+                intersecting.len() as u64,
+                "range {range:?} must report exactly the chunks it read"
+            );
             eprintln!(
                 "Gate B: range requested bytes={requested}; range payload bytes read={fetched}; range overfetch bytes={overfetch}; range chunks read={}; blob bytes={length}",
-                intersecting.len()
+                read.chunks_read()
             );
         }
     }
