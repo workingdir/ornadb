@@ -147,18 +147,21 @@ id = "B2"
 title = "Record peak RSS, bytes read and written, network objects and elapsed time"
 select = [
   { record = "workspace-cli", package = "orna-cli", target = "test:media_import_query", test = "gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:media_import_query", test = "gate_b_metadata_update_reads_zero_payload_bytes_at_mib_scale" },
 ]
 counters = ["^Gate B: "]
 
 [[item]]
 gate = "B"
 id = "B3"
-title = "Title, MIME and hint-only update, row lookup and summary read touch zero media-payload bytes; metadata counted separately"
+title = "MIME and hint-only update, row lookup and summary read touch zero media-payload bytes; metadata counted separately"
 select = [
   { record = "workspace-cli", package = "orna-cli", target = "test:media_import_query", test = "gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:media_import_query", test = "gate_b_metadata_update_reads_zero_payload_bytes_at_mib_scale" },
 ]
+counters = ["^Gate B: metadata-only update "]
 limitations = [
-  "There is no title-only update, metadata bytes are not reported, and the zero-read checks cannot see the commit or publish path (ornadb-5il1.8).",
+  "There is no title-only update: the zero-read update re-pins a blob's MIME and hint, not a title column. The zero-read checks cannot see the commit or publish path (ornadb-5il1.8).",
 ]
 
 [[item]]
@@ -172,9 +175,16 @@ counters = ["^Gate B: range "]
 gate = "B"
 id = "B5"
 title = "Full export verifies raw hashes"
-select = [{ record = "workspace-cli", package = "orna-cli", target = "test:complete_copy_export" }]
+select = [
+  { record = "workspace-cli", package = "orna-cli", target = "test:complete_copy_export" },
+  { record = "workspace-rest", package = "orna-repository", target = "lib", test = "closure_refuses_a_descriptor_whose_raw_digest_is_forged" },
+  { record = "workspace-rest", package = "orna-repository", target = "lib", test = "closure_accepts_a_descriptor_whose_raw_digest_is_consistent" },
+  { record = "workspace-rest", package = "orna-repository", target = "lib", test = "two_level_descriptor_with_a_forged_raw_digest_is_refused" },
+  { record = "workspace-rest", package = "orna-repository", target = "lib", test = "height_two_descriptor_with_a_forged_raw_digest_is_refused" },
+  { record = "workspace-rest", package = "orna-repository", target = "lib", test = "height_two_descriptor_whose_byte_index_matches_its_raw_digest_verifies" },
+]
 limitations = [
-  "The Blob's raw SHA-256 is not recomputed against its descriptor, and the 10 GiB row is never exported (ornadb-5il1.193).",
+  "The raw SHA-256 check runs through verify_closure, which export calls on every member, and is proven by unit tests that forge a descriptor in a hand-built repository: at the root, through a two-level byte index, and through a height-2 root (three index levels, four chunks). Both forged-descriptor tests refuse, and both valid-descriptor tests verify. No CLI or integration export carries a forged descriptor: export only admits a whole format-3 graph, `NodeData` is not reachable from integration tests, and descriptors are built only by the production writer, so an export-level forged-descriptor test needs a test seam in production code (not built here). The 10 GiB row is never exported (ornadb-5il1.193).",
 ]
 
 [[item]]
@@ -204,10 +214,12 @@ select = [
   { record = "workspace-rest", package = "orna-repository", target = "test:row_store_scale", test = "orp1_row_store_ten_rows" },
   { record = "workspace-cli", package = "orna-cli", target = "test:partial_clone_publication_race" },
   { record = "workspace-rest", package = "orna-repository", target = "test:row_store_scale", test = "orp1_production_publication_race" },
+  { record = "workspace-rest", package = "orna-repository", target = "test:row_store_scale", test = "orp1_partial_clone_cold_publication_race" },
+  { record = "workspace-rest", package = "orna-repository", target = "test:row_store_scale", test = "orp1_partial_clone_warm_publication_race" },
   { record = "gate-c-million-rows", package = "orna-repository", target = "test:row_store_scale", test = "orp1_row_store_one_million_rows" },
 ]
 limitations = [
-  "Concurrent publication is raced three ways: two publishers on one local repository (orp1_production_publication_race), and a cold and a warm partial clone that each publish their own row and then race the push to a shared bare remote (partial_clone_publication_race). The clone race asserts one push wins, the remote branch reaches only the winner commit, a fresh product reader over the remote reads the winner row and not the loser row, and the losing clone keeps its own publication as a local commit after fetching the published snapshot. It does not merge the two publications: both rewrite one store file and the format has no merge rule for two publications of one store. Still not covered: exercise_concurrent_writes computes the row index on two threads without publishing, so it does not race two publications. That driver now runs nightly, because the ignored one-million-row case runs in the nightly gates job and C2 selects its record; what it does not do is publish concurrently, which the two race tests above cover on their own (ornadb-mmsa.13).",
+  "Concurrent publication is raced four ways: two publishers on one local repository (orp1_production_publication_race); the same two-publisher race in a cold and a warm promisor clone (orp1_partial_clone_cold_publication_race, orp1_partial_clone_warm_publication_race); and a cold and a warm partial clone that each publish their own row and then race the push to a shared bare remote (partial_clone_publication_race). The clone race asserts one push wins, the remote branch reaches only the winner commit, a fresh product reader over the remote reads the winner row and not the loser row, and the losing clone keeps its own publication as a local commit after fetching the published snapshot. It does not merge the two publications: both rewrite one store file and the format has no merge rule for two publications of one store. Still not covered: exercise_concurrent_writes computes the row index on two threads without publishing, so it does not race two publications. That driver now runs nightly, because the ignored one-million-row case runs in the nightly gates job and C2 selects its record; what it does not do is publish concurrently, which the race tests above cover on their own (ornadb-mmsa.13).",
 ]
 
 [[item]]
@@ -244,6 +256,8 @@ id = "C5"
 title = "Malformed overlapping ranges, broken counts, giant fanout and wrong schema domains fail"
 select = [
   { record = "workspace-rest", package = "orna-repository", target = "test:row_store_scale", test = "orp1_malformed_graphs_report_specific_diagnostics" },
+  { record = "workspace-rest", package = "orna-repository", target = "test:row_store_scale", test = "orp1_nested_overlap_reports_diagnostic_on_descent" },
+  { record = "workspace-rest", package = "orna-repository", target = "test:row_store_scale", test = "orp1_interior_count_mismatch_reports_diagnostic_on_descent" },
 ]
 
 [[item]]
@@ -506,6 +520,7 @@ select = [
 ]
 limitations = [
   "Both snapshots are format-3 commits whose store is a text file, and the extractor checks Git object IDs only (ornadb-5il1.193, ornadb-5il1.192).",
+  "Legacy repository-format-1 dependencies are read by a standard-library walker in scripts/orna_extract.py and recorded under legacy_dependencies. Loose rows, storage placements and compact table rows are checked by scripts.test_orna_extract (LegacyDependencyTests) and by extractor_matches_the_real_reader_on_a_migrated_golden_copy in crates/orna-cli/tests/independent_extractor_cli.rs; neither is a selected record. Compact rows are read through scripts/orna_compact.py, which verifies each declared digest; Blob values are reported by length and SHA-256, not by content. No selected test exercises the legacy path, so F5 is not mapped to it (ornadb-v18eb.3).",
 ]
 
 [[item]]
@@ -533,7 +548,13 @@ limitations = ["Refresh is checked only with no change between reads; a change i
 gate = "G"
 id = "G4"
 title = "Download and native audio or image rendering over the same production API"
-limitations = ["A served page cannot yet carry a committed Blob reference: pinned page reads replace it with a placeholder, so std.ui audio, image and download nodes over committed Blobs are not proven through the pinned route (ornadb-5il1.495.1.1)."]
+select = [
+  { record = "workspace-cli", package = "orna-cli", target = "test:served_image_media", test = "served_image_links_committed_blob_bytes_through_the_media_route" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:served_image_media", test = "served_page_reads_a_blob_table_and_a_plain_table_in_one_evaluation" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:serve_table_reads", test = "committed_blob_rows_are_served_as_contextual_values" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:serve_table_reads", test = "uncommitted_blob_row_is_refused_without_a_value" },
+]
+limitations = ["Proves an image over a committed Blob is served as a page node whose source is the committed /media/ route, that the route answers the stored bytes, and that a plain table and a Blob table read in one evaluation. Audio playback, the download node and HEAD and range requests on the media route are not proven through the pinned route (ornadb-5il1.495.1.1)."]
 
 [[item]]
 gate = "G"
@@ -579,8 +600,8 @@ limitations = ["Covers FUSE editor drafts only. Typed client drafts and their re
 gate = "H"
 id = "H2"
 title = "Reconnect fences old watch deltas and installs a replacement snapshot"
-select = [{ record = "workspace-cli", package = "orna-cli", target = "test:watch_command", test = "reconnect_fences_old_deltas_and_installs_replacement_snapshot" }]
-limitations = ["Covers the watch command only. Status recovery after a lost reply is not run by any nightly record: orna-live is excluded from the nightly rest shard, and its reconnect and durable status tests run in live-v1-tests.yml (ornadb-rt9zj)."]
+select = [{ record = "workspace-cli", package = "orna-cli", target = "test:watch_command", test = "reconnect_fences_old_deltas_and_installs_replacement_snapshot" }, { record = "workspace-rest", package = "orna-live", target = "test:live_host", test = "watch_resync_replaces_the_complete_identity_bearing_tree_at_a_new_revision" }, { record = "workspace-rest", package = "orna-live", target = "test:live_host", test = "watch_resync_rejects_changed_same_revision_and_regressed_snapshots" }, { record = "workspace-rest", package = "orna-live", target = "test:live_host", test = "status_snapshots_survive_successful_reconnect_storm" }, { record = "workspace-rest", package = "orna-live", target = "test:live_host", test = "durable_status_retry_replays_unknown_after_target_completes_and_host_recovers" }]
+limitations = ["Covers the watch command, and the host-side watch resync and status snapshots across reconnects that the rest shard records. Other reconnect and status-recovery paths in orna-live are not selected here, and the host runs only in the live-host test binary (ornadb-rt9zj)."]
 
 [[item]]
 gate = "H"
@@ -607,7 +628,8 @@ limitations = ["No JS generator exists in the repository. The test runs the ship
 gate = "H"
 id = "H6"
 title = "Typed events are admitted and diagnosed by executed tests"
-limitations = ["The typed event tests are in orna-live. The nightly rest shard excludes orna-live, so no nightly record executes them (ornadb-rt9zj)."]
+select = [{ record = "workspace-rest", package = "orna-live", target = "test:live_host", test = "synchronous_event_diagnostic_replays_after_watch_closure" }, { record = "workspace-rest", package = "orna-live", target = "test:live_host", test = "durable_event_diagnostic_status_and_replay_keep_closed_watch_correlation" }, { record = "workspace-rest", package = "orna-live", target = "test:live_host", test = "durable_event_diagnostic_replays_after_host_recovery_without_restored_watch" }, { record = "workspace-rest", package = "orna-live", target = "test:live_host", test = "durable_transactional_event_commits_through_synchronous_dispatch" }, { record = "workspace-rest", package = "orna-live", target = "test:live_host", test = "mutating_event_invalidates_only_its_owning_watch" }, { record = "workspace-rest", package = "orna-live", target = "test:live_host", test = "pure_rejected_and_rolled_back_events_preserve_their_watch" }, { record = "workspace-rest", package = "orna-live", target = "test:live_host", test = "cancelled_event_preserves_its_watch" }, { record = "workspace-rest", package = "orna-live", target = "test:live_host", test = "durable_stale_event_is_rejected_before_request_admission" }]
+limitations = ["Covers the orna-live host event admission and diagnostic tests listed here. Events are exercised through the host test binary, not through a served browser or CLI route."]
 
 [[item]]
 gate = "H"
