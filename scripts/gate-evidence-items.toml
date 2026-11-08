@@ -369,7 +369,7 @@ select = [
   { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_truncate_sparse" },
   { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_aggregate_quota", test = "open_candidates_share_one_draft_quota_across_documents" },
 ]
-limitations = ["fork is simulated with an inherited handle and close(2) errors are not observed (ornadb-5il1.60, ornadb-5il1.61). The aggregate draft quota selector (vfs_mount_aggregate_quota) needs the test-seams feature and runs in the aggregate-quota CI job; it proves one shared budget across open candidates of one mount released by truncate, by close, and by a synced replacement (accept is not isolated from the truncate that precedes it), and nothing about the copy-free or bounded-RSS items of ornadb-5il1.366."]
+limitations = ["fork is simulated with an inherited handle and close(2) errors are not observed (ornadb-5il1.60, ornadb-5il1.61). The aggregate draft quota selector (vfs_mount_aggregate_quota) needs the test-seams feature and runs in the aggregate-quota CI job; it proves one shared budget across open candidates of one mount released by truncate and by a synced replacement (accept is not isolated from the truncate that precedes it; release by bare close and accept without a prior truncate are unproven here), and nothing about the copy-free or bounded-RSS items of ornadb-5il1.366."]
 
 [[item]]
 gate = "E"
