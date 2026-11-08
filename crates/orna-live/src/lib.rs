@@ -1072,6 +1072,15 @@ pub trait LiveApplication {
     /// in here. Any other report is downgraded to `ExternalPossible`, which
     /// recovers as `ExternalEffectsUncertain` after an observed rollback.
     /// The default is untrusted.
+    ///
+    /// Returning `true` is an unchecked claim, not a verification: the host
+    /// cannot observe the application's effects, so an implementation that
+    /// returns `true` for an application that reaches external state defeats
+    /// the rollback downgrade. Only the first-party adapter, which is trusted
+    /// by construction, returns `true`, and only when no sys host is attached;
+    /// third-party implementations must keep the default.
+    /// Residual: the trust is a `bool`, not a gate-issued token
+    /// (ornadb-5il1.459 follow-up).
     fn trusts_controlled_effect_reports(&self) -> bool {
         false
     }
@@ -11298,7 +11307,7 @@ mod tests {
             let transaction = LiveEvalTransaction::new(
                 vec![mutation],
                 [24; 32],
-                ActivationEffectReport::declare(orna_runtime::DeclaredEffectSet::None),
+                orna_runtime::EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
                 if fail {
                     Arc::new(FailBeforeTableWrite)
                 } else {
@@ -11454,7 +11463,7 @@ mod tests {
         let transaction = LiveEvalTransaction::new(
             vec![mutation],
             [24; 32],
-            ActivationEffectReport::declare(orna_runtime::DeclaredEffectSet::None),
+            orna_runtime::EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
             Arc::new(NoFault),
         )
         .for_request(identity)
@@ -11553,7 +11562,7 @@ mod tests {
             let mut transaction = LiveEvalTransaction::new(
                 vec![mutation],
                 [24; 32],
-                ActivationEffectReport::declare(orna_runtime::DeclaredEffectSet::None),
+                orna_runtime::EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
                 Arc::new(NoFault),
             );
             if let Some(supplied_identity) = supplied_identity {
