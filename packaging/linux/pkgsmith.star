@@ -24,7 +24,7 @@ OrnaDB is a Git-backed database platform for typed applications. orna reads, wri
     # exactly this, so a placeholder can never be mistaken for a real contact.
     "maintainer": "OrnaDB maintainers <maintainers@ornadb.invalid>",
     "homepage": "https://github.com/workingdir/ornadb",
-    "license": "Apache-2.0",
+    "license": "MPL-2.0",
     # The two payload paths are the whole inventory, so the artifact owns no
     # directory. The formats that need parent entries to unpack (deb, rpm) add
     # them as root:root 0755 themselves.
