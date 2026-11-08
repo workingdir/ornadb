@@ -52,7 +52,7 @@ pub use table_storage::{
     TableStorageError, admitted_table_schemas, blob_placeholder, committed_tables,
     contextual_table_rows, evaluator_rows, evaluator_rows_from_stored, has_text_primary_key,
     holds_blob, private_candidate_tables, restore_stored_blobs, runtime_key_from_evaluator,
-    storage_row_from_record, stored_blob_references, stored_field_names, stored_rows_hold_blob,
+    storage_row_from_record, stored_blob_references, stored_field_names,
 };
 pub use typed_row::{DescriptorField, StoredSchema, TypedRowError};
 

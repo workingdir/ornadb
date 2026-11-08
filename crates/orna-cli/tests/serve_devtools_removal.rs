@@ -144,9 +144,9 @@ fn standard_snapshot() -> TempDir {
 /// The project source: its two tables, plus the frontend's serving entry when
 /// `with_frontend` is set. Removal rewrites this file without the entry.
 ///
-/// `Note` is scalar so the served page can read it: serve refuses a page whose
-/// admitted tables hold stored Blob rows (`serve.table_read_unsupported`), so
-/// the `Asset` row is captured after the frontend is gone.
+/// `Note` is scalar so the served page can read it: serve refuses a page that
+/// reads a Blob row not yet committed (`serve.table_read_unsupported`), so the
+/// `Asset` row is captured after the frontend is gone.
 fn project_source(with_frontend: bool) -> String {
     let tables = "pub table Note(id: Str) {\n    body: Str,\n}\n\npub table Asset(id: Str) {\n    content: Blob,\n}\n";
     if with_frontend {
