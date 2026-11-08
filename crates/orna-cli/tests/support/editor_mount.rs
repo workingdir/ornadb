@@ -194,7 +194,23 @@ pub fn spawn_mount_process(repository_path: &Path, mountpoint: &Path) -> Mounted
 /// Starts `mount --cwd` on an existing mountpoint directory without waiting for
 /// the FUSE mount to appear.
 pub fn start_mount_process(repository_path: &Path, mountpoint: &Path) -> MountedProcess {
-    spawn_mount_with(repository_path, mountpoint, &["--cwd"])
+    spawn_mount_with(repository_path, mountpoint, &["--cwd"], &[])
+}
+
+/// Starts `mount --cwd` with extra environment variables on an existing
+/// mountpoint, then waits until the FUSE mount answers.
+pub fn spawn_mount_process_with_env(
+    repository_path: &Path,
+    mountpoint: &Path,
+    env: &[(&str, &str)],
+) -> MountedProcess {
+    std::fs::create_dir(mountpoint).unwrap();
+    wait_for_mount(spawn_mount_with(
+        repository_path,
+        mountpoint,
+        &["--cwd"],
+        env,
+    ))
 }
 
 /// Starts `mount --at <selector>` on an existing mountpoint, then waits until the
@@ -209,10 +225,16 @@ pub fn spawn_snapshot_mount_process(
         repository_path,
         mountpoint,
         &["--at", selector],
+        &[],
     ))
 }
 
-fn spawn_mount_with(repository_path: &Path, mountpoint: &Path, mode: &[&str]) -> MountedProcess {
+fn spawn_mount_with(
+    repository_path: &Path,
+    mountpoint: &Path,
+    mode: &[&str],
+    env: &[(&str, &str)],
+) -> MountedProcess {
     let mut child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
@@ -221,6 +243,7 @@ fn spawn_mount_with(repository_path: &Path, mountpoint: &Path, mode: &[&str]) ->
             mountpoint.to_str().unwrap(),
         ])
         .args(mode)
+        .envs(env.iter().copied())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
