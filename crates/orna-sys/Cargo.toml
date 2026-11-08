@@ -3,7 +3,7 @@ name = "orna-sys"
 version = "1.1.0"
 edition = "2024"
 rust-version = "1.95"
-license = "Apache-2.0"
+license.workspace = true
 description = "Final Orna 1.1.0 portable sys catalogue and bounded pre-effect admission"
 build = "build.rs"
 

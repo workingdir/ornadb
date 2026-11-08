@@ -3,7 +3,7 @@ name = "orna-table"
 version = "1.0.0"
 edition = "2024"
 rust-version = "1.95"
-license = "Apache-2.0"
+license.workspace = true
 description = "In-memory transactional table primitive for Orna 1.0"
 publish = false
 
