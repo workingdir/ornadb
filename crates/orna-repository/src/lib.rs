@@ -13922,6 +13922,42 @@ mod tests {
         );
     }
 
+    /// Layered guard at line 4096: an unchanged, unskipped node-metadata leaf whose worktree
+    /// bytes differ from the committed bytes is an external edit and is refused.
+    #[test]
+    fn managed_guard_layered_unchanged_metadata_leaf_edit_is_refused() {
+        let (root, repository) = managed_guard_store_fixture(b"committed\n");
+        let expected = repository.index_generation().unwrap();
+        let candidate = managed_guard_committed_candidate(&repository);
+        fs::write(root.path().join(".orna/store/data"), b"edited\n").unwrap();
+
+        assert!(matches!(
+            repository.reconcile_store_worktree_transition(&expected, &candidate, false),
+            Err(RepositoryError::ManagedContentConflict)
+        ));
+        assert_eq!(
+            fs::read(root.path().join(".orna/store/data")).unwrap(),
+            b"edited\n"
+        );
+    }
+
+    /// Positive control for the metadata guard: a worktree leaf that already holds the
+    /// committed bytes passes the unchanged-metadata check and the transition succeeds.
+    #[test]
+    fn managed_guard_layered_unchanged_metadata_leaf_matching_commit_is_admitted() {
+        let (root, repository) = managed_guard_store_fixture(b"committed\n");
+        let expected = repository.index_generation().unwrap();
+        let candidate = managed_guard_committed_candidate(&repository);
+
+        repository
+            .reconcile_store_worktree_transition(&expected, &candidate, false)
+            .unwrap();
+        assert_eq!(
+            fs::read(root.path().join(".orna/store/data")).unwrap(),
+            b"committed\n"
+        );
+    }
+
     /// Layered guard at line 4093: a skipped store leaf that is absent from the
     /// worktree may be restored only from its committed bytes, so a quarantine that
     /// holds other bytes is refused and left in place.
@@ -14208,6 +14244,52 @@ mod tests {
         assert!(!raced.get());
         assert_eq!(fs::read(store.join("data")).unwrap(), b"old\n");
         assert_eq!(fs::read(&quarantine).unwrap(), b"old\n");
+    }
+
+    /// Store-reconcile guard in `materialize_store_worktree_file` (ORNA-PUB-010): a displaced
+    /// copy holding the expected bytes while the target already holds the next bytes is
+    /// verified and removed, and the target keeps the next bytes.
+    #[test]
+    fn managed_guard_store_materialize_removes_displaced_copy_when_target_holds_next() {
+        let (root, repository) = managed_guard_store_fixture(b"old\n");
+        let candidate = managed_guard_committed_candidate(&repository);
+        let path = ManagedPath::new(".orna/store/data").unwrap();
+        let store = root.path().join(".orna/store");
+        fs::write(store.join("data"), b"new\n").unwrap();
+        let quarantine = store.join(format!(
+            ".orna-store-reconcile-{}-data",
+            candidate.commit().as_str()
+        ));
+        fs::write(&quarantine, b"old\n").unwrap();
+
+        repository
+            .materialize_store_worktree_file(&path, Some(b"old\n"), Some(b"new\n"), &candidate)
+            .unwrap();
+        assert_eq!(fs::read(store.join("data")).unwrap(), b"new\n");
+        assert!(!quarantine.exists());
+    }
+
+    /// Store-reconcile guard in `materialize_store_worktree_file` (ORNA-PUB-010): a displaced
+    /// copy holding the expected bytes while the target is absent installs the next bytes,
+    /// then removes the verified displaced copy.
+    #[test]
+    fn managed_guard_store_materialize_installs_next_when_target_absent() {
+        let (root, repository) = managed_guard_store_fixture(b"old\n");
+        let candidate = managed_guard_committed_candidate(&repository);
+        let path = ManagedPath::new(".orna/store/data").unwrap();
+        let store = root.path().join(".orna/store");
+        fs::remove_file(store.join("data")).unwrap();
+        let quarantine = store.join(format!(
+            ".orna-store-reconcile-{}-data",
+            candidate.commit().as_str()
+        ));
+        fs::write(&quarantine, b"old\n").unwrap();
+
+        repository
+            .materialize_store_worktree_file(&path, Some(b"old\n"), Some(b"new\n"), &candidate)
+            .unwrap();
+        assert_eq!(fs::read(store.join("data")).unwrap(), b"new\n");
+        assert!(!quarantine.exists());
     }
 
     /// Store-reconcile guard in `materialize_store_worktree_file` (ORNA-PUB-010): a foreign
@@ -14639,6 +14721,48 @@ mod tests {
             ),
             Err(RepositoryError::ManagedContentConflict)
         ));
+        assert_eq!(fs::read(&target).unwrap(), b"first");
+        assert_eq!(fs::read(&quarantine).unwrap(), b"foreign");
+    }
+
+    /// Removal rename guard (ORNA-PUB-010): a quarantine path that appears between the
+    /// path check and the move is refused as a managed conflict, not a local-state
+    /// failure, and the target keeps its expected bytes.
+    #[test]
+    fn managed_guard_removal_refuses_quarantine_created_before_move() {
+        let (root, repository) = managed_guard_fixture();
+        let path = ManagedPath::new("generated/row.orna").unwrap();
+        repository
+            .materialize_managed_file(&path, None, Some(b"first"))
+            .unwrap();
+        let target = root.path().join(path.as_path());
+        let quarantine = target
+            .parent()
+            .unwrap()
+            .join(".orna-quarantine-removal-created");
+        let race_quarantine = quarantine.clone();
+        // The first hook call precedes the quarantine path check; the second runs
+        // after it, immediately before the move, so only the second creates the path.
+        let mut hook_calls = 0;
+        let mut create_quarantine = || {
+            hook_calls += 1;
+            if hook_calls == 2 {
+                fs::write(&race_quarantine, b"foreign").unwrap();
+            }
+        };
+
+        assert!(matches!(
+            repository.materialize_managed_file_impl_with_quarantine(
+                &path,
+                Some(b"first"),
+                None,
+                Some(&quarantine),
+                Some(&mut create_quarantine),
+                None,
+            ),
+            Err(RepositoryError::ManagedContentConflict)
+        ));
+        assert_eq!(hook_calls, 2);
         assert_eq!(fs::read(&target).unwrap(), b"first");
         assert_eq!(fs::read(&quarantine).unwrap(), b"foreign");
     }
