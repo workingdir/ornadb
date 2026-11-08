@@ -259,9 +259,7 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
                 [0x5d; 32],
                 TerminalOutcome::new(vec![0x5e]).unwrap(),
                 &orna_runtime::NoFault,
-                orna_runtime::ActivationEffectReport::declare(
-                    orna_runtime::DeclaredEffectSet::None
-                ),
+                orna_runtime::EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
             )
             .await,
         Err(RuntimeError::StaleCapture { .. })
@@ -290,7 +288,7 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
             [0x59; 32],
             TerminalOutcome::new(vec![0x5a]).unwrap(),
             &orna_runtime::NoFault,
-            orna_runtime::ActivationEffectReport::declare(orna_runtime::DeclaredEffectSet::None),
+            orna_runtime::EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
         )
         .await
         .unwrap();
@@ -400,9 +398,7 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
                 [0x65; 32],
                 TerminalOutcome::new(vec![0x66]).unwrap(),
                 &FailAt(FaultPoint::AfterMutation),
-                orna_runtime::ActivationEffectReport::declare(
-                    orna_runtime::DeclaredEffectSet::None
-                ),
+                orna_runtime::EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
             )
             .await,
         Err(RuntimeError::FaultInjected(FaultPoint::AfterMutation))
