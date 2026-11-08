@@ -613,10 +613,11 @@ async fn dd_close_of_valid_candidate_exits_zero_and_is_accepted() {
     );
     assert_view_contains(&fixture, "Dd accepted");
     await_draft_guard(&fixture, b'0', "an accepted dd close leaves no draft guard").await;
-    // Known defect (ornadb-bqa69): an O_TRUNC open lets the close FLUSH overtake the WRITE, so
-    // an empty candidate is refused and retained before the real row is accepted. The accepted
-    // content and the cleared guard above are the proven guarantees; the retained-record check
-    // is not asserted until that bead lands.
+    // Note (ornadb-bqa69): before dd's WRITE, the kernel sends a close FLUSH for a duplicated
+    // descriptor of the O_TRUNC handle. That early flush is a close flush on dirty state, which
+    // EDIT-1 step 5 permits to repeat or not occur (source/41-vfs.md). Its outcome is not asserted
+    // here, so the retained-record check is omitted. The accepted content and the cleared guard
+    // above are the guarantees this test proves.
 }
 
 /// ORNA-VFS-008/009: a dirty handle whose baseline a peer has since accepted is
