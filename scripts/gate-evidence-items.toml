@@ -135,10 +135,11 @@ id = "B1"
 title = "Two small media fixtures and one 10 GB high-entropy fixture import with bounded RSS and temporary storage"
 select = [
   { record = "workspace-cli", package = "orna-cli", target = "test:media_import_query", test = "gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:media_import_query", test = "gate_b_production_import_of_10_gib_file_with_bounded_rss" },
 ]
 counters = ["^Gate B: "]
 limitations = [
-  "The 10 GiB payload goes through the repository capture seam into a hand-built store, not through the production import (ornadb-5il1.120, ornadb-5il1.117).",
+  "The network 10 GiB payload (gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata) goes through the repository capture seam into a hand-built store, not through the production import (ornadb-5il1.120, ornadb-5il1.117). The production 10 GiB row runs sys.blob.capture_file through the evaluator with the same accept and commit helpers as the small fixtures, but the commit is the test helper commit_captured_binding, not the orna binary process.",
 ]
 
 [[item]]
@@ -158,6 +159,7 @@ title = "MIME and hint-only update, row lookup and summary read touch zero media
 select = [
   { record = "workspace-cli", package = "orna-cli", target = "test:media_import_query", test = "gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata" },
   { record = "workspace-cli", package = "orna-cli", target = "test:media_import_query", test = "gate_b_metadata_update_reads_zero_payload_bytes_at_mib_scale" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:media_import_query", test = "gate_b_production_import_of_mib_file_reads_zero_payload_on_metadata_update" },
 ]
 counters = ["^Gate B: metadata-only update "]
 limitations = [

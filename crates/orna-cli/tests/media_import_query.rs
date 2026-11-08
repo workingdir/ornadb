@@ -2732,24 +2732,60 @@ async fn commit_captured_binding(
     publish_media_row(repository, state, key, ordinal + 0x10).await;
 }
 
+/// Which import path a Gate B run drives: the network capture seam, or the
+/// production `sys.blob.capture_file` binding that `orna` uses for file imports.
+#[cfg(target_os = "linux")]
+enum GateBImport {
+    CaptureSeam,
+    ProductionFile,
+}
+
+/// Counters and the captured binding produced by one Gate B import path.
+#[cfg(target_os = "linux")]
+struct GateBCapture {
+    binding: OrpBlobBinding,
+    binary_rehashed_bytes: u64,
+    payload_bytes_read: u64,
+    payload_bytes_written: u64,
+    objects_read: u64,
+    network_bytes_read: u64,
+    network_fetches: u64,
+}
+
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata() {
-    run_gate_b_import_and_metadata_update(GATE_B_LARGE_PAYLOAD_BYTES).await;
+    run_gate_b_import_and_metadata_update(GATE_B_LARGE_PAYLOAD_BYTES, GateBImport::CaptureSeam)
+        .await;
 }
 
-// The MiB-scale twin runs the same capture, accept, commit, metadata-only
-// re-pin and query sequence as the 10 GiB run, so per-PR CI exercises every
+// The production file import of the same 10 GiB size goes through
+// `sys.blob.capture_file`, the binding `orna` evaluates for file imports.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn gate_b_production_import_of_10_gib_file_with_bounded_rss() {
+    run_gate_b_import_and_metadata_update(GATE_B_LARGE_PAYLOAD_BYTES, GateBImport::ProductionFile)
+        .await;
+}
+
+// The MiB-scale twins run the same capture, accept, commit, metadata-only
+// re-pin and query sequence as the 10 GiB runs, so per-PR CI exercises every
 // code path without the 10 GiB payload.
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn gate_b_metadata_update_reads_zero_payload_bytes_at_mib_scale() {
-    run_gate_b_import_and_metadata_update(8 * 1024 * 1024).await;
+    run_gate_b_import_and_metadata_update(8 * 1024 * 1024, GateBImport::CaptureSeam).await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn gate_b_production_import_of_mib_file_reads_zero_payload_on_metadata_update() {
+    run_gate_b_import_and_metadata_update(8 * 1024 * 1024, GateBImport::ProductionFile).await;
 }
 
 #[allow(clippy::too_many_lines)]
 #[cfg(target_os = "linux")]
-async fn run_gate_b_import_and_metadata_update(payload_bytes: u64) {
+async fn run_gate_b_import_and_metadata_update(payload_bytes: u64, import: GateBImport) {
     let (directory, repository, relation_id) = empty_format3_repository();
     let source = TempDir::new_in(directory.path()).expect("create disposable input directory");
     for name in ["tone.wav", "pixel.png"] {
@@ -2800,55 +2836,117 @@ async fn run_gate_b_import_and_metadata_update(payload_bytes: u64) {
     let expected_sha256 = write_high_entropy_fixture(&large_path, payload_bytes);
     assert_eq!(std::fs::metadata(&large_path).unwrap().len(), payload_bytes);
     let object_count_before = git_object_count(directory.path());
-    let capability = repository.capture_capability(relation_id).unwrap();
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback source");
-    let address = listener.local_addr().unwrap();
-    let sender_path = large_path.clone();
-    let sender = thread::spawn(move || {
-        let (mut socket, _) = listener.accept().expect("accept local payload reader");
-        let mut file = File::open(sender_path).expect("open generated payload");
-        io::copy(&mut file, &mut socket).expect("stream payload over loopback")
-    });
-    let socket = std::net::TcpStream::connect(address).expect("connect local payload reader");
-    let mut network_source = CountingReader {
-        reader: socket,
-        bytes_read: 0,
-        fetches: 0,
-    };
     let started = Instant::now();
     let rehash_before_capture = raw_content_bytes_digested();
-    // Capture completes before an activation request is opened: the long read
-    // only produces a protected candidate; the row is installed afterwards.
-    let candidate = capability
-        .capture_blob_candidate(&mut network_source, payload_bytes)
-        .expect("stream the network payload into the owned OGB-2 writer");
-    // ORNA-VFS-010: the binary save streams the resulting bytes to establish
-    // the raw SHA-256; this thread's digest counter must report that cost.
-    let binary_rehashed = raw_content_bytes_digested() - rehash_before_capture;
+    let GateBCapture {
+        binding,
+        binary_rehashed_bytes: binary_rehashed,
+        payload_bytes_read: graph_payload_bytes_read,
+        payload_bytes_written: graph_payload_bytes_written,
+        objects_read: graph_objects_read,
+        network_bytes_read,
+        network_fetches,
+    } = match import {
+        GateBImport::CaptureSeam => {
+            let capability = repository.capture_capability(relation_id).unwrap();
+            let listener =
+                std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback source");
+            let address = listener.local_addr().unwrap();
+            let sender_path = large_path.clone();
+            let sender = thread::spawn(move || {
+                let (mut socket, _) = listener.accept().expect("accept local payload reader");
+                let mut file = File::open(sender_path).expect("open generated payload");
+                io::copy(&mut file, &mut socket).expect("stream payload over loopback")
+            });
+            let socket =
+                std::net::TcpStream::connect(address).expect("connect local payload reader");
+            let mut network_source = CountingReader {
+                reader: socket,
+                bytes_read: 0,
+                fetches: 0,
+            };
+            // Capture completes before an activation request is opened: the long read
+            // only produces a protected candidate; the row is installed afterwards.
+            let candidate = capability
+                .capture_blob_candidate(&mut network_source, payload_bytes)
+                .expect("stream the network payload into the owned OGB-2 writer");
+            // ORNA-VFS-010: the binary save streams the resulting bytes to establish
+            // the raw SHA-256; this thread's digest counter must report that cost.
+            let binary_rehashed_bytes = raw_content_bytes_digested() - rehash_before_capture;
+            let network_bytes_read = network_source.bytes_read;
+            let network_fetches = network_source.fetches;
+            assert_eq!(network_bytes_read, payload_bytes);
+            assert_eq!(
+                sender.join().expect("payload sender completes"),
+                payload_bytes
+            );
+            let payload_bytes_read = capability.payload_bytes_read();
+            let payload_bytes_written = capability.payload_bytes_written();
+            let objects_read = capability.objects_read();
+            GateBCapture {
+                binding: capability
+                    .accept_captured_blob(candidate, "application/octet-stream", None)
+                    .unwrap(),
+                binary_rehashed_bytes,
+                payload_bytes_read,
+                payload_bytes_written,
+                objects_read,
+                network_bytes_read,
+                network_fetches,
+            }
+        }
+        GateBImport::ProductionFile => {
+            // The production binding: the same `sys.blob.capture_file` expression
+            // `orna` evaluates, streamed from a file in an allowlisted capture root.
+            let capability = repository.capture_capability(relation_id).unwrap();
+            let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16)
+                .unwrap()
+                .with_capture_limit(payload_bytes)
+                .unwrap();
+            filesystem.allow_root(source.path()).unwrap();
+            let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+                .with_filesystem_provider(filesystem)
+                .with_repository_capture_capability(capability.clone());
+            let expression = format!(
+                "sys.blob.capture_file({:?}, \"high-entropy.bin\", {payload_bytes})",
+                source.path().to_string_lossy().as_ref()
+            );
+            let value = evaluate_expression_ovb2_with_effects(
+                &expression,
+                &BTreeMap::default(),
+                Limits::default(),
+                &mut bindings,
+            )
+            .unwrap_or_else(|error| panic!("production capture_file failed: {}", error.code()));
+            let binary_rehashed_bytes = raw_content_bytes_digested() - rehash_before_capture;
+            let payload_bytes_read = capability.payload_bytes_read();
+            let payload_bytes_written = capability.payload_bytes_written();
+            let objects_read = capability.objects_read();
+            GateBCapture {
+                binding: bindings
+                    .accept_captured_blob_for_row(&value)
+                    .expect("the captured Blob is accepted for a row"),
+                binary_rehashed_bytes,
+                payload_bytes_read,
+                payload_bytes_written,
+                objects_read,
+                network_bytes_read: 0,
+                network_fetches: 0,
+            }
+        }
+    };
+    // ORNA-VFS-010: the binary save must digest the full payload to establish its raw SHA-256.
     assert!(
         binary_rehashed >= payload_bytes,
         "the binary save must digest the full payload: digested {binary_rehashed} of {payload_bytes} bytes"
     );
-    let network_bytes_read = network_source.bytes_read;
-    let network_fetches = network_source.fetches;
-    let graph_payload_bytes_read = capability.payload_bytes_read();
-    let graph_payload_bytes_written = capability.payload_bytes_written();
-    let graph_objects_read = capability.objects_read();
-    let identity = candidate.content_identity();
+    let identity = binding.content_identity();
     assert_eq!(identity.length(), payload_bytes);
     assert_eq!(identity.sha256(), expected_sha256);
-    assert_eq!(network_bytes_read, payload_bytes);
     assert_eq!(
         graph_payload_bytes_written, payload_bytes,
         "the owned writer accounts exactly the captured media bytes"
     );
-    assert_eq!(
-        sender.join().expect("payload sender completes"),
-        payload_bytes
-    );
-    let binding = capability
-        .accept_captured_blob(candidate, "application/octet-stream", None)
-        .unwrap();
     commit_captured_binding(
         &repository,
         &state,
