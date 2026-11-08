@@ -1481,3 +1481,120 @@ async fn repl_write_is_refused_while_live_mount_holds_writer_lease() {
         String::from_utf8_lossy(&released.stderr),
     );
 }
+
+/// profiles/vfs-1.md (open): "`O_TRUNC` truncates only the private candidate." A
+/// writer opened with `O_TRUNC` on `data.orna` never changes the accepted row
+/// while its draft is private. A reader opened before the truncation keeps the
+/// accepted bytes, and after sync accepts the draft a new open sees it while
+/// that earlier reader stays pinned to its generation (profiles/vfs-1.md:
+/// "After sync accepted ... reads opened earlier are still pinned").
+#[tokio::test]
+async fn o_trunc_on_row_file_only_truncates_the_private_candidate() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let original = fresh_view(&fixture);
+    let mut pinned = File::open(&fixture.data_path).unwrap();
+    assert_eq!(read_from_start(&mut pinned), original);
+
+    let mut writer = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .truncate(true)
+        .open(&fixture.data_path)
+        .expect("open the row read-write with O_TRUNC");
+    writer
+        .write_all(music_row("Truncated draft").as_bytes())
+        .unwrap();
+    assert_eq!(
+        read_from_start(&mut writer),
+        music_row("Truncated draft"),
+        "the writer sees exactly its own truncated draft, with no old tail"
+    );
+    assert_eq!(
+        fresh_view(&fixture),
+        original,
+        "a new open sees the accepted row while the O_TRUNC draft is private"
+    );
+    assert_eq!(
+        read_from_start(&mut pinned),
+        original,
+        "a reader opened before O_TRUNC keeps the accepted bytes"
+    );
+
+    writer
+        .sync_all()
+        .expect("fsync accepts the truncated draft");
+    assert!(
+        fresh_view(&fixture).contains("Truncated draft"),
+        "a new open sees the accepted truncated draft"
+    );
+    assert_eq!(
+        read_from_start(&mut pinned),
+        original,
+        "a reader opened before acceptance stays pinned to its generation"
+    );
+    drop(writer);
+    drop(pinned);
+}
+
+/// profiles/vfs-1.md: "`data.orna` unlink fails." The row file cannot be removed
+/// (EPERM from the Document refusal), and an exclusive create over it is refused
+/// by the kernel with EEXIST, so no blind replacement can go through `create_new`.
+/// The accepted row is unchanged by either refusal.
+#[tokio::test]
+async fn data_orna_unlink_and_exclusive_create_are_refused_and_row_is_kept() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let original = fresh_view(&fixture);
+    assert_errno(
+        std::fs::remove_file(&fixture.data_path),
+        &[libc::EPERM],
+        "unlink of data.orna is refused",
+    );
+    assert_errno(
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&fixture.data_path)
+            .map(|_| ()),
+        &[libc::EEXIST],
+        "an exclusive create over data.orna is refused",
+    );
+    assert_eq!(
+        fresh_view(&fixture),
+        original,
+        "the accepted row survives the refused unlink and exclusive create"
+    );
+}
+
+/// profiles/vfs-1.md: row delete, rekey and create "use explicit Orna mutation";
+/// "unchecked cross-table moves" are unsupported. Renaming a row directory moves
+/// the row to a new key outside that path, so it is refused with EPERM. The row
+/// keeps its accepted bytes at its original name and no row appears at the new one.
+#[tokio::test]
+async fn row_directory_rename_is_refused_and_row_stays_at_its_name() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let original = fresh_view(&fixture);
+    let moved = fixture.row_directory.with_file_name("paris");
+    assert_errno(
+        std::fs::rename(&fixture.row_directory, &moved),
+        &[libc::EPERM],
+        "renaming a row directory is refused",
+    );
+    assert!(
+        !moved.exists(),
+        "the refused rename creates no row at the new name"
+    );
+    assert_eq!(
+        fresh_view(&fixture),
+        original,
+        "the row keeps its accepted bytes at its original name"
+    );
+}
