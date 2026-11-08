@@ -1915,7 +1915,16 @@ mod tests {
             let diagnostic = settle_owner_reply(Err(Errno::NOTCONN), &draft)
                 .expect_err("a retained draft leaves the outcome unknown");
             assert_eq!(diagnostic.code, "E2010");
-            assert_eq!(&*diagnostic.title, "Edit outcome is unknown");
+            assert!(
+                diagnostic.title.starts_with("Edit outcome is unknown"),
+                "{}",
+                diagnostic.title
+            );
+            assert!(
+                diagnostic.title.contains(&draft.display().to_string()),
+                "the default title names the retained draft: {}",
+                diagnostic.title
+            );
             assert!(
                 diagnostic.help.contains("orna status"),
                 "{}",
@@ -1947,7 +1956,11 @@ mod tests {
                     let diagnostic = settle_owner_reply(Err(errno), &draft)
                         .expect_err("a definite refusal is an error");
                     assert_eq!(diagnostic.code, "E2000", "{errno}");
-                    assert_eq!(&*diagnostic.title, "Edit was not accepted", "{errno}");
+                    assert!(
+                        diagnostic.title.starts_with("Edit was not accepted"),
+                        "{errno}: {}",
+                        diagnostic.title
+                    );
                 }
             }
         }
@@ -1959,10 +1972,20 @@ mod tests {
             let diagnostic = settle_owner_reply(Err(Errno::STALE), &draft)
                 .expect_err("a stale baseline is refused");
             assert_eq!(diagnostic.code, "E2000");
-            assert_eq!(
-                &*diagnostic.title,
-                "Edit is stale against the mounted baseline"
+            assert!(
+                diagnostic
+                    .title
+                    .starts_with("Edit is stale against the mounted baseline"),
+                "{}",
+                diagnostic.title
             );
+            assert!(
+                diagnostic.title.contains(&draft.display().to_string()),
+                "the default title names the retained draft: {}",
+                diagnostic.title
+            );
+            let detail = diagnostic.detail.unwrap_or_default();
+            assert!(detail.contains(&draft.display().to_string()), "{detail}");
         }
     }
 }
