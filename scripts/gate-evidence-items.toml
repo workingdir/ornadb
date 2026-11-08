@@ -506,6 +506,7 @@ select = [
 ]
 limitations = [
   "Both snapshots are format-3 commits whose store is a text file, and the extractor checks Git object IDs only (ornadb-5il1.193, ornadb-5il1.192).",
+  "Legacy repository-format-1 dependencies are read by a standard-library walker in scripts/orna_extract.py and recorded under legacy_dependencies. Loose rows and storage placements are checked against the golden bundle by scripts.test_orna_extract (LegacyDependencyTests), which is not a selected record. Compact table contents and Blob values are recorded as unread, and no selected test exercises the legacy path (ornadb-v18eb.3).",
 ]
 
 [[item]]

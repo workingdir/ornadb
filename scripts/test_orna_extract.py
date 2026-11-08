@@ -749,5 +749,215 @@ class IndependenceTests(unittest.TestCase):
                 self.assertTrue(independence_violations(self.source + "\n" + extra), label)
 
 
+GOLDEN_BUNDLE = REPO_ROOT / "crates/orna-cli/tests/fixtures/legacy-format1.bundle"
+LEGACY_FORMAT = b'{repository_format: 1, storage_profile: "compact-storage-v1"}\n'
+GOLDEN_STORAGE = [f"018f0000-0000-7100-0000-00000000000{number}" for number in range(1, 6)]
+
+
+def legacy_walk(repository: Path) -> dict | None:
+    """The repository-format-1 record of HEAD, read the way a gitlink dependency is read."""
+    commit = git(repository, "rev-parse", "HEAD").decode().strip()
+    objects = GitObjects(repository, "legacy test", 20)
+    try:
+        commit_data = objects.read(commit, "commit", extractor.SOURCE_TREE_BYTES_LIMIT, "legacy test")
+        return extractor.legacy_dependency(objects, commit_data, "dep")
+    finally:
+        objects.close()
+
+
+class LegacyDependencyTests(unittest.TestCase):
+    def setUp(self) -> None:
+        scratch = tempfile.TemporaryDirectory(prefix="legacy-dependency-test-")
+        self.addCleanup(scratch.cleanup)
+        self.root = Path(scratch.name)
+
+    def repository(self, name: str, files: dict[str, bytes]) -> Path:
+        return make_repository(self.root / name, {".orna/format.orna": LEGACY_FORMAT, **files})
+
+    def test_golden_bundle_dependency_matches_its_declarations(self) -> None:
+        golden = self.root / "golden"
+        git(self.root, "clone", "-q", str(GOLDEN_BUNDLE), str(golden))
+        record = legacy_walk(golden)
+        self.assertEqual(record["repository_format"], 1)
+        self.assertEqual(
+            record["storage"],
+            [
+                {"storage": storage, "table": storage, "placement": "compact", "contents": "unread"}
+                for storage in GOLDEN_STORAGE[:3]
+            ]
+            + [{"storage": GOLDEN_STORAGE[3], "table": GOLDEN_STORAGE[3], "placement": "editable", "contents": "editable-policy-only"}]
+            + [{"storage": GOLDEN_STORAGE[4], "table": GOLDEN_STORAGE[4], "placement": "compact", "contents": "unread"}],
+        )
+        tables = {table["name"]: table for table in record["tables"]}
+        self.assertEqual(sorted(tables), ["Asset", "Contact", "Counter", "Day", "Label"])
+        contact = tables["Contact"]
+        self.assertEqual(contact["status"], "extracted")
+        self.assertEqual(contact["module"], "contacts/main.orna")
+        self.assertEqual(contact["row_directory"], "contacts/Contact")
+        self.assertEqual(contact["key"], {"name": "id", "type": "Str"})
+        self.assertEqual(contact["fields"], {"name": "Str", "emails": "List<Str>"})
+        self.assertEqual(contact["loose_row_files"], 2)
+        self.assertEqual(
+            contact["rows"],
+            [
+                {
+                    "key": "alice-smith",
+                    "path": "contacts/Contact/alice-smith.orna",
+                    "object": "fc9ea74140d01f6c80ce5779e3de8a0978c81c3b",
+                    "sha256": "e9d2eb3c9624d42620dbb3614802f8f1ed1fd8e1d69560929ee6919c858a43ca",
+                    "fields": {"name": "Alice Smith", "emails": ["alice@example.com"]},
+                },
+                {
+                    "key": "bob-jones",
+                    "path": "contacts/Contact/bob-jones.orna",
+                    "object": "52ba0e1dc0ee7b9a4f49bd5b404c4e259e848beb",
+                    "sha256": "458164a9d9c8128232454860e5ffef74e2cab246ae7517d99accfb6b26b674fa",
+                    "fields": {"name": "Bob Jones", "emails": []},
+                },
+            ],
+        )
+        self.assertEqual(tables["Label"]["status"], "extracted")
+        self.assertEqual(tables["Label"]["fields"], {})
+        self.assertEqual(tables["Label"]["rows"], [])
+        self.assertEqual(tables["Counter"]["reason"], "key type Int is not extracted")
+        self.assertEqual(tables["Day"]["reason"], "key type Date is not extracted")
+        self.assertEqual(tables["Asset"]["reason"], "key type Int is not extracted")
+        for name in ("Counter", "Day", "Asset"):
+            self.assertEqual(tables[name]["status"], "unextracted")
+            self.assertNotIn("rows", tables[name])
+
+    def test_repository_without_format_record_is_not_legacy(self) -> None:
+        plain = make_repository(self.root / "plain", {"main.orna": b"pub table Note(id: Str) {}\n"})
+        self.assertIsNone(legacy_walk(plain))
+
+    def test_other_repository_format_is_refused(self) -> None:
+        repository = make_repository(
+            self.root / "format-two", {".orna/format.orna": b'{repository_format: 2, storage_profile: "x"}\n'}
+        )
+        with self.assertRaisesRegex(extractor.ExtractionError, "not repository format 1"):
+            legacy_walk(repository)
+
+    def test_key_path_vectors(self) -> None:
+        vectors = {
+            "": "~ff",
+            "alice": "alice",
+            "a-b_c.d": "a-b_c.d",
+            "a.": "a~2e",
+            ".": "~2e",
+            "..": "~2e~2e",
+            "CON": "~43ON",
+            "con.txt": "~63on.txt",
+            ".git": "~2egit",
+            " x": "~20x",
+            "~": "~7e",
+            "é": "~c3~a9",
+        }
+        for key, component in vectors.items():
+            with self.subTest(key=key):
+                self.assertEqual(extractor.key_path_encode(key), component)
+                self.assertEqual(extractor.key_path_decode(component, "vector"), key)
+
+    def test_key_path_refuses_non_canonical_components(self) -> None:
+        refused = {
+            "non-canonical escape of a readable byte": "~41",
+            "malformed escape": "a~zz",
+            "truncated escape": "a~4",
+            "uppercase escape digit": "a~2E",
+            "~ff inside a longer component": "a~ff",
+            "unescaped byte": "a b",
+            "truncated UTF-8 sequence": "~c3",
+            "over the component limit": "a" * (extractor.KEY_COMPONENT_LIMIT + 1),
+        }
+        for label, component in refused.items():
+            with self.subTest(case=label), self.assertRaises(extractor.ExtractionError):
+                extractor.key_path_decode(component, "vector")
+
+    def test_loose_rows_round_trip_through_the_walker(self) -> None:
+        repository = self.repository(
+            "rows",
+            {
+                "main.orna": b"pub table Note(id: Str) {\n    body: Str,\n    pinned: Bool,\n    tags: List<Str>,\n    rank: Int,\n}\n",
+                "Note/a.b.orna": b'{ body: "one", pinned: true, tags: ["x", "y"], rank: -3, }\n',
+                "Note/~20x.orna": b"/* block /* nested */ */ { body: \"\\u{48}i\", pinned: false, tags: [], rank: 0 } ;\n",
+                "Note/~ff.orna": b'{ body: "", pinned: false, tags: [], rank: 7 }',
+            },
+        )
+        table = legacy_walk(repository)["tables"][0]
+        self.assertEqual(table["status"], "extracted")
+        self.assertEqual(table["loose_row_files"], 3)
+        self.assertEqual([row["key"] for row in table["rows"]], ["", " x", "a.b"])
+        self.assertEqual([row["path"] for row in table["rows"]], ["Note/~ff.orna", "Note/~20x.orna", "Note/a.b.orna"])
+        self.assertEqual(table["rows"][2]["fields"], {"body": "one", "pinned": True, "tags": ["x", "y"], "rank": -3})
+        self.assertEqual(table["rows"][1]["fields"], {"body": "Hi", "pinned": False, "tags": [], "rank": 0})
+
+    def test_unextracted_table_records_its_row_files_without_reading_them(self) -> None:
+        repository = self.repository(
+            "unread",
+            {
+                "main.orna": b"pub table Counter(id: Int) {}\n",
+                "Counter/1.orna": b"this is not a row unit",
+            },
+        )
+        table = legacy_walk(repository)["tables"][0]
+        self.assertEqual(table["status"], "unextracted")
+        self.assertEqual(table["loose_row_files"], 1)
+        self.assertNotIn("rows", table)
+
+    def test_declaration_forms_that_are_not_extracted_carry_a_reason(self) -> None:
+        repository = self.repository(
+            "reasons",
+            {
+                "main.orna": (
+                    b"pub table Pair(id: Str, n: Int) {}\n"
+                    b"table Blobbed(id: Str) { payload: Blob }\n"
+                    b"table Odd(id: Str) { items: Set<Str> }\n"
+                ),
+            },
+        )
+        tables = {table["name"]: table for table in legacy_walk(repository)["tables"]}
+        self.assertEqual(tables["Pair"]["reason"], "composite keys are not extracted")
+        self.assertEqual(tables["Blobbed"]["reason"], "field payload of type Blob is not extracted")
+        self.assertEqual(tables["Odd"]["reason"], "field items of type Set<Str> is not extracted")
+
+    def test_refused_row_units_fail_closed(self) -> None:
+        module = b"pub table Note(id: Str) {\n    body: Str,\n    rank: Int,\n}\n"
+        good = b'{ body: "x", rank: 1 }'
+        cases = {
+            "unknown field": {"Note/a.orna": b'{ body: "x", rank: 1, extra: 2 }'},
+            "missing field": {"Note/a.orna": b'{ body: "x" }'},
+            "string where Int is declared": {"Note/a.orna": b'{ body: "x", rank: "1" }'},
+            "Bool where Int is declared": {"Note/a.orna": b'{ body: "x", rank: true }'},
+            "non-literal value": {"Note/a.orna": b'{ body: "x", rank: f(1) }'},
+            "trailing content after the record": {"Note/a.orna": b'{ body: "x", rank: 1 } extra'},
+            "non-UTF-8 row": {"Note/a.orna": b'{ body: "\xff", rank: 1 }'},
+            "non-canonical key component": {"Note/~41.orna": good},
+            "ASCII case collision": {"Note/Alpha.orna": good, "Note/alpha.orna": good},
+            "non-row file in row directory": {"Note/readme.txt": b"text"},
+            "nested directory under row directory": {"Note/sub/a.orna": good},
+            "key over the component limit": {f"Note/{'a' * (extractor.KEY_COMPONENT_LIMIT + 1)}.orna": good},
+            "table declared twice": {"second.orna": b"pub table Note(id: Str) {}\n"},
+        }
+        for label, rows in cases.items():
+            with self.subTest(case=label):
+                files = {"main.orna": module, **rows}
+                repository = self.repository(label.replace(" ", "-"), files)
+                with self.assertRaises(extractor.ExtractionError):
+                    legacy_walk(repository)
+
+    def test_storage_policy_must_hold_exactly_placement_and_table(self) -> None:
+        for label, policy in {
+            "extra field": b'{placement: "compact", table: "t", extra: 1}',
+            "unknown placement": b'{placement: "shared", table: "t"}',
+            "non-text table": b'{placement: "compact", table: 1}',
+        }.items():
+            with self.subTest(case=label):
+                repository = self.repository(
+                    label.replace(" ", "-"),
+                    {".orna/storage/018f0000-0000-7100-0000-000000000009/policy.orna": policy},
+                )
+                with self.assertRaises(extractor.ExtractionError):
+                    legacy_walk(repository)
+
+
 if __name__ == "__main__":
     unittest.main()
