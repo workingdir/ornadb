@@ -600,8 +600,14 @@ DYNAMIC_NAMES = frozenset({"__import__", "compile", "eval", "exec"})
 SUBPROCESS_CONSTANTS = frozenset({"PIPE", "DEVNULL", "STDOUT", "TimeoutExpired", "CalledProcessError"})
 
 
+# Shared standard-library decoders the extractor may load. Each reads the published format and never the Rust engine or the orna
+# binary: orna_legacy (OVB-1, ORR-2 and OGB-1 readers), orna_compact (compact-storage-v1 tables) and orna_parquet (segment files).
+# Any other scripts module, and any orna crate or binary, stays refused.
+SHARED_DECODERS = frozenset({"scripts.orna_compact", "scripts.orna_legacy", "scripts.orna_parquet"})
+
+
 def _module_violations(name: str, line: int) -> list[str]:
-    if not name:
+    if not name or name in SHARED_DECODERS:
         return []
     top = name.split(".")[0]
     problems = []
@@ -671,7 +677,11 @@ def independence_violations(source: str) -> list[str]:
             if node.level:
                 problems.append(f"line {line}: relative import")
             module = node.module or ""
-            problems += _module_violations(module, line)
+            if module == "scripts":
+                for alias in node.names:
+                    problems += _module_violations(f"scripts.{alias.name}", line)
+            else:
+                problems += _module_violations(module, line)
             if module in {"os", "subprocess", "sys"}:
                 problems.append(f"line {line}: 'from {module} import ...' hides calls; use 'import {module}'")
         elif isinstance(node, ast.Name):
@@ -710,6 +720,12 @@ class IndependenceTests(unittest.TestCase):
     def test_the_guard_admits_the_git_environment_hook(self) -> None:
         self.assertEqual(independence_violations("import subprocess\nsubprocess.Popen(['git'], env=git_environment())\n"), [])
 
+    def test_the_guard_admits_the_shared_decoders(self) -> None:
+        self.assertEqual(
+            independence_violations("from scripts import orna_compact, orna_legacy, orna_parquet\nimport scripts.orna_compact\n"),
+            [],
+        )
+
     def test_the_guard_refuses_each_known_hole(self) -> None:
         holes = {
             "non-stdlib import": "import requests\n",
@@ -743,6 +759,8 @@ class IndependenceTests(unittest.TestCase):
             "subprocess shell keyword": "import subprocess\nsubprocess.run(['git', 'status'], shell=True)\n",
             "subprocess env overriding PATH": "import subprocess\nsubprocess.run(['git', 'status'], env={'PATH': '/tmp/bin'})\n",
             "subprocess spread keywords": "import subprocess\nsubprocess.run(['git', 'status'], **OPTIONS)\n",
+            "unlisted scripts module": "from scripts import mutation_orna_extract_legacy\n",
+            "unlisted scripts submodule": "import scripts.test_orna_extract\n",
         }
         for label, extra in holes.items():
             with self.subTest(hole=label):
@@ -780,14 +798,34 @@ class LegacyDependencyTests(unittest.TestCase):
         record = legacy_walk(golden)
         self.assertEqual(record["repository_format"], 1)
         self.assertEqual(
-            record["storage"],
+            [{key: value for key, value in item.items() if key != "rows"} for item in record["storage"]],
             [
-                {"storage": storage, "table": storage, "placement": "compact", "contents": "unread"}
+                {"storage": storage, "table": storage, "placement": "compact", "contents": "extracted"}
                 for storage in GOLDEN_STORAGE[:3]
             ]
             + [{"storage": GOLDEN_STORAGE[3], "table": GOLDEN_STORAGE[3], "placement": "editable", "contents": "editable-policy-only"}]
-            + [{"storage": GOLDEN_STORAGE[4], "table": GOLDEN_STORAGE[4], "placement": "compact", "contents": "unread"}],
+            + [{"storage": GOLDEN_STORAGE[4], "table": GOLDEN_STORAGE[4], "placement": "compact", "contents": "extracted"}],
         )
+        rows = {item["storage"]: item["rows"] for item in record["storage"] if "rows" in item}
+        self.assertEqual(sorted(rows), sorted([GOLDEN_STORAGE[0], GOLDEN_STORAGE[1], GOLDEN_STORAGE[2], GOLDEN_STORAGE[4]]))
+        self.assertEqual([row["key"] for row in rows[GOLDEN_STORAGE[0]]], [1, 2, 3, 4])
+        self.assertEqual([row["fields"] for row in rows[GOLDEN_STORAGE[0]]], [{}, {}, {}, {}])
+        self.assertEqual([row["key"] for row in rows[GOLDEN_STORAGE[1]]], ["alpha", "beta", "gamma"])
+        self.assertEqual(
+            [row["key"] for row in rows[GOLDEN_STORAGE[2]]],
+            [{"tag": 60001, "value": day} for day in ("1969-12-31", "1970-01-01", "1970-01-02")],
+        )
+        self.assertEqual([row["key"] for row in rows[GOLDEN_STORAGE[4]]], [1, 2])
+        blob_column = "018f0000000072008000000000000005"
+        self.assertEqual(
+            [row["fields"] for row in rows[GOLDEN_STORAGE[4]]],
+            [
+                {blob_column: {"blob": {"length": 7, "sha256": hashlib.sha256(b"\x00\xff\x80orna").hexdigest()}}},
+                {blob_column: {"blob": {"length": 0, "sha256": hashlib.sha256(b"").hexdigest()}}},
+            ],
+        )
+        self.assertTrue(all(row["deleted"] is False for table_rows in rows.values() for row in table_rows))
+        self.assertNotIn("rows", record["storage"][3])
         tables = {table["name"]: table for table in record["tables"]}
         self.assertEqual(sorted(tables), ["Asset", "Contact", "Counter", "Day", "Label"])
         contact = tables["Contact"]
@@ -955,8 +993,21 @@ class LegacyDependencyTests(unittest.TestCase):
                     label.replace(" ", "-"),
                     {".orna/storage/018f0000-0000-7100-0000-000000000009/policy.orna": policy},
                 )
-                with self.assertRaises(extractor.ExtractionError):
+                with self.assertRaisesRegex(extractor.ExtractionError, "is not a storage policy"):
                     legacy_walk(repository)
+
+    def test_a_compact_table_that_fails_verification_is_refused(self) -> None:
+        table = "018f0000-0000-7100-0000-000000000009"
+        base = f".orna/storage/{table}/"
+        repository = self.repository(
+            "compact-manifest-mismatch",
+            {
+                base + "policy.orna": f'{{placement: "compact", table: "{table}"}}'.encode(),
+                base + "manifest.orna": f'{{profile: "other", table: "{table}", schema: "00", next_generation: 1, shards: []}}'.encode(),
+            },
+        )
+        with self.assertRaisesRegex(extractor.ExtractionError, "manifest profile or table differs"):
+            legacy_walk(repository)
 
 
 if __name__ == "__main__":
