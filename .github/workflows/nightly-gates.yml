@@ -5,8 +5,9 @@ name: Nightly gates
 # "Evidence record per gate"):
 # - `cargo test --workspace --no-fail-fast`, split into four runners by package
 #   for disk and time. The four shards cover every workspace package except
-#   orna-live and orna-conformance, which live-v1-tests.yml and
-#   conformance-v1-tests.yml gate on every pull request.
+#   orna-conformance, which conformance-v1-tests.yml gates on every pull request.
+#   orna-live also runs on every pull request in live-v1-tests.yml; the rest
+#   shard records its tests here so nightly evidence executes them too.
 # - The Gate D crash matrix (feature crash-barriers). Gate B's 10 GiB import is
 #   not run here; it lives in cli-gate-b.yml.
 # - The Gate C one-million-row case (row_store_scale, #[ignore], needs
@@ -110,7 +111,6 @@ jobs:
             packages: >-
               --workspace --exclude orna-cli --exclude orna-evaluator
               --exclude orna-sys --exclude orna-conformance
-              --exclude orna-live
             recorder: ""
     steps:
       - name: Check out the tested revision
