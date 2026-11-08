@@ -37,6 +37,7 @@ from scripts.gate_evidence import (
     known_failures_for,
     load_baseline,
     load_items,
+    missing_selected_tests,
     cargo_test_command,
     main,
     parse_timeout_override,
@@ -1216,6 +1217,35 @@ class RequiredFeatureTests(unittest.TestCase):
                 and required <= {name for value in option_values(words, "--features") for name in value.split(",")}
             ]
             self.assertTrue(runs, f"job {job} does not run {package} {label} with features {sorted(required)}")
+
+
+class SelectorSourceTests(unittest.TestCase):
+    def test_a_selector_naming_a_module_or_function_absent_from_its_source_is_reported(self) -> None:
+        # R1: a renamed or removed test must not stay selected by a gate item.
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "crates" / "orna-demo" / "src"
+            source.mkdir(parents=True)
+            (source / "lib.rs").write_text("mod remote_tests {\n    fn present_case() {}\n}\n", encoding="utf-8")
+            items = [
+                {
+                    "id": "H9",
+                    "select": [
+                        {"package": "orna-demo", "target": "lib", "test": "remote_tests::present_case"},
+                        {"package": "orna-demo", "target": "lib", "test": "remote_tests::renamed_case"},
+                        {"package": "orna-demo", "target": "lib", "test": "gone_module::present_case"},
+                        {"package": "orna-demo", "target": "lib", "prefix": "remote_tests::"},
+                    ],
+                }
+            ]
+            self.assertEqual(
+                missing_selected_tests(items, root),
+                ["H9: orna-demo remote_tests::renamed_case", "H9: orna-demo gone_module::present_case"],
+            )
+
+    def test_every_test_selector_in_the_gate_manifest_resolves_in_source(self) -> None:
+        # R2: the real manifest must name only tests that exist in the crates it selects.
+        self.assertEqual(missing_selected_tests(load_items(ITEMS).items, Path(__file__).resolve().parent.parent), [])
 
 
 if __name__ == "__main__":

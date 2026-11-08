@@ -371,6 +371,9 @@ pub enum Reproducibility {
     /// The retained output is replayed; the external service is not called again.
     RetainedOutputReplay(RetainedArtifact),
     /// The analysis is re-run, and only with the retained model artifacts identified here.
+    /// Limitation: the payload is the same `RetainedArtifact` type as `RetainedOutputReplay`, so
+    /// the type does not prove the identity names model artifacts rather than a retained output.
+    /// Callers must supply the model-artifact identity; a distinct model-artifact type is open.
     ReExecutionWithRetainedArtifacts(RetainedArtifact),
     NotReproducible,
 }
@@ -649,6 +652,69 @@ mod remote_analysis_tests {
                 .unwrap()
                 .identity(),
             "model:sha256:abc"
+        );
+    }
+
+    #[test]
+    fn cost_bounds_hold_at_u64_maximum() {
+        let unbounded = RemoteAnalysisRequest::new(
+            allowed_within(u64::MAX),
+            SNAPSHOT,
+            disclosed(),
+            u64::MAX,
+            CostAcknowledgement::Given,
+        );
+        assert!(unbounded.is_allowed());
+        assert_eq!(unbounded.declared_cost_units(), u64::MAX);
+
+        let capped = RemoteAnalysisRequest::new(
+            allowed_within(u64::MAX - 1),
+            SNAPSHOT,
+            disclosed(),
+            u64::MAX,
+            CostAcknowledgement::Given,
+        );
+        assert_eq!(
+            capped.decision(),
+            RemoteAnalysisDecision::DeniedCostExceedsPolicy
+        );
+        assert!(capped.disclosed_data().is_empty());
+    }
+
+    #[test]
+    fn zero_ceiling_refuses_any_cost_even_when_acknowledged() {
+        let request = RemoteAnalysisRequest::new(
+            allowed_within(0),
+            SNAPSHOT,
+            disclosed(),
+            1,
+            CostAcknowledgement::Given,
+        );
+        assert_eq!(
+            request.decision(),
+            RemoteAnalysisDecision::DeniedCostExceedsPolicy
+        );
+        assert!(request.disclosed_data().is_empty());
+        assert_eq!(
+            RecordedRemoteAnalysis::record(&request, Reproducibility::NotReproducible),
+            Err(RemoteAnalysisRecordError::NotAllowed(
+                RemoteAnalysisDecision::DeniedCostExceedsPolicy
+            ))
+        );
+    }
+
+    #[test]
+    fn ceiling_check_takes_precedence_over_acknowledgement() {
+        let request = RemoteAnalysisRequest::new(
+            allowed_within(10),
+            SNAPSHOT,
+            disclosed(),
+            11,
+            CostAcknowledgement::Withheld,
+        );
+        assert_eq!(
+            request.decision(),
+            RemoteAnalysisDecision::DeniedCostExceedsPolicy
         );
     }
 }
