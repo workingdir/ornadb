@@ -543,8 +543,19 @@ limitations = ["The served table list is checked for user tables only; system ta
 gate = "G"
 id = "G2"
 title = "Input and Run submit over the production API, returning typed output"
-select = [{ record = "workspace-cli", package = "orna-cli", target = "test:devtools_app", test = "devtools_lists_tables_runs_input_and_refreshes" }]
-limitations = ["No POST run is sent and no typed output is checked (ornadb-5il1.493)."]
+select = [
+  { record = "workspace-cli", package = "orna-cli", target = "test:devtools_app", test = "run_action_evaluates_the_form_input_over_http" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:devtools_app", test = "run_action_renders_an_input_error_as_its_code" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:devtools_app", test = "run_action_refuses_cross_origin_and_serves_only_post" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:devtools_app", test = "run_action_escapes_the_rendered_value" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:devtools_app", test = "run_action_requires_a_form_body" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:devtools_app", test = "run_action_answers_an_unoffered_action_with_not_found" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:devtools_app", test = "run_action_refuses_an_oversize_input" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:devtools_app", test = "run_action_refuses_a_malformed_form_value" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:devtools_app", test = "run_action_refuses_a_foreign_host" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:devtools_app", test = "run_action_refuses_an_effectful_input" },
+]
+limitations = ["Proven over a real serve process: input 1 + 1 is served as 2, a parse error renders its code, a malformed form value, an unoffered action, an oversize input, a foreign Host and an effectful input are refused with their stable codes, cross-origin and originless POSTs and GET are refused, and a rendered value is escaped. Not proven over HTTP: the busy-session 409 path (unit test `a_busy_console_refuses_the_input_at_once` in orna-cli only, not selected); the Refresh control, which posts the same route and evaluates the query field (ornadb-5il1.494); a project's working tree rather than its committed HEAD (startup-admitted)."]
 
 [[item]]
 gate = "G"
