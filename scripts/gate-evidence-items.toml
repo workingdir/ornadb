@@ -88,7 +88,7 @@ select = [
   { record = "workspace-cli", package = "orna-cli", target = "test:legacy_fixture_bundle", test = "builder_regenerates_the_committed_bundle_byte_for_byte" },
 ]
 limitations = [
-  "Key-only compact rows and 1.0.0 loose row units from a bundle built by the in-repo test encoder, not a 1.0.0 golden; key-bound min_key/max_key encoding is unresolved against the 1.0.0 key-schema text; stored columns and row values beyond the key-only record shape are not asserted; Blob rows are absent because the format-1 compact decoder admits no blob column (ornadb-5il1.192, ornadb-5il1.191).",
+  "Key-only compact rows (Int, Str, Date), one Int-keyed Blob table whose unannotated BYTE_ARRAY value column is read as payload bytes only (1.0.0 23-storage.md:184; the octet-stream default is a migration-layer step, not asserted here), and 1.0.0 loose row units, all from a bundle built by the in-repo test encoder, not a 1.0.0 golden; key-bound min_key/max_key encoding is unresolved against the 1.0.0 key-schema text; no other stored value columns and no row values beyond the key and Blob payload are asserted; state.db and persistent consumers are not covered; ORNA-UPGRADE-008 is not asserted (ornadb-5il1.192, ornadb-5il1.191).",
 ]
 
 [[item]]
@@ -499,7 +499,7 @@ select = [
   { record = "workspace-rest", package = "orna-repository", target = "test:migration_copy", test = "populated_format2_dirty_workspace_is_preserved_in_copy" },
 ]
 limitations = [
-  "A library call decodes a format-1 compact commit and its loose rows from the committed bundle, but no user command does, the user still supplies the annotation-default count, and no legacy Blob row exists to derive it from because the format-1 compact decoder admits no blob column (ornadb-5il1.184, ornadb-5il1.192, ornadb-5il1.398).",
+  "A library call decodes a format-1 compact commit and its loose rows from the committed bundle, but no user command does, and the user still supplies the annotation-default count: the bundle's Blob rows are unannotated bytes (1.0.0 23-storage.md:184), so no annotation inventory is derived from them (ornadb-5il1.184, ornadb-5il1.192, ornadb-5il1.398).",
 ]
 
 [[item]]
