@@ -442,7 +442,7 @@ impl Run {
             .to_owned()
     }
 
-    fn describe(&self) -> String {
+    pub fn describe(&self) -> String {
         let status = self.code.map_or_else(
             || "no exit status".to_owned(),
             |code| format!("exit {code}"),

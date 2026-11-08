@@ -51112,6 +51112,140 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn empty_row_key_migration_runs_on_reopen_and_admits_empty_keys() {
+        let (_temp, repo) = repository();
+        let legacy_digest: String = Sha256::digest([0u8])
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        {
+            let state = open_state(&repo).await;
+            state
+                .connection
+                .execute_batch(&format!(
+                    "DROP TABLE table_row;
+                     CREATE TABLE table_row (
+                        table_id TEXT NOT NULL CHECK (length(table_id) > 0),
+                        row_key BLOB NOT NULL CHECK (length(row_key) > 0),
+                        row_value BLOB NOT NULL,
+                        row_digest BLOB NOT NULL CHECK (length(row_digest) = 32),
+                        PRIMARY KEY (table_id, row_key)
+                     );
+                     INSERT INTO table_row (table_id, row_key, row_value, row_digest)
+                        VALUES ('legacy', X'6b', X'00', X'{legacy_digest}');
+                     DROP TABLE runtime_table_history;
+                     CREATE TABLE runtime_table_history (
+                        mutation_sequence INTEGER NOT NULL CHECK (mutation_sequence >= 0),
+                        table_id TEXT NOT NULL CHECK (length(table_id) > 0),
+                        row_key BLOB NOT NULL CHECK (length(row_key) > 0),
+                        row_value BLOB,
+                        row_digest BLOB,
+                        deleted INTEGER NOT NULL CHECK (deleted IN (0, 1)),
+                        PRIMARY KEY (mutation_sequence, table_id, row_key),
+                        CHECK (
+                            (deleted = 1 AND row_value IS NULL AND row_digest IS NULL)
+                            OR (deleted = 0 AND row_value IS NOT NULL AND length(row_digest) = 32)
+                        )
+                     );
+                     INSERT INTO runtime_table_history
+                        (mutation_sequence, table_id, row_key, row_value, row_digest, deleted)
+                        VALUES (0, 'legacy', X'6b', X'00', X'{legacy_digest}', 0);
+                     CREATE INDEX IF NOT EXISTS runtime_table_history_lookup
+                        ON runtime_table_history (table_id, row_key, mutation_sequence);"
+                ))
+                .await
+                .unwrap();
+        }
+
+        let reopened = open_state(&repo).await;
+        let count = |connection: &libsql::Connection, sql: &'static str| {
+            let connection = connection.clone();
+            async move {
+                let mut rows = connection.query(sql, ()).await.unwrap();
+                rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
+            }
+        };
+        assert_eq!(
+            count(
+                &reopened.connection,
+                "SELECT COUNT(*) FROM sqlite_master WHERE sql LIKE '%length(row_key) > 0%'",
+            )
+            .await,
+            0,
+            "reopening must drop the legacy row_key CHECK from both tables"
+        );
+        assert_eq!(
+            count(
+                &reopened.connection,
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'runtime_table_history_lookup'",
+            )
+            .await,
+            1,
+            "the history lookup index must be recreated by the rebuild"
+        );
+        assert_eq!(
+            count(
+                &reopened.connection,
+                "SELECT COUNT(*) FROM table_row WHERE table_id = 'legacy' AND row_key = X'6b'",
+            )
+            .await,
+            1,
+            "the legacy table_row row must survive the rebuild"
+        );
+        assert_eq!(
+            count(
+                &reopened.connection,
+                "SELECT COUNT(*) FROM runtime_table_history WHERE table_id = 'legacy' AND row_key = X'6b'",
+            )
+            .await,
+            1,
+            "the legacy history row must survive the rebuild"
+        );
+        assert_eq!(
+            count(
+                &reopened.connection,
+                "SELECT COUNT(*) FROM runtime_schema_migration WHERE migration = 'empty-row-key-v1'",
+            )
+            .await,
+            1,
+            "the rebuild must record the empty-row-key-v1 marker"
+        );
+        reopened
+            .connection
+            .execute(
+                &format!(
+                    "INSERT INTO table_row (table_id, row_key, row_value, row_digest)
+                     VALUES ('legacy', X'', X'01', X'{legacy_digest}')"
+                ),
+                (),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened.committed_table_row("legacy", &[]).await.unwrap(),
+            Some(vec![1]),
+            "an empty key must be admitted and read back through the table API"
+        );
+        drop(reopened);
+
+        let again = open_state(&repo).await;
+        assert_eq!(
+            count(
+                &again.connection,
+                "SELECT COUNT(*) FROM runtime_schema_migration WHERE migration = 'empty-row-key-v1'",
+            )
+            .await,
+            1,
+            "a second open must not record the marker again"
+        );
+        assert_eq!(
+            again.committed_table_row("legacy", &[]).await.unwrap(),
+            Some(vec![1]),
+            "the empty-key row must persist across a second open"
+        );
+    }
+
+    #[tokio::test]
     async fn populated_legacy_catalogue_kind_domain_migrates_without_losing_rows() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
