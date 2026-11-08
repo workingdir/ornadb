@@ -630,6 +630,46 @@ fn extractor_matches_the_real_reader_on_a_migrated_golden_copy() {
         );
     }
 
+    // The editable table is read from its committed loose row units (ORNA-ROW-001..004). The golden
+    // bundle commits two rows of `contacts/Contact`, each with Str and List<Str> fields and no Blob field.
+    let contacts = legacy[0]["tables"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|table| table["row_directory"] == "contacts/Contact")
+        .expect("the legacy dependency reports contacts/Contact");
+    assert_eq!(
+        contacts["status"], "extracted",
+        "contacts/Contact: the schema is read"
+    );
+    assert_eq!(
+        contacts["loose_row_files"],
+        serde_json::json!(2),
+        "contacts/Contact: both row units are listed"
+    );
+    let contact_rows = contacts["rows"].as_array().unwrap();
+    let contact_keys: Vec<Value> = contact_rows.iter().map(|row| row["key"].clone()).collect();
+    assert_eq!(
+        contact_keys,
+        vec![
+            serde_json::json!("alice-smith"),
+            serde_json::json!("bob-jones")
+        ],
+        "contacts/Contact: the row keys"
+    );
+    assert_eq!(contact_rows[0]["path"], "contacts/Contact/alice-smith.orna");
+    assert_eq!(
+        contact_rows[0]["fields"],
+        serde_json::json!({"name": "Alice Smith", "emails": ["alice@example.com"]}),
+        "alice-smith: the committed fields"
+    );
+    assert_eq!(contact_rows[1]["path"], "contacts/Contact/bob-jones.orna");
+    assert_eq!(
+        contact_rows[1]["fields"],
+        serde_json::json!({"name": "Bob Jones", "emails": []}),
+        "bob-jones: the committed fields"
+    );
+
     let relations = report["snapshot"]["relations"].as_array().unwrap();
     let mut extracted_ids: Vec<&str> = relations
         .iter()
