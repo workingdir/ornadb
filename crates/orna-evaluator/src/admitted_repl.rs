@@ -975,14 +975,17 @@ fn register_module_import_alias(
     target: &str,
 ) -> Result<(), ReplError> {
     let key = module_function_alias_key(namespace, local_name);
-    // Two bindings of one bare name to different functions are ambiguous. The
-    // committed semantic layer reports conflicting explicit imports as
-    // `DIAG_AMBIGUOUS` (`insert_explicit`); the REPL does the same at load so
-    // that import order never selects a winner. The root `pub fn` aliases are
-    // registered before root imports, so an import of the same name conflicts
-    // with the root function too. Re-binding the same target is not a conflict.
+    // Root-module bindings are strict: two bindings of one bare name to different
+    // functions are ambiguous (`DIAG_AMBIGUOUS`), and the root `pub fn` aliases are
+    // registered before root imports, so an import of the same name conflicts with
+    // the root function too. Re-binding the same target is not a conflict. Other
+    // namespaces keep first-wins: a module may import one bare name from two
+    // siblings and reach each through its qualified spelling (the snapshot
+    // dependency-graph fixtures rely on this).
     match aliases.get(&key) {
-        Some(existing) if existing != target => Err(ReplError::semantic(DIAG_AMBIGUOUS)),
+        Some(existing) if existing != target && namespace == "main" => {
+            Err(ReplError::semantic(DIAG_AMBIGUOUS))
+        }
         Some(_) => Ok(()),
         None => {
             aliases.insert(key, target.to_owned());
