@@ -69,6 +69,7 @@ mod contextual_snapshot;
 mod repl_transaction;
 mod table_reference;
 pub use browser_profile::execute_browser_profile;
+pub use contextual_snapshot::evaluate_contextual_page_read;
 pub use contextual_snapshot::evaluate_contextual_snapshot_read;
 pub use repl_transaction::{ReplEvaluationFailure, ReplTransactionScope};
 mod format3_store;
@@ -1605,6 +1606,10 @@ pub struct SourceMutationEffectHandler {
     sys_host: Option<SysHostAttachment>,
     /// Pins `sys.explain` inputs to the activation's snapshot.
     explain_catalogue: Option<orna_evaluator::ActivationExplainCatalogue>,
+    /// Format-3 rows of Blob-holding tables, decoded in the snapshot's owner
+    /// context. Served only by the contextual page read; a table absent here
+    /// is read through `captured_rows` as before.
+    context_table_rows: BTreeMap<String, BTreeMap<Vec<u8>, ContextValue>>,
 }
 
 impl SourceMutationEffectHandler {
@@ -1629,6 +1634,7 @@ impl SourceMutationEffectHandler {
             protected_field_pins: Vec::new(),
             sys_host: None,
             explain_catalogue: None,
+            context_table_rows: BTreeMap::new(),
         }
     }
 
