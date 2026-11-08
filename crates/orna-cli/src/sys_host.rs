@@ -48,3 +48,52 @@ pub(crate) fn std_snapshot_pin(project: &LoadedProject) -> StdSnapshotPin {
         Err(_) => StdSnapshotPin::Unreadable,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::sys_host_context;
+    use orna_application::{ApplicationAuthority, ApplicationLiveAdapter};
+    use orna_evaluator::Limits;
+    use orna_live::LiveApplication;
+    use orna_runtime::RuntimeIdentity;
+    use orna_semantic::Catalogue;
+    use orna_sys::{RuntimeMode, StdSnapshotPin};
+    use std::path::Path;
+
+    fn identity() -> RuntimeIdentity {
+        RuntimeIdentity {
+            database_id: [1; 16],
+            repository_id: [2; 16],
+        }
+    }
+
+    #[test]
+    fn detached_adapter_trusts_controlled_effect_reports() {
+        let adapter = ApplicationLiveAdapter::new(ApplicationAuthority::new(
+            Catalogue::authoritative_core(),
+            Limits::default(),
+        ));
+        assert!(
+            adapter.trusts_controlled_effect_reports(),
+            "an adapter with no bound sys host reports only its own controlled effects"
+        );
+    }
+
+    #[test]
+    fn host_bound_adapter_never_trusts_controlled_effect_reports() {
+        let context = sys_host_context(
+            Path::new("."),
+            identity(),
+            RuntimeMode::Serve,
+            StdSnapshotPin::Unpinned,
+        );
+        let adapter = ApplicationLiveAdapter::new(
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default())
+                .with_sys_host_context(context),
+        );
+        assert!(
+            !adapter.trusts_controlled_effect_reports(),
+            "a bound sys host can reach state the handler does not observe, so its reports are downgraded"
+        );
+    }
+}
