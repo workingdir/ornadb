@@ -462,7 +462,7 @@ fn corrupt_committed_row_node_is_refused_without_a_value() {
 const BLOB_SOURCE: &str = "pub table media(id: Str) { content: Blob, }\n\npub fn store(id: Str, content: Blob) = media.insert({ id: id, content: content });\n\npub fn serve() = media | count();\n";
 
 #[test]
-fn committed_blob_rows_are_refused_without_a_value() {
+fn committed_blob_rows_are_served_as_contextual_values() {
     let directory = TempDir::new().expect("create the test directory");
     let root = committed_project(&directory, BLOB_SOURCE);
     let pixel = fs::read(concat!(
@@ -487,10 +487,6 @@ fn committed_blob_rows_are_refused_without_a_value() {
     publish(&root);
     let (_server, address) = start_server(&root);
     let (status, body) = http_get(&address, "/").expect("GET /");
-    assert_eq!(status, 500, "body: {body}");
-    assert!(
-        body.contains("serve.table_read_unsupported"),
-        "body: {body}"
-    );
-    assert!(!body.contains(": Int"), "no partial value: {body}");
+    assert_eq!(status, 200, "body: {body}");
+    assert_eq!(body.trim(), "1 : Int", "the committed blob row counts once");
 }

@@ -303,9 +303,7 @@ pub fn evaluate_contextual_page_read(
     )
     .map_err(|error| ApplicationError::Evaluation(error.code().to_owned()))?;
     if !handler.mutations.is_empty() {
-        return Err(ApplicationError::Runtime(
-            "a contextual read staged a mutation".into(),
-        ));
+        return Err(ApplicationError::ReadStagedMutation);
     }
     Ok(value)
 }
