@@ -600,7 +600,8 @@ limitations = ["Native execution only. The Wasm build of the same evaluator is c
 gate = "H"
 id = "H5"
 title = "Generated host-only JS has executed tests"
-limitations = ["No executed test covers generated host-only JS, and none is mapped (ornadb-w2gdn)."]
+select = [{ record = "workspace-rest", package = "orna-application", target = "test:browser_profile_host_surface", test = "browser_profile_host_js_binds_platform_surface_only" }]
+limitations = ["No JS generator exists in the repository. The test runs the shipped src/browser-profile-host.mjs against a stub evaluator and proves its touched-export set and network isolation, not the real Wasm import surface."]
 
 [[item]]
 gate = "H"
