@@ -608,6 +608,7 @@ gate = "G"
 id = "G8"
 title = "Remove devtools and keep local queries, mount and content IO working"
 select = [{ record = "workspace-cli", package = "orna-cli", target = "test:serve_devtools_removal", test = "devtools_removal_keeps_local_query_mount_and_content_io" }]
+limitations = ["The test returns early and passes without running when FUSE prerequisites are unavailable and ORNA_REQUIRE_FUSE is unset (support/editor_mount.rs require_fuse_or_skip); the mount leg is proven only in runs with ORNA_REQUIRE_FUSE=1 on a host with /dev/fuse and fusermount."]
 
 [[item]]
 gate = "G"
