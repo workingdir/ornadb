@@ -295,12 +295,15 @@ fn run_action_refuses_a_foreign_host() {
 }
 
 #[test]
-// Specified: Gate G / DESIGN S5a; an effectful input is refused by the served console, not evaluated.
+// Specified: Gate G / DESIGN S5a; an effectful input is refused by the served console, not evaluated, and leaves the served page unchanged.
 fn run_action_refuses_an_effectful_input() {
     let snapshot = standard_snapshot();
     let project = devtools_project(snapshot.path());
     let (_server, address) = start(project.path());
     let origin = format!("http://{address}");
+
+    let before = get(&address, "/").expect("read the page before the input");
+    assert_eq!(before.status, 200, "{}", before.body);
 
     let reply = post_form(
         &address,
@@ -314,6 +317,74 @@ fn run_action_refuses_an_effectful_input() {
         "the served console refuses the effect: {}",
         reply.body
     );
+
+    let after = get(&address, "/").expect("read the page after the input");
+    assert_eq!(after.status, 200, "{}", after.body);
+    assert_eq!(
+        after.body, before.body,
+        "a refused effect leaves the served tables unchanged"
+    );
+}
+
+#[test]
+// Specified: Gate G / DESIGN S5a; an action body over its route limit is refused from the declared length, before the body is read.
+fn run_action_refuses_a_body_over_its_limit_before_reading_it() {
+    let snapshot = standard_snapshot();
+    let project = devtools_project(snapshot.path());
+    let (_server, address) = start(project.path());
+    let origin = format!("http://{address}");
+
+    // Only the head is sent: a refusal that waited for the body would time out.
+    let declared = 60 * 1024;
+    let head = format!(
+        "POST /action/devtools.run HTTP/1.1\r\nHost: {address}\r\nOrigin: {origin}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {declared}\r\nConnection: close\r\n\r\n"
+    );
+    let mut stream = TcpStream::connect(&address).expect("connect to the serving process");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("read timeout");
+    stream
+        .write_all(head.as_bytes())
+        .expect("send the action head");
+    let mut raw = Vec::new();
+    stream
+        .read_to_end(&mut raw)
+        .expect("the refusal arrives before any body");
+    let reply = parse_reply(&raw);
+    assert_eq!(reply.status, 413, "{}", reply.body);
+    assert_eq!(reply.body, r#"{"error":"payload_too_large"}"#);
+}
+
+/// A Run of 1,000 `heavy(60)` terms: each is 60 nested `spin(50)` calls, under
+/// the call-depth limit, and the list literal keeps the parse shallow. The Run
+/// takes about a third of a second end to end on the reference machine, so the
+/// page request below is sent while it is still evaluating.
+const SPIN_DECLARATION: &str = "pub fn spin(n: Int): Int = if n == 0 { 0 } else { 1 + spin(n - 1) };\npub fn heavy(n: Int): Int = if n == 0 { 0 } else { spin(50) + heavy(n - 1) };\n";
+
+#[test]
+// Specified: Gate G / DESIGN S5a; the page answers while a Run is still evaluating.
+fn get_root_answers_while_a_long_run_evaluates() {
+    let snapshot = standard_snapshot();
+    let project = devtools_project_declaring(snapshot.path(), SPIN_DECLARATION);
+    let (_server, address) = start(project.path());
+    let origin = format!("http://{address}");
+    let query = format!("[{}0]", "main.heavy(60), ".repeat(1_000));
+    let body = format!("query={query}");
+
+    let run = thread::spawn({
+        let address = address.clone();
+        move || post_form(&address, "/action/devtools.run", Some(&origin), &body)
+    });
+    thread::sleep(Duration::from_millis(100));
+    let page = get(&address, "/").expect("read the page during the run");
+    assert_eq!(page.status, 200, "{}", page.body);
+    assert!(
+        !run.is_finished(),
+        "the page must answer while the Run is still evaluating"
+    );
+    let reply = run.join().expect("the Run thread");
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert!(reply.body.contains("Array"), "{}", reply.body);
 }
 
 #[test]
