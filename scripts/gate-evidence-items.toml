@@ -517,10 +517,11 @@ id = "F5"
 title = "With original remotes disabled, rebuild both snapshots from a complete superproject and dependency export with an independent extractor"
 select = [
   { record = "workspace-rest", package = "orna-repository", target = "test:complete_copy", test = "complete_copy_reconstructs_both_snapshots_offline_with_an_independent_extractor" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:independent_extractor_cli", test = "extractor_matches_the_real_reader_on_a_migrated_golden_copy" },
 ]
 limitations = [
   "Both snapshots are format-3 commits whose store is a text file, and the extractor checks Git object IDs only (ornadb-5il1.193, ornadb-5il1.192).",
-  "Legacy repository-format-1 dependencies are read by a standard-library walker in scripts/orna_extract.py and recorded under legacy_dependencies. Loose rows, storage placements and compact table rows are checked by scripts.test_orna_extract (LegacyDependencyTests) and by extractor_matches_the_real_reader_on_a_migrated_golden_copy in crates/orna-cli/tests/independent_extractor_cli.rs; neither is a selected record. Compact table Blob values are written to blobs/ under their SHA-256 and checked against the golden bytes by scripts.test_orna_extract; loose-row Blob payloads (ORR-2 sha256 references to OGB-1 roots) are not extracted. No selected test exercises the legacy path, so F5 is not mapped to it (ornadb-v18eb.3).",
+  "The legacy repository-format-1 dependency is read by a standard-library walker in scripts/orna_extract.py, with its decoders in scripts/orna_legacy.py and scripts/orna_compact.py. The selected golden test checks that dependency's compact table rows, their keys and deletion flags, and the Blob length and SHA-256 of compact-table Blob values, against the real reader's golden values. It does not check loose rows of a legacy dependency or their Blob payloads (ORR-2 sha256 references, resolved through the OGB-1 root at .orna/blobs/<2>/<62>); those are checked only by scripts.test_orna_extract (LegacyDependencyTests, LooseRowBlobTests), which is not a selected record. The walker and its decoders are shared with the extractor's own tests, so no independent second decoder checks them (ornadb-v18eb.3.2, ornadb-v18eb.3.4).",
 ]
 
 [[item]]
