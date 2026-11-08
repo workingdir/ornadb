@@ -526,8 +526,8 @@ limitations = [
 gate = "G"
 id = "G1"
 title = "Table list over the production API, read from the admitted catalogue"
-select = [{ record = "workspace-cli", package = "orna-cli", target = "test:devtools_app", test = "devtools_lists_tables_runs_input_and_refreshes" }]
-limitations = ["The test asserts that a table element is present, not the admitted table names (ornadb-5il1.492)."]
+select = [{ record = "workspace-cli", package = "orna-cli", target = "test:devtools_app", test = "devtools_lists_exactly_the_admitted_table_names" }]
+limitations = ["The served table list is checked for user tables only; system tables in the catalogue are not asserted."]
 
 [[item]]
 gate = "G"
