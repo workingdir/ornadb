@@ -11,37 +11,58 @@ use std::fmt::Write as _;
 use orna_foundation::OvbRaw;
 use orna_value::{ContextValue, ROV3_BLOB_TAG};
 
+/// A rendered page and the action identifiers its activate buttons submit to.
+/// The serving route answers `POST /action/<id>` only for an identifier listed
+/// here, so the list is built from the nodes that were emitted, never from the
+/// page text.
+pub struct RenderedPage {
+    pub html: String,
+    pub actions: Vec<String>,
+}
+
 /// Renders a value read through a Format-3 context as HTML when it is a
 /// `std.ui` node, or `None` so the caller can fall back to Inspect.
 /// `media_commit` is the HEAD commit that Blob nodes link to through
 /// `/media/<commit>/<descriptor>`; without it a Blob node has no route and the
 /// whole value falls back to Inspect.
-pub fn render_ui_html(value: &ContextValue, media_commit: Option<&str>) -> Option<String> {
-    render_value_html(value.raw(), media_commit)
+pub fn render_ui_page(value: &ContextValue, media_commit: Option<&str>) -> Option<RenderedPage> {
+    render_value_page(value.raw(), media_commit)
 }
 
 /// Renders a canonical (OVB-1) value's raw form the same way. A canonical value
 /// cannot hold a Blob node, so the serve path renders it without copying it
 /// into a context.
-pub fn render_value_html(raw: &OvbRaw, media_commit: Option<&str>) -> Option<String> {
+pub fn render_value_page(raw: &OvbRaw, media_commit: Option<&str>) -> Option<RenderedPage> {
     let mut html = String::new();
-    render_node(raw, &mut html, 0, media_commit)?;
+    let mut actions = Vec::new();
+    render_node(raw, &mut html, &mut actions, 0, media_commit)?;
     // An activate button names its action in `formaction`. Such buttons submit
     // the enclosing form, so a page that has any becomes one POST form. A page
     // that already holds a `form` node cannot nest a second form; it falls back
     // to Inspect rather than emit markup a browser would split.
-    if html.contains("formaction=\"") {
+    if !actions.is_empty() {
         if html.contains("<form ") {
             return None;
         }
-        return Some(format!("<form method=\"post\">{html}</form>"));
+        html = format!("<form method=\"post\">{html}</form>");
     }
-    Some(html)
+    Some(RenderedPage { html, actions })
+}
+
+/// Renders a value the same way and returns only its HTML.
+pub fn render_value_html(raw: &OvbRaw, media_commit: Option<&str>) -> Option<String> {
+    render_value_page(raw, media_commit).map(|page| page.html)
 }
 
 const MAX_DEPTH: usize = 32;
 
-fn render_node(raw: &OvbRaw, out: &mut String, depth: usize, media: Option<&str>) -> Option<()> {
+fn render_node(
+    raw: &OvbRaw,
+    out: &mut String,
+    actions: &mut Vec<String>,
+    depth: usize,
+    media: Option<&str>,
+) -> Option<()> {
     if depth >= MAX_DEPTH {
         return None;
     }
@@ -71,18 +92,18 @@ fn render_node(raw: &OvbRaw, out: &mut String, depth: usize, media: Option<&str>
         "rows" | "cols" | "stack" => {
             out.push_str("<div>");
             for child in children {
-                render_node(child, out, depth + 1, media)?;
+                render_node(child, out, actions, depth + 1, media)?;
             }
             out.push_str("</div>");
         }
         "details" => {
             out.push_str("<dl>");
             for child in children {
-                render_node(child, out, depth + 1, media)?;
+                render_node(child, out, actions, depth + 1, media)?;
             }
             out.push_str("</dl>");
         }
-        "table" => render_table_node(properties, children, out, depth, media)?,
+        "table" => render_table_node(properties, children, out, actions, depth, media)?,
         "image" => {
             let href = media_href(properties, "blob", media)?;
             out.push_str("<img src=\"");
@@ -110,11 +131,11 @@ fn render_node(raw: &OvbRaw, out: &mut String, depth: usize, media: Option<&str>
             push_value(properties, "source", out)?;
             out.push_str("</code></pre>");
         }
-        "button" => render_button(node, properties, out)?,
+        "button" => render_button(node, properties, out, actions)?,
         "form" => {
             out.push_str("<form method=\"get\">");
             for child in children {
-                render_node(child, out, depth + 1, media)?;
+                render_node(child, out, actions, depth + 1, media)?;
             }
             out.push_str("</form>");
         }
@@ -136,17 +157,20 @@ fn render_node(raw: &OvbRaw, out: &mut String, depth: usize, media: Option<&str>
 }
 
 /// An activate button submits to its action through `formaction`; a button with
-/// no activate action is a plain submit button.
+/// no activate action is a plain submit button. The action it names is recorded
+/// in `actions`, the only list the serving route trusts.
 fn render_button(
     node: &[(OvbRaw, OvbRaw)],
     properties: &[(OvbRaw, OvbRaw)],
     out: &mut String,
+    actions: &mut Vec<String>,
 ) -> Option<()> {
     match activate_action_id(node) {
         Some(action_id) => {
             out.push_str("<button type=\"submit\" formaction=\"/action/");
             push_escaped(&action_id, out);
             out.push_str("\">");
+            actions.push(action_id);
         }
         None => out.push_str("<button type=\"submit\">"),
     }
@@ -210,6 +234,7 @@ fn render_table_node(
     properties: &[(OvbRaw, OvbRaw)],
     children: &[OvbRaw],
     out: &mut String,
+    actions: &mut Vec<String>,
     depth: usize,
     media: Option<&str>,
 ) -> Option<()> {
@@ -249,7 +274,7 @@ fn render_table_node(
         out.push_str("</tr>");
     }
     for child in children {
-        render_node(child, out, depth + 1, media)?;
+        render_node(child, out, actions, depth + 1, media)?;
     }
     out.push_str("</tbody></table>");
     Some(())
@@ -572,7 +597,7 @@ mod tests {
     fn render_at(raw: OvbRaw, commit: Option<&str>) -> Option<String> {
         let value = ContextValue::new_in_context(&format3_context(), ValueFormat::Rov3, raw)
             .expect("blob node is a valid ROV-3 value");
-        render_ui_html(&value, commit)
+        render_value_html(value.raw(), commit)
     }
 
     #[test]
