@@ -381,7 +381,13 @@ pub fn contextual_table_rows(
     let mut rows = BTreeMap::new();
     for (runtime_key, storage_row) in &table.rows {
         let key_bytes = evaluator_key_from_runtime(runtime_key, text_primary_key)?;
-        let record = contextual_record(&key_names, &key_bytes, &table.storage_order, storage_row)?;
+        let record = contextual_record(
+            &key_names,
+            &key_bytes,
+            schema,
+            &table.storage_order,
+            storage_row,
+        )?;
         let row = ContextValue::decode_in_context(&record, ValueFormat::Rov3, &context)
             .map_err(|_| TableStorageError)?;
         if rows.insert(key_bytes, row).is_some() {
@@ -391,25 +397,50 @@ pub fn contextual_table_rows(
     Ok(rows.into_iter().collect())
 }
 
+/// Checks one committed tuple the way the retired `stored_rows_hold_blob` scan
+/// did, then returns its values in storage order. The tuple must decode as a
+/// canonical array of the storage order's length, every stored field must
+/// have a schema type, and a Blob-holding field must carry a well-formed
+/// optional wrapper. A present Blob reference must be an ROV-3 reference
+/// (`blob_metadata_from_raw`, the same check `stored_blob_references` makes);
+/// its payload shape is then validated by the ROV-3 record decode.
+fn committed_stored_values(
+    schema: &TableSchema,
+    storage_order: &[String],
+    storage_row: &[u8],
+) -> Result<Vec<Raw>, TableStorageError> {
+    let Raw::Array(values) =
+        decode_canonical_storage_value(storage_row).map_err(|_| TableStorageError)?
+    else {
+        return Err(TableStorageError);
+    };
+    if values.len() != storage_order.len() {
+        return Err(TableStorageError);
+    }
+    for (value, name) in values.iter().zip(storage_order) {
+        let ty = schema.fields.get(name).ok_or(TableStorageError)?;
+        if holds_blob(ty)
+            && let Some(reference) = present_blob(ty, value)?
+        {
+            orna_value::blob_metadata_from_raw(reference).map_err(|_| TableStorageError)?;
+        }
+    }
+    Ok(values)
+}
+
 /// Builds the canonical evaluator record of one stored tuple without
 /// placeholdering its Blob fields. Mirrors [`evaluator_record`], which rejects
 /// ROV-3 tags because it decodes the tuple as an OVB-1 value.
 fn contextual_record(
     key_names: &[String],
     key_bytes: &[u8],
+    schema: &TableSchema,
     storage_order: &[String],
     storage_row: &[u8],
 ) -> Result<Vec<u8>, TableStorageError> {
     let key_value = Value::decode(key_bytes).map_err(|_| TableStorageError)?;
     let key_parts = key_values(key_names.len(), key_value.raw())?;
-    let Raw::Array(stored_values) =
-        decode_canonical_storage_value(storage_row).map_err(|_| TableStorageError)?
-    else {
-        return Err(TableStorageError);
-    };
-    if stored_values.len() != storage_order.len() {
-        return Err(TableStorageError);
-    }
+    let stored_values = committed_stored_values(schema, storage_order, storage_row)?;
     let mut fields = Vec::with_capacity(key_names.len() + stored_values.len());
     for (name, value) in key_names.iter().zip(key_parts) {
         fields.push((Raw::Text(name.clone()), value));
@@ -855,16 +886,17 @@ mod tests {
     }
 
     fn stored_blob(seed: u8) -> Raw {
-        Raw::Tag(
-            ROV3_BLOB_TAG,
-            Box::new(Raw::Array(vec![
-                Raw::Int(23.into()),
-                Raw::Bytes(vec![seed; 32]),
-                Raw::Text("audio/mpeg".to_owned()),
-                Raw::Null,
-                Raw::Bytes(vec![seed; 20]),
-            ])),
-        )
+        Raw::Tag(ROV3_BLOB_TAG, Box::new(stored_blob_payload(seed)))
+    }
+
+    fn stored_blob_payload(seed: u8) -> Raw {
+        Raw::Array(vec![
+            Raw::Int(23.into()),
+            Raw::Bytes(vec![seed; 32]),
+            Raw::Text("audio/mpeg".to_owned()),
+            Raw::Null,
+            Raw::Bytes(vec![seed; 20]),
+        ])
     }
 
     fn option(value: Option<Raw>) -> Raw {
@@ -1002,6 +1034,60 @@ mod tests {
             Raw::Text("c".to_owned()),
         ]);
         assert!(stored_blob_references(&schema, &order, &[(b"k3".to_vec(), invented)]).is_err());
+    }
+
+    #[test]
+    fn committed_rows_refuse_what_the_retired_scan_refused() {
+        let schema = media_schema();
+        let order = vec!["content".to_owned(), "cover".to_owned(), "title".to_owned()];
+        let key_names = vec!["id".to_owned()];
+        let key = encode(Raw::Text("one".to_owned()));
+        let record = |order: &[String], row: Vec<u8>| {
+            contextual_record(&key_names, &key, &schema, order, &row)
+        };
+        let title = || Raw::Text("t".to_owned());
+        // Well-formed committed rows: a present reference, and an absent `Blob?`.
+        assert!(
+            record(
+                &order,
+                storage(vec![stored_blob(1), option(Some(stored_blob(2))), title()])
+            )
+            .is_ok()
+        );
+        assert!(record(&order, storage(vec![stored_blob(1), option(None), title()])).is_ok());
+        // A row that does not decode as a canonical array is refused.
+        let not_an_array =
+            encode_canonical_storage_value(&Raw::Text("x".to_owned())).expect("encode");
+        assert!(record(&order, not_an_array).is_err());
+        // A tuple whose field count differs from the storage order is refused.
+        assert!(record(&order, storage(vec![stored_blob(1), option(None)])).is_err());
+        // A stored field with no schema type is refused.
+        let ghost = vec!["content".to_owned(), "cover".to_owned(), "ghost".to_owned()];
+        assert!(record(&ghost, storage(vec![stored_blob(1), option(None), title()])).is_err());
+        // A malformed optional wrapper on a Blob? field is refused.
+        let bad_option = Raw::Tag(OPTION_TAG, Box::new(Raw::Array(vec![Raw::Int(2.into())])));
+        assert!(record(&order, storage(vec![stored_blob(1), bad_option, title()])).is_err());
+        // A Blob field whose value is not an ROV-3 reference (wrong tag) is refused.
+        assert!(
+            record(
+                &order,
+                storage(vec![Raw::Int(7.into()), option(None), title()])
+            )
+            .is_err()
+        );
+        let ovb2_tag = Raw::Tag(orna_value::OVB2_BLOB_TAG, Box::new(stored_blob_payload(1)));
+        assert!(record(&order, storage(vec![ovb2_tag, option(None), title()])).is_err());
+        // A ROV-3-tagged reference with the wrong field count is refused.
+        let short_rov3 = Raw::Tag(orna_value::ROV3_BLOB_TAG, Box::new(Raw::Array(Vec::new())));
+        assert!(record(&order, storage(vec![short_rov3, option(None), title()])).is_err());
+        // An optional Blob holding a non-reference value is refused.
+        assert!(
+            record(
+                &order,
+                storage(vec![stored_blob(1), option(Some(title())), title()])
+            )
+            .is_err()
+        );
     }
 
     #[test]

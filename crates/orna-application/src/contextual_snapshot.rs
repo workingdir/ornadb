@@ -586,8 +586,13 @@ mod tests {
 
     /// A contextual page read never returns a value for a body that writes a
     /// plain table. The same source stages a real mutation on the canonical
-    /// path, so the refusal is not vacuous. The contextual dispatch refuses the
-    /// insert before the `ReadStagedMutation` guard is reached.
+    /// path, so the refusal is not vacuous. `SourceMutationEffectHandler`
+    /// declines every effect on the context dispatch (`handle_context` returns
+    /// `None`), so the insert is refused as an unhandled evaluation error before
+    /// any mutation is staged. The `ReadStagedMutation` guard in
+    /// `evaluate_contextual_page_read` is therefore unreachable through this
+    /// entry point; it is kept as defence in depth and is a documented
+    /// non-kill for mutation testing.
     #[test]
     fn contextual_read_of_a_plain_table_write_returns_no_value() {
         const STAGED_WRITE_SOURCE: &str = "pub table Note(id: Int) { text: Str, }\n\nfn main() {\n    Note.insert({ id: 7, text: \"written\" })\n}\n";
@@ -616,8 +621,8 @@ mod tests {
             BTreeMap::new(),
         );
         assert!(
-            result.is_err(),
-            "a contextual read of a write returns no value"
+            matches!(result, Err(ApplicationError::Evaluation(_))),
+            "a contextual read of a write is declined by the context dispatch"
         );
     }
 
