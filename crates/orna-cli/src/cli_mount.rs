@@ -351,16 +351,35 @@ pub(super) fn run_mount_cwd(endpoint: &Endpoint, mountpoint: &Path) -> Result<()
 
 #[cfg(target_os = "linux")]
 fn edit_refusal(error: crate::fuse_mount::EditError) -> Diagnostic {
+    use crate::fuse_mount::EditError;
+    // The retained draft is the recovery handle, so its location is part of the title that default
+    // output prints; the technical cause stays in the detail shown under --debug (ORNA-UX-004).
     match error {
-        crate::fuse_mount::EditError::Stale(detail) => Diagnostic::target_with_detail(
+        EditError::Stale { message, draft } => Diagnostic::target_with_detail(
             "E2000",
-            "Edit is stale against the mounted baseline",
+            format!(
+                "Edit is stale against the mounted baseline; draft retained at {}",
+                draft.display()
+            ),
             "run mount DIR --cwd to read the current row, then reapply the retained draft",
-            detail,
+            message,
         ),
-        crate::fuse_mount::EditError::Failed(detail) => {
-            mount_error("Edit was not accepted", detail)
-        }
+        EditError::Failed {
+            message,
+            draft: Some(draft),
+        } => Diagnostic::target_with_detail(
+            "E2000",
+            format!(
+                "Edit was not accepted; draft retained at {}",
+                draft.display()
+            ),
+            "correct the retained draft, then run orna edit --row again",
+            message,
+        ),
+        EditError::Failed {
+            message,
+            draft: None,
+        } => mount_error("Edit was not accepted", message),
     }
 }
 
@@ -458,19 +477,33 @@ fn settle_owner_reply(
         Err(error) => error,
     };
     if error == rustix::io::Errno::STALE {
-        return Err(edit_refusal(crate::fuse_mount::EditError::Stale(format!(
-            "the mounted baseline is stale against the durable row (cause sys.vfs.stale_edit); nothing was written; draft retained at {}",
-            draft.display()
-        ))));
+        return Err(edit_refusal(crate::fuse_mount::EditError::Stale {
+            message: format!(
+                "the mounted baseline is stale against the durable row (cause sys.vfs.stale_edit); nothing was written; draft retained at {}",
+                draft.display()
+            ),
+            draft: draft.to_path_buf(),
+        }));
     }
-    let definite_refusal = [
+    // BUSY, IO, INVAL and NODATA are definite refusals; the owner has retained the draft.
+    if error == rustix::io::Errno::INVAL {
+        // EINVAL is a malformed candidate (ORNA-VFS spec, profiles/vfs-1.md), so the retained draft is the content to correct.
+        return Err(edit_refusal(crate::fuse_mount::EditError::Failed {
+            message: format!(
+                "mounted workspace refused the edit ({error}); draft retained at {}",
+                draft.display()
+            ),
+            draft: Some(draft.to_path_buf()),
+        }));
+    }
+    if [
         rustix::io::Errno::BUSY,
         rustix::io::Errno::IO,
-        rustix::io::Errno::INVAL,
         rustix::io::Errno::NODATA,
     ]
-    .contains(&error);
-    if definite_refusal {
+    .contains(&error)
+    {
+        // BUSY, IO and NODATA are mount or backing conditions, not content errors, so they keep the generic mount help.
         return Err(mount_error(
             "Edit was not accepted",
             format!(
@@ -484,7 +517,10 @@ fn settle_owner_reply(
     }
     Err(Diagnostic::target_with_detail(
         "E2010",
-        "Edit outcome is unknown",
+        format!(
+            "Edit outcome is unknown; draft retained at {}",
+            draft.display()
+        ),
         "run `orna status` to inspect the durable row before retrying the retained draft",
         format!(
             "the mount connection ended before the owner replied ({error}); the draft at {} is still present, so the edit may or may not have been accepted",
@@ -1890,7 +1926,16 @@ mod tests {
             let diagnostic = settle_owner_reply(Err(Errno::NOTCONN), &draft)
                 .expect_err("a retained draft leaves the outcome unknown");
             assert_eq!(diagnostic.code, "E2010");
-            assert_eq!(&*diagnostic.title, "Edit outcome is unknown");
+            assert!(
+                diagnostic.title.starts_with("Edit outcome is unknown"),
+                "{}",
+                diagnostic.title
+            );
+            assert!(
+                diagnostic.title.contains(&draft.display().to_string()),
+                "the default title names the retained draft: {}",
+                diagnostic.title
+            );
             assert!(
                 diagnostic.help.contains("orna status"),
                 "{}",
@@ -1922,8 +1967,41 @@ mod tests {
                     let diagnostic = settle_owner_reply(Err(errno), &draft)
                         .expect_err("a definite refusal is an error");
                     assert_eq!(diagnostic.code, "E2000", "{errno}");
-                    assert_eq!(&*diagnostic.title, "Edit was not accepted", "{errno}");
+                    assert!(
+                        diagnostic.title.starts_with("Edit was not accepted"),
+                        "{errno}: {}",
+                        diagnostic.title
+                    );
                 }
+            }
+        }
+
+        #[test]
+        fn owner_refusal_help_matches_the_errno_class() {
+            let directory = tempfile::tempdir().unwrap();
+            let draft = retained_draft(directory.path());
+            // INVAL is malformed content, so it asks for the draft to be corrected.
+            let invalid = settle_owner_reply(Err(Errno::INVAL), &draft)
+                .expect_err("INVAL is a definite refusal");
+            assert!(
+                invalid.help.contains("correct the retained draft"),
+                "{}",
+                invalid.help
+            );
+            // BUSY, IO and NODATA are mount or backing conditions, not content, so they keep the generic mount help.
+            for errno in [Errno::BUSY, Errno::IO, Errno::NODATA] {
+                let diagnostic = settle_owner_reply(Err(errno), &draft)
+                    .expect_err("a definite refusal is an error");
+                assert!(
+                    !diagnostic.help.contains("correct the retained draft"),
+                    "{errno}: {}",
+                    diagnostic.help
+                );
+                assert!(
+                    diagnostic.help.contains("run mount DIR --cwd"),
+                    "{errno}: {}",
+                    diagnostic.help
+                );
             }
         }
 
@@ -1934,11 +2012,20 @@ mod tests {
             let diagnostic = settle_owner_reply(Err(Errno::STALE), &draft)
                 .expect_err("a stale baseline is refused");
             assert_eq!(diagnostic.code, "E2000");
-            assert_eq!(
-                &*diagnostic.title,
-                "Edit is stale against the mounted baseline"
+            assert!(
+                diagnostic
+                    .title
+                    .starts_with("Edit is stale against the mounted baseline"),
+                "{}",
+                diagnostic.title
+            );
+            assert!(
+                diagnostic.title.contains(&draft.display().to_string()),
+                "the default title names the retained draft: {}",
+                diagnostic.title
             );
             let detail = diagnostic.detail.unwrap_or_default();
+            assert!(detail.contains(&draft.display().to_string()), "{detail}");
             assert!(detail.contains("sys.vfs.stale_edit"), "{detail}");
         }
     }
