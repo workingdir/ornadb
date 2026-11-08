@@ -731,14 +731,30 @@ mod tests {
         .expect("the contacts descriptor is valid")
     }
 
+    /// The Option tag orna-project lowers `Blob?` values to (`OPTION_TAG`).
+    const OPTION_TAG: u64 = 60_013;
+
     /// The contacts descriptor extended with an unannotated Blob `avatar`.
     fn blob_declared() -> StagedRelations {
-        const AVATAR: [u8; 16] = [0x75; 16];
+        blob_declared_with(Raw::Array(vec![
+            Raw::Int(0.into()),
+            Raw::Text("Blob".to_owned()),
+        ]))
+    }
+
+    /// The contacts descriptor extended with an optional Blob `avatar`.
+    fn optional_blob_declared() -> StagedRelations {
         let blob_node = Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Blob".to_owned())]);
+        blob_declared_with(Raw::Array(vec![Raw::Int(2.into()), blob_node]))
+    }
+
+    /// The contacts descriptor extended with an `avatar` of type `node`.
+    fn blob_declared_with(node: Raw) -> StagedRelations {
+        const AVATAR: [u8; 16] = [0x75; 16];
         let avatar = Raw::Array(vec![
             tagged(AVATAR),
             Raw::Text("avatar".to_owned()),
-            blob_node,
+            node,
             Raw::Int(1.into()),
             Raw::Array(vec![Raw::Int(0.into())]),
         ]);
@@ -972,6 +988,118 @@ mod tests {
             .descriptor(&identity)
             .expect("the descriptor was written");
         assert_eq!(reference[4], Raw::Bytes(oid.as_bytes().to_vec()));
+    }
+
+    /// A Blob field's text is padded standard Base64 and nothing else: unpadded,
+    /// URL-safe and whitespace-bearing text fails closed as an invalid row.
+    #[test]
+    fn blob_text_must_be_padded_standard_base64() {
+        for bad in ["Zm9", "Zm9_", "Zm 9", "Zm9\tvYg="] {
+            let rows = LegacyTableRows::loose_for_tests(vec![LegacyRow::for_tests(
+                TypedKey::Text("alice".to_owned()),
+                vec![
+                    declared_field("name", text("Alice Smith")),
+                    declared_field("emails", Raw::Array(Vec::new())),
+                    declared_field("avatar", text(bad)),
+                ],
+            )]);
+            let result = map_contacts(&blob_declared(), &rows);
+            assert!(
+                matches!(result, Err(MigrationRowError::InvalidRow { .. })),
+                "{bad:?} is not padded standard Base64"
+            );
+        }
+    }
+
+    /// A Str field holding valid padded Base64 text is text: it is not decoded
+    /// and stores no blob.
+    #[test]
+    fn str_field_with_base64_text_stays_text() {
+        let rows = LegacyTableRows::loose_for_tests(vec![LegacyRow::for_tests(
+            TypedKey::Text("alice".to_owned()),
+            vec![
+                declared_field("name", text("Zm9vYmFy")),
+                declared_field("emails", Raw::Array(Vec::new())),
+            ],
+        )]);
+        let input = map_contacts(&declared(), &rows).expect("the Str field maps");
+        assert!(input.blobs().is_empty());
+        let admitted = input.relations()[0]
+            .encoded_rows(&MigrationBlobDescriptors::default())
+            .expect("the row encodes");
+        let (_, tuple) = &admitted[0];
+        assert_eq!(
+            decode_canonical_storage_value(tuple).expect("the tuple decodes"),
+            Raw::Array(vec![text("Zm9vYmFy"), Raw::Array(Vec::new())])
+        );
+    }
+
+    /// An absent optional Blob is `null` in the loose source: it stores no bytes
+    /// and the Option's empty state.
+    #[test]
+    fn absent_optional_blob_stores_the_empty_option() {
+        let rows = LegacyTableRows::loose_for_tests(vec![LegacyRow::for_tests(
+            TypedKey::Text("alice".to_owned()),
+            vec![
+                declared_field("name", text("Alice Smith")),
+                declared_field("emails", Raw::Array(Vec::new())),
+                declared_field("avatar", Raw::Null),
+            ],
+        )]);
+        let input = map_contacts(&optional_blob_declared(), &rows).expect("the absent Blob? maps");
+        assert!(input.blobs().is_empty());
+        let admitted = input.relations()[0]
+            .encoded_rows(&MigrationBlobDescriptors::default())
+            .expect("the row encodes");
+        let (_, tuple) = &admitted[0];
+        let Raw::Array(fields) = decode_canonical_storage_value(tuple).expect("the tuple decodes")
+        else {
+            panic!("the stored row is a tuple");
+        };
+        assert_eq!(
+            fields[2],
+            Raw::Tag(OPTION_TAG, Box::new(Raw::Array(vec![Raw::Int(0.into())])))
+        );
+    }
+
+    /// A present optional Blob is bare padded Base64 text in the loose source:
+    /// its bytes enter the blob table and the Option carries the reference.
+    #[test]
+    fn present_optional_blob_stores_a_blob_reference() {
+        let rows = LegacyTableRows::loose_for_tests(vec![LegacyRow::for_tests(
+            TypedKey::Text("alice".to_owned()),
+            vec![
+                declared_field("name", text("Alice Smith")),
+                declared_field("emails", Raw::Array(Vec::new())),
+                declared_field("avatar", text("AQID")),
+            ],
+        )]);
+        let input = map_contacts(&optional_blob_declared(), &rows).expect("the present Blob? maps");
+        let identity = blob_identity(&[1, 2, 3]).expect("the blob identity");
+        assert_eq!(
+            input.blobs().get(&identity).map(Vec::as_slice),
+            Some(&[1, 2, 3][..])
+        );
+
+        let (_directory, repository, _commit) = golden();
+        let descriptors = write_blobs(&repository, &input);
+        let admitted = input.relations()[0]
+            .encoded_rows(&descriptors)
+            .expect("the row encodes");
+        let (_, tuple) = &admitted[0];
+        let Raw::Array(fields) = decode_canonical_storage_value(tuple).expect("the tuple decodes")
+        else {
+            panic!("the stored row is a tuple");
+        };
+        let Raw::Tag(OPTION_TAG, payload) = &fields[2] else {
+            panic!("the Blob? field is an Option");
+        };
+        let Raw::Array(option) = payload.as_ref() else {
+            panic!("the Option payload is a tuple");
+        };
+        assert_eq!(option.len(), 2);
+        assert_eq!(option[0], Raw::Int(1.into()));
+        assert!(matches!(option[1], Raw::Tag(ROV3_BLOB_TAG, _)));
     }
 
     /// The golden bundle the CLI legacy tests read.
