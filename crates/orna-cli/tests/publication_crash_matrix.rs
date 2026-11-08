@@ -11,9 +11,9 @@ use std::{
 use orna_evaluator::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
 use orna_repository::Repository;
 use orna_runtime::{
-    ActivationEffectReport, DeclaredEffectSet, FaultInjector, FaultPoint, NoFault,
-    RecoveryDisposition, RequestIdentity, RequestOwner, RequestState, RuntimeError, RuntimeState,
-    TableMutation, TableObjectId, TerminalOutcome, WriterLease,
+    ActivationEffectReport, EffectGate, FaultInjector, FaultPoint, NoFault, RecoveryDisposition,
+    RequestIdentity, RequestOwner, RequestState, RuntimeError, RuntimeState, TableMutation,
+    TableObjectId, TerminalOutcome, WriterLease,
 };
 use orna_storage::RuntimePublicationCoordinator;
 use orna_sys::{EnvironmentProvider, FilesystemProvider};
@@ -134,7 +134,7 @@ async fn commit_capture(
             [24; 32],
             TerminalOutcome::new(vec![25]).unwrap(),
             &NoFault,
-            orna_runtime::ActivationEffectReport::declare(orna_runtime::DeclaredEffectSet::None),
+            orna_runtime::EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
         )
         .await
         .unwrap();
@@ -3246,7 +3246,7 @@ async fn kill_at_the_request_row_commit_barrier_keeps_the_row_and_its_recorded_o
                 [78; 32],
                 TerminalOutcome::new(vec![OUTCOME]).unwrap(),
                 &NoFault,
-                ActivationEffectReport::declare(DeclaredEffectSet::None),
+                EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
             )
             .await
             .unwrap();
