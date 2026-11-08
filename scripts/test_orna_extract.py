@@ -53,6 +53,7 @@ from scripts.orna_extract import (
     parse_tree,
     main,
 )
+from scripts import test_orna_legacy as legacy_fixtures
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MEDIA_PROFILE = REPO_ROOT / "crates/orna-conformance/tests/fixtures/reference/profiles/media-1.json"
@@ -772,15 +773,24 @@ LEGACY_FORMAT = b'{repository_format: 1, storage_profile: "compact-storage-v1"}\
 GOLDEN_STORAGE = [f"018f0000-0000-7100-0000-00000000000{number}" for number in range(1, 6)]
 
 
-def legacy_walk(repository: Path) -> dict | None:
-    """The repository-format-1 record of HEAD, read the way a gitlink dependency is read."""
+def legacy_walk(repository: Path, output: Path | None = None) -> dict | None:
+    """The repository-format-1 record of HEAD, read the way a gitlink dependency is read.
+
+    Blob bytes are written under ``output``; without one they go to a scratch directory that is removed.
+    """
     commit = git(repository, "rev-parse", "HEAD").decode().strip()
     objects = GitObjects(repository, "legacy test", 20)
+    scratch = None
+    if output is None:
+        scratch = tempfile.TemporaryDirectory(prefix="legacy-blobs-")
+        output = Path(scratch.name)
     try:
         commit_data = objects.read(commit, "commit", extractor.SOURCE_TREE_BYTES_LIMIT, "legacy test")
-        return extractor.legacy_dependency(objects, commit_data, "dep")
+        return extractor.legacy_dependency(objects, commit_data, "dep", extractor.BlobOutput(output))
     finally:
         objects.close()
+        if scratch is not None:
+            scratch.cleanup()
 
 
 class LegacyDependencyTests(unittest.TestCase):
@@ -863,6 +873,21 @@ class LegacyDependencyTests(unittest.TestCase):
         for name in ("Counter", "Day", "Asset"):
             self.assertEqual(tables[name]["status"], "unextracted")
             self.assertNotIn("rows", tables[name])
+
+    def test_golden_compact_blob_bytes_are_written_under_their_sha256(self) -> None:
+        golden = self.root / "golden"
+        git(self.root, "clone", "-q", str(GOLDEN_BUNDLE), str(golden))
+        output = self.root / "out"
+        record = legacy_walk(golden, output)
+        rows = {item["storage"]: item["rows"] for item in record["storage"] if "rows" in item}
+        blob_column = "018f0000000072008000000000000005"
+        golden_bytes = [b"\x00\xff\x80orna", b""]
+        values = [row["fields"][blob_column]["blob"] for row in rows[GOLDEN_STORAGE[4]]]
+        self.assertEqual(len(values), len(golden_bytes))
+        for value, data in zip(values, golden_bytes):
+            digest = hashlib.sha256(data).hexdigest()
+            self.assertEqual(value, {"length": len(data), "sha256": digest})
+            self.assertEqual((output / "blobs" / digest).read_bytes(), data)
 
     def test_repository_without_format_record_is_not_legacy(self) -> None:
         plain = make_repository(self.root / "plain", {"main.orna": b"pub table Note(id: Str) {}\n"})
@@ -947,14 +972,14 @@ class LegacyDependencyTests(unittest.TestCase):
             {
                 "main.orna": (
                     b"pub table Pair(id: Str, n: Int) {}\n"
-                    b"table Blobbed(id: Str) { payload: Blob }\n"
+                    b"table Blobbed(id: Str) { payload: Set<Int> }\n"
                     b"table Odd(id: Str) { items: Set<Str> }\n"
                 ),
             },
         )
         tables = {table["name"]: table for table in legacy_walk(repository)["tables"]}
         self.assertEqual(tables["Pair"]["reason"], "composite keys are not extracted")
-        self.assertEqual(tables["Blobbed"]["reason"], "field payload of type Blob is not extracted")
+        self.assertEqual(tables["Blobbed"]["reason"], "field payload of type Set<Int> is not extracted")
         self.assertEqual(tables["Odd"]["reason"], "field items of type Set<Str> is not extracted")
 
     def test_refused_row_units_fail_closed(self) -> None:
@@ -1007,6 +1032,90 @@ class LegacyDependencyTests(unittest.TestCase):
             },
         )
         with self.assertRaisesRegex(extractor.ExtractionError, "manifest profile or table differs"):
+            legacy_walk(repository)
+
+
+class LooseRowBlobTests(unittest.TestCase):
+    """Loose-row Blob fields of repository format 1 (ORR-2) are resolved and verified, never trusted.
+
+    Each repository is a real commit. An ORR-2 SHA-256 names an OGB-1 root at .orna/blobs/<2>/<62> of the
+    commit tree; the bytes are read through that root and written under their SHA-256.
+    """
+
+    TABLE = b"pub table Doc(id: Str) { payload: Blob }\n"
+
+    def setUp(self) -> None:
+        scratch = tempfile.TemporaryDirectory(prefix="loose-blob-test-")
+        self.addCleanup(scratch.cleanup)
+        self.root = Path(scratch.name)
+
+    @staticmethod
+    def stored_row(data: bytes, length: int | None = None) -> bytes:
+        digest = hashlib.sha256(data).hexdigest()
+        recorded = len(data) if length is None else length
+        return f'{{ payload: {{ blob: "sha256:{digest}", length: {recorded} }}, }}\n'.encode()
+
+    def literal(self, repository: Path, kind: str, data: bytes) -> str:
+        return git(repository, "hash-object", "-w", "--literally", "-t", kind, "--stdin", stdin=data).decode().strip()
+
+    def tree(self, repository: Path, entries: list[str]) -> str:
+        return git(repository, "mktree", stdin="".join(f"{entry}\n" for entry in entries).encode()).decode().strip()
+
+    def build_repository(self, name: str, row: bytes, data: bytes | None) -> Path:
+        """A commit whose Doc table holds one row. ``data``, when given, is stored as the OGB-1 root the row names."""
+        repository = self.root / name
+        repository.mkdir()
+        git(repository, "init", "-q")
+        orna = [f"100644 blob {self.literal(repository, 'blob', LEGACY_FORMAT)}\tformat.orna"]
+        if data is not None:
+            store = legacy_fixtures.MemStore()
+            built = legacy_fixtures.build(store, legacy_fixtures.split(data, 1024))
+            self.assertEqual(built.digest, hashlib.sha256(data).hexdigest())
+            for oid, (kind, payload) in store.objects.items():
+                self.assertEqual(self.literal(repository, kind, payload), oid)
+            leaf = self.tree(repository, [f"040000 tree {built.root}\t{built.digest[2:]}"])
+            blobs = self.tree(repository, [f"040000 tree {leaf}\t{built.digest[:2]}"])
+            orna.append(f"040000 tree {blobs}\tblobs")
+        doc = self.tree(repository, [f"100644 blob {self.literal(repository, 'blob', row)}\ta.orna"])
+        root = self.tree(
+            repository,
+            [
+                f"100644 blob {self.literal(repository, 'blob', self.TABLE)}\tmain.orna",
+                f"040000 tree {doc}\tDoc",
+                f"040000 tree {self.tree(repository, orna)}\t.orna",
+            ],
+        )
+        commit = git(repository, "commit-tree", root, "-m", "fixture").decode().strip()
+        git(repository, "update-ref", "HEAD", commit)
+        return repository
+
+    def test_stored_blob_is_read_through_its_root_and_written_under_its_sha256(self) -> None:
+        data = deterministic_bytes(5000)
+        repository = self.build_repository("stored", self.stored_row(data), data)
+        output = self.root / "out"
+        field = legacy_walk(repository, output)["tables"][0]["rows"][0]["fields"]["payload"]
+        digest = hashlib.sha256(data).hexdigest()
+        self.assertEqual(field, {"blob": {"length": len(data), "sha256": digest}})
+        self.assertEqual((output / "blobs" / digest).read_bytes(), data)
+
+    def test_inline_blob_is_written_under_the_sha256_of_its_bytes(self) -> None:
+        repository = self.build_repository("inline", b'{ payload: "aGVsbG8=", }\n', None)
+        output = self.root / "out"
+        field = legacy_walk(repository, output)["tables"][0]["rows"][0]["fields"]["payload"]
+        digest = hashlib.sha256(b"hello").hexdigest()
+        self.assertEqual(field, {"blob": {"length": 5, "sha256": digest}})
+        self.assertEqual((output / "blobs" / digest).read_bytes(), b"hello")
+
+    def test_missing_content_root_is_refused(self) -> None:
+        data = deterministic_bytes(5000)
+        repository = self.build_repository("missing", self.stored_row(data), None)
+        with self.assertRaisesRegex(ExtractionError, r"content root \.orna/blobs/\w+/\w+ is absent"):
+            legacy_walk(repository)
+
+    def test_length_that_differs_from_the_content_root_is_refused(self) -> None:
+        data = deterministic_bytes(5000)
+        repository = self.build_repository("length", self.stored_row(data, len(data) + 1), data)
+        with self.assertRaisesRegex(ExtractionError, "content root records 5000 bytes"):
             legacy_walk(repository)
 
 
