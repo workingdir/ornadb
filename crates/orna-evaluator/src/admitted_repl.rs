@@ -15,8 +15,8 @@ use orna_foundation::{
 use orna_project::{AttachedDatabaseSession, LoadedProject};
 use orna_semantic::StandardDependencyProfile;
 use orna_semantic::{
-    Analysis, Catalogue, EffectSummary, ModuleInput, ReplAdmission, ReplContext, SymbolKind,
-    SystemProviders, Type, analyze_with_providers, unresolved_member, unresolved_name,
+    Analysis, Catalogue, DIAG_AMBIGUOUS, EffectSummary, ModuleInput, ReplAdmission, ReplContext,
+    SymbolKind, SystemProviders, Type, analyze_with_providers, unresolved_member, unresolved_name,
 };
 use orna_syntax::{
     Declaration, ImportSegment, ReplInput, SyntaxDiagnostic, TokenKind, TypeMember,
@@ -659,21 +659,33 @@ fn admitted_runtime_sources(
                 {
                     // The root module executes as `main`, so its public functions
                     // resolve through the same qualified key a committed run uses.
+                    // They are also keyed as an import of that name would be, so an
+                    // import binding the same bare name to another function is
+                    // ambiguous (ORNA-IMPORT-001) rather than silently shadowed.
                     let qualified = format!("main.{}", signature.name);
-                    module_aliases.insert(qualified.clone(), qualified);
+                    module_aliases.insert(qualified.clone(), qualified.clone());
+                    module_aliases.insert(
+                        module_function_alias_key("main", &signature.name),
+                        qualified,
+                    );
                 }
             }
         }
     }
     for (namespace, module) in &parsed_modules {
-        let Some(namespace) = namespace else {
-            continue;
+        // The root module executes as `main` only when no source `main` module
+        // exists. Its imports resolve under that same qualified key, so a bare
+        // call inside a root function reaches the imported module function.
+        let import_namespace = match namespace.as_deref() {
+            Some(namespace) => namespace,
+            None if !has_main_module => "main",
+            None => continue,
         };
         for item in &module.items {
             if let Declaration::Use { path, tail } = &item.declaration {
                 add_module_import_aliases(
                     &mut module_aliases,
-                    namespace,
+                    import_namespace,
                     path,
                     tail,
                     &function_names,
@@ -859,7 +871,7 @@ fn add_module_import_aliases(
                     namespace,
                     &name.name,
                     &format!("{imported_path}.{}", name.name),
-                );
+                )?;
             }
         }
         UseTail::Glob { .. } => {
@@ -916,7 +928,7 @@ fn add_import_or_namespace_alias(
     function_names: &BTreeSet<String>,
 ) -> Result<(), ReplError> {
     if function_names.contains(imported_path) {
-        register_module_import_alias(aliases, namespace, local_name, imported_path);
+        register_module_import_alias(aliases, namespace, local_name, imported_path)?;
         Ok(())
     } else {
         add_imported_module_functions(
@@ -951,7 +963,7 @@ fn add_imported_module_functions(
         } else {
             format!("{local_prefix}.{suffix}")
         };
-        register_module_import_alias(aliases, namespace, &local_name, target);
+        register_module_import_alias(aliases, namespace, &local_name, target)?;
     }
     Ok(())
 }
@@ -961,14 +973,25 @@ fn register_module_import_alias(
     namespace: &str,
     local_name: &str,
     target: &str,
-) {
+) -> Result<(), ReplError> {
     let key = module_function_alias_key(namespace, local_name);
-    // An unqualified name imported twice from different modules is the same
-    // ambiguity the semantic layer records as `DIAG_AMBIGUOUS` and resolves by
-    // keeping the first binding. Qualified calls never consult this map, so a
-    // program that imports `value` from two graph branches still loads and
-    // executes through its module-qualified spelling.
-    aliases.entry(key).or_insert_with(|| target.to_owned());
+    // Root-module bindings are strict: two bindings of one bare name to different
+    // functions are ambiguous (`DIAG_AMBIGUOUS`), and the root `pub fn` aliases are
+    // registered before root imports, so an import of the same name conflicts with
+    // the root function too. Re-binding the same target is not a conflict. Other
+    // namespaces keep first-wins: a module may import one bare name from two
+    // siblings and reach each through its qualified spelling (the snapshot
+    // dependency-graph fixtures rely on this).
+    match aliases.get(&key) {
+        Some(existing) if existing != target && namespace == "main" => {
+            Err(ReplError::semantic(DIAG_AMBIGUOUS))
+        }
+        Some(_) => Ok(()),
+        None => {
+            aliases.insert(key, target.to_owned());
+            Ok(())
+        }
+    }
 }
 
 fn admitted_table_names(analysis: &Analysis) -> Vec<String> {
@@ -1274,6 +1297,125 @@ mod tests {
             with_main.submit("main.add(1)"),
             Ok(Some(Value::int(2.into())))
         );
+    }
+
+    #[test]
+    fn root_module_imports_resolve_under_main_without_a_source_main_module() {
+        let mut root = admitted_runtime_sources(
+            vec![
+                (
+                    None,
+                    "use library.local;\npub fn run(): Int = local(40);".into(),
+                ),
+                (
+                    Some("library".into()),
+                    "pub fn local(value: Int): Int = value + 1;".into(),
+                ),
+            ],
+            Vec::new(),
+            Vec::new(),
+            Limits::default(),
+        )
+        .expect("root module with import loads");
+        assert_eq!(root.submit("main.run()"), Ok(Some(Value::int(41.into()))));
+    }
+
+    fn load_error_code(result: Result<ReplSession, ReplError>) -> String {
+        match result {
+            Ok(_) => panic!("ambiguous import loaded"),
+            Err(error) => error.code().to_owned(),
+        }
+    }
+
+    #[test]
+    fn root_pub_fn_and_same_named_import_are_ambiguous() {
+        let error = load_error_code(admitted_runtime_sources(
+            vec![
+                (
+                    None,
+                    "use library.local;\npub fn local(value: Int): Int = value;\npub fn run(): Int = local(40);"
+                        .into(),
+                ),
+                (
+                    Some("library".into()),
+                    "pub fn local(value: Int): Int = value + 1;".into(),
+                ),
+            ],
+            Vec::new(),
+            Vec::new(),
+            Limits::default(),
+        ));
+        assert_eq!(error, DIAG_AMBIGUOUS);
+    }
+
+    #[test]
+    fn two_imports_binding_one_bare_name_are_ambiguous() {
+        let error = load_error_code(admitted_runtime_sources(
+            vec![
+                (
+                    None,
+                    "use a.value;\nuse b.value;\npub fn run(): Int = value(1);".into(),
+                ),
+                (Some("a".into()), "pub fn value(x: Int): Int = x;".into()),
+                (
+                    Some("b".into()),
+                    "pub fn value(x: Int): Int = x + 1;".into(),
+                ),
+            ],
+            Vec::new(),
+            Vec::new(),
+            Limits::default(),
+        ));
+        assert_eq!(error, DIAG_AMBIGUOUS);
+    }
+
+    #[test]
+    fn importing_the_same_function_twice_is_not_ambiguous() {
+        let mut root = admitted_runtime_sources(
+            vec![
+                (
+                    None,
+                    "use library.local;\nuse library.local;\npub fn run(): Int = local(40);".into(),
+                ),
+                (
+                    Some("library".into()),
+                    "pub fn local(value: Int): Int = value + 1;".into(),
+                ),
+            ],
+            Vec::new(),
+            Vec::new(),
+            Limits::default(),
+        )
+        .expect("one function imported twice loads");
+        assert_eq!(root.submit("main.run()"), Ok(Some(Value::int(41.into()))));
+    }
+
+    #[test]
+    fn source_main_module_keeps_root_imports_ignored() {
+        admitted_runtime_sources(
+            vec![
+                (
+                    None,
+                    "use library.local;\nuse other.local;\npub fn run(): Int = local(40);".into(),
+                ),
+                (
+                    Some("main".into()),
+                    "pub fn helper(value: Int): Int = value;".into(),
+                ),
+                (
+                    Some("library".into()),
+                    "pub fn local(value: Int): Int = value + 1;".into(),
+                ),
+                (
+                    Some("other".into()),
+                    "pub fn local(value: Int): Int = value + 2;".into(),
+                ),
+            ],
+            Vec::new(),
+            Vec::new(),
+            Limits::default(),
+        )
+        .expect("a source main module leaves root imports unprocessed");
     }
 
     #[test]
