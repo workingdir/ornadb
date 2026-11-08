@@ -772,15 +772,24 @@ LEGACY_FORMAT = b'{repository_format: 1, storage_profile: "compact-storage-v1"}\
 GOLDEN_STORAGE = [f"018f0000-0000-7100-0000-00000000000{number}" for number in range(1, 6)]
 
 
-def legacy_walk(repository: Path) -> dict | None:
-    """The repository-format-1 record of HEAD, read the way a gitlink dependency is read."""
+def legacy_walk(repository: Path, output: Path | None = None) -> dict | None:
+    """The repository-format-1 record of HEAD, read the way a gitlink dependency is read.
+
+    Blob bytes are written under ``output``; without one they go to a scratch directory that is removed.
+    """
     commit = git(repository, "rev-parse", "HEAD").decode().strip()
     objects = GitObjects(repository, "legacy test", 20)
+    scratch = None
+    if output is None:
+        scratch = tempfile.TemporaryDirectory(prefix="legacy-blobs-")
+        output = Path(scratch.name)
     try:
         commit_data = objects.read(commit, "commit", extractor.SOURCE_TREE_BYTES_LIMIT, "legacy test")
-        return extractor.legacy_dependency(objects, commit_data, "dep")
+        return extractor.legacy_dependency(objects, commit_data, "dep", extractor.BlobOutput(output))
     finally:
         objects.close()
+        if scratch is not None:
+            scratch.cleanup()
 
 
 class LegacyDependencyTests(unittest.TestCase):
@@ -863,6 +872,21 @@ class LegacyDependencyTests(unittest.TestCase):
         for name in ("Counter", "Day", "Asset"):
             self.assertEqual(tables[name]["status"], "unextracted")
             self.assertNotIn("rows", tables[name])
+
+    def test_golden_compact_blob_bytes_are_written_under_their_sha256(self) -> None:
+        golden = self.root / "golden"
+        git(self.root, "clone", "-q", str(GOLDEN_BUNDLE), str(golden))
+        output = self.root / "out"
+        record = legacy_walk(golden, output)
+        rows = {item["storage"]: item["rows"] for item in record["storage"] if "rows" in item}
+        blob_column = "018f0000000072008000000000000005"
+        golden_bytes = [b"\x00\xff\x80orna", b""]
+        values = [row["fields"][blob_column]["blob"] for row in rows[GOLDEN_STORAGE[4]]]
+        self.assertEqual(len(values), len(golden_bytes))
+        for value, data in zip(values, golden_bytes):
+            digest = hashlib.sha256(data).hexdigest()
+            self.assertEqual(value, {"length": len(data), "sha256": digest})
+            self.assertEqual((output / "blobs" / digest).read_bytes(), data)
 
     def test_repository_without_format_record_is_not_legacy(self) -> None:
         plain = make_repository(self.root / "plain", {"main.orna": b"pub table Note(id: Str) {}\n"})

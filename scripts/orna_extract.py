@@ -2103,7 +2103,7 @@ def module_namespace(path: str) -> str:
 # storage placements (ORNA-PATH-001..011, ORNA-ROW-001..004). This is a second,
 # standard-library reading of the same bytes, so the orna crates and the
 # orna_legacy / orna_compact readers are not the oracle for these rows. Compact table contents are read by
-# scripts/orna_compact.py, which verifies every declared digest; Blob values are reported by length and SHA-256.
+# scripts/orna_compact.py, which verifies every declared digest; Blob values are written to blobs/ and verified.
 LEGACY_REPOSITORY_FORMAT = 1
 KEY_COMPONENT_LIMIT = 200
 _KEY_READABLE = frozenset(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-")
@@ -2409,11 +2409,11 @@ def _row_fields(record: dict, fields: dict[str, str], where: str) -> dict:
     return {name: record[name] for name in fields}
 
 
-def _compact_rows(objects: GitObjects, files: dict[str, TreeEntry], storage: str, table: str, where: str) -> list[dict]:
+def _compact_rows(objects: GitObjects, files: dict[str, TreeEntry], storage: str, table: str, where: str, blobs: BlobOutput) -> list[dict]:
     """Reads one compact-storage-v1 table with scripts/orna_compact.py over its files in the object store.
 
-    orna_compact verifies every digest the table declares and resolves the winner per key. Blob values are
-    reported by length and SHA-256, never by content.
+    orna_compact verifies every digest the table declares and resolves the winner per key. Each Blob value's
+    bytes are written to DIR/blobs under their SHA-256; BlobOutput checks them against the length and digest.
     """
     if storage != table:
         fail(f"{where}: storage directory {storage} holds table {table}")
@@ -2436,29 +2436,34 @@ def _compact_rows(objects: GitObjects, files: dict[str, TreeEntry], storage: str
         except (orna_compact.CompactError, OSError) as error:
             fail(f"{where}: compact table {table}: {error}")
 
-    def value(item: object) -> object:
+    def value(item: object, descriptor: str) -> object:
         if item is None or isinstance(item, (bool, int, str)):
             return item
         if isinstance(item, bytes):
-            return {"blob": {"length": len(item), "sha256": hashlib.sha256(item).hexdigest()}}
+            digest = hashlib.sha256(item).digest()
+            blobs.write(descriptor, len(item), digest, lambda sink: sink(item), f"{where}: {descriptor}")
+            return {"blob": {"length": len(item), "sha256": digest.hex()}}
         if isinstance(item, list):
-            return [value(element) for element in item]
+            return [value(element, f"{descriptor}[{number}]") for number, element in enumerate(item)]
         if isinstance(item, orna_compact.Tag):
-            return {"tag": item.number, "value": value(item.value)}
+            return {"tag": item.number, "value": value(item.value, descriptor)}
         fail(f"{where}: compact table {table} holds a value with no JSON form")
         raise AssertionError("unreachable")
 
-    return [
-        {
-            "key": value(row.key),
-            "deleted": row.fields is None,
-            "fields": None if row.fields is None else {name: value(item) for name, item in sorted(row.fields.items())},
-        }
-        for row in resolved.rows
-    ]
+    rows: list[dict] = []
+    for index, row in enumerate(resolved.rows):
+        label = f"{where}: compact table {table} row {index}"
+        rows.append(
+            {
+                "key": value(row.key, f"{label} key"),
+                "deleted": row.fields is None,
+                "fields": None if row.fields is None else {name: value(item, f"{label} field {name}") for name, item in sorted(row.fields.items())},
+            }
+        )
+    return rows
 
 
-def legacy_dependency(objects: GitObjects, commit_data: bytes, path: str) -> dict | None:
+def legacy_dependency(objects: GitObjects, commit_data: bytes, path: str, blobs: BlobOutput) -> dict | None:
     """The repository-format-1 record of one dependency commit; None when it is not a legacy repository."""
     where = f"dependency {path}"
     tree = commit_tree(commit_data, objects.width, where)
@@ -2508,7 +2513,7 @@ def legacy_dependency(objects: GitObjects, commit_data: bytes, path: str) -> dic
             )
     for entry in storage:
         if entry["placement"] == "compact":
-            entry["rows"] = _compact_rows(objects, files, entry["storage"], entry["table"], where)
+            entry["rows"] = _compact_rows(objects, files, entry["storage"], entry["table"], where, blobs)
     tables: list[dict] = []
     schemas: dict[str, dict] = {}
     for child in sorted(files):
@@ -2670,7 +2675,7 @@ class Extraction:
                     commit_data = objects.read(commit, "commit", SOURCE_TREE_BYTES_LIMIT, f"dependency {path}")
                 except UnavailableObject:
                     continue
-                legacy = legacy_dependency(objects, commit_data, path)
+                legacy = legacy_dependency(objects, commit_data, path, self.blobs)
                 self.objects_verified += len(objects.verified)
                 return {"commit": commit, "path": path, "verified": True}, legacy
             finally:
