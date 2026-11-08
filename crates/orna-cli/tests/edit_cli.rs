@@ -193,6 +193,71 @@ async fn edit_entrypoint_admits_valid_row_and_retains_invalid_candidate() {
     );
 }
 
+/// A rejected `orna edit --row` candidate reports its detailed admission diagnostic and names
+/// the retained draft. Two byte-identical rejected candidates keep distinct draft records, so a
+/// later rejection cannot overwrite an earlier one (profiles/vfs-1.md:101-102). The accepted row
+/// stays unchanged for both attempts.
+#[tokio::test]
+async fn edit_row_rejection_reports_diagnostic_and_retains_distinct_drafts() {
+    let (repository_directory, repository, relation_id) =
+        commit_london_row("{ title: \"before\", }\n").await;
+    let scripts = TempDir::new().unwrap();
+    let invalid = editor(
+        &scripts,
+        "invalid-editor",
+        r#"printf '%s\n' '{ title: }' > "$1""#,
+    );
+    let accepted_before = current_row(&repository, relation_id, "Music", b"london")
+        .await
+        .expect("the source row is admitted before editing");
+
+    let mut drafts = Vec::new();
+    for _ in 0..2 {
+        let rejected = edit(
+            &repository_directory,
+            &invalid,
+            &["--debug", "edit", "--row", ROW_PATH],
+        );
+        assert!(
+            !rejected.status.success(),
+            "invalid candidate must be rejected"
+        );
+        let stderr = String::from_utf8_lossy(&rejected.stderr).into_owned();
+        assert!(
+            stderr.contains(
+                "edit candidate was rejected: mounted row save failed: malformed draft; draft retained at "
+            ),
+            "rejection reports the admission diagnostic and the retained draft: {stderr}"
+        );
+        assert!(
+            stderr.contains("vfs-retained-drafts-v1/editor-drafts/orna-edit-"),
+            "retained draft lives in the owner's draft store: {stderr}"
+        );
+        let draft = stderr
+            .split("draft retained at ")
+            .nth(1)
+            .unwrap_or_else(|| panic!("rejection did not report retained draft: {stderr}"))
+            .lines()
+            .next()
+            .expect("draft path line")
+            .trim()
+            .to_owned();
+        assert_eq!(fs::read(&draft).unwrap(), b"{ title: }\n");
+        drafts.push(draft);
+    }
+    assert_ne!(
+        drafts[0], drafts[1],
+        "identical rejected candidates keep distinct draft records"
+    );
+    let accepted_after = current_row(&repository, relation_id, "Music", b"london")
+        .await
+        .expect("accepted row remains admitted");
+    assert_eq!(
+        accepted_after, accepted_before,
+        "rejected candidates leave the accepted row unchanged"
+    );
+}
+
 /// A REPL write issued while `orna edit` is in its editor is refused by the runtime owner lock
 /// the edit holds (ORNA-REPL-EFFECT; cf. the `sys.admin.busy` clause for an incompatible active
 /// owner or lease, reference/Orna-1.1.0/Orna-1.1.0.md). The REPL change never lands, so the
