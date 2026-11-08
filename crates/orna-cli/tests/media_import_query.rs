@@ -2653,6 +2653,10 @@ fn process_peak_rss_bytes() -> u64 {
     kib.checked_mul(1024).expect("RSS bytes fit u64")
 }
 
+// ORNA-VFS-010 / B6: the structural bytes a metadata-only save may digest. A
+// payload-scale re-digest is at least one full payload chunk and exceeds it.
+const STRUCTURAL_DIGEST_BOUND: u64 = 4096;
+
 #[cfg(target_os = "linux")]
 fn git_object_count(root: &Path) -> usize {
     let output = Command::new("git")
@@ -2905,7 +2909,6 @@ async fn run_gate_b_import_and_metadata_update(payload_bytes: u64) {
     // descriptor's chunk verifications on the publish path (3 x 118 bytes on
     // this fixture; attribution recorded in CHANGELOG). A payload-scale
     // re-digest is at least one full payload chunk and exceeds this bound.
-    const STRUCTURAL_DIGEST_BOUND: u64 = 4096;
     let metadata_rehashed = raw_content_bytes_digested() - rehash_before_metadata;
     assert!(
         metadata_rehashed <= STRUCTURAL_DIGEST_BOUND,
