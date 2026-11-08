@@ -64,9 +64,14 @@ MUTANTS: dict[str, list[tuple[str, str]]] = {
     "other-repository-format-accepted": [
         ('if format_record.get("repository_format") != LEGACY_REPOSITORY_FORMAT:', "if False:"),
     ],
-    "editable-contents-reported-unread": [
-        ('"contents": "unread" if policy["placement"] == "compact" else "editable-policy-only",', '"contents": "unread",'),
+    "editable-contents-reported-extracted": [
+        ('"contents": "extracted" if policy["placement"] == "compact" else "editable-policy-only",', '"contents": "extracted",'),
     ],
+    "compact-storage-rows-dropped": [('if entry["placement"] == "compact":', "if False:")],
+    "compact-read-error-swallowed": [('            fail(f"{where}: compact table {table}: {error}")', "            return []")],
+    "blob-content-reported": [('{"blob": {"length": len(item), "sha256": hashlib.sha256(item).hexdigest()}}', '{"blob": item.hex()}')],
+    "blob-sha256-blanked": [('"sha256": hashlib.sha256(item).hexdigest()', '"sha256": ""')],
+    "tag-form-dropped": [('{"tag": item.number, "value": value(item.value)}', "value(item.value)")],
     "policy-extra-field-accepted": [
         ('if set(policy) != {"placement", "table"} or policy["placement"]', 'if policy["placement"]'),
     ],
