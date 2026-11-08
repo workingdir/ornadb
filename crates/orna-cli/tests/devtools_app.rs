@@ -363,13 +363,20 @@ fn run_action_refuses_a_body_over_its_limit_before_reading_it() {
     assert_eq!(reply.body, r#"{"error":"payload_too_large"}"#);
 }
 
-/// A Run of 1,000 `heavy(60)` terms: each is 60 nested `quad(50)` calls, each
-/// of which is four `spin(50)` calls, under the call-depth limit. The list
-/// literal keeps the parse shallow and the query stays under the body limit
-/// (a 4,000-term query is refused with 413 before it runs). The page request
-/// below is sent 100 ms after the Run starts; the Run is sized to keep
-/// evaluating well past that point, with margin for a slow CI runner.
-const SPIN_DECLARATION: &str = "pub fn spin(n: Int): Int = if n == 0 { 0 } else { 1 + spin(n - 1) };\npub fn quad(n: Int): Int = spin(n) + spin(n) + spin(n) + spin(n);\npub fn heavy(n: Int): Int = if n == 0 { 0 } else { quad(50) + heavy(n - 1) };\n";
+/// Declarations for the long Run. Each `tree(6, i)` term is 64 `spin(40, tag)`
+/// leaves whose tags are unique to that term, so the activation memo cannot
+/// collapse the work across terms: every term costs real evaluation. One term
+/// is about 1.8 s in a debug build; the step budget (`DEFAULT_STEPS`) admits
+/// eight terms and refuses sixteen, so the Run below uses four.
+const SPIN_DECLARATION: &str = "pub fn spin(n: Int, tag: Int): Int = if n == 0 { 0 } else { 1 + spin(n - 1, tag) };\npub fn tree(depth: Int, tag: Int): Int = if depth == 0 { spin(40, tag) } else { tree(depth - 1, tag * 2) + tree(depth - 1, tag * 2 + 1) };\n";
+
+/// A Run body of `terms` distinct `tree(6, i)` terms.
+fn spin_run_body(terms: usize) -> String {
+    let terms: Vec<String> = (1..=terms)
+        .map(|index| format!("main.tree(6, {index})"))
+        .collect();
+    format!("query=[{}, 0]", terms.join(", "))
+}
 
 #[test]
 // Specified: Gate G / DESIGN S5a; the page answers while a Run is still evaluating.
@@ -378,23 +385,63 @@ fn get_root_answers_while_a_long_run_evaluates() {
     let project = devtools_project_declaring(snapshot.path(), SPIN_DECLARATION);
     let (_server, address) = start(project.path());
     let origin = format!("http://{address}");
-    let query = format!("[{}0]", "main.heavy(60), ".repeat(1_000));
-    let body = format!("query={query}");
 
+    // Calibration: one term sets the unit of work on this machine.
+    let probe_started = Instant::now();
+    let probe = post_form(
+        &address,
+        "/action/devtools.run",
+        Some(&origin),
+        &spin_run_body(1),
+    );
+    let unit = probe_started.elapsed();
+    assert_eq!(probe.status, 200, "{}", probe.body);
+
+    let run_started = Instant::now();
     let run = thread::spawn({
         let address = address.clone();
-        move || post_form(&address, "/action/devtools.run", Some(&origin), &body)
+        let origin = origin.clone();
+        move || {
+            let reply = post_form(
+                &address,
+                "/action/devtools.run",
+                Some(&origin),
+                &spin_run_body(4),
+            );
+            (reply, Instant::now())
+        }
     });
-    thread::sleep(Duration::from_millis(100));
-    let page = get(&address, "/").expect("read the page during the run");
-    assert_eq!(page.status, 200, "{}", page.body);
-    assert!(
-        !run.is_finished(),
-        "the page must answer while the Run is still evaluating"
-    );
-    let reply = run.join().expect("the Run thread");
+
+    // Latencies of GETs that complete while the Run has not yet finished.
+    let mut in_flight = Vec::new();
+    while !run.is_finished() {
+        let began = Instant::now();
+        let page = get(&address, "/").expect("read the page during the run");
+        let latency = began.elapsed();
+        assert_eq!(page.status, 200, "{}", page.body);
+        if !run.is_finished() {
+            in_flight.push(latency);
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let (reply, finished) = run.join().expect("the Run thread");
+    let run_elapsed = finished.duration_since(run_started);
     assert_eq!(reply.status, 200, "{}", reply.body);
     assert!(reply.body.contains("Array"), "{}", reply.body);
+
+    assert!(
+        run_elapsed >= unit * 3,
+        "the Run ({run_elapsed:?}) must last at least three probe terms ({unit:?})"
+    );
+    assert!(
+        !in_flight.is_empty(),
+        "the page must answer while the Run is still evaluating"
+    );
+    let slowest = in_flight.iter().max().expect("an in-flight GET");
+    assert!(
+        *slowest < run_elapsed / 4,
+        "an in-flight GET took {slowest:?} against a Run of {run_elapsed:?}"
+    );
 }
 
 #[test]
