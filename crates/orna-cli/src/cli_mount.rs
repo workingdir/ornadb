@@ -459,7 +459,7 @@ fn settle_owner_reply(
     };
     if error == rustix::io::Errno::STALE {
         return Err(edit_refusal(crate::fuse_mount::EditError::Stale(format!(
-            "the mounted baseline is stale against the durable row; nothing was written; draft retained at {}",
+            "the mounted baseline is stale against the durable row (cause sys.vfs.stale_edit); nothing was written; draft retained at {}",
             draft.display()
         ))));
     }
@@ -1938,6 +1938,8 @@ mod tests {
                 &*diagnostic.title,
                 "Edit is stale against the mounted baseline"
             );
+            let detail = diagnostic.detail.unwrap_or_default();
+            assert!(detail.contains("sys.vfs.stale_edit"), "{detail}");
         }
     }
 }
