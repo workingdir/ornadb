@@ -530,10 +530,12 @@ title = "With original remotes disabled, rebuild both snapshots from a complete 
 select = [
   { record = "workspace-rest", package = "orna-repository", target = "test:complete_copy", test = "complete_copy_reconstructs_both_snapshots_offline_with_an_independent_extractor" },
   { record = "workspace-cli", package = "orna-cli", target = "test:independent_extractor_cli", test = "extractor_matches_the_real_reader_on_a_migrated_golden_copy" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:independent_extractor_cli", test = "extractor_walks_the_native_store_of_each_snapshot_in_a_two_snapshot_copy" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:independent_extractor_cli", test = "extractor_recovers_declared_schema_scalar_rows_and_modules_of_product_snapshots" },
 ]
 limitations = [
-  "Both snapshots are format-3 commits whose store is a text file, and the extractor checks Git object IDs only (ornadb-5il1.193, ornadb-5il1.192).",
-  "The legacy repository-format-1 dependency is read by a standard-library walker in scripts/orna_extract.py, with its decoders in scripts/orna_legacy.py and scripts/orna_compact.py. The selected golden test checks that dependency's compact table rows, their keys and deletion flags, and the Blob length and SHA-256 of compact-table Blob values, against the real reader's golden values. It also checks the committed loose rows of contacts/Contact (row count, keys, paths, Str and List<Str> fields, and the inline padded-Base64 Blob avatar length and SHA-256 of both rows). Format-1 loose rows carry only inline Base64 Blobs: the 1.0.0 ORNA-OGB-001 and ORNA-OGB-007 clauses (requirement-changes.json) allow externalised Blob references only from repository format 2, so the ORR-2 reference branch of the loose-row decoder is not reachable in this format and is checked only by scripts.test_orna_extract (LooseRowBlobTests), which is not a selected record. The walker and its decoders are shared with the extractor's own tests, so no independent second decoder checks them (ornadb-v18eb.3.2, ornadb-v18eb.3.4).",
+  "The complete_copy test's snapshots are format-3 commits whose store is a text file, and the extractor checks Git object IDs only (ornadb-5il1.193, ornadb-5il1.192).",
+  "No selected F5 test exports or rebuilds a format-3 snapshot with a pinned dependency: the golden test covers only the migrated legacy gitlink `vendor/stdlib` (ornadb-v18eb.3). The new product-snapshot test checks only Str rows; no Blob, Int or other scalar column is recovered by it (ornadb-v18eb.3).",
 ]
 
 [[item]]
