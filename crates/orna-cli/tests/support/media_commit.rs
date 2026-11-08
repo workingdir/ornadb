@@ -202,7 +202,7 @@ async fn commit_capture_inner(
             [ordinal + 4; 32],
             TerminalOutcome::new(vec![ordinal + 5]).unwrap(),
             &NoFault,
-            orna_runtime::ActivationEffectReport::declare(orna_runtime::DeclaredEffectSet::None),
+            orna_runtime::EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
         )
         .await
         .unwrap();
@@ -300,7 +300,7 @@ pub async fn commit_capture_pending_wide(
             ])
             .unwrap(),
             &NoFault,
-            orna_runtime::ActivationEffectReport::declare(orna_runtime::DeclaredEffectSet::None),
+            orna_runtime::EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
         )
         .await
         .unwrap();
@@ -504,7 +504,7 @@ pub async fn commit_source_captures_for_table(
             [ordinal.wrapping_add(4); 32],
             TerminalOutcome::new(vec![ordinal.wrapping_add(5)]).unwrap(),
             &NoFault,
-            orna_runtime::ActivationEffectReport::declare(orna_runtime::DeclaredEffectSet::None),
+            orna_runtime::EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
         )
         .await
         .unwrap();

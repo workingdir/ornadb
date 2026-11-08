@@ -1210,10 +1210,13 @@ fn restore_contextual_blob_values(
 /// under a bound registry. `may_reach_external_state` is currently constant `true`
 /// (environment reads are always external), so this always yields `ExternalPossible`.
 /// The declaration is truthful, but the REPL commit path does not yet persist it to
-/// the request ledger (tracked by ornadb-rg5g); this helper only maps the registry
-/// answer to the declared effect set.
+/// the request ledger (tracked by ornadb-rg5g); this helper only admits the
+/// evaluation through [`EffectGate::admit`] under that registry.
 pub(crate) fn repl_declared_effects(bindings: &SysHostBindingRegistry) -> ActivationEffectReport {
-    crate::declared_effects(bindings.may_reach_external_state())
+    EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::bound(
+        None,
+        Some(bindings),
+    ))
 }
 
 #[cfg(test)]
