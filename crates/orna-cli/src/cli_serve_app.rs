@@ -55,9 +55,25 @@ pub(super) struct ServeApp {
     authority: ApplicationAuthority,
     /// Project root whose committed `HEAD` supplies the module and rows.
     root: String,
-    /// The console session the page's Run control evaluates against. Its
-    /// admission failure is kept as the stable code every action answers with.
-    console: Result<AdmittedReplSession, String>,
+}
+
+/// The admitted serving entry. The page's authority and the console session
+/// the Run control evaluates against have separate locks, so a long Run never
+/// blocks `GET /`, and a Run that finds the console busy is refused at once.
+pub(super) struct ServingEntry {
+    app: Mutex<ServeApp>,
+    /// The console session. Its admission failure is kept as the stable code
+    /// every action answers with.
+    console: Mutex<Result<AdmittedReplSession, String>>,
+}
+
+impl ServingEntry {
+    pub(super) fn new(app: ServeApp, console: Result<AdmittedReplSession, String>) -> Self {
+        Self {
+            app: Mutex::new(app),
+            console: Mutex::new(console),
+        }
+    }
 }
 
 impl ServeApp {
@@ -95,7 +111,6 @@ impl ServeApp {
             Ok(_) if serve_is_public(&project.modules()[index].source) => Ok(Some(Self {
                 authority,
                 root: root.to_owned(),
-                console: console_session(project),
             })),
             // A private `serve` is not the serving entry (ORNA-APP-001 explicit root `pub fn serve()`).
             Ok(_) | Err(ApplicationError::MissingEntry(_)) => Ok(None),
@@ -453,16 +468,17 @@ fn serve_error(code: &str) -> Response {
 /// Every response this route produces (including 405 and 500) carries
 /// `X-Content-Type-Options: nosniff`.
 pub(super) fn serving_entry_route(
-    app: Option<&Mutex<ServeApp>>,
+    entry: Option<&ServingEntry>,
     request: &Request,
 ) -> Option<Response> {
-    let mut response = serving_entry_route_inner(app, request)?;
+    let mut response = serving_entry_route_inner(entry, request)?;
     super::ensure_header(&mut response, "X-Content-Type-Options", "nosniff");
     Some(response)
 }
 
-fn serving_entry_route_inner(app: Option<&Mutex<ServeApp>>, request: &Request) -> Option<Response> {
-    let app = app?;
+fn serving_entry_route_inner(entry: Option<&ServingEntry>, request: &Request) -> Option<Response> {
+    let entry = entry?;
+    let app = &entry.app;
     if let Some(suffix) = request.path.strip_prefix(MEDIA_PREFIX) {
         return Some(media_route(app, request, suffix));
     }
@@ -470,7 +486,7 @@ fn serving_entry_route_inner(app: Option<&Mutex<ServeApp>>, request: &Request) -
         return Some(preview_route(app, request, suffix));
     }
     if let Some(action_id) = request.path.strip_prefix(ACTION_PREFIX) {
-        return Some(action_route(app, request, action_id));
+        return Some(action_route(entry, request, action_id));
     }
     if request.path != "/" {
         return None;
@@ -917,13 +933,18 @@ fn refuse_uncommitted_blobs(
 
 /// Path prefix of the console action route. The page's Run control posts its
 /// single form field here as one console input (ORNA-APP-012).
-const ACTION_PREFIX: &str = "/action/";
+pub(super) const ACTION_PREFIX: &str = "/action/";
 /// Largest decoded console input one action request may evaluate.
 const MAX_CONSOLE_INPUT_BYTES: usize = 16 * 1024;
+/// Largest form body one action request may carry: every input byte may be
+/// percent-encoded to three bytes, plus the field name and separator.
+pub(super) const ACTION_REQUEST_BODY_BYTES: usize = 3 * MAX_CONSOLE_INPUT_BYTES + 1024;
 
 /// Admits the console session the Run control evaluates against. A failure is
 /// kept as its stable code rather than stopping the server.
-fn console_session(project: &orna_project::LoadedProject) -> Result<AdmittedReplSession, String> {
+pub(super) fn console_session(
+    project: &orna_project::LoadedProject,
+) -> Result<AdmittedReplSession, String> {
     AdmittedReplSession::from_loaded_project(
         project,
         project.standard_sources().iter().cloned(),
@@ -933,8 +954,9 @@ fn console_session(project: &orna_project::LoadedProject) -> Result<AdmittedRepl
 }
 
 /// Answers `POST /action/<id>`: the form's one field is evaluated as one
-/// console input and its value rendered. Only POST is served.
-fn action_route(app: &Mutex<ServeApp>, request: &Request, action_id: &str) -> Response {
+/// console input and its value rendered. Only POST is served, and only for an
+/// action identifier the page `GET /` currently offers.
+fn action_route(entry: &ServingEntry, request: &Request, action_id: &str) -> Response {
     if request.method != "POST" {
         return Response::new(
             405,
@@ -942,7 +964,7 @@ fn action_route(app: &Mutex<ServeApp>, request: &Request, action_id: &str) -> Re
             br#"{"error":"method_not_allowed"}"#.to_vec(),
         );
     }
-    if !valid_action_id(action_id) {
+    if !valid_action_id(action_id) || !page_offers_action(entry, action_id) {
         return Response::new(
             404,
             "application/json",
@@ -953,10 +975,32 @@ fn action_route(app: &Mutex<ServeApp>, request: &Request, action_id: &str) -> Re
         Ok(source) => source,
         Err((status, code)) => return action_error(status, code),
     };
-    // A session that another request holds is refused visibly instead of
-    // queueing the input behind an evaluation that is still running.
-    match app.try_lock() {
-        Ok(mut app) => app.console_submit(&source),
+    submit_console(&entry.console, &source)
+}
+
+/// True when the page answered by `GET /` offers `action_id` as a Run control.
+/// An action the page does not offer is not an input the console accepts.
+fn page_offers_action(entry: &ServingEntry, action_id: &str) -> bool {
+    let Ok(app) = entry.app.lock() else {
+        return false;
+    };
+    let page = app.respond();
+    let offered = format!(r#"formaction="/action/{action_id}""#);
+    page.status == 200 && contains_bytes(&page.body, offered.as_bytes())
+}
+
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
+/// Evaluates one console input under the session lock. A session another
+/// request holds is refused visibly instead of queueing the input behind an
+/// evaluation that is still running.
+fn submit_console(console: &Mutex<Result<AdmittedReplSession, String>>, source: &str) -> Response {
+    match console.try_lock() {
+        Ok(mut session) => console_submit(&mut session, source),
         Err(TryLockError::WouldBlock) => action_error(409, "serve.session_busy"),
         Err(TryLockError::Poisoned(_)) => unavailable_response(),
     }
@@ -1032,12 +1076,13 @@ fn action_error(status: u16, code: &str) -> Response {
     )
 }
 
-impl ServeApp {
-    /// Evaluates one console input and renders its value. The session is
-    /// pure: `submit` refuses an effectful input before it runs, and that
-    /// refusal is rendered like any other diagnostic.
-    fn console_submit(&mut self, source: &str) -> Response {
-        let session = match &mut self.console {
+/// Evaluates one console input and renders its value. The session is pure:
+/// `submit` refuses an effectful input before it runs, and that refusal is
+/// rendered like any other diagnostic. A session that failed to admit answers
+/// with its stable code.
+fn console_submit(console: &mut Result<AdmittedReplSession, String>, source: &str) -> Response {
+    contained(|| {
+        let session = match console {
             Ok(session) => session,
             Err(code) => return action_error(503, code),
         };
@@ -1055,7 +1100,15 @@ impl ServeApp {
             Ok(None) => Response::new(200, "text/html; charset=utf-8", b"<p>no value</p>".to_vec()),
             Err(error) => action_error(422, error.code()),
         }
-    }
+    })
+}
+
+/// Runs one evaluation so that a panic inside it answers 500 and returns
+/// without poisoning the console lock. The session stays available to the next
+/// input.
+fn contained(evaluate: impl FnOnce() -> Response) -> Response {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(evaluate))
+        .unwrap_or_else(|_| action_error(500, "serve.evaluation_failed"))
 }
 
 #[cfg(test)]
@@ -1119,5 +1172,82 @@ mod tests {
         assert_eq!(count("x-content-type-options"), 1);
         assert_eq!(count("content-disposition"), 1);
         assert_eq!(count("content-security-policy"), 1);
+    }
+}
+
+#[cfg(test)]
+mod serving_entry_tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    fn entry(console: Result<AdmittedReplSession, String>) -> ServingEntry {
+        let app = ServeApp {
+            authority: ApplicationAuthority::new(
+                orna_semantic::Catalogue::default(),
+                Limits::default(),
+            ),
+            root: String::new(),
+        };
+        ServingEntry::new(app, console)
+    }
+
+    fn get_root() -> Request {
+        Request {
+            method: "GET".into(),
+            path: "/".into(),
+            query: String::new(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn get_root_answers_while_the_console_is_held() {
+        let entry = entry(Err("serve.test".into()));
+        let _held = entry.console.lock().expect("console lock");
+        let (sender, receiver) = mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let answered = serving_entry_route(Some(&entry), &get_root()).is_some();
+                let _ = sender.send(answered);
+            });
+            assert_eq!(
+                receiver.recv_timeout(Duration::from_secs(30)),
+                Ok(true),
+                "GET / must not wait on the console session's lock"
+            );
+        });
+    }
+
+    #[test]
+    fn a_busy_console_refuses_the_input_at_once() {
+        let entry = entry(Err("serve.test".into()));
+        let _held = entry.console.lock().expect("console lock");
+        let response = submit_console(&entry.console, "1 + 1");
+        assert_eq!(response.status, 409);
+        assert_eq!(
+            response.body,
+            b"<p class=\"diagnostic\">serve.session_busy</p>"
+        );
+    }
+
+    #[test]
+    fn an_unadmitted_console_answers_its_stable_code() {
+        let entry = entry(Err("serve.session_unavailable".into()));
+        let response = submit_console(&entry.console, "1");
+        assert_eq!(response.status, 503);
+        assert!(contains_bytes(&response.body, b"serve.session_unavailable"));
+    }
+
+    #[test]
+    fn a_panic_during_evaluation_answers_500_without_poisoning_the_console() {
+        let entry = entry(Err("serve.test".into()));
+        let response = {
+            let _session = entry.console.lock().expect("console lock");
+            contained(|| panic!("evaluation panicked"))
+        };
+        assert_eq!(response.status, 500);
+        assert!(!entry.console.is_poisoned());
     }
 }

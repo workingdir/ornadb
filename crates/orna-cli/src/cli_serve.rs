@@ -242,7 +242,7 @@ struct ServeState {
     application: Mutex<ApplicationLiveAdapter>,
     /// The admitted `serve` entry that answers `/`; `None` when the project
     /// declares no serving entry.
-    app: Option<Mutex<cli_serve_app::ServeApp>>,
+    app: Option<cli_serve_app::ServingEntry>,
     workers: WebSocketWorkers,
     /// Connections being served, bounded by [`ServeOptions::max_connections`]
     /// (see [`ConnectionSlot`]).
@@ -516,7 +516,7 @@ struct ServedClone {
     catalogue: orna_semantic::Catalogue,
     project: Option<orna_project::LoadedProject>,
     /// The admitted `serve` entry, or `None` when the project declares none.
-    app: Option<cli_serve_app::ServeApp>,
+    app: Option<cli_serve_app::ServingEntry>,
     /// The clone's durable runtime. The live host owns it, so each live
     /// request is durably admitted and an Eval's writes commit together with
     /// its terminal outcome (30-protocol REQUEST-1).
@@ -665,7 +665,7 @@ fn admit_serving_entry(
 ) -> (
     Option<orna_project::LoadedProject>,
     orna_semantic::Catalogue,
-    Option<cli_serve_app::ServeApp>,
+    Option<cli_serve_app::ServingEntry>,
 ) {
     let project = match load_project(endpoint) {
         Ok(project) => project,
@@ -694,7 +694,10 @@ fn admit_serving_entry(
                 // Without a serving entry the Git transport still serves; `/` is absent.
                 report_serving_diagnostic(&cli_serve_app::missing_entry_diagnostic());
             }
-            (Some(project), catalogue, app)
+            let entry = app.map(|app| {
+                cli_serve_app::ServingEntry::new(app, cli_serve_app::console_session(&project))
+            });
+            (Some(project), catalogue, entry)
         }
         Err(diagnostic) => {
             report_serving_diagnostic(&diagnostic);
@@ -806,7 +809,7 @@ fn new_serve_state(
             deletion: LocalSessionDeletion,
         }),
         application: Mutex::new(application),
-        app: app.map(Mutex::new),
+        app,
         workers: WebSocketWorkers::default(),
         connections: AtomicUsize::new(0),
     })
@@ -2279,6 +2282,8 @@ fn is_orna_request_line(line: &[u8]) -> bool {
 fn request_body_limit(path: &str) -> usize {
     if path.starts_with("/git/") {
         MAX_GIT_REQUEST_BODY_BYTES
+    } else if path.starts_with(cli_serve_app::ACTION_PREFIX) {
+        cli_serve_app::ACTION_REQUEST_BODY_BYTES
     } else {
         MAX_REQUEST_BODY_BYTES
     }
