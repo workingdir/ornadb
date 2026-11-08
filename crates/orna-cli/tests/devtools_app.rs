@@ -211,6 +211,111 @@ fn run_action_escapes_the_rendered_value() {
     );
 }
 
+#[test]
+// Specified: Gate G / DESIGN S5a; an action the page does not offer is not found.
+fn run_action_answers_an_unoffered_action_with_not_found() {
+    let snapshot = standard_snapshot();
+    let project = devtools_project(snapshot.path());
+    let (_server, address) = start(project.path());
+    let origin = format!("http://{address}");
+
+    let reply = post_form(
+        &address,
+        "/action/devtools.missing",
+        Some(&origin),
+        "query=1",
+    );
+    assert_eq!(reply.status, 404, "{}", reply.body);
+    assert!(
+        reply.body.contains(r#""error":"action.not_found""#),
+        "{}",
+        reply.body
+    );
+}
+
+#[test]
+// Specified: Gate G / DESIGN S5a; an input over the console limit is refused before evaluation.
+fn run_action_refuses_an_oversize_input() {
+    let snapshot = standard_snapshot();
+    let project = devtools_project(snapshot.path());
+    let (_server, address) = start(project.path());
+    let origin = format!("http://{address}");
+
+    let body = format!("query={}", "1".repeat(16 * 1024 + 1));
+    let reply = post_form(&address, "/action/devtools.run", Some(&origin), &body);
+    assert_eq!(reply.status, 413, "{}", reply.body);
+    assert!(
+        reply.body.contains("action.input_too_large"),
+        "{}",
+        reply.body
+    );
+}
+
+#[test]
+// Specified: Gate G / DESIGN S5a; a malformed or non-UTF-8 form value is an invalid form.
+fn run_action_refuses_a_malformed_form_value() {
+    let snapshot = standard_snapshot();
+    let project = devtools_project(snapshot.path());
+    let (_server, address) = start(project.path());
+    let origin = format!("http://{address}");
+
+    for body in ["query=%zz", "query=%4", "query=%ff"] {
+        let reply = post_form(&address, "/action/devtools.run", Some(&origin), body);
+        assert_eq!(reply.status, 400, "{body}: {}", reply.body);
+        assert!(
+            reply.body.contains("action.invalid_form"),
+            "{body}: {}",
+            reply.body
+        );
+    }
+}
+
+#[test]
+// Specified: Gate G / DESIGN S5a; a request naming a foreign Host is refused even with a matching Origin.
+fn run_action_refuses_a_foreign_host() {
+    let snapshot = standard_snapshot();
+    let project = devtools_project(snapshot.path());
+    let (_server, address) = start(project.path());
+    let origin = format!("http://{address}");
+    let body = "query=1+%2B+1";
+
+    let request = format!(
+        "POST /action/devtools.run HTTP/1.1\r\nHost: evil.example\r\nOrigin: {origin}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let mut stream = TcpStream::connect(&address).expect("connect to the serving process");
+    stream
+        .write_all(request.as_bytes())
+        .expect("send the action request");
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).expect("read the action reply");
+    let reply = parse_reply(&raw);
+    assert_eq!(reply.status, 403, "{}", reply.body);
+    assert_eq!(reply.body, r#"{"error":"host_denied"}"#);
+}
+
+#[test]
+// Specified: Gate G / DESIGN S5a; an effectful input is refused by the served console, not evaluated.
+fn run_action_refuses_an_effectful_input() {
+    let snapshot = standard_snapshot();
+    let project = devtools_project(snapshot.path());
+    let (_server, address) = start(project.path());
+    let origin = format!("http://{address}");
+
+    let reply = post_form(
+        &address,
+        "/action/devtools.run",
+        Some(&origin),
+        "query=main.Note.insert%28%7B+id%3A+1%2C+body%3A+%22x%22+%7D%29",
+    );
+    assert_eq!(reply.status, 422, "{}", reply.body);
+    assert!(
+        reply.body.contains("ORNA-REPL-EFFECT"),
+        "the served console refuses the effect: {}",
+        reply.body
+    );
+}
+
 fn initialize_project(directory: &Path) {
     let output = Command::new(BINARY)
         .env("GIT_CONFIG_NOSYSTEM", "1")
