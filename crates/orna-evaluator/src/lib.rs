@@ -40,6 +40,8 @@ mod admitted_repl;
 mod browser_profile;
 mod cancellation;
 #[cfg(feature = "system-host-bindings")]
+mod effect_evidence;
+#[cfg(feature = "system-host-bindings")]
 mod explain_bindings;
 mod list;
 mod regex_lite;
@@ -61,6 +63,8 @@ pub use admitted_repl::{
 };
 pub use browser_profile::{BrowserProfileError, execute_browser_profile};
 pub use cancellation::CancellationToken;
+#[cfg(feature = "system-host-bindings")]
+pub use effect_evidence::SysHostEffectEvidence;
 #[cfg(feature = "system-host-bindings")]
 pub use explain_bindings::{ActivationExplainCatalogue, ExplainCatalogue};
 use list::List;

@@ -185,7 +185,7 @@ async fn commit_capture(
             [ordinal + 4; 32],
             TerminalOutcome::new(vec![ordinal + 5]).unwrap(),
             &NoFault,
-            orna_runtime::ActivationEffectReport::declare(orna_runtime::DeclaredEffectSet::None),
+            orna_runtime::EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
         )
         .await
         .unwrap();

@@ -28,7 +28,7 @@ use orna_protocol::{
 };
 use orna_repository::{GitCommitRef, ProtectedContentPin, RepositoryCaptureCapability};
 use orna_runtime::{
-    ActivationEffectReport, DeclaredEffectSet, NoFault, RequestIdentity, RuntimeActivationContext,
+    ActivationEffectReport, EffectGate, NoFault, RequestIdentity, RuntimeActivationContext,
     RuntimeError, RuntimePublicationMetadataRows, RuntimeTableActivationSnapshot,
     RuntimeTableIdentity, RuntimeTableRows, StagedTableActivation, TableMutation, TableObjectId,
 };
@@ -945,9 +945,8 @@ impl ApplicationAuthority {
     /// Stages an ordered mutation batch for one captured activation. An empty
     /// batch is rejected by the runtime boundary; pure activations never
     /// enter this path. `effects` is the mandatory effect report of REQUEST-1 step 5,
-    /// built with
-    /// [`ActivationEffectReport::declare`]: only a declaration of no external
-    /// effects grants the Orna-controlled marker.
+    /// built by [`EffectGate::admit`]: only an evaluation bound to no host object
+    /// grants the Orna-controlled marker.
     pub fn stage_mutations(
         &self,
         context: RuntimeActivationContext,
@@ -1062,20 +1061,6 @@ impl ApplicationAuthority {
             .collect::<Result<Vec<_>, _>>()?;
         self.stage_mutations(context, mutations, effects)
     }
-}
-
-/// Declares the effect set of an evaluation (REQUEST-1 step 5). The caller
-/// states whether its bindings may reach state outside Orna's table
-/// transaction (ORNA-CAP-005): a system host attachment or a bound
-/// `SysHostBindingRegistry` (see `may_reach_external_state`). Only an
-/// evaluation with neither performs Orna table writes alone, and only it
-/// declares no external effects.
-pub(crate) fn declared_effects(may_reach_external_state: bool) -> ActivationEffectReport {
-    ActivationEffectReport::declare(if may_reach_external_state {
-        DeclaredEffectSet::ExternalPossible
-    } else {
-        DeclaredEffectSet::None
-    })
 }
 
 /// The evaluated result of one admitted source activation together with the
@@ -1928,9 +1913,12 @@ impl SourceMutationEffectHandler {
         Ok(())
     }
 
-    /// The effect report for this handler's evaluation: see [`declared_effects`].
+    /// The effect report for this handler's evaluation: see [`EffectGate::admit`].
     pub(crate) fn effect_report(&self) -> ActivationEffectReport {
-        declared_effects(self.sys_host.is_some())
+        EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::bound(
+            self.sys_host.as_ref(),
+            None,
+        ))
     }
 
     /// Finishes evaluation while retaining source schema and protected pins.
@@ -3856,7 +3844,7 @@ fn source_error_location(source: &str) -> (u64, u64) {
 }
 
 impl LiveApplication for ApplicationLiveAdapter {
-    // This adapter's effect reports come from `declared_effects`, which reads the
+    // This adapter's effect reports come from `EffectGate::admit`, which reads the
     // evaluator's own sys-host bindings (REQUEST-1 step 5), so they are trusted.
     fn trusts_controlled_effect_reports(&self) -> bool {
         true
@@ -4479,11 +4467,23 @@ mod tests {
         let registry = orna_evaluator::SysHostBindingRegistry::default();
         assert!(registry.may_reach_external_state());
         assert!(matches!(
-            declared_effects(registry.may_reach_external_state()),
+            EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::bound(
+                None,
+                Some(&registry)
+            )),
             ActivationEffectReport::ExternalPossible
         ));
         assert!(matches!(
-            declared_effects(false),
+            EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
+            ActivationEffectReport::ControlledOnly(_)
+        ));
+    }
+
+    #[test]
+    fn source_handler_without_host_reports_controlled_effects() {
+        let handler = SourceMutationEffectHandler::new(BTreeMap::new());
+        assert!(matches!(
+            handler.effect_report(),
             ActivationEffectReport::ControlledOnly(_)
         ));
     }

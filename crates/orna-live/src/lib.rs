@@ -11298,7 +11298,7 @@ mod tests {
             let transaction = LiveEvalTransaction::new(
                 vec![mutation],
                 [24; 32],
-                ActivationEffectReport::declare(orna_runtime::DeclaredEffectSet::None),
+                orna_runtime::EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
                 if fail {
                     Arc::new(FailBeforeTableWrite)
                 } else {
@@ -11454,7 +11454,7 @@ mod tests {
         let transaction = LiveEvalTransaction::new(
             vec![mutation],
             [24; 32],
-            ActivationEffectReport::declare(orna_runtime::DeclaredEffectSet::None),
+            orna_runtime::EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
             Arc::new(NoFault),
         )
         .for_request(identity)
@@ -11553,7 +11553,7 @@ mod tests {
             let mut transaction = LiveEvalTransaction::new(
                 vec![mutation],
                 [24; 32],
-                ActivationEffectReport::declare(orna_runtime::DeclaredEffectSet::None),
+                orna_runtime::EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
                 Arc::new(NoFault),
             );
             if let Some(supplied_identity) = supplied_identity {
