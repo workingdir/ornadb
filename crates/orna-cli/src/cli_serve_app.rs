@@ -129,22 +129,23 @@ impl ServeApp {
         }
     }
 
-    /// Invokes `serve` read-only and renders its value as the `GET /` body.
-    /// A `serve` that stages any table mutation is refused.
-    fn respond(&self) -> Response {
+    /// Invokes `serve` read-only and renders its value as the `GET /` body,
+    /// with the action identifiers the page's Run controls submit to. A
+    /// `serve` that stages any table mutation is refused.
+    fn respond(&self) -> (Response, Vec<String>) {
         let (served, commit) = match self.stage_at_head() {
             Ok(served) => served,
-            Err(code) => return serve_error(code),
+            Err(code) => return (serve_error(code), Vec::new()),
         };
         // A `std.ui` node tree renders as semantic HTML; every other value
         // keeps the Inspect text fallback.
         match served {
             ServedValue::Canonical(staged) => {
                 if !staged.mutations().is_empty() {
-                    return serve_error("serve.write_refused");
+                    return (serve_error("serve.write_refused"), Vec::new());
                 }
                 page(
-                    crate::ui_render::render_value_html(
+                    crate::ui_render::render_value_page(
                         staged.value().raw(),
                         Some(commit.as_str()),
                     ),
@@ -152,7 +153,7 @@ impl ServeApp {
                 )
             }
             ServedValue::Contextual(value) => page(
-                crate::ui_render::render_ui_html(&value, Some(commit.as_str())),
+                crate::ui_render::render_ui_page(&value, Some(commit.as_str())),
                 || crate::repl::inspect_context(&value),
             ),
         }
@@ -502,7 +503,7 @@ fn serving_entry_route_inner(entry: Option<&ServingEntry>, request: &Request) ->
     let head = request.method == "HEAD";
     Some(match app.lock() {
         Ok(app) => {
-            let mut response = app.respond();
+            let (mut response, _) = app.respond();
             if head {
                 response.body.clear();
             }
@@ -833,12 +834,22 @@ enum ServedValue {
     Contextual(ContextValue),
 }
 
-/// Renders the body as HTML when the value is a `std.ui` tree, otherwise as the
-/// Inspect text fallback.
-fn page(html: Option<String>, text: impl FnOnce() -> String) -> Response {
-    match html {
-        Some(html) => Response::new(200, "text/html; charset=utf-8", html.into_bytes()),
-        None => Response::new(200, "text/plain; charset=utf-8", text().into_bytes()),
+/// Renders the body as HTML when the value is a `std.ui` tree, with the
+/// actions its controls submit to, otherwise as the Inspect text fallback
+/// that offers none.
+fn page(
+    rendered: Option<crate::ui_render::RenderedPage>,
+    text: impl FnOnce() -> String,
+) -> (Response, Vec<String>) {
+    match rendered {
+        Some(page) => (
+            Response::new(200, "text/html; charset=utf-8", page.html.into_bytes()),
+            page.actions,
+        ),
+        None => (
+            Response::new(200, "text/plain; charset=utf-8", text().into_bytes()),
+            Vec::new(),
+        ),
     }
 }
 
@@ -979,14 +990,15 @@ fn action_route(entry: &ServingEntry, request: &Request, action_id: &str) -> Res
 }
 
 /// True when the page answered by `GET /` offers `action_id` as a Run control.
-/// An action the page does not offer is not an input the console accepts.
+/// The offer is the identifier a rendered activate button emitted, not a
+/// substring of the page text, so page content cannot forge an offer. An action
+/// the page does not offer is not an input the console accepts.
 fn page_offers_action(entry: &ServingEntry, action_id: &str) -> bool {
     let Ok(app) = entry.app.lock() else {
         return false;
     };
-    let page = app.respond();
-    let offered = format!(r#"formaction="/action/{action_id}""#);
-    page.status == 200 && contains_bytes(&page.body, offered.as_bytes())
+    let (response, actions) = app.respond();
+    response.status == 200 && actions.iter().any(|offered| offered == action_id)
 }
 
 fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
