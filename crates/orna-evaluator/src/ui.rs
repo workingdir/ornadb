@@ -287,14 +287,34 @@ pub(super) fn ui_property_type_matches(type_name: &str, value: &Value) -> bool {
 
 /// Checks that a node property is canonical data. The canonical encoder refuses
 /// a Blob reference, so the property is checked through its skeleton with every
-/// Blob node replaced by null; the reference was validated when it was decoded.
+/// well-formed ROV-3 reference replaced by null. Any other Blob form is refused
+/// here, as it was before a UI property could carry a Blob at all.
 fn ui_property_is_canonical(value: &Value) -> Result<(), EvaluationError> {
+    let raw = value.raw()?;
+    if !ui_blob_forms_are_references(&raw) {
+        return Err(error("ORNA-EVAL-VALUE"));
+    }
     let mut blob_positions = Vec::new();
     let mut next_index = 0;
-    let skeleton = identity_skeleton(value.raw()?, &mut next_index, &mut blob_positions);
+    let skeleton = identity_skeleton(raw, &mut next_index, &mut blob_positions);
     CanonicalValue::new(skeleton)
         .map(drop)
         .map_err(|_| error("ORNA-EVAL-VALUE"))
+}
+
+/// Whether every Blob node in `raw` is a well-formed ROV-3 reference. Inline
+/// OVB-2, SOV-3 and overflow nodes, and malformed ROV-3 references, are not.
+fn ui_blob_forms_are_references(raw: &Raw) -> bool {
+    match raw {
+        Raw::Tag(ROV3_BLOB_TAG, _) => orna_value::blob_metadata_from_raw(raw).is_ok(),
+        Raw::Tag(OVB2_BLOB_TAG | SOV3_BLOB_TAG | ROV3_OVERFLOW_TAG, _) => false,
+        Raw::Tag(_, payload) => ui_blob_forms_are_references(payload),
+        Raw::Array(items) => items.iter().all(ui_blob_forms_are_references),
+        Raw::Map(entries) => entries.iter().all(|(key, value)| {
+            ui_blob_forms_are_references(key) && ui_blob_forms_are_references(value)
+        }),
+        _ => true,
+    }
 }
 
 fn ui_type_name_is_well_formed(type_name: &str) -> bool {
@@ -387,4 +407,38 @@ fn is_ui_action_descriptor(value: &Value) -> bool {
         && fields
             .get("debug_kind")
             .is_none_or(|value| matches!(value, Value::Null | Value::String(_)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn non_blob_non_canonical_property_is_still_rejected() {
+        let value = Value::Float(f64::NAN.to_bits() ^ 1);
+        assert!(ui_property_is_canonical(&value).is_err());
+    }
+
+    #[test]
+    fn plain_property_is_accepted() {
+        assert!(ui_property_is_canonical(&Value::String("label".into())).is_ok());
+    }
+
+    #[test]
+    fn inline_blob_forms_are_not_admitted_in_a_property() {
+        let inline = Raw::Tag(OVB2_BLOB_TAG, Box::new(Raw::Null));
+        let sov3 = Raw::Tag(SOV3_BLOB_TAG, Box::new(Raw::Null));
+        let overflow = Raw::Tag(ROV3_OVERFLOW_TAG, Box::new(Raw::Null));
+        assert!(!ui_blob_forms_are_references(&inline));
+        assert!(!ui_blob_forms_are_references(&sov3));
+        assert!(!ui_blob_forms_are_references(&overflow));
+        let nested = Raw::Array(vec![Raw::Map(vec![(Raw::Null, sov3)])]);
+        assert!(!ui_blob_forms_are_references(&nested));
+    }
+
+    #[test]
+    fn malformed_rov3_reference_is_not_admitted_in_a_property() {
+        let malformed = Raw::Tag(ROV3_BLOB_TAG, Box::new(Raw::Array(Vec::new())));
+        assert!(!ui_blob_forms_are_references(&malformed));
+    }
 }
