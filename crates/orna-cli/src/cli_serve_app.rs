@@ -15,19 +15,24 @@
 use super::apply_payload_policy;
 use super::{
     CommittedRowsError, CommittedTableIdentity, Diagnostic, Limits, Mutex, PinnedCommittedRows,
-    PinnedCommittedTables, Request, Response, RuntimeState, admitted_table_schemas,
-    committed_rows_at, committed_table_identities, evaluate_over_committed_tables,
-    legacy_bare_module_candidates, legacy_bare_module_table, runtime_identity,
-    unavailable_response,
+    PinnedCommittedTables, Request, Response, RuntimeState, RuntimeTableIdentity, RuntimeTableRows,
+    admitted_table_schemas, committed_rows_at, committed_table_identities,
+    evaluate_over_committed_tables, legacy_bare_module_candidates, legacy_bare_module_table,
+    runtime_identity, unavailable_response,
 };
 use crate::media_range::{MediaMethod, MediaReply, media_reply, plan_media_response};
-use orna_application::{ApplicationAuthority, ApplicationError, StagedActivation};
+use orna_application::{
+    AdmittedApplication, ApplicationAuthority, ApplicationError, StagedActivation,
+};
 use orna_evaluator::Environment;
-use orna_repository::{GitHashAlgorithm, KeyRange, NativeOid};
+use orna_repository::{GitHashAlgorithm, KeyRange, NativeOid, RepositoryFormatContext};
+use orna_semantic::TableSchema;
 use orna_serving::media_preview::{
     MAX_PREVIEW_INPUT_BYTES, MAX_WAVE_INPUT_BYTES, PreviewError, WaveInspectionError,
     decode_image_preview, image_format_for, inspect_pcm_wave, is_wave_essence,
 };
+use orna_value::ContextValue;
+use std::collections::BTreeMap;
 
 /// Repository-relative module that hosts the serving entry.
 pub(super) const SERVE_MODULE_PATH: &str = "main.orna";
@@ -106,21 +111,28 @@ impl ServeApp {
     /// Invokes `serve` read-only and renders its value as the `GET /` body.
     /// A `serve` that stages any table mutation is refused.
     fn respond(&self) -> Response {
-        let (staged, commit) = match self.stage_at_head() {
-            Ok(staged) => staged,
+        let (served, commit) = match self.stage_at_head() {
+            Ok(served) => served,
             Err(code) => return serve_error(code),
         };
-        if !staged.mutations().is_empty() {
-            return serve_error("serve.write_refused");
-        }
         // A `std.ui` node tree renders as semantic HTML; every other value
         // keeps the Inspect text fallback.
-        match crate::ui_render::render_value_html(staged.value().raw(), Some(commit.as_str())) {
-            Some(html) => Response::new(200, "text/html; charset=utf-8", html.into_bytes()),
-            None => Response::new(
-                200,
-                "text/plain; charset=utf-8",
-                crate::repl::inspect(staged.value()).into_bytes(),
+        match served {
+            ServedValue::Canonical(staged) => {
+                if !staged.mutations().is_empty() {
+                    return serve_error("serve.write_refused");
+                }
+                page(
+                    crate::ui_render::render_value_html(
+                        staged.value().raw(),
+                        Some(commit.as_str()),
+                    ),
+                    || crate::repl::inspect(staged.value()),
+                )
+            }
+            ServedValue::Contextual(value) => page(
+                crate::ui_render::render_ui_html(&value, Some(commit.as_str())),
+                || crate::repl::inspect_context(&value),
             ),
         }
     }
@@ -150,9 +162,7 @@ impl ServeApp {
     /// CWD generation captured for this activation. A missing or unreadable HEAD
     /// entry is `serve.entry_unavailable`; a table whose committed identity is
     /// missing, or present for only some tables, is refused before any read.
-    fn stage_at_head(
-        &self,
-    ) -> Result<(StagedActivation, orna_repository::GitCommitRef), &'static str> {
+    fn stage_at_head(&self) -> Result<(ServedValue, orna_repository::GitCommitRef), &'static str> {
         let repository = orna_repository::Repository::discover(&self.root)
             .map_err(|_| "serve.entry_unavailable")?;
         // An unborn HEAD is reported before any runtime state opens.
@@ -195,7 +205,7 @@ impl ServeApp {
             return self
                 .authority
                 .evaluate_staged(&base, &Environment::new())
-                .map(|staged| (staged, commit))
+                .map(|staged| (ServedValue::Canonical(staged), commit))
                 .map_err(|_| "serve.evaluation_failed");
         }
         let Ok(tables) = committed_table_identities(&repository, &commit, names.clone()) else {
@@ -241,21 +251,28 @@ impl ServeApp {
                 CommittedRowsError::Limit => "serve.table_read_limit",
                 CommittedRowsError::Unavailable => "serve.table_rows_unavailable",
             })?;
-        // A stored Blob reference has no portable value to serve; refuse rather than
-        // expose its placeholder as committed data.
-        for (name, table) in admitted.table_schemas() {
-            let stored = rows.get(name).map(Vec::as_slice).unwrap_or_default();
-            let order = storage_orders
-                .get(name)
-                .map(Vec::as_slice)
-                .unwrap_or_default();
-            if orna_project::stored_rows_hold_blob(table.schema(), order, stored)
-                .map_err(|_| "serve.table_rows_unavailable")?
-            {
-                return Err("serve.table_read_unsupported");
-            }
-        }
+        // A table whose schema holds a Blob is served as ROV-3 contextual values
+        // (ORNA-APP-013): a committed Blob reference keeps its media authority,
+        // and an uncommitted one is refused.
+        let blob_tables = admitted
+            .table_schemas()
+            .values()
+            .any(|table| table.schema().fields.values().any(orna_project::holds_blob));
         // Step 3 is the activation's `load_tx` fence over this pin.
+        if blob_tables {
+            let format = repository
+                .open_pinned_format_context(commit.as_str())
+                .map_err(|_| "serve.table_rows_unavailable")?;
+            let committed = PinnedCommittedTables {
+                rows: PinnedCommittedRows::new(pin, rows.clone())
+                    .map_err(|_| "serve.table_rows_unavailable")?,
+                storage_orders,
+            };
+            return evaluate_contextual_serve(
+                &format, &runtime, &state, &admitted, &tables, committed, &rows,
+            )
+            .map(|value| (ServedValue::Contextual(value), commit));
+        }
         let committed = PinnedCommittedTables {
             rows: PinnedCommittedRows::new(pin, rows)
                 .map_err(|_| "serve.table_rows_unavailable")?,
@@ -271,7 +288,7 @@ impl ServeApp {
             None,
         )
         .map_err(|_| "serve.evaluation_failed")?;
-        Ok((staged, commit))
+        Ok((ServedValue::Canonical(staged), commit))
     }
 
     /// The HEAD commit of `repository`. An unborn HEAD has no commit to serve
@@ -782,6 +799,111 @@ pub(super) fn missing_entry_diagnostic() -> Diagnostic {
         "no serving entry: main.orna does not declare `pub fn serve()`",
         "add `pub fn serve()` to main.orna to serve `/`; Git transport remains available",
     )
+}
+
+/// The value `serve` renders for one request: a canonical value when no
+/// admitted table holds a Blob, otherwise a ROV-3 contextual value.
+enum ServedValue {
+    Canonical(StagedActivation),
+    Contextual(ContextValue),
+}
+
+/// Renders the body as HTML when the value is a `std.ui` tree, otherwise as the
+/// Inspect text fallback.
+fn page(html: Option<String>, text: impl FnOnce() -> String) -> Response {
+    match html {
+        Some(html) => Response::new(200, "text/html; charset=utf-8", html.into_bytes()),
+        None => Response::new(200, "text/plain; charset=utf-8", text().into_bytes()),
+    }
+}
+
+/// Evaluates `serve` over a Blob-holding activation as ROV-3 contextual values
+/// (ORNA-APP-013). A committed Blob reference keeps its capability context so
+/// the page can name its media descriptor. An uncommitted row that carries a
+/// Blob reference has no committed media authority and is refused.
+fn evaluate_contextual_serve(
+    format: &RepositoryFormatContext,
+    runtime: &tokio::runtime::Runtime,
+    state: &RuntimeState,
+    admitted: &AdmittedApplication,
+    tables: &[RuntimeTableIdentity],
+    committed: PinnedCommittedTables,
+    committed_rows: &RuntimeTableRows,
+) -> Result<ContextValue, &'static str> {
+    let PinnedCommittedTables {
+        rows,
+        storage_orders,
+    } = committed;
+    let snapshot = runtime
+        .block_on(state.begin_admitted_table_activation_over_committed(tables, rows))
+        .map_err(|_| "serve.table_rows_unavailable")?;
+    let mut plain = BTreeMap::new();
+    let mut context_rows = BTreeMap::new();
+    for (name, table) in admitted.table_schemas() {
+        let schema = table.schema();
+        let storage_order = storage_orders
+            .get(name)
+            .ok_or("serve.table_rows_unavailable")?;
+        let stored = snapshot
+            .table_rows()
+            .get(name)
+            .map_or(&[][..], Vec::as_slice);
+        if !schema.fields.values().any(orna_project::holds_blob) {
+            let table_rows =
+                orna_project::evaluator_rows_from_stored(schema, storage_order, stored)
+                    .map_err(|_| "serve.table_rows_unavailable")?;
+            plain.insert(name.clone(), table_rows);
+            continue;
+        }
+        let committed_stored = committed_rows.get(name).map_or(&[][..], Vec::as_slice);
+        refuse_uncommitted_blobs(schema, storage_order, stored, committed_stored)?;
+        let object_id = tables
+            .iter()
+            .find(|identity| identity.table() == name.as_str())
+            .ok_or("serve.table_rows_unavailable")?
+            .object_id();
+        let table_rows = orna_project::contextual_table_rows(
+            format,
+            object_id,
+            &orna_project::CommittedTable {
+                storage_order: storage_order.clone(),
+                rows: stored.to_vec(),
+            },
+            schema,
+        )
+        .map_err(|_| "serve.table_rows_unavailable")?;
+        context_rows.insert(name.clone(), table_rows);
+    }
+    orna_application::evaluate_contextual_page_read(admitted, &BTreeMap::new(), plain, context_rows)
+        .map_err(|error| match error {
+            ApplicationError::ReadStagedMutation => "serve.write_refused",
+            _ => "serve.evaluation_failed",
+        })
+}
+
+/// Refuses a merged row of a Blob-holding table that carries a Blob reference
+/// but is not the committed row: only committed rows authorise media.
+fn refuse_uncommitted_blobs(
+    schema: &TableSchema,
+    storage_order: &[String],
+    merged: &[(Vec<u8>, Vec<u8>)],
+    committed: &[(Vec<u8>, Vec<u8>)],
+) -> Result<(), &'static str> {
+    for row in merged {
+        let is_committed = committed
+            .binary_search_by(|(key, _)| key.as_slice().cmp(row.0.as_slice()))
+            .is_ok_and(|index| committed[index].1 == row.1);
+        if is_committed {
+            continue;
+        }
+        let references =
+            orna_project::stored_blob_references(schema, storage_order, std::slice::from_ref(row))
+                .map_err(|_| "serve.table_rows_unavailable")?;
+        if !references.is_empty() {
+            return Err("serve.table_read_unsupported");
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
