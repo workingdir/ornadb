@@ -4,8 +4,10 @@
 //! annotation. Schema and reflection conformance lives in
 //! `orna-sys/tests/sys_reflection_schema_conformance.rs`.
 //!
-//! Library-layer coverage only: no CLI route accepts OVB-1 values as input
-//! (see gap bead for the missing CLI/export harness).
+//! Library-layer coverage only: the spec requires no CLI input route for OVB-1
+//! values (ORNA-FORMAT-005, ORNA-BLOB-009), so runtime and export are proven
+//! here through their library entry points. The live wire rejection of the
+//! format-3 tags is a separate, unresolved spec question (SPEC-QUESTIONS.md).
 
 use std::collections::BTreeMap;
 
@@ -88,4 +90,28 @@ fn value_layer_ovb1_export_refuses_annotated_blob_with_invalid_profile() {
             .any(|code| code == export_code),
         "the export refusal code must be one reflection declares"
     );
+}
+
+/// Runtime and export must report the same declared code for one annotated
+/// Blob crossing the OVB-1 boundary.
+#[test]
+fn runtime_and_export_agree_on_ovb1_annotated_blob_code() {
+    let blob = Blob::from_bytes_with_annotation(b"payload".to_vec(), "image/jpeg", Some("jpeg"))
+        .expect("valid annotation");
+    let export_code = ContextValue::from_blob(&blob, ValueFormat::Ovb1)
+        .err()
+        .and_then(|error| error.code().map(orna_value::ErrorCode::as_str))
+        .expect("OVB-1 export refuses with a stable code");
+
+    let legacy = ContextValue::new(ValueFormat::Ovb1, Raw::Bytes(b"payload".to_vec()))
+        .expect("canonical OVB-1 bytes");
+    let environment = BTreeMap::from([("asset".to_owned(), legacy)]);
+    let runtime_code = evaluate_expression_ovb2(ANNOTATE, &environment, Limits::default())
+        .expect_err("OVB-1 source must not satisfy the annotated Blob interface")
+        .code()
+        .to_owned();
+
+    assert_eq!(runtime_code, CODE);
+    assert_eq!(export_code, CODE);
+    assert_eq!(runtime_code, export_code);
 }
