@@ -890,6 +890,19 @@ class GitObjects:
         self._check_hash(oid, kind, data, what)
         return data
 
+    def read_any(self, oid: str, what: str) -> tuple[str, bytes]:
+        """An object read at the kind and size Git reports, within SOURCE_BYTES_LIMIT."""
+        if len(oid) != 2 * self.width or not _HEX_RE.fullmatch(oid):
+            fail(f"{what}: {oid!r} is not a {self.width}-byte native object id")
+        found, kind, size = self._header(oid, what)
+        if found != oid:
+            self._abandon(f"{what}: git returned {found} for {oid}")
+        if size > SOURCE_BYTES_LIMIT:
+            self._abandon(f"{what}: {kind} {oid} holds {size} bytes, above the {SOURCE_BYTES_LIMIT}-byte bound")
+        data = self._body(size)
+        self._check_hash(oid, kind, data, what)
+        return kind, data
+
 
 @dataclass(frozen=True)
 class TreeEntry:
@@ -2112,7 +2125,7 @@ _KEY_ESCAPE = re.compile(r"~([0-9a-f]{2})")
 _TABLE_DECLARATION = re.compile(r"(?:^|\n)[ \t]*(?:pub[ \t]+)?table[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]*\(([^()\n]*)\)[ \t]*\{([^{}]*)\}")
 _KEY_DECLARATION = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)[ \t]*:[ \t]*([A-Za-z_][A-Za-z0-9_]*)")
 _FIELD_DECLARATION = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)[ \t]*:[ \t]*(.+)")
-_EXTRACTED_FIELD_TYPES = frozenset({"Str", "Int", "Bool", "List<Str>"})
+_EXTRACTED_FIELD_TYPES = frozenset({"Str", "Int", "Bool", "List<Str>", "Blob"})
 _ROW_IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _ROW_INT = re.compile(r"-?(?:0|[1-9][0-9]*)")
 _ROW_KEYWORDS = {"true": True, "false": False, "null": None}
@@ -2402,6 +2415,8 @@ def _row_fields(record: dict, fields: dict[str, str], where: str) -> dict:
             valid = isinstance(value, int) and not isinstance(value, bool)
         elif kind == "Bool":
             valid = isinstance(value, bool)
+        elif kind == "Blob":
+            valid = isinstance(value, (str, dict))
         else:
             valid = isinstance(value, list) and all(isinstance(item, str) for item in value)
         if not valid:
@@ -2417,10 +2432,7 @@ def _compact_rows(objects: GitObjects, files: dict[str, TreeEntry], storage: str
     """
     if storage != table:
         fail(f"{where}: storage directory {storage} holds table {table}")
-    # This file also runs as a script, where the repository root is not on sys.path; the scripts package lives there.
-    repository_root = str(Path(__file__).resolve().parent.parent)
-    if repository_root not in sys.path:
-        sys.path.insert(0, repository_root)
+    _repository_root_on_path()
     from scripts import orna_compact
 
     prefix = f".orna/storage/{storage}/"
@@ -2461,6 +2473,71 @@ def _compact_rows(objects: GitObjects, files: dict[str, TreeEntry], storage: str
             }
         )
     return rows
+
+
+def _repository_root_on_path() -> None:
+    """This file also runs as a script, where scripts/ is the path entry, not the repository root."""
+    repository_root = str(Path(__file__).resolve().parent.parent)
+    if repository_root not in sys.path:
+        sys.path.insert(0, repository_root)
+
+
+class _ObjectSource:
+    """orna_legacy's ObjectSource over one repository: each object is read at the kind Git reports."""
+
+    def __init__(self, objects: GitObjects, where: str) -> None:
+        self._objects = objects
+        self._where = where
+
+    def get(self, oid: str) -> tuple[str, bytes]:
+        return self._objects.read_any(oid, f"{self._where}: object {oid}")
+
+
+def _content_root(objects: GitObjects, commit_tree: str, digest: str, where: str) -> str:
+    """The tree at .orna/blobs/<2>/<62> of the pinned commit, where an ORR-2 SHA-256 names its OGB-1 root."""
+    path = [".orna", "blobs", digest[:2], digest[2:]]
+    current = commit_tree
+    for depth, name in enumerate(path):
+        listing = f"{where}: tree {'/'.join(path[:depth]) or '/'}"
+        entries = parse_tree(objects.read(current, "tree", SOURCE_TREE_BYTES_LIMIT, listing), objects.width, listing)
+        match = next((entry for entry in entries if entry.name == name.encode("ascii")), None)
+        if match is None or match.mode != b"40000":
+            fail(f"{where}: content root {'/'.join(path)} is absent or not a tree")
+        current = match.oid
+    return current
+
+
+def _loose_blob(objects: GitObjects, commit_tree: str, raw: object, where: str, blobs: BlobOutput) -> dict:
+    """One Blob field of a loose row: inline padded Base64, or an ORR-2 reference resolved to an OGB-1 root.
+
+    The bytes are written to DIR/blobs under their SHA-256; the field reports only length and SHA-256.
+    """
+    _repository_root_on_path()
+    from scripts import orna_legacy
+    try:
+        value = orna_legacy.row_blob_field({"value": raw}, "value", where)
+        if isinstance(value, bytes):
+            digest = hashlib.sha256(value).digest()
+            blobs.write(where, len(value), digest, lambda sink: sink(value), where)
+            return {"blob": {"length": len(value), "sha256": digest.hex()}}
+        root = _content_root(objects, commit_tree, value.digest, where)
+        reader = orna_legacy.OgbReader(_ObjectSource(objects, where), objects.algorithm)
+        descriptor = reader.descriptor(root)
+    except orna_legacy.LegacyBlobError as error:
+        fail(f"{where}: {error}")
+    if descriptor.digest != value.digest or descriptor.length != value.length:
+        fail(
+            f"{where}: content root records {descriptor.length} bytes with SHA-256 {descriptor.digest}; "
+            f"the field records {value.length} bytes with SHA-256 {value.digest}"
+        )
+
+    def produce(sink: Callable[[bytes], None]) -> None:
+        for offset in range(0, value.length, orna_legacy.MAX_READ):
+            sink(reader.read_range(root, offset, min(orna_legacy.MAX_READ, value.length - offset)))
+
+    # BlobOutput checks the whole content against the recorded length and SHA-256 as the bytes are written.
+    blobs.write(where, value.length, bytes.fromhex(value.digest), produce, where)
+    return {"blob": {"length": value.length, "sha256": value.digest}}
 
 
 def legacy_dependency(objects: GitObjects, commit_data: bytes, path: str, blobs: BlobOutput) -> dict | None:
@@ -2555,14 +2632,20 @@ def legacy_dependency(objects: GitObjects, commit_data: bytes, path: str, blobs:
             folded_seen[folded] = component
             key = key_path_decode(component, where)
             data = objects.read(files[member].oid, "blob", SOURCE_BYTES_LIMIT, f"{where}: row {member}")
-            record = parse_row_unit(data, f"{where}: row {member}")
+            row_where = f"{where}: row {member}"
+            record = parse_row_unit(data, row_where)
+            field_types = schemas[table["row_directory"]]["fields"]
+            fields = _row_fields(record, field_types, row_where)
+            for name, kind in field_types.items():
+                if kind == "Blob":
+                    fields[name] = _loose_blob(objects, tree, fields[name], f"{row_where} field {name}", blobs)
             rows.append(
                 {
                     "key": key,
                     "path": member,
                     "object": files[member].oid,
                     "sha256": hashlib.sha256(data).hexdigest(),
-                    "fields": _row_fields(record, schemas[table["row_directory"]]["fields"], f"{where}: row {member}"),
+                    "fields": fields,
                 }
             )
         table["rows"] = sorted(rows, key=lambda row: row["key"].encode("utf-8"))
