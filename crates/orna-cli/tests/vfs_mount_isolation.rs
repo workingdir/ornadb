@@ -1288,6 +1288,7 @@ async fn blind_replacement_after_late_temp_overwrites_owner_change_while_orna_ed
     .unwrap();
     std::fs::set_permissions(&outer_editor, std::fs::Permissions::from_mode(0o755)).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .arg("--debug")
         .arg("--db")
         .arg(fixture.repository_directory.path())
         .args(["edit", "Music/london/data.orna"])
@@ -1303,16 +1304,17 @@ async fn blind_replacement_after_late_temp_overwrites_owner_change_while_orna_ed
         !output.status.success(),
         "orna edit's strong read baseline refuses the save: {diagnostics}"
     );
-    // The owner refuses the explicit edit with ESTALE (the xattr commit's Stale arm), and the CLI
-    // reports that reply as the stale detail with E2000 (cli_mount.rs:436-440). [INFERENCE] from
-    // reading fuse_mount.rs:3893: that refusal returns before the mount records a draft refusal,
-    // so the spec cause sys.vfs.stale_edit (fuse_mount.rs:1587, Orna-1.1.0.md:8674) is not in
-    // the mount's unresolved-draft fields. This test does not assert that absence.
-    // E2000 relies on ESTALE on the wire: EAGAIN surfaces as EOPNOTSUPP on this kernel
-    // (ornadb-eufo.1.1; tests/vfs_setxattr_errno_kernel_limit.rs).
+    // The owner refuses the explicit edit with ESTALE, and the CLI reports that reply as the
+    // stale detail with E2000 (cli_mount.rs settle_owner_reply). The spec cause sys.vfs.stale_edit
+    // is in that detail, which --debug renders (ORNA-UX-004). E2000 relies on ESTALE on the wire:
+    // EAGAIN surfaces as EOPNOTSUPP on this kernel (ornadb-eufo.1.1; tests/vfs_setxattr_errno_kernel_limit.rs).
     assert!(
         diagnostics.contains("E2000"),
         "the refusal carries the product code E2000: {diagnostics}"
+    );
+    assert!(
+        diagnostics.contains("sys.vfs.stale_edit"),
+        "the refusal names the spec cause, which --debug renders: {diagnostics}"
     );
     assert!(
         diagnostics.contains("Edit is stale against the mounted baseline"),
