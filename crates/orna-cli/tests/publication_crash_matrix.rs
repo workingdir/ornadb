@@ -1162,7 +1162,7 @@ async fn publish_kill_matrix(between_kill_and_recovery: fn(&Repository, &Path)) 
         );
         // Lock and lease-release evidence only. This block does NOT prove Gate D P5 ("no abandoned
         // owner retains write permission"): no token is rejected here, and the publisher never held
-        // the seeded writer lease. P5 stays open until production fencing lands (W76 F1; beads
+        // the seeded writer lease. The publish-time owner fence is tested in live_owner_fence.rs. P5 stays open for other writer paths (W76 F1; beads
         // .127 and .220). `orna publish` acquires no writer lease, so the seeded lease must be
         // untouched by the killed publish or its recovery, and the publisher's own runtime-owner
         // and coordination locks must be released and acquirable afterwards.
