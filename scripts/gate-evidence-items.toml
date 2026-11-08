@@ -180,9 +180,11 @@ select = [
   { record = "workspace-rest", package = "orna-repository", target = "lib", test = "closure_refuses_a_descriptor_whose_raw_digest_is_forged" },
   { record = "workspace-rest", package = "orna-repository", target = "lib", test = "closure_accepts_a_descriptor_whose_raw_digest_is_consistent" },
   { record = "workspace-rest", package = "orna-repository", target = "lib", test = "two_level_descriptor_with_a_forged_raw_digest_is_refused" },
+  { record = "workspace-rest", package = "orna-repository", target = "lib", test = "height_two_descriptor_with_a_forged_raw_digest_is_refused" },
+  { record = "workspace-rest", package = "orna-repository", target = "lib", test = "height_two_descriptor_whose_byte_index_matches_its_raw_digest_verifies" },
 ]
 limitations = [
-  "The raw SHA-256 check runs through verify_closure, which export calls on every member, and is proven by unit tests that forge a descriptor in a hand-built repository, one at the root and one through a two-level byte index. No CLI export carries a forged descriptor: export only admits a whole format-3 graph, and descriptors are built only by the production writer, so a forged descriptor needs a test seam in production code. Byte indexes deeper than two levels are untested, and the 10 GiB row is never exported (ornadb-5il1.193).",
+  "The raw SHA-256 check runs through verify_closure, which export calls on every member, and is proven by unit tests that forge a descriptor in a hand-built repository: at the root, through a two-level byte index, and through a height-2 root (three index levels, four chunks). Both forged-descriptor tests refuse, and both valid-descriptor tests verify. No CLI or integration export carries a forged descriptor: export only admits a whole format-3 graph, `NodeData` is not reachable from integration tests, and descriptors are built only by the production writer, so an export-level forged-descriptor test needs a test seam in production code (not built here). The 10 GiB row is never exported (ornadb-5il1.193).",
 ]
 
 [[item]]
