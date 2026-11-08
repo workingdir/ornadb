@@ -2435,6 +2435,25 @@ fn raw_suffix(raw: &Raw) -> Result<Option<String>> {
     }
 }
 
+/// Decides an inline OVB-2 Blob's annotation and content identity from its raw
+/// wire value without copying the content. It runs the same checks that
+/// building the Blob from that value runs, so it fails exactly where the Blob
+/// would fail to build.
+pub fn ovb2_blob_fingerprint(raw: &Raw) -> Result<(MediaAnnotation, ContentIdentity)> {
+    // The checks `ContextValue::new(Ovb2, raw)` runs, then the decode
+    // `ContextValue::blob` runs, without copying the content.
+    validate_context_raw(raw, 0, ValueFormat::Ovb2, None, MimeRegistry::mime1())?;
+    let Raw::Tag(OVB2_BLOB_TAG, payload) = raw else {
+        return Err(Error::InvalidValue);
+    };
+    let [Raw::Bytes(bytes), Raw::Text(media_type), suffix] = array(payload)?.as_slice() else {
+        return Err(Error::InvalidTag);
+    };
+    let suffix = raw_suffix(suffix)?;
+    let annotation = MimeRegistry::mime1().annotation(media_type, suffix.as_deref())?;
+    Ok((annotation, ContentIdentity::from_bytes(bytes)))
+}
+
 fn validate_context_raw(
     value: &Raw,
     depth: usize,
