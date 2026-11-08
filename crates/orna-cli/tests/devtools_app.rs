@@ -355,11 +355,13 @@ fn run_action_refuses_a_body_over_its_limit_before_reading_it() {
     assert_eq!(reply.body, r#"{"error":"payload_too_large"}"#);
 }
 
-/// A Run of 1,000 `heavy(60)` terms: each is 60 nested `spin(50)` calls, under
-/// the call-depth limit, and the list literal keeps the parse shallow. The Run
-/// takes about a third of a second end to end on the reference machine, so the
-/// page request below is sent while it is still evaluating.
-const SPIN_DECLARATION: &str = "pub fn spin(n: Int): Int = if n == 0 { 0 } else { 1 + spin(n - 1) };\npub fn heavy(n: Int): Int = if n == 0 { 0 } else { spin(50) + heavy(n - 1) };\n";
+/// A Run of 1,000 `heavy(60)` terms: each is 60 nested `quad(50)` calls, each
+/// of which is four `spin(50)` calls, under the call-depth limit. The list
+/// literal keeps the parse shallow and the query stays under the body limit
+/// (a 4,000-term query is refused with 413 before it runs). The page request
+/// below is sent 100 ms after the Run starts; the Run is sized to keep
+/// evaluating well past that point, with margin for a slow CI runner.
+const SPIN_DECLARATION: &str = "pub fn spin(n: Int): Int = if n == 0 { 0 } else { 1 + spin(n - 1) };\npub fn quad(n: Int): Int = spin(n) + spin(n) + spin(n) + spin(n);\npub fn heavy(n: Int): Int = if n == 0 { 0 } else { quad(50) + heavy(n - 1) };\n";
 
 #[test]
 // Specified: Gate G / DESIGN S5a; the page answers while a Run is still evaluating.
