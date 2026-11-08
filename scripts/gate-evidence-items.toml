@@ -369,8 +369,9 @@ title = "fsync/fdatasync, repeated flush, dup/fork, temp sync/rename, writes aft
 select = [
   { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_sync_semantics" },
   { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_truncate_sparse" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_aggregate_quota", test = "open_candidates_share_one_draft_quota_across_documents" },
 ]
-limitations = ["fork is simulated with an inherited handle and close(2) errors are not observed (ornadb-5il1.60, ornadb-5il1.61)."]
+limitations = ["fork is simulated with an inherited handle and close(2) errors are not observed (ornadb-5il1.60, ornadb-5il1.61). The aggregate draft quota selector (vfs_mount_aggregate_quota) needs the test-seams feature and runs in the aggregate-quota CI job; it proves one shared budget across open candidates of one mount released by truncate and by a synced replacement (accept is not isolated from the truncate that precedes it; release by bare close and accept without a prior truncate are unproven here), and nothing about the copy-free or bounded-RSS items of ornadb-5il1.366."]
 
 [[item]]
 gate = "E"
@@ -520,6 +521,7 @@ select = [
 ]
 limitations = [
   "Both snapshots are format-3 commits whose store is a text file, and the extractor checks Git object IDs only (ornadb-5il1.193, ornadb-5il1.192).",
+  "Legacy repository-format-1 dependencies are read by a standard-library walker in scripts/orna_extract.py and recorded under legacy_dependencies. Loose rows, storage placements and compact table rows are checked by scripts.test_orna_extract (LegacyDependencyTests) and by extractor_matches_the_real_reader_on_a_migrated_golden_copy in crates/orna-cli/tests/independent_extractor_cli.rs; neither is a selected record. Compact rows are read through scripts/orna_compact.py, which verifies each declared digest; Blob values are reported by length and SHA-256, not by content. No selected test exercises the legacy path, so F5 is not mapped to it (ornadb-v18eb.3).",
 ]
 
 [[item]]
