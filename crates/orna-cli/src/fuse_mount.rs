@@ -7,7 +7,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use crate::cli_dispatch::{
@@ -1413,22 +1413,33 @@ fn declare_historical_commit(
 
 /// Test seam: `ORNA_DRAFT_QUOTA_BYTES` replaces the aggregate draft quota of a
 /// mounted editor so an end-to-end test can exhaust it with small candidates.
-/// Unset selects the production default. The value is parsed once per process,
-/// so every editor opened by one mount shares one budget; a malformed value is
-/// an error, never a silent fallback.
-const DRAFT_QUOTA_ENV: &str = "ORNA_DRAFT_QUOTA_BYTES";
-
+/// Compiled only with the `test-seams` feature; the default build ignores the
+/// variable and always charges the production default. The value is parsed once
+/// per process, so every editor opened by one mount shares one budget; a
+/// malformed value is an error, never a silent fallback.
+#[cfg(feature = "test-seams")]
 fn mount_draft_quota() -> Result<Arc<orna_runtime::vfs::DraftQuota>, String> {
-    static MOUNT_DRAFT_QUOTA: LazyLock<Result<Arc<orna_runtime::vfs::DraftQuota>, String>> =
-        LazyLock::new(|| match std::env::var(DRAFT_QUOTA_ENV) {
-            Err(std::env::VarError::NotPresent) => Ok(orna_runtime::vfs::default_draft_quota()),
-            Err(error) => Err(format!("{DRAFT_QUOTA_ENV} is not valid: {error}")),
-            Ok(value) => value
-                .parse::<u64>()
-                .map(|bytes| Arc::new(orna_runtime::vfs::DraftQuota::new(bytes)))
-                .map_err(|error| format!("{DRAFT_QUOTA_ENV} is not a byte count: {error}")),
-        });
+    const DRAFT_QUOTA_ENV: &str = "ORNA_DRAFT_QUOTA_BYTES";
+    static MOUNT_DRAFT_QUOTA: std::sync::LazyLock<
+        Result<Arc<orna_runtime::vfs::DraftQuota>, String>,
+    > = std::sync::LazyLock::new(|| match std::env::var(DRAFT_QUOTA_ENV) {
+        Err(std::env::VarError::NotPresent) => Ok(orna_runtime::vfs::default_draft_quota()),
+        Err(error) => Err(format!("{DRAFT_QUOTA_ENV} is not valid: {error}")),
+        Ok(value) => value
+            .parse::<u64>()
+            .map(|bytes| Arc::new(orna_runtime::vfs::DraftQuota::new(bytes)))
+            .map_err(|error| format!("{DRAFT_QUOTA_ENV} is not a byte count: {error}")),
+    });
     MOUNT_DRAFT_QUOTA.clone()
+}
+
+/// Default build: no environment seam exists; the production budget is used.
+/// The `Result` matches the seam variant above, which can fail on a malformed
+/// value, so both call sites stay identical.
+#[cfg(not(feature = "test-seams"))]
+#[allow(clippy::unnecessary_wraps)]
+fn mount_draft_quota() -> Result<Arc<orna_runtime::vfs::DraftQuota>, String> {
+    Ok(orna_runtime::vfs::default_draft_quota())
 }
 
 impl MountWriter {
@@ -11708,5 +11719,40 @@ mod historical_scan_budget_tests {
             "identity-less commits declare no generation"
         );
         assert!(introductions.is_empty());
+    }
+}
+
+/// Default build only: the draft-quota env seam must not exist. Setting the
+/// variable needs `unsafe` on edition 2024 and this crate forbids it, so the
+/// variable is set on a child run of this test binary.
+#[cfg(all(test, not(feature = "test-seams")))]
+mod draft_quota_seam_tests {
+    use std::sync::Arc;
+
+    #[test]
+    fn default_build_ignores_draft_quota_env() {
+        const CHILD_MARKER: &str = "ORNA_DRAFT_QUOTA_SEAM_CHILD";
+        const TEST_NAME: &str =
+            "fuse_mount::draft_quota_seam_tests::default_build_ignores_draft_quota_env";
+        if std::env::var_os(CHILD_MARKER).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args(["--exact", TEST_NAME, "--nocapture"])
+                .env(CHILD_MARKER, "1")
+                .env("ORNA_DRAFT_QUOTA_BYTES", "1")
+                .output()
+                .expect("re-run the test binary");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "child run did not pass the default-build probe:\n{stdout}{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let quota = super::mount_draft_quota().expect("default build has a quota");
+        assert!(
+            Arc::ptr_eq(&quota, &orna_runtime::vfs::default_draft_quota()),
+            "default build must charge the production budget whatever ORNA_DRAFT_QUOTA_BYTES says"
+        );
     }
 }
