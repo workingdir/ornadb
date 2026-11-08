@@ -1,0 +1,55 @@
+# Every commit in this repository is authored and committed by the owner. This job fails a pull
+# request or a push to main that carries any other identity or a trailer naming another person.
+name: Commit identity
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  identity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          submodules: false
+
+      - name: Check author and committer of every new commit
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          owner='Kieran Drewett <kieran@drewett.dev>'
+          zero=0000000000000000000000000000000000000000
+          if [ "$EVENT" = pull_request ]; then
+            range="$PR_BASE..$PR_HEAD"
+          elif [ "$PUSH_BEFORE" != "$zero" ] && git cat-file -e "$PUSH_BEFORE^{commit}" 2>/dev/null; then
+            range="$PUSH_BEFORE..$PUSH_AFTER"
+          else
+            # A new branch or a force-push whose old tip is not in this clone: check the newest commits.
+            range="$PUSH_AFTER -n 200"
+          fi
+          echo "Checking: $range"
+          bad=$(git log $range --format='%H|%an <%ae>|%cn <%ce>' | awk -F'|' -v o="$owner" '$2 != o || $3 != o { print $1 "  author: " $2 "  committer: " $3 }')
+          if [ -n "$bad" ]; then
+            echo "::error::Commits not authored and committed by $owner:"
+            printf '%s\n' "$bad"
+            exit 1
+          fi
+          trailers=$(git log $range --format='%H%n%B' | grep -i -E '^(co-authored-by|reviewed-by|acked-by|tested-by):|^signed-off-by:' | grep -v -F -i "Signed-off-by: $owner" || true)
+          if [ -n "$trailers" ]; then
+            echo "::error::A commit message names another person in a trailer:"
+            printf '%s\n' "$trailers"
+            exit 1
+          fi
+          echo "All checked commits are authored and committed by $owner."
