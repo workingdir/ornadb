@@ -498,6 +498,8 @@ fn lower_rows(
 /// lowered against a provisional blob reference; every other value is lowered
 /// to its final stored form here. With `format2_blobs`, a Blob slot whose value
 /// is ORR-2 text (inline padded Base64 or a storage record) is read through it.
+/// Without it, a format-1 loose Blob holds its quoted padded Base64 text, which
+/// is decoded to the payload here.
 fn lower_row_fields(
     schema: &StoredSchema<'_>,
     relation: &str,
@@ -528,6 +530,14 @@ fn lower_row_fields(
                 ));
             }
             (Raw::Bytes(bytes), None) if field.is_blob() => Some(bytes.clone()),
+            (Raw::Text(text), None) if field.is_blob() => {
+                Some(orna_value::base64_decode(text).map_err(|_| {
+                    invalid(format!(
+                        "Blob field `{}` is not padded Base64",
+                        field.name()
+                    ))
+                })?)
+            }
             (_, Some(read)) if field.is_blob() => match orr2_slot_text(value) {
                 Some(text) => Some(read(&text).map_err(&invalid)?),
                 None => None,
@@ -649,7 +659,7 @@ mod tests {
 
     use super::{
         LegacyTable, MigrationBlobDescriptors, MigrationRowError, MigrationRowInput, blob_identity,
-        migration_row_input,
+        blob_tuple, migration_row_input,
     };
     use crate::format3_store::StagedRelations;
     use crate::legacy_store::{
@@ -721,14 +731,30 @@ mod tests {
         .expect("the contacts descriptor is valid")
     }
 
+    /// The Option tag orna-project lowers `Blob?` values to (`OPTION_TAG`).
+    const OPTION_TAG: u64 = 60_013;
+
     /// The contacts descriptor extended with an unannotated Blob `avatar`.
     fn blob_declared() -> StagedRelations {
-        const AVATAR: [u8; 16] = [0x75; 16];
+        blob_declared_with(Raw::Array(vec![
+            Raw::Int(0.into()),
+            Raw::Text("Blob".to_owned()),
+        ]))
+    }
+
+    /// The contacts descriptor extended with an optional Blob `avatar`.
+    fn optional_blob_declared() -> StagedRelations {
         let blob_node = Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Blob".to_owned())]);
+        blob_declared_with(Raw::Array(vec![Raw::Int(2.into()), blob_node]))
+    }
+
+    /// The contacts descriptor extended with an `avatar` of type `node`.
+    fn blob_declared_with(node: Raw) -> StagedRelations {
+        const AVATAR: [u8; 16] = [0x75; 16];
         let avatar = Raw::Array(vec![
             tagged(AVATAR),
             Raw::Text("avatar".to_owned()),
-            blob_node,
+            node,
             Raw::Int(1.into()),
             Raw::Array(vec![Raw::Int(0.into())]),
         ]);
@@ -964,6 +990,118 @@ mod tests {
         assert_eq!(reference[4], Raw::Bytes(oid.as_bytes().to_vec()));
     }
 
+    /// A Blob field's text is padded standard Base64 and nothing else: unpadded,
+    /// URL-safe and whitespace-bearing text fails closed as an invalid row.
+    #[test]
+    fn blob_text_must_be_padded_standard_base64() {
+        for bad in ["Zm9", "Zm9_", "Zm 9", "Zm9\tvYg="] {
+            let rows = LegacyTableRows::loose_for_tests(vec![LegacyRow::for_tests(
+                TypedKey::Text("alice".to_owned()),
+                vec![
+                    declared_field("name", text("Alice Smith")),
+                    declared_field("emails", Raw::Array(Vec::new())),
+                    declared_field("avatar", text(bad)),
+                ],
+            )]);
+            let result = map_contacts(&blob_declared(), &rows);
+            assert!(
+                matches!(result, Err(MigrationRowError::InvalidRow { .. })),
+                "{bad:?} is not padded standard Base64"
+            );
+        }
+    }
+
+    /// A Str field holding valid padded Base64 text is text: it is not decoded
+    /// and stores no blob.
+    #[test]
+    fn str_field_with_base64_text_stays_text() {
+        let rows = LegacyTableRows::loose_for_tests(vec![LegacyRow::for_tests(
+            TypedKey::Text("alice".to_owned()),
+            vec![
+                declared_field("name", text("Zm9vYmFy")),
+                declared_field("emails", Raw::Array(Vec::new())),
+            ],
+        )]);
+        let input = map_contacts(&declared(), &rows).expect("the Str field maps");
+        assert!(input.blobs().is_empty());
+        let admitted = input.relations()[0]
+            .encoded_rows(&MigrationBlobDescriptors::default())
+            .expect("the row encodes");
+        let (_, tuple) = &admitted[0];
+        assert_eq!(
+            decode_canonical_storage_value(tuple).expect("the tuple decodes"),
+            Raw::Array(vec![text("Zm9vYmFy"), Raw::Array(Vec::new())])
+        );
+    }
+
+    /// An absent optional Blob is `null` in the loose source: it stores no bytes
+    /// and the Option's empty state.
+    #[test]
+    fn absent_optional_blob_stores_the_empty_option() {
+        let rows = LegacyTableRows::loose_for_tests(vec![LegacyRow::for_tests(
+            TypedKey::Text("alice".to_owned()),
+            vec![
+                declared_field("name", text("Alice Smith")),
+                declared_field("emails", Raw::Array(Vec::new())),
+                declared_field("avatar", Raw::Null),
+            ],
+        )]);
+        let input = map_contacts(&optional_blob_declared(), &rows).expect("the absent Blob? maps");
+        assert!(input.blobs().is_empty());
+        let admitted = input.relations()[0]
+            .encoded_rows(&MigrationBlobDescriptors::default())
+            .expect("the row encodes");
+        let (_, tuple) = &admitted[0];
+        let Raw::Array(fields) = decode_canonical_storage_value(tuple).expect("the tuple decodes")
+        else {
+            panic!("the stored row is a tuple");
+        };
+        assert_eq!(
+            fields[2],
+            Raw::Tag(OPTION_TAG, Box::new(Raw::Array(vec![Raw::Int(0.into())])))
+        );
+    }
+
+    /// A present optional Blob is bare padded Base64 text in the loose source:
+    /// its bytes enter the blob table and the Option carries the reference.
+    #[test]
+    fn present_optional_blob_stores_a_blob_reference() {
+        let rows = LegacyTableRows::loose_for_tests(vec![LegacyRow::for_tests(
+            TypedKey::Text("alice".to_owned()),
+            vec![
+                declared_field("name", text("Alice Smith")),
+                declared_field("emails", Raw::Array(Vec::new())),
+                declared_field("avatar", text("AQID")),
+            ],
+        )]);
+        let input = map_contacts(&optional_blob_declared(), &rows).expect("the present Blob? maps");
+        let identity = blob_identity(&[1, 2, 3]).expect("the blob identity");
+        assert_eq!(
+            input.blobs().get(&identity).map(Vec::as_slice),
+            Some(&[1, 2, 3][..])
+        );
+
+        let (_directory, repository, _commit) = golden();
+        let descriptors = write_blobs(&repository, &input);
+        let admitted = input.relations()[0]
+            .encoded_rows(&descriptors)
+            .expect("the row encodes");
+        let (_, tuple) = &admitted[0];
+        let Raw::Array(fields) = decode_canonical_storage_value(tuple).expect("the tuple decodes")
+        else {
+            panic!("the stored row is a tuple");
+        };
+        let Raw::Tag(OPTION_TAG, payload) = &fields[2] else {
+            panic!("the Blob? field is an Option");
+        };
+        let Raw::Array(option) = payload.as_ref() else {
+            panic!("the Option payload is a tuple");
+        };
+        assert_eq!(option.len(), 2);
+        assert_eq!(option[0], Raw::Int(1.into()));
+        assert!(matches!(option[1], Raw::Tag(ROV3_BLOB_TAG, _)));
+    }
+
     /// The golden bundle the CLI legacy tests read.
     const GOLDEN_BUNDLE: &str = "../orna-cli/tests/fixtures/legacy-format1.bundle";
 
@@ -1008,8 +1146,14 @@ mod tests {
     }
 
     /// The stored tuple a legacy row lowers to: its role-1 field values in
-    /// descriptor order, read from the legacy row by stored field.
-    fn stored_values(relation: &StagedRelation, row: &LegacyRow) -> Raw {
+    /// descriptor order, read from the legacy row by stored field. A format-1
+    /// loose Blob holds its padded Base64 text, which lowers to the reference
+    /// of its decoded payload, named by the descriptor the repository wrote.
+    fn stored_values(
+        relation: &StagedRelation,
+        row: &LegacyRow,
+        descriptors: &MigrationBlobDescriptors,
+    ) -> Raw {
         let schema = StoredSchema::new(relation.descriptor()).expect("the descriptor reads");
         Raw::Array(
             schema
@@ -1017,15 +1161,27 @@ mod tests {
                 .iter()
                 .filter(|stored| stored.role() == 1)
                 .map(|stored| {
-                    row.fields()
+                    let value = row
+                        .fields()
                         .iter()
                         .find(|field| match field.name() {
                             LegacyFieldName::Declared(name) => name == stored.name(),
                             LegacyFieldName::ObjectId(id) => id == stored.id(),
                         })
                         .unwrap_or_else(|| panic!("the row has field {}", stored.name()))
-                        .value()
-                        .clone()
+                        .value();
+                    match value {
+                        Raw::Text(text) if stored.is_blob() => {
+                            let bytes = orna_value::base64_decode(text)
+                                .expect("the legacy Blob is padded Base64");
+                            let identity = blob_identity(&bytes).expect("the blob identity");
+                            let oid = descriptors
+                                .descriptor(&identity)
+                                .expect("the blob descriptor was written");
+                            blob_tuple(&identity, oid.as_bytes())
+                        }
+                        other => other.clone(),
+                    }
                 })
                 .collect(),
         )
@@ -1037,11 +1193,12 @@ mod tests {
         relation: &StagedRelation,
         admitted: &[(TypedKey, Vec<u8>)],
         legacy: &LegacyTableRows,
+        descriptors: &MigrationBlobDescriptors,
     ) {
         assert_eq!(admitted.len(), legacy.rows().len());
         for ((key, tuple), row) in admitted.iter().zip(legacy.rows()) {
             assert_eq!(key, row.key(), "the admitted key is the legacy key");
-            let values = stored_values(relation, row);
+            let values = stored_values(relation, row, descriptors);
             assert_eq!(
                 decode_canonical_storage_value(tuple).expect("the tuple decodes"),
                 values
@@ -1073,7 +1230,7 @@ mod tests {
             let rows = relation
                 .encoded_rows(&descriptors)
                 .expect("the golden compact rows encode");
-            assert_rows_match_legacy(&declared.relations()[0], &rows, &legacy);
+            assert_rows_match_legacy(&declared.relations()[0], &rows, &legacy, &descriptors);
         }
     }
 
@@ -1084,7 +1241,7 @@ mod tests {
         let legacy = read_legacy_table_rows(&repository, &commit, &address)
             .expect("the legacy loose table decodes");
         assert_eq!(legacy.rows().len(), 2, "the golden holds two contacts");
-        let declared = declared();
+        let declared = blob_declared();
         let input = migration_row_input(&declared, &[LegacyTable::new(&address, &legacy)])
             .expect("the golden contacts map onto the declared Contact table");
         let relation = input
@@ -1092,11 +1249,17 @@ mod tests {
             .iter()
             .find(|relation| relation.relation_id() == &TABLE)
             .expect("the declared Contact table is in the input");
+        let alice_avatar = b"orna-avatar\0\xff".to_vec();
+        let bob_avatar = b"bob-avatar".to_vec();
+        let blob_bytes: Vec<&Vec<u8>> = input.blobs().values().collect();
+        assert_eq!(blob_bytes.len(), 2, "each contact holds one avatar");
+        assert!(blob_bytes.contains(&&alice_avatar), "alice's avatar bytes");
+        assert!(blob_bytes.contains(&&bob_avatar), "bob's avatar bytes");
         let descriptors = write_blobs(&repository, &input);
         let rows = relation
             .encoded_rows(&descriptors)
             .expect("the golden contacts encode");
-        assert_rows_match_legacy(&declared.relations()[0], &rows, &legacy);
+        assert_rows_match_legacy(&declared.relations()[0], &rows, &legacy, &descriptors);
     }
 
     /// Sets the commit identity the candidate's commit objects need in the
@@ -1218,7 +1381,7 @@ mod tests {
         let address = LegacyTableAddress::TablePath(PATH.to_owned());
         let legacy = read_legacy_table_rows(&repository, &commit, &address)
             .expect("the legacy loose table decodes");
-        let declared_set = declared();
+        let declared_set = blob_declared();
         let input = migration_row_input(&declared_set, &[LegacyTable::new(&address, &legacy)])
             .expect("the golden contacts map onto the declared Contact table");
         let descriptors = write_blobs(&repository, &input);
