@@ -666,8 +666,13 @@ fn admitted_runtime_sources(
         }
     }
     for (namespace, module) in &parsed_modules {
-        let Some(namespace) = namespace else {
-            continue;
+        // The root module executes as `main` (see the public-function keys
+        // above), so its imports must resolve under that same namespace.
+        // When a real `main` module exists the root cannot claim the name.
+        let namespace = match namespace {
+            Some(namespace) => namespace.as_str(),
+            None if !has_main_module => "main",
+            None => continue,
         };
         for item in &module.items {
             if let Declaration::Use { path, tail } = &item.declaration {

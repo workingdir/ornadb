@@ -424,34 +424,6 @@ fn contextual_record(
     encode_canonical_storage_value(&Raw::Map(fields)).map_err(|_| TableStorageError)
 }
 
-/// Whether any stored tuple of `rows` holds a present Blob reference. Such a
-/// reference has no portable evaluator value (see [`blob_placeholder`]), so a
-/// caller that serves a read to a client refuses it instead of exposing the
-/// placeholder as data.
-pub fn stored_rows_hold_blob(
-    schema: &TableSchema,
-    storage_order: &[String],
-    rows: &[(Vec<u8>, Vec<u8>)],
-) -> Result<bool, TableStorageError> {
-    for (_, storage_row) in rows {
-        let Raw::Array(values) =
-            decode_canonical_storage_value(storage_row).map_err(|_| TableStorageError)?
-        else {
-            return Err(TableStorageError);
-        };
-        if values.len() != storage_order.len() {
-            return Err(TableStorageError);
-        }
-        for (value, name) in values.iter().zip(storage_order) {
-            let ty = schema.fields.get(name).ok_or(TableStorageError)?;
-            if holds_blob(ty) && present_blob(ty, value)?.is_some() {
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
-}
-
 /// One present Blob reference a stored row carries, read from the committed
 /// tuple rather than from its evaluator placeholder.
 #[derive(Clone, Debug, Eq, PartialEq)]
