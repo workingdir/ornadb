@@ -10682,7 +10682,7 @@ mod tests {
     }
 
     /// Upper bound on one stored chunk, mirroring orna-repository's private
-    /// `blob_store::GEAR_MAXIMUM`. A window intersects at most two chunks.
+    /// `blob_store::GEAR_MAXIMUM`. Windows of at most 64 KiB read at most two chunks.
     const BLOB_CHUNK_MAXIMUM_BYTES: u64 = 1_048_576;
 
     #[tokio::test]
@@ -10772,29 +10772,55 @@ mod tests {
         let length = reference.content_identity().length();
         assert_eq!(length, PAYLOAD_BYTES);
 
-        let scope = graph.open_read_scope().unwrap();
-        let window =
-            super::read_blob_window(&graph, &reference, WINDOW_OFFSET, WINDOW_BYTES, &scope)
-                .unwrap();
-        let start = usize::try_from(WINDOW_OFFSET).unwrap();
-        let end = start + usize::try_from(WINDOW_BYTES).unwrap();
-        assert_eq!(window.bytes(), &payload[start..end]);
-        let charged = scope.payload_bytes_read();
-        assert!(
-            charged >= u64::from(WINDOW_BYTES),
-            "the window's bytes are charged: {charged}"
-        );
-        assert!(
-            charged <= 2 * BLOB_CHUNK_MAXIMUM_BYTES,
-            "a window intersects at most two chunks: charged {charged}"
-        );
-        assert!(
-            charged < length,
-            "the read does not fetch the whole Blob: charged {charged} of {length}"
-        );
-        eprintln!(
-            "Gate B: range mount window requested={WINDOW_BYTES} charged={charged} length={length}"
-        );
+        // Every non-final chunk is at least GEAR_MINIMUM (64 KiB), so a window no
+        // larger than that crosses at most one chunk boundary and reads at most two
+        // chunks. The final chunk may be short; a window that ends at the Blob's end
+        // still crosses at most one boundary.
+        let cases = [
+            ("interior", WINDOW_OFFSET, WINDOW_BYTES),
+            (
+                "mid-chunk near 1 MiB",
+                BLOB_CHUNK_MAXIMUM_BYTES - 100,
+                WINDOW_BYTES,
+            ),
+            ("end of blob", PAYLOAD_BYTES - 100, WINDOW_BYTES),
+            ("at end of blob", PAYLOAD_BYTES, WINDOW_BYTES),
+        ];
+        for (label, offset, size) in cases {
+            let scope = graph.open_read_scope().unwrap();
+            let window = super::read_blob_window(&graph, &reference, offset, size, &scope).unwrap();
+            let start = offset.min(length);
+            let end = offset.saturating_add(u64::from(size)).min(length);
+            let requested = end - start;
+            let start_index = usize::try_from(start).unwrap();
+            let end_index = usize::try_from(end).unwrap();
+            assert_eq!(
+                window.bytes(),
+                &payload[start_index..end_index],
+                "{label}: the window returned the wrong bytes"
+            );
+            let charged = scope.payload_bytes_read();
+            let chunks = window.chunks_read();
+            assert!(
+                chunks <= 2,
+                "{label}: a window of at most 64 KiB reads at most two chunks: read {chunks}"
+            );
+            assert!(
+                charged >= requested,
+                "{label}: the window's bytes are charged: {charged} < {requested}"
+            );
+            assert!(
+                charged <= chunks * BLOB_CHUNK_MAXIMUM_BYTES,
+                "{label}: charged {charged} exceeds the {chunks} chunks the window reads"
+            );
+            assert!(
+                charged < length,
+                "{label}: the read does not fetch the whole Blob: charged {charged} of {length}"
+            );
+            eprintln!(
+                "Gate B: range mount window {label}: requested={requested} charged={charged} chunks={chunks} length={length}"
+            );
+        }
     }
 
     #[tokio::test]
