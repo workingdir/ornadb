@@ -25,8 +25,8 @@ use orna_syntax::{
 use orna_value::{
     CANONICAL_NAN_BITS, ContentIdentity, ContextValue, Error as ValueError,
     ErrorValue as CanonicalErrorValue, Format3Context, MediaAnnotation, OVB2_BLOB_TAG,
-    ROV3_BLOB_TAG, Raw, SOV3_BLOB_TAG, ValueFormat, domain_digest, float_max, float_min,
-    float_ordinary_eq, float_total_cmp, ovb2_blob_fingerprint,
+    ROV3_BLOB_TAG, ROV3_OVERFLOW_TAG, Raw, SOV3_BLOB_TAG, ValueFormat, domain_digest, float_max,
+    float_min, float_ordinary_eq, float_total_cmp, ovb2_blob_fingerprint,
 };
 use serde::{
     Deserialize,
