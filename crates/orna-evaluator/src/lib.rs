@@ -1120,10 +1120,11 @@ impl std::error::Error for StandardLayerConflict {}
 
 impl FromIterator<(String, PureFunction)> for Functions {
     fn from_iter<I: IntoIterator<Item = (String, PureFunction)>>(entries: I) -> Self {
-        Self {
-            local: entries.into_iter().collect(),
-            ..Self::default()
+        let mut functions = Self::default();
+        for (name, function) in entries {
+            functions.insert(name, function);
         }
+        functions
     }
 }
 
