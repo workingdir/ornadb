@@ -10,10 +10,11 @@ description = "Bounded deterministic evaluator for the Orna 1.0 expression subse
 crate-type = ["rlib", "cdylib"]
 
 [features]
-default = ["project-repl", "system-host-bindings"]
-project-repl = ["dep:orna-project", "system-host-bindings"]
+default = ["system-host-bindings"]
 system-host-bindings = ["dep:orna-sys", "dep:orna-repository", "dep:orna-runtime"]
 browser-wasm = ["getrandom/wasm_js", "dep:uuid", "uuid/js"]
+# Unstable test seam for orna-project-repl: exposes CancellationToken::request_after_checks.
+cancellation-test-hooks = []
 
 [dependencies]
 num-bigint = "0.4.6"
@@ -27,7 +28,6 @@ serde = "1.0"
 serde_json = { version = "1.0.151", features = ["arbitrary_precision", "raw_value"] }
 stacker = "0.1.25"
 orna-foundation = { path = "../orna-foundation" }
-orna-project = { path = "../orna-project", optional = true }
 orna-repository = { path = "../orna-repository", optional = true }
 orna-runtime = { path = "../orna-runtime", optional = true }
 orna-standard-sources = { path = "../orna-standard-sources" }
@@ -40,4 +40,6 @@ unicode-normalization = "=0.1.24"
 unicode-case-mapping = "=1.0.0"
 
 [dev-dependencies]
+orna-project = { path = "../orna-project" }
+orna-project-repl = { path = "../orna-project-repl" }
 tempfile = "3.23.0"

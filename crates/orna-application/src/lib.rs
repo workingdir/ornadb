@@ -8,11 +8,11 @@
 
 use num_bigint::BigInt;
 use orna_evaluator::{
-    AdmittedReplSession, EffectHandler, Environment, EvaluationError, Functions, Limits,
-    NominalDefinitions, Ovb2EffectHandler, PureFunction, RelationPage, ReplError, ReplSession,
-    StagedReplActivation, StandardLayer, StepBudget, SysHostAttachment, SysHostBindingRegistry,
-    SysHostContext, invoke_named, invoke_named_with_effects, invoke_named_with_sys_host_context,
-    module_function_alias_key, reference_standard_profile, reference_standard_sources,
+    EffectHandler, Environment, EvaluationError, Functions, Limits, NominalDefinitions,
+    Ovb2EffectHandler, PureFunction, RelationPage, ReplSession, StandardLayer, StepBudget,
+    SysHostAttachment, SysHostBindingRegistry, SysHostContext, invoke_named,
+    invoke_named_with_effects, invoke_named_with_sys_host_context, module_function_alias_key,
+    reference_standard_profile, reference_standard_sources,
 };
 use orna_foundation::{CanonicalSnapshot, CanonicalValue, OvbRaw, SafeText};
 use orna_live::{
@@ -23,6 +23,7 @@ use orna_project::{
     AdmittedSourceRow, CommittedReadLimits, LoadedProject, ProjectLimits, ResolvedTableSchema,
     admitted_table_schemas,
 };
+use orna_project_repl::{AdmittedReplSession, ReplError, RepositoryScope, StagedReplActivation};
 use orna_protocol::{
     Envelope, Message, PresentIdentity, PresentKind, PresentNode, PresentPropertyKey, ResultStatus,
 };
@@ -3500,8 +3501,9 @@ impl ApplicationLiveAdapter {
     fn new_repl_session(&self) -> Result<AdmittedReplSession, LiveError> {
         let session = self.new_unscoped_repl_session()?;
         Ok(match self.runtime_identity {
-            Some((database, repository)) => session
-                .with_repository_scope(orna_evaluator::RepositoryScope::new(database, repository)),
+            Some((database, repository)) => {
+                session.with_repository_scope(RepositoryScope::new(database, repository))
+            }
             None => session,
         })
     }

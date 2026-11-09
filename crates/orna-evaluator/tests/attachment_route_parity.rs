@@ -1,10 +1,11 @@
 use std::{cell::Cell, fs, path::Path, process::Command};
 
-use orna_evaluator::{AdmittedReplSession, Limits};
+use orna_evaluator::Limits;
 use orna_project::{
     AttachedDatabaseSession, AttachmentError, PACKAGE_PIN_MANIFEST_PATH, PackageResolver,
     PinnedDatabase, ProjectLoader, ReboundPathCheckpoint,
 };
+use orna_project_repl::AdmittedReplSession;
 use orna_repository::Repository;
 use orna_value::Value;
 use tempfile::TempDir;

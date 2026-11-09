@@ -1,12 +1,13 @@
 use futures::executor::block_on;
 use orna_conformance::{
-    AdmittedReplSession, BoundedEvaluator, Corpus, DurableTransactionalEvaluator, EvidenceStatus,
-    Harness, ImplementationClaim, ProjectEnvironment, ProjectExpectations, ProjectUnit,
+    BoundedEvaluator, Corpus, DurableTransactionalEvaluator, EvidenceStatus, Harness,
+    ImplementationClaim, ProjectEnvironment, ProjectExpectations, ProjectUnit,
     ReferenceProjectRuntimeEvidence, RuntimeAdapter, RuntimeEvaluator, Scenario, SourceUnit,
     StageOutcome, SyntaxAdapter, TransactionalEvaluator, run_reference_project_runtime_adapter,
 };
 use orna_evaluator::Limits as EvaluatorLimits;
 use orna_foundation::{Diagnostic, DiagnosticSeverity, SafeText, Value};
+use orna_project_repl::AdmittedReplSession;
 use orna_protocol::{
     DatabaseContext, Envelope, Limits as ProtocolLimits, Message, PresentationContext,
     canonical_request_fingerprint,
