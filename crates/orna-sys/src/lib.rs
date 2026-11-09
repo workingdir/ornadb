@@ -992,6 +992,10 @@ impl CancellationToken {
     pub fn is_cancelled(&self) -> bool {
         self.requested.load(Ordering::Acquire)
     }
+
+    fn cancel(&self) {
+        self.requested.store(true, Ordering::Release);
+    }
 }
 
 impl fmt::Debug for CancellationToken {
@@ -1142,9 +1146,8 @@ impl Runtime {
         self.generation = self.generation.saturating_add(1);
         self.id = RuntimeId::new(format!("{}@{}", self.id.as_str(), self.generation));
         for invocation in self.invocations.values_mut() {
-            if invocation.terminal.is_none() {
-                invocation.terminal = Some(RetainedInvocationResult::Orphaned(None));
-                invocation.ended = Some(Instant::now());
+            if invocation.terminal().is_none() {
+                invocation.finish(RetainedInvocationResult::Orphaned(None));
             }
         }
         for entry in self.idempotency.values_mut() {
@@ -1152,7 +1155,7 @@ impl Runtime {
                 entry.terminal = self
                     .invocations
                     .get(&entry.invocation)
-                    .and_then(|invocation| invocation.terminal.clone());
+                    .and_then(|invocation| invocation.terminal().cloned());
             }
         }
         self.id.clone()
@@ -1218,13 +1221,12 @@ impl Runtime {
                 mode: request.mode,
                 transaction: request.transaction,
                 context,
-                execution_started: request.mode == InvocationMode::Invoke,
-                terminal: None,
                 started: Instant::now(),
-                ended: None,
-                cancellation_requested: false,
-                cancellation_reason: None,
-                cancellation: CancellationToken::new(),
+                phase: match request.mode {
+                    InvocationMode::Invoke => Phase::Running,
+                    InvocationMode::Start => Phase::Queued,
+                },
+                cancellation: Cancellation::new(),
             },
         );
         if let Some(key) = request.idempotency_key {
@@ -1252,30 +1254,22 @@ impl Runtime {
         &self,
         handle: &InvocationHandle<T>,
     ) -> Result<InvocationMetadata, AdmissionError> {
-        self.check_handle(handle)?;
-        let stored = self
-            .invocations
-            .get(handle.invocation.id())
-            .expect("checked");
-        let (status, failure) = match &stored.terminal {
-            None => (
-                if stored.mode == InvocationMode::Start && !stored.execution_started {
-                    InvocationStatus::Queued
-                } else {
-                    InvocationStatus::Running
-                },
-                None,
-            ),
-            Some(RetainedInvocationResult::Success(_)) => (InvocationStatus::Succeeded, None),
-            Some(RetainedInvocationResult::OrdinaryFailure(failure)) => {
-                (InvocationStatus::Failed, Some(failure.clone()))
-            }
-            Some(RetainedInvocationResult::Cancelled(failure)) => {
-                (InvocationStatus::Cancelled, failure.clone())
-            }
-            Some(RetainedInvocationResult::Orphaned(failure)) => {
-                (InvocationStatus::Orphaned, failure.clone())
-            }
+        let stored = self.stored(handle)?;
+        let (status, failure) = match &stored.phase {
+            Phase::Queued => (InvocationStatus::Queued, None),
+            Phase::Running => (InvocationStatus::Running, None),
+            Phase::Terminal { result, .. } => match result {
+                RetainedInvocationResult::Success(_) => (InvocationStatus::Succeeded, None),
+                RetainedInvocationResult::OrdinaryFailure(failure) => {
+                    (InvocationStatus::Failed, Some(failure.clone()))
+                }
+                RetainedInvocationResult::Cancelled(failure) => {
+                    (InvocationStatus::Cancelled, failure.clone())
+                }
+                RetainedInvocationResult::Orphaned(failure) => {
+                    (InvocationStatus::Orphaned, failure.clone())
+                }
+            },
         };
         Ok(InvocationMetadata {
             invocation: handle.invocation.clone(),
@@ -1288,7 +1282,7 @@ impl Runtime {
             status,
             failure,
             started: stored.started,
-            ended: stored.ended,
+            ended: stored.ended(),
         })
     }
 
@@ -1361,22 +1355,11 @@ impl Runtime {
         handle: &InvocationHandle<T>,
         completion: ExecutionResult<TypedValue>,
     ) -> Result<(), AdmissionError> {
-        self.check_handle(handle)?;
-        let cancellation_reason = self
-            .invocations
-            .get(handle.invocation.id())
-            .expect("checked")
-            .cancellation_reason
-            .clone();
-        if self
-            .invocations
-            .get(handle.invocation.id())
-            .expect("checked")
-            .terminal
-            .is_some()
-        {
+        let stored = self.stored(handle)?;
+        if stored.terminal().is_some() {
             return Ok(());
         }
+        let cancellation_reason = stored.cancellation.reason.clone();
         let result = match completion {
             ExecutionResult::Success(value) => {
                 if value.static_type() != handle.result_type().id() {
@@ -1402,13 +1385,9 @@ impl Runtime {
         self.store_terminal(handle, result)
     }
     fn mark_running<T>(&mut self, handle: &InvocationHandle<T>) -> Result<(), AdmissionError> {
-        self.check_handle(handle)?;
-        let invocation = self
-            .invocations
-            .get_mut(handle.invocation.id())
-            .expect("checked");
-        if invocation.terminal.is_none() {
-            invocation.execution_started = true;
+        let invocation = self.stored_mut(handle)?;
+        if matches!(invocation.phase, Phase::Queued) {
+            invocation.phase = Phase::Running;
         }
         Ok(())
     }
@@ -1416,34 +1395,21 @@ impl Runtime {
         &self,
         handle: &InvocationHandle<T>,
     ) -> Result<InvocationState, AdmissionError> {
-        self.check_handle(handle)?;
-        Ok(
-            match self
-                .invocations
-                .get(handle.invocation.id())
-                .expect("checked")
-                .terminal
-                .clone()
-            {
-                Some(result) => InvocationState::Terminal(result),
-                None => InvocationState::Active,
-            },
-        )
+        Ok(match self.stored(handle)?.terminal().cloned() {
+            Some(result) => InvocationState::Terminal(result),
+            None => InvocationState::Active,
+        })
     }
 
     fn terminal_result<T>(
         &self,
         handle: &InvocationHandle<T>,
     ) -> Result<Option<InvocationResult<RetainedValue>>, AdmissionError> {
-        self.check_handle(handle)?;
-        let stored = self
-            .invocations
-            .get(handle.invocation.id())
-            .expect("checked");
-        let Some(result) = stored.terminal.as_ref() else {
+        let stored = self.stored(handle)?;
+        let Phase::Terminal { result, ended } = &stored.phase else {
             return Ok(None);
         };
-        let ended = stored.ended.expect("terminal results have an end time");
+        let ended = *ended;
         let (status, value, failure) = match result {
             RetainedInvocationResult::Success(value) => {
                 (InvocationStatus::Succeeded, Some(value.clone()), None)
@@ -1477,47 +1443,23 @@ impl Runtime {
         handle: &InvocationHandle<T>,
         reason: Option<Diagnostic>,
     ) -> Result<bool, AdmissionError> {
-        self.check_handle(handle)?;
-        let invocation = self
-            .invocations
-            .get_mut(handle.invocation.id())
-            .expect("checked");
-        match invocation.terminal.as_ref() {
-            Some(result) => Ok(result.terminal_class() == TerminalClass::Cancelled),
-            None => {
-                if invocation.cancellation_requested {
-                    return Ok(true);
-                }
-                invocation.cancellation_requested = true;
-                invocation
-                    .cancellation
-                    .requested
-                    .store(true, Ordering::Release);
-                invocation.cancellation_reason = reason;
-                Ok(true)
-            }
+        let invocation = self.stored_mut(handle)?;
+        if let Some(result) = invocation.terminal() {
+            return Ok(result.terminal_class() == TerminalClass::Cancelled);
         }
+        invocation.cancellation.request(reason);
+        Ok(true)
     }
     pub fn cancellation_requested<T>(
         &self,
         handle: &InvocationHandle<T>,
     ) -> Result<bool, AdmissionError> {
-        self.check_handle(handle)?;
-        Ok(self
-            .invocations
-            .get(handle.invocation.id())
-            .expect("checked")
-            .cancellation
-            .is_cancelled())
+        Ok(self.stored(handle)?.cancellation.requested())
     }
     fn request_cancellation_for_all(&mut self) {
         for invocation in self.invocations.values_mut() {
-            if invocation.terminal.is_none() {
-                invocation.cancellation_requested = true;
-                invocation
-                    .cancellation
-                    .requested
-                    .store(true, Ordering::Release);
+            if invocation.terminal().is_none() {
+                invocation.cancellation.request(None);
             }
         }
     }
@@ -1525,36 +1467,25 @@ impl Runtime {
         &self,
         handle: &InvocationHandle<T>,
     ) -> Result<CancellationToken, AdmissionError> {
-        self.check_handle(handle)?;
-        Ok(self
-            .invocations
-            .get(handle.invocation.id())
-            .expect("checked")
-            .cancellation
-            .clone())
+        Ok(self.stored(handle)?.cancellation.token.clone())
     }
     fn store_terminal<T>(
         &mut self,
         handle: &InvocationHandle<T>,
         result: RetainedInvocationResult,
     ) -> Result<(), AdmissionError> {
-        self.check_handle(handle)?;
-        let stored = self
-            .invocations
-            .get_mut(handle.invocation.id())
-            .expect("checked");
-        if stored.terminal.is_some() {
+        let stored = self.stored_mut(handle)?;
+        if stored.terminal().is_some() {
             return Ok(());
         }
-        let result = if stored.cancellation_requested
+        let result = if stored.cancellation.requested()
             && result.terminal_class() != TerminalClass::Cancelled
         {
-            RetainedInvocationResult::Cancelled(stored.cancellation_reason.clone())
+            RetainedInvocationResult::Cancelled(stored.cancellation.reason.clone())
         } else {
             result
         };
-        stored.terminal = Some(result.clone());
-        stored.ended = Some(Instant::now());
+        stored.finish(result.clone());
         for entry in self
             .idempotency
             .values_mut()
@@ -1565,31 +1496,36 @@ impl Runtime {
         Ok(())
     }
     pub fn check_handle<T>(&self, handle: &InvocationHandle<T>) -> Result<(), AdmissionError> {
+        self.stored(handle).map(|_| ())
+    }
+
+    /// The ledger record this handle names, after the handle checks every
+    /// operation needs: same runtime generation, not resumable, still stored,
+    /// and issued for the stored result type.
+    fn stored<T>(&self, handle: &InvocationHandle<T>) -> Result<&StoredInvocation, AdmissionError> {
         if handle.resumable {
             return Err(AdmissionError::ExpiredHandle);
         }
         if handle.runtime != self.id {
             return Err(AdmissionError::ForeignRuntime);
         }
-        let stored = self
-            .invocations
+        self.invocations
             .get(handle.invocation.id())
-            .ok_or(AdmissionError::ExpiredHandle)?;
-        if stored.result_type != *handle.result_type.id() {
-            return Err(AdmissionError::ExpiredHandle);
-        }
-        Ok(())
+            .filter(|stored| stored.result_type == *handle.result_type.id())
+            .ok_or(AdmissionError::ExpiredHandle)
+    }
+
+    fn stored_mut<T>(
+        &mut self,
+        handle: &InvocationHandle<T>,
+    ) -> Result<&mut StoredInvocation, AdmissionError> {
+        self.check_handle(handle)?;
+        self.invocations
+            .get_mut(handle.invocation.id())
+            .ok_or(AdmissionError::ExpiredHandle)
     }
     pub fn expire<T>(&mut self, handle: &InvocationHandle<T>) -> Result<(), AdmissionError> {
-        self.check_handle(handle)?;
-        let Some(result) = self
-            .invocations
-            .get(handle.invocation.id())
-            .expect("checked")
-            .terminal
-            .as_ref()
-            .cloned()
-        else {
+        let Some(result) = self.stored(handle)?.terminal().cloned() else {
             return Ok(());
         };
         for entry in self
@@ -2254,6 +2190,50 @@ impl RuntimeSupervisor {
     }
 }
 
+/// Where one admitted invocation is in its life.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum Phase {
+    /// A `Start` admission that no worker has begun executing.
+    Queued,
+    Running,
+    /// The retained outcome and the instant it was recorded, so a terminal
+    /// invocation cannot lack an end time.
+    Terminal {
+        result: RetainedInvocationResult,
+        ended: Instant,
+    },
+}
+
+/// The cancellation request for one invocation: the token executors poll and
+/// the reason recorded when it was raised.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Cancellation {
+    token: CancellationToken,
+    reason: Option<Diagnostic>,
+}
+
+impl Cancellation {
+    fn new() -> Self {
+        Self {
+            token: CancellationToken::new(),
+            reason: None,
+        }
+    }
+
+    fn requested(&self) -> bool {
+        self.token.is_cancelled()
+    }
+
+    /// Raises the request. The first request wins; a later one keeps the
+    /// original reason.
+    fn request(&mut self, reason: Option<Diagnostic>) {
+        if !self.requested() {
+            self.token.cancel();
+            self.reason = reason;
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct StoredInvocation {
     function: FunctionIdentity,
@@ -2262,13 +2242,32 @@ struct StoredInvocation {
     mode: InvocationMode,
     transaction: TransactionMode,
     context: InvocationContext,
-    execution_started: bool,
-    terminal: Option<RetainedInvocationResult>,
     started: Instant,
-    ended: Option<Instant>,
-    cancellation_requested: bool,
-    cancellation_reason: Option<Diagnostic>,
-    cancellation: CancellationToken,
+    phase: Phase,
+    cancellation: Cancellation,
+}
+
+impl StoredInvocation {
+    fn terminal(&self) -> Option<&RetainedInvocationResult> {
+        match &self.phase {
+            Phase::Terminal { result, .. } => Some(result),
+            Phase::Queued | Phase::Running => None,
+        }
+    }
+
+    fn ended(&self) -> Option<Instant> {
+        match &self.phase {
+            Phase::Terminal { ended, .. } => Some(*ended),
+            Phase::Queued | Phase::Running => None,
+        }
+    }
+
+    fn finish(&mut self, result: RetainedInvocationResult) {
+        self.phase = Phase::Terminal {
+            result,
+            ended: Instant::now(),
+        };
+    }
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct IdempotencyEntry {
@@ -2720,6 +2719,66 @@ mod tests {
 
         assert_ne!(original, identity(&changed, &changed_bound));
     }
+    #[test]
+    fn the_first_cancellation_request_keeps_its_reason_and_beats_a_late_success() {
+        let mut runtime = Runtime::new(RuntimeId::new("r"));
+        let handle = match runtime
+            .admit(request(Some(value("Int", "1")), ArgumentMap::default()))
+            .unwrap()
+        {
+            Admission::New { handle, .. } => handle,
+            _ => unreachable!(),
+        };
+        let first = Diagnostic::new("sys.test.first", "first request");
+        let second = Diagnostic::new("sys.test.second", "second request");
+
+        assert_eq!(runtime.cancellation_requested(&handle), Ok(false));
+        assert_eq!(runtime.cancel(&handle, Some(first.clone())), Ok(true));
+        assert_eq!(runtime.cancel(&handle, Some(second)), Ok(true));
+        assert_eq!(runtime.cancellation_requested(&handle), Ok(true));
+        assert_eq!(
+            runtime.invocation_state(&handle),
+            Ok(InvocationState::Active)
+        );
+
+        runtime
+            .retain_terminal(&handle, InvocationResult::Success(value("Str", "late")))
+            .unwrap();
+        assert_eq!(
+            runtime.invocation_state(&handle),
+            Ok(InvocationState::Terminal(
+                RetainedInvocationResult::Cancelled(Some(first))
+            ))
+        );
+        // Cancelling a terminal invocation only reports whether it was cancelled.
+        assert_eq!(runtime.cancel(&handle, None), Ok(true));
+    }
+
+    #[test]
+    fn a_start_admission_is_queued_until_a_worker_marks_it_running() {
+        let mut runtime = Runtime::new(RuntimeId::new("r"));
+        let mut start = request(Some(value("Int", "1")), ArgumentMap::default());
+        start.mode = InvocationMode::Start;
+        start.transaction = TransactionMode::Separate;
+        let handle = match runtime.admit(start).unwrap() {
+            Admission::New { handle, .. } => handle,
+            _ => unreachable!(),
+        };
+        let status = |runtime: &Runtime| runtime.invocation_metadata(&handle).unwrap().status();
+        assert_eq!(status(&runtime), InvocationStatus::Queued);
+        runtime.mark_running(&handle).unwrap();
+        assert_eq!(status(&runtime), InvocationStatus::Running);
+        runtime.restart();
+        let orphaned = runtime.id().clone();
+        assert_eq!(orphaned.as_str(), "r@2");
+        // The old-generation handle is no longer valid; the ledger entry is
+        // orphaned, never re-run.
+        assert_eq!(
+            runtime.invocation_metadata(&handle).map(|_| ()),
+            Err(AdmissionError::ForeignRuntime)
+        );
+    }
+
     #[test]
     fn an_absent_context_field_and_an_empty_one_have_different_invocation_identities() {
         // ORNA-SYS-079: the idempotency tuple includes the relevant context, so a
