@@ -25,6 +25,6 @@ pub fn joined(left: Relation<Sample>, right: Relation<Sample>):
     Relation<(Sample, Sample?)> =
     std.collection.asof_join(left, right, row => row.time, row => row.group);
 pub fn bucketed(rows: Relation<Instant>): Relation<[Instant]> =
-    std.collection.bucket_by(rows, period: 1.day, zone: "UTC");
+    std.collection.bucket_by(rows, 1.day, zone: "UTC");
 pub fn piped_chunks(rows: Relation<Sample>): Relation<[Sample]> =
     rows | std.collection.chunk(2);
