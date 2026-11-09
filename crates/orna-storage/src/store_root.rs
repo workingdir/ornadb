@@ -157,6 +157,58 @@ struct RelationCandidate {
     maintenance: Option<IndexMaintenance>,
 }
 
+/// The net change one frozen prefix makes: a loaded base per touched
+/// relation, the net rows those bases leave, and the logical row rekeys the
+/// prefix requested.
+struct FoldedPrefix {
+    bases: BTreeMap<[u8; 16], RelationBase>,
+    net_rows: NetRows,
+    logical_rekeys: Vec<PublicationLogicalRowRekey>,
+}
+
+/// Loads each touched relation's base and folds every mutation into the net
+/// rows the prefix publishes.
+fn fold_frozen_prefix(
+    format: &HistoricalFormatContext,
+    mutations: &[TableMutation],
+) -> Result<FoldedPrefix, Error> {
+    let mut folded = FoldedPrefix {
+        bases: BTreeMap::new(),
+        net_rows: NetRows::default(),
+        logical_rekeys: Vec::new(),
+    };
+    for mutation in mutations {
+        let relation_id = mutation
+            .table_object_id()
+            .ok_or_else(|| {
+                Error::repository_unavailable_reason("runtime mutation has no table object id")
+            })?
+            .bytes();
+        let base = match folded.bases.entry(relation_id) {
+            std::collections::btree_map::Entry::Occupied(occupied) => occupied.into_mut(),
+            std::collections::btree_map::Entry::Vacant(vacant) => {
+                vacant.insert(RelationBase::load(format, relation_id)?)
+            }
+        };
+        let projected =
+            project_runtime_mutation(&base.schema, relation_id, mutation, &base.value_context)?;
+        if let Some(new_key) = projected.rekey_to.as_ref() {
+            folded.logical_rekeys.push(
+                PublicationLogicalRowRekey::new(
+                    relation_id,
+                    projected.key.clone(),
+                    new_key.clone(),
+                )
+                .map_err(Error::repository_unavailable)?,
+            );
+        }
+        folded
+            .net_rows
+            .fold(relation_id, projected, mutation.is_insert());
+    }
+    Ok(folded)
+}
+
 /// The store root a frozen prefix publishes, with what the caller journals and
 /// measures.
 pub(crate) struct FrozenStoreRoot {
@@ -180,36 +232,11 @@ pub(crate) fn build_frozen_publication_store_root(
         ));
     }
 
-    let mut bases = BTreeMap::<[u8; 16], RelationBase>::new();
-    let mut net_rows = NetRows::default();
-    let mut logical_rekeys = Vec::new();
-    for mutation in mutations {
-        let relation_id = mutation
-            .table_object_id()
-            .ok_or_else(|| {
-                Error::repository_unavailable_reason("runtime mutation has no table object id")
-            })?
-            .bytes();
-        let base = match bases.entry(relation_id) {
-            std::collections::btree_map::Entry::Occupied(occupied) => occupied.into_mut(),
-            std::collections::btree_map::Entry::Vacant(vacant) => {
-                vacant.insert(RelationBase::load(&format, relation_id)?)
-            }
-        };
-        let projected =
-            project_runtime_mutation(&base.schema, relation_id, mutation, &base.value_context)?;
-        if let Some(new_key) = projected.rekey_to.as_ref() {
-            logical_rekeys.push(
-                PublicationLogicalRowRekey::new(
-                    relation_id,
-                    projected.key.clone(),
-                    new_key.clone(),
-                )
-                .map_err(Error::repository_unavailable)?,
-            );
-        }
-        net_rows.fold(relation_id, projected, mutation.is_insert());
-    }
+    let FoldedPrefix {
+        bases,
+        net_rows,
+        logical_rekeys,
+    } = fold_frozen_prefix(&format, mutations)?;
 
     // Relations are maintained in ascending id order, and the first one's
     // graph carries the publication.
