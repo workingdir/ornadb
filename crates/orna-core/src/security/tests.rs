@@ -734,13 +734,14 @@ fn sealed_system_target_rejects_forged_class_and_revision_pins() {
     let session = snapshot
         .bind_authenticated_session(USER, vec![])
         .expect("active session should bind");
-    let forged = InvocationTarget {
-        function: crate::system::SYS_INVOKE_FUNCTION_ID,
-        revision: REVISION,
-        class: Some(TargetClass::Application),
-        standard_revision: Some(OTHER_STANDARD_REVISION),
-        executable_revision: Some(OTHER_STD_EXECUTABLE),
-    };
+    // A sealed system function is never a verified-standard target: the pinned
+    // shape must be refused even though the function identity is registered.
+    let forged = InvocationTarget::verified_standard(
+        crate::system::SYS_INVOKE_FUNCTION_ID,
+        REVISION,
+        OTHER_STANDARD_REVISION,
+        OTHER_STD_EXECUTABLE,
+    );
 
     assert_eq!(
         snapshot.authorise_system_function(&session, forged),

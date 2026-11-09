@@ -174,6 +174,15 @@ pub enum TargetClass {
     VerifiedStandard,
 }
 
+/// The immutable standard-library pin of a verified-standard function: the
+/// exact standard snapshot revision and the exact executable function revision
+/// inside it. The two are only meaningful together, so they travel as one value.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+struct StandardPin {
+    standard_revision: StandardLibraryRevisionId,
+    executable_revision: FunctionRevisionId,
+}
+
 /// One function in the closed two-class `EXECUTE` target union.
 ///
 /// The canonical security snapshot is the identity-ordered union of the
@@ -186,9 +195,9 @@ pub enum TargetClass {
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SecurityFunctionTarget {
     function: FunctionId,
-    class: TargetClass,
-    standard_revision: Option<StandardLibraryRevisionId>,
-    executable_revision: Option<FunctionRevisionId>,
+    /// `None` is an application-catalogue function; `Some` is a
+    /// verified-standard function and its pin.
+    standard: Option<StandardPin>,
 }
 
 impl SecurityFunctionTarget {
@@ -196,9 +205,7 @@ impl SecurityFunctionTarget {
     pub const fn application(function: FunctionId) -> Self {
         Self {
             function,
-            class: TargetClass::Application,
-            standard_revision: None,
-            executable_revision: None,
+            standard: None,
         }
     }
 
@@ -211,9 +218,10 @@ impl SecurityFunctionTarget {
     ) -> Self {
         Self {
             function,
-            class: TargetClass::VerifiedStandard,
-            standard_revision: Some(standard_revision),
-            executable_revision: Some(executable_revision),
+            standard: Some(StandardPin {
+                standard_revision,
+                executable_revision,
+            }),
         }
     }
 
@@ -224,17 +232,26 @@ impl SecurityFunctionTarget {
 
     /// Returns the closed target class.
     pub const fn class(self) -> TargetClass {
-        self.class
+        match self.standard {
+            None => TargetClass::Application,
+            Some(_) => TargetClass::VerifiedStandard,
+        }
     }
 
     /// Returns the exact standard snapshot revision that pins this target.
     pub const fn standard_revision(self) -> Option<StandardLibraryRevisionId> {
-        self.standard_revision
+        match self.standard {
+            Some(pin) => Some(pin.standard_revision),
+            None => None,
+        }
     }
 
     /// Returns the exact pinned executable function revision.
     pub const fn executable_revision(self) -> Option<FunctionRevisionId> {
-        self.executable_revision
+        match self.standard {
+            Some(pin) => Some(pin.executable_revision),
+            None => None,
+        }
     }
 }
 
@@ -243,9 +260,9 @@ impl SecurityFunctionTarget {
 pub struct InvocationTarget {
     function: FunctionId,
     revision: RevisionPair,
-    class: Option<TargetClass>,
-    standard_revision: Option<StandardLibraryRevisionId>,
-    executable_revision: Option<FunctionRevisionId>,
+    /// `None` names only an application-catalogue function; `Some` pins one
+    /// verified-standard executable.
+    standard: Option<StandardPin>,
 }
 
 impl InvocationTarget {
@@ -260,9 +277,7 @@ impl InvocationTarget {
         Self {
             function,
             revision,
-            class: None,
-            standard_revision: None,
-            executable_revision: None,
+            standard: None,
         }
     }
 
@@ -277,9 +292,10 @@ impl InvocationTarget {
         Self {
             function,
             revision,
-            class: Some(TargetClass::VerifiedStandard),
-            standard_revision: Some(standard_revision),
-            executable_revision: Some(executable_revision),
+            standard: Some(StandardPin {
+                standard_revision,
+                executable_revision,
+            }),
         }
     }
 
@@ -295,17 +311,26 @@ impl InvocationTarget {
 
     /// Returns the closed target class when the caller pinned one.
     pub const fn class(self) -> Option<TargetClass> {
-        self.class
+        match self.standard {
+            Some(_) => Some(TargetClass::VerifiedStandard),
+            None => None,
+        }
     }
 
     /// Returns the exact verified standard snapshot revision pin, when present.
     pub const fn standard_revision(self) -> Option<StandardLibraryRevisionId> {
-        self.standard_revision
+        match self.standard {
+            Some(pin) => Some(pin.standard_revision),
+            None => None,
+        }
     }
 
     /// Returns the exact pinned executable function revision, when present.
     pub const fn executable_revision(self) -> Option<FunctionRevisionId> {
-        self.executable_revision
+        match self.standard {
+            Some(pin) => Some(pin.executable_revision),
+            None => None,
+        }
     }
 }
 
@@ -2317,14 +2342,10 @@ impl SecuritySnapshot {
         let Some(function_target) = self.function_targets.get(&target.function) else {
             return ExecuteDecision::Denied(ExecuteDenial::UnknownFunction);
         };
-        let target_class = target.class().unwrap_or(TargetClass::Application);
-        if function_target.class != target_class {
-            return ExecuteDecision::Denied(ExecuteDenial::UnknownFunction);
-        }
-        if target_class == TargetClass::VerifiedStandard
-            && (function_target.executable_revision != target.executable_revision()
-                || function_target.standard_revision != target.standard_revision())
-        {
+        // A class-less target is an application target, so the pins must match
+        // exactly: the same class and, for a standard function, the same
+        // immutable standard snapshot and executable revision.
+        if function_target.standard != target.standard {
             return ExecuteDecision::Denied(ExecuteDenial::UnknownFunction);
         }
         let has_execute_grant = |grantee| {
@@ -2389,10 +2410,7 @@ impl SecuritySnapshot {
         session: &AuthenticatedSession,
         target: InvocationTarget,
     ) -> ExecuteDecision {
-        if target.class.is_some()
-            || target.standard_revision.is_some()
-            || target.executable_revision.is_some()
-        {
+        if target.standard.is_some() {
             return ExecuteDecision::Denied(ExecuteDenial::UnknownFunction);
         }
         if system_function_by_id(target.function).is_none() {
