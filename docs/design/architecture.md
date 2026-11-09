@@ -517,6 +517,20 @@ institutionalised form of the god-function problem. Nothing counts them, so noth
 stops the count growing. No CI job inspects the dependency graph, so nothing stops a
 new crate edge from crossing a layer.
 
+The two lint groups behave differently, and the difference matters for the plan
+(verified against the clippy lint index, `too_many_arguments` is `complexity`/warn and
+`too_many_lines` is `pedantic`/allow):
+
+* `clippy::complexity` is part of `clippy::all`, so `-D warnings` **is** active for
+  `too_many_arguments` (and `type_complexity`). Every one of those 87 sites needed a
+  deliberate `#[allow]` against a live lint.
+* `clippy::pedantic` is **not** enabled, so `too_many_lines` never fires, so those 51
+  `#[allow(clippy::too_many_lines)]` attributes suppress nothing at all. They are dead
+  annotations that record the authors' knowledge of the problem, not a passing gate.
+* `clippy::cognitive_complexity` is neither pedantic nor default; it is in the
+  **restriction** group, which must be named explicitly. Any plan that says "turn on
+  pedantic and the function-size lints apply" is wrong about this one.
+
 There is also no publication policy: only 6 of 26 crates set `publish = false`
 (`orna-application`, `orna-conformance`, `orna-runtime`, `orna-stream`, `orna-table`,
 `orna-traceability`), so the other 20 are publishable to a registry by default with
@@ -537,6 +551,7 @@ There is also no publication policy: only 6 of 26 crates set `publish = false`
 | rustc (tidy) | per-subsystem dependency allowlists enforced in CI: `PERMITTED_RUSTC_DEPENDENCIES`, `PERMITTED_STDLIB_DEPENDENCIES`, `PERMITTED_CRANELIFT_DEPENDENCIES`, each with a `ListLocation` so the diagnostic points at the list line | https://raw.githubusercontent.com/rust-lang/rust/master/src/tools/tidy/src/deps.rs | **Yes, this is the enforcement model.** Per-crate allowlist, checked by a small script, diagnostic names the file and line of the declaration. Adopt nearly verbatim. |
 | Go | `internal` package rule: a package under `.../internal/...` is importable only from the subtree above it, enforced by the toolchain (Go 1.4 release notes, "Internal packages") | https://go.dev/doc/go1.4 | **Partly.** Rust has no equivalent; the closest cheap analogue is a crate *naming* rule plus the allowlist script (`orna-*-internal` crates may only be depended on by their owner). Does not apply as language machinery. |
 | cargo-deny | `[bans]` denies crates globally; `[[bans.deny]]` with `wrappers` restricts a ban to everything except named direct dependents; `multiple-versions`, `wildcards`, `[[bans.features]]` | https://embarkstudios.github.io/cargo-deny/checks/bans/cfg.html and https://embarkstudios.github.io/cargo-deny/checks/bans/index.html | **Partly.** Excellent for external crates (`hex` banned outside the one crate that owns hex, two base64 libraries forbidden, `libsql` only below the state layer). Insufficient for internal layer rules: bans are global except for the `wrappers` exception list, so expressing "layer 6 must not depend on layer 8" needs the allowlist script. Both are proposed; cargo-deny owns external deps, the script owns internal edges. |
+| cargo-modules | `cargo modules structure`, `dependencies --acyclic` (fails on a module cycle), `orphans --deny` (fails on a source file no `mod` item links) | https://github.com/regexident/cargo-modules | **Yes, for the other half of the problem.** It analyses a crate's *internal* module graph and cannot express a crate-to-crate layer rule, so it is not a substitute for the metadata script. It is exactly the right tool for two failure modes this plan creates: a module cycle introduced by a split, and a file left unlinked by a `git mv`. Proposed as a per-crate gate in the split stages and nightly, not in the fast `arch` job, because it needs a build. |
 | Roslyn / Go compiler layering | layer docs with an enforcing test | Roslyn's `docs/wiki/Layers.md` is no longer at that path (HTTP 404 on 2026-11-09), so no claim is made about its contents | Not cited as precedent for a mechanism. The mechanism adopted here is rustc's tidy allowlist, which was verified. |
 
 What does **not** transfer:
@@ -806,7 +821,8 @@ caps in section 3.6.
 
 ### 3.5 Enforcement in CI
 
-Four mechanisms, all cheap, all byte-deterministic.
+Five mechanisms: three cheap and byte-deterministic, one that needs a build, one CI job
+that glues them together.
 
 **(a) `scripts/check_architecture.py` over `cargo metadata`.** Reads
 `docs/design/layers.toml`, which is generated from section 3.1 and hand-maintained
@@ -862,25 +878,53 @@ wrappers = ["orna-store"]
 **(c) `clippy.toml` + a suppression budget.**
 
 ```toml
-# clippy.toml
-too-many-lines-threshold = 120
-too-many-arguments-threshold = 7
-cognitive-complexity-threshold = 25
-type-complexity-threshold = 250
+# clippy.toml  (all four keys and their defaults verified against the clippy index)
+too-many-lines-threshold = 120        # default 100, clippy::pedantic
+too-many-arguments-threshold = 7      # default 7,   clippy::complexity
+cognitive-complexity-threshold = 25   # default 25,  clippy::restriction
+type-complexity-threshold = 250       # default 250, clippy::complexity
 ```
 
-`too_many_lines` and `cognitive_complexity` are `clippy::pedantic`, which the
-workspace does not enable today. Enabling pedantic across 491,334 lines in one step
-is not reviewable, so the rollout is a ratchet:
+`too_many_lines` is `clippy::pedantic` (off by default) and `cognitive_complexity` is
+`clippy::restriction` (off by default and not part of pedantic), so neither can be
+switched on by "enable pedantic" alone: the workspace lints table must name them.
+`too_many_arguments` and `type_complexity` are already live under `-D warnings`.
 
+Enabling pedantic plus one restriction lint across 491,334 lines in one step is not
+reviewable, so the rollout is a ratchet:
+
+* `[workspace.lints.clippy]` gains, from stage 01, `too_many_lines = "deny"` and
+  `cognitive_complexity = "deny"` beside the existing `all = "deny"`, so both size
+  lints are actually running;
 * `scripts/architecture-budget.toml` records, per crate, the number of
-  `#[allow(clippy::*)]` attributes and the list of files over 1,200 lines;
+  `#[allow(clippy::*)]` attributes and the list of files over 1,200 lines. That file,
+  not the lint command line, is where the unfinished backlog is written down, so a
+  crate can be cleaned and tightened independently of its neighbours;
 * CI fails if any recorded number grows;
 * a stage that shrinks a crate lowers its recorded number in the same PR, so the
   file only ever moves down. This is the same mechanic the repo already trusts for
   `scripts/known-test-failures.toml` and `scripts/semantic-known-red.txt`.
 
-**(d) A CI job, `arch`, in `.github/workflows/lint.yml`.** Three steps, no compile:
+After stage 01 the 51 existing `#[allow(clippy::too_many_lines)]` attributes become
+live suppressions for the first time, which is what makes them countable and therefore
+shrinkable.
+
+**(d) `cargo-modules` for the intra-crate graph.** The layer script cannot see inside a
+crate, and every stage in this plan moves modules *between* crates, which is exactly
+when a `mod` declaration gets lost or a module cycle appears:
+
+```
+cargo modules dependencies -p orna-store --lib --no-externs --acyclic
+cargo modules orphans -p orna-store --lib --deny
+```
+
+`dependencies --acyclic` fails on a module cycle (the tool documents this by showing
+its own cycle error); `orphans --deny` fails on a source file no `mod` item links,
+which is the signature failure of a botched `git mv` split. This is R4's enforcement.
+It needs a build, so it runs per-crate in the stage PRs and nightly, not in the
+32-second `arch` job.
+
+**(e) A CI job, `arch`, in `.github/workflows/lint.yml`.** Three steps, no compile:
 
 ```yaml
       - name: Architecture
@@ -989,6 +1033,9 @@ cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo test --locked --workspace --all-targets            # via lane-run.sh
 python3 scripts/check_architecture.py --mode=deny
 cargo deny --locked check bans licenses sources
+# for every crate the stage created or moved modules out of:
+cargo modules dependencies -p <crate> --lib --no-externs --acyclic
+cargo modules orphans -p <crate> --lib --deny
 ```
 
    and for anything touching the CLI, `sys` catalogue or formats, the generated
@@ -1016,9 +1063,12 @@ mechanical import rewrites.
 *Files:* `scripts/check_architecture.py` (new), `scripts/check_architecture_test.py`
 (new), `docs/design/layers.toml` (new), `scripts/architecture-budget.toml` (new),
 `deny.toml` (new), `clippy.toml` (new), `ARCHITECTURE.md` (new),
-`docs/ARCHITECTURE.md` (new), `.github/workflows/lint.yml`,
-`justfile` (add `arch-check`), root `Cargo.toml` (`[workspace.lints]` only;
-`members` unchanged), `publish = false` added to the 20 crates that lack it,
+`docs/ARCHITECTURE.md` (new), `.github/workflows/lint.yml` (the `arch` job),
+`.github/workflows/nightly-gates.yml` (a `cargo modules dependencies --acyclic` and
+`cargo modules orphans --deny` pass over every workspace crate, plus a pinned
+`cargo-modules` version so the gate cannot drift), `justfile` (add `arch-check` and
+`module-graph`), root `Cargo.toml` (`[workspace.lints]` only; `members` unchanged),
+`publish = false` added to the 20 crates that lack it,
 `crates/orna-security/Cargo.toml` and
 `crates/orna-standard-sources/Cargo.toml` (`lints.workspace = true` as the opt-in
 proof).
@@ -1252,13 +1302,15 @@ workspace member count drops from 33 to 31.
 
 *Files:* `clippy.toml` thresholds tightened to the `docs/ARCHITECTURE.md` numbers;
 `[workspace.lints]` promoted so every crate uses `lints.workspace = true` with
-`clippy::pedantic = deny`; `scripts/architecture-budget.toml` lowered to the final
-numbers (0 `too_many_arguments` allows, <= 40 public error enums, no file over 1,200
-lines, no inline `#[cfg(test)]` in `src`).
+`clippy::pedantic = deny` and `clippy::cognitive_complexity = deny` (restriction, so
+it must be named - pedantic alone does not include it);
+`scripts/architecture-budget.toml` lowered to the final numbers (0
+`too_many_arguments` allows, <= 40 public error enums, no file over 1,200 lines, no
+inline `#[cfg(test)]` in `src`).
 
 *Acceptance:* `cargo clippy --locked --workspace --all-targets -- -D warnings` green
-with pedantic on; `check_architecture.py --mode=budget` green; the budget file's
-every number is at or below the target column of section 3.6.
+with pedantic and `cognitive_complexity` on; `check_architecture.py --mode=budget`
+green; the budget file's every number is at or below the target column of section 3.6.
 
 *Waits for:* stages 05-13, because tightening before the splits would only create
 hundreds of new suppressions.
@@ -1559,6 +1611,18 @@ grep -rn 'orna_runtime::' crates/orna-repository/src/        # empty: repository
 grep -rc 'orna_runtime::' crates/orna-storage/src/*.rs       # 6 + 5, mostly fixture-gated
 grep -rn 'orna_sys::' crates/orna-semantic/src/*.rs          # 22 sites, catalogue data only
 grep -rn 'orna_sys::' crates/orna-runtime/src/*.rs           # 21 sites, dispatch tables only
+
+# lint-group facts (verified against the clippy lint index, not assumed)
+#   too_many_arguments  -> clippy::complexity  (live under -D warnings)
+#   too_many_lines      -> clippy::pedantic    (off by default)
+#   cognitive_complexity-> clippy::restriction (off by default, not in pedantic)
+#   type_complexity     -> clippy::complexity
+# https://rust-lang.github.io/rust-clippy/master/index.html
+
+# intra-crate gates used by every split stage
+cargo modules dependencies -p <crate> --lib --no-externs --acyclic
+cargo modules orphans -p <crate> --lib --deny
+# https://github.com/regexident/cargo-modules
 ```
 
 ## Appendix C: the proposed root `ARCHITECTURE.md`
