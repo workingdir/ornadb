@@ -10,7 +10,6 @@ pub use migration::{
 };
 
 pub(crate) const JOURNAL_MAGIC: &[u8] = b"ORNA-PUB-JOURNAL\0";
-pub(crate) const GIT_INDEX_LOCK_MAGIC: &[u8] = b"ORNA-GIT-INDEX-LOCK\0";
 const MAX_MIGRATION_IDENTITY_RECORDS: usize = 65_536;
 const MAX_MIGRATION_IDENTITY_COMPONENT_BYTES: usize = 1024 * 1024;
 const MAX_MIGRATION_ANNOTATION_DEFAULTS: usize = 1_000_000_000;
