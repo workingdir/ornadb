@@ -33,6 +33,42 @@ pub(crate) fn configure_fixture_git_identity(directory: &Path) {
     }
 }
 
+/// Initialises a Git repository at `root` with the fixture identity and commit
+/// signing disabled, leaving staging and the first commit to the caller.
+pub(crate) fn initialize_fixture_repository(root: &Path) {
+    git(root, &["init", "-b", "main"]);
+    configure_fixture_git_identity(root);
+    git(root, &["config", "commit.gpgsign", "false"]);
+}
+
+/// Writes `main.orna` and records it as the repository's first commit.
+pub(crate) fn commit_initial_module(root: &Path) {
+    std::fs::write(root.join("main.orna"), "module main;\n").expect("fixture source");
+    git(root, &["add", "main.orna"]);
+    git(root, &["commit", "-m", "initial"]);
+}
+
+/// Populates `root` as the legacy format-1 compact fixture both the unit and
+/// integration legacy tests read: the module source, an ordinary file and the
+/// format record, committed once.
+pub(crate) fn populate_compact_fixture(root: &Path) {
+    initialize_fixture_repository(root);
+    std::fs::write(
+        root.join("main.orna"),
+        include_str!("../tests/fixtures/git-repository-main.orna"),
+    )
+    .expect("fixture module source");
+    std::fs::write(root.join("ordinary.txt"), "base\n").expect("fixture ordinary file");
+    std::fs::create_dir_all(root.join(".orna")).expect("fixture format directory");
+    std::fs::write(
+        root.join(".orna/format.orna"),
+        "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n",
+    )
+    .expect("fixture format record");
+    git(root, &["add", "."]);
+    git(root, &["commit", "-m", "initial"]);
+}
+
 /// Runs one fixture Git command and returns its trimmed UTF-8 stdout.
 pub(crate) fn git(directory: &Path, arguments: &[&str]) -> String {
     run_fixture_git(directory, arguments, false)
