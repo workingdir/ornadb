@@ -98,7 +98,7 @@ name = "orna-conformance"
 "src/vector_suites.rs::path_vectors" = 122
 
 [[crate]]
-name = "orna-core"
+name = "orna-compat-v1"
 [crate.files]
 "src/canonical_hash.rs" = 2627
 "src/canonical_hash/tests.rs" = 3258

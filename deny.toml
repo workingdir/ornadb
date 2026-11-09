@@ -36,7 +36,7 @@ use-instead = "orna-base::hex"
 crate = "libsql"
 wrappers = ["orna-cli", "orna-runtime"]
 
-# base64 is not banned yet: orna-core and orna-storage depend on it directly, and
+# base64 is not banned yet: orna-compat-v1 and orna-storage depend on it directly, and
 # reqwest/hyper-util depend on it transitively, so a wrapper list would have to
 # name external crates. Stage 03 moves the workspace implementations to
 # orna-base; the ban is added there once the external route is the only one.

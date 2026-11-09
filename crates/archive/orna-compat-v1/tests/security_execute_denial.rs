@@ -1,4 +1,4 @@
-use orna_core::{
+use orna_compat_v1::{
     CatalogueRevisionId, FunctionId, PrincipalId, SourceRevisionId,
     revision::RevisionPair,
     security::{

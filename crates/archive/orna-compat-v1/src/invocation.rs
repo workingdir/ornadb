@@ -50,7 +50,7 @@ pub enum ProtectedInvocationDecision {
 /// Makes one complete protected invocation decision without exposing phases.
 ///
 /// The caller must decode the retained Request envelope before this operation.
-/// `orna-core` does not decode ORV5 bytes, so it keeps the protocol boundary
+/// `orna-compat-v1` does not decode ORV5 bytes, so it keeps the protocol boundary
 /// acyclic. This operation first checks the exact system entry, then checks
 /// the authenticated protocol major. It privately resolves one target in the
 /// pinned application and verified-standard catalogues, makes base `EXECUTE`

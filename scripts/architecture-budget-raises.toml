@@ -8,7 +8,9 @@
 #
 # Every entry needs:
 #   path       crates/<crate>/<relative file>::<function> for a function,
-#              crates/<crate>/<relative file> for a file
+#              crates/<crate>/<relative file> for a file, or the same forms one
+#              level deeper for an archived crate:
+#              crates/archive/<crate>/<relative file>[::<function>]
 #   new_limit  the reviewed size the path may reach (the same max(5%, 25 lines)
 #              tolerance applies above it)
 #   reason     why the size is accepted
@@ -60,7 +62,7 @@ reason = "PR #9768 shares byte-index chunk verification across the native graph 
 bead = "ornadb-l0ouj"
 
 [[raise]]
-path = "crates/orna-core/src/security.rs"
+path = "crates/archive/orna-compat-v1/src/security.rs"
 new_limit = 2633
 reason = "PR #9767 replaces the SecurityAuditDecision wildcard projections with every rejected shape named, and splits SecuritySnapshot validation into one helper per definition category so from_definitions stays under the 120-line cap; the accessor expansion is the remaining ornadb-x5oag debt"
 bead = "ornadb-x5oag"

@@ -57,7 +57,9 @@ class Fixture:
         role: str | None = None,
         warning: str | None = None,
         files: dict[str, str] | None = None,
+        directory: str | None = None,
     ) -> None:
+        package_directory = directory or f"crates/{name}"
         self.crates.append(
             {
                 "name": name,
@@ -66,10 +68,11 @@ class Fixture:
                 "allowed": list(allowed),
                 "role": role,
                 "warning": warning,
+                "directory": package_directory,
             }
         )
-        directory = self.root / "crates" / name
-        (directory / "src").mkdir(parents=True, exist_ok=True)
+        package_root = self.root / package_directory
+        (package_root / "src").mkdir(parents=True, exist_ok=True)
         tables: dict[str, list[str]] = {"dependencies": [], "dev-dependencies": [], "build-dependencies": []}
         for dep in deps:
             if isinstance(dep, str):
@@ -87,9 +90,9 @@ class Fixture:
                 manifest.append(f"[{table}]")
                 manifest.extend(entries)
                 manifest.append("")
-        (directory / "Cargo.toml").write_text("\n".join(manifest), encoding="utf-8")
+        (package_root / "Cargo.toml").write_text("\n".join(manifest), encoding="utf-8")
         for relative, text in (files or {}).items():
-            target = directory / relative
+            target = package_root / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(text, encoding="utf-8")
 
@@ -160,7 +163,9 @@ class Fixture:
                     "name": crate["name"],
                     "id": identifier,
                     "version": "0.0.0",
-                    "manifest_path": str(self.root / "crates" / crate["name"] / "Cargo.toml"),
+                    "manifest_path": str(
+                        self.root / crate["directory"] / "Cargo.toml"
+                    ),
                     "dependencies": dependencies,
                 }
             )
@@ -517,6 +522,23 @@ class BudgetTests(unittest.TestCase):
         fixture.raises(
             '[[raise]]\npath = "crates/demo-a/src/lib.rs"\nnew_limit = 600\n'
             'reason = "test"\nbead = "ornadb-test"\n'
+        )
+        result = fixture.run("--mode=budget")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_raise_path_names_an_archived_crate(self) -> None:
+        fixture = Fixture(self)
+        fixture.crate(
+            "demo-a",
+            1,
+            files={"src/lib.rs": "// filler\n" * 600},
+            directory="crates/archive/demo-a",
+        )
+        fixture.shipped = "demo-a"
+        self.budget(fixture, files={"src/lib.rs": 500})
+        fixture.raises(
+            '[[raise]]\npath = "crates/archive/demo-a/src/lib.rs"\nnew_limit = 600\n'
+            'reason = "archive move"\nbead = "ornadb-test"\n'
         )
         result = fixture.run("--mode=budget")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
