@@ -50,14 +50,14 @@ pub struct SemanticParameter {
     pub annotation_explicit: bool,
 }
 
-/// Authorship is provenance, not a component of semantic identity.
+/// Authorship is provenance, not a component of semantic identity. Parameter
+/// explicitness lives on the parameter entries themselves, and every field or
+/// enum payload member is declared with an annotation by grammar, so no
+/// position-indexed flag vectors exist to drift out of step with them.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeclarationExplicitness {
     pub authored: bool,
-    pub parameter_annotations: Vec<bool>,
     pub result_annotation: bool,
-    /// Owning declaration field/payload annotations, in declaration order.
-    pub field_annotations: Vec<bool>,
 }
 
 /// Only this producer can construct a declaration. Getters expose no mutation.
@@ -343,9 +343,7 @@ impl Producer<'_> {
         let symbol = &analysis.modules[&key.0].symbols[&key.1];
         let mut explicitness = DeclarationExplicitness {
             authored: true,
-            parameter_annotations: Vec::new(),
             result_annotation: false,
-            field_annotations: Vec::new(),
         };
         let mut parameters = Vec::new();
         let mut semantic_parameters = Vec::new();
@@ -424,9 +422,6 @@ impl Producer<'_> {
                         Raw::Bool(parameter.default.is_some()),
                         default,
                     ]));
-                    explicitness
-                        .parameter_annotations
-                        .push(parameter.annotation.is_some());
                 }
                 let result = signature
                     .result
@@ -493,13 +488,7 @@ impl Producer<'_> {
                         let resolved = resolved_type_of(ty, scope);
                         let encoded = self.type_node(key, &resolved, scope)?;
                         locals.bind("self", resolved.clone());
-                        let members = self.type_members(
-                            key,
-                            refinements,
-                            scope,
-                            &mut locals,
-                            &mut explicitness,
-                        )?;
+                        let members = self.type_members(key, refinements, scope, &mut locals)?;
                         let category = if refinements.is_empty() {
                             "alias"
                         } else {
@@ -523,8 +512,7 @@ impl Producer<'_> {
                             })
                             .collect();
                         locals.bind("self", Type::Record(fields));
-                        let members =
-                            self.type_members(key, members, scope, &mut locals, &mut explicitness)?;
+                        let members = self.type_members(key, members, scope, &mut locals)?;
                         (
                             Type::Named(nominal_identity(&key.0, &key.1)),
                             node("nominal_record", vec![members]),
@@ -552,7 +540,6 @@ impl Producer<'_> {
                             text(&field.name),
                             self.type_node(key, &ty, scope)?,
                         ]));
-                        explicitness.field_annotations.push(true);
                     }
                     encoded.push(array(vec![text(&variant.name), array(fields)]));
                 }
@@ -631,7 +618,6 @@ impl Producer<'_> {
         members: &[TypeMember],
         scope: &Scope,
         locals: &mut Locals,
-        flags: &mut DeclarationExplicitness,
     ) -> Result<Raw> {
         let mut encoded = Vec::new();
         for member in members {
@@ -643,7 +629,6 @@ impl Producer<'_> {
                     initializer,
                     ..
                 } => {
-                    flags.field_annotations.push(true);
                     let ty = resolved_type_of(ty, scope);
                     // Nominal value fields have no table key role; encode that explicitly.
                     node(
@@ -1552,9 +1537,9 @@ mod tests {
         let b = named(&explicit, "payload.increment");
         assert_eq!(a.canonical_payload(), b.canonical_payload());
         assert_eq!(a.resolved_type(), b.resolved_type());
-        assert_eq!(a.explicitness().parameter_annotations, vec![false]);
+        assert!(!a.parameters()[0].annotation_explicit);
         assert!(!a.explicitness().result_annotation);
-        assert_eq!(b.explicitness().parameter_annotations, vec![true]);
+        assert!(b.parameters()[0].annotation_explicit);
         assert!(b.explicitness().result_annotation);
         assert!(a.explicitness().authored && b.explicitness().authored);
     }

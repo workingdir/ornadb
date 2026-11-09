@@ -214,6 +214,20 @@ impl fmt::Display for RuntimeError {
 
 impl std::error::Error for RuntimeError {}
 
+impl From<libsql::Error> for RuntimeError {
+    /// Every embedded-storage failure becomes `StorageUnavailable`.
+    ///
+    /// `RuntimeError` is deliberately redacted (`Display` must not disclose
+    /// local paths, SQL or native error text) and is `Clone + Eq`, so the
+    /// `libsql` cause cannot ride along. Keeping this lossy mapping in one
+    /// place lets storage calls use `?` instead of repeating it per site.
+    /// A site that maps a specific storage failure to a different runtime
+    /// error keeps its explicit `map_err`.
+    fn from(_: libsql::Error) -> Self {
+        Self::StorageUnavailable
+    }
+}
+
 #[derive(Debug)]
 pub enum StreamTableDeliveryError {
     Runtime(RuntimeError),
