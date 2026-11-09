@@ -1,7 +1,3 @@
-#![allow(
-    dead_code,
-    reason = "The bounded binary exposes planning and session seams for a later integration adapter."
-)]
 // Every command returns `Result<(), Diagnostic>` with the full command
 // diagnostic: code, message and the hints a user needs to fix the call. Boxing
 // it would push a Box onto every command without shrinking what a user reads.
@@ -95,8 +91,6 @@ fn cli_request_nonce() -> u128 {
         ^ u128::from(CLI_REQUEST_NONCE.fetch_add(1, AtomicOrdering::Relaxed))
 }
 
-const SENSOR_SOURCE_IDENTITY: &str = "example:sensors:v1";
-
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum ColorMode {
     #[default]
@@ -145,17 +139,15 @@ fn write_cli_line(text: &[u8], color: AnsiColor, color_enabled: bool) -> Result<
             body: None,
         })
 }
-#[allow(
-    dead_code,
-    reason = "The bounded CLI records the complete specified exit-status space."
-)]
+/// The process exit status of a failed command, as the `--help` exit status
+/// table lists it. Status 0 (success) is the absence of a diagnostic and
+/// status 4 (authorisation) belongs to remote transports this build does not
+/// have, so neither is a status a `Diagnostic` can carry.
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Exit {
-    Success = 0,
     Target = 1,
     Usage = 2,
     Connection = 3,
-    Authorisation = 4,
     Presentation = 5,
     Cancelled = 6,
     Protocol = 7,
@@ -747,217 +739,6 @@ fn hex_digit(byte: u8) -> Option<u8> {
         b'a'..=b'f' | b'A'..=b'F' => Some(byte.to_ascii_lowercase() - b'a' + 10),
         _ => None,
     }
-}
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum SessionState {
-    Open,
-    Closing,
-    Closed,
-}
-trait SessionAdapter {
-    fn is_terminal(&mut self, child: u64) -> Result<bool, Diagnostic>;
-    fn cancel(&mut self, child: u64) -> Result<(), Diagnostic>;
-    fn drain_terminal(&mut self) -> Result<(), Diagnostic>;
-    fn close_transport(&mut self) -> Result<(), Diagnostic>;
-}
-struct Session {
-    state: SessionState,
-    owned: BTreeSet<u64>,
-}
-impl Session {
-    fn new() -> Self {
-        Self {
-            state: SessionState::Open,
-            owned: BTreeSet::new(),
-        }
-    }
-    fn own(&mut self, child: u64) -> Result<(), Diagnostic> {
-        if self.state != SessionState::Open {
-            return Err(Diagnostic::target(
-                "E1201",
-                "cannot add an invocation to a closed session",
-                "start a new root session before creating child actions",
-            ));
-        }
-        self.owned.insert(child);
-        Ok(())
-    }
-    fn close<A: SessionAdapter>(&mut self, adapter: &mut A) -> Result<bool, Diagnostic> {
-        if self.state == SessionState::Closed {
-            return Ok(false);
-        }
-        self.state = SessionState::Closing;
-        let mut first_error = None;
-        for child in self.owned.iter().copied() {
-            let should_cancel = match adapter.is_terminal(child) {
-                Ok(terminal) => !terminal,
-                Err(error) => {
-                    first_error.get_or_insert(error);
-                    true
-                }
-            };
-            if should_cancel && let Err(error) = adapter.cancel(child) {
-                first_error.get_or_insert(error);
-            }
-        }
-        if let Some(error) = first_error {
-            return Err(error);
-        }
-        adapter.drain_terminal()?;
-        adapter.close_transport()?;
-        self.owned.clear();
-        self.state = SessionState::Closed;
-        Ok(true)
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Default)]
-struct ReferenceState {
-    initialized: bool,
-    books: BTreeSet<&'static str>,
-    loans: BTreeMap<&'static str, &'static str>,
-    stock: BTreeMap<(&'static str, &'static str), i32>,
-    readings: BTreeMap<(&'static str, u8), &'static str>,
-    checkpoint: u8,
-}
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum Step {
-    Init,
-    Seed,
-    Exercise,
-    Sensors,
-    Noop(&'static str),
-}
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct Plan {
-    steps: Vec<Step>,
-}
-fn seeded(s: &ReferenceState) -> bool {
-    s.books == BTreeSet::from(["book-1", "book-2"])
-        && s.stock == BTreeMap::from([(("north", "pencil"), 12), (("south", "pencil"), 4)])
-}
-fn exercised(s: &ReferenceState) -> bool {
-    s.loans == BTreeMap::from([("book-1", "reader-1")])
-        && s.stock == BTreeMap::from([(("north", "pencil"), 9), (("south", "pencil"), 7)])
-}
-fn seed(s: &mut ReferenceState) -> Result<(), Diagnostic> {
-    if !s.initialized {
-        return Err(Diagnostic::target(
-            "E2002",
-            "reference database is not initialized",
-            "initialize it before invoking the reference seed",
-        ));
-    }
-    if !s.books.is_empty() || !s.stock.is_empty() {
-        return Err(Diagnostic::target(
-            "E2003",
-            "reference seed would create duplicate keys",
-            "use a fresh database or workflow planning after confirming the seed postcondition",
-        ));
-    }
-    s.books.extend(["book-1", "book-2"]);
-    s.stock.insert(("north", "pencil"), 12);
-    s.stock.insert(("south", "pencil"), 4);
-    Ok(())
-}
-fn exercise(s: &mut ReferenceState) -> Result<(), Diagnostic> {
-    if !seeded(s) {
-        return Err(Diagnostic::target(
-            "E2004",
-            "reference exercise requires the exact seeded state",
-            "seed an empty initialized reference database before exercising it",
-        ));
-    }
-    if !s.loans.is_empty() {
-        return Err(Diagnostic::target(
-            "E2005",
-            "reference exercise would create a duplicate loan key",
-            "use workflow planning after confirming the exercise postcondition",
-        ));
-    }
-    s.stock.insert(("north", "pencil"), 9);
-    s.stock.insert(("south", "pencil"), 7);
-    s.loans.insert("book-1", "reader-1");
-    Ok(())
-}
-fn sensors(s: &mut ReferenceState) -> Result<(), Diagnostic> {
-    if !s.initialized {
-        return Err(Diagnostic::target(
-            "E2002",
-            "reference database is not initialized",
-            "initialize it before invoking sensor ingestion",
-        ));
-    }
-    for (sensor, sequence, value) in [
-        ("greenhouse", 0, "18.25"),
-        ("greenhouse", 1, "18.50"),
-        ("greenhouse", 2, "18.75"),
-    ]
-    .into_iter()
-    .skip(usize::from(s.checkpoint))
-    {
-        if s.readings.insert((sensor, sequence), value).is_some() {
-            return Err(Diagnostic::target(
-                "E2009",
-                "sensor ingestion would create a duplicate reading key",
-                "restore the matching checkpoint or use a fresh reference database",
-            ));
-        }
-        s.checkpoint = sequence + 1;
-    }
-    Ok(())
-}
-fn plan(s: &ReferenceState) -> Result<Plan, Diagnostic> {
-    let mut p = s.clone();
-    let mut steps = Vec::new();
-    if p.initialized {
-        steps.push(Step::Noop("already initialized"));
-    } else {
-        p.initialized = true;
-        steps.push(Step::Init);
-    }
-    if seeded(&p) || exercised(&p) {
-        steps.push(Step::Noop("seed postcondition holds"));
-    } else {
-        seed(&mut p)?;
-        steps.push(Step::Seed);
-    }
-    if exercised(&p) {
-        steps.push(Step::Noop("exercise postcondition holds"));
-    } else {
-        exercise(&mut p)?;
-        steps.push(Step::Exercise);
-    }
-    if p.checkpoint == 3 && p.readings.len() == 3 {
-        steps.push(Step::Noop("sensor consumer at exhaustion"));
-    } else {
-        sensors(&mut p)?;
-        steps.push(Step::Sensors);
-    }
-    Ok(Plan { steps })
-}
-fn apply(s: &mut ReferenceState, p: &Plan) -> Result<(), Diagnostic> {
-    let mut candidate = s.clone();
-    for step in &p.steps {
-        match step {
-            Step::Init => {
-                if candidate.initialized {
-                    return Err(Diagnostic::target(
-                        "E2001",
-                        "reference database is already initialized",
-                        "use workflow planning to make initialization idempotent",
-                    ));
-                }
-                candidate.initialized = true;
-            }
-            Step::Seed => seed(&mut candidate)?,
-            Step::Exercise => exercise(&mut candidate)?,
-            Step::Sensors => sensors(&mut candidate)?,
-            Step::Noop(_) => {}
-        }
-    }
-    *s = candidate;
-    Ok(())
 }
 
 fn local_project_path(endpoint: &Endpoint) -> Result<&str, Diagnostic> {
@@ -3948,18 +3729,6 @@ fn stage_outcome_cause(outcome: &StageOutcome<orna_foundation::Diagnostic>) -> S
     }
 }
 
-fn run_repl_submission<W: io::Write>(
-    session: &mut AdmittedReplSession,
-    source: &str,
-    writer: &mut W,
-    color_enabled: bool,
-) -> Result<(), Diagnostic> {
-    let mut submitter = |session: &mut AdmittedReplSession, source: &str| {
-        session.submit(source).map_err(repl::ReplFailure::from)
-    };
-    run_repl_submission_with(session, source, writer, color_enabled, &mut submitter)
-}
-
 fn run_repl_submission_with<W, S>(
     session: &mut AdmittedReplSession,
     source: &str,
@@ -4063,7 +3832,7 @@ fn run_repl(
         repository: runtime.repository.as_ref(),
         host_bindings,
     };
-    repl::run_with_snapshot_loader_and_color_and_submitter(
+    repl::run_with_loader_and_submitter(
         &mut BufReader::new(stdin.lock()),
         &mut stdout.lock(),
         &mut runtime.session,
@@ -5395,6 +5164,20 @@ mod tests {
         );
     }
 
+    /// One single-expression REPL submission against a bare session, the path
+    /// `orna repl EXPR` takes without a project transaction authority.
+    fn run_repl_submission<W: io::Write>(
+        session: &mut AdmittedReplSession,
+        source: &str,
+        writer: &mut W,
+        color_enabled: bool,
+    ) -> Result<(), Diagnostic> {
+        let mut submitter = |session: &mut AdmittedReplSession, source: &str| {
+            session.submit(source).map_err(repl::ReplFailure::from)
+        };
+        run_repl_submission_with(session, source, writer, color_enabled, &mut submitter)
+    }
+
     #[test]
     fn single_expression_repl_reports_visible_success_failure_and_quit() {
         let mut session = AdmittedReplSession::new(Limits::default());
@@ -5891,187 +5674,6 @@ mod tests {
             Endpoint::parse("orna://[::1]:7443/team%2Fwork").expect("IPv6 TLS endpoint"),
             Endpoint::RemoteTls("orna://[::1]:7443/team%2Fwork".into())
         );
-    }
-    #[test]
-    fn workflow_is_deterministic_and_idempotent() {
-        let mut state = ReferenceState::default();
-        let first = plan(&state).expect("plan");
-        assert_eq!(
-            first.steps,
-            vec![Step::Init, Step::Seed, Step::Exercise, Step::Sensors]
-        );
-        apply(&mut state, &first).expect("apply");
-        assert_eq!(
-            (
-                state.checkpoint,
-                state.readings.len(),
-                state.stock.get(&("north", "pencil"))
-            ),
-            (3, 3, Some(&9))
-        );
-        let repeat = plan(&state).expect("replan");
-        assert!(
-            repeat
-                .steps
-                .iter()
-                .all(|step| matches!(step, Step::Noop(_)))
-        );
-    }
-    #[test]
-    fn invalid_workflow_rolls_back_candidate() {
-        let mut state = ReferenceState {
-            initialized: true,
-            ..ReferenceState::default()
-        };
-        let before = state.clone();
-        let invalid = Plan {
-            steps: vec![Step::Exercise],
-        };
-        assert_eq!(
-            apply(&mut state, &invalid).expect_err("invalid").code,
-            "E2004"
-        );
-        assert_eq!(state, before);
-    }
-    #[test]
-    fn direct_seed_preserves_reference_duplicate_failure() {
-        let mut state = ReferenceState {
-            initialized: true,
-            ..ReferenceState::default()
-        };
-        seed(&mut state).expect("first seed");
-        assert_eq!(seed(&mut state).expect_err("duplicate").code, "E2003");
-    }
-    #[derive(Default)]
-    struct Recording {
-        calls: Vec<String>,
-        terminal: BTreeSet<u64>,
-        fail_cancel: BTreeSet<u64>,
-        fail_drain: bool,
-    }
-    impl SessionAdapter for Recording {
-        fn is_terminal(&mut self, child: u64) -> Result<bool, Diagnostic> {
-            self.calls.push(format!("terminal:{child}"));
-            Ok(self.terminal.contains(&child))
-        }
-        fn cancel(&mut self, child: u64) -> Result<(), Diagnostic> {
-            self.calls.push(format!("cancel:{child}"));
-            if self.fail_cancel.contains(&child) {
-                return Err(Diagnostic::target(
-                    "E1203",
-                    "session child cancellation is incomplete",
-                    "retry close after child cancellation becomes available",
-                ));
-            }
-            Ok(())
-        }
-        fn drain_terminal(&mut self) -> Result<(), Diagnostic> {
-            self.calls.push("drain".into());
-            if self.fail_drain {
-                return Err(Diagnostic::target(
-                    "E1202",
-                    "session cleanup is incomplete",
-                    "retry close after child cleanup completes",
-                ));
-            }
-            Ok(())
-        }
-        fn close_transport(&mut self) -> Result<(), Diagnostic> {
-            self.calls.push("close".into());
-            Ok(())
-        }
-    }
-    #[test]
-    fn close_cancels_only_owned_unfinished_children_then_drains_and_is_idempotent() {
-        let mut session = Session::new();
-        session.own(9).expect("open");
-        session.own(2).expect("open");
-        let mut adapter = Recording {
-            terminal: BTreeSet::from([9]),
-            ..Recording::default()
-        };
-        assert_eq!(session.close(&mut adapter), Ok(true));
-        assert_eq!(
-            adapter.calls,
-            ["terminal:2", "cancel:2", "terminal:9", "drain", "close"]
-        );
-        assert_eq!(session.close(&mut adapter), Ok(false));
-        assert_eq!(adapter.calls.len(), 5);
-    }
-    #[test]
-    fn failed_close_keeps_the_session_closed_to_new_children_until_cleanup_retries() {
-        let mut session = Session::new();
-        session.own(2).expect("open");
-        let mut adapter = Recording {
-            fail_drain: true,
-            ..Recording::default()
-        };
-
-        assert_eq!(
-            session.close(&mut adapter).expect_err("drain failure").code,
-            "E1202"
-        );
-        assert_eq!(session.own(3).expect_err("admission sealed").code, "E1201");
-
-        adapter.fail_drain = false;
-        assert_eq!(session.close(&mut adapter), Ok(true));
-        assert_eq!(
-            adapter.calls,
-            [
-                "terminal:2",
-                "cancel:2",
-                "drain",
-                "terminal:2",
-                "cancel:2",
-                "drain",
-                "close"
-            ]
-        );
-    }
-    #[test]
-    fn failed_child_cancellation_still_attempts_every_owned_child() {
-        let mut session = Session::new();
-        session.own(2).expect("open");
-        session.own(3).expect("open");
-        let mut adapter = Recording {
-            fail_cancel: BTreeSet::from([2]),
-            ..Recording::default()
-        };
-
-        assert_eq!(
-            session
-                .close(&mut adapter)
-                .expect_err("first cancellation fails")
-                .code,
-            "E1203"
-        );
-        assert_eq!(
-            adapter.calls,
-            ["terminal:2", "cancel:2", "terminal:3", "cancel:3"]
-        );
-        assert_eq!(session.own(4).expect_err("admission sealed").code, "E1201");
-
-        adapter.fail_cancel.clear();
-        assert_eq!(session.close(&mut adapter), Ok(true));
-        assert_eq!(
-            adapter.calls,
-            [
-                "terminal:2",
-                "cancel:2",
-                "terminal:3",
-                "cancel:3",
-                "terminal:2",
-                "cancel:2",
-                "terminal:3",
-                "cancel:3",
-                "drain",
-                "close",
-            ]
-        );
-    }
-    #[test]
-    fn identity_is_declared_for_adapter_integration() {
-        assert_eq!(SENSOR_SOURCE_IDENTITY, "example:sensors:v1");
     }
     #[test]
     fn init_parse_defaults_to_the_current_directory_target() {

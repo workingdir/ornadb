@@ -782,40 +782,6 @@ fn legacy_field_blob_metadata(value: &orna_value::Raw) -> Option<orna_value::Blo
     orna_value::blob_metadata_from_raw(value).ok()
 }
 
-/// Pages `[from, until)` in ordered pages of `page_rows` keys. Each page
-/// resumes after the last key it returned, through the range's exclusive
-/// resume cursor, so no row is read twice and none is skipped. The cursor is
-/// a comparison under the logical key order, so every key type pages,
-/// composite keys included, and no successor of a key is ever computed.
-fn scan_pages<T>(
-    page_rows: usize,
-    from: Option<TypedKey>,
-    until: Option<TypedKey>,
-    mut read_page: impl FnMut(&KeyRange) -> Result<Vec<T>, Diagnostic>,
-    key_of: impl Fn(&T) -> TypedKey,
-) -> Result<Vec<T>, Diagnostic> {
-    let base = KeyRange::new(from, until, page_rows)
-        .map_err(|error| query_error("Row range is invalid", format!("{error:?}")))?;
-    let mut rows = Vec::new();
-    let mut range = base.clone();
-    loop {
-        let page = read_page(&range)?;
-        let short = page.len() < page_rows;
-        let Some(last) = page.last().map(&key_of) else {
-            break;
-        };
-        rows.extend(page);
-        if short {
-            break;
-        }
-        range = base
-            .clone()
-            .with_resume_after(last)
-            .map_err(|error| query_error("Row range is invalid", format!("{error:?}")))?;
-    }
-    Ok(rows)
-}
-
 /// Projects one row's Blob fields into the listing, applying the field filter
 /// and the annotation predicate at the row the walk just read.
 ///
@@ -851,13 +817,17 @@ fn collect_row_blob_listings(
     Ok(())
 }
 
-/// Visits `[from, until)` in ordered pages, stopping when `visit` asks it to.
+/// Visits `[from, until)` in ordered pages of `page_rows` keys, stopping when
+/// `visit` asks it to.
 ///
-/// The paging rules are the ones [`scan_pages`] states: each page resumes after
-/// the last key it returned, and the walk ends on a short page or the upper
-/// bound. Unlike [`scan_pages`], no page is retained, so a caller that stops on
-/// its own limit never materialises the rest of the range (ORNA-ROW-009
-/// separates the estimated work of the range from the actual work of the walk).
+/// Each page resumes after the last key it returned, through the range's
+/// exclusive resume cursor, so no row is read twice and none is skipped. The
+/// cursor is a comparison under the logical key order, so every key type pages,
+/// composite keys included, and no successor of a key is ever computed. The
+/// walk ends on a short page or the upper bound. No page is retained, so a
+/// caller that stops on its own limit never materialises the rest of the range
+/// (ORNA-ROW-009 separates the estimated work of the range from the actual
+/// work of the walk).
 fn visit_row_pages<T>(
     page_rows: usize,
     from: Option<TypedKey>,
@@ -1147,35 +1117,70 @@ mod tests {
         assert!(parse_bound_key("plain").is_err());
     }
 
-    /// Pages a sorted key set the way the graph does: each read serves the
-    /// keys in `[lower, upper)` strictly above the resume cursor, at most the
-    /// range's limit of them.
+    /// One page of a sorted key set, the way the graph serves it: the keys in
+    /// `[lower, upper)` strictly above the resume cursor, at most the range's
+    /// limit of them.
+    fn fixture_page(keys: &[TypedKey], range: &orna_repository::KeyRange) -> Vec<TypedKey> {
+        keys.iter()
+            .filter(|key| range.lower_inclusive().is_none_or(|lower| *key >= lower))
+            .filter(|key| range.resume_after().is_none_or(|after| *key > after))
+            .filter(|key| range.upper_exclusive().is_none_or(|upper| *key < upper))
+            .take(range.limit())
+            .cloned()
+            .collect()
+    }
+
+    /// Every key `visit_row_pages` visits for a bound pair, in visit order.
     fn scan_fixture(
         keys: &[TypedKey],
         from: Option<TypedKey>,
         until: Option<TypedKey>,
         page_rows: usize,
     ) -> Result<Vec<TypedKey>, super::Diagnostic> {
-        super::scan_pages(
+        let mut scanned = Vec::new();
+        super::visit_row_pages(
             page_rows,
             from,
             until,
-            |range| {
-                Ok(keys
-                    .iter()
-                    .filter(|key| range.lower_inclusive().is_none_or(|lower| *key >= lower))
-                    .filter(|key| range.resume_after().is_none_or(|after| *key > after))
-                    .filter(|key| range.upper_exclusive().is_none_or(|upper| *key < upper))
-                    .take(range.limit())
-                    .cloned()
-                    .collect())
-            },
+            |range| Ok(fixture_page(keys, range)),
             std::clone::Clone::clone,
-        )
+            |key| {
+                scanned.push(key);
+                std::ops::ControlFlow::Continue(())
+            },
+        )?;
+        Ok(scanned)
     }
 
     #[test]
-    fn scan_pages_returns_every_key_at_each_production_page_boundary() {
+    fn visit_row_pages_stops_reading_once_the_visitor_breaks() {
+        let keys: Vec<TypedKey> = (0..512_i64).map(TypedKey::Int).collect();
+        let (mut pages_read, mut visited) = (0_usize, 0_usize);
+        super::visit_row_pages(
+            4,
+            None,
+            None,
+            |range| {
+                pages_read += 1;
+                Ok(fixture_page(&keys, range))
+            },
+            std::clone::Clone::clone,
+            |_| {
+                visited += 1;
+                if visited == 6 {
+                    std::ops::ControlFlow::Break(())
+                } else {
+                    std::ops::ControlFlow::Continue(())
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(visited, 6, "the visitor is not called after it breaks");
+        assert_eq!(pages_read, 2, "the third page is never read");
+    }
+
+    #[test]
+    fn visit_row_pages_returns_every_key_at_each_production_page_boundary() {
         for count in [0_i64, 1, 255, 256, 257, 512] {
             let keys: Vec<TypedKey> = (0..count).map(TypedKey::Int).collect();
             let scanned = scan_fixture(&keys, None, None, super::MAX_QUERY_LIMIT).unwrap();
@@ -1184,7 +1189,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_pages_matches_a_single_read_at_small_page_sizes() {
+    fn visit_row_pages_matches_a_single_read_at_small_page_sizes() {
         let keys: Vec<TypedKey> = (0..8_i64).map(TypedKey::Int).collect();
         for page_rows in [1_usize, 2, 3, 4, 5, 8] {
             let scanned = scan_fixture(&keys, None, None, page_rows).unwrap();
@@ -1193,7 +1198,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_pages_stops_at_an_upper_bound_that_falls_on_a_page_boundary() {
+    fn visit_row_pages_stops_at_an_upper_bound_that_falls_on_a_page_boundary() {
         let keys: Vec<TypedKey> = (0..512_i64).map(TypedKey::Int).collect();
         let scanned = scan_fixture(
             &keys,
@@ -1206,7 +1211,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_pages_reaches_a_match_held_only_by_a_later_page() {
+    fn visit_row_pages_reaches_a_match_held_only_by_a_later_page() {
         let keys: Vec<TypedKey> = (0..512_i64).map(TypedKey::Int).collect();
         let scanned =
             scan_fixture(&keys, Some(TypedKey::Int(250)), Some(TypedKey::Int(260)), 4).unwrap();
@@ -1214,7 +1219,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_pages_yields_nothing_for_missing_keys() {
+    fn visit_row_pages_yields_nothing_for_missing_keys() {
         let keys: Vec<TypedKey> = (0..512_i64).map(TypedKey::Int).collect();
         let past_end = scan_fixture(&keys, Some(TypedKey::Int(1000)), None, 256).unwrap();
         assert!(past_end.is_empty());
@@ -1224,14 +1229,14 @@ mod tests {
     }
 
     #[test]
-    fn scan_pages_pages_a_uint_range_across_production_pages() {
+    fn visit_row_pages_pages_a_uint_range_across_production_pages() {
         let keys: Vec<TypedKey> = (0..600_u64).map(TypedKey::UInt).collect();
         let scanned = scan_fixture(&keys, None, None, super::MAX_QUERY_LIMIT).unwrap();
         assert_eq!(scanned, keys);
     }
 
     #[test]
-    fn scan_pages_pages_composite_keys_component_wise() {
+    fn visit_row_pages_pages_composite_keys_component_wise() {
         let mut keys: Vec<TypedKey> = Vec::new();
         for first in 0..4_i64 {
             for second in ["a", "b", "c"] {
@@ -1259,7 +1264,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_pages_reaches_a_uint_key_held_only_by_a_later_page() {
+    fn visit_row_pages_reaches_a_uint_key_held_only_by_a_later_page() {
         let keys: Vec<TypedKey> = (0..600_u64).map(TypedKey::UInt).collect();
         let scanned = scan_fixture(
             &keys,
@@ -1276,7 +1281,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_pages_continues_past_a_full_page_at_the_greatest_unsigned_key() {
+    fn visit_row_pages_continues_past_a_full_page_at_the_greatest_unsigned_key() {
         let keys: Vec<TypedKey> = (u64::MAX - 255..=u64::MAX).map(TypedKey::UInt).collect();
         assert_eq!(
             scan_fixture(&keys, None, None, super::MAX_QUERY_LIMIT).unwrap(),

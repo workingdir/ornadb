@@ -93,7 +93,7 @@ pub enum SnapshotTarget {
 ///
 /// The loader must not mutate repository HEAD, the index, the worktree, or
 /// refs. It must return an *owned*, fully admitted session only after source
-/// loading and admission succeed. `run_with_snapshot_loader` leaves the
+/// loading and admission succeed. `run_with_loader_and_submitter` leaves the
 /// current session unchanged for malformed selectors and loader errors, then
 /// replaces the whole session on success; the replacement therefore cannot
 /// retain the previous snapshot's REPL overlay, `$_`, or `$?`.
@@ -125,6 +125,13 @@ pub struct WatchCommandState {
     presentation: Option<WatchPresentation>,
 }
 
+/// Accessors that only `tests/watch_command.rs` reads. It includes this module
+/// by path, so the binary's own test build never calls them.
+#[cfg(test)]
+#[allow(
+    dead_code,
+    reason = "read by tests/watch_command.rs, which includes this module by path"
+)]
 impl WatchCommandState {
     pub fn new() -> Self {
         Self::default()
@@ -137,14 +144,22 @@ impl WatchCommandState {
             .map(orna_live::live_presentation::PublishedPresentation::revision)
     }
 
-    pub fn watch(&self) -> Option<[u8; 16]> {
-        self.presentation.as_ref().map(WatchPresentation::watch)
-    }
-
     pub fn awaiting_snapshot(&self) -> bool {
         self.presentation
             .as_ref()
             .is_some_and(WatchPresentation::awaiting_snapshot)
+    }
+
+    pub fn begin_resubscription(&mut self) {
+        if let Some(presentation) = &mut self.presentation {
+            presentation.begin_resubscription();
+        }
+    }
+}
+
+impl WatchCommandState {
+    pub fn watch(&self) -> Option<[u8; 16]> {
+        self.presentation.as_ref().map(WatchPresentation::watch)
     }
 
     /// Remains available until the host has successfully sent the resync.
@@ -155,12 +170,6 @@ impl WatchCommandState {
     pub fn acknowledge_resync_request(&mut self, request: ResyncRequest) {
         if let Some(presentation) = &mut self.presentation {
             presentation.acknowledge_resync_request(request);
-        }
-    }
-
-    pub fn begin_resubscription(&mut self) {
-        if let Some(presentation) = &mut self.presentation {
-            presentation.begin_resubscription();
         }
     }
 
@@ -410,7 +419,9 @@ fn write_repl_value<W: Write>(
 
 /// Run one retained, line-oriented admitted REPL session. A malformed or
 /// rejected submission reports its redacted evaluator code and leaves the
-/// session open.
+/// session open. The binary always runs with a snapshot loader and a
+/// submitter; this bare form exists for the tests of the line loop.
+#[cfg(test)]
 pub fn run<R: BufRead, W: Write>(
     reader: &mut R,
     writer: &mut W,
@@ -432,6 +443,7 @@ pub fn run<R: BufRead, W: Write>(
 /// A successful `:at CWD|HEAD|ref` installs the owned candidate returned by
 /// `loader`. Failed preparation and malformed selectors report
 /// `ORNA-REPL-AT` and retain the prior session unchanged.
+#[cfg(test)]
 pub fn run_with_snapshot_loader<R: BufRead, W: Write, L: SnapshotSessionLoader + ?Sized>(
     reader: &mut R,
     writer: &mut W,
@@ -449,33 +461,10 @@ pub fn run_with_snapshot_loader<R: BufRead, W: Write, L: SnapshotSessionLoader +
     )
 }
 
-/// Run an admitted REPL session with color enabled according to the CLI mode.
-pub fn run_with_snapshot_loader_and_color<
-    R: BufRead,
-    W: Write,
-    L: SnapshotSessionLoader + ?Sized,
->(
-    reader: &mut R,
-    writer: &mut W,
-    session: &mut AdmittedReplSession,
-    loader: &L,
-    color_enabled: bool,
-) -> io::Result<()> {
-    run_loop(
-        reader,
-        writer,
-        session,
-        Some(loader),
-        None::<WatchBinding<'_, dyn WatchFrameSource<Error = ()>>>,
-        color_enabled,
-        None,
-    )
-}
-
 /// Run an admitted REPL with a host-provided submission adapter. The adapter is
 /// discarded after successful snapshot replacement because its transaction
 /// authority is bound to the initial committed source snapshot.
-pub fn run_with_snapshot_loader_and_color_and_submitter<
+pub fn run_with_loader_and_submitter<
     R: BufRead,
     W: Write,
     L: SnapshotSessionLoader + ?Sized,
@@ -502,6 +491,13 @@ pub fn run_with_snapshot_loader_and_color_and_submitter<
 
 /// Run with a host-owned live watch frame source. The REPL receives complete
 /// encoded frames, while the host owns the subscription and resync transport.
+/// The binary has no watch host yet; the watch command is driven by
+/// `tests/watch_command.rs` through this entry point.
+#[cfg(test)]
+#[allow(
+    dead_code,
+    reason = "driven by tests/watch_command.rs, which includes this module by path"
+)]
 pub fn run_with_watch<R: BufRead, W: Write, S: WatchFrameSource + ?Sized>(
     reader: &mut R,
     writer: &mut W,
@@ -514,31 +510,6 @@ pub fn run_with_watch<R: BufRead, W: Write, S: WatchFrameSource + ?Sized>(
         writer,
         session,
         None::<&dyn SnapshotSessionLoader<Error = ()>>,
-        Some(WatchBinding { source, state }),
-        false,
-        None,
-    )
-}
-
-/// Run with both an atomic snapshot loader and a host-owned live watch.
-pub fn run_with_loader_and_watch<
-    R: BufRead,
-    W: Write,
-    L: SnapshotSessionLoader + ?Sized,
-    S: WatchFrameSource + ?Sized,
->(
-    reader: &mut R,
-    writer: &mut W,
-    session: &mut AdmittedReplSession,
-    loader: &L,
-    source: &mut S,
-    state: &mut WatchCommandState,
-) -> io::Result<()> {
-    run_loop(
-        reader,
-        writer,
-        session,
-        Some(loader),
         Some(WatchBinding { source, state }),
         false,
         None,

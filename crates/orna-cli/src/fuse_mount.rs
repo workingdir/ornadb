@@ -1152,9 +1152,6 @@ struct HistoricalTableSchemas {
     /// The stored constant default of each field that schema evolution introduced, as frozen by
     /// the commit that introduced it (ORNA-FIELD-003, ORNA-EVOL-009).
     introductions: BTreeMap<[u8; 16], Raw>,
-    /// The number of commits that carry no committed identities for the table and so declare
-    /// nothing (F7). They are counted rather than skipped silently.
-    unidentified_commits: usize,
 }
 
 enum HistoricalState {
@@ -1352,7 +1349,6 @@ fn advance_historical_scan(
     Ok(HistoricalStep::Settled(HistoricalTableSchemas {
         generations,
         introductions,
-        unidentified_commits: unidentified,
     }))
 }
 

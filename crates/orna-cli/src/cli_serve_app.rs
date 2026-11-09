@@ -1003,12 +1003,6 @@ fn page_offers_action(entry: &ServingEntry, action_id: &str) -> bool {
     response.status == 200 && actions.iter().any(|offered| offered == action_id)
 }
 
-fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack
-        .windows(needle.len())
-        .any(|window| window == needle)
-}
-
 /// Evaluates one console input under the session lock. A session another
 /// request holds is refused visibly instead of queueing the input behind an
 /// evaluation that is still running. The evaluation carries no wall-clock
@@ -1280,7 +1274,11 @@ mod serving_entry_tests {
         let entry = entry(Err("serve.session_unavailable".into()));
         let response = submit_console(&entry.console, "1");
         assert_eq!(response.status, 503);
-        assert!(contains_bytes(&response.body, b"serve.session_unavailable"));
+        assert!(
+            String::from_utf8_lossy(&response.body).contains("serve.session_unavailable"),
+            "{:?}",
+            response.body
+        );
     }
 
     #[test]
