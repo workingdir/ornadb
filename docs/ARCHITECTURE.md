@@ -121,21 +121,30 @@ accident); a crate outside the shipped closure must not depend on a `harness` or
 
 ## 4. Size budgets
 
-| item | cap | recorded worst on origin/main cb197b7b0 |
+| item | cap | recorded worst on main d63b6df40 |
 |---|---:|---:|
-| one source file | 1,200 lines | 35,506 (`orna-runtime/src/lib.rs`) |
-| one function | 120 lines | 4,399 (`orna-sys/src/introspection.rs::explain_with_inputs`) |
+| one source file | 1,200 lines | 35,336 (`orna-runtime/src/lib.rs`) |
+| one function | 120 lines | 3,983 (`orna-sys/src/introspection.rs::explain_with_inputs`) |
 | one crate's `src` | 25,000 lines | 74,780 (`orna-repository`) |
-| `#[allow(clippy::...)]` | 0 in new code | 209 attributes |
+| `#[allow(clippy::...)]` | 0 in new code | 204 attributes |
 
 The budgets are ratchets, not bans. [scripts/architecture-budget.toml](../scripts/architecture-budget.toml)
 records every crate above 25,000 lines, every file above 1,200 lines, every function
 above 120 lines, and every crate's current suppression count. `--mode=budget` fails
 when a measured number grows past its record or a new file, function or crate
-exceeds its cap. A stage that shrinks one of these lowers or deletes the entry in
-the same PR, so the file only ever moves down. The checker prints a warning when an
-entry is stale (the measured value is lower than the record); the warning does not
-fail the job, so an unrelated PR is never blocked by a lower number.
+exceeds its cap. Shrinkage never fails: the checker prints a `[note]` when an entry's
+measured value is lower than the record, so a PR that is behind a merged refactor is
+never blocked by another PR's good news.
+
+Lower the drift after a merge with:
+
+```sh
+python3 scripts/check_architecture.py --mode=budget --update
+```
+
+The update lowers or removes entries that shrank and never raises one. A deliberate
+raise is a reviewed edit justified in the commit that makes it; until then the
+update reports it as a remaining violation. The CI job never passes `--update`.
 
 Scope and measurement: `crates/<crate>/src/**/*.rs`; integration tests under
 `tests/` are excluded. Lines are logical lines. A function's length is counted from
@@ -156,6 +165,7 @@ line and carry a stable key.
 python3 scripts/check_architecture.py --mode=report   # current state, always exit 0
 python3 scripts/check_architecture.py --mode=deny     # exit 1 on a violation not recorded as known
 python3 scripts/check_architecture.py --mode=budget   # exit 1 on budget growth
+python3 scripts/check_architecture.py --mode=budget --update   # lower drift; never raises
 python3 scripts/check_architecture.py --mode=deny --strict   # ignore the baseline
 ```
 
@@ -163,8 +173,8 @@ python3 scripts/check_architecture.py --mode=deny --strict   # ignore the baseli
 warning, then the budget summary. `--mode=deny` is the CI gate: a violation recorded
 in `docs/design/layers.toml` under `[[known]]` is the ratchet baseline and does not
 fail the job, while any other violation does. `--strict` ignores the baseline and is
-how the stage proves the check still has teeth: on the pre-stage tree it reports
-exactly the ten violations below and exits 1.
+how the stage proves the check still has teeth: it reports every violation still
+recorded below and exits 1.
 
 Treat a new violation as a bug, not as an entry to add. A baseline entry is deleted
 by the stage that fixes it. A stale entry is printed as a warning.
@@ -177,13 +187,15 @@ by the stage that fixes it. A stale entry is printed as a warning.
 | V2 | `orna-cli -> orna-conformance`: the harness is in the shipped binary | stage 10 (`orna-admission`) |
 | V3 | `orna-conformance -> orna-table`: the oracle reaches the binary through the harness | stage 13 (merge into conformance) |
 | V4 | `orna-traceability -> orna-conformance`: a standalone tool depends on the harness | corpus facade |
-| V5 | `orna-evaluator -> orna-runtime` is optional | stage 05a (`HostPort`) |
 | V6 | `orna-evaluator -> orna-repository` is optional | stage 05a (`HostPort`) |
 | V7 | `orna-evaluator -> orna-sys` is optional | stage 05a (`HostPort`) |
 | V8 | `orna-core`: production in-degree 0, role not archive | stage 02 (`orna-compat-v1`) |
 | V9 | `orna-lsp`: production in-degree 0, role not tool | the LSP is its own binary |
 | V10 | `orna-traceability`: production in-degree 0, role not tool | moves under `tools/` with no production dependent |
 | W1 | `orna-foundation`: no cohesive subject, 16 production dependents | stage 03 (`orna-base`) |
+
+The IDs are stable labels; V5 was fixed by the evaluator refactor and its entry
+deleted, so the list has a gap.
 
 ### External dependency policy
 
