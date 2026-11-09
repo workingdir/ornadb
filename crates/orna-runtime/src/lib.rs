@@ -727,8 +727,32 @@ CREATE UNIQUE INDEX IF NOT EXISTS sys_stream_observation_present_natural_key
 
 pub const MAX_TERMINAL_OUTCOME_BYTES: usize = 16 * 1024 * 1024;
 
-const SESSION_DELETION_CLOSING: i64 = 1;
-const SESSION_DELETION_CLOSED: i64 = 2;
+/// Where one session's deletion stands. The marker is written `Closing` by
+/// `begin_session_deletion`, which refuses new reservations for the session,
+/// and becomes `Closed` once no request of the session is Reserved or
+/// Running. It is retained in `Closed` so the session stays closed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SessionDeletionState {
+    Closing,
+    Closed,
+}
+
+impl SessionDeletionState {
+    const fn code(self) -> i64 {
+        match self {
+            Self::Closing => 1,
+            Self::Closed => 2,
+        }
+    }
+
+    fn from_code(code: i64) -> Result<Self, RuntimeError> {
+        match code {
+            1 => Ok(Self::Closing),
+            2 => Ok(Self::Closed),
+            _ => Err(RuntimeError::RecoveryInvalid),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RuntimeIdentity {
@@ -2731,7 +2755,7 @@ impl From<RuntimeError> for RequestActivationTransactionError {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SessionDeletionRecord {
     owner: WriterLease,
-    state: i64,
+    state: SessionDeletionState,
 }
 
 /// The immutable runtime context captured at activation admission.
@@ -5889,14 +5913,6 @@ impl RuntimeState {
         self.require_owner(&transaction, owner).await?;
         match session_deletion_record(&transaction, session_id).await? {
             Some(record) if record.owner != owner => return Err(RuntimeError::OwnerLost),
-            Some(record)
-                if !matches!(
-                    record.state,
-                    SESSION_DELETION_CLOSING | SESSION_DELETION_CLOSED
-                ) =>
-            {
-                return Err(RuntimeError::RecoveryInvalid);
-            }
             Some(_) => {}
             None => {
                 transaction
@@ -5908,7 +5924,7 @@ impl RuntimeState {
                             owner.owner_id.to_vec(),
                             i64::try_from(owner.epoch)
                                 .map_err(|_| RuntimeError::RecoveryInvalid)?,
-                            SESSION_DELETION_CLOSING,
+                            SessionDeletionState::Closing.code(),
                         ],
                     )
                     .await
@@ -5943,12 +5959,6 @@ impl RuntimeState {
         if record.owner != owner {
             return Err(RuntimeError::OwnerLost);
         }
-        if !matches!(
-            record.state,
-            SESSION_DELETION_CLOSING | SESSION_DELETION_CLOSED
-        ) {
-            return Err(RuntimeError::RecoveryInvalid);
-        }
         let mut active = transaction
             .query(
                 "SELECT 1 FROM request_ledger
@@ -5970,7 +5980,7 @@ impl RuntimeState {
         {
             return Err(RuntimeError::SessionWorkActive);
         }
-        if record.state == SESSION_DELETION_CLOSED {
+        if record.state == SessionDeletionState::Closed {
             transaction
                 .commit()
                 .await
@@ -5983,11 +5993,11 @@ impl RuntimeState {
                  WHERE session_id = ?2 AND owner_id = ?3 AND owner_epoch = ?4
                    AND state = ?5",
                 params![
-                    SESSION_DELETION_CLOSED,
+                    SessionDeletionState::Closed.code(),
                     session_id.to_vec(),
                     owner.owner_id.to_vec(),
                     i64::try_from(owner.epoch).map_err(|_| RuntimeError::RecoveryInvalid)?,
-                    SESSION_DELETION_CLOSING,
+                    SessionDeletionState::Closing.code(),
                 ],
             )
             .await
@@ -14743,10 +14753,9 @@ impl RuntimeState {
             if epoch <= 0 {
                 return Err(RuntimeError::RecoveryInvalid);
             }
-            let state: i64 = row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?;
-            if !matches!(state, SESSION_DELETION_CLOSING | SESSION_DELETION_CLOSED) {
-                return Err(RuntimeError::RecoveryInvalid);
-            }
+            SessionDeletionState::from_code(
+                row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )?;
         }
         Ok(())
     }
@@ -19372,10 +19381,8 @@ async fn session_deletion_record(
             .map_err(|_| RuntimeError::RecoveryInvalid)?,
     )
     .map_err(|_| RuntimeError::RecoveryInvalid)?;
-    let state = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
-    if !matches!(state, SESSION_DELETION_CLOSING | SESSION_DELETION_CLOSED) {
-        return Err(RuntimeError::RecoveryInvalid);
-    }
+    let state =
+        SessionDeletionState::from_code(row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
     Ok(Some(SessionDeletionRecord {
         owner: WriterLease {
             owner_id,
