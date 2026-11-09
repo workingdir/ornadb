@@ -35,8 +35,7 @@ pub(crate) async fn apply_stream_intent(
     let transaction = state
         .connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     state.require_owner(&transaction, lease).await?;
     if let CommitIntent::ReplayComplete {
         failure,
@@ -93,10 +92,7 @@ pub(crate) async fn apply_stream_intent(
                 .await?;
             }
             sync_stream_observation_tx(&transaction, &result).await?;
-            transaction
-                .commit()
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            transaction.commit().await?;
             Ok(result)
         }
         Err(error) => Err(error),
@@ -203,8 +199,7 @@ async fn pause_stream_tx(
                 "INSERT OR IGNORE INTO stream_pause_pending (key_id) VALUES (?1)",
                 params![stream_key_id(&key)],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .await?
             != 0;
         return Ok(CommitResult::PausePending {
             state: stream_state(key, StreamStatus::Running),
@@ -269,15 +264,13 @@ async fn reset_stream_checkpoint_tx(
              WHERE key_id = ?1",
             params![key_id.clone(), to.token.as_str().to_owned()],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     connection
         .execute(
             "DELETE FROM stream_provider_failure WHERE key_id = ?1",
             params![key_id],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     Ok(CommitResult::CheckpointReset {
         checkpoint: load_stream_checkpoint(connection, &key).await?,
     })
@@ -304,8 +297,7 @@ async fn issue_stream_lease_tx(
                 i64::try_from(fence).map_err(|_| RuntimeError::RecoveryInvalid)?
             ],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     connection
         .execute(
             "INSERT INTO stream_lease
@@ -319,8 +311,7 @@ async fn issue_stream_lease_tx(
                 encode_purpose(purpose),
             ],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     Ok(fence)
 }
 
@@ -336,15 +327,13 @@ async fn drop_stream_lease_tx(
             "DELETE FROM stream_lease WHERE key_id = ?1",
             params![key_id.clone()],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     connection
         .execute(
             "DELETE FROM stream_retry_claim WHERE key_id = ?1",
             params![key_id],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     Ok(())
 }
 
@@ -371,8 +360,7 @@ async fn transition_stream_failure_tx(
              WHERE identity_id = ?1",
             params![stream_identity_id(failure), encode_status(status)],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     Ok(())
 }
 
@@ -420,8 +408,7 @@ async fn acquire_delivery_tx(
                      WHERE key_id = ?1 AND identity_id = ?2",
                     params![stream_key_id(&key), stream_identity_id(&identity)],
                 )
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
+                .await?;
             if claimed == 1 {
                 connection
                     .execute(
@@ -435,8 +422,7 @@ async fn acquire_delivery_tx(
                             delivery.successor.token.as_str().to_owned(),
                         ],
                     )
-                    .await
-                    .map_err(|_| RuntimeError::StorageUnavailable)?;
+                    .await?;
                 return Ok(CommitResult::Acquired {
                     lease: DeliveryLease {
                         delivery,
@@ -477,8 +463,7 @@ async fn acquire_delivery_tx(
             "DELETE FROM stream_provider_failure WHERE key_id = ?1",
             params![stream_key_id(&key)],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     Ok(CommitResult::Acquired {
         lease: DeliveryLease {
             delivery,
@@ -545,15 +530,13 @@ async fn fail_delivery_tx(
                 encode_status(FailureStatus::Retrying),
             ],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     connection
         .execute(
             "DELETE FROM stream_failure_assertion_detail WHERE identity_id = ?1",
             params![identity_id],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     publish_pending_stream_pause(connection, &key).await?;
     Ok(CommitResult::Failed {
         failure: reload_stream_failure(connection, &identity).await?,
@@ -611,16 +594,14 @@ async fn retry_failed_delivery_tx(
              VALUES (?1, ?2)",
             params![stream_key_id(&key), identity_id.clone()],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     connection
         .execute(
             "UPDATE stream_failure SET version = version + 1, attempts = attempts + 1, status = ?2
              WHERE identity_id = ?1",
             params![identity_id, encode_status(FailureStatus::Retrying)],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     Ok(CommitResult::RetryScheduled {
         failure: reload_stream_failure(connection, &failure).await?,
     })
@@ -644,8 +625,7 @@ async fn advance_checkpoint_past_delivery_tx(
                 delivery.successor.token.as_str().to_owned()
             ],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     drop_stream_lease_tx(connection, key).await?;
     transition_stream_failure_tx(connection, &FailureIdentity(delivery), status).await?;
     publish_pending_stream_pause(connection, key).await?;
@@ -758,8 +738,7 @@ async fn delete_replay_claim_tx(
                 i64::try_from(version).map_err(|_| RuntimeError::RecoveryInvalid)?,
             ],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     if deleted != 1 {
         return Err(RuntimeError::RecoveryInvalid);
     }
@@ -790,8 +769,7 @@ async fn grant_replay_tx(
                 encode_status(FailureStatus::Replaying)
             ],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     Ok(CommitResult::ReplayGranted {
         grant: orna_stream::ReplayGrant {
             failure,
@@ -841,15 +819,13 @@ async fn fail_replay_tx(
                 encode_class(diagnostic.class),
             ],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     connection
         .execute(
             "DELETE FROM stream_failure_assertion_detail WHERE identity_id = ?1",
             params![stream_identity_id(&failure)],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     if claim.is_some() {
         delete_replay_claim_tx(connection, &failure, expected_version).await?;
     }
@@ -940,8 +916,7 @@ async fn cancel_delivery_tx(
                 encode_status(FailureStatus::Retrying),
             ],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     publish_pending_stream_pause(connection, &key).await?;
     Ok(CommitResult::Cancelled {
         checkpoint: load_stream_checkpoint(connection, &key).await?,

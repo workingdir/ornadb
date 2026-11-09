@@ -5,7 +5,7 @@ use crate::error::RuntimeError;
 use crate::table_store::{Mutation, TableMutation, validate_table_name};
 use crate::{RuntimeState, process_owner_id};
 use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
-use libsql::{TransactionBehavior, params};
+use libsql::{Connection, TransactionBehavior, params};
 use orna_foundation::{CanonicalValue, OvbRaw};
 use orna_repository::{
     CompactPublicationPending, CompactRuntimeReceipt, Repository, RepositoryError,
@@ -187,6 +187,47 @@ pub struct PublicationFreeze {
     pub mutations: Vec<PublicationFreezeMutation>,
 }
 
+/// The compact-binding columns of one `publication_freeze` row.
+///
+/// The schema CHECK admits only all-NULL (an ordinary freeze) or all-set (a
+/// freeze bound to one compact publication). The impossible mixed shape stays
+/// a third case because the two readers report it differently: binding refuses
+/// it as a conflicting intent, while completing an ordinary publication keeps
+/// reporting that a compact receipt is required.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum FreezeBinding {
+    /// No compact publication claims the freeze.
+    Unbound,
+    /// Every compact column is present.
+    CompactBound {
+        watermark: Vec<u8>,
+        commit: Vec<u8>,
+        verifier: Vec<u8>,
+    },
+    /// Some, but not all, compact columns are present.
+    Inconsistent,
+}
+
+/// Decodes the three nullable compact columns selected from
+/// `publication_freeze`. Lengths are checked by the caller that consumes the
+/// digests, so the bind path and the ordinary completion path keep their
+/// existing validation.
+fn decode_freeze_binding(
+    watermark: Option<Vec<u8>>,
+    commit: Option<Vec<u8>>,
+    verifier: Option<Vec<u8>>,
+) -> FreezeBinding {
+    match (watermark, commit, verifier) {
+        (None, None, None) => FreezeBinding::Unbound,
+        (Some(watermark), Some(commit), Some(verifier)) => FreezeBinding::CompactBound {
+            watermark,
+            commit,
+            verifier,
+        },
+        _ => FreezeBinding::Inconsistent,
+    }
+}
+
 /// An operation for projecting frozen runtime mutations against a pinned row root.
 ///
 /// Insert remains insert-only; replacement may create or replace a row, while
@@ -351,6 +392,60 @@ fn publication_candidate_digest<'a>(
     hasher.finalize().into()
 }
 
+/// Decodes one `checkpoint` row selected as
+/// `(generation, mutation_sequence, digest)`.
+fn decode_checkpoint_row(row: &libsql::Row) -> Result<Checkpoint, RuntimeError> {
+    let generation = u64::try_from(
+        row.get::<i64>(0)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?,
+    )
+    .map_err(|_| RuntimeError::RecoveryInvalid)?;
+    let mutation_sequence = u64::try_from(
+        row.get::<i64>(1)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?,
+    )
+    .map_err(|_| RuntimeError::RecoveryInvalid)?;
+    Ok(Checkpoint {
+        generation,
+        digest: fixed(row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+        mutation_sequence,
+    })
+}
+
+/// Counts the frozen pending prefix through `upper` and adds it to the
+/// publication statistics row inside the caller's transaction.
+///
+/// Ordinary and compact completion publish the same prefix; one helper keeps
+/// the measured range and the accumulated counters equal on both paths.
+async fn record_published_prefix_tx(
+    transaction: &Connection,
+    upper: i64,
+) -> Result<(), RuntimeError> {
+    let mut batch_rows = transaction
+        .query(
+            "SELECT COUNT(*), COALESCE(SUM(length(payload)), 0) \
+             FROM pending_mutation WHERE sequence <= ?1",
+            params![upper],
+        )
+        .await?;
+    let batch = batch_rows
+        .next()
+        .await?
+        .ok_or(RuntimeError::RecoveryInvalid)?;
+    let published_rows: i64 = batch.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    let published_bytes: i64 = batch.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    transaction
+        .execute(
+            "UPDATE publication_metadata SET \
+             published_mutations = published_mutations + ?1, \
+             published_payload_bytes = published_payload_bytes + ?2, \
+             last_publication_ms = ?3 WHERE singleton = 1",
+            params![published_rows, published_bytes, now_ms()?],
+        )
+        .await?;
+    Ok(())
+}
+
 impl RuntimeState {
     pub async fn pending(&self) -> Result<Vec<Mutation>, RuntimeError> {
         let mut rows = self
@@ -359,14 +454,9 @@ impl RuntimeState {
                 "SELECT mutation_id, payload, digest FROM pending_mutation ORDER BY sequence",
                 (),
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let mut out = Vec::new();
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        {
+        while let Some(row) = rows.next().await? {
             out.push(Mutation {
                 id: fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
                 payload: row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
@@ -427,11 +517,8 @@ impl RuntimeState {
             let database = libsql::Builder::new_local(&state_db)
                 .flags(libsql::OpenFlags::SQLITE_OPEN_READ_ONLY)
                 .build()
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
-            let connection = database
-                .connect()
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
+                .await?;
+            let connection = database.connect()?;
             Self::count_pending(&connection).await
         }
         .await;
@@ -477,13 +564,8 @@ impl RuntimeState {
     async fn count_pending(connection: &libsql::Connection) -> Result<usize, RuntimeError> {
         let mut rows = connection
             .query("SELECT COUNT(*) FROM pending_mutation", ())
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let row = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-            .ok_or(RuntimeError::RecoveryInvalid)?;
+            .await?;
+        let row = rows.next().await?.ok_or(RuntimeError::RecoveryInvalid)?;
         let count: i64 = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
         usize::try_from(count).map_err(|_| RuntimeError::RecoveryInvalid)
     }
@@ -506,8 +588,7 @@ impl RuntimeState {
                 [i64::try_from(compressed_target_bytes)
                     .map_err(|_| RuntimeError::InvalidPublicationPolicy)?],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         Ok(())
     }
 
@@ -522,12 +603,8 @@ impl RuntimeState {
                 (),
             )
             .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let row = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-            .ok_or(RuntimeError::RecoveryInvalid)?;
+            ?;
+        let row = rows.next().await?.ok_or(RuntimeError::RecoveryInvalid)?;
         let pending_rows: i64 = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
         let pending_bytes: i64 = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
         let compressed_target_bytes: i64 = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
@@ -591,13 +668,9 @@ impl RuntimeState {
                 params![upper],
             )
             .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            ?;
         let mut out = Vec::new();
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        {
+        while let Some(row) = rows.next().await? {
             out.push(Mutation {
                 id: fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
                 payload: row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
@@ -724,26 +797,15 @@ impl RuntimeState {
         let mut rows = self
             .connection
             .query(
-                "SELECT generation, digest, mutation_sequence FROM checkpoint ORDER BY generation DESC LIMIT 1",
+                "SELECT generation, mutation_sequence, digest FROM checkpoint ORDER BY generation DESC LIMIT 1",
                 (),
             )
             .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let Some(row) = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        else {
+            ?;
+        let Some(row) = rows.next().await? else {
             return Ok(None);
         };
-        let generation: i64 = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
-        let mutation_sequence: i64 = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
-        Ok(Some(Checkpoint {
-            generation: u64::try_from(generation).map_err(|_| RuntimeError::RecoveryInvalid)?,
-            digest: fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
-            mutation_sequence: u64::try_from(mutation_sequence)
-                .map_err(|_| RuntimeError::RecoveryInvalid)?,
-        }))
+        Ok(Some(decode_checkpoint_row(&row)?))
     }
 
     pub async fn freeze(
@@ -786,7 +848,7 @@ impl RuntimeState {
                 ],
             )
             .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            ?;
         let stored = self
             .frozen_intent(intent_id)
             .await?
@@ -862,8 +924,7 @@ impl RuntimeState {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let mut rows = transaction
             .query(
                 "SELECT checkpoint_generation, checkpoint_mutation_sequence, checkpoint_digest, \
@@ -871,27 +932,9 @@ impl RuntimeState {
                  FROM publication_freeze WHERE intent_id = ?1",
                 params![freeze.intent_id.to_vec()],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let row = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-            .ok_or(RuntimeError::RecoveryInvalid)?;
-        let stored = Checkpoint {
-            generation: u64::try_from(
-                row.get::<i64>(0)
-                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
-            )
-            .map_err(|_| RuntimeError::RecoveryInvalid)?,
-            mutation_sequence: u64::try_from(
-                row.get::<i64>(1)
-                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
-            )
-            .map_err(|_| RuntimeError::RecoveryInvalid)?,
-            digest: fixed(row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
-        };
-        if stored != freeze.checkpoint {
+            .await?;
+        let row = rows.next().await?.ok_or(RuntimeError::RecoveryInvalid)?;
+        if decode_checkpoint_row(&row)? != freeze.checkpoint {
             return Err(RuntimeError::ConflictingPublicationIntent);
         }
         let mut completed_rows = transaction
@@ -900,13 +943,8 @@ impl RuntimeState {
                  WHERE intent_id = ?1",
                 params![freeze.intent_id.to_vec()],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        if let Some(completed) = completed_rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        {
+            .await?;
+        if let Some(completed) = completed_rows.next().await? {
             let completed_commit: Vec<u8> = completed
                 .get(0)
                 .map_err(|_| RuntimeError::RecoveryInvalid)?;
@@ -928,17 +966,14 @@ impl RuntimeState {
             {
                 return Err(RuntimeError::ConflictingPublicationCommit);
             }
-            transaction
-                .commit()
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            transaction.commit().await?;
             return Ok(());
         }
         let watermark: Option<Vec<u8>> = row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?;
         let commit: Option<Vec<u8>> = row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?;
         let verifier: Option<Vec<u8>> = row.get(5).map_err(|_| RuntimeError::RecoveryInvalid)?;
-        match (watermark, commit, verifier) {
-            (None, None, None) => {
+        match decode_freeze_binding(watermark, commit, verifier) {
+            FreezeBinding::Unbound => {
                 transaction
                     .execute(
                         "UPDATE publication_freeze SET compact_watermark = ?1, \
@@ -951,10 +986,13 @@ impl RuntimeState {
                             freeze.intent_id.to_vec(),
                         ],
                     )
-                    .await
-                    .map_err(|_| RuntimeError::StorageUnavailable)?;
+                    .await?;
             }
-            (Some(watermark), Some(commit), Some(verifier)) => {
+            FreezeBinding::CompactBound {
+                watermark,
+                commit,
+                verifier,
+            } => {
                 if fixed::<32>(watermark)? != pending.cleanup_watermark()
                     || commit != pending.commit().as_str().as_bytes()
                     || fixed::<32>(verifier)? != pending.journal_verifier()
@@ -962,12 +1000,9 @@ impl RuntimeState {
                     return Err(RuntimeError::ConflictingPublicationIntent);
                 }
             }
-            _ => return Err(RuntimeError::ConflictingPublicationIntent),
+            FreezeBinding::Inconsistent => return Err(RuntimeError::ConflictingPublicationIntent),
         }
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)
+        transaction.commit().await.map_err(RuntimeError::from)
     }
 
     /// Atomically signs and persists a compact publication receipt with the
@@ -1016,20 +1051,14 @@ impl RuntimeState {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let mut rows = tx
             .query(
                 "SELECT commit_id, compact_receipt FROM publication_commit WHERE intent_id = ?1",
                 params![freeze.intent_id.to_vec()],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        if let Some(row) = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        {
+            .await?;
+        if let Some(row) = rows.next().await? {
             let commit: Vec<u8> = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
             if commit != pending.commit().as_str().as_bytes() {
                 return Err(RuntimeError::ConflictingPublicationCommit);
@@ -1045,35 +1074,10 @@ impl RuntimeState {
             if existing != receipt {
                 return Err(RuntimeError::ConflictingPublicationIntent);
             }
-            tx.commit()
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            tx.commit().await?;
             return Ok(existing);
         }
-        let mut batch_rows = tx
-            .query(
-                "SELECT COUNT(*), COALESCE(SUM(length(payload)), 0) \
-                 FROM pending_mutation WHERE sequence <= ?1",
-                params![upper],
-            )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let batch = batch_rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-            .ok_or(RuntimeError::RecoveryInvalid)?;
-        let published_rows: i64 = batch.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
-        let published_bytes: i64 = batch.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
-        tx.execute(
-            "UPDATE publication_metadata SET \
-             published_mutations = published_mutations + ?1, \
-             published_payload_bytes = published_payload_bytes + ?2, \
-             last_publication_ms = ?3 WHERE singleton = 1",
-            params![published_rows, published_bytes, now_ms()?],
-        )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        record_published_prefix_tx(&tx, upper).await?;
         tx.execute(
             "INSERT INTO publication_commit (intent_id, commit_id, compact_receipt)
              VALUES (?1, ?2, ?3)",
@@ -1083,17 +1087,13 @@ impl RuntimeState {
                 encoded,
             ],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
         tx.execute(
             "DELETE FROM pending_mutation WHERE sequence <= ?1",
             params![upper],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
+        tx.commit().await?;
         Ok(receipt)
     }
 
@@ -1124,40 +1124,32 @@ impl RuntimeState {
                  FROM publication_freeze WHERE intent_id = ?1",
                 params![freeze.intent_id.to_vec()],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let binding = binding
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-            .ok_or(RuntimeError::RecoveryInvalid)?;
+            .await?;
+        let binding = binding.next().await?.ok_or(RuntimeError::RecoveryInvalid)?;
         let watermark: Option<Vec<u8>> =
             binding.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
         let commit: Option<Vec<u8>> = binding.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
         let verifier: Option<Vec<u8>> =
             binding.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
-        if watermark.is_some() || commit.is_some() || verifier.is_some() {
-            return Err(RuntimeError::CompactPublicationRequired);
+        match decode_freeze_binding(watermark, commit, verifier) {
+            FreezeBinding::Unbound => {}
+            FreezeBinding::CompactBound { .. } | FreezeBinding::Inconsistent => {
+                return Err(RuntimeError::CompactPublicationRequired);
+            }
         }
         let upper = i64::try_from(freeze.checkpoint.mutation_sequence)
             .map_err(|_| RuntimeError::RecoveryInvalid)?;
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let mut rows = tx
             .query(
                 "SELECT commit_id FROM publication_commit WHERE intent_id = ?1",
                 params![freeze.intent_id.to_vec()],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        if let Some(row) = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        {
+            .await?;
+        if let Some(row) = rows.next().await? {
             let existing = row
                 .get::<Vec<u8>>(0)
                 .map_err(|_| RuntimeError::RecoveryInvalid)?;
@@ -1169,42 +1161,15 @@ impl RuntimeState {
                 "INSERT INTO publication_commit (intent_id, commit_id) VALUES (?1, ?2)",
                 params![freeze.intent_id.to_vec(), commit_id.as_bytes().to_vec()],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-            let mut batch_rows = tx
-                .query(
-                    "SELECT COUNT(*), COALESCE(SUM(length(payload)), 0) \
-                     FROM pending_mutation WHERE sequence <= ?1",
-                    params![upper],
-                )
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
-            let batch = batch_rows
-                .next()
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?
-                .ok_or(RuntimeError::RecoveryInvalid)?;
-            let published_rows: i64 = batch.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
-            let published_bytes: i64 = batch.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
-            tx.execute(
-                "UPDATE publication_metadata SET \
-                 published_mutations = published_mutations + ?1, \
-                 published_payload_bytes = published_payload_bytes + ?2, \
-                 last_publication_ms = ?3 WHERE singleton = 1",
-                params![published_rows, published_bytes, now_ms()?],
-            )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
+            record_published_prefix_tx(&tx, upper).await?;
         }
         tx.execute(
             "DELETE FROM pending_mutation WHERE sequence <= ?1",
             params![upper],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)
+        .await?;
+        tx.commit().await.map_err(RuntimeError::from)
     }
 
     async fn load_publication_mutations(
@@ -1221,15 +1186,10 @@ impl RuntimeState {
                  FROM pending_mutation WHERE sequence <= ?1 ORDER BY sequence",
                 params![upper],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let mut previous = 0_u64;
         let mut decoded = Vec::new();
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        {
+        while let Some(row) = rows.next().await? {
             let sequence = u64::try_from(
                 row.get::<i64>(0)
                     .map_err(|_| RuntimeError::RecoveryInvalid)?,
@@ -1276,22 +1236,11 @@ impl RuntimeState {
     }
 
     async fn frozen_intent(&self, intent_id: [u8; 16]) -> Result<Option<Checkpoint>, RuntimeError> {
-        let mut rows = self.connection.query("SELECT checkpoint_generation, checkpoint_mutation_sequence, checkpoint_digest FROM publication_freeze WHERE intent_id = ?1", params![intent_id.to_vec()]).await.map_err(|_| RuntimeError::StorageUnavailable)?;
-        let Some(row) = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        else {
+        let mut rows = self.connection.query("SELECT checkpoint_generation, checkpoint_mutation_sequence, checkpoint_digest FROM publication_freeze WHERE intent_id = ?1", params![intent_id.to_vec()]).await?;
+        let Some(row) = rows.next().await? else {
             return Ok(None);
         };
-        let generation: i64 = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
-        let mutation_sequence: i64 = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
-        Ok(Some(Checkpoint {
-            generation: u64::try_from(generation).map_err(|_| RuntimeError::RecoveryInvalid)?,
-            digest: fixed(row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
-            mutation_sequence: u64::try_from(mutation_sequence)
-                .map_err(|_| RuntimeError::RecoveryInvalid)?,
-        }))
+        Ok(Some(decode_checkpoint_row(&row)?))
     }
 
     /// Reconstructs a persisted publication freeze for restart recovery.

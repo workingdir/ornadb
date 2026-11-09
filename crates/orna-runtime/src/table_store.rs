@@ -953,13 +953,8 @@ impl<'a> CommittedTableBase<'a> {
                      WHERE table_id = ?1 AND mutation_sequence > ?2",
                     params![storage.clone(), sequence],
                 )
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
-            while let Some(row) = tail
-                .next()
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?
-            {
+                .await?;
+            while let Some(row) = tail.next().await? {
                 let key: Vec<u8> = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
                 overridden.insert(key);
             }
@@ -1016,13 +1011,8 @@ pub(crate) async fn published_mutation_sequence_tx(
                ON publication_commit.intent_id = publication_freeze.intent_id",
             (),
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    let row = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-        .ok_or(RuntimeError::RecoveryInvalid)?;
+        .await?;
+    let row = rows.next().await?.ok_or(RuntimeError::RecoveryInvalid)?;
     row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)
 }
 
@@ -1039,14 +1029,8 @@ async fn row_present_tx(
             "SELECT 1 FROM table_row WHERE table_id = ?1 AND row_key = ?2 LIMIT 1",
             params![storage.to_owned(), key.to_vec()],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    if rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-        .is_some()
-    {
+        .await?;
+    if rows.next().await?.is_some() {
         return Ok(true);
     }
     Ok(base.committed_visible(storage, key))
@@ -1068,8 +1052,7 @@ pub(crate) async fn apply_table_mutation_tx(
                 "INSERT OR IGNORE INTO table_identity (table_name, object_id) VALUES (?1, ?2)",
                 params![mutation.table().to_owned(), identity.bytes().to_vec()],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
     }
     apply_table_row_tx(connection, mutation, base).await?;
     let storage_table = mutation.storage_table();
@@ -1100,8 +1083,7 @@ async fn apply_table_row_tx(
                 "DELETE FROM table_row WHERE table_id = ?1 AND row_key = ?2",
                 params![storage_table.clone(), mutation.key().to_vec()],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         connection
             .execute(
                 "INSERT INTO table_row (table_id, row_key, row_value, row_digest)
@@ -1113,8 +1095,7 @@ async fn apply_table_row_tx(
                     digest.to_vec()
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         return Ok(());
     }
     if mutation.is_insert() {
@@ -1134,8 +1115,7 @@ async fn apply_table_row_tx(
                     digest.to_vec()
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         return Ok(());
     }
     match &mutation.value {
@@ -1155,8 +1135,7 @@ async fn apply_table_row_tx(
                         digest.to_vec()
                     ],
                 )
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
+                .await?;
         }
         None => {
             // Rows are values; mutations are operations on tables
@@ -1173,8 +1152,7 @@ async fn apply_table_row_tx(
                     "DELETE FROM table_row WHERE table_id = ?1 AND row_key = ?2",
                     params![storage_table.clone(), mutation.key.clone()],
                 )
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
+                .await?;
         }
     }
     Ok(())
@@ -1240,13 +1218,8 @@ pub(crate) async fn table_rows_tx(
                  WHERE table_id = ?1 ORDER BY row_key",
                 params![storage.clone()],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        while let Some(row) = query
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        {
+            .await?;
+        while let Some(row) = query.next().await? {
             let key: Vec<u8> = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
             let value: Vec<u8> = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
             if base.includes_live_row(&storage, &key) {
@@ -1357,13 +1330,8 @@ pub(crate) async fn table_mutations_already_durable_tx(
                 "SELECT digest FROM admitted_mutation WHERE mutation_id = ?1",
                 params![mutation.id.to_vec()],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let Some(row) = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        else {
+            .await?;
+        let Some(row) = rows.next().await? else {
             continue;
         };
         // The retained digest must commit to the payload being replayed: an
@@ -1430,14 +1398,8 @@ pub(crate) async fn append_mutations_with_catalogue_tx(
                 "SELECT 1 FROM admitted_mutation WHERE mutation_id = ?1",
                 params![mutation.id.to_vec()],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        if retained_rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-            .is_some()
-        {
+            .await?;
+        if retained_rows.next().await?.is_some() {
             return Err(RuntimeError::InvalidTableMutation);
         }
     }
@@ -1451,23 +1413,17 @@ pub(crate) async fn append_mutations_with_catalogue_tx(
                     mutation.digest.to_vec()
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         connection
             .execute(
                 "INSERT INTO admitted_mutation (mutation_id, digest) VALUES (?1, ?2)",
                 params![mutation.id.to_vec(), mutation.digest.to_vec()],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let mut rows = connection
-            .query("SELECT last_insert_rowid()", ())
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
+        let mut rows = connection.query("SELECT last_insert_rowid()", ()).await?;
         sequence = Some(
             rows.next()
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?
+                .await?
                 .ok_or(RuntimeError::RecoveryInvalid)?
                 .get(0)
                 .map_err(|_| RuntimeError::RecoveryInvalid)?,
@@ -1493,8 +1449,7 @@ pub(crate) async fn append_mutations_with_catalogue_tx(
                             table_mutation.key()
                         ],
                     )
-                    .await
-                    .map_err(|_| RuntimeError::StorageUnavailable)?;
+                    .await?;
                 let value = table_mutation
                     .value()
                     .ok_or(RuntimeError::RecoveryInvalid)?;
@@ -1511,8 +1466,7 @@ pub(crate) async fn append_mutations_with_catalogue_tx(
                             Sha256::digest(value).to_vec()
                         ],
                     )
-                    .await
-                    .map_err(|_| RuntimeError::StorageUnavailable)?;
+                    .await?;
             } else {
                 let (value, row_digest, deleted) = match table_mutation.value() {
                     Some(value) => (
@@ -1536,8 +1490,7 @@ pub(crate) async fn append_mutations_with_catalogue_tx(
                             deleted,
                         ],
                     )
-                    .await
-                    .map_err(|_| RuntimeError::StorageUnavailable)?;
+                    .await?;
             }
         }
     }
@@ -1552,8 +1505,7 @@ pub(crate) async fn append_mutations_with_catalogue_tx(
                 sequence
             ],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     connection
         .execute(
             "INSERT INTO runtime_history_governance_boundary
@@ -1563,8 +1515,7 @@ pub(crate) async fn append_mutations_with_catalogue_tx(
                     COALESCE((SELECT MAX(sequence) FROM stream_checkpoint_reset_audit), 0)",
             params![i64::try_from(generation).map_err(|_| RuntimeError::RecoveryInvalid)?],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     faults.check(FaultPoint::AfterCheckpoint)?;
     connection
         .execute(
@@ -1574,8 +1525,7 @@ pub(crate) async fn append_mutations_with_catalogue_tx(
                 next_digest.to_vec()
             ],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     faults.check(FaultPoint::AfterCapture)?;
     let capture = capture_tx(connection).await?;
     if carry_catalogue_forward {
@@ -1644,11 +1594,9 @@ impl RuntimeState {
                 "SELECT row_value FROM table_row WHERE table_id = ?1 AND row_key = ?2",
                 params![table, key.to_vec()],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         rows.next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .await?
             .map(|row| row.get(0).map_err(|_| RuntimeError::RecoveryInvalid))
             .transpose()
     }
@@ -1669,11 +1617,9 @@ impl RuntimeState {
                 "SELECT row_value FROM table_row WHERE table_id = ?1 AND row_key = ?2",
                 params![storage, key.to_vec()],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         rows.next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .await?
             .map(|row| row.get(0).map_err(|_| RuntimeError::RecoveryInvalid))
             .transpose()
     }
@@ -1689,13 +1635,8 @@ impl RuntimeState {
                 "SELECT 1 FROM table_row WHERE table_id = ?1 LIMIT 1",
                 params![table],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        Ok(rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-            .is_some())
+            .await?;
+        Ok(rows.next().await?.is_some())
     }
 
     /// Reads one complete committed relation in canonical key order.
@@ -1714,13 +1655,8 @@ impl RuntimeState {
                 "SELECT object_id FROM table_identity WHERE table_name = ?1",
                 params![table],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        while let Some(row) = identities
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        {
+            .await?;
+        while let Some(row) = identities.next().await? {
             let bytes: Vec<u8> = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
             if let Ok(id) = <[u8; 16]>::try_from(bytes.as_slice()) {
                 storage.push(table_storage_key(table, Some(TableObjectId::new(id))));
@@ -1738,14 +1674,9 @@ impl RuntimeState {
                     storage.get(2).cloned().unwrap_or_default()
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let mut result = Vec::new();
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        {
+        while let Some(row) = rows.next().await? {
             result.push((
                 row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
                 row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
@@ -1794,13 +1725,10 @@ impl RuntimeState {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         self.require_owner(&tx, lease).await?;
         let next = append_mutations_tx(&tx, expected, mutations, next_digest, faults).await?;
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        tx.commit().await?;
         faults.check(FaultPoint::AfterCommit)?;
         Ok(next)
     }

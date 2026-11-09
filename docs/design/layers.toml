@@ -1,0 +1,205 @@
+# Crate layer table for the OrnaDB workspace.
+#
+# This file is the machine-readable form of ARCHITECTURE.md and the data source
+# for scripts/check_architecture.py. The layer numbers and names follow
+# docs/design/architecture.md section 3.1 (the target architecture); the crate
+# entries name the crates that exist today, so the check can run before the
+# split stages land.
+#
+# The rule is: a crate may depend only on a crate in a lower layer. A same-layer
+# dependency must be written down in `allowed`; a lower-layer dependency does not
+# need an entry. Layer 0 is empty until stage 03 creates orna-base;
+# orna-foundation is parked at layer 1 until its split, because it already
+# depends on orna-value.
+#
+# `role` is one of:
+#   production (default) - part of the shipped binary's closure
+#   tool                 - a separate binary or dev tool the orna binary never links
+#   harness              - the conformance harness
+#   oracle               - a test/table model consumed only by the harness
+#   archive              - the 1.0.0 compatibility archive; nothing may depend on it
+#
+# The `known` entries below are the violations recorded on origin/main cb197b7b0
+# (docs/design/architecture.md Appendix A). They are the ratchet baseline:
+# `--mode=deny` fails only on a violation absent from this list. A stage that
+# fixes a violation deletes its entry in the same PR, so this list only shrinks.
+
+[meta]
+# The crate whose production dependency closure is the shipped binary.
+shipped_binary = "orna-cli"
+# R2: the shipped binary must never link these crates, whatever their role.
+forbidden_in_shipped = [
+    "orna-conformance",
+    "orna-traceability",
+    "orna-lsp",
+    "orna-core",
+]
+
+# Layer 0 primitives is reserved for orna-base (stage 03).
+
+[[crate]]
+name = "orna-value"
+layer = 1
+
+[[crate]]
+name = "orna-foundation"
+layer = 1
+allowed = ["orna-value"]
+warning = "single crate, no cohesive subject, 16 production dependents; absorbed by orna-base and orna-value (stage 03)"
+
+[[crate]]
+name = "orna-syntax"
+layer = 2
+
+[[crate]]
+name = "orna-standard-sources"
+layer = 3
+
+[[crate]]
+name = "orna-sys-macros"
+layer = 3
+
+[[crate]]
+name = "orna-semantic"
+layer = 4
+
+[[crate]]
+name = "orna-evaluator"
+layer = 5
+
+[[crate]]
+name = "orna-sys"
+layer = 6
+allowed = ["orna-security"]
+
+[[crate]]
+name = "orna-security"
+layer = 6
+
+[[crate]]
+name = "orna-evolution"
+layer = 7
+
+[[crate]]
+name = "orna-stream"
+layer = 7
+
+[[crate]]
+name = "orna-repository"
+layer = 8
+
+[[crate]]
+name = "orna-runtime"
+layer = 9
+
+[[crate]]
+name = "orna-storage"
+layer = 10
+
+[[crate]]
+name = "orna-project"
+layer = 11
+
+[[crate]]
+name = "orna-project-repl"
+layer = 11
+allowed = ["orna-project"]
+
+[[crate]]
+name = "orna-protocol"
+layer = 12
+
+[[crate]]
+name = "orna-serving"
+layer = 12
+allowed = ["orna-protocol"]
+
+[[crate]]
+name = "orna-live"
+layer = 12
+allowed = ["orna-protocol", "orna-serving"]
+
+[[crate]]
+name = "orna-application"
+layer = 13
+
+[[crate]]
+name = "orna-cli"
+layer = 14
+allowed = ["orna-conformance"]
+
+[[crate]]
+name = "orna-lsp"
+layer = 14
+
+[[crate]]
+name = "orna-conformance"
+layer = 14
+role = "harness"
+allowed = ["orna-table"]
+
+[[crate]]
+name = "orna-table"
+layer = 14
+role = "oracle"
+
+[[crate]]
+name = "orna-traceability"
+layer = 14
+allowed = ["orna-conformance"]
+
+[[crate]]
+name = "orna-core"
+layer = 15
+
+# The known violations, in the order docs/design/architecture.md Appendix A
+# labels them. `--mode=report` prints these with their V number.
+[[known]]
+id = "V1"
+key = "layer:orna-semantic->orna-sys"
+reason = "layer 4 -> 6: the only upward production edge; the catalogue moves to orna-sys-id at layer 3 (stage 06)"
+
+[[known]]
+id = "V2"
+key = "shipped:orna-cli->orna-conformance"
+reason = "R2: the harness is in the shipped binary; the CLI drops it after orna-admission is extracted (stage 10)"
+
+[[known]]
+id = "V3"
+key = "shipped:orna-conformance->orna-table"
+reason = "R2: the oracle table reaches the shipped binary through the harness; merged into orna-conformance (stage 13)"
+
+[[known]]
+id = "V4"
+key = "tool:orna-traceability->orna-conformance"
+reason = "a standalone tool depends on the harness; replaced by the orna-corpus facade"
+
+[[known]]
+id = "V5"
+key = "optional:orna-evaluator->orna-runtime"
+reason = "R1: optional internal edge; removed by the HostPort trait (stage 05a)"
+
+[[known]]
+id = "V6"
+key = "optional:orna-evaluator->orna-repository"
+reason = "R1: optional internal edge; removed by the HostPort trait (stage 05a)"
+
+[[known]]
+id = "V7"
+key = "optional:orna-evaluator->orna-sys"
+reason = "R1: optional internal edge; removed by the HostPort trait (stage 05a)"
+
+[[known]]
+id = "V8"
+key = "orphan:orna-core"
+reason = "production in-degree 0 and not declared an archive; becomes orna-compat-v1 (stage 02)"
+
+[[known]]
+id = "V9"
+key = "orphan:orna-lsp"
+reason = "production in-degree 0 and not declared a tool; the LSP is its own binary"
+
+[[known]]
+id = "V10"
+key = "orphan:orna-traceability"
+reason = "production in-degree 0 and not declared a tool; moves under tools/ with no production dependent"
