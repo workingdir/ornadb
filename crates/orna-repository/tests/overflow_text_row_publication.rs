@@ -138,7 +138,7 @@ async fn overflow_text_rows_publish_and_read_back_through_production_writer() {
                 [ordinal + 4; 32],
                 TerminalOutcome::new(vec![ordinal + 5]).expect("terminal outcome"),
                 &NoFault,
-                orna_runtime::EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
+                orna_evaluator::EffectGate::admit_unbound_for_test(),
             )
             .await
             .expect("commit the Note row through the runtime");

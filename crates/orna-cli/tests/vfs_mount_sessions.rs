@@ -225,7 +225,7 @@ async fn commit_unvalidated_runtime_row(
             [0x7f; 32],
             TerminalOutcome::new(vec![0x80]).unwrap(),
             &NoFault,
-            orna_runtime::EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
+            orna_evaluator::EffectGate::admit_unbound_for_test(),
         )
         .await
         .unwrap();
