@@ -23,7 +23,7 @@ use std::{
 use uuid::Uuid;
 
 fn fixture_image() -> Arc<VfsFileSnapshot<u64>> {
-    let contents = include_str!("../../tests/fixtures/publication-repository-main.orna");
+    let contents = include_str!("../../../tests/fixtures/publication-repository-main.orna");
     Arc::new(VfsFileSnapshot::new(
         SnapshotPin::capture(Arc::new(7)),
         Arc::<[u8]>::from(contents.as_bytes()),
@@ -670,7 +670,7 @@ fn content_file_name_stays_within_the_component_bound_with_its_suffix() {
 }
 
 fn vfs_row_image() -> Arc<VfsFileSnapshot<u64>> {
-    let contents = include_str!("../../tests/fixtures/vfs-row-music-london.orna");
+    let contents = include_str!("../../../tests/fixtures/vfs-row-music-london.orna");
     Arc::new(VfsFileSnapshot::new(
         SnapshotPin::capture(Arc::new(17)),
         Arc::<[u8]>::from(contents.as_bytes()),
@@ -728,9 +728,9 @@ impl ValidatedRowStore {
 async fn direct_draft_commit_publishes_through_destination_and_rejects_stale_drafts() {
     let repository = VfsRepositoryCache::new();
     let target = repository.managed_file(fixture_image()).await.unwrap();
-    let baseline = include_str!("../../tests/fixtures/publication-repository-main.orna");
-    let accepted_bytes = include_str!("../../tests/fixtures/checkpoint_snapshot_v1.orna");
-    let rejected_bytes = include_str!("../../tests/fixtures/case_closure_edge_tail_sixty.orna");
+    let baseline = include_str!("../../../tests/fixtures/publication-repository-main.orna");
+    let accepted_bytes = include_str!("../../../tests/fixtures/checkpoint_snapshot_v1.orna");
+    let rejected_bytes = include_str!("../../../tests/fixtures/case_closure_edge_tail_sixty.orna");
     let old_handle = target.open_read().await;
     assert!(old_handle.projection_is_current().await.unwrap());
 
@@ -820,7 +820,7 @@ async fn direct_draft_commit_publishes_through_destination_and_rejects_stale_dra
 async fn unlink_hides_new_opens_and_keeps_earlier_handle_bytes() {
     let repository = VfsRepositoryCache::new();
     let target = repository.managed_file(fixture_image()).await.unwrap();
-    let accepted_bytes = include_str!("../../tests/fixtures/checkpoint_snapshot_v1.orna");
+    let accepted_bytes = include_str!("../../../tests/fixtures/checkpoint_snapshot_v1.orna");
 
     let draft = target.open_draft(1 << 20).await;
     draft.truncate(0).await.unwrap();
@@ -1230,7 +1230,7 @@ async fn accepted_fsync_advances_only_future_opens_and_release_never_commits() {
 async fn vfs_editor_backup_temp_and_truncate_patterns_share_one_validated_transaction() {
     let repository = VfsRepositoryCache::new();
     let target = repository.managed_file(vfs_row_image()).await.unwrap();
-    let row_text = include_str!("../../tests/fixtures/vfs-row-music-london.orna").as_bytes();
+    let row_text = include_str!("../../../tests/fixtures/vfs-row-music-london.orna").as_bytes();
     let row_store = Arc::new(ValidatedRowStore::new(row_text));
 
     // A backup file is private scratch seeded with the accepted row bytes.
@@ -1347,7 +1347,7 @@ async fn vfs_editor_backup_temp_and_truncate_patterns_share_one_validated_transa
 async fn vfs_rejected_editor_saves_keep_row_store_and_expose_typed_diagnostic() {
     let repository = VfsRepositoryCache::new();
     let target = repository.managed_file(vfs_row_image()).await.unwrap();
-    let row_text = include_str!("../../tests/fixtures/vfs-row-music-london.orna").as_bytes();
+    let row_text = include_str!("../../../tests/fixtures/vfs-row-music-london.orna").as_bytes();
     let invalid = &row_text[..row_text.len() / 2];
     let row_store = Arc::new(ValidatedRowStore::new(row_text));
 
@@ -1729,7 +1729,7 @@ async fn repository_scoped_rename_refuses_a_foreign_cache_scope() {
     let foreign_image = Arc::new(VfsFileSnapshot::new(
         SnapshotPin::capture(Arc::new(7_u64)),
         Arc::<[u8]>::from(
-            include_str!("../../tests/fixtures/publication-repository-main.orna").as_bytes(),
+            include_str!("../../../tests/fixtures/publication-repository-main.orna").as_bytes(),
         ),
     ));
     let foreign = unrelated.managed_file(foreign_image).await.unwrap();
@@ -1766,7 +1766,7 @@ async fn repository_scoped_rename_refuses_a_foreign_cache_scope() {
         Err(TemporaryRenameError::WrongRepositoryScope)
     ));
     assert_eq!(repository.generation().await, 0);
-    let baseline = include_str!("../../tests/fixtures/publication-repository-main.orna");
+    let baseline = include_str!("../../../tests/fixtures/publication-repository-main.orna");
     assert_eq!(
         target.open_read().await.read_at(0, baseline.len()).unwrap(),
         baseline.as_bytes()
@@ -1777,7 +1777,7 @@ async fn repository_scoped_rename_refuses_a_foreign_cache_scope() {
 async fn accepted_rename_rebases_the_next_draft_on_the_live_image() {
     let repository = VfsRepositoryCache::new();
     let target = repository.managed_file(fixture_image()).await.unwrap();
-    let accepted_bytes = include_str!("../../tests/fixtures/checkpoint_snapshot_v1.orna");
+    let accepted_bytes = include_str!("../../../tests/fixtures/checkpoint_snapshot_v1.orna");
 
     let save = target.begin_temporary_replacement(1 << 20).await;
     save.write_at(0, accepted_bytes.as_bytes()).await.unwrap();
@@ -1829,9 +1829,9 @@ async fn accepted_rename_rebases_the_next_draft_on_the_live_image() {
 async fn strong_read_baseline_refuses_a_save_after_a_concurrent_repl_change() {
     let repository = VfsRepositoryCache::new();
     let target = repository.managed_file(fixture_image()).await.unwrap();
-    let read_bytes = include_str!("../../tests/fixtures/publication-repository-main.orna");
-    let repl_bytes = include_str!("../../tests/fixtures/checkpoint_snapshot_v1.orna");
-    let draft_bytes = include_str!("../../tests/fixtures/case_closure_edge_tail_sixty.orna");
+    let read_bytes = include_str!("../../../tests/fixtures/publication-repository-main.orna");
+    let repl_bytes = include_str!("../../../tests/fixtures/checkpoint_snapshot_v1.orna");
+    let draft_bytes = include_str!("../../../tests/fixtures/case_closure_edge_tail_sixty.orna");
 
     // The editor reads the row and retains that exact version, with its own
     // draft over the version it read.
@@ -2017,9 +2017,9 @@ async fn durable_temporary_rename_commits_and_refuses_changed_row_baseline() {
         .await
         .unwrap();
     let accepted_for_admit =
-        include_bytes!("../../tests/fixtures/vfs-row-music-london.orna").to_vec();
+        include_bytes!("../../../tests/fixtures/vfs-row-music-london.orna").to_vec();
     let stale_fixture =
-        include_bytes!("../../tests/fixtures/publication-repository-main.orna").to_vec();
+        include_bytes!("../../../tests/fixtures/publication-repository-main.orna").to_vec();
     let schema_for_admit = schema.clone();
     let accepted_baseline = accepted_for_admit.clone();
     let stale_for_validation = stale_fixture.clone();
@@ -2263,7 +2263,7 @@ fn source_blob_mib_row(encoded_blob: &[u8]) -> Vec<u8> {
 
 #[tokio::test]
 async fn durable_blob_temp_rename_cas_commits_canonical_media_and_pin() {
-    const PIXEL: &[u8] = include_bytes!("../../tests/fixtures/media/pixel.png");
+    const PIXEL: &[u8] = include_bytes!("../../../tests/fixtures/media/pixel.png");
     let (_temp, repo, relation_id) = format3_blob_repository();
     let capture = repo.capture_capability(relation_id).unwrap();
     let runtime_identity = RuntimeIdentity {

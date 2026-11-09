@@ -364,7 +364,8 @@ pub fn content_suffix_is_compatible(media_type: &str, suffix: &str) -> bool {
     classify_content_suffix(media_type, Some(suffix)).is_ok()
 }
 
-/// The canonical stored hint for an editor-selected suffix (MIME-1, VFS-012).
+/// The canonical stored hint for an editor-selected suffix (MIME-1,
+/// ORNA-VFS-012).
 ///
 /// `selected` is the suffix the sibling file now spells; `None` means the
 /// projected preferred suffix. The result is the hint to record, or `None` when
