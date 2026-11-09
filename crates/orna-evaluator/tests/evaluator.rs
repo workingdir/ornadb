@@ -6,9 +6,8 @@ use orna_evaluator::{
     NominalDefinitions, NominalField, NominalVariant, PureFunction, RelationPage,
     RelationReadScope, StepBudget, SysHostBindingRegistry, evaluate_expression,
     evaluate_expression_with_functions, evaluate_function, evaluate_parsed,
-    evaluate_parsed_with_nominals, evaluate_repl, evaluate_with_functions_and_nominals,
-    invoke_named, invoke_named_with_effects, invoke_named_with_effects_and_budget,
-    invoke_named_with_nominals,
+    evaluate_parsed_with_nominals, evaluate_with_functions_and_nominals, invoke_named,
+    invoke_named_with_effects, invoke_named_with_effects_and_budget, invoke_named_with_nominals,
 };
 use orna_project_repl::AdmittedReplSession;
 use orna_syntax::{
@@ -2535,7 +2534,6 @@ fn pipeline_input_runs_once_and_before_stage_arguments() {
 }
 
 #[test]
-#[test]
 fn std_bits_preserves_unbounded_signed_twos_complement_semantics() {
     assert_eq!(
         evaluate(include_str!(
@@ -2838,9 +2836,6 @@ fn std_text_split_and_join_charge_step_budget_without_changing_outputs() {
     );
 }
 
-#[test]
-#[test]
-#[test]
 #[test]
 fn std_collection_first_returns_only_the_head_of_a_finite_list() {
     for (expression, expected) in [
@@ -4842,11 +4837,6 @@ fn root_first_dispatch_respects_local_function_and_relation_shadowing() {
 }
 
 #[test]
-#[test]
-#[test]
-#[test]
-#[test]
-#[test]
 fn generic_callback_can_precede_its_value_and_returns_the_projected_field() {
     assert_eq!(
         call_module(
@@ -5153,8 +5143,6 @@ fn std_collection_asof_join_propagates_selector_failures() {
     );
 }
 
-#[test]
-#[test]
 #[test]
 fn std_collection_rank_honors_collection_and_step_limits() {
     assert_eq!(
@@ -5498,11 +5486,6 @@ fn std_collection_map_and_flat_map_enforce_collection_limits() {
 }
 
 #[test]
-#[test]
-#[test]
-#[test]
-#[test]
-#[test]
 fn std_collection_group_by_accepts_functions_and_enforces_limits() {
     let source = include_str!("fixtures/group_by_callbacks.orna");
     assert_eq!(
@@ -5792,7 +5775,6 @@ fn function_argument_admission_precedes_default_evaluation_and_redacts_errors() 
     }
 }
 
-#[test]
 #[test]
 fn final_control_expression_in_a_block_returns_its_value() {
     let source = include_str!("fixtures/control-expression-block-tail-uamr.orna");
@@ -6225,7 +6207,6 @@ fn coalesces_present_and_missing_optional_values_without_evaluating_dead_rhs() {
 }
 
 #[test]
-#[test]
 fn pinned_standard_math_source_executes_every_public_function() {
     let (path, source) = orna_standard_sources::reference_standard_sources_v1()
         .into_iter()
@@ -6294,7 +6275,6 @@ fn pinned_standard_math_source_executes_every_public_function() {
     );
 }
 
-#[test]
 #[test]
 fn evaluates_local_assignments_and_finite_list_for_mutations() {
     assert_eq!(
@@ -10763,7 +10743,6 @@ fn admitted_eval_producer_stages_effectful_source_without_publishing() {
     );
 }
 
-#[test]
 #[test]
 fn default_limits_still_stop_an_infinite_while_loop_with_eval_limit() {
     assert_eq!(
