@@ -27,7 +27,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 orna-conformance = { path = "../orna-conformance" }
-orna-evaluator = { path = "../orna-evaluator" }
+orna-evaluator = { path = "../orna-evaluator", features = ["test-evidence"] }
 orna-project = { path = "../orna-project" }
 orna-runtime = { path = "../orna-runtime" }
 orna-semantic = { path = "../orna-semantic" }

@@ -62,6 +62,7 @@ required-features = ["test-seams"]
 
 [dev-dependencies]
 bytes = "1.11.1"
+orna-evaluator = { path = "../orna-evaluator", features = ["test-evidence"] }
 libsql = { version = "0.9.29", default-features = false, features = ["core"] }
 parquet = { version = "59.3.0", default-features = false, features = ["crc", "zstd"] }
 orna-application = { path = "../orna-application", features = ["test-support"] }

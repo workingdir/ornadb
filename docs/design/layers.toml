@@ -19,7 +19,7 @@
 #   oracle               - a test/table model consumed only by the harness
 #   archive              - the 1.0.0 compatibility archive; nothing may depend on it
 #
-# The `known` entries below are the violations recorded on origin/main cb197b7b0
+# The `known` entries below are the violations recorded on origin/main d63b6df40
 # (docs/design/architecture.md Appendix A). They are the ratchet baseline:
 # `--mode=deny` fails only on a violation absent from this list. A stage that
 # fixes a violation deletes its entry in the same PR, so this list only shrinks.
@@ -173,11 +173,6 @@ reason = "R2: the oracle table reaches the shipped binary through the harness; m
 id = "V4"
 key = "tool:orna-traceability->orna-conformance"
 reason = "a standalone tool depends on the harness; replaced by the orna-corpus facade"
-
-[[known]]
-id = "V5"
-key = "optional:orna-evaluator->orna-runtime"
-reason = "R1: optional internal edge; removed by the HostPort trait (stage 05a)"
 
 [[known]]
 id = "V6"
