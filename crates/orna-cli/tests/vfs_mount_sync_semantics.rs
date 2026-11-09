@@ -543,8 +543,8 @@ async fn close_flush_accepts_dirty_draft_once() {
 }
 
 /// Runs `dd` as an external writer on the mount file. dd opens it with `O_TRUNC`, writes the
-/// candidate, and closes it; a failed close(2) is reported on stderr as "closing output file" and
-/// makes dd exit 1, so dd's exit status observes the mount's close(2) result.
+/// candidate, and closes it. It is a real-world closer for the positive control; its close(2)
+/// reporting is not the contract under test (see [`close_probe_write`]).
 fn dd_write(candidate: &std::path::Path, target: &std::path::Path) -> std::process::Output {
     Command::new("dd")
         .arg(format!("if={}", candidate.display()))
@@ -555,9 +555,47 @@ fn dd_write(candidate: &std::path::Path, target: &std::path::Path) -> std::proce
         .expect("run dd")
 }
 
-/// ORNA-VFS-007/009: a close flush whose acceptance is refused makes close(2) fail, dd reports it
-/// and exits 1, and the application has ignored the error. The durable row stays unchanged and
-/// the refused candidate is retained as a recoverable draft that holds the draft guard.
+/// Runs a controlled closer on the mount file: a `python3` helper opens `target` with `O_TRUNC`,
+/// writes `candidate`, calls `os.close`, and reports a refused close(2) on stderr as "closing
+/// output file: ...", exiting 1. It models an application that closes a dirty draft.
+///
+/// The closer must report close(2) itself. `dd` cannot be relied on for that: what a `dd` reports
+/// for a refused close is that binary's policy, not this mount's contract, and it differs between
+/// hosts (GNU coreutils' dd reports it; the `dd` shipped by Ubuntu 26.04 writes through
+/// `std::fs::File` and drops the close(2) error). ORNA-VFS-007/009 constrain the mount's close
+/// flush, so the probe closes its own descriptor and reports the errno itself. `python3` helper
+/// processes are already how this suite performs raw file operations (see the `os.truncate` and
+/// dirty-document helpers).
+fn close_probe_write(
+    candidate: &std::path::Path,
+    target: &std::path::Path,
+) -> std::process::Output {
+    const CLOSE_PROBE: &str = r#"
+import os, sys
+target, candidate = sys.argv[1], sys.argv[2]
+fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o666)
+with open(candidate, "rb") as source:
+    while chunk := source.read(1 << 16):
+        os.write(fd, chunk)
+try:
+    os.close(fd)
+except OSError as error:
+    print(f"closing output file: {error}", file=sys.stderr)
+    sys.exit(1)
+"#;
+    Command::new("python3")
+        .arg("-c")
+        .arg(CLOSE_PROBE)
+        .arg(target)
+        .arg(candidate)
+        .output()
+        .expect("run the close probe")
+}
+
+/// ORNA-VFS-007/009: a close flush whose acceptance is refused makes close(2) fail, the closer
+/// reports it and exits 1, and the application has ignored the error. The durable row stays
+/// unchanged and the refused candidate is retained as a recoverable draft that holds the draft
+/// guard, with the refusal's invalid-document diagnostic association.
 #[tokio::test]
 async fn ignored_close_error_leaves_row_unchanged_and_draft_retained() {
     if !require_fuse_or_skip() {
@@ -568,27 +606,40 @@ async fn ignored_close_error_leaves_row_unchanged_and_draft_retained() {
     let candidate = scratch.path().join("refused.orna");
     std::fs::write(&candidate, invalid_row("Refused on close"))
         .expect("write the refused candidate");
-    let refused = dd_write(&candidate, &fixture.data_path);
+    let refused = close_probe_write(&candidate, &fixture.data_path);
     let stderr = String::from_utf8_lossy(&refused.stderr).into_owned();
     assert_eq!(
         refused.status.code(),
         Some(1),
-        "dd observes the refused close(2): {stderr}"
+        "the closer observes the refused close(2): {stderr}"
     );
     assert!(
         stderr.contains("closing output file") && stderr.contains("Invalid argument"),
-        "dd reports the refused close with EINVAL: {stderr}"
+        "the closer reports the refused close with EINVAL: {stderr}"
     );
     assert!(
         fresh_view(&fixture).contains("Original"),
         "a refused close flush leaves the accepted row unchanged",
     );
     assert_view_lacks(&fixture, "Refused on close");
+    let records = retained_draft_records(&fixture.repository);
+    let (_, record) = records
+        .iter()
+        .find(|(_, record)| record.contains("Refused on close"))
+        .unwrap_or_else(|| {
+            panic!("the refused candidate is retained in recovery storage: {records:?}")
+        });
+    let (header, body) = record
+        .split_once("\n\n")
+        .unwrap_or_else(|| panic!("the retained record has a header: {record:?}"));
+    assert_eq!(
+        body,
+        invalid_row("Refused on close"),
+        "the retained record holds the refused candidate's exact bytes",
+    );
     assert!(
-        retained_drafts(&fixture.repository)
-            .iter()
-            .any(|draft| draft.contains("Refused on close")),
-        "the refused candidate is retained in recovery storage",
+        header.contains("cause sys.vfs.invalid_document\n"),
+        "the close flush recorded the invalid-document refusal: {header:?}"
     );
     await_draft_guard(&fixture, b'1', "the retained refusal holds the draft guard").await;
 }
@@ -618,6 +669,32 @@ async fn dd_close_of_valid_candidate_exits_zero_and_is_accepted() {
     // EDIT-1 step 5 permits to repeat or not occur (source/41-vfs.md). Its outcome is not asserted
     // here, so the retained-record check is omitted. The accepted content and the cleared guard
     // above are the guarantees this test proves.
+}
+
+/// Positive control for [`close_probe_write`]: the closer the refused-close test uses observes a
+/// clean close(2) for an accepted candidate. Its descriptor is closed directly, so unlike `dd` the
+/// probe exits 0 only when close(2) really succeeded.
+#[tokio::test]
+async fn close_probe_of_valid_candidate_exits_zero_and_is_accepted() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let scratch = TempDir::new().expect("create the candidate directory");
+    let candidate = scratch.path().join("accepted.orna");
+    std::fs::write(&candidate, row("Probe accepted")).expect("write the accepted candidate");
+    let accepted = close_probe_write(&candidate, &fixture.data_path);
+    assert!(
+        accepted.status.success(),
+        "the closer closes an accepted candidate cleanly: {}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    assert_view_contains(&fixture, "Probe accepted");
+    await_draft_guard(&fixture, b'0', "an accepted close leaves no draft guard").await;
+    assert!(
+        retained_drafts(&fixture.repository).is_empty(),
+        "an accepted close retains no draft",
+    );
 }
 
 /// ORNA-VFS-008/009: a dirty handle whose baseline a peer has since accepted is
