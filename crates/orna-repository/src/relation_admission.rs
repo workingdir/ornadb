@@ -44,6 +44,7 @@ use crate::{
     allocator::AllocatorError,
     bind_tree_entry_in_index,
     blob_store::{ContentIdentity, GearChunker},
+    cbor::{bytes as cbor_bytes, head as cbor_head, text as cbor_text},
     hex::{hex_decode, hex_encode},
     native_graph::{
         ByteIndexEntry, GitHashAlgorithm, GraphError, IndexMaintenance, MAX_GRAPH_HEIGHT, MAX_REFS,
@@ -2046,9 +2047,10 @@ impl Repository {
                 std::process::id(),
                 Uuid::new_v4()
             ));
-        fs::write(&candidate_index, &base_index)
-            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
-        let result = (|| {
+        // The guard removes the candidate on every early return; a successful
+        // rename has already moved it, so the removal is a no-op.
+        let _staged_candidate = crate::StagedFile::create(candidate_index.clone(), &base_index)?;
+        (|| {
             bind_tree_entry_in_index(
                 || self.command(),
                 &candidate_index,
@@ -2117,9 +2119,7 @@ impl Repository {
             .and_then(|directory| directory.sync_all())
             .map_err(|_| RepositoryError::LocalStateUnavailable)?;
             Ok(())
-        })();
-        let _ = fs::remove_file(&candidate_index);
-        result
+        })()
     }
 
     /// Points the stage-0 entry of `path` in `index` at `blob`, keeping its
@@ -2720,35 +2720,6 @@ fn rows_domain(relation_id: &[u8; 16], schema_digest: &[u8; 32]) -> Vec<u8> {
     cbor_bytes(&mut domain, relation_id);
     cbor_bytes(&mut domain, schema_digest);
     domain
-}
-
-/// Appends a shortest-form definite CBOR head.
-fn cbor_head(output: &mut Vec<u8>, major: u8, value: u64) {
-    let prefix = major << 5;
-    if value < 24 {
-        output.push(prefix | value as u8);
-    } else if value <= u64::from(u8::MAX) {
-        output.extend_from_slice(&[prefix | 24, value as u8]);
-    } else if value <= u64::from(u16::MAX) {
-        output.push(prefix | 25);
-        output.extend_from_slice(&(value as u16).to_be_bytes());
-    } else if value <= u64::from(u32::MAX) {
-        output.push(prefix | 26);
-        output.extend_from_slice(&(value as u32).to_be_bytes());
-    } else {
-        output.push(prefix | 27);
-        output.extend_from_slice(&value.to_be_bytes());
-    }
-}
-
-fn cbor_bytes(output: &mut Vec<u8>, bytes: &[u8]) {
-    cbor_head(output, 2, bytes.len() as u64);
-    output.extend_from_slice(bytes);
-}
-
-fn cbor_text(output: &mut Vec<u8>, text: &str) {
-    cbor_head(output, 3, text.len() as u64);
-    output.extend_from_slice(text.as_bytes());
 }
 
 /// Writes OGS-1 node envelopes and raw chunks into the repository's object

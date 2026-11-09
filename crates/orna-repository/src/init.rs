@@ -609,7 +609,8 @@ fn acquire_init_lock(repository: &Repository) -> Result<InitLock, RepositoryInit
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(_) => return Err(RepositoryInitError::LocalStateUnavailable),
     }
-    let file = open_lock_file(&path)?;
+    let file =
+        crate::open_lock_file(&path).map_err(|_| RepositoryInitError::LocalStateUnavailable)?;
     file.try_lock_exclusive()
         .map_err(|_| RepositoryInitError::RepositoryBusy)?;
     Ok(InitLock { file })
@@ -636,19 +637,6 @@ fn ensure_directory_tree(path: &Path) -> Result<(), RepositoryInitError> {
         }
         Err(_) => Err(RepositoryInitError::LocalStateUnavailable),
     }
-}
-
-fn open_lock_file(path: &Path) -> Result<File, RepositoryInitError> {
-    let mut options = OpenOptions::new();
-    options.create(true).read(true).write(true).truncate(false);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW);
-    }
-    options
-        .open(path)
-        .map_err(|_| RepositoryInitError::LocalStateUnavailable)
 }
 
 fn database_bytes(metadata: &RepositoryMetadata) -> Vec<u8> {
