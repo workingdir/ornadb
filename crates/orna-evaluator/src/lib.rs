@@ -5216,6 +5216,16 @@ struct StreamRunContext<'a> {
     depth: usize,
 }
 
+/// Outcome of filling the Blob ABI slots: ready values, or a terminal result
+/// from the `from_bytes` entry point.
+enum BlobArguments {
+    Ready {
+        values: Vec<ContextValue>,
+        bounds: Vec<BigInt>,
+    },
+    Done(Box<Value>),
+}
+
 impl StreamCallbackState {
     /// Moves a pending debounced item into the batch for the final flush.
     fn release_debounced(&mut self) {
@@ -9257,6 +9267,34 @@ impl Context<'_, '_> {
             }
         }
 
+        let (supplied_values, bounds) =
+            match self.blob_argument_values(operation, parameters, supplied)? {
+                BlobArguments::Ready { values, bounds } => (values, bounds),
+                BlobArguments::Done(value) => return Ok(*value),
+            };
+        if crate::sys_bindings::is_blob_read_operation(operation) {
+            return self.blob_read_value(operation, &supplied_values, &bounds);
+        }
+        if crate::sys_bindings::is_blob_reflection_operation(operation) {
+            return crate::sys_bindings::dispatch_blob_reflection(
+                operation,
+                &supplied_values,
+                self.cancellation,
+            );
+        }
+        let annotated = crate::sys_bindings::dispatch_blob_annotation(operation, &supplied_values)?;
+        Value::from_context_value(&annotated, self, 0)
+    }
+
+    /// Fills every declared Blob ABI slot and converts each value to the
+    /// argument the generated contract admits. `from_bytes` is terminal: it
+    /// builds the annotated Blob itself, so the caller returns it directly.
+    fn blob_argument_values(
+        &mut self,
+        operation: &str,
+        parameters: &[orna_sys::OperationParameter],
+        mut supplied: Vec<Option<Value>>,
+    ) -> Result<BlobArguments, EvaluationError> {
         let mut supplied_values = Vec::with_capacity(parameters.len());
         let mut bounds = Vec::new();
         for (position, parameter) in parameters.iter().enumerate() {
@@ -9280,7 +9318,8 @@ impl Context<'_, '_> {
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 let annotated = crate::sys_bindings::dispatch_blob_from_bytes(&integers)?;
-                return Value::from_context_value(&annotated, self, 0);
+                return Value::from_context_value(&annotated, self, 0)
+                    .map(|value| BlobArguments::Done(Box::new(value)));
             }
             if matches!(&parameter.ty, orna_sys::AbiType::Named(name) if name == "Int") {
                 let Value::Int(bound) = value else {
@@ -9291,36 +9330,37 @@ impl Context<'_, '_> {
                 supplied_values.push(Self::blob_annotation_argument(value, &parameter.ty)?);
             }
         }
-        if crate::sys_bindings::is_blob_read_operation(operation) {
-            let source = supplied_values
-                .first()
-                .ok_or_else(|| error("ORNA-EVAL-ARGUMENT"))?;
-            return match crate::sys_bindings::dispatch_blob_read(operation, source, &bounds)? {
-                crate::sys_bindings::BlobReadValue::Int(length) => {
-                    Ok(Value::Int(BigInt::from(length)))
-                }
-                crate::sys_bindings::BlobReadValue::Blob(value) => {
-                    Value::from_context_value(&value, self, 0)
-                }
-                crate::sys_bindings::BlobReadValue::Bytes(bytes) => Ok(Value::List(List::from(
-                    bytes
-                        .into_iter()
-                        .map(|byte| Value::Int(BigInt::from(byte)))
-                        .collect::<Vec<_>>(),
-                ))),
-                crate::sys_bindings::BlobReadValue::Unit => Ok(Value::Unit),
-                crate::sys_bindings::BlobReadValue::Digest(value) => Ok(Value::Digest(value)),
-            };
+        Ok(BlobArguments::Ready {
+            values: supplied_values,
+            bounds,
+        })
+    }
+
+    /// Runs the read entry point and converts its tagged result back to a
+    /// source-level value.
+    fn blob_read_value(
+        &mut self,
+        operation: &str,
+        supplied_values: &[ContextValue],
+        bounds: &[BigInt],
+    ) -> Result<Value, EvaluationError> {
+        let source = supplied_values
+            .first()
+            .ok_or_else(|| error("ORNA-EVAL-ARGUMENT"))?;
+        match crate::sys_bindings::dispatch_blob_read(operation, source, bounds)? {
+            crate::sys_bindings::BlobReadValue::Int(length) => Ok(Value::Int(BigInt::from(length))),
+            crate::sys_bindings::BlobReadValue::Blob(value) => {
+                Value::from_context_value(&value, self, 0)
+            }
+            crate::sys_bindings::BlobReadValue::Bytes(bytes) => Ok(Value::List(List::from(
+                bytes
+                    .into_iter()
+                    .map(|byte| Value::Int(BigInt::from(byte)))
+                    .collect::<Vec<_>>(),
+            ))),
+            crate::sys_bindings::BlobReadValue::Unit => Ok(Value::Unit),
+            crate::sys_bindings::BlobReadValue::Digest(value) => Ok(Value::Digest(value)),
         }
-        if crate::sys_bindings::is_blob_reflection_operation(operation) {
-            return crate::sys_bindings::dispatch_blob_reflection(
-                operation,
-                &supplied_values,
-                self.cancellation,
-            );
-        }
-        let annotated = crate::sys_bindings::dispatch_blob_annotation(operation, &supplied_values)?;
-        Value::from_context_value(&annotated, self, 0)
     }
 
     /// Converts one source-level argument into the value accepted by the

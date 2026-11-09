@@ -160,7 +160,6 @@ name = "orna-evaluator"
 "src/repl.rs" = 1766
 "src/sys_bindings.rs" = 2392
 [crate.functions]
-"src/lib.rs::call_blob_operation" = 123
 "src/lib.rs::collection" = 187
 "src/lib.rs::concurrent" = 134
 "src/lib.rs::context_named_invocation_adopts_effect_result_owner_context" = 163
