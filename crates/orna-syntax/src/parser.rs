@@ -1789,6 +1789,13 @@ const LEGACY_FORMS: &[LegacyForm] = &[
     },
 ];
 
+/// What the block loop does after one block item.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BlockStep {
+    Next,
+    End,
+}
+
 struct Parser {
     tokens: Vec<Token>,
     at: usize,
@@ -3362,179 +3369,19 @@ impl Parser {
         }
         self.bump();
         while !self.eof() && !self.is_punct("}") {
-            match self.keyword() {
-                Some(Keyword::Let) => {
-                    let statement_start = self.current().span.clone();
-                    self.bump();
-                    let pattern = self.parse_pattern();
-                    let annotation = if self.is_punct(":") {
-                        self.bump();
-                        self.parse_type_expr()
-                    } else {
-                        None
-                    };
-                    if self.is_punct("=") {
-                        self.bump();
-                        let value = self.expr().unwrap_or(Expr::Tuple {
-                            elements: Vec::new(),
-                            span: statement_start.clone(),
-                        });
-                        let end = value.span();
-                        statements.push(Statement::Let {
-                            pattern,
-                            annotation,
-                            value,
-                            span: statement_start.join(end),
-                        });
-                    } else {
-                        self.error_here("ORNA-PARSE-001", "expected `=` in let statement")
-                    }
-                    if self.is_punct(";") {
-                        self.bump()
-                    } else {
-                        self.error_here("ORNA-PARSE-002", MissingSemicolon::LetStatement.message());
-                        break;
-                    }
-                }
-                Some(Keyword::Assert) => {
-                    let statement_start = self.current().span.clone();
-                    self.bump();
-                    let (value, terminated) = self.parse_assertion_clause(
-                        statement_start.clone(),
-                        false,
-                        MissingSemicolon::AssertionItem,
-                    );
-                    if let Some(value) = value {
-                        let end = value.span();
-                        statements.push(Statement::Assert {
-                            value,
-                            span: statement_start.join(end),
-                        });
-                    }
-                    if !terminated {
-                        break;
-                    }
-                }
+            let step = match self.keyword() {
+                Some(Keyword::Let) => self.block_let_statement(&mut statements),
+                Some(Keyword::Assert) => self.block_assert_statement(&mut statements),
                 Some(Keyword::Return | Keyword::Break | Keyword::Continue) => {
-                    let statement_start = self.current().span.clone();
-                    let keyword = self.keyword();
-                    self.bump();
-                    let value = if !self.is_punct(";") {
-                        self.expr()
-                    } else {
-                        None
-                    };
-                    let end = value
-                        .as_ref()
-                        .map(Expr::span)
-                        .unwrap_or_else(|| statement_start.clone());
-                    match keyword {
-                        Some(Keyword::Return) => statements.push(Statement::Return {
-                            value,
-                            span: statement_start.join(end),
-                        }),
-                        Some(Keyword::Break) => statements.push(Statement::Break {
-                            value,
-                            span: statement_start.join(end),
-                        }),
-                        _ => {
-                            if let Some(value) = &value {
-                                self.errors.push(Diagnostic::error(
-                                    "ORNA-PARSE-002",
-                                    "`continue` takes no value",
-                                    value.span(),
-                                ));
-                            }
-                            statements.push(Statement::Continue {
-                                span: statement_start,
-                            });
-                        }
-                    }
-                    if self.is_punct(";") {
-                        self.bump()
-                    } else {
-                        self.error_here(
-                            "ORNA-PARSE-002",
-                            MissingSemicolon::ControlStatement.message(),
-                        );
-                        break;
-                    }
+                    self.block_jump_statement(&mut statements)
                 }
                 Some(
                     Keyword::For | Keyword::While | Keyword::Loop | Keyword::If | Keyword::Case,
-                ) => {
-                    let value = self.parse_control_block_item();
-                    let span = value.span();
-                    if self.is_punct(";") {
-                        if matches!(&value, Expr::Control { .. }) {
-                            statements.push(Statement::Control { value, span });
-                        } else {
-                            statements.push(Statement::Expression { value, span });
-                        }
-                        self.bump()
-                    } else if self.is_punct("}") {
-                        tail = Some(Box::new(value));
-                        break;
-                    } else if matches!(&value, Expr::Control { .. }) {
-                        statements.push(Statement::Control { value, span });
-                    } else {
-                        statements.push(Statement::Expression { value, span });
-                        self.error_here(
-                            "ORNA-PARSE-002",
-                            MissingSemicolon::ExpressionStatement.message(),
-                        );
-                        // The expression parser stopped at the next block
-                        // item. Diagnose the missing boundary, then let the
-                        // block loop parse that item so a later final tail is
-                        // retained in the malformed tree.
-                        continue;
-                    }
-                }
-                _ => {
-                    if self.assignment_follows() {
-                        let statement_start = self.current().span.clone();
-                        let target = self.parse_assignment_target();
-                        let operator = match self.current().text.as_str() {
-                            "=" => AssignmentOperator::Set,
-                            "+=" => AssignmentOperator::Add,
-                            "-=" => AssignmentOperator::Subtract,
-                            "*=" => AssignmentOperator::Multiply,
-                            "/=" => AssignmentOperator::Divide,
-                            _ => unreachable!(
-                                "assignment_follows accepted a non-assignment operator"
-                            ),
-                        };
-                        self.bump();
-                        let value = self.expr().unwrap_or(Expr::Tuple {
-                            elements: Vec::new(),
-                            span: statement_start.clone(),
-                        });
-                        let end = value.span();
-                        statements.push(Statement::Assignment {
-                            target,
-                            operator,
-                            value,
-                            span: statement_start.join(end),
-                        });
-                    } else {
-                        let value = match self.expr() {
-                            Some(value) => value,
-                            None => break,
-                        };
-                        let span = value.span();
-                        if self.is_punct(";") {
-                            statements.push(Statement::Expression { value, span })
-                        } else {
-                            tail = Some(Box::new(value));
-                            break;
-                        }
-                    }
-                    if self.is_punct(";") {
-                        self.bump()
-                    } else {
-                        break;
-                    }
-                }
+                ) => self.block_control_statement(&mut statements, &mut tail),
+                _ => self.block_expression_statement(&mut statements, &mut tail),
+            };
+            if matches!(step, BlockStep::End) {
+                break;
             }
         }
         if self.is_punct("}") {
@@ -3553,6 +3400,193 @@ impl Parser {
             self.error_expr()
         }
     }
+
+    fn block_let_statement(&mut self, statements: &mut Vec<Statement>) -> BlockStep {
+        let statement_start = self.current().span.clone();
+        self.bump();
+        let pattern = self.parse_pattern();
+        let annotation = if self.is_punct(":") {
+            self.bump();
+            self.parse_type_expr()
+        } else {
+            None
+        };
+        if self.is_punct("=") {
+            self.bump();
+            let value = self.expr().unwrap_or(Expr::Tuple {
+                elements: Vec::new(),
+                span: statement_start.clone(),
+            });
+            let end = value.span();
+            statements.push(Statement::Let {
+                pattern,
+                annotation,
+                value,
+                span: statement_start.join(end),
+            });
+        } else {
+            self.error_here("ORNA-PARSE-001", "expected `=` in let statement")
+        }
+        if self.is_punct(";") {
+            self.bump();
+            BlockStep::Next
+        } else {
+            self.error_here("ORNA-PARSE-002", MissingSemicolon::LetStatement.message());
+            BlockStep::End
+        }
+    }
+
+    fn block_assert_statement(&mut self, statements: &mut Vec<Statement>) -> BlockStep {
+        let statement_start = self.current().span.clone();
+        self.bump();
+        let (value, terminated) = self.parse_assertion_clause(
+            statement_start.clone(),
+            false,
+            MissingSemicolon::AssertionItem,
+        );
+        if let Some(value) = value {
+            let end = value.span();
+            statements.push(Statement::Assert {
+                value,
+                span: statement_start.join(end),
+            });
+        }
+        if terminated {
+            BlockStep::Next
+        } else {
+            BlockStep::End
+        }
+    }
+
+    fn block_jump_statement(&mut self, statements: &mut Vec<Statement>) -> BlockStep {
+        let statement_start = self.current().span.clone();
+        let keyword = self.keyword();
+        self.bump();
+        let value = if !self.is_punct(";") {
+            self.expr()
+        } else {
+            None
+        };
+        let end = value
+            .as_ref()
+            .map(Expr::span)
+            .unwrap_or_else(|| statement_start.clone());
+        match keyword {
+            Some(Keyword::Return) => statements.push(Statement::Return {
+                value,
+                span: statement_start.join(end),
+            }),
+            Some(Keyword::Break) => statements.push(Statement::Break {
+                value,
+                span: statement_start.join(end),
+            }),
+            _ => {
+                if let Some(value) = &value {
+                    self.errors.push(Diagnostic::error(
+                        "ORNA-PARSE-002",
+                        "`continue` takes no value",
+                        value.span(),
+                    ));
+                }
+                statements.push(Statement::Continue {
+                    span: statement_start,
+                });
+            }
+        }
+        if self.is_punct(";") {
+            self.bump();
+            BlockStep::Next
+        } else {
+            self.error_here(
+                "ORNA-PARSE-002",
+                MissingSemicolon::ControlStatement.message(),
+            );
+            BlockStep::End
+        }
+    }
+
+    fn block_control_statement(
+        &mut self,
+        statements: &mut Vec<Statement>,
+        tail: &mut Option<Box<Expr>>,
+    ) -> BlockStep {
+        let value = self.parse_control_block_item();
+        let span = value.span();
+        if self.is_punct(";") {
+            if matches!(&value, Expr::Control { .. }) {
+                statements.push(Statement::Control { value, span });
+            } else {
+                statements.push(Statement::Expression { value, span });
+            }
+            self.bump();
+            BlockStep::Next
+        } else if self.is_punct("}") {
+            *tail = Some(Box::new(value));
+            BlockStep::End
+        } else if matches!(&value, Expr::Control { .. }) {
+            statements.push(Statement::Control { value, span });
+            BlockStep::Next
+        } else {
+            statements.push(Statement::Expression { value, span });
+            self.error_here(
+                "ORNA-PARSE-002",
+                MissingSemicolon::ExpressionStatement.message(),
+            );
+            // The expression parser stopped at the next block item. Diagnose
+            // the missing boundary, then let the block loop parse that item so
+            // a later final tail is retained in the malformed tree.
+            BlockStep::Next
+        }
+    }
+
+    fn block_expression_statement(
+        &mut self,
+        statements: &mut Vec<Statement>,
+        tail: &mut Option<Box<Expr>>,
+    ) -> BlockStep {
+        if self.assignment_follows() {
+            let statement_start = self.current().span.clone();
+            let target = self.parse_assignment_target();
+            let operator = match self.current().text.as_str() {
+                "=" => AssignmentOperator::Set,
+                "+=" => AssignmentOperator::Add,
+                "-=" => AssignmentOperator::Subtract,
+                "*=" => AssignmentOperator::Multiply,
+                "/=" => AssignmentOperator::Divide,
+                _ => unreachable!("assignment_follows accepted a non-assignment operator"),
+            };
+            self.bump();
+            let value = self.expr().unwrap_or(Expr::Tuple {
+                elements: Vec::new(),
+                span: statement_start.clone(),
+            });
+            let end = value.span();
+            statements.push(Statement::Assignment {
+                target,
+                operator,
+                value,
+                span: statement_start.join(end),
+            });
+        } else {
+            let Some(value) = self.expr() else {
+                return BlockStep::End;
+            };
+            let span = value.span();
+            if self.is_punct(";") {
+                statements.push(Statement::Expression { value, span })
+            } else {
+                *tail = Some(Box::new(value));
+                return BlockStep::End;
+            }
+        }
+        if self.is_punct(";") {
+            self.bump();
+            BlockStep::Next
+        } else {
+            BlockStep::End
+        }
+    }
+
     /// Parses a block item that begins with `if`, `case`, `for`, `while` or
     /// `loop`. Under ORNA-PARSE-002 the braced control expression is a whole
     /// item when another block item follows, so a following `(`, `[`, `-`,

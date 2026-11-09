@@ -36,18 +36,6 @@ reason = "PR #9783 splits Parser::item per declaration kind and adds the located
 bead = "ornadb-18ky0"
 
 [[raise]]
-path = "crates/orna-syntax/src/parser.rs::parse_block_inner"
-new_limit = 205
-reason = "PR #9783's located-span accessors touch parse_block_inner; splitting it is the remaining ornadb-18ky0 work"
-bead = "ornadb-18ky0"
-
-[[raise]]
-path = "crates/orna-syntax/src/visit.rs::walk_expr"
-new_limit = 146
-reason = "PR #9783 adds the exhaustive orna_syntax::visit traversal; walk_expr is the one arm over the 120-line cap"
-bead = "ornadb-41661"
-
-[[raise]]
 path = "crates/orna-evaluator/src/sys_bindings.rs"
 new_limit = 2556
 reason = "PR #9764 classifies filesystem and process dispatch once instead of an implicit god function; the split is the remaining ornadb-aok6t work"
