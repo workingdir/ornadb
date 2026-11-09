@@ -580,17 +580,58 @@ impl PublicationMaterializationPhase {
     }
 }
 
+/// One managed path's recorded progress through its quarantine-and-install
+/// sequence. Every phase past `Clean` names the quarantine file that holds the
+/// displaced bytes, so a phase and its quarantine cannot disagree.
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct PublicationMaterialization {
-    phase: PublicationMaterializationPhase,
-    quarantine: Option<String>,
+enum PublicationMaterialization {
+    Clean,
+    QuarantinePrepared(String),
+    Quarantined(String),
+    Installed(String),
 }
 
 impl PublicationMaterialization {
-    const fn clean() -> Self {
-        Self {
-            phase: PublicationMaterializationPhase::Clean,
-            quarantine: None,
+    /// The state `phase` records. A `Clean` path has no quarantine and every
+    /// other phase has one; any other pairing is a corrupt journal.
+    fn from_parts(
+        phase: PublicationMaterializationPhase,
+        quarantine: Option<String>,
+    ) -> Result<Self, RepositoryError> {
+        match (phase, quarantine) {
+            (PublicationMaterializationPhase::Clean, None) => Ok(Self::Clean),
+            (PublicationMaterializationPhase::QuarantinePrepared, Some(name)) => {
+                Ok(Self::QuarantinePrepared(name))
+            }
+            (PublicationMaterializationPhase::Quarantined, Some(name)) => {
+                Ok(Self::Quarantined(name))
+            }
+            (PublicationMaterializationPhase::Installed, Some(name)) => Ok(Self::Installed(name)),
+            (PublicationMaterializationPhase::Clean, Some(_))
+            | (
+                PublicationMaterializationPhase::QuarantinePrepared
+                | PublicationMaterializationPhase::Quarantined
+                | PublicationMaterializationPhase::Installed,
+                None,
+            ) => Err(RepositoryError::InvalidPublicationJournal),
+        }
+    }
+
+    fn phase(&self) -> PublicationMaterializationPhase {
+        match self {
+            Self::Clean => PublicationMaterializationPhase::Clean,
+            Self::QuarantinePrepared(_) => PublicationMaterializationPhase::QuarantinePrepared,
+            Self::Quarantined(_) => PublicationMaterializationPhase::Quarantined,
+            Self::Installed(_) => PublicationMaterializationPhase::Installed,
+        }
+    }
+
+    fn quarantine(&self) -> Option<&str> {
+        match self {
+            Self::Clean => None,
+            Self::QuarantinePrepared(name) | Self::Quarantined(name) | Self::Installed(name) => {
+                Some(name)
+            }
         }
     }
 }
@@ -646,7 +687,7 @@ impl PublicationJournalEntry {
             path,
             expected,
             next,
-            materialization: PublicationMaterialization::clean(),
+            materialization: PublicationMaterialization::Clean,
         }
     }
 
@@ -1192,7 +1233,6 @@ pub struct PublicationJournal {
     entries: Vec<PublicationJournalEntry>,
     stage: PublicationJournalStage,
     wire_version: u8,
-    binding_version: u8,
 }
 
 impl PublicationJournal {
@@ -1257,7 +1297,6 @@ impl PublicationJournal {
             entries,
             stage: PublicationJournalStage::Prepared,
             wire_version: 5,
-            binding_version: 5,
         })
     }
 
@@ -1309,7 +1348,6 @@ impl PublicationJournal {
         }
         self.store_root = Some(IndexTreeRef(store_root));
         self.wire_version = self.wire_version.max(8);
-        self.binding_version = self.binding_version.max(8);
         Ok(self)
     }
 
@@ -1332,7 +1370,6 @@ impl PublicationJournal {
         }
         self.logical_rekeys = logical_rekeys;
         self.wire_version = self.wire_version.max(9);
-        self.binding_version = self.binding_version.max(9);
         Ok(self)
     }
 
@@ -1355,7 +1392,6 @@ impl PublicationJournal {
         }
         self.migration_continuity = Some(continuity);
         self.wire_version = self.wire_version.max(6);
-        self.binding_version = self.binding_version.max(6);
         Ok(self)
     }
 
@@ -1387,7 +1423,6 @@ impl PublicationJournal {
         }
         self.migration_annotation_defaults = Some(defaults);
         self.wire_version = self.wire_version.max(7);
-        self.binding_version = self.binding_version.max(7);
         Ok(self)
     }
 
@@ -1410,7 +1445,6 @@ impl PublicationJournal {
             .migration_annotation_defaults
             .ok_or(RepositoryError::InvalidFormatMigration)?;
         if self.wire_version != 7
-            || self.binding_version != 7
             || !self.is_resumable_migration_stage()
             || self.compact_manifest.is_some()
             || self.migration_continuity.is_none()
@@ -1566,8 +1600,8 @@ impl PublicationJournal {
             put_string(&mut bytes, path)?;
             put_optional_bytes(&mut bytes, entry.expected.as_deref())?;
             put_optional_bytes(&mut bytes, entry.next.as_deref())?;
-            bytes.push(entry.materialization.phase.code());
-            put_optional_string(&mut bytes, entry.materialization.quarantine.as_deref())?;
+            bytes.push(entry.materialization.phase().code());
+            put_optional_string(&mut bytes, entry.materialization.quarantine())?;
         }
         if bytes.len() > MAX_JOURNAL_BYTES {
             return Err(RepositoryError::InvalidPublicationJournal);
@@ -1578,9 +1612,8 @@ impl PublicationJournal {
     fn lock_binding(&self) -> Result<[u8; 32], RepositoryError> {
         let mut stable = self.clone();
         stable.stage = PublicationJournalStage::Prepared;
-        stable.wire_version = stable.binding_version;
         for entry in &mut stable.entries {
-            entry.materialization = PublicationMaterialization::clean();
+            entry.materialization = PublicationMaterialization::Clean;
         }
         Ok(Sha256::digest(stable.encode()?).into())
     }
@@ -1691,14 +1724,8 @@ impl PublicationJournal {
             }
             let phase = PublicationMaterializationPhase::from_code(take_byte(bytes, &mut cursor)?)?;
             let quarantine = take_optional_string(bytes, &mut cursor)?;
-            if (phase == PublicationMaterializationPhase::Clean) == quarantine.is_some()
-                || phase != PublicationMaterializationPhase::Clean && quarantine.is_none()
-            {
-                return Err(RepositoryError::InvalidPublicationJournal);
-            }
-            let materialization = PublicationMaterialization { phase, quarantine };
             let mut entry = PublicationJournalEntry::new(path, expected, next);
-            entry.materialization = materialization;
+            entry.materialization = PublicationMaterialization::from_parts(phase, quarantine)?;
             entries.push(entry);
         }
         if cursor != bytes.len() {
@@ -1717,12 +1744,10 @@ impl PublicationJournal {
             entries,
             stage,
             wire_version: version,
-            binding_version: version,
         };
         for (index, entry) in journal.entries.iter().enumerate() {
-            if entry.materialization.phase != PublicationMaterializationPhase::Clean
-                && entry.materialization.quarantine.as_deref()
-                    != Some(journal.quarantine_name(index)?.as_str())
+            if let Some(name) = entry.materialization.quarantine()
+                && name != journal.quarantine_name(index)?
             {
                 return Err(RepositoryError::InvalidPublicationJournal);
             }
@@ -1733,9 +1758,8 @@ impl PublicationJournal {
     fn quarantine_name(&self, index: usize) -> Result<String, RepositoryError> {
         let mut stable = self.clone();
         stable.stage = PublicationJournalStage::Prepared;
-        stable.wire_version = stable.binding_version;
         for entry in &mut stable.entries {
-            entry.materialization = PublicationMaterialization::clean();
+            entry.materialization = PublicationMaterialization::Clean;
         }
         let mut digest = Sha256::new();
         digest.update(stable.encode()?);
@@ -1746,28 +1770,23 @@ impl PublicationJournal {
         ))
     }
 
+    /// Records that `index` reached `phase`. A phase past `Clean` carries the
+    /// quarantine name derived from this journal's binding, the only name
+    /// decode accepts.
     fn set_materialization(
         &mut self,
         index: usize,
         phase: PublicationMaterializationPhase,
-        quarantine: Option<String>,
     ) -> Result<(), RepositoryError> {
-        let expected_quarantine = self.quarantine_name(index)?;
-        if (phase == PublicationMaterializationPhase::Clean && quarantine.is_some())
-            || (phase != PublicationMaterializationPhase::Clean && quarantine.is_none())
-        {
-            return Err(RepositoryError::InvalidPublicationJournal);
-        }
-        if phase != PublicationMaterializationPhase::Clean
-            && quarantine.as_deref() != Some(expected_quarantine.as_str())
-        {
-            return Err(RepositoryError::InvalidPublicationJournal);
-        }
+        let quarantine = (phase != PublicationMaterializationPhase::Clean)
+            .then(|| self.quarantine_name(index))
+            .transpose()?;
+        let materialization = PublicationMaterialization::from_parts(phase, quarantine)?;
         let entry = self
             .entries
             .get_mut(index)
             .ok_or(RepositoryError::InvalidPublicationJournal)?;
-        entry.materialization = PublicationMaterialization { phase, quarantine };
+        entry.materialization = materialization;
         Ok(())
     }
 }
@@ -5911,7 +5930,7 @@ impl Repository {
         let quarantine = parent.join(&quarantine_name);
         let quarantine_bytes = self.read_managed_file(&quarantine)?;
         let current = self.read_managed_file(&target)?;
-        let phase = entry.materialization().phase;
+        let phase = entry.materialization().phase();
 
         if phase == PublicationMaterializationPhase::Clean {
             if quarantine_bytes.is_some() {
@@ -5923,11 +5942,8 @@ impl Repository {
             if current.as_deref() != entry.expected() {
                 return Err(Self::managed_content_conflict(journal, &entry));
             }
-            journal.set_materialization(
-                index,
-                PublicationMaterializationPhase::QuarantinePrepared,
-                Some(quarantine_name.clone()),
-            )?;
+            journal
+                .set_materialization(index, PublicationMaterializationPhase::QuarantinePrepared)?;
             self.write_publication_journal_locked(journal)?;
         } else if let Some(bytes) = quarantine_bytes.as_deref() {
             if Some(bytes) != entry.expected() {
@@ -5941,7 +5957,7 @@ impl Repository {
                     entry.expected(),
                     entry.next(),
                 )?;
-                journal.set_materialization(index, PublicationMaterializationPhase::Clean, None)?;
+                journal.set_materialization(index, PublicationMaterializationPhase::Clean)?;
                 self.write_publication_journal_locked(journal)?;
                 return Ok(());
             }
@@ -5954,11 +5970,7 @@ impl Repository {
                 {
                     return Err(Self::managed_content_conflict(journal, &entry));
                 }
-                journal.set_materialization(
-                    index,
-                    PublicationMaterializationPhase::Installed,
-                    Some(quarantine_name.clone()),
-                )?;
+                journal.set_materialization(index, PublicationMaterializationPhase::Installed)?;
                 self.write_publication_journal_locked(journal)?;
             } else {
                 self.materialize_managed_file_impl_with_quarantine_locked(
@@ -5974,11 +5986,7 @@ impl Repository {
                 {
                     return Err(Self::managed_content_conflict(journal, &entry));
                 }
-                journal.set_materialization(
-                    index,
-                    PublicationMaterializationPhase::Installed,
-                    Some(quarantine_name.clone()),
-                )?;
+                journal.set_materialization(index, PublicationMaterializationPhase::Installed)?;
                 self.write_publication_journal_locked(journal)?;
             }
             self.remove_verified_quarantine(
@@ -5988,11 +5996,11 @@ impl Repository {
                 entry.expected(),
                 entry.next(),
             )?;
-            journal.set_materialization(index, PublicationMaterializationPhase::Clean, None)?;
+            journal.set_materialization(index, PublicationMaterializationPhase::Clean)?;
             self.write_publication_journal_locked(journal)?;
             return Ok(());
         } else if current.as_deref() == entry.next() {
-            journal.set_materialization(index, PublicationMaterializationPhase::Clean, None)?;
+            journal.set_materialization(index, PublicationMaterializationPhase::Clean)?;
             self.write_publication_journal_locked(journal)?;
             return Ok(());
         } else if phase != PublicationMaterializationPhase::QuarantinePrepared
@@ -6002,7 +6010,7 @@ impl Repository {
         }
 
         let mut after_boundary = |phase| {
-            journal.set_materialization(index, phase, Some(quarantine_name.clone()))?;
+            journal.set_materialization(index, phase)?;
             self.write_publication_journal_locked(journal)
         };
         self.materialize_managed_file_impl_with_quarantine_locked(
@@ -6013,7 +6021,7 @@ impl Repository {
             None,
             Some(&mut after_boundary),
         )?;
-        journal.set_materialization(index, PublicationMaterializationPhase::Clean, None)?;
+        journal.set_materialization(index, PublicationMaterializationPhase::Clean)?;
         self.write_publication_journal_locked(journal)
     }
 
@@ -13613,15 +13621,11 @@ mod tests {
         .unwrap();
         let conflict_name = conflict.quarantine_name(0).unwrap();
         conflict
-            .set_materialization(
-                0,
-                PublicationMaterializationPhase::QuarantinePrepared,
-                Some(conflict_name.clone()),
-            )
+            .set_materialization(0, PublicationMaterializationPhase::QuarantinePrepared)
             .unwrap();
         repository.write_publication_journal(&conflict).unwrap();
         let mut after_boundary = |phase| {
-            conflict.set_materialization(0, phase, Some(conflict_name.clone()))?;
+            conflict.set_materialization(0, phase)?;
             repository.write_publication_journal_locked(&conflict)?;
             if phase == PublicationMaterializationPhase::Quarantined {
                 fs::write(&conflict_target, b"external").unwrap();
@@ -13644,7 +13648,7 @@ mod tests {
         assert_eq!(fs::read(&conflict_target).unwrap(), b"external");
         let persisted = repository.read_publication_journal().unwrap().unwrap();
         assert_eq!(
-            persisted.entries()[0].materialization().phase,
+            persisted.entries()[0].materialization().phase(),
             PublicationMaterializationPhase::Quarantined
         );
 
@@ -13666,11 +13670,7 @@ mod tests {
         let delete_quarantine = delete_target.parent().unwrap().join(&delete_name);
         fs::write(&delete_quarantine, b"to-delete").unwrap();
         deletion
-            .set_materialization(
-                0,
-                PublicationMaterializationPhase::Installed,
-                Some(delete_name),
-            )
+            .set_materialization(0, PublicationMaterializationPhase::Installed)
             .unwrap();
         repository.write_publication_journal(&deletion).unwrap();
         let mut recovered = repository.read_publication_journal().unwrap().unwrap();
@@ -13680,7 +13680,7 @@ mod tests {
         assert!(!delete_target.exists());
         assert!(!delete_quarantine.exists());
         assert_eq!(
-            recovered.entries()[0].materialization().phase,
+            recovered.entries()[0].materialization().phase(),
             PublicationMaterializationPhase::Clean
         );
     }
@@ -13774,7 +13774,7 @@ mod tests {
         assert_eq!(fs::read(&target).unwrap(), b"foreign");
         let persisted = repository.read_publication_journal().unwrap().unwrap();
         assert_eq!(
-            persisted.entries()[0].materialization().phase,
+            persisted.entries()[0].materialization().phase(),
             PublicationMaterializationPhase::Clean
         );
     }
@@ -13790,11 +13790,7 @@ mod tests {
             managed_guard_journal(&repository, &path, Some(b"expected"), Some(b"next"), 33);
         let name = journal.quarantine_name(0).unwrap();
         journal
-            .set_materialization(
-                0,
-                PublicationMaterializationPhase::QuarantinePrepared,
-                Some(name.clone()),
-            )
+            .set_materialization(0, PublicationMaterializationPhase::QuarantinePrepared)
             .unwrap();
         let parent = root.path().join("generated");
         let quarantine = parent.join(&name);
@@ -13820,9 +13816,8 @@ mod tests {
         let path = ManagedPath::new("generated/row.orna").unwrap();
         let mut journal =
             managed_guard_journal(&repository, &path, Some(b"expected"), Some(b"next"), 34);
-        let name = journal.quarantine_name(0).unwrap();
         journal
-            .set_materialization(0, PublicationMaterializationPhase::Installed, Some(name))
+            .set_materialization(0, PublicationMaterializationPhase::Installed)
             .unwrap();
         let target = root.path().join(path.as_path());
         fs::create_dir_all(target.parent().unwrap()).unwrap();
@@ -13836,7 +13831,7 @@ mod tests {
         assert_eq!(fs::read(&target).unwrap(), b"expected");
         let persisted = repository.read_publication_journal().unwrap().unwrap();
         assert_eq!(
-            persisted.entries()[0].materialization().phase,
+            persisted.entries()[0].materialization().phase(),
             PublicationMaterializationPhase::Installed
         );
     }
@@ -14904,17 +14899,7 @@ mod tests {
         fs::create_dir_all(quarantine.parent().unwrap()).unwrap();
         fs::write(&quarantine, b"captured").unwrap();
         journal
-            .set_materialization(
-                0,
-                PublicationMaterializationPhase::Quarantined,
-                Some(
-                    quarantine
-                        .file_name()
-                        .unwrap()
-                        .to_string_lossy()
-                        .into_owned(),
-                ),
-            )
+            .set_materialization(0, PublicationMaterializationPhase::Quarantined)
             .unwrap();
         repository.write_publication_journal(&journal).unwrap();
         let mut recovered = repository.read_publication_journal().unwrap().unwrap();
@@ -14928,7 +14913,7 @@ mod tests {
         );
         assert!(!quarantine.exists());
         assert_eq!(
-            recovered.entries()[0].materialization().phase,
+            recovered.entries()[0].materialization().phase(),
             PublicationMaterializationPhase::Clean
         );
         assert_eq!(
@@ -14938,7 +14923,7 @@ mod tests {
                 .unwrap()
                 .entries()[0]
                 .materialization()
-                .phase,
+                .phase(),
             PublicationMaterializationPhase::Clean
         );
     }
@@ -15874,6 +15859,33 @@ mod tests {
             .materialize_managed_file(&path, Some(b"editor"), None)
             .unwrap();
         assert!(!target.exists());
+    }
+
+    /// A journal entry is `Clean` with no quarantine or past `Clean` with one;
+    /// the other pairings are not states the recovery protocol can be in.
+    #[test]
+    fn materialization_phase_and_quarantine_must_agree() {
+        use super::PublicationMaterialization;
+        use PublicationMaterializationPhase::{Clean, Installed, QuarantinePrepared, Quarantined};
+
+        assert_eq!(
+            PublicationMaterialization::from_parts(Clean, None).unwrap(),
+            PublicationMaterialization::Clean
+        );
+        assert!(matches!(
+            PublicationMaterialization::from_parts(Clean, Some("q".to_owned())),
+            Err(RepositoryError::InvalidPublicationJournal)
+        ));
+        for phase in [QuarantinePrepared, Quarantined, Installed] {
+            assert!(matches!(
+                PublicationMaterialization::from_parts(phase, None),
+                Err(RepositoryError::InvalidPublicationJournal)
+            ));
+            let state =
+                PublicationMaterialization::from_parts(phase, Some("q".to_owned())).unwrap();
+            assert_eq!(state.phase(), phase);
+            assert_eq!(state.quarantine(), Some("q"));
+        }
     }
 }
 
