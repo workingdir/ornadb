@@ -161,3 +161,29 @@ fn undeclared_core_collection_spellings_are_rejected() {
         analysis.diagnostics
     );
 }
+
+/// S4: `partition` on a relation preserves the container kind in both result
+/// components, matching the pre-registry behaviour.
+#[test]
+fn partition_relation_result_components_preserve_the_container_kind() {
+    let analysis = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "partition-consumer.orna",
+            "table Note(id: Int) { value: Int, }\n\
+             pub fn partitioned(rows: Relation<Note>) = std.collection.partition(rows, note => note.value > 0);\n",
+        )],
+        &collection_catalogue(),
+    );
+    assert!(analysis.is_ok(), "{:?}", analysis.diagnostics);
+    let result = result_of(module(&analysis, "partition-consumer"), "partitioned");
+    let Type::Tuple(elements) = result else {
+        panic!("partition result must be a tuple, got {result:?}");
+    };
+    assert_eq!(elements.len(), 2);
+    for element in &elements {
+        assert!(
+            matches!(element, Type::Relation(_)),
+            "partition component must be a relation, got {element:?}"
+        );
+    }
+}
