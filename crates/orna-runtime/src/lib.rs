@@ -8812,18 +8812,12 @@ impl RuntimeState {
         payload: StreamFailurePayload,
         faults: &dyn FaultInjector,
     ) -> Result<CommitResult, RuntimeError> {
-        let (plaintext, reference, digest, retention) = match payload {
-            StreamFailurePayload::Unavailable => {
-                return Err(RuntimeError::RecoveryInvalid);
-            }
-            StreamFailurePayload::Plaintext(bytes) => (Some(bytes), None, None, 1_i64),
-            StreamFailurePayload::ProtectedReference { reference, digest } => {
-                if reference.is_empty() {
-                    return Err(RuntimeError::InvalidIdentity);
-                }
-                (None, Some(reference), Some(digest.to_vec()), 2_i64)
-            }
-        };
+        let FailurePayloadColumns {
+            payload: plaintext,
+            reference,
+            digest,
+            retention,
+        } = StoredFailurePayload::from_submitted(payload)?.into_columns();
         let result = match assertion_detail {
             Some(detail) => {
                 apply_stream_intent_tx(
@@ -11513,9 +11507,10 @@ impl RuntimeState {
         writer: WriterLease,
         grant: &ReplayGrant,
         diagnostic: SafeDiagnostic,
-    ) -> Result<CommitResult, RuntimeError> {
+    ) -> Result<CommitResult, StreamStepError> {
         self.fail_stream_replay_with_faults(writer, grant, diagnostic, &NoFault)
             .await
+            .map_err(StreamStepError::Runtime)
     }
 
     async fn fail_stream_replay_with_faults(
@@ -11743,81 +11738,14 @@ impl RuntimeState {
         {
             return Ok(CommitResult::Rejected(reason));
         }
-        let payload = match load_stored_stream_failure_payload(&self.connection, &grant.failure)
+        let payload = match self
+            .replay_payload(&grant, provider)
             .await
             .map_err(StreamStepError::Runtime)?
         {
-            Some(StoredStreamFailurePayload {
-                payload: Some(payload),
-                retention: 1,
-                ..
-            }) => payload,
-            Some(StoredStreamFailurePayload {
-                payload: None,
-                reference: Some(reference),
-                digest: Some(digest),
-                retention: 2,
-            }) => {
-                let Some(provider) = provider else {
-                    return self
-                        .fail_stream_replay(
-                            writer,
-                            &grant,
-                            SafeDiagnostic {
-                                code: DiagnosticCode::ProviderUnavailable,
-                                class: DiagnosticClass::Transient,
-                            },
-                        )
-                        .await
-                        .map_err(StreamStepError::Runtime);
-                };
-                let expected_digest: [u8; 32] = digest
-                    .try_into()
-                    .map_err(|_| StreamStepError::Runtime(RuntimeError::RecoveryInvalid))?;
-                let payload = match provider.refetch(&reference).await {
-                    Ok(payload) => payload,
-                    Err(_) => {
-                        return self
-                            .fail_stream_replay(
-                                writer,
-                                &grant,
-                                SafeDiagnostic {
-                                    code: DiagnosticCode::ProviderUnavailable,
-                                    class: DiagnosticClass::Transient,
-                                },
-                            )
-                            .await
-                            .map_err(StreamStepError::Runtime);
-                    }
-                };
-                let actual_digest: [u8; 32] = Sha256::digest(&payload).into();
-                if actual_digest != expected_digest {
-                    return self
-                        .fail_stream_replay(
-                            writer,
-                            &grant,
-                            SafeDiagnostic {
-                                code: DiagnosticCode::Internal,
-                                class: DiagnosticClass::Permanent,
-                            },
-                        )
-                        .await
-                        .map_err(StreamStepError::Runtime);
-                }
-                payload
-            }
-            Some(_) | None => {
-                return self
-                    .fail_stream_replay(
-                        writer,
-                        &grant,
-                        SafeDiagnostic {
-                            code: DiagnosticCode::Internal,
-                            class: DiagnosticClass::Permanent,
-                        },
-                    )
-                    .await
-                    .map_err(StreamStepError::Runtime);
+            ControlFlow::Continue(payload) => payload,
+            ControlFlow::Break(diagnostic) => {
+                return self.fail_stream_replay(writer, &grant, diagnostic).await;
             }
         };
         self.verify_stream_replay_claim(writer, &grant)
@@ -11848,8 +11776,8 @@ impl RuntimeState {
                 .await
                 .map(|(_, result)| result)
                 .map_err(StreamStepError::Runtime),
-            StreamHandlerResult::CommitTable(_) => self
-                .fail_stream_replay(
+            StreamHandlerResult::CommitTable(_) => {
+                self.fail_stream_replay(
                     writer,
                     &grant,
                     SafeDiagnostic {
@@ -11858,7 +11786,7 @@ impl RuntimeState {
                     },
                 )
                 .await
-                .map_err(StreamStepError::Runtime),
+            }
             StreamHandlerResult::CommitValidatedTable(mut batch) => {
                 match self
                     .commit_stream_validated_table_replay(StreamValidatedTableReplayCommit {
@@ -11873,25 +11801,64 @@ impl RuntimeState {
                     .await
                 {
                     Ok((_, result)) => Ok(result),
-                    Err(StreamTableDeliveryError::ValidationFailed(diagnostic)) => self
-                        .fail_stream_replay(writer, &grant, diagnostic)
-                        .await
-                        .map_err(StreamStepError::Runtime),
+                    Err(StreamTableDeliveryError::ValidationFailed(diagnostic)) => {
+                        self.fail_stream_replay(writer, &grant, diagnostic).await
+                    }
                     Err(StreamTableDeliveryError::Runtime(error)) => {
                         Err(StreamStepError::Runtime(error))
                     }
                 }
             }
             StreamHandlerResult::FailAfterTable(_, diagnostic)
-            | StreamHandlerResult::Fail(diagnostic) => self
-                .fail_stream_replay(writer, &grant, diagnostic)
-                .await
-                .map_err(StreamStepError::Runtime),
+            | StreamHandlerResult::Fail(diagnostic) => {
+                self.fail_stream_replay(writer, &grant, diagnostic).await
+            }
             StreamHandlerResult::Cancelled => self
                 .cancel_admitted_stream_replay(writer, &grant)
                 .await
                 .map_err(StreamStepError::Runtime),
         }
+    }
+
+    /// The payload a replay hands its handler. A payload the runtime cannot
+    /// produce fails the replay with the diagnostic returned in `Break`: a
+    /// protected reference without a provider, or whose refetch fails, is a
+    /// transient provider failure; a digest mismatch or a missing payload
+    /// record is a permanent internal one.
+    async fn replay_payload<P>(
+        &self,
+        grant: &ReplayGrant,
+        provider: Option<&P>,
+    ) -> Result<ControlFlow<SafeDiagnostic, Vec<u8>>, RuntimeError>
+    where
+        P: StreamFailurePayloadProvider + ?Sized,
+    {
+        const PROVIDER_UNAVAILABLE: SafeDiagnostic = SafeDiagnostic {
+            code: DiagnosticCode::ProviderUnavailable,
+            class: DiagnosticClass::Transient,
+        };
+        const INTERNAL: SafeDiagnostic = SafeDiagnostic {
+            code: DiagnosticCode::Internal,
+            class: DiagnosticClass::Permanent,
+        };
+        let stored = load_stored_stream_failure_payload(&self.connection, &grant.failure).await?;
+        Ok(match stored {
+            Some(StoredFailurePayload::Plaintext(payload)) => ControlFlow::Continue(payload),
+            Some(StoredFailurePayload::ProtectedReference { reference, digest }) => {
+                let Some(provider) = provider else {
+                    return Ok(ControlFlow::Break(PROVIDER_UNAVAILABLE));
+                };
+                let Ok(payload) = provider.refetch(&reference).await else {
+                    return Ok(ControlFlow::Break(PROVIDER_UNAVAILABLE));
+                };
+                if <[u8; 32]>::from(Sha256::digest(&payload)) == digest {
+                    ControlFlow::Continue(payload)
+                } else {
+                    ControlFlow::Break(INTERNAL)
+                }
+            }
+            None => ControlFlow::Break(INTERNAL),
+        })
     }
 
     pub async fn pending(&self) -> Result<Vec<Mutation>, RuntimeError> {
@@ -15159,13 +15126,12 @@ impl RuntimeState {
             if referenced.as_deref() != Some(identity_id.as_str()) || legacy.is_some() {
                 return Err(RuntimeError::RecoveryInvalid);
             }
-            let payload = StoredStreamFailurePayload {
-                payload: row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?,
-                reference: row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?,
-                digest: row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?,
-                retention: row.get(5).map_err(|_| RuntimeError::RecoveryInvalid)?,
-            };
-            validate_stream_failure_payload(&payload)?;
+            StoredFailurePayload::from_columns(
+                row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                row.get(5).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )?;
         }
 
         let mut orphans = self
@@ -18135,45 +18101,90 @@ async fn load_stream_replay_claim(
     }))
 }
 
-struct StoredStreamFailurePayload {
+/// A failed delivery's retained payload as the runtime stores it: the source
+/// bytes, or a protected connector reference with the digest its refetch must
+/// match. The table spreads this over four nullable columns plus a
+/// `retention` discriminant, and only two shapes of them are valid;
+/// [`Self::from_columns`] checks that shape once so no consumer handles a
+/// half-populated payload.
+enum StoredFailurePayload {
+    Plaintext(Vec<u8>),
+    ProtectedReference { reference: String, digest: [u8; 32] },
+}
+
+impl StoredFailurePayload {
+    const PLAINTEXT_RETENTION: i64 = 1;
+    const PROTECTED_REFERENCE_RETENTION: i64 = 2;
+
+    /// Decodes the `payload`, `payload_reference`, `payload_digest` and
+    /// `retention` columns. Any other combination is a damaged row.
+    fn from_columns(
+        payload: Option<Vec<u8>>,
+        reference: Option<String>,
+        digest: Option<Vec<u8>>,
+        retention: i64,
+    ) -> Result<Self, RuntimeError> {
+        match (retention, payload, reference, digest) {
+            (Self::PLAINTEXT_RETENTION, Some(bytes), None, None) => Ok(Self::Plaintext(bytes)),
+            (Self::PROTECTED_REFERENCE_RETENTION, None, Some(reference), Some(digest))
+                if !reference.is_empty() =>
+            {
+                Ok(Self::ProtectedReference {
+                    reference,
+                    digest: fixed(digest)?,
+                })
+            }
+            _ => Err(RuntimeError::RecoveryInvalid),
+        }
+    }
+
+    /// Encodes a connector-selected payload for storage. A connector that
+    /// declared no safe retention has nothing to store, and a protected
+    /// reference must name something.
+    fn from_submitted(payload: StreamFailurePayload) -> Result<Self, RuntimeError> {
+        match payload {
+            StreamFailurePayload::Unavailable => Err(RuntimeError::RecoveryInvalid),
+            StreamFailurePayload::Plaintext(bytes) => Ok(Self::Plaintext(bytes)),
+            StreamFailurePayload::ProtectedReference { reference, digest } => {
+                if reference.is_empty() {
+                    return Err(RuntimeError::InvalidIdentity);
+                }
+                Ok(Self::ProtectedReference { reference, digest })
+            }
+        }
+    }
+
+    fn into_columns(self) -> FailurePayloadColumns {
+        match self {
+            Self::Plaintext(bytes) => FailurePayloadColumns {
+                payload: Some(bytes),
+                reference: None,
+                digest: None,
+                retention: Self::PLAINTEXT_RETENTION,
+            },
+            Self::ProtectedReference { reference, digest } => FailurePayloadColumns {
+                payload: None,
+                reference: Some(reference),
+                digest: Some(digest.to_vec()),
+                retention: Self::PROTECTED_REFERENCE_RETENTION,
+            },
+        }
+    }
+}
+
+/// The `payload`, `payload_reference`, `payload_digest` and `retention`
+/// columns of `stream_failure_payload`.
+struct FailurePayloadColumns {
     payload: Option<Vec<u8>>,
     reference: Option<String>,
     digest: Option<Vec<u8>>,
     retention: i64,
 }
 
-fn validate_stream_failure_payload(
-    payload: &StoredStreamFailurePayload,
-) -> Result<(), RuntimeError> {
-    if let Some(digest) = &payload.digest
-        && digest.len() != 32
-    {
-        return Err(RuntimeError::RecoveryInvalid);
-    }
-    match payload.retention {
-        1 if payload.payload.is_some()
-            && payload.reference.is_none()
-            && payload.digest.is_none() =>
-        {
-            Ok(())
-        }
-        2 if payload.payload.is_none()
-            && payload
-                .reference
-                .as_deref()
-                .is_some_and(|value| !value.is_empty())
-            && payload.digest.is_some() =>
-        {
-            Ok(())
-        }
-        _ => Err(RuntimeError::RecoveryInvalid),
-    }
-}
-
 async fn load_stored_stream_failure_payload(
     connection: &Connection,
     identity: &FailureIdentity,
-) -> Result<Option<StoredStreamFailurePayload>, RuntimeError> {
+) -> Result<Option<StoredFailurePayload>, RuntimeError> {
     let mut rows = connection
         .query(
             STREAM_FAILURE_PAYLOAD_SELECT,
@@ -18188,14 +18199,13 @@ async fn load_stored_stream_failure_payload(
     else {
         return Ok(None);
     };
-    let payload = StoredStreamFailurePayload {
-        payload: row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
-        reference: row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
-        digest: row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?,
-        retention: row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?,
-    };
-    validate_stream_failure_payload(&payload)?;
-    Ok(Some(payload))
+    StoredFailurePayload::from_columns(
+        row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?,
+    )
+    .map(Some)
 }
 
 async fn load_stream_failure_payload_metadata(
@@ -18205,12 +18215,15 @@ async fn load_stream_failure_payload_metadata(
     let Some(payload) = load_stored_stream_failure_payload(connection, identity).await? else {
         return Ok(None);
     };
+    let (plaintext_bytes, protected_reference) = match &payload {
+        StoredFailurePayload::Plaintext(bytes) => {
+            (Some(u64::try_from(bytes.len()).unwrap_or(u64::MAX)), false)
+        }
+        StoredFailurePayload::ProtectedReference { .. } => (None, true),
+    };
     Ok(Some(StreamFailurePayloadMetadata {
-        plaintext_bytes: payload
-            .payload
-            .as_ref()
-            .map(|bytes| u64::try_from(bytes.len()).unwrap_or(u64::MAX)),
-        protected_reference: payload.retention == 2,
+        plaintext_bytes,
+        protected_reference,
         redacted: true,
     }))
 }
