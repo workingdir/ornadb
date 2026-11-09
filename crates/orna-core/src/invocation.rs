@@ -1555,9 +1555,10 @@ fn selector_order(
 mod tests {
     use super::*;
     use crate::catalogue::{
-        CatalogueSnapshot, FunctionDefinition, FunctionDomain, FunctionReturn, FunctionSecurity,
-        FunctionTransaction, FunctionVolatility, ObjectTypeDefinition, ParameterDefinition,
-        SchemaDefinition, ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
+        CatalogueDefinitions, CatalogueSnapshot, FunctionDefinition, FunctionDomain,
+        FunctionReturn, FunctionSecurity, FunctionTransaction, FunctionVolatility,
+        ObjectTypeDefinition, ParameterDefinition, SchemaDefinition, ValueTypeDefinition,
+        ValueTypeMutability, ValueTypePersistence,
     };
     use crate::revision::{
         ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
@@ -1727,14 +1728,16 @@ mod tests {
         )
         .expect("an application source revision");
         let function = decision_function(security);
-        let catalogue = CatalogueSnapshot::new_with_functions(
+        let catalogue = CatalogueSnapshot::from_definitions(
             CatalogueRevisionId::from_bytes([19; 16]),
-            vec![SchemaDefinition::new(
-                SchemaId::from_bytes([20; 16]),
-                QualifiedSemanticName::new(["app"]).expect("a schema name"),
-            )],
-            vec![],
-            vec![function.clone()],
+            CatalogueDefinitions {
+                schemas: vec![SchemaDefinition::new(
+                    SchemaId::from_bytes([20; 16]),
+                    QualifiedSemanticName::new(["app"]).expect("a schema name"),
+                )],
+                functions: vec![function.clone()],
+                ..CatalogueDefinitions::default()
+            },
         )
         .expect("an application function catalogue");
         let origin = SourceOrigin::new(source_unit, 0, 0).expect("a source origin");
@@ -1859,16 +1862,17 @@ mod tests {
             ValueTypePersistence::Persistable,
             "orna.kernel.value.integer@1",
         );
-        let catalogue = CatalogueSnapshot::new_with_functions_and_types(
+        let catalogue = CatalogueSnapshot::from_definitions(
             CatalogueRevisionId::from_bytes([0x49; 16]),
-            vec![SchemaDefinition::new(
-                SchemaId::from_bytes([0x4a; 16]),
-                QualifiedSemanticName::new(["std", "invoke"]).expect("a schema name"),
-            )],
-            vec![],
-            vec![integer_type.clone()],
-            vec![],
-            vec![function.clone()],
+            CatalogueDefinitions {
+                schemas: vec![SchemaDefinition::new(
+                    SchemaId::from_bytes([0x4a; 16]),
+                    QualifiedSemanticName::new(["std", "invoke"]).expect("a schema name"),
+                )],
+                value_types: vec![integer_type.clone()],
+                functions: vec![function.clone()],
+                ..CatalogueDefinitions::default()
+            },
         )
         .expect("a standard catalogue");
         let declaration = SourceOrigin::new(invoke_unit, 0, 0).expect("a source origin");
@@ -2040,20 +2044,22 @@ mod tests {
             Some(FunctionTransaction::ReadOnly),
             FunctionVolatility::Stable,
         );
-        let catalogue = CatalogueSnapshot::new_with_functions(
+        let catalogue = CatalogueSnapshot::from_definitions(
             CatalogueRevisionId::from_bytes([0x76; 16]),
-            vec![
-                SchemaDefinition::new(
-                    SchemaId::from_bytes([0x57; 16]),
-                    QualifiedSemanticName::new(["app"]).expect("a schema name"),
-                ),
-                SchemaDefinition::new(
-                    SchemaId::from_bytes([0x4a; 16]),
-                    QualifiedSemanticName::new(["std", "invoke"]).expect("a schema name"),
-                ),
-            ],
-            vec![],
-            vec![function.clone()],
+            CatalogueDefinitions {
+                schemas: vec![
+                    SchemaDefinition::new(
+                        SchemaId::from_bytes([0x57; 16]),
+                        QualifiedSemanticName::new(["app"]).expect("a schema name"),
+                    ),
+                    SchemaDefinition::new(
+                        SchemaId::from_bytes([0x4a; 16]),
+                        QualifiedSemanticName::new(["std", "invoke"]).expect("a schema name"),
+                    ),
+                ],
+                functions: vec![function.clone()],
+                ..CatalogueDefinitions::default()
+            },
         )
         .expect("an application catalogue that duplicates a standard function");
         let origin = SourceOrigin::new(source_unit, 0, 0).expect("a source origin");
@@ -2552,14 +2558,16 @@ mod tests {
     fn protected_decision_resolves_ambiguity_privately_and_fails_closed_for_definer() {
         let verified = standard_executable_snapshot();
         let standard_function = verified.catalogue().functions()[0].clone();
-        let application = CatalogueSnapshot::new_with_functions(
+        let application = CatalogueSnapshot::from_definitions(
             CatalogueRevisionId::from_bytes([26; 16]),
-            vec![SchemaDefinition::new(
-                SchemaId::from_bytes([0x5b; 16]),
-                QualifiedSemanticName::new(["std", "invoke"]).expect("a schema name"),
-            )],
-            vec![],
-            vec![standard_function],
+            CatalogueDefinitions {
+                schemas: vec![SchemaDefinition::new(
+                    SchemaId::from_bytes([0x5b; 16]),
+                    QualifiedSemanticName::new(["std", "invoke"]).expect("a schema name"),
+                )],
+                functions: vec![standard_function],
+                ..CatalogueDefinitions::default()
+            },
         )
         .expect("an application catalogue that duplicates a standard function");
         assert!(
@@ -2603,24 +2611,28 @@ mod tests {
     fn private_resolution_pins_class_and_executable_for_both_target_classes() {
         let verified = standard_executable_snapshot();
         let standard_function = verified.catalogue().functions()[0].clone();
-        let application = CatalogueSnapshot::new_with_functions(
+        let application = CatalogueSnapshot::from_definitions(
             CatalogueRevisionId::from_bytes([0x5a; 16]),
-            vec![SchemaDefinition::new(
-                SchemaId::from_bytes([0x5b; 16]),
-                QualifiedSemanticName::new(["app"]).expect("a schema name"),
-            )],
-            vec![],
-            vec![decision_function(FunctionSecurity::Invoker)],
+            CatalogueDefinitions {
+                schemas: vec![SchemaDefinition::new(
+                    SchemaId::from_bytes([0x5b; 16]),
+                    QualifiedSemanticName::new(["app"]).expect("a schema name"),
+                )],
+                functions: vec![decision_function(FunctionSecurity::Invoker)],
+                ..CatalogueDefinitions::default()
+            },
         )
         .expect("an application catalogue");
-        let both = CatalogueSnapshot::new_with_functions(
+        let both = CatalogueSnapshot::from_definitions(
             CatalogueRevisionId::from_bytes([0x5c; 16]),
-            vec![SchemaDefinition::new(
-                SchemaId::from_bytes([0x5d; 16]),
-                QualifiedSemanticName::new(["std", "invoke"]).expect("a schema name"),
-            )],
-            vec![],
-            vec![standard_function.clone()],
+            CatalogueDefinitions {
+                schemas: vec![SchemaDefinition::new(
+                    SchemaId::from_bytes([0x5d; 16]),
+                    QualifiedSemanticName::new(["std", "invoke"]).expect("a schema name"),
+                )],
+                functions: vec![standard_function.clone()],
+                ..CatalogueDefinitions::default()
+            },
         )
         .expect("an application catalogue that duplicates a standard function");
         let application_selector = InvocationTarget::function_id(FunctionId::from_bytes([10; 16]));

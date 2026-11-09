@@ -498,6 +498,26 @@ impl FunctionDefinition {
     }
 }
 
+/// The definitions of one catalogue revision before validation. A category a
+/// snapshot has no definitions for stays empty.
+#[derive(Clone, Debug, Default)]
+pub struct CatalogueDefinitions {
+    /// Declared schemas.
+    pub schemas: Vec<SchemaDefinition>,
+    /// Durable object types.
+    pub object_types: Vec<ObjectTypeDefinition>,
+    /// Primitive and opaque value types.
+    pub value_types: Vec<ValueTypeDefinition>,
+    /// Enum value types.
+    pub enum_types: Vec<EnumTypeDefinition>,
+    /// Named immutable record value types.
+    pub record_value_types: Vec<RecordValueTypeDefinition>,
+    /// Direct type-name bindings.
+    pub type_bindings: Vec<TypeBinding>,
+    /// Functions.
+    pub functions: Vec<FunctionDefinition>,
+}
+
 /// Name and identity lookups over one category of definitions, as positions in
 /// the snapshot-ordered `Vec` that owns them.
 #[derive(Clone, Debug)]
@@ -638,147 +658,31 @@ impl CatalogueSnapshot {
         schemas: Vec<SchemaDefinition>,
         object_types: Vec<ObjectTypeDefinition>,
     ) -> Result<Self, CatalogueSnapshotError> {
-        Self::new_with_functions_and_types(
+        Self::from_definitions(
             revision,
-            schemas,
-            object_types,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
+            CatalogueDefinitions {
+                schemas,
+                object_types,
+                ..CatalogueDefinitions::default()
+            },
         )
     }
 
-    /// Validates and creates a snapshot with schemas, object types, and functions.
-    pub fn new_with_functions(
+    /// Validates and creates an immutable catalogue snapshot from the
+    /// definitions of every category.
+    pub fn from_definitions(
         revision: CatalogueRevisionId,
-        schemas: Vec<SchemaDefinition>,
-        object_types: Vec<ObjectTypeDefinition>,
-        functions: Vec<FunctionDefinition>,
+        definitions: CatalogueDefinitions,
     ) -> Result<Self, CatalogueSnapshotError> {
-        Self::new_with_functions_and_types(
-            revision,
-            schemas,
-            object_types,
-            Vec::new(),
-            Vec::new(),
-            functions,
-        )
-    }
-
-    /// Validates and creates a snapshot with object types, value types, and bindings.
-    pub fn new_with_types(
-        revision: CatalogueRevisionId,
-        schemas: Vec<SchemaDefinition>,
-        object_types: Vec<ObjectTypeDefinition>,
-        value_types: Vec<ValueTypeDefinition>,
-        type_bindings: Vec<TypeBinding>,
-    ) -> Result<Self, CatalogueSnapshotError> {
-        Self::new_with_functions_and_types(
-            revision,
-            schemas,
-            object_types,
-            value_types,
-            type_bindings,
-            Vec::new(),
-        )
-    }
-
-    /// Validates and creates a snapshot with functions and all catalogue type categories.
-    pub fn new_with_functions_and_types(
-        revision: CatalogueRevisionId,
-        schemas: Vec<SchemaDefinition>,
-        object_types: Vec<ObjectTypeDefinition>,
-        value_types: Vec<ValueTypeDefinition>,
-        type_bindings: Vec<TypeBinding>,
-        functions: Vec<FunctionDefinition>,
-    ) -> Result<Self, CatalogueSnapshotError> {
-        Self::new_with_functions_and_enum_types(
-            revision,
-            schemas,
-            object_types,
-            value_types,
-            Vec::new(),
-            type_bindings,
-            functions,
-        )
-    }
-
-    /// Validates and creates a snapshot with enum types and the earlier categories.
-    pub fn new_with_enum_types(
-        revision: CatalogueRevisionId,
-        schemas: Vec<SchemaDefinition>,
-        object_types: Vec<ObjectTypeDefinition>,
-        value_types: Vec<ValueTypeDefinition>,
-        enum_types: Vec<EnumTypeDefinition>,
-        type_bindings: Vec<TypeBinding>,
-    ) -> Result<Self, CatalogueSnapshotError> {
-        Self::new_with_functions_and_enum_types(
-            revision,
-            schemas,
-            object_types,
-            value_types,
-            enum_types,
-            type_bindings,
-            Vec::new(),
-        )
-    }
-
-    /// Validates and creates a snapshot with functions, enums, and earlier categories.
-    pub fn new_with_functions_and_enum_types(
-        revision: CatalogueRevisionId,
-        schemas: Vec<SchemaDefinition>,
-        object_types: Vec<ObjectTypeDefinition>,
-        value_types: Vec<ValueTypeDefinition>,
-        enum_types: Vec<EnumTypeDefinition>,
-        type_bindings: Vec<TypeBinding>,
-        functions: Vec<FunctionDefinition>,
-    ) -> Result<Self, CatalogueSnapshotError> {
-        Self::new_with_functions_and_record_value_types(
-            revision,
-            schemas,
-            object_types,
-            value_types,
-            enum_types,
-            Vec::new(),
-            type_bindings,
-            functions,
-        )
-    }
-
-    /// Validates and creates a snapshot with every type category, including records.
-    pub fn new_with_record_value_types(
-        revision: CatalogueRevisionId,
-        schemas: Vec<SchemaDefinition>,
-        object_types: Vec<ObjectTypeDefinition>,
-        value_types: Vec<ValueTypeDefinition>,
-        enum_types: Vec<EnumTypeDefinition>,
-        record_value_types: Vec<RecordValueTypeDefinition>,
-        type_bindings: Vec<TypeBinding>,
-    ) -> Result<Self, CatalogueSnapshotError> {
-        Self::new_with_functions_and_record_value_types(
-            revision,
+        let CatalogueDefinitions {
             schemas,
             object_types,
             value_types,
             enum_types,
             record_value_types,
             type_bindings,
-            Vec::new(),
-        )
-    }
-
-    /// Validates and creates a snapshot with functions and every type category.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_with_functions_and_record_value_types(
-        revision: CatalogueRevisionId,
-        schemas: Vec<SchemaDefinition>,
-        object_types: Vec<ObjectTypeDefinition>,
-        value_types: Vec<ValueTypeDefinition>,
-        enum_types: Vec<EnumTypeDefinition>,
-        record_value_types: Vec<RecordValueTypeDefinition>,
-        type_bindings: Vec<TypeBinding>,
-        functions: Vec<FunctionDefinition>,
-    ) -> Result<Self, CatalogueSnapshotError> {
+            functions,
+        } = definitions;
         // The categories are validated in a fixed order and each stops at its
         // first error, so the error reported for an input with several faults
         // does not depend on how the checks are organised.
@@ -2406,13 +2310,13 @@ impl Error for CatalogueSnapshotError {}
 #[cfg(test)]
 mod tests {
     use crate::catalogue::{
-        CatalogueSnapshot, CatalogueSnapshotError, EnumTypeDefinition, FieldDefinition,
-        FunctionDefinition, FunctionDomain, FunctionReturn, FunctionReturnColumnDefinition,
-        FunctionSecurity, FunctionTransaction, FunctionVolatility, ObjectTypeDefinition,
-        OnDeleteAction, ParameterDefinition, PreludeTypeName, QualifiedSemanticName,
-        RecordValueFieldDefinition, RecordValueTypeDefinition, SchemaDefinition, SemanticNameError,
-        TypeBinding, TypeBindingKind, TypeDefinitionKind, TypeLookupName, ValueTypeDefinition,
-        ValueTypeMutability, ValueTypePersistence,
+        CatalogueDefinitions, CatalogueSnapshot, CatalogueSnapshotError, EnumTypeDefinition,
+        FieldDefinition, FunctionDefinition, FunctionDomain, FunctionReturn,
+        FunctionReturnColumnDefinition, FunctionSecurity, FunctionTransaction, FunctionVolatility,
+        ObjectTypeDefinition, OnDeleteAction, ParameterDefinition, PreludeTypeName,
+        QualifiedSemanticName, RecordValueFieldDefinition, RecordValueTypeDefinition,
+        SchemaDefinition, SemanticNameError, TypeBinding, TypeBindingKind, TypeDefinitionKind,
+        TypeLookupName, ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
     };
     use crate::{
         CatalogueRevisionId, ExpressionId, FieldId, FunctionId, FunctionRevisionId, ParameterId,
@@ -2625,12 +2529,14 @@ mod tests {
         let qualified = TypeBinding::qualified(name(&["std", "boolean"]), boolean).unwrap();
         let prelude_name = PreludeTypeName::new(["BOOLEAN"]).unwrap();
         let prelude = TypeBinding::prelude(prelude_name.clone(), boolean).unwrap();
-        let catalogue = CatalogueSnapshot::new_with_types(
+        let catalogue = CatalogueSnapshot::from_definitions(
             CatalogueRevisionId::from_bytes([7; 16]),
-            vec![schema(1, &["std"]), schema(2, &["std", "types"])],
-            vec![],
-            vec![value_type],
-            vec![qualified, prelude],
+            CatalogueDefinitions {
+                schemas: vec![schema(1, &["std"]), schema(2, &["std", "types"])],
+                value_types: vec![value_type],
+                type_bindings: vec![qualified, prelude],
+                ..CatalogueDefinitions::default()
+            },
         )
         .unwrap();
 
@@ -2665,13 +2571,14 @@ mod tests {
             ["lead", "owner's", "customer"],
         );
         let alias = TypeBinding::qualified(name(&["crm", "stage_alias"]), stage).unwrap();
-        let catalogue = CatalogueSnapshot::new_with_enum_types(
+        let catalogue = CatalogueSnapshot::from_definitions(
             CatalogueRevisionId::from_bytes([7; 16]),
-            vec![schema(1, &["crm"])],
-            vec![],
-            vec![],
-            vec![enum_type],
-            vec![alias],
+            CatalogueDefinitions {
+                schemas: vec![schema(1, &["crm"])],
+                enum_types: vec![enum_type],
+                type_bindings: vec![alias],
+                ..CatalogueDefinitions::default()
+            },
         )
         .unwrap();
 
@@ -2719,14 +2626,16 @@ mod tests {
             ],
         );
         let alias = TypeBinding::qualified(name(&["geometry", "coordinate"]), point_id).unwrap();
-        let catalogue = CatalogueSnapshot::new_with_record_value_types(
+        let catalogue = CatalogueSnapshot::from_definitions(
             CatalogueRevisionId::from_bytes([7; 16]),
-            vec![schema(1, &["geometry"]), schema(2, &["std", "types"])],
-            vec![],
-            vec![boolean],
-            vec![axis],
-            vec![point],
-            vec![alias],
+            CatalogueDefinitions {
+                schemas: vec![schema(1, &["geometry"]), schema(2, &["std", "types"])],
+                value_types: vec![boolean],
+                enum_types: vec![axis],
+                record_value_types: vec![point],
+                type_bindings: vec![alias],
+                ..CatalogueDefinitions::default()
+            },
         )
         .unwrap();
 
@@ -2786,14 +2695,14 @@ mod tests {
         );
         let point_id = TypeId::from_bytes([13; 16]);
         let point = record(13, &["geometry", "point"], vec![record_field(14, "x", 0)]);
-        let catalogue = CatalogueSnapshot::new_with_record_value_types(
+        let catalogue = CatalogueSnapshot::from_definitions(
             CatalogueRevisionId::from_bytes([7; 16]),
-            vec![schema(1, &["geometry"])],
-            vec![person, shape],
-            vec![],
-            vec![],
-            vec![point],
-            vec![],
+            CatalogueDefinitions {
+                schemas: vec![schema(1, &["geometry"])],
+                object_types: vec![person, shape],
+                record_value_types: vec![point],
+                ..CatalogueDefinitions::default()
+            },
         )
         .unwrap();
 
@@ -2830,14 +2739,13 @@ mod tests {
     #[test]
     fn snapshot_rejects_invalid_record_value_type_members() {
         let build = |record_value_type| {
-            CatalogueSnapshot::new_with_record_value_types(
+            CatalogueSnapshot::from_definitions(
                 CatalogueRevisionId::from_bytes([7; 16]),
-                vec![schema(1, &["geometry"])],
-                vec![],
-                vec![],
-                vec![],
-                vec![record_value_type],
-                vec![],
+                CatalogueDefinitions {
+                    schemas: vec![schema(1, &["geometry"])],
+                    record_value_types: vec![record_value_type],
+                    ..CatalogueDefinitions::default()
+                },
             )
         };
         let point_id = TypeId::from_bytes([2; 16]);
@@ -2898,18 +2806,18 @@ mod tests {
             "orna.kernel.value.void@1",
         );
         let build = |resolved_type| {
-            CatalogueSnapshot::new_with_record_value_types(
+            CatalogueSnapshot::from_definitions(
                 CatalogueRevisionId::from_bytes([7; 16]),
-                vec![schema(1, &["geometry"]), schema(2, &["std", "types"])],
-                vec![],
-                vec![transient.clone()],
-                vec![],
-                vec![record(
-                    2,
-                    &["geometry", "point"],
-                    vec![record_field_with_type(3, "x", 0, resolved_type)],
-                )],
-                vec![],
+                CatalogueDefinitions {
+                    schemas: vec![schema(1, &["geometry"]), schema(2, &["std", "types"])],
+                    value_types: vec![transient.clone()],
+                    record_value_types: vec![record(
+                        2,
+                        &["geometry", "point"],
+                        vec![record_field_with_type(3, "x", 0, resolved_type)],
+                    )],
+                    ..CatalogueDefinitions::default()
+                },
             )
         };
 
@@ -2921,14 +2829,13 @@ mod tests {
             descriptor.clone(),
         )
         .unwrap();
-        let error = CatalogueSnapshot::new_with_record_value_types(
+        let error = CatalogueSnapshot::from_definitions(
             CatalogueRevisionId::from_bytes([7; 16]),
-            vec![schema(1, &["geometry"])],
-            vec![],
-            vec![],
-            vec![],
-            vec![record(2, &["geometry", "point"], vec![field])],
-            vec![],
+            CatalogueDefinitions {
+                schemas: vec![schema(1, &["geometry"])],
+                record_value_types: vec![record(2, &["geometry", "point"], vec![field])],
+                ..CatalogueDefinitions::default()
+            },
         )
         .unwrap_err();
         let owner = TypeId::from_bytes([2; 16]);
@@ -2969,22 +2876,22 @@ mod tests {
         let enum_id = TypeId::from_bytes([96; 16]);
         let normalised_enum = ResolvedType::value(enum_id);
         assert_eq!(
-            CatalogueSnapshot::new_with_record_value_types(
+            CatalogueSnapshot::from_definitions(
                 CatalogueRevisionId::from_bytes([7; 16]),
-                vec![schema(1, &["geometry"])],
-                vec![],
-                vec![],
-                vec![EnumTypeDefinition::new(
-                    enum_id,
-                    name(&["geometry", "axis"]),
-                    ["x"],
-                )],
-                vec![record(
-                    2,
-                    &["geometry", "point"],
-                    vec![record_field_with_type(3, "x", 0, normalised_enum)],
-                )],
-                vec![],
+                CatalogueDefinitions {
+                    schemas: vec![schema(1, &["geometry"])],
+                    enum_types: vec![EnumTypeDefinition::new(
+                        enum_id,
+                        name(&["geometry", "axis"]),
+                        ["x"],
+                    )],
+                    record_value_types: vec![record(
+                        2,
+                        &["geometry", "point"],
+                        vec![record_field_with_type(3, "x", 0, normalised_enum)],
+                    )],
+                    ..CatalogueDefinitions::default()
+                }
             )
             .unwrap()
             .record_value_types()[0]
@@ -2994,22 +2901,23 @@ mod tests {
         );
 
         let resolved_type = ResolvedType::named(object_id);
-        let error = CatalogueSnapshot::new_with_record_value_types(
+        let error = CatalogueSnapshot::from_definitions(
             CatalogueRevisionId::from_bytes([7; 16]),
-            vec![schema(1, &["geometry"])],
-            vec![object(95, &["geometry", "object"], vec![])],
-            vec![],
-            vec![EnumTypeDefinition::new(
-                enum_id,
-                name(&["geometry", "axis"]),
-                ["x"],
-            )],
-            vec![record(
-                2,
-                &["geometry", "point"],
-                vec![record_field_with_type(3, "x", 0, resolved_type)],
-            )],
-            vec![],
+            CatalogueDefinitions {
+                schemas: vec![schema(1, &["geometry"])],
+                object_types: vec![object(95, &["geometry", "object"], vec![])],
+                enum_types: vec![EnumTypeDefinition::new(
+                    enum_id,
+                    name(&["geometry", "axis"]),
+                    ["x"],
+                )],
+                record_value_types: vec![record(
+                    2,
+                    &["geometry", "point"],
+                    vec![record_field_with_type(3, "x", 0, resolved_type)],
+                )],
+                ..CatalogueDefinitions::default()
+            },
         )
         .unwrap_err();
         assert_eq!(
@@ -3025,39 +2933,39 @@ mod tests {
         // referenced record is declared later in the input.
         let nested_id = TypeId::from_bytes([97; 16]);
         let enum_id = TypeId::from_bytes([98; 16]);
-        let snapshot = CatalogueSnapshot::new_with_record_value_types(
+        let snapshot = CatalogueSnapshot::from_definitions(
             CatalogueRevisionId::from_bytes([7; 16]),
-            vec![schema(1, &["geometry"])],
-            vec![],
-            vec![],
-            vec![EnumTypeDefinition::new(
-                enum_id,
-                name(&["geometry", "axis"]),
-                ["x"],
-            )],
-            vec![
-                record(
-                    2,
-                    &["geometry", "point"],
-                    vec![record_field_with_type(
-                        3,
-                        "nested",
-                        0,
-                        ResolvedType::named(nested_id),
-                    )],
-                ),
-                record(
-                    97,
-                    &["geometry", "nested"],
-                    vec![record_field_with_type(
-                        4,
-                        "axis",
-                        0,
-                        ResolvedType::value(enum_id),
-                    )],
-                ),
-            ],
-            vec![],
+            CatalogueDefinitions {
+                schemas: vec![schema(1, &["geometry"])],
+                enum_types: vec![EnumTypeDefinition::new(
+                    enum_id,
+                    name(&["geometry", "axis"]),
+                    ["x"],
+                )],
+                record_value_types: vec![
+                    record(
+                        2,
+                        &["geometry", "point"],
+                        vec![record_field_with_type(
+                            3,
+                            "nested",
+                            0,
+                            ResolvedType::named(nested_id),
+                        )],
+                    ),
+                    record(
+                        97,
+                        &["geometry", "nested"],
+                        vec![record_field_with_type(
+                            4,
+                            "axis",
+                            0,
+                            ResolvedType::value(enum_id),
+                        )],
+                    ),
+                ],
+                ..CatalogueDefinitions::default()
+            },
         )
         .unwrap();
         assert_eq!(
@@ -3101,18 +3009,18 @@ mod tests {
             } else {
                 vec![nested, point]
             };
-            let snapshot = CatalogueSnapshot::new_with_record_value_types(
+            let snapshot = CatalogueSnapshot::from_definitions(
                 CatalogueRevisionId::from_bytes([7; 16]),
-                vec![schema(1, &["geometry"])],
-                vec![],
-                vec![],
-                vec![EnumTypeDefinition::new(
-                    enum_id,
-                    name(&["geometry", "axis"]),
-                    ["x"],
-                )],
-                records,
-                vec![],
+                CatalogueDefinitions {
+                    schemas: vec![schema(1, &["geometry"])],
+                    enum_types: vec![EnumTypeDefinition::new(
+                        enum_id,
+                        name(&["geometry", "axis"]),
+                        ["x"],
+                    )],
+                    record_value_types: records,
+                    ..CatalogueDefinitions::default()
+                },
             )
             .expect("local application record field is accepted");
             let point_definition = snapshot
@@ -3150,14 +3058,14 @@ mod tests {
             )
         };
         let build = |schemas, records| {
-            CatalogueSnapshot::new_with_record_value_types(
+            CatalogueSnapshot::from_definitions(
                 CatalogueRevisionId::from_bytes([7; 16]),
-                schemas,
-                vec![],
-                vec![boolean()],
-                vec![],
-                records,
-                vec![],
+                CatalogueDefinitions {
+                    schemas,
+                    value_types: vec![boolean()],
+                    record_value_types: records,
+                    ..CatalogueDefinitions::default()
+                },
             )
         };
 
@@ -3211,14 +3119,14 @@ mod tests {
     fn record_value_types_collide_with_every_primary_type_category() {
         let record_value_type = record(2, &["geometry", "point"], vec![record_field(3, "x", 0)]);
         let object = object(4, &["geometry", "point"], vec![]);
-        let error = CatalogueSnapshot::new_with_record_value_types(
+        let error = CatalogueSnapshot::from_definitions(
             CatalogueRevisionId::from_bytes([7; 16]),
-            vec![schema(1, &["geometry"])],
-            vec![object],
-            vec![],
-            vec![],
-            vec![record_value_type],
-            vec![],
+            CatalogueDefinitions {
+                schemas: vec![schema(1, &["geometry"])],
+                object_types: vec![object],
+                record_value_types: vec![record_value_type],
+                ..CatalogueDefinitions::default()
+            },
         )
         .unwrap_err();
         assert_eq!(
@@ -3234,14 +3142,14 @@ mod tests {
             name(&["geometry", "axis"]),
             ["x"],
         );
-        let error = CatalogueSnapshot::new_with_record_value_types(
+        let error = CatalogueSnapshot::from_definitions(
             CatalogueRevisionId::from_bytes([7; 16]),
-            vec![schema(1, &["geometry"])],
-            vec![],
-            vec![],
-            vec![enum_type],
-            vec![record_value_type],
-            vec![],
+            CatalogueDefinitions {
+                schemas: vec![schema(1, &["geometry"])],
+                enum_types: vec![enum_type],
+                record_value_types: vec![record_value_type],
+                ..CatalogueDefinitions::default()
+            },
         )
         .unwrap_err();
         assert_eq!(
@@ -3258,18 +3166,18 @@ mod tests {
             ValueTypePersistence::Persistable,
             "orna.kernel.value.boolean@1",
         );
-        let error = CatalogueSnapshot::new_with_record_value_types(
+        let error = CatalogueSnapshot::from_definitions(
             CatalogueRevisionId::from_bytes([7; 16]),
-            vec![schema(1, &["geometry"])],
-            vec![],
-            vec![boolean],
-            vec![],
-            vec![record(
-                2,
-                &["geometry", "point"],
-                vec![record_field(3, "x", 0)],
-            )],
-            vec![],
+            CatalogueDefinitions {
+                schemas: vec![schema(1, &["geometry"])],
+                value_types: vec![boolean],
+                record_value_types: vec![record(
+                    2,
+                    &["geometry", "point"],
+                    vec![record_field(3, "x", 0)],
+                )],
+                ..CatalogueDefinitions::default()
+            },
         )
         .unwrap_err();
         assert!(matches!(
@@ -3282,18 +3190,18 @@ mod tests {
             name(&["geometry", "point"]),
             ["x"],
         );
-        let error = CatalogueSnapshot::new_with_record_value_types(
+        let error = CatalogueSnapshot::from_definitions(
             CatalogueRevisionId::from_bytes([7; 16]),
-            vec![schema(1, &["geometry"])],
-            vec![],
-            vec![],
-            vec![enum_type],
-            vec![record(
-                2,
-                &["geometry", "point"],
-                vec![record_field(3, "x", 0)],
-            )],
-            vec![],
+            CatalogueDefinitions {
+                schemas: vec![schema(1, &["geometry"])],
+                enum_types: vec![enum_type],
+                record_value_types: vec![record(
+                    2,
+                    &["geometry", "point"],
+                    vec![record_field(3, "x", 0)],
+                )],
+                ..CatalogueDefinitions::default()
+            },
         )
         .unwrap_err();
         assert!(matches!(
@@ -3305,20 +3213,21 @@ mod tests {
         let binding =
             TypeBinding::qualified(name(&["geometry", "point"]), TypeId::from_bytes([2; 16]))
                 .unwrap();
-        let error = CatalogueSnapshot::new_with_record_value_types(
+        let error = CatalogueSnapshot::from_definitions(
             CatalogueRevisionId::from_bytes([7; 16]),
-            vec![schema(1, &["geometry"]), schema(2, &["std", "types"])],
-            vec![],
-            vec![ValueTypeDefinition::primitive(
-                TypeId::from_bytes([90; 16]),
-                name(&["std", "types", "boolean"]),
-                ValueTypeMutability::Immutable,
-                ValueTypePersistence::Persistable,
-                "orna.kernel.value.boolean@1",
-            )],
-            vec![],
-            vec![record_value_type],
-            vec![binding],
+            CatalogueDefinitions {
+                schemas: vec![schema(1, &["geometry"]), schema(2, &["std", "types"])],
+                value_types: vec![ValueTypeDefinition::primitive(
+                    TypeId::from_bytes([90; 16]),
+                    name(&["std", "types", "boolean"]),
+                    ValueTypeMutability::Immutable,
+                    ValueTypePersistence::Persistable,
+                    "orna.kernel.value.boolean@1",
+                )],
+                record_value_types: vec![record_value_type],
+                type_bindings: vec![binding],
+                ..CatalogueDefinitions::default()
+            },
         )
         .unwrap_err();
         assert!(matches!(
@@ -3326,23 +3235,23 @@ mod tests {
             CatalogueSnapshotError::DuplicateTypeName { .. }
         ));
 
-        let error = CatalogueSnapshot::new_with_record_value_types(
+        let error = CatalogueSnapshot::from_definitions(
             CatalogueRevisionId::from_bytes([7; 16]),
-            vec![schema(1, &["geometry"]), schema(2, &["std", "types"])],
-            vec![],
-            vec![ValueTypeDefinition::primitive(
-                TypeId::from_bytes([90; 16]),
-                name(&["std", "types", "boolean"]),
-                ValueTypeMutability::Immutable,
-                ValueTypePersistence::Persistable,
-                "orna.kernel.value.boolean@1",
-            )],
-            vec![],
-            vec![
-                record(2, &["geometry", "point"], vec![record_field(3, "x", 0)]),
-                record(4, &["geometry", "point"], vec![record_field(5, "y", 0)]),
-            ],
-            vec![],
+            CatalogueDefinitions {
+                schemas: vec![schema(1, &["geometry"]), schema(2, &["std", "types"])],
+                value_types: vec![ValueTypeDefinition::primitive(
+                    TypeId::from_bytes([90; 16]),
+                    name(&["std", "types", "boolean"]),
+                    ValueTypeMutability::Immutable,
+                    ValueTypePersistence::Persistable,
+                    "orna.kernel.value.boolean@1",
+                )],
+                record_value_types: vec![
+                    record(2, &["geometry", "point"], vec![record_field(3, "x", 0)]),
+                    record(4, &["geometry", "point"], vec![record_field(5, "y", 0)]),
+                ],
+                ..CatalogueDefinitions::default()
+            },
         )
         .unwrap_err();
         assert!(matches!(
@@ -3355,13 +3264,13 @@ mod tests {
     fn snapshot_rejects_invalid_enum_labels_and_shared_type_collisions() {
         let stage = TypeId::from_bytes([1; 16]);
         let build = |enum_type| {
-            CatalogueSnapshot::new_with_enum_types(
+            CatalogueSnapshot::from_definitions(
                 CatalogueRevisionId::from_bytes([7; 16]),
-                vec![schema(1, &["crm"])],
-                vec![],
-                vec![],
-                vec![enum_type],
-                vec![],
+                CatalogueDefinitions {
+                    schemas: vec![schema(1, &["crm"])],
+                    enum_types: vec![enum_type],
+                    ..CatalogueDefinitions::default()
+                },
             )
         };
 
@@ -3388,13 +3297,14 @@ mod tests {
         );
 
         let enum_type = EnumTypeDefinition::new(stage, name(&["crm", "stage"]), ["lead"]);
-        let error = CatalogueSnapshot::new_with_enum_types(
+        let error = CatalogueSnapshot::from_definitions(
             CatalogueRevisionId::from_bytes([7; 16]),
-            vec![schema(1, &["crm"])],
-            vec![object(2, &["crm", "stage"], vec![])],
-            vec![],
-            vec![enum_type],
-            vec![],
+            CatalogueDefinitions {
+                schemas: vec![schema(1, &["crm"])],
+                object_types: vec![object(2, &["crm", "stage"], vec![])],
+                enum_types: vec![enum_type],
+                ..CatalogueDefinitions::default()
+            },
         )
         .unwrap_err();
         assert_eq!(
@@ -3412,13 +3322,14 @@ mod tests {
             ValueTypePersistence::Persistable,
             "orna.kernel.value.stage@1",
         );
-        let error = CatalogueSnapshot::new_with_enum_types(
+        let error = CatalogueSnapshot::from_definitions(
             CatalogueRevisionId::from_bytes([7; 16]),
-            vec![schema(1, &["crm"])],
-            vec![],
-            vec![value_type],
-            vec![enum_type],
-            vec![],
+            CatalogueDefinitions {
+                schemas: vec![schema(1, &["crm"])],
+                value_types: vec![value_type],
+                enum_types: vec![enum_type],
+                ..CatalogueDefinitions::default()
+            },
         )
         .unwrap_err();
         assert_eq!(
@@ -3430,13 +3341,14 @@ mod tests {
 
         let enum_type = EnumTypeDefinition::new(stage, name(&["crm", "stage"]), ["lead"]);
         let binding = TypeBinding::qualified(name(&["crm", "stage"]), stage).unwrap();
-        let error = CatalogueSnapshot::new_with_enum_types(
+        let error = CatalogueSnapshot::from_definitions(
             CatalogueRevisionId::from_bytes([7; 16]),
-            vec![schema(1, &["crm"])],
-            vec![],
-            vec![],
-            vec![enum_type],
-            vec![binding],
+            CatalogueDefinitions {
+                schemas: vec![schema(1, &["crm"])],
+                enum_types: vec![enum_type],
+                type_bindings: vec![binding],
+                ..CatalogueDefinitions::default()
+            },
         )
         .unwrap_err();
         assert_eq!(
@@ -3459,12 +3371,15 @@ mod tests {
         );
         let binding = TypeBinding::qualified(name(&["std", "boolean"]), value_type.id()).unwrap();
 
-        let error = CatalogueSnapshot::new_with_types(
+        let error = CatalogueSnapshot::from_definitions(
             CatalogueRevisionId::from_bytes([7; 16]),
-            vec![schema(1, &["std"]), schema(2, &["std", "types"])],
-            vec![object],
-            vec![value_type],
-            vec![binding],
+            CatalogueDefinitions {
+                schemas: vec![schema(1, &["std"]), schema(2, &["std", "types"])],
+                object_types: vec![object],
+                value_types: vec![value_type],
+                type_bindings: vec![binding],
+                ..CatalogueDefinitions::default()
+            },
         )
         .unwrap_err();
 
@@ -3488,12 +3403,14 @@ mod tests {
             "orna.kernel.value.boolean@1",
         );
 
-        let error = CatalogueSnapshot::new_with_types(
+        let error = CatalogueSnapshot::from_definitions(
             CatalogueRevisionId::from_bytes([7; 16]),
-            vec![schema(1, &["std"]), schema(2, &["std", "types"])],
-            vec![object],
-            vec![value],
-            vec![],
+            CatalogueDefinitions {
+                schemas: vec![schema(1, &["std"]), schema(2, &["std", "types"])],
+                object_types: vec![object],
+                value_types: vec![value],
+                ..CatalogueDefinitions::default()
+            },
         )
         .unwrap_err();
 
@@ -3509,12 +3426,12 @@ mod tests {
         let binding =
             TypeBinding::prelude(PreludeTypeName::new(["BOOLEAN"]).unwrap(), target).unwrap();
 
-        let error = CatalogueSnapshot::new_with_types(
+        let error = CatalogueSnapshot::from_definitions(
             CatalogueRevisionId::from_bytes([7; 16]),
-            vec![],
-            vec![],
-            vec![],
-            vec![binding.clone()],
+            CatalogueDefinitions {
+                type_bindings: vec![binding.clone()],
+                ..CatalogueDefinitions::default()
+            },
         )
         .unwrap_err();
 
@@ -3545,16 +3462,19 @@ mod tests {
         );
         let prelude = PreludeTypeName::new(["CHARACTER", "LARGE", "OBJECT"]).unwrap();
         let binding = TypeBinding::prelude(prelude.clone(), value_id).unwrap();
-        let catalogue = CatalogueSnapshot::new_with_types(
+        let catalogue = CatalogueSnapshot::from_definitions(
             CatalogueRevisionId::from_bytes([7; 16]),
-            vec![
-                schema(1, &["character", "large"]),
-                schema(2, &["std"]),
-                schema(3, &["std", "types"]),
-            ],
-            vec![object],
-            vec![value],
-            vec![binding],
+            CatalogueDefinitions {
+                schemas: vec![
+                    schema(1, &["character", "large"]),
+                    schema(2, &["std"]),
+                    schema(3, &["std", "types"]),
+                ],
+                object_types: vec![object],
+                value_types: vec![value],
+                type_bindings: vec![binding],
+                ..CatalogueDefinitions::default()
+            },
         )
         .unwrap();
 
@@ -3584,12 +3504,14 @@ mod tests {
         );
         let binding = TypeBinding::qualified(name(&["other", "boolean"]), value_id).unwrap();
 
-        let error = CatalogueSnapshot::new_with_types(
+        let error = CatalogueSnapshot::from_definitions(
             CatalogueRevisionId::from_bytes([7; 16]),
-            vec![schema(1, &["std"]), schema(2, &["std", "types"])],
-            vec![],
-            vec![value],
-            vec![binding.clone()],
+            CatalogueDefinitions {
+                schemas: vec![schema(1, &["std"]), schema(2, &["std", "types"])],
+                value_types: vec![value],
+                type_bindings: vec![binding.clone()],
+                ..CatalogueDefinitions::default()
+            },
         )
         .unwrap_err();
 
@@ -3613,12 +3535,13 @@ mod tests {
             "",
         );
 
-        let error = CatalogueSnapshot::new_with_types(
+        let error = CatalogueSnapshot::from_definitions(
             CatalogueRevisionId::from_bytes([7; 16]),
-            vec![schema(1, &["std"]), schema(2, &["std", "types"])],
-            vec![],
-            vec![value],
-            vec![],
+            CatalogueDefinitions {
+                schemas: vec![schema(1, &["std"]), schema(2, &["std", "types"])],
+                value_types: vec![value],
+                ..CatalogueDefinitions::default()
+            },
         )
         .unwrap_err();
 
@@ -3691,12 +3614,7 @@ mod tests {
                 if schema == name(&["crm"])
         ));
         assert!(matches!(
-            CatalogueSnapshot::new_with_functions(
-                CatalogueRevisionId::new(),
-                vec![],
-                vec![],
-                vec![function]
-            ),
+            CatalogueSnapshot::from_definitions(CatalogueRevisionId::new(), CatalogueDefinitions { functions: vec![function], ..CatalogueDefinitions::default() }),
             Err(CatalogueSnapshotError::FunctionSchemaNotDeclared { schema, .. })
                 if schema == name(&["crm"])
         ));
@@ -3846,11 +3764,13 @@ mod tests {
             FunctionReturn::Stream(ResolvedType::scalar(StandardScalar::Integer)),
             None,
         );
-        let catalogue = CatalogueSnapshot::new_with_functions(
+        let catalogue = CatalogueSnapshot::from_definitions(
             CatalogueRevisionId::from_bytes([7; 16]),
-            vec![schema(1, &["tasks"])],
-            vec![],
-            vec![function, stream],
+            CatalogueDefinitions {
+                schemas: vec![schema(1, &["tasks"])],
+                functions: vec![function, stream],
+                ..CatalogueDefinitions::default()
+            },
         )
         .unwrap();
 
@@ -3947,38 +3867,46 @@ mod tests {
         );
 
         assert!(matches!(
-            CatalogueSnapshot::new_with_functions(
+            CatalogueSnapshot::from_definitions(
                 CatalogueRevisionId::new(),
-                vec![schema(1, &["tasks"])],
-                vec![],
-                vec![first.clone(), same_name]
+                CatalogueDefinitions {
+                    schemas: vec![schema(1, &["tasks"])],
+                    functions: vec![first.clone(), same_name],
+                    ..CatalogueDefinitions::default()
+                }
             ),
             Err(CatalogueSnapshotError::DuplicateFunctionName { .. })
         ));
         assert!(matches!(
-            CatalogueSnapshot::new_with_functions(
+            CatalogueSnapshot::from_definitions(
                 CatalogueRevisionId::new(),
-                vec![schema(1, &["tasks"])],
-                vec![],
-                vec![first, same_id]
+                CatalogueDefinitions {
+                    schemas: vec![schema(1, &["tasks"])],
+                    functions: vec![first, same_id],
+                    ..CatalogueDefinitions::default()
+                }
             ),
             Err(CatalogueSnapshotError::DuplicateFunctionId { .. })
         ));
         assert!(matches!(
-            CatalogueSnapshot::new_with_functions(
+            CatalogueSnapshot::from_definitions(
                 CatalogueRevisionId::new(),
-                vec![schema(1, &["tasks"])],
-                vec![],
-                vec![duplicate_parameter_name]
+                CatalogueDefinitions {
+                    schemas: vec![schema(1, &["tasks"])],
+                    functions: vec![duplicate_parameter_name],
+                    ..CatalogueDefinitions::default()
+                }
             ),
             Err(CatalogueSnapshotError::DuplicateParameterName { .. })
         ));
         assert!(matches!(
-            CatalogueSnapshot::new_with_functions(
+            CatalogueSnapshot::from_definitions(
                 CatalogueRevisionId::new(),
-                vec![schema(1, &["tasks"])],
-                vec![],
-                vec![duplicate_parameter_id]
+                CatalogueDefinitions {
+                    schemas: vec![schema(1, &["tasks"])],
+                    functions: vec![duplicate_parameter_id],
+                    ..CatalogueDefinitions::default()
+                }
             ),
             Err(CatalogueSnapshotError::DuplicateParameterId { .. })
         ));
@@ -4028,47 +3956,57 @@ mod tests {
         );
 
         assert!(matches!(
-            CatalogueSnapshot::new_with_functions(
+            CatalogueSnapshot::from_definitions(
                 CatalogueRevisionId::new(),
-                vec![schema(1, &["studio"])],
-                vec![],
-                vec![client_transaction]
+                CatalogueDefinitions {
+                    schemas: vec![schema(1, &["studio"])],
+                    functions: vec![client_transaction],
+                    ..CatalogueDefinitions::default()
+                }
             ),
             Err(CatalogueSnapshotError::ClientFunctionTransaction { .. })
         ));
         assert!(matches!(
-            CatalogueSnapshot::new_with_functions(
+            CatalogueSnapshot::from_definitions(
                 CatalogueRevisionId::new(),
-                vec![schema(1, &["tasks"])],
-                vec![],
-                vec![non_contiguous_parameters]
+                CatalogueDefinitions {
+                    schemas: vec![schema(1, &["tasks"])],
+                    functions: vec![non_contiguous_parameters],
+                    ..CatalogueDefinitions::default()
+                }
             ),
             Err(CatalogueSnapshotError::ParameterOrdinalOutOfSequence { .. })
         ));
         assert!(matches!(
-            CatalogueSnapshot::new_with_functions(
+            CatalogueSnapshot::from_definitions(
                 CatalogueRevisionId::new(),
-                vec![schema(1, &["tasks"])],
-                vec![],
-                vec![duplicate_return_column]
+                CatalogueDefinitions {
+                    schemas: vec![schema(1, &["tasks"])],
+                    functions: vec![duplicate_return_column],
+                    ..CatalogueDefinitions::default()
+                }
             ),
             Err(CatalogueSnapshotError::DuplicateReturnColumnName { .. })
         ));
         assert!(matches!(
-            CatalogueSnapshot::new_with_functions(
+            CatalogueSnapshot::from_definitions(
                 CatalogueRevisionId::new(),
-                vec![schema(1, &["tasks"])],
-                vec![],
-                vec![non_contiguous_return_column]
+                CatalogueDefinitions {
+                    schemas: vec![schema(1, &["tasks"])],
+                    functions: vec![non_contiguous_return_column],
+                    ..CatalogueDefinitions::default()
+                }
             ),
             Err(CatalogueSnapshotError::ReturnColumnOrdinalOutOfSequence { .. })
         ));
         assert!(matches!(
-            CatalogueSnapshot::new_with_functions(
+            CatalogueSnapshot::from_definitions(
                 CatalogueRevisionId::new(),
-                vec![schema(1, &["tasks"])],
-                vec![],
-                vec![empty_rows]
+                CatalogueDefinitions {
+                    schemas: vec![schema(1, &["tasks"])],
+                    functions: vec![empty_rows],
+                    ..CatalogueDefinitions::default()
+                }
             ),
             Err(CatalogueSnapshotError::EmptyRowsReturn { .. })
         ));
