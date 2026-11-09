@@ -7,6 +7,7 @@ license.workspace = true
 description = "Build-time sys API and host-registry generation used by orna-sys"
 
 [dependencies]
+orna-sys-id = { path = "../orna-sys-id" }
 orna-sys-model = { path = "../orna-sys-model" }
 quote = "1.0.45"
 serde = { version = "1.0.229", features = ["derive"] }

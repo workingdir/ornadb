@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Deserialize;
 
 use crate::{AbiVersion, SystemEffect, TypedValue};
-use orna_sys_id::SysFailureCode;
+use orna_sys_id::{SysFailureCode, VersionedId};
 use orna_sys_model::signature::{
     matching_delimiter as matching, split_top_level as split_signature,
 };
@@ -54,7 +54,11 @@ pub struct SemanticRoleId(String);
 impl SemanticRoleId {
     pub fn new(value: impl Into<String>) -> Result<Self, ProviderAbiError> {
         let value = value.into();
-        if !valid_qualified_id(&value) {
+        if value.contains('@') {
+            value
+                .parse::<VersionedId>()
+                .map_err(|_| ProviderAbiError::InvalidRoleId)?;
+        } else if !valid_qualified_id(&value) {
             return Err(ProviderAbiError::InvalidRoleId);
         }
         Ok(Self(value))
@@ -71,7 +75,11 @@ pub struct ProviderId(String);
 impl ProviderId {
     pub fn new(value: impl Into<String>) -> Result<Self, ProviderAbiError> {
         let value = value.into();
-        if !valid_qualified_id(&value) {
+        if value.contains('@') {
+            value
+                .parse::<VersionedId>()
+                .map_err(|_| ProviderAbiError::InvalidProviderId)?;
+        } else if !valid_qualified_id(&value) {
             return Err(ProviderAbiError::InvalidProviderId);
         }
         Ok(Self(value))
@@ -1266,7 +1274,29 @@ fn split_top_level(source: &str, delimiter: char) -> Result<Vec<&str>, ProviderA
 
 #[cfg(test)]
 mod tests {
-    use super::{GENERATED_PROVIDER_ABI, ProviderAbiError, SystemProviderAbi};
+    use super::{
+        GENERATED_PROVIDER_ABI, ProviderAbiError, ProviderId, SemanticRoleId, SystemProviderAbi,
+    };
+
+    #[test]
+    fn versioned_role_and_provider_ids_keep_their_bytes_and_validate_versions() {
+        let role = SemanticRoleId::new("langitem.sys.explain@1.0").unwrap();
+        assert_eq!(role.as_str(), "langitem.sys.explain@1.0");
+        let legacy_role = SemanticRoleId::new("langitem.sys.invoke").unwrap();
+        assert_eq!(legacy_role.as_str(), "langitem.sys.invoke");
+        assert_eq!(
+            SemanticRoleId::new("langitem.sys.explain@1.x"),
+            Err(ProviderAbiError::InvalidRoleId)
+        );
+        let provider = ProviderId::new("host.std.io.fs.read@1.0").unwrap();
+        assert_eq!(provider.as_str(), "host.std.io.fs.read@1.0");
+        let legacy_provider = ProviderId::new("orna.sys.host.filesystem.v1").unwrap();
+        assert_eq!(legacy_provider.as_str(), "orna.sys.host.filesystem.v1");
+        assert_eq!(
+            ProviderId::new("host..io@1.0"),
+            Err(ProviderAbiError::InvalidProviderId)
+        );
+    }
 
     #[test]
     fn provider_registry_rejects_operation_signature_label_mismatches() {
