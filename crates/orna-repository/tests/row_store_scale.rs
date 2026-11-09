@@ -2585,6 +2585,8 @@ async fn admit_production_rows_into(
         .expect("read latest checkpoint")
         .expect("admitted rows leave a checkpoint");
     let freeze = state
+        .publication_writer(&repository)
+        .expect("publication lease")
         .freeze([0x91; 16], &checkpoint)
         .await
         .expect("freeze admitted row prefix");

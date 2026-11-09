@@ -151,6 +151,8 @@ async fn overflow_text_rows_publish_and_read_back_through_production_writer() {
         .expect("read latest checkpoint")
         .expect("admitted rows leave a checkpoint");
     let freeze = state
+        .publication_writer(&repository)
+        .expect("publication lease")
         .freeze([0x9a; 16], &checkpoint)
         .await
         .expect("freeze admitted rows");

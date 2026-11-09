@@ -255,6 +255,8 @@ async fn prepare_publication(
         .expect("read latest checkpoint")
         .expect("capture leaves a checkpoint");
     let freeze = state
+        .publication_writer(repository)
+        .expect("publication lease")
         .freeze([0x82; 16], &checkpoint)
         .await
         .expect("freeze captured row prefix");

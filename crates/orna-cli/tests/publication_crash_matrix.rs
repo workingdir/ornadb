@@ -9,8 +9,7 @@ use std::{
 };
 
 use orna_evaluator::{
-    ActivationEffectReport, EffectGate, Limits, SysHostBindingRegistry,
-    evaluate_expression_ovb2_with_effects,
+    ActivationEffectReport, Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects,
 };
 use orna_repository::Repository;
 use orna_runtime::{
@@ -436,7 +435,12 @@ async fn format3_publication_recovers_when_gc_prunes_candidate_before_publish() 
         seeded_project().await;
     let root = directory.path();
     let checkpoint = state.latest_checkpoint().await.unwrap().unwrap();
-    let freeze = state.freeze([0x44; 16], &checkpoint).await.unwrap();
+    let freeze = state
+        .publication_writer(&repository)
+        .unwrap()
+        .freeze([0x44; 16], &checkpoint)
+        .await
+        .unwrap();
     let intent_id = freeze.intent_id;
     let expected_index = repository.index_generation().unwrap();
     let mut coordinator = RuntimePublicationCoordinator::prepare_allow_noop(
@@ -621,7 +625,12 @@ async fn coordinator_recovery_discards_a_pre_ref_journal_and_keeps_the_batch_pen
     let (_directory, _source, repository, state, head, _relation_id, _format_context) =
         seeded_project().await;
     let checkpoint = state.latest_checkpoint().await.unwrap().unwrap();
-    let freeze = state.freeze([0x45; 16], &checkpoint).await.unwrap();
+    let freeze = state
+        .publication_writer(&repository)
+        .unwrap()
+        .freeze([0x45; 16], &checkpoint)
+        .await
+        .unwrap();
     let index = repository.index_generation().unwrap();
     let coordinator = RuntimePublicationCoordinator::prepare_allow_noop(
         &repository,
@@ -658,7 +667,12 @@ async fn coordinator_recovery_preserves_a_candidate_byte_binding_failure() {
     let (_directory, _source, repository, state, head, _relation_id, _format_context) =
         seeded_project().await;
     let checkpoint = state.latest_checkpoint().await.unwrap().unwrap();
-    let freeze = state.freeze([0x46; 16], &checkpoint).await.unwrap();
+    let freeze = state
+        .publication_writer(&repository)
+        .unwrap()
+        .freeze([0x46; 16], &checkpoint)
+        .await
+        .unwrap();
     let index = repository.index_generation().unwrap();
     let coordinator = RuntimePublicationCoordinator::prepare_allow_noop(
         &repository,
