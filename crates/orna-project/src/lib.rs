@@ -14,9 +14,10 @@ use std::{
 };
 
 use orna_repository::{
-    CommittedTableBinding, CommittedTreeEntry, CommittedTreeEntryKind, FINAL_REPOSITORY_FORMAT,
-    FormatContextError, GitCommitRef, OrpBlobBinding, PrivateCommit, ProtectedContentPin,
-    Repository, RepositoryError, RepositoryFormatContext, TypedKey,
+    CommittedTableBinding, CommittedTableBindingRequest, CommittedTreeEntry,
+    CommittedTreeEntryKind, FINAL_REPOSITORY_FORMAT, FormatContextError, GitCommitRef,
+    OrpBlobBinding, PrivateCommit, ProtectedContentPin, Repository, RepositoryError,
+    RepositoryFormatContext, TypedKey,
 };
 use orna_runtime::vfs::{VfsComponent, project_key_component, unproject_component};
 use orna_runtime::{TableMutation, TableObjectId};
@@ -1913,15 +1914,15 @@ fn resolve_source_table_schema(
         return Err(ProjectLoadError::InvalidTableSchema);
     }
     let binding = context
-        .bind_committed_table(
-            table.module_name(),
-            table.source_path(),
-            table.declaration_name(),
-            *table.table_object_id(),
-            expected_database_id,
-            &snapshot_id,
-            table.descriptor(),
-        )
+        .bind_committed_table(CommittedTableBindingRequest {
+            module_name: table.module_name(),
+            source_path: table.source_path(),
+            declaration_name: table.declaration_name(),
+            table_object_id: *table.table_object_id(),
+            database_id: expected_database_id,
+            snapshot_id: &snapshot_id,
+            schema: table.descriptor(),
+        })
         .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
     if binding.database_id() != expected_database_id
         || binding.snapshot_id() != &snapshot_id

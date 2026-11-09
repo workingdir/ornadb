@@ -1991,8 +1991,8 @@ mod tests {
     use crate::compact::CompactLogicalKeyError;
     use orna_foundation::SchemaDescriptor;
     use orna_repository::{
-        COMPACT_MAX_UNCOMPRESSED_PAGE_BYTES, CompactManifest, CompactSegment, CompactSegmentRole,
-        ManagedFileChange, ManagedPath,
+        COMPACT_MAX_UNCOMPRESSED_PAGE_BYTES, CompactManifest, CompactPublicationRequest,
+        CompactSegment, CompactSegmentRecord, CompactSegmentRole, ManagedFileChange, ManagedPath,
     };
     use parquet::{
         basic::{Compression, Encoding},
@@ -3575,35 +3575,35 @@ mod tests {
         ))
         .unwrap();
         let key = expected_scalar(1);
-        let segment = CompactSegment::new(
-            SEGMENT_ID,
-            CompactSegmentRole::Data,
-            profile.schema_fingerprint(),
-            "test-encoder-v1",
-            segment_path.clone(),
+        let segment = CompactSegment::new(CompactSegmentRecord {
+            segment_id: SEGMENT_ID,
+            role: CompactSegmentRole::Data,
+            schema: profile.schema_fingerprint(),
+            encoder_version: "test-encoder-v1".to_owned(),
+            relative_path: segment_path.clone(),
             bytes,
-            key.clone(),
-            key,
-            1,
-            CanonicalValue::new(OvbRaw::Array(vec![descriptor(KEY_A, int_type())]))
+            min_key: key.clone(),
+            max_key: key,
+            row_count: 1,
+            columns: CanonicalValue::new(OvbRaw::Array(vec![descriptor(KEY_A, int_type())]))
                 .unwrap()
                 .encode()
                 .unwrap(),
-            true,
-            false,
-        )
+            row_group_index: true,
+            bloom: false,
+        })
         .unwrap();
         let head = repository.head().unwrap().unwrap();
         let plan = repository
-            .prepare_compact_publication(
-                &head,
-                repository.index_generation().unwrap(),
-                CompactManifest::empty(TABLE, profile.schema_fingerprint()),
-                [9; 16],
-                [8; 32],
-                &[segment],
-                "compact physical reader fixture",
-            )
+            .prepare_compact_publication(CompactPublicationRequest {
+                expected_head: &head,
+                expected_index: repository.index_generation().unwrap(),
+                base: CompactManifest::empty(TABLE, profile.schema_fingerprint()),
+                runtime_intent_id: [9; 16],
+                cleanup_watermark: [8; 32],
+                segments: &[segment],
+                message: "compact physical reader fixture",
+            })
             .unwrap();
         let manifest = plan.manifest().clone();
         // The drift commits below build on the fixture as the committed HEAD.
@@ -3685,32 +3685,32 @@ mod tests {
                 &SEGMENT_ID.to_string()[..2]
             ))
             .unwrap();
-            let segment = CompactSegment::new(
-                SEGMENT_ID,
-                CompactSegmentRole::Data,
-                profile.schema_fingerprint(),
-                "test-encoder-v1",
-                segment_path,
-                bytes.clone(),
+            let segment = CompactSegment::new(CompactSegmentRecord {
+                segment_id: SEGMENT_ID,
+                role: CompactSegmentRole::Data,
+                schema: profile.schema_fingerprint(),
+                encoder_version: "test-encoder-v1".to_owned(),
+                relative_path: segment_path,
+                bytes: bytes.clone(),
                 min_key,
                 max_key,
-                2,
-                columns.clone(),
-                true,
-                false,
-            )
+                row_count: 2,
+                columns: columns.clone(),
+                row_group_index: true,
+                bloom: false,
+            })
             .unwrap();
             let head = repository.head().unwrap().unwrap();
             let plan = repository
-                .prepare_compact_publication(
-                    &head,
-                    repository.index_generation().unwrap(),
-                    CompactManifest::empty(TABLE, profile.schema_fingerprint()),
-                    [10; 16],
-                    [11; 32],
-                    &[segment],
-                    "committed compact key-bound fixture",
-                )
+                .prepare_compact_publication(CompactPublicationRequest {
+                    expected_head: &head,
+                    expected_index: repository.index_generation().unwrap(),
+                    base: CompactManifest::empty(TABLE, profile.schema_fingerprint()),
+                    runtime_intent_id: [10; 16],
+                    cleanup_watermark: [11; 32],
+                    segments: &[segment],
+                    message: "committed compact key-bound fixture",
+                })
                 .unwrap();
             let manifest = plan.manifest().clone();
             let source = CompactParquetKeySource::from_verified_manifest(
@@ -3773,62 +3773,62 @@ mod tests {
             .encode()
             .unwrap();
 
-        let valid = CompactSegment::new(
-            SEGMENT_ID,
-            CompactSegmentRole::Data,
-            expected_profile.schema_fingerprint(),
-            "test-encoder-v1",
-            path.clone(),
-            valid,
-            key.clone(),
-            key.clone(),
-            1,
-            columns.clone(),
-            true,
-            false,
-        )
+        let valid = CompactSegment::new(CompactSegmentRecord {
+            segment_id: SEGMENT_ID,
+            role: CompactSegmentRole::Data,
+            schema: expected_profile.schema_fingerprint(),
+            encoder_version: "test-encoder-v1".to_owned(),
+            relative_path: path.clone(),
+            bytes: valid,
+            min_key: key.clone(),
+            max_key: key.clone(),
+            row_count: 1,
+            columns: columns.clone(),
+            row_group_index: true,
+            bloom: false,
+        })
         .unwrap();
-        let mismatched = CompactSegment::new(
-            SEGMENT_ID,
-            CompactSegmentRole::Data,
-            expected_profile.schema_fingerprint(),
-            "test-encoder-v1",
-            path,
-            mismatched,
-            key.clone(),
-            key,
-            1,
+        let mismatched = CompactSegment::new(CompactSegmentRecord {
+            segment_id: SEGMENT_ID,
+            role: CompactSegmentRole::Data,
+            schema: expected_profile.schema_fingerprint(),
+            encoder_version: "test-encoder-v1".to_owned(),
+            relative_path: path,
+            bytes: mismatched,
+            min_key: key.clone(),
+            max_key: key,
+            row_count: 1,
             columns,
-            true,
-            false,
-        )
+            row_group_index: true,
+            bloom: false,
+        })
         .unwrap();
         let (temp, repository) = repository();
         let head = repository.head().unwrap().unwrap();
         let generation = repository.index_generation().unwrap();
         assert!(
             repository
-                .prepare_compact_publication(
-                    &head,
-                    generation.clone(),
-                    CompactManifest::empty(TABLE, expected_profile.schema_fingerprint()),
-                    [9; 16],
-                    [8; 32],
-                    &[valid],
-                    "valid schema descriptor fixture",
-                )
+                .prepare_compact_publication(CompactPublicationRequest {
+                    expected_head: &head,
+                    expected_index: generation.clone(),
+                    base: CompactManifest::empty(TABLE, expected_profile.schema_fingerprint()),
+                    runtime_intent_id: [9; 16],
+                    cleanup_watermark: [8; 32],
+                    segments: &[valid],
+                    message: "valid schema descriptor fixture",
+                })
                 .is_ok()
         );
         assert!(matches!(
-            repository.prepare_compact_publication(
-                &head,
-                generation,
-                CompactManifest::empty(TABLE, expected_profile.schema_fingerprint()),
-                [9; 16],
-                [8; 32],
-                &[mismatched],
-                "mismatched schema descriptor fixture",
-            ),
+            repository.prepare_compact_publication(CompactPublicationRequest {
+                expected_head: &head,
+                expected_index: generation,
+                base: CompactManifest::empty(TABLE, expected_profile.schema_fingerprint()),
+                runtime_intent_id: [9; 16],
+                cleanup_watermark: [8; 32],
+                segments: &[mismatched],
+                message: "mismatched schema descriptor fixture",
+            }),
             Err(orna_repository::RepositoryError::InvalidCompactManifest)
         ));
         drop(temp);
@@ -3938,32 +3938,32 @@ mod tests {
         .unwrap()
         .encode()
         .unwrap();
-        let segment = CompactSegment::new(
-            SEGMENT_ID,
-            CompactSegmentRole::Data,
-            profile.schema_fingerprint(),
-            "test-encoder-v1",
-            segment_path,
+        let segment = CompactSegment::new(CompactSegmentRecord {
+            segment_id: SEGMENT_ID,
+            role: CompactSegmentRole::Data,
+            schema: profile.schema_fingerprint(),
+            encoder_version: "test-encoder-v1".to_owned(),
+            relative_path: segment_path,
             bytes,
             min_key,
             max_key,
-            2,
+            row_count: 2,
             columns,
-            true,
-            false,
-        )
+            row_group_index: true,
+            bloom: false,
+        })
         .unwrap();
         let head = repository.head().unwrap().unwrap();
         let plan = repository
-            .prepare_compact_publication(
-                &head,
-                repository.index_generation().unwrap(),
-                CompactManifest::empty(TABLE, profile.schema_fingerprint()),
-                [7; 16],
-                [8; 32],
-                &[segment],
-                "compact string physical reader fixture",
-            )
+            .prepare_compact_publication(CompactPublicationRequest {
+                expected_head: &head,
+                expected_index: repository.index_generation().unwrap(),
+                base: CompactManifest::empty(TABLE, profile.schema_fingerprint()),
+                runtime_intent_id: [7; 16],
+                cleanup_watermark: [8; 32],
+                segments: &[segment],
+                message: "compact string physical reader fixture",
+            })
             .unwrap();
         let manifest = plan.manifest().clone();
         let source = CompactParquetKeySource::from_verified_manifest(
@@ -4265,32 +4265,32 @@ mod tests {
         .unwrap()
         .encode()
         .unwrap();
-        let segment = CompactSegment::new(
-            SEGMENT_ID,
-            CompactSegmentRole::Data,
-            profile.schema_fingerprint(),
-            "test-encoder-v1",
-            path,
+        let segment = CompactSegment::new(CompactSegmentRecord {
+            segment_id: SEGMENT_ID,
+            role: CompactSegmentRole::Data,
+            schema: profile.schema_fingerprint(),
+            encoder_version: "test-encoder-v1".to_owned(),
+            relative_path: path,
             bytes,
-            expected_date("1970-01-01"),
-            expected_date("1970-01-02"),
-            2,
+            min_key: expected_date("1970-01-01"),
+            max_key: expected_date("1970-01-02"),
+            row_count: 2,
             columns,
-            true,
-            false,
-        )
+            row_group_index: true,
+            bloom: false,
+        })
         .unwrap();
         let head = repository.head().unwrap().unwrap();
         let plan = repository
-            .prepare_compact_publication(
-                &head,
-                repository.index_generation().unwrap(),
-                CompactManifest::empty(TABLE, profile.schema_fingerprint()),
-                [4; 16],
-                [5; 32],
-                &[segment],
-                "verified date compact publication",
-            )
+            .prepare_compact_publication(CompactPublicationRequest {
+                expected_head: &head,
+                expected_index: repository.index_generation().unwrap(),
+                base: CompactManifest::empty(TABLE, profile.schema_fingerprint()),
+                runtime_intent_id: [4; 16],
+                cleanup_watermark: [5; 32],
+                segments: &[segment],
+                message: "verified date compact publication",
+            })
             .unwrap();
         let manifest = plan.manifest().clone();
         let source = CompactParquetKeySource::from_verified_manifest(
