@@ -4892,25 +4892,49 @@ fn resolve_imports_with_dependencies(
 ) -> Scope {
     let ImportInputs {
         modules,
-        historical_modules,
         attached_symbols,
-        attached_databases,
         dependency_summaries,
-        units,
-    } = inputs;
-    let mut scope = Scope {
+        ..
+    } = &inputs;
+    let mut scope = module_scope(namespace, tree, header, &inputs, diagnostics);
+    install_attached_symbols(&mut scope, attached_symbols);
+    install_module_rows(&mut scope, modules);
+    let mut implicit_roots = register_implicit_modules(&mut scope, modules);
+    let (explicit, glob) =
+        collect_use_bindings(&mut scope, tree, modules, &mut implicit_roots, diagnostics);
+    apply_use_bindings(&mut scope, explicit, glob, diagnostics);
+    import_protocol_members(&mut scope, tree, modules);
+    import_dependency_provenance(&mut scope, tree, modules, dependency_summaries);
+    canonicalize_scope_metadata(&mut scope, namespace, tree);
+    scope.currency_types = currency_types(namespace, tree, &scope);
+    install_attached_type_rows(&mut scope, attached_symbols);
+    collect_protocol_implementations(&mut scope, tree);
+
+    collect_nominal_conversion_effects(&mut scope, tree);
+    merge_exported_conversion_metadata(&mut scope, modules);
+    scope
+}
+
+fn module_scope(
+    namespace: &Namespace,
+    tree: &SyntaxTree,
+    header: &ModuleHeader,
+    inputs: &ImportInputs<'_>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Scope {
+    Scope {
         names: header.symbols.clone(),
         current_namespace: None,
-        source_units: Rc::clone(&units.units),
-        source_dimensions: Rc::clone(&units.dimensions),
+        source_units: Rc::clone(&inputs.units.units),
+        source_dimensions: Rc::clone(&inputs.units.dimensions),
         function_dependencies: RefCell::new(BTreeMap::new()),
         unlinked_system_members: None,
         ambiguous: BTreeSet::new(),
         nominal_identities: BTreeMap::new(),
         modules: BTreeMap::new(),
-        available_modules: modules.clone(),
-        historical_modules: historical_modules.clone(),
-        attached_databases: attached_databases.clone(),
+        available_modules: inputs.modules.clone(),
+        historical_modules: inputs.historical_modules.clone(),
+        attached_databases: inputs.attached_databases.clone(),
         // Row shapes and automatic-key tables are keyed by the same qualified
         // identity that table symbols carry, never by the bare declared name.
         table_rows: tree
@@ -5023,7 +5047,10 @@ fn resolve_imports_with_dependencies(
         nominal_conversions: BTreeMap::new(),
         nominal_conversion_effects: BTreeMap::new(),
         return_frames: RefCell::new(Vec::new()),
-    };
+    }
+}
+
+fn install_attached_symbols(scope: &mut Scope, attached_symbols: &BTreeMap<String, Symbol>) {
     for (name, symbol) in attached_symbols {
         scope
             .names
@@ -5049,6 +5076,9 @@ fn resolve_imports_with_dependencies(
                 .or_insert_with(|| Type::Record(row.clone()));
         }
     }
+}
+
+fn install_module_rows(scope: &mut Scope, modules: &BTreeMap<Namespace, ModuleHeader>) {
     for (module_namespace, module) in modules {
         for (name, symbol) in &module.exports {
             if symbol.kind != SymbolKind::Table {
@@ -5083,6 +5113,12 @@ fn resolve_imports_with_dependencies(
                 .or_insert_with(|| Type::Record(fields.clone()));
         }
     }
+}
+
+fn register_implicit_modules(
+    scope: &mut Scope,
+    modules: &BTreeMap<Namespace, ModuleHeader>,
+) -> BTreeSet<String> {
     if modules.contains_key(&Namespace(vec!["std".into()])) {
         scope
             .modules
@@ -5096,7 +5132,16 @@ fn resolve_imports_with_dependencies(
                 .or_insert_with(|| module_namespace.clone());
         }
     }
-    let mut implicit_roots = scope.modules.keys().cloned().collect::<BTreeSet<_>>();
+    scope.modules.keys().cloned().collect::<BTreeSet<_>>()
+}
+
+fn collect_use_bindings(
+    scope: &mut Scope,
+    tree: &SyntaxTree,
+    modules: &BTreeMap<Namespace, ModuleHeader>,
+    implicit_roots: &mut BTreeSet<String>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> (BTreeMap<String, Symbol>, BTreeMap<String, Vec<Symbol>>) {
     let mut explicit = BTreeMap::<String, Symbol>::new();
     let mut glob = BTreeMap::<String, Vec<Symbol>>::new();
     for item in &tree.items {
@@ -5237,6 +5282,15 @@ fn resolve_imports_with_dependencies(
             }
         }
     }
+    (explicit, glob)
+}
+
+fn apply_use_bindings(
+    scope: &mut Scope,
+    explicit: BTreeMap<String, Symbol>,
+    glob: BTreeMap<String, Vec<Symbol>>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
     for (name, symbol) in explicit {
         scope.names.entry(name).or_insert(symbol);
     }
@@ -5253,6 +5307,13 @@ fn resolve_imports_with_dependencies(
             scope.ambiguous.insert(name);
         }
     }
+}
+
+fn import_protocol_members(
+    scope: &mut Scope,
+    tree: &SyntaxTree,
+    modules: &BTreeMap<Namespace, ModuleHeader>,
+) {
     // Import the protocol member signatures alongside named or wildcard
     // imports so implementations are checked against captured source.
     for item in &tree.items {
@@ -5288,6 +5349,14 @@ fn resolve_imports_with_dependencies(
             }
         }
     }
+}
+
+fn import_dependency_provenance(
+    scope: &mut Scope,
+    tree: &SyntaxTree,
+    modules: &BTreeMap<Namespace, ModuleHeader>,
+    dependency_summaries: &BTreeMap<Namespace, BTreeMap<String, BTreeSet<String>>>,
+) {
     // Preserve dependency provenance for imported helpers without extending
     // the public ModuleHeader/Symbol representations. Qualified calls use the
     // module binding (including aliases); named and wildcard imports use their
@@ -5383,8 +5452,9 @@ fn resolve_imports_with_dependencies(
             }
         }
     }
-    canonicalize_scope_metadata(&mut scope, namespace, tree);
-    scope.currency_types = currency_types(namespace, tree, &scope);
+}
+
+fn install_attached_type_rows(scope: &mut Scope, attached_symbols: &BTreeMap<String, Symbol>) {
     for (name, symbol) in attached_symbols {
         if symbol.kind == SymbolKind::Type
             && let Some(row) = symbol.table_fields()
@@ -5399,6 +5469,9 @@ fn resolve_imports_with_dependencies(
                 .or_insert_with(|| Type::Record(row.clone()));
         }
     }
+}
+
+fn collect_protocol_implementations(scope: &mut Scope, tree: &SyntaxTree) {
     for item in &tree.items {
         let (target, members) = match &item.declaration {
             Declaration::Type {
@@ -5443,10 +5516,10 @@ fn resolve_imports_with_dependencies(
             ),
             _ => continue,
         };
-        let target_identity = canonical_nominal_name(target, &scope);
+        let target_identity = canonical_nominal_name(target, scope);
         let protocols = members
             .iter()
-            .map(|implementation| resolved_type_of(&implementation.protocol, &scope))
+            .map(|implementation| resolved_type_of(&implementation.protocol, scope))
             .filter(|protocol| *protocol != Type::Error)
             .collect::<Vec<_>>();
         scope
@@ -5464,7 +5537,7 @@ fn resolve_imports_with_dependencies(
             if path.as_slice() != ["From"] || arguments.len() != 1 {
                 continue;
             }
-            if let Some(source) = valid_static_type(&arguments[0], &scope) {
+            if let Some(source) = valid_static_type(&arguments[0], scope) {
                 scope
                     .nominal_conversions
                     .entry(target_identity.clone())
@@ -5473,10 +5546,8 @@ fn resolve_imports_with_dependencies(
             }
         }
     }
-    collect_nominal_conversion_effects(&mut scope, tree);
-    merge_exported_conversion_metadata(&mut scope, modules);
-    scope
 }
+
 fn collect_nominal_conversion_effects(scope: &mut Scope, tree: &SyntaxTree) {
     for item in &tree.items {
         let (target, implementations) = match &item.declaration {
@@ -11904,7 +11975,7 @@ fn inferred_comparison_parameter_type(
             Expr::Name { text, .. } if text == name => Some(other),
             Expr::Field {
                 base, name: field, ..
-            } if is_direct_name(base, name) => {
+            } if contains_direct_name(base, name) => {
                 Some(Type::Record(BTreeMap::from([(field.clone(), other)])))
             }
             _ => None,
@@ -12031,7 +12102,7 @@ fn inferred_relation_parameter_type(body: &Expr, name: &str) -> Option<Type> {
     let Expr::Binary { lhs, rhs, op, .. } = unwrap_group(body) else {
         return None;
     };
-    if op != "|" || !is_direct_name(lhs, name) {
+    if op != "|" || !contains_direct_name(lhs, name) {
         return None;
     }
     let Expr::Call {
@@ -12077,7 +12148,7 @@ fn inferred_record_fields(body: &Expr, name: &str) -> BTreeMap<String, Type> {
         match expression {
             Expr::Field {
                 base, name: field, ..
-            } if is_direct_name(base, name) => {
+            } if contains_direct_name(base, name) => {
                 fields.entry(field.clone()).or_insert(Type::Error);
             }
             Expr::Unary { rhs, .. } | Expr::Group { inner: rhs, .. } => visit(rhs, name, fields),
@@ -12219,15 +12290,12 @@ fn parameter_comparison_usage(expression: &Expr, name: &str) -> bool {
     visit(expression, name)
 }
 
+/// Whether the expression is the bare (possibly parenthesised) name `name`.
 fn contains_direct_name(expression: &Expr, name: &str) -> bool {
     match unwrap_group(expression) {
         Expr::Name { text, .. } => text == name,
         _ => false,
     }
-}
-
-fn is_direct_name(expression: &Expr, name: &str) -> bool {
-    contains_direct_name(expression, name)
 }
 
 fn unwrap_group(expression: &Expr) -> &Expr {
@@ -16835,6 +16903,38 @@ fn infer_success_pipeline(
     } else {
         infer(lhs, scope, local, diagnostics)
     };
+    if let Some(result) = pipeline_generic_stage(&input, rhs, scope, local, diagnostics) {
+        return result;
+    }
+    if diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code() == DIAG_DURABLE_CONSUMER_SOURCE_ROOTS)
+    {
+        return Inferred::error_with(input.effects);
+    }
+    if let Some(result) = pipeline_relation_module_stage(&input, rhs, scope, local, diagnostics) {
+        return result;
+    }
+    if let Some(result) = pipeline_relation_intrinsic_stage(&input, rhs, scope, local, diagnostics)
+    {
+        return result;
+    }
+    if let Some(result) = pipeline_collection_stage(&input, rhs, scope, local, diagnostics) {
+        return result;
+    }
+    if let Some(result) = pipeline_untyped_stage(&input, rhs, scope, local, diagnostics) {
+        return result;
+    }
+    infer_relation_stream_pipeline(input, rhs, scope, local, diagnostics)
+}
+
+fn pipeline_generic_stage(
+    input: &Inferred,
+    rhs: &Expr,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
     if let Expr::GenericCall {
         callee,
         type_arguments,
@@ -16842,15 +16942,15 @@ fn infer_success_pipeline(
         ..
     } = rhs
     {
-        return infer_generic_pipeline_stage(
-            input,
+        return Some(infer_generic_pipeline_stage(
+            input.clone(),
             callee,
             type_arguments,
             arguments,
             scope,
             local,
             diagnostics,
-        );
+        ));
     }
     if let Expr::Call {
         callee, arguments, ..
@@ -16870,12 +16970,12 @@ fn infer_success_pipeline(
             diagnostics,
         )
         .expect("sys.explain has a query-plan overload");
-        let mut effects = input.effects;
+        let mut effects = input.effects.clone();
         effects.join(&stage.effects);
-        return Inferred {
+        return Some(Inferred {
             ty: stage.ty,
             effects,
-        };
+        });
     }
     if let Expr::Call {
         callee, arguments, ..
@@ -16894,34 +16994,40 @@ fn infer_success_pipeline(
             local,
             diagnostics,
         );
-        let mut effects = input.effects;
+        let mut effects = input.effects.clone();
         effects.join(&stage.effects);
-        return Inferred {
+        return Some(Inferred {
             ty: stage.ty,
             effects,
-        };
+        });
     }
-    if diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic.code() == DIAG_DURABLE_CONSUMER_SOURCE_ROOTS)
-    {
-        return Inferred::error_with(input.effects);
-    }
+    None
+}
+
+fn pipeline_relation_module_stage(
+    input: &Inferred,
+    rhs: &Expr,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
     if matches!(&input.ty, Type::Relation(_))
         && let Expr::Call {
             callee, arguments, ..
         } = rhs
         && standard_statistics_module_operation(callee, scope, local).is_some()
     {
-        return infer_relation_statistics_call(
-            callee,
-            arguments,
-            Some(input),
-            scope,
-            local,
-            diagnostics,
-        )
-        .expect("recognized statistics module operation has relation input");
+        return Some(
+            infer_relation_statistics_call(
+                callee,
+                arguments,
+                Some(input.clone()),
+                scope,
+                local,
+                diagnostics,
+            )
+            .expect("recognized statistics module operation has relation input"),
+        );
     }
     if matches!(&input.ty, Type::Relation(_))
         && let Expr::Call {
@@ -16929,15 +17035,25 @@ fn infer_success_pipeline(
         } = rhs
         && let Some(operation) = standard_collection_module_operation(callee, scope, local)
     {
-        return infer_relation_collection_pipeline(
+        return Some(infer_relation_collection_pipeline(
             operation,
-            input,
+            input.clone(),
             arguments,
             scope,
             local,
             diagnostics,
-        );
+        ));
     }
+    None
+}
+
+fn pipeline_relation_intrinsic_stage(
+    input: &Inferred,
+    rhs: &Expr,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
     if let Type::Relation(element) = &input.ty
         && let Expr::Call {
             callee, arguments, ..
@@ -16956,12 +17072,12 @@ fn infer_success_pipeline(
             local,
             diagnostics,
         );
-        let mut effects = input.effects;
+        let mut effects = input.effects.clone();
         effects.join(&callback.effects);
-        return Inferred {
+        return Some(Inferred {
             ty: Type::Relation(element.clone()),
             effects,
-        };
+        });
     }
     if let Type::Relation(element) = &input.ty
         && let Expr::Call {
@@ -16981,16 +17097,16 @@ fn infer_success_pipeline(
             local,
             diagnostics,
         );
-        let mut effects = input.effects;
+        let mut effects = input.effects.clone();
         effects.join(&callback.effects);
-        return Inferred {
+        return Some(Inferred {
             ty: if callback.ty == Type::Bool {
                 Type::Bool
             } else {
                 Type::Error
             },
             effects,
-        };
+        });
     }
     if let Type::Relation(element) = &input.ty
         && let Expr::Call {
@@ -17007,12 +17123,12 @@ fn infer_success_pipeline(
             local,
             diagnostics,
         );
-        let mut effects = input.effects;
+        let mut effects = input.effects.clone();
         effects.join(&window.effects);
-        return Inferred {
+        return Some(Inferred {
             ty: window.ty,
             effects,
-        };
+        });
     }
     if let Type::Relation(element) = &input.ty
         && let Expr::Call {
@@ -17023,10 +17139,10 @@ fn infer_success_pipeline(
         && root_collection_intrinsic_is_unshadowed("first", scope, local)
         && arguments.is_empty()
     {
-        return Inferred {
+        return Some(Inferred {
             ty: Type::Optional(element.clone()),
-            effects: input.effects,
-        };
+            effects: input.effects.clone(),
+        });
     }
     if let Type::Relation(element) = &input.ty
         && let Expr::Call {
@@ -17039,42 +17155,52 @@ fn infer_success_pipeline(
         && (argument.name.is_none() || argument.name.as_deref() == Some("right"))
     {
         let right = infer(&argument.value, scope, local, diagnostics);
-        let mut effects = input.effects;
+        let mut effects = input.effects.clone();
         effects.join(&right.effects);
         let Type::Relation(right_element) = right.ty else {
             diagnostics.push(diag(
                 DIAG_TYPE,
                 "relation union requires a relation with a compatible element type",
             ));
-            return Inferred::error_with(effects);
+            return Some(Inferred::error_with(effects));
         };
         if !types_match(element, &right_element) {
             diagnostics.push(diag(
                 DIAG_TYPE,
                 "relation union requires relations with compatible element types",
             ));
-            return Inferred::error_with(effects);
+            return Some(Inferred::error_with(effects));
         }
-        return Inferred {
+        return Some(Inferred {
             ty: Type::Relation(element.clone()),
             effects,
-        };
+        });
     }
+    None
+}
+
+fn pipeline_collection_stage(
+    input: &Inferred,
+    rhs: &Expr,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
     if matches!(&input.ty, Type::List(_))
         && let Expr::Call {
             callee, arguments, ..
         } = rhs
         && let Some(operation) = finite_list_collection_operation(callee, scope, local)
     {
-        return infer_finite_list_collection(
+        return Some(infer_finite_list_collection(
             operation,
-            Some(input),
+            Some(input.clone()),
             arguments,
             finite_list_aggregate_element(callee, operation, scope),
             scope,
             local,
             diagnostics,
-        );
+        ));
     }
     if let Type::List(element) = &input.ty
         && let Expr::Call {
@@ -17094,54 +17220,54 @@ fn infer_success_pipeline(
                     local,
                     diagnostics,
                 );
-                let mut effects = input.effects;
+                let mut effects = input.effects.clone();
                 effects.join(&callback.effects);
-                return Inferred {
+                return Some(Inferred {
                     ty: if callback.ty == Type::Bool {
-                        input.ty
+                        input.ty.clone()
                     } else {
                         Type::Error
                     },
                     effects,
-                };
+                });
             }
             ("distinct", []) => {
                 if is_default_float_equality_type(element) {
                     diagnostics.push(diag(
-                        DIAG_TYPE,
-                        "distinct requires a lawful equality key; default Float equality is unavailable",
-                    ));
-                    return Inferred::error_with(input.effects);
+                    DIAG_TYPE,
+                    "distinct requires a lawful equality key; default Float equality is unavailable",
+                ));
+                    return Some(Inferred::error_with(input.effects.clone()));
                 }
-                return Inferred {
-                    ty: input.ty,
-                    effects: input.effects,
-                };
+                return Some(Inferred {
+                    ty: input.ty.clone(),
+                    effects: input.effects.clone(),
+                });
             }
             ("union", [argument])
                 if argument.name.is_none() || argument.name.as_deref() == Some("right") =>
             {
                 let right = infer(&argument.value, scope, local, diagnostics);
-                let mut effects = input.effects;
+                let mut effects = input.effects.clone();
                 effects.join(&right.effects);
                 let Type::List(right_element) = right.ty else {
                     diagnostics.push(diag(
                         DIAG_TYPE,
                         "union requires a list with a compatible element type",
                     ));
-                    return Inferred::error_with(effects);
+                    return Some(Inferred::error_with(effects));
                 };
                 if !types_match(element, &right_element) {
                     diagnostics.push(diag(
                         DIAG_TYPE,
                         "union requires lists with compatible element types",
                     ));
-                    return Inferred::error_with(effects);
+                    return Some(Inferred::error_with(effects));
                 }
-                return Inferred {
-                    ty: input.ty,
+                return Some(Inferred {
+                    ty: input.ty.clone(),
                     effects,
-                };
+                });
             }
             ("sort_by", [argument]) if argument.name.is_none() => {
                 let callback = infer_callback(
@@ -17152,18 +17278,18 @@ fn infer_success_pipeline(
                     local,
                     diagnostics,
                 );
-                let mut effects = input.effects;
+                let mut effects = input.effects.clone();
                 effects.join(&callback.effects);
-                return Inferred {
-                    ty: input.ty,
+                return Some(Inferred {
+                    ty: input.ty.clone(),
                     effects,
-                };
+                });
             }
             ("last", []) => {
-                return Inferred {
+                return Some(Inferred {
                     ty: Type::Optional(element.clone()),
-                    effects: input.effects,
-                };
+                    effects: input.effects.clone(),
+                });
             }
             _ => {}
         }
@@ -17177,12 +17303,12 @@ fn infer_success_pipeline(
                 DIAG_TYPE,
                 "distinct requires a lawful equality key; default Float equality is unavailable",
             ));
-            return Inferred::error_with(input.effects);
+            return Some(Inferred::error_with(input.effects.clone()));
         }
-        return Inferred {
-            ty: input.ty,
-            effects: input.effects,
-        };
+        return Some(Inferred {
+            ty: input.ty.clone(),
+            effects: input.effects.clone(),
+        });
     }
     if let Expr::Call {
         callee, arguments, ..
@@ -17190,7 +17316,7 @@ fn infer_success_pipeline(
         && matches!(callee.as_ref(), Expr::Name { text, .. } if text == "take" || text == "drop")
         && let Type::List(element) = &input.ty
     {
-        let mut effects = input.effects;
+        let mut effects = input.effects.clone();
         let operation = match callee.as_ref() {
             Expr::Name { text, .. } => text.as_str(),
             _ => unreachable!("pipeline collection operation must be named"),
@@ -17225,41 +17351,41 @@ fn infer_success_pipeline(
                 Type::Error
             }
         };
-        return Inferred { ty, effects };
+        return Some(Inferred { ty, effects });
     }
     if let Type::List(element) = &input.ty
         && let Expr::Name { text, .. } = rhs
         && (text == "mean" || root_collection_intrinsic_is_unshadowed(text, scope, local))
         && let Some(ty) = infer_affine_collection_aggregate(text, element, diagnostics)
     {
-        return Inferred {
+        return Some(Inferred {
             ty,
-            effects: input.effects,
-        };
+            effects: input.effects.clone(),
+        });
     }
     if let Type::List(_) = &input.ty
         && let Some(operation @ ("sum" | "min" | "max")) =
             finite_list_collection_operation(rhs, scope, local)
     {
-        return infer_finite_list_collection(
+        return Some(infer_finite_list_collection(
             operation,
-            Some(input),
+            Some(input.clone()),
             &[],
             finite_list_aggregate_element(rhs, operation, scope),
             scope,
             local,
             diagnostics,
-        );
+        ));
     }
     if let Expr::Name { text, .. } = rhs
         && let Type::Relation(element) = &input.ty
         && root_collection_intrinsic_is_unshadowed(text, scope, local)
         && let Some(ty) = infer_relation_sum(text, element, diagnostics)
     {
-        return Inferred {
+        return Some(Inferred {
             ty,
-            effects: input.effects,
-        };
+            effects: input.effects.clone(),
+        });
     }
     if matches!(&input.ty, Type::Relation(_) | Type::Stream(_))
         && let Some((callee, arguments)) = match rhs {
@@ -17290,47 +17416,87 @@ fn infer_success_pipeline(
         )
         && !root_collection_intrinsic_is_unshadowed(text, scope, local)
     {
-        return infer_named_pipeline_stage(input, callee, arguments, scope, local, diagnostics);
+        return Some(infer_named_pipeline_stage(
+            input.clone(),
+            callee,
+            arguments,
+            scope,
+            local,
+            diagnostics,
+        ));
     }
     if let Expr::Name { text, .. } = rhs
         && text == "count"
         && matches!(input.ty, Type::List(_))
     {
-        return Inferred {
+        return Some(Inferred {
             ty: Type::Int,
-            effects: input.effects,
-        };
+            effects: input.effects.clone(),
+        });
     }
     if let Expr::Name { text, .. } = rhs
         && text == "count"
         && matches!(input.ty, Type::Relation(_))
         && root_collection_intrinsic_is_unshadowed("count", scope, local)
     {
-        return Inferred {
+        return Some(Inferred {
             ty: Type::Int,
-            effects: input.effects,
-        };
+            effects: input.effects.clone(),
+        });
     }
+    None
+}
+
+fn pipeline_untyped_stage(
+    input: &Inferred,
+    rhs: &Expr,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
     if !matches!(input.ty, Type::Relation(_) | Type::Stream(_)) {
         if let Some(lambda) = pipeline_lambda(rhs) {
-            return infer_lambda_pipeline_stage(input, lambda, scope, local, diagnostics);
+            return Some(infer_lambda_pipeline_stage(
+                input.clone(),
+                lambda,
+                scope,
+                local,
+                diagnostics,
+            ));
         }
-        return match rhs {
+        return Some(match rhs {
             Expr::Call {
                 callee, arguments, ..
-            } => infer_named_pipeline_stage(input, callee, arguments, scope, local, diagnostics),
+            } => infer_named_pipeline_stage(
+                input.clone(),
+                callee,
+                arguments,
+                scope,
+                local,
+                diagnostics,
+            ),
             Expr::Name { .. } | Expr::Field { .. } => {
-                infer_named_pipeline_stage(input, rhs, &[], scope, local, diagnostics)
+                infer_named_pipeline_stage(input.clone(), rhs, &[], scope, local, diagnostics)
             }
             _ => {
                 diagnostics.push(diag(
                     DIAG_UNSUPPORTED,
                     "pipeline stage is outside this semantic slice",
                 ));
-                Inferred::error_with(input.effects)
+                Inferred::error_with(input.effects.clone())
             }
-        };
+        });
     }
+    None
+}
+
+fn infer_relation_stream_pipeline(
+    input: Inferred,
+    rhs: &Expr,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
     let Expr::Call {
         callee, arguments, ..
     } = rhs
@@ -17488,9 +17654,9 @@ fn infer_success_pipeline(
         {
             if is_default_float_equality_type(&element) {
                 diagnostics.push(diag(
-                    DIAG_TYPE,
-                    "distinct requires a lawful equality key; default Float equality is unavailable",
-                ));
+                DIAG_TYPE,
+                "distinct requires a lawful equality key; default Float equality is unavailable",
+            ));
                 (Type::Error, None)
             } else {
                 (Type::Relation(Box::new(element.clone())), None)
