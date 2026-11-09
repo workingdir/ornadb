@@ -5,9 +5,10 @@ use std::{
     time::Duration,
 };
 
-use orna_evaluator::{AdmittedReplSession, Limits, SysHostBindingRegistry};
+use orna_evaluator::{Limits, SysHostBindingRegistry};
 use orna_foundation::CanonicalValue;
 use orna_project::{LoadedProject, ProjectLoadError, ProjectLoader};
+use orna_project_repl::AdmittedReplSession;
 use orna_repository::{Repository, initialize_repository};
 use orna_semantic::StandardDependencyProfile;
 use orna_sys::{EnvironmentProvider, ProcessProvider};

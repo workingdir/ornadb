@@ -24,12 +24,12 @@ use orna_syntax::{
 };
 use sha2::{Digest as _, Sha256};
 
-use crate::{
+use orna_evaluator::{
     CancellationToken, Environment, EvaluationError, Functions, Limits, NominalDefinition,
     NominalDefinitions, NominalField, PureFunction, ReplSession, module_function_alias_key,
     source_enum_definitions,
 };
-use crate::{reference_standard_profile, reference_standard_sources};
+use orna_evaluator::{reference_standard_profile, reference_standard_sources};
 
 /// Redacted failure from the admitted REPL boundary.
 ///
@@ -235,7 +235,7 @@ impl AdmittedReplSession {
     /// `sys.version.incompatible` rather than inventing host facts.
     #[cfg(feature = "system-host-bindings")]
     #[must_use]
-    pub fn with_sys_host_context(mut self, context: crate::SysHostContext) -> Self {
+    pub fn with_sys_host_context(mut self, context: orna_evaluator::SysHostContext) -> Self {
         self.runtime = self.runtime.with_sys_host_context(context);
         self
     }
@@ -433,7 +433,7 @@ impl AdmittedReplSession {
     pub fn submit_with_sys_host_bindings(
         &mut self,
         source: &str,
-        bindings: &mut crate::SysHostBindingRegistry,
+        bindings: &mut orna_evaluator::SysHostBindingRegistry,
     ) -> Result<Option<CanonicalValue>, ReplError> {
         let input = match self.parse(source) {
             Ok(input) => input,
@@ -492,7 +492,7 @@ impl AdmittedReplSession {
     pub fn evaluate_staged_with_effects(
         &self,
         staged: StagedReplActivation,
-        effects: &mut dyn crate::EffectHandler,
+        effects: &mut dyn orna_evaluator::EffectHandler,
     ) -> Result<(Option<CanonicalValue>, Self), ReplError> {
         let mut successor = self.clone();
         let value = successor
@@ -1232,7 +1232,7 @@ fn locate_identifier(source: &str, name: &str, qualified: bool) -> Option<std::o
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parse_admitted_repl;
+    use orna_evaluator::parse_admitted_repl;
     use orna_project::{AttachedDatabaseSession, PinnedDatabase, ProjectLoader};
     use orna_repository::Repository;
     use orna_semantic::StandardDependencyProfile;
@@ -1641,7 +1641,7 @@ mod tests {
 
     #[test]
     fn admitted_standard_functions_execute_their_verified_source_bodies() {
-        let profile = crate::reference_standard_profile();
+        let profile = orna_evaluator::reference_standard_profile();
         let (_directory, project) = loaded_project(
             &[(
                 "main.orna",
@@ -1651,7 +1651,7 @@ mod tests {
         );
         let mut session = AdmittedReplSession::from_loaded_project(
             &project,
-            crate::reference_standard_sources(),
+            orna_evaluator::reference_standard_sources(),
             Limits::default(),
         )
         .unwrap();
@@ -2513,8 +2513,7 @@ mod tests {
     fn repl_root_enum_identity_matches_the_committed_main_namespace() {
         let parsed = orna_syntax::parse_module(ROOT_TYPES);
         assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
-        let committed =
-            crate::source_enums::source_enum_definitions(Some("main"), &parsed.value.items);
+        let committed = orna_evaluator::source_enum_definitions(Some("main"), &parsed.value.items);
         let definition = &committed["main.Availability"];
         let ready = definition
             .variants

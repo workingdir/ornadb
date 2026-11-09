@@ -341,7 +341,8 @@ id = "E1"
 title = "Supported in-place and temp/rename editors run; editor, kernel and libfuse versions and save settings are recorded"
 select = [{ record = "workspace-cli", package = "orna-cli", target = "test:vfs_editor_compat" }]
 limitations = [
-  "Save settings are fixed in the test; editor, kernel and libfuse versions come from the workspace-cli record's tool versions (ornadb-5il1.9).",
+  "Exercises one in-place save (vim, -Es with the recorded argv) and one temp/rename save (emacs, --batch with the recorded argv); no other editor versions or save settings are covered.",
+  "Editor, kernel and libfuse versions are recorded as tool versions of the CI-installed binaries; no supported-version range is proven (ornadb-5il1.9).",
 ]
 
 [[item]]
@@ -601,7 +602,7 @@ gate = "G"
 id = "G6"
 title = "An invalid mutation stays invalid from REPL, edit and mount"
 select = [{ record = "workspace-cli", package = "orna-cli", target = "test:invalid_mutation_parity", test = "invalid_table_assertion_is_refused_identically_from_repl_edit_and_mount" }, { record = "workspace-cli", package = "orna-cli", target = "test:devtools_app", test = "run_action_refuses_an_invalid_table_mutation_without_writing" }]
-limitations = ["The UI leg refuses the mutation (invalid stays invalid) with a different diagnostic identity: the served console answers ORNA-REPL-EFFECT, not the ORNA-A091-009 the REPL and edit legs give, and the served page and stored rows are unchanged. The refusal is the `is_effectful` guard in `orna-evaluator` `admitted_repl.rs` `submit` (the console path through `AdmittedReplSession::submit`); the `orna-application` ORNA-REPL-EFFECT arm is the project `eval_with_transaction` path and is not the guard this test reaches. The writable serve path is not implemented (ornadb-rheqi). The mount leg proves only EINVAL and unchanged row bytes, since the mount channel carries no diagnostic code. Untested mappings: the three rename-over temporary-save rejections in fuse_mount.rs, and the REPL external-binding refusal in main.rs (table_activation_cause, reached only when an external binding dispatched); no test reaches either with a false assertion. Only the table-assertion class is exercised."]
+limitations = ["The UI leg refuses the mutation (invalid stays invalid) with a different diagnostic identity: the served console answers ORNA-REPL-EFFECT, not the ORNA-A091-009 the REPL and edit legs give, and the served page and stored rows are unchanged. The refusal is the `is_effectful` guard in `orna-project-repl` `lib.rs` `submit` (the console path through `AdmittedReplSession::submit`); the `orna-application` ORNA-REPL-EFFECT arm is the project `eval_with_transaction` path and is not the guard this test reaches. The writable serve path is not implemented (ornadb-rheqi). The mount leg proves only EINVAL and unchanged row bytes, since the mount channel carries no diagnostic code. Untested mappings: the three rename-over temporary-save rejections in fuse_mount.rs, and the REPL external-binding refusal in main.rs (table_activation_cause, reached only when an external binding dispatched); no test reaches either with a false assertion. Only the table-assertion class is exercised."]
 
 [[item]]
 gate = "G"
