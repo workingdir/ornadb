@@ -178,17 +178,19 @@ fn suppressed_paired_rebind_keeps_same_named_tuple_pins_distinct() {
 
     let specialized = specialize_dynamic_parameter_snapshot_contexts(
         &result,
-        &[formal_pair, Type::Text],
-        &BTreeSet::new(),
-        None,
-        &arguments,
-        &[Type::Tuple(vec![
-            contextual_snapshot_ref("selector:HEAD~2"),
-            contextual_snapshot_ref("selector:HEAD~1"),
-        ])],
-        &BTreeMap::new(),
-        &call_span,
-        None,
+        DynamicParameters {
+            formal_parameters: &[formal_pair, Type::Text],
+            default_parameters: &BTreeSet::new(),
+            parameter_names: None,
+            arguments: &arguments,
+            argument_types: &[Type::Tuple(vec![
+                contextual_snapshot_ref("selector:HEAD~2"),
+                contextual_snapshot_ref("selector:HEAD~1"),
+            ])],
+            local: &BTreeMap::new(),
+            call_span: &call_span,
+            historical_context: None,
+        },
     );
     let Type::Record(fields) = specialized else {
         panic!("suppressed paired rebind must retain its record result");
@@ -261,14 +263,16 @@ fn unknown_direct_pair_sibling_suppresses_valid_pin_promotion() {
 
     let specialized = specialize_dynamic_parameter_snapshot_contexts(
         &result,
-        &[left, right],
-        &BTreeSet::new(),
-        None,
-        &arguments,
-        &[contextual_snapshot_ref("selector:HEAD~12"), Type::Error],
-        &BTreeMap::new(),
-        &SyntaxSpan::new(30, 68),
-        None,
+        DynamicParameters {
+            formal_parameters: &[left, right],
+            default_parameters: &BTreeSet::new(),
+            parameter_names: None,
+            arguments: &arguments,
+            argument_types: &[contextual_snapshot_ref("selector:HEAD~12"), Type::Error],
+            local: &BTreeMap::new(),
+            call_span: &SyntaxSpan::new(30, 68),
+            historical_context: None,
+        },
     );
 
     let mut contexts = BTreeSet::new();
@@ -338,20 +342,22 @@ fn unknown_nested_paired_width_suppresses_sibling_identity_promotion() {
 
     let specialized = specialize_dynamic_parameter_snapshot_contexts(
         &result,
-        &[formal_callback, formal_pair],
-        &BTreeSet::new(),
-        None,
-        &arguments,
-        &[
-            actual_callback,
-            Type::Tuple(vec![
-                contextual_snapshot_ref("selector:HEAD~10"),
-                contextual_snapshot_ref("selector:HEAD~9"),
-            ]),
-        ],
-        &BTreeMap::new(),
-        &SyntaxSpan::new(45, 75),
-        None,
+        DynamicParameters {
+            formal_parameters: &[formal_callback, formal_pair],
+            default_parameters: &BTreeSet::new(),
+            parameter_names: None,
+            arguments: &arguments,
+            argument_types: &[
+                actual_callback,
+                Type::Tuple(vec![
+                    contextual_snapshot_ref("selector:HEAD~10"),
+                    contextual_snapshot_ref("selector:HEAD~9"),
+                ]),
+            ],
+            local: &BTreeMap::new(),
+            call_span: &SyntaxSpan::new(45, 75),
+            historical_context: None,
+        },
     );
 
     let mut contexts = BTreeSet::new();
@@ -409,20 +415,22 @@ fn omitted_sibling_keeps_same_named_captured_and_live_slots_distinct() {
     }];
     let specialized = specialize_dynamic_parameter_snapshot_contexts(
         &result,
-        &[
-            Type::Named("sys.SnapshotRef".into()),
-            Type::Tuple(vec![
+        DynamicParameters {
+            formal_parameters: &[
                 Type::Named("sys.SnapshotRef".into()),
-                Type::Named("sys.SnapshotRef".into()),
-            ]),
-        ],
-        &BTreeSet::new(),
-        None,
-        &arguments,
-        &[contextual_snapshot_ref("selector:HEAD~12")],
-        &BTreeMap::new(),
-        &SyntaxSpan::new(5, 30),
-        None,
+                Type::Tuple(vec![
+                    Type::Named("sys.SnapshotRef".into()),
+                    Type::Named("sys.SnapshotRef".into()),
+                ]),
+            ],
+            default_parameters: &BTreeSet::new(),
+            parameter_names: None,
+            arguments: &arguments,
+            argument_types: &[contextual_snapshot_ref("selector:HEAD~12")],
+            local: &BTreeMap::new(),
+            call_span: &SyntaxSpan::new(5, 30),
+            historical_context: None,
+        },
     );
 
     let Type::Applied { base, arguments } = &specialized else {

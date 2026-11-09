@@ -58,9 +58,8 @@ pub use table_storage::{
 pub use typed_row::{DescriptorField, StoredSchema, TypedRowError};
 
 pub use attachments::{
-    AttachedDatabaseSession, AttachedRelationSource, AttachmentError, NestedPairDepthLabel,
-    PACKAGE_PIN_MANIFEST_PATH, PackagePin, PackagePinManifest, PackagePinSpec, PackageResolver,
-    PinnedDatabase, ReboundPathCheckpoint, ReboundPathResolution, SiblingRebindResolution,
+    AttachedDatabaseSession, AttachedRelationSource, AttachmentError, PACKAGE_PIN_MANIFEST_PATH,
+    PackagePin, PackagePinManifest, PackagePinSpec, PackageResolver, PinnedDatabase,
 };
 
 /// Bounded resource limits applied before source contents are read.
