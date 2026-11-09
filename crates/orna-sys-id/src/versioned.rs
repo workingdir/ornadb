@@ -163,6 +163,12 @@ impl fmt::Display for VersionedId {
     }
 }
 
+impl PartialEq<&str> for VersionedId {
+    fn eq(&self, other: &&str) -> bool {
+        self.to_string() == *other
+    }
+}
+
 impl std::str::FromStr for VersionedId {
     type Err = IdError;
 

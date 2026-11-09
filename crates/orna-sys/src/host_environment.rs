@@ -77,8 +77,23 @@ impl EnvironmentProvider {
         Ok(Self { values })
     }
 
+    /// # Preconditions
+    ///
+    /// name matches [A-Z_][A-Z0-9_]*
+    ///
+    /// name is explicitly allowlisted by the host
     #[sys_host_operation(
-        r###"{"name":"std.io.environment.get","version":{"major":1,"minor":0},"signature":"fn std.io.environment.get(name: Str): Str?","effects":["read"],"preconditions":["name matches [A-Z_][A-Z0-9_]*","name is explicitly allowlisted by the host"],"failures":["sys.host.environment.invalid_name","sys.host.environment.denied","sys.host.environment.unavailable"],"role":"host.std.io.environment@1.0","provider":"orna.sys.host.environment.v1","implementation":"get"}"###
+        operation = HostOperation::StdIoEnvironmentGet,
+        effects = [SysEffectKind::Read],
+        failures = [
+            SysFailureCode::HostEnvironmentInvalidName,
+            SysFailureCode::HostEnvironmentDenied,
+            SysFailureCode::HostEnvironmentUnavailable
+        ],
+        role = "host.std.io.environment@1.0",
+        provider = HostProvider::Environment,
+        signature = "fn std.io.environment.get(name: Str): Str?",
+        implementation = "get"
     )]
     pub fn get(&self, name: &str) -> Result<Option<&str>, EnvironmentProviderError> {
         validate_environment_name(name)?;
@@ -90,8 +105,24 @@ impl EnvironmentProvider {
             .map_err(|error| *error)
     }
 
+    /// # Preconditions
+    ///
+    /// name matches [A-Z_][A-Z0-9_]*
+    ///
+    /// name is explicitly allowlisted by the host
     #[sys_host_operation(
-        r###"{"name":"std.io.environment.require","version":{"major":1,"minor":0},"signature":"fn std.io.environment.require(name: Str): Str","effects":["read"],"preconditions":["name matches [A-Z_][A-Z0-9_]*","name is explicitly allowlisted by the host"],"failures":["sys.host.environment.invalid_name","sys.host.environment.denied","sys.host.environment.unset","sys.host.environment.unavailable"],"role":"host.std.io.environment@1.0","provider":"orna.sys.host.environment.v1","implementation":"require"}"###
+        operation = HostOperation::StdIoEnvironmentRequire,
+        effects = [SysEffectKind::Read],
+        failures = [
+            SysFailureCode::HostEnvironmentInvalidName,
+            SysFailureCode::HostEnvironmentDenied,
+            SysFailureCode::HostEnvironmentUnset,
+            SysFailureCode::HostEnvironmentUnavailable
+        ],
+        role = "host.std.io.environment@1.0",
+        provider = HostProvider::Environment,
+        signature = "fn std.io.environment.require(name: Str): Str",
+        implementation = "require"
     )]
     pub fn require(&self, name: &str) -> Result<&str, EnvironmentProviderError> {
         self.get(name)?.ok_or(EnvironmentProviderError::Unset)

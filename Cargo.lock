@@ -1787,6 +1787,7 @@ dependencies = [
 name = "orna-sys-codegen"
 version = "1.1.0"
 dependencies = [
+ "orna-sys-id",
  "orna-sys-model",
  "quote",
  "serde",
