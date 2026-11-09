@@ -1263,19 +1263,45 @@ section 5.2.
 | std.money | format | __format | money.orna:31 | lib.rs:11635 | P1 (locale data) |
 | std.ui | node | __node | ui.orna:5 | lib.rs:9635 | P4 |
 
-Totals by class:
+Totals by class over the 119 table rows (one row per operation, shared
+`std.collection`/`std.query` identities listed once):
 
 ```
 CORE (incl. relation overloads)   27
-P1 host resource                  15
-P2 canonical format/digest        10
+P1 host resource                  16
+P2 canonical format/digest        12
 P3 Unicode data                    4
-P4 representation/plan/stream     25
+P4 representation/plan/stream     22
 P5 canonical key folding           3
 legacy (historical pins only)      6
-SRC                               13
-SRC?                              19 (needs the measured threshold)
+SRC                               15
+SRC?                              14 (needs the measured threshold)
+                                 ---
+                                 119
 ```
+
+Per-module split of the same rows:
+
+```
+collection/query   CORE 24  SRC 9  SRC? 0  P4 1  P5 2  legacy 6   = 42
+math               SRC 6                                        =  6
+text               P3 4  P4 2  SRC? 4                           = 10
+bits               P4 6                                         =  6
+stream             P1 2  P4 8                                   = 10
+concurrent         P1 3                                         =  3
+stats              CORE 3  P4 2  P5 1  SRC? 8                   = 14
+time               P1 6                                         =  6
+hash               P2 3  P4 2                                   =  5
+random             P1 4                                         =  4
+base64/json/orna/ovb  P2 9                                      =  9
+money              P1 1  SRC? 2                                 =  3
+ui                 P4 1                                         =  1
+```
+
+What later stages do to these rows: S4 turns the 4 `std.collection` placeholder
+leaves and the 5 `std.query` window leaves into `fail(...)` markers; S5 deletes
+the 9 `std.collection` list-helper arms and the 6 `std.math` arms (15 rows) and
+moves the 6 historical-pin leaves to `retired.rs`.
 
 ### 3.10 Relationship to the `orna-sys` host registry
 
