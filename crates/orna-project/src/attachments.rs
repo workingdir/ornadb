@@ -13,8 +13,8 @@ use std::{
     path::Path,
 };
 
+use orna_check::ModuleInput;
 use orna_repository::{CommittedTreeEntryKind, GitCommitRef, Repository, RepositoryError};
-use orna_semantic::ModuleInput;
 use orna_syntax::{Declaration, Keyword, TokenKind, lex, parse_module};
 
 use crate::{LoadedProject, LooseRowCandidate, ProjectLoadError, ProjectLoader};

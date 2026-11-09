@@ -1,9 +1,9 @@
-use orna_conformance::{SourceUnit, StageOutcome, TransactionalEvaluator};
-use orna_evaluator::Limits;
-use orna_semantic::{
+use orna_check::{
     Catalogue, DIAG_ASSERTION_ONE_TABLE, DIAG_ASSERTION_SCOPE, ModuleInput, analyze,
     analyze_with_catalogue,
 };
+use orna_conformance::{SourceUnit, StageOutcome, TransactionalEvaluator};
+use orna_evaluator::Limits;
 use orna_value::Value;
 
 const RUNTIME_FIXTURE: &str =

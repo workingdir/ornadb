@@ -1,8 +1,8 @@
 use std::{fs, process::Command};
 
+use orna_check::{Catalogue, ModuleInput, RowUnitInput, admit_row_unit, analyze_with_catalogue};
 use orna_project::ProjectLoader;
 use orna_repository::Repository;
-use orna_semantic::{Catalogue, ModuleInput, RowUnitInput, admit_row_unit, analyze_with_catalogue};
 use orna_syntax::parse_module_with_file;
 use tempfile::TempDir;
 

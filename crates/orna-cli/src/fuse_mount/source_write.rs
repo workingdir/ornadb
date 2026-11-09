@@ -838,10 +838,10 @@ fn admit_source_overlays(
     let catalogue = project
         .production_catalogue()
         .map_err(|error| format!("{error:?}"))?;
-    let analysis = orna_semantic::analyze_with_providers(
+    let analysis = orna_check::analyze_with_providers(
         project.modules(),
         &catalogue,
-        orna_semantic::SystemProviders::Production,
+        orna_check::SystemProviders::Production,
     );
     if analysis.is_ok() {
         return Ok(());

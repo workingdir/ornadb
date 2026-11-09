@@ -1418,7 +1418,7 @@ fn reject_uncaptured_standard_modules(
 
 fn semantic_catalogue(
     project: &orna_project::LoadedProject,
-) -> Result<orna_semantic::Catalogue, Diagnostic> {
+) -> Result<orna_check::Catalogue, Diagnostic> {
     project.production_catalogue().map_err(|_| {
         Diagnostic::target(
             "ORNA-S010-IMPORT",
@@ -1431,10 +1431,10 @@ fn semantic_catalogue(
 fn check_project(endpoint: &Endpoint, color_enabled: bool) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
     let catalogue = semantic_catalogue(&project)?;
-    let analysis = orna_semantic::analyze_with_providers(
+    let analysis = orna_check::analyze_with_providers(
         project.modules(),
         &catalogue,
-        orna_semantic::SystemProviders::Production,
+        orna_check::SystemProviders::Production,
     );
     if analysis.is_ok() {
         write_success_line("project valid", color_enabled)
@@ -1552,7 +1552,7 @@ fn run_project_invocation(
     run_project_invocation_with_arguments(endpoint, root_entry, &Environment::new(), color_enabled)
 }
 
-fn public_project_function(analysis: &orna_semantic::Analysis, target: &str) -> bool {
+fn public_project_function(analysis: &orna_check::Analysis, target: &str) -> bool {
     let Some((module, function)) = target.rsplit_once('.') else {
         return false;
     };
@@ -1566,9 +1566,9 @@ fn public_project_function(analysis: &orna_semantic::Analysis, target: &str) -> 
     }
     analysis
         .modules
-        .get(&orna_semantic::Namespace(namespace))
+        .get(&orna_check::Namespace(namespace))
         .and_then(|module| module.exports.get(function))
-        .is_some_and(|symbol| symbol.kind == orna_semantic::SymbolKind::Function)
+        .is_some_and(|symbol| symbol.kind == orna_check::SymbolKind::Function)
 }
 fn run_public_project_function(
     endpoint: &Endpoint,
@@ -1588,10 +1588,10 @@ fn run_project_function(
 ) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
     let catalogue = std::sync::Arc::new(semantic_catalogue(&project)?);
-    let analysis = orna_semantic::analyze_with_providers(
+    let analysis = orna_check::analyze_with_providers(
         project.modules(),
         &catalogue,
-        orna_semantic::SystemProviders::Production,
+        orna_check::SystemProviders::Production,
     );
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
@@ -1604,9 +1604,9 @@ fn run_project_function(
         && target == "main.main"
         && analysis
             .modules
-            .get(&orna_semantic::Namespace(Vec::new()))
+            .get(&orna_check::Namespace(Vec::new()))
             .and_then(|module| module.symbols.get("main"))
-            .is_some_and(|symbol| symbol.kind == orna_semantic::SymbolKind::Function);
+            .is_some_and(|symbol| symbol.kind == orna_check::SymbolKind::Function);
     if allow_private_root_main && !private_default_main_present {
         return Err(Diagnostic::target(
             "E2103",
@@ -1643,10 +1643,10 @@ fn run_project_stream_invocation(
 ) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
     let catalogue = std::sync::Arc::new(semantic_catalogue(&project)?);
-    let analysis = orna_semantic::analyze_with_providers(
+    let analysis = orna_check::analyze_with_providers(
         project.modules(),
         &catalogue,
-        orna_semantic::SystemProviders::Production,
+        orna_check::SystemProviders::Production,
     );
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
@@ -1754,12 +1754,12 @@ fn run_project_invocation_with_arguments(
 /// The production catalogue of a project that passes semantic analysis.
 fn admit_project_analysis(
     project: &orna_project::LoadedProject,
-) -> Result<std::sync::Arc<orna_semantic::Catalogue>, Diagnostic> {
+) -> Result<std::sync::Arc<orna_check::Catalogue>, Diagnostic> {
     let catalogue = std::sync::Arc::new(semantic_catalogue(project)?);
-    let analysis = orna_semantic::analyze_with_providers(
+    let analysis = orna_check::analyze_with_providers(
         project.modules(),
         &catalogue,
-        orna_semantic::SystemProviders::Production,
+        orna_check::SystemProviders::Production,
     );
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
@@ -1817,7 +1817,7 @@ fn run_project_stream_invocation_with_project(
     root_entry: &str,
     project: &ProjectUnit,
     std_snapshot: StdSnapshotPin,
-    catalogue: std::sync::Arc<orna_semantic::Catalogue>,
+    catalogue: std::sync::Arc<orna_check::Catalogue>,
     color_enabled: bool,
 ) -> Result<(), Diagnostic> {
     let repository =
@@ -1998,7 +1998,7 @@ fn run_authority_invocation(
         return Ok(false);
     }
     let authority = ApplicationAuthority::new(
-        orna_semantic::Catalogue::authoritative_core(),
+        orna_check::Catalogue::authoritative_core(),
         Limits::default(),
     )
     .with_loaded_standard(project)
@@ -2084,10 +2084,10 @@ fn run_authority_invocation(
 /// evaluator.
 fn admit_function_only_project(project: &orna_project::LoadedProject) -> Result<(), Diagnostic> {
     let catalogue = semantic_catalogue(project)?;
-    let analysis = orna_semantic::analyze_with_providers(
+    let analysis = orna_check::analyze_with_providers(
         project.modules(),
         &catalogue,
-        orna_semantic::SystemProviders::Production,
+        orna_check::SystemProviders::Production,
     );
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
@@ -2203,7 +2203,7 @@ struct ReplTransactions {
     tables: Vec<RuntimeTableIdentity>,
     identities: orna_project::ObjectIdentityManifest,
     table_object_ids: Arc<BTreeMap<String, TableObjectId>>,
-    table_schemas: BTreeMap<String, orna_semantic::TableSchema>,
+    table_schemas: BTreeMap<String, orna_check::TableSchema>,
     capture_relation_id: [u8; 16],
     session_id: [u8; 16],
     host_bindings: Rc<RefCell<Option<SysHostBindingRegistry>>>,
@@ -2623,7 +2623,7 @@ enum CommittedRowsError {
 /// The schema of every admitted table, keyed by table name.
 fn admitted_table_schemas(
     admitted: &AdmittedApplication,
-) -> BTreeMap<String, orna_semantic::TableSchema> {
+) -> BTreeMap<String, orna_check::TableSchema> {
     admitted
         .table_schemas()
         .iter()
@@ -2638,7 +2638,7 @@ fn admitted_table_schemas(
 fn committed_rows_at(
     repository: &orna_repository::Repository,
     commit: &orna_repository::GitCommitRef,
-    schemas: &BTreeMap<String, orna_semantic::TableSchema>,
+    schemas: &BTreeMap<String, orna_check::TableSchema>,
     tables: &[RuntimeTableIdentity],
 ) -> Result<(RuntimeTableRows, BTreeMap<String, Vec<String>>), CommittedRowsError> {
     let format = repository
@@ -2874,10 +2874,10 @@ fn repl_transactions(
         return None;
     }
     let catalogue = semantic_catalogue(&project).ok()?;
-    let analysis = orna_semantic::analyze_with_providers(
+    let analysis = orna_check::analyze_with_providers(
         project.modules(),
         &catalogue,
-        orna_semantic::SystemProviders::Production,
+        orna_check::SystemProviders::Production,
     );
     if !analysis.is_ok() {
         return None;
@@ -2935,8 +2935,8 @@ fn repl_transactions(
 /// schema carries an admission, under its qualified name, in module order.
 /// Returns `None` when two admitted tables share a qualified name.
 fn admitted_project_tables(
-    analysis: &orna_semantic::Analysis,
-) -> Option<(Vec<String>, BTreeMap<String, orna_semantic::TableSchema>)> {
+    analysis: &orna_check::Analysis,
+) -> Option<(Vec<String>, BTreeMap<String, orna_check::TableSchema>)> {
     let mut table_names = Vec::new();
     let mut table_schemas = BTreeMap::new();
     for (namespace, module) in &analysis.modules {
@@ -2944,7 +2944,7 @@ fn admitted_project_tables(
             let Some(schema) = symbol.table_schema.as_ref() else {
                 continue;
             };
-            if symbol.kind == orna_semantic::SymbolKind::Table && schema.admission.is_some() {
+            if symbol.kind == orna_check::SymbolKind::Table && schema.admission.is_some() {
                 let table = match namespace.display().as_str() {
                     "" => name.clone(),
                     prefix => format!("{prefix}.{name}"),

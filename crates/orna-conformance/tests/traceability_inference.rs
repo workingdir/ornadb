@@ -1,8 +1,8 @@
 //! Focused successful and failing inference evidence on checked-in sources.
 
+use orna_check::{Catalogue, ModuleInput, Type, analyze_with_catalogue};
 use orna_evaluator::Limits;
 use orna_project_repl::AdmittedReplSession;
-use orna_semantic::{Catalogue, ModuleInput, Type, analyze_with_catalogue};
 use orna_value::Value;
 
 const INFER_SUCCESS: &str = include_str!("fixtures/traceability-infer-success.orna");
@@ -11,14 +11,14 @@ const INFER_UNDERCONSTRAINED: &str =
 const NUMERIC_CONTEXT: &str =
     include_str!("fixtures/reference/examples/valid/numeric-literal-context.orna");
 
-fn analyze(source: &str) -> orna_semantic::Analysis {
+fn analyze(source: &str) -> orna_check::Analysis {
     analyze_with_catalogue(
         &[ModuleInput::new("main.orna", source)],
         &Catalogue::authoritative_fixture(),
     )
 }
 
-fn diagnostic_text(result: &orna_semantic::Analysis) -> String {
+fn diagnostic_text(result: &orna_check::Analysis) -> String {
     result
         .diagnostics
         .iter()
@@ -27,7 +27,7 @@ fn diagnostic_text(result: &orna_semantic::Analysis) -> String {
         .join(" | ")
 }
 
-fn increment_type(result: &orna_semantic::Analysis) -> &Type {
+fn increment_type(result: &orna_check::Analysis) -> &Type {
     &result
         .modules
         .values()

@@ -125,7 +125,7 @@ impl FsBuilder {
     /// directories. Reserved root `.git` and `.orna` are never projected.
     pub(crate) fn add_source_modules(
         &mut self,
-        modules: &[orna_semantic::ModuleInput],
+        modules: &[orna_check::ModuleInput],
     ) -> Result<(), String> {
         for module in modules {
             let components = module.logical_path.split('/').collect::<Vec<_>>();

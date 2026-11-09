@@ -314,8 +314,8 @@ mod tests {
 
     use super::*;
     use crate::ApplicationAuthority;
+    use orna_check::Catalogue;
     use orna_evaluator::{Environment, Limits};
-    use orna_semantic::Catalogue;
 
     struct UnavailableResolver;
 

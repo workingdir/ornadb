@@ -16,11 +16,11 @@ use std::{
 };
 
 use orna_application::ApplicationAuthority;
+use orna_check::{Catalogue, ModuleInput, analyze};
 use orna_evaluator::{Environment, Limits};
 use orna_project::{ObjectIdentityManifest, ProjectLoader, admit_format3_row};
 use orna_repository::{Repository, TypedKey};
 use orna_runtime::TableObjectId;
-use orna_semantic::{Catalogue, ModuleInput, analyze};
 use orna_value::{
     AvailabilityState, BlobResolver, ContentReference, Error as ValueError, Format3Context,
     Format3Quota, GitHash, NativeOid, OwnerLifetime, Raw, Snapshot, Value,

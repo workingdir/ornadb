@@ -4,13 +4,13 @@
 //! key/path fixtures. A passed row below names only the observed analyzer or
 //! path-codec boundary; it is not a claim of complete language conformance.
 
-use orna_semantic::{
+use orna_check::{
     Catalogue, DIAG_MONEY_BINARY_FLOAT, DIAG_TYPE, ModuleInput, Type, analyze,
     analyze_with_catalogue,
 };
 use orna_storage::LoosePath;
 
-fn analyzed(name: &str, source: &str) -> orna_semantic::Analysis {
+fn analyzed(name: &str, source: &str) -> orna_check::Analysis {
     analyze(&[ModuleInput::new(name, source)])
 }
 
@@ -20,7 +20,7 @@ fn passed(requirement: &str, boundary: &str) {
     );
 }
 
-fn type_error(result: &orna_semantic::Analysis) -> bool {
+fn type_error(result: &orna_check::Analysis) -> bool {
     result
         .diagnostics
         .iter()

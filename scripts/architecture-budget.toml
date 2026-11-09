@@ -383,7 +383,7 @@ name = "orna-runtime"
 "src/vfs.rs::vfs_rejected_editor_saves_keep_row_store_and_expose_typed_diagnostic" = 140
 
 [[crate]]
-name = "orna-semantic"
+name = "orna-check"
 [crate.files]
 "src/lib.rs" = 5760
 "src/semantic_payload.rs" = 1831

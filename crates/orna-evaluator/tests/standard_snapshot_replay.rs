@@ -5,11 +5,11 @@ use std::{
     time::Duration,
 };
 
+use orna_check::StandardDependencyProfile;
 use orna_evaluator::{Limits, SysHostBindingRegistry};
 use orna_project::{LoadedProject, ProjectLoadError, ProjectLoader};
 use orna_project_repl::AdmittedReplSession;
 use orna_repository::{Repository, initialize_repository};
-use orna_semantic::StandardDependencyProfile;
 use orna_sys::{EnvironmentProvider, ProcessProvider};
 use orna_value::CanonicalValue;
 use orna_value::{Raw, Value};

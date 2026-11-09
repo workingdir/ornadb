@@ -81,7 +81,7 @@ pub(crate) fn build_store_with_expectation(
     let catalogue = project
         .production_catalogue()
         .map_err(|error| refused(format!("the source catalogue is unavailable: {error:?}")))?;
-    let analysis = orna_semantic::analyze_with_catalogue(project.modules(), &catalogue);
+    let analysis = orna_check::analyze_with_catalogue(project.modules(), &catalogue);
     if !analysis.is_ok() {
         return Err(refused("the source does not analyse"));
     }

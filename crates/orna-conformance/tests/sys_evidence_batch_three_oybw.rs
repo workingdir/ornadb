@@ -1,4 +1,4 @@
-use orna_semantic::{Catalogue, ModuleInput, analyze_with_catalogue};
+use orna_check::{Catalogue, ModuleInput, analyze_with_catalogue};
 use orna_sys::{
     Admission, AdmissionRequest, ArgumentMap, ExecutionBoundary, FunctionDescriptor, FunctionId,
     FunctionIdentity, InvocationCompletion, InvocationContext, InvocationExecutor, InvocationMode,

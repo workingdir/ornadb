@@ -1,9 +1,9 @@
+use orna_check::{Catalogue, analyze_with_catalogue};
 use orna_conformance::{DurableTransactionalEvaluator, SourceUnit, StageOutcome};
 use orna_evaluator::Limits;
 use orna_project::ProjectLoader;
 use orna_repository::Repository;
 use orna_runtime::{RuntimeError, RuntimeIdentity, RuntimeState};
-use orna_semantic::{Catalogue, analyze_with_catalogue};
 use orna_value::Value;
 use std::{fs, path::Path, process::Command};
 use tempfile::TempDir;

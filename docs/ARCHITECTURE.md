@@ -33,7 +33,7 @@ the unit tests assert the two agree.
 | 1 | value | orna-value, orna-sys-model |
 | 2 | syntax | orna-syntax, orna-intrinsics, orna-sys-codegen |
 | 3 | identity | orna-sys-id, orna-standard-sources, orna-sys-macros |
-| 4 | analysis | orna-semantic |
+| 4 | analysis | orna-check |
 | 5 | evaluation | orna-evaluator |
 | 6 | hosts (I/O) | orna-sys, orna-security |
 | 7 | formats and planning | orna-evolution, orna-stream |
@@ -201,7 +201,7 @@ by the stage that fixes it. A stale entry is printed as a warning.
 
 | id | violation | fixed by |
 |---|---|---|
-| V1 | `orna-semantic -> orna-sys` is layer 4 -> 6, upward | stage 06 (`orna-sys-id` at layer 3) |
+| V1 | `orna-check -> orna-sys` is layer 4 -> 6, upward | stage 06 (`orna-sys-id` at layer 3) |
 | V2 | `orna-cli -> orna-conformance`: the harness is in the shipped binary | stage 10 (`orna-admission`) |
 | V3 | `orna-conformance -> orna-table`: the oracle reaches the binary through the harness | stage 13 (merge into conformance) |
 | V4 | `orna-traceability -> orna-conformance`: a standalone tool depends on the harness | corpus facade |

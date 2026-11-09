@@ -1,4 +1,5 @@
 use futures::executor::block_on;
+use orna_check::{ModuleInput, analyze};
 use orna_conformance::{
     BoundedEvaluator, Corpus, DurableTransactionalEvaluator, EvidenceStatus, Harness,
     ImplementationClaim, ProjectEnvironment, ProjectExpectations, ProjectUnit,
@@ -14,7 +15,6 @@ use orna_protocol::{
 use orna_repository::Repository;
 use orna_runtime::{RequestIdentity, RequestState, RuntimeError, RuntimeIdentity, RuntimeState};
 use orna_security::OpaqueCredential;
-use orna_semantic::{ModuleInput, analyze};
 use orna_serving::{Limits as ServingLimits, Origin, Patch, RetainedPin, Serving};
 use orna_value::{Diagnostic, DiagnosticSeverity, SafeText, Value};
 use std::collections::BTreeMap;
@@ -88,7 +88,7 @@ impl RuntimeEvaluator for CompositeEvaluator {
     fn validate_resolved_rows(
         &mut self,
         project: &orna_conformance::ProjectUnit,
-        analysis: &orna_semantic::Analysis,
+        analysis: &orna_check::Analysis,
     ) -> StageOutcome<orna_value::Diagnostic> {
         self.bounded.validate_resolved_rows(project, analysis)
     }

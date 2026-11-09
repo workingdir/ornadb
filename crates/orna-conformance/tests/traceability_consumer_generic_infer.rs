@@ -1,19 +1,19 @@
 //! Focused consumer and generic evidence against the frozen 1.0 gap tails.
 
-use orna_semantic::{Catalogue, ModuleInput, Type, analyze_with_catalogue};
+use orna_check::{Catalogue, ModuleInput, Type, analyze_with_catalogue};
 
 const MULTIPLE_ROOTS: &str = include_str!("fixtures/streams-pa0p-multiple-roots.orna");
 const GENERIC_INFERRED_ARGUMENT: &str =
     include_str!("fixtures/traceability-generic-inferred-argument.orna");
 
-fn analyze(source: &str) -> orna_semantic::Analysis {
+fn analyze(source: &str) -> orna_check::Analysis {
     analyze_with_catalogue(
         &[ModuleInput::new("main.orna", source)],
         &Catalogue::authoritative_fixture(),
     )
 }
 
-fn diagnostic_text(result: &orna_semantic::Analysis) -> String {
+fn diagnostic_text(result: &orna_check::Analysis) -> String {
     result
         .diagnostics
         .iter()
