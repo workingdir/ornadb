@@ -1574,6 +1574,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "orna-format3"
+version = "1.0.0"
+dependencies = [
+ "orna-base",
+ "serde_json",
+ "sha1",
+ "sha2 0.11.0",
+]
+
+[[package]]
 name = "orna-intrinsics"
 version = "1.0.0"
 
@@ -1664,6 +1674,7 @@ dependencies = [
  "orna-check",
  "orna-conformance",
  "orna-evaluator",
+ "orna-format3",
  "orna-project",
  "orna-runtime",
  "orna-storage",

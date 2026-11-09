@@ -36,7 +36,7 @@ the unit tests assert the two agree.
 | 4 | analysis | orna-check |
 | 5 | evaluation | orna-evaluator |
 | 6 | hosts (I/O) | orna-sys, orna-security |
-| 7 | formats and planning | orna-evolution, orna-stream |
+| 7 | formats and planning | orna-evolution, orna-format3, orna-stream |
 | 8 | repository layout | orna-repository |
 | 9 | durable state | orna-runtime |
 | 10 | publication | orna-storage |
