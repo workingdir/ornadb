@@ -54,7 +54,6 @@ layer = 2
 [[crate]]
 name = "orna-intrinsics"
 layer = 2
-role = "tool"
 
 [[crate]]
 name = "orna-sys-id"
