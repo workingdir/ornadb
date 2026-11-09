@@ -533,6 +533,47 @@ class EndToEndTests(unittest.TestCase):
             self.assertEqual(signed["reviewer"], "Kieran")
             self.assertNotIn("No reviewer is recorded by an automated run.", signed["limitations"])
 
+    def test_run_records_each_editor_save_argv_and_fails_when_a_required_editor_is_absent(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            baseline = root / "baseline.toml"
+            baseline.write_text("", encoding="utf-8")
+            vim = {"editor": "vim", "mode": "in-place", "argv": ["-Es", "-u", "NONE", "-c", "write"]}
+            emacs = {"editor": "emacs", "mode": "temp-rename", "argv": ["--batch", "-Q", "--visit"]}
+            printer = "import sys\nfor value in sys.argv[1:]: print('ORNA-EDITOR-SAVE ' + value)"
+            run = ["run", "--record", "editors", "--check", "editors", "--out", str(root), "--baseline", str(baseline)]
+
+            both = [*run, "--require-editor-save", "vim", "--require-editor-save", "emacs", "--"]
+            self.assertEqual(self.run_main([*both, sys.executable, "-c", printer, json.dumps(vim), json.dumps(emacs)]), 0)
+            saved = json.loads((root / "editors.record.json").read_text(encoding="utf-8"))
+            self.assertEqual(saved["editor_saves"], [vim, emacs])
+            self.assertEqual(saved["failures"]["new"], [])
+
+            # A changed save setting is recorded as a different argv, not the same evidence.
+            changed = dict(vim, argv=["-Es", "-u", "NONE", "-c", "set nofsync"])
+            self.assertEqual(self.run_main([*run, "--require-editor-save", "vim", "--", sys.executable, "-c", printer, json.dumps(changed)]), 0)
+            drifted = json.loads((root / "editors.record.json").read_text(encoding="utf-8"))
+            self.assertEqual(drifted["editor_saves"], [changed])
+            self.assertNotEqual(drifted["editor_saves"], saved["editor_saves"])
+
+            # Emacs printed nothing: its required save is a new failure naming the editor.
+            self.assertEqual(self.run_main([*both, sys.executable, "-c", printer, json.dumps(vim)]), 1)
+            missing = json.loads((root / "editors.record.json").read_text(encoding="utf-8"))
+            self.assertEqual(missing["state"], "failed")
+            self.assertEqual(
+                [(failure["package"], failure["target"], failure["test"]) for failure in missing["failures"]["new"]],
+                [("workspace", "editor-saves", "emacs")],
+            )
+
+    def test_nightly_cli_record_requires_the_real_editor_saves_and_no_vi_probe(self) -> None:
+        root = Path(__file__).resolve().parent.parent / ".github" / "workflows"
+        nightly = yaml.safe_load((root / "nightly-gates.yml").read_text(encoding="utf-8"))
+        matrix = nightly["jobs"]["workspace"]["strategy"]["matrix"]["include"]
+        recorder = next(entry["recorder"] for entry in matrix if entry["shard"] == "cli")
+        words = shlex.split(recorder)
+        self.assertEqual(option_values(words, "--require-editor-save"), ["vim", "emacs"])
+        self.assertNotIn("vi --version", recorder)
+
     def test_run_records_the_peak_child_rss(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
