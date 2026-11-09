@@ -32,7 +32,7 @@ forbidden_in_shipped = [
     "orna-conformance",
     "orna-traceability",
     "orna-lsp",
-    "orna-core",
+    "orna-compat-v1",
 ]
 
 # Layer 0 primitives is reserved for orna-base (stage 03).
@@ -158,8 +158,9 @@ layer = 14
 allowed = ["orna-conformance"]
 
 [[crate]]
-name = "orna-core"
+name = "orna-compat-v1"
 layer = 15
+role = "archive"
 
 # The known violations, in the order docs/design/architecture.md Appendix A
 # labels them. `--mode=report` prints these with their V number.
@@ -192,11 +193,6 @@ reason = "R1: optional internal edge; removed by the HostPort trait (stage 05a)"
 id = "V7"
 key = "optional:orna-evaluator->orna-sys"
 reason = "R1: optional internal edge; removed by the HostPort trait (stage 05a)"
-
-[[known]]
-id = "V8"
-key = "orphan:orna-core"
-reason = "production in-degree 0 and not declared an archive; becomes orna-compat-v1 (stage 02)"
 
 [[known]]
 id = "V9"

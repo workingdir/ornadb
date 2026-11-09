@@ -2714,7 +2714,7 @@ fn validate_limits(limits: Limits) -> Result<(), EvaluationError> {
 }
 
 /// Equality for `==` and `!=`: Blob values are compared by their annotation and
-/// exact content, not by OVB-2 or format-3 representation. Lists, tuples and
+/// exact content, not by OVB-2 or format-3 representation. Containers and
 /// options are compared element-wise so that a Blob nested inside them is
 /// decided the same way. Every other pair keeps ordinary structural equality.
 fn blob_aware_eq(left: &Value, right: &Value) -> Result<bool, EvaluationError> {
@@ -2723,22 +2723,8 @@ fn blob_aware_eq(left: &Value, right: &Value) -> Result<bool, EvaluationError> {
             blob_aware_seq_eq(left.as_slice(), right.as_slice())
         }
         (Value::Tuple(left), Value::Tuple(right)) => blob_aware_seq_eq(left, right),
-        (Value::Option(left), Value::Option(right)) => match (left.as_deref(), right.as_deref()) {
-            (None, None) => Ok(true),
-            (Some(left), Some(right)) => blob_aware_eq(left, right),
-            _ => Ok(false),
-        },
-        (Value::Record(left), Value::Record(right)) => {
-            if left.len() != right.len() {
-                return Ok(false);
-            }
-            for ((left_key, left), (right_key, right)) in left.iter().zip(right) {
-                if left_key != right_key || !blob_aware_eq(left, right)? {
-                    return Ok(false);
-                }
-            }
-            Ok(true)
-        }
+        (Value::Option(left), Value::Option(right)) => blob_aware_option_eq(left, right),
+        (Value::Record(left), Value::Record(right)) => blob_aware_record_eq(left, right),
         (
             Value::NominalRecord {
                 type_id: left_type,
@@ -2748,17 +2734,7 @@ fn blob_aware_eq(left: &Value, right: &Value) -> Result<bool, EvaluationError> {
                 type_id: right_type,
                 fields: right_fields,
             },
-        ) => {
-            if left_type != right_type || left_fields.len() != right_fields.len() {
-                return Ok(false);
-            }
-            for ((left_key, left), (right_key, right)) in left_fields.iter().zip(right_fields) {
-                if left_key != right_key || !blob_aware_eq(left, right)? {
-                    return Ok(false);
-                }
-            }
-            Ok(true)
-        }
+        ) => blob_aware_nominal_record_eq(left_type, left_fields, right_type, right_fields),
         (
             Value::Enum {
                 type_id: left_type,
@@ -2770,16 +2746,14 @@ fn blob_aware_eq(left: &Value, right: &Value) -> Result<bool, EvaluationError> {
                 variant_id: right_variant,
                 payload: right_payload,
             },
-        ) => {
-            if left_type != right_type || left_variant != right_variant {
-                return Ok(false);
-            }
-            match (left_payload.as_deref(), right_payload.as_deref()) {
-                (None, None) => Ok(true),
-                (Some(left), Some(right)) => blob_aware_eq(left, right),
-                _ => Ok(false),
-            }
-        }
+        ) => blob_aware_enum_eq(
+            left_type,
+            left_variant,
+            left_payload.as_deref(),
+            right_type,
+            right_variant,
+            right_payload.as_deref(),
+        ),
         (
             Value::Range {
                 lower: left_lower,
@@ -2791,50 +2765,134 @@ fn blob_aware_eq(left: &Value, right: &Value) -> Result<bool, EvaluationError> {
                 upper: right_upper,
                 upper_inclusive: right_inclusive,
             },
-        ) => {
-            if left_inclusive != right_inclusive {
-                return Ok(false);
-            }
-            Ok(
-                optional_blob_aware_eq(left_lower.as_deref(), right_lower.as_deref())?
-                    && optional_blob_aware_eq(left_upper.as_deref(), right_upper.as_deref())?,
-            )
-        }
-        (
-            Value::Stream {
-                values: left_values,
-                source_label: left_label,
-                source_digest: left_digest,
-                position: left_position,
-                provider: left_provider,
-            },
-            Value::Stream {
-                values: right_values,
-                source_label: right_label,
-                source_digest: right_digest,
-                position: right_position,
-                provider: right_provider,
-            },
-        ) => {
-            if left_label != right_label
-                || left_digest != right_digest
-                || left_position != right_position
-                || left_provider != right_provider
-            {
-                return Ok(false);
-            }
-            blob_aware_seq_eq(left_values, right_values)
-        }
+        ) => blob_aware_range_eq(
+            left_lower.as_deref(),
+            left_upper.as_deref(),
+            *left_inclusive,
+            right_lower.as_deref(),
+            right_upper.as_deref(),
+            *right_inclusive,
+        ),
+        (Value::Stream { .. }, Value::Stream { .. }) => blob_aware_stream_eq(left, right),
         (
             Value::AnnotatedBlob(_) | Value::ContextualBlob(_),
             Value::AnnotatedBlob(_) | Value::ContextualBlob(_),
-        ) => {
-            let left = annotated_blob(left)?;
-            let right = annotated_blob(right)?;
-            left.value_eq(&right).map_err(blob_equality_error)
-        }
+        ) => blob_aware_annotated_eq(left, right),
         _ => Ok(left == right),
     }
+}
+
+fn blob_aware_option_eq(
+    left: &Option<Box<Value>>,
+    right: &Option<Box<Value>>,
+) -> Result<bool, EvaluationError> {
+    match (left.as_deref(), right.as_deref()) {
+        (None, None) => Ok(true),
+        (Some(left), Some(right)) => blob_aware_eq(left, right),
+        _ => Ok(false),
+    }
+}
+
+fn blob_aware_record_eq(
+    left: &BTreeMap<String, Value>,
+    right: &BTreeMap<String, Value>,
+) -> Result<bool, EvaluationError> {
+    if left.len() != right.len() {
+        return Ok(false);
+    }
+    for ((left_key, left), (right_key, right)) in left.iter().zip(right) {
+        if left_key != right_key || !blob_aware_eq(left, right)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn blob_aware_nominal_record_eq(
+    left_type: &Raw,
+    left_fields: &[(Raw, Value)],
+    right_type: &Raw,
+    right_fields: &[(Raw, Value)],
+) -> Result<bool, EvaluationError> {
+    if left_type != right_type || left_fields.len() != right_fields.len() {
+        return Ok(false);
+    }
+    for ((left_key, left), (right_key, right)) in left_fields.iter().zip(right_fields) {
+        if left_key != right_key || !blob_aware_eq(left, right)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn blob_aware_enum_eq(
+    left_type: &Raw,
+    left_variant: &Raw,
+    left_payload: Option<&Value>,
+    right_type: &Raw,
+    right_variant: &Raw,
+    right_payload: Option<&Value>,
+) -> Result<bool, EvaluationError> {
+    if left_type != right_type || left_variant != right_variant {
+        return Ok(false);
+    }
+    match (left_payload, right_payload) {
+        (None, None) => Ok(true),
+        (Some(left), Some(right)) => blob_aware_eq(left, right),
+        _ => Ok(false),
+    }
+}
+
+fn blob_aware_range_eq(
+    left_lower: Option<&Value>,
+    left_upper: Option<&Value>,
+    left_inclusive: bool,
+    right_lower: Option<&Value>,
+    right_upper: Option<&Value>,
+    right_inclusive: bool,
+) -> Result<bool, EvaluationError> {
+    if left_inclusive != right_inclusive {
+        return Ok(false);
+    }
+    Ok(optional_blob_aware_eq(left_lower, right_lower)?
+        && optional_blob_aware_eq(left_upper, right_upper)?)
+}
+
+/// Compares two streams by their replay metadata and then their items.
+fn blob_aware_stream_eq(left: &Value, right: &Value) -> Result<bool, EvaluationError> {
+    let (
+        Value::Stream {
+            values: left_values,
+            source_label: left_label,
+            source_digest: left_digest,
+            position: left_position,
+            provider: left_provider,
+        },
+        Value::Stream {
+            values: right_values,
+            source_label: right_label,
+            source_digest: right_digest,
+            position: right_position,
+            provider: right_provider,
+        },
+    ) = (left, right)
+    else {
+        return Ok(false);
+    };
+    if left_label != right_label
+        || left_digest != right_digest
+        || left_position != right_position
+        || left_provider != right_provider
+    {
+        return Ok(false);
+    }
+    blob_aware_seq_eq(left_values, right_values)
+}
+
+fn blob_aware_annotated_eq(left: &Value, right: &Value) -> Result<bool, EvaluationError> {
+    let left = annotated_blob(left)?;
+    let right = annotated_blob(right)?;
+    left.value_eq(&right).map_err(blob_equality_error)
 }
 
 fn blob_aware_seq_eq(left: &[Value], right: &[Value]) -> Result<bool, EvaluationError> {
@@ -5188,6 +5246,157 @@ impl<'functions> Context<'functions, '_> {
     }
 }
 
+/// The terminal a relation plan is observed through.
+///
+/// `relation_call` admits exactly this closed set, so carrying the variants
+/// instead of the source spelling turns an unhandled terminal into a compile
+/// error rather than a runtime `ORNA-EVAL-UNSUPPORTED`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RelationTerminal {
+    Count,
+    First,
+    Last,
+    One,
+    Every,
+    Exists,
+    Sum,
+    Min,
+    Max,
+}
+
+impl RelationTerminal {
+    fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "count" => Self::Count,
+            "first" => Self::First,
+            "last" => Self::Last,
+            "one" => Self::One,
+            "every" => Self::Every,
+            "exists" => Self::Exists,
+            "sum" => Self::Sum,
+            "min" => Self::Min,
+            "max" => Self::Max,
+            _ => return None,
+        })
+    }
+
+    /// The list spelling the terminal reuses once rows are retained.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Count => "count",
+            Self::First => "first",
+            Self::Last => "last",
+            Self::One => "one",
+            Self::Every => "every",
+            Self::Exists => "exists",
+            Self::Sum => "sum",
+            Self::Min => "min",
+            Self::Max => "max",
+        }
+    }
+}
+
+/// How a relation terminal reaches its rows. The drivers deliver the same
+/// logical rows in declared order (ORNA-ORDER-001..004); they differ only in
+/// whether rows are streamed, sorted or re-bucketed first.
+#[derive(Clone, Copy)]
+enum RelationRows {
+    Scan,
+    Sorted,
+    Bucket(usize),
+}
+
+impl RelationRows {
+    /// Selects the driver: a bucket stage owns observation outright, then a
+    /// sort stage, otherwise the plan is streamed.
+    fn of(plan: &RelationPlan) -> Self {
+        if let Some(bucket_index) = plan
+            .stages
+            .iter()
+            .position(|stage| matches!(stage, RelationStage::BucketBy(_)))
+        {
+            return Self::Bucket(bucket_index);
+        }
+        if plan
+            .stages
+            .iter()
+            .any(|stage| matches!(stage, RelationStage::SortBy(_)))
+        {
+            return Self::Sorted;
+        }
+        Self::Scan
+    }
+
+    fn bounds(self) -> RelationBounds {
+        match self {
+            // A scan charges `max_steps` per scanned row and streams aggregate
+            // rows through a bounded fold.
+            Self::Scan => RelationBounds {
+                count_charges_items: false,
+                aggregates: AggregateRetention::ChunkedFold,
+            },
+            // A sorted driver already retained and item-checked the relation
+            // before delivery, so the terminal keeps those bounds.
+            Self::Sorted => RelationBounds {
+                count_charges_items: true,
+                aggregates: AggregateRetention::Collect,
+            },
+            // Buckets are emitted one at a time, so the count needs no item
+            // budget while the aggregate terminals still retain their rows.
+            Self::Bucket(_) => RelationBounds {
+                count_charges_items: false,
+                aggregates: AggregateRetention::Collect,
+            },
+        }
+    }
+
+    fn for_each(
+        self,
+        context: &mut Context<'_, '_>,
+        plan: &RelationPlan,
+        depth: usize,
+        visit: &mut dyn FnMut(&mut Context<'_, '_>, Value) -> Result<bool, EvaluationError>,
+    ) -> Result<(), EvaluationError> {
+        match self {
+            Self::Scan => context.for_each_relation_value(plan, depth, visit),
+            Self::Sorted => context.for_each_sorted_relation(plan, depth, visit),
+            Self::Bucket(bucket_index) => {
+                context.for_each_bucket_group(plan, bucket_index, depth, visit)
+            }
+        }
+    }
+}
+
+/// Resource bounds a relation terminal applies while it walks rows.
+///
+/// ORNA-REL-001/002 fix composability and bounded presentation and
+/// ORNA-PLAN-001 fixes results, but the reference specifies no item budget and
+/// no materialization record per row source. These fields therefore record the
+/// bound each driver has always applied instead of unifying them silently.
+#[derive(Clone, Copy)]
+struct RelationBounds {
+    /// `count` charges every observed row against `max_collection_items`.
+    count_charges_items: bool,
+    aggregates: AggregateRetention,
+}
+
+/// How `sum`/`min`/`max` retain the rows they fold.
+#[derive(Clone, Copy)]
+enum AggregateRetention {
+    /// Retain every row, charging `max_collection_items` as the relation grows.
+    Collect,
+    /// Fold in chunks of at most `max_collection_items` rows and record one
+    /// materialization. Nothing beyond one chunk is retained.
+    ChunkedFold,
+}
+
+/// The container kind a list operation was given for one operand.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RelationOperand {
+    List,
+    Relation,
+}
+
 impl Context<'_, '_> {
     fn has_ovb2_effects(&self) -> bool {
         self.effects
@@ -7129,6 +7338,13 @@ impl Context<'_, '_> {
                 return Err(error("ORNA-EVAL-TYPE"));
             };
 
+            if let Some(terminal) = RelationTerminal::from_name(name) {
+                // Keep adjacent filters compiled as one cascade until terminal
+                // demand begins, then push the batch once.
+                let plan = plan.flush_filter_cascade();
+                return self.observe_relation(&plan, terminal, &ordered[1..], depth);
+            }
+
             match name {
                 // The reference specifies relation composition and order but
                 // no separate projection grammar. `project` is the named
@@ -7183,12 +7399,6 @@ impl Context<'_, '_> {
                     });
                     Ok(Value::Relation(plan))
                 }
-                "count" | "first" | "last" | "one" | "every" | "exists" | "sum" | "min" | "max" => {
-                    // Keep adjacent filters compiled as one cascade until
-                    // terminal demand begins, then push the batch once.
-                    let plan = plan.flush_filter_cascade();
-                    self.observe_relation(&plan, name, &ordered[1..], depth)
-                }
                 _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
             }
         })())
@@ -7208,12 +7418,12 @@ impl Context<'_, '_> {
             return Err(error("ORNA-EVAL-ARGUMENT"));
         }
 
-        let mut relation_kinds = Vec::with_capacity(collection_count);
+        let mut operands = Vec::with_capacity(collection_count);
         for value in values.iter_mut().take(collection_count) {
             match value {
-                Value::List(_) => relation_kinds.push(false),
+                Value::List(_) => operands.push(RelationOperand::List),
                 Value::Relation(plan) => {
-                    relation_kinds.push(true);
+                    operands.push(RelationOperand::Relation);
                     *value = Value::list(self.collect_relation_values(plan, depth + 1)?);
                 }
                 _ => return Err(error("ORNA-EVAL-TYPE")),
@@ -7221,16 +7431,14 @@ impl Context<'_, '_> {
         }
 
         let relation_result = match name {
-            "zip" | "zip_exact" => {
-                if relation_kinds[0] != relation_kinds[1] {
-                    return Err(error("ORNA-EVAL-TYPE"));
-                }
-                relation_kinds[0]
-            }
-            // The result follows the left operand's container kind; the right
-            // side only supplies candidate rows to the as-of selector.
-            "asof_join" => relation_kinds[0],
-            _ => relation_kinds[0],
+            "zip" | "zip_exact" => match operands.as_slice() {
+                [left, right] if left == right => *left == RelationOperand::Relation,
+                _ => return Err(error("ORNA-EVAL-TYPE")),
+            },
+            // The result follows the left operand's container kind; a list
+            // stays a list and a relation stays a relation. For `asof_join`
+            // the right side only supplies candidate rows to the selector.
+            _ => operands[0] == RelationOperand::Relation,
         };
 
         let result = self.collection(name, values, depth)?;
@@ -7351,129 +7559,39 @@ impl Context<'_, '_> {
         Ok(())
     }
 
-    fn observe_bucket_relation(
-        &mut self,
-        plan: &RelationPlan,
-        bucket_index: usize,
-        operation: &str,
-        arguments: &[Value],
-        depth: usize,
-    ) -> Result<Value, EvaluationError> {
-        match operation {
-            "count" => {
-                let mut count = 0usize;
-                self.for_each_bucket_group(plan, bucket_index, depth, |_, _| {
-                    count = count
-                        .checked_add(1)
-                        .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
-                    Ok(true)
-                })?;
-                Ok(Value::Int(BigInt::from(count)))
-            }
-            "first" => {
-                let mut first = None;
-                self.for_each_bucket_group(plan, bucket_index, depth, |_, value| {
-                    first = Some(value);
-                    Ok(false)
-                })?;
-                Ok(Value::Option(first.map(Box::new)))
-            }
-            "last" => {
-                let mut state = RelationLastState::new();
-                self.for_each_bucket_group(plan, bucket_index, depth, |_, value| {
-                    state.push(value);
-                    Ok(true)
-                })?;
-                Ok(Value::Option(state.finish().map(Box::new)))
-            }
-            "one" => {
-                let mut found = None;
-                self.for_each_bucket_group(plan, bucket_index, depth, |_, value| {
-                    if found.is_some() {
-                        return Err(error("ORNA-EVAL-RELATION-ONE-MULTIPLE"));
-                    }
-                    found = Some(value);
-                    Ok(true)
-                })?;
-                found.ok_or_else(|| error("ORNA-EVAL-RELATION-ONE-ZERO"))
-            }
-            "sum" | "min" | "max" | "window" => {
-                let mut values = Vec::new();
-                self.for_each_bucket_group(plan, bucket_index, depth, |context, value| {
-                    values.push(value);
-                    context.items(values.len())?;
-                    Ok(true)
-                })?;
-                self.observe_list_relation(operation, values, arguments, depth)
-            }
-            "every" | "exists" => {
-                let predicate = arguments
-                    .first()
-                    .ok_or_else(|| error("ORNA-EVAL-ARGUMENT"))?;
-                let want_exists = operation == "exists";
-                let mut result = !want_exists;
-                self.for_each_bucket_group(plan, bucket_index, depth, |context, value| {
-                    context.step()?;
-                    let Value::Bool(value) =
-                        context.invoke_predicate(predicate, value, depth + 1)?
-                    else {
-                        return Err(error("ORNA-EVAL-TYPE"));
-                    };
-                    if value == want_exists {
-                        result = value;
-                        return Ok(false);
-                    }
-                    Ok(true)
-                })?;
-                Ok(Value::Bool(result))
-            }
-            _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
-        }
-    }
-
     fn observe_relation(
         &mut self,
         plan: &RelationPlan,
-        operation: &str,
+        operation: RelationTerminal,
         arguments: &[Value],
         depth: usize,
     ) -> Result<Value, EvaluationError> {
-        if let Some(bucket_index) = plan
-            .stages
-            .iter()
-            .position(|stage| matches!(stage, RelationStage::BucketBy(_)))
-        {
-            return self.observe_bucket_relation(plan, bucket_index, operation, arguments, depth);
-        }
-        if plan
-            .stages
-            .iter()
-            .any(|stage| matches!(stage, RelationStage::SortBy(_)))
-        {
-            return self.observe_sorted_relation(plan, operation, arguments, depth);
-        }
-
+        let rows = RelationRows::of(plan);
+        let bounds = rows.bounds();
         match operation {
-            "last" => {
+            RelationTerminal::Last => {
                 let mut state = RelationLastState::new();
-                self.for_each_relation_value(plan, depth, |_, value| {
+                rows.for_each(self, plan, depth, &mut |_, value| {
                     state.push(value);
                     Ok(true)
                 })?;
                 Ok(Value::Option(state.finish().map(Box::new)))
             }
-            "first" => {
+            RelationTerminal::First => {
                 let mut first = None;
-                self.for_each_relation_value_with_page_limit(plan, depth, 1, |_, value| {
+                rows.for_each(self, plan, depth, &mut |_, value| {
                     first = Some(value);
                     Ok(false)
                 })?;
                 Ok(Value::Option(first.map(Box::new)))
             }
-            "one" => {
+            RelationTerminal::One => {
+                // `one(rows)` and `one(rows, predicate)` are both contract
+                // (09-standard-library.md:36), so the optional predicate is
+                // applied whatever driver produced the rows.
                 let predicate = arguments.first();
                 let mut found = None;
-                self.for_each_relation_value_with_page_limit(plan, depth, 1, |context, value| {
+                rows.for_each(self, plan, depth, &mut |context, value| {
                     if let Some(predicate) = predicate {
                         context.step()?;
                         match context.invoke_predicate(predicate, value.clone(), depth + 1)? {
@@ -7490,23 +7608,26 @@ impl Context<'_, '_> {
                 })?;
                 found.ok_or_else(|| error("ORNA-EVAL-RELATION-ONE-ZERO"))
             }
-            "count" => {
+            RelationTerminal::Count => {
                 let mut count = 0usize;
-                self.for_each_relation_value(plan, depth, |_, _| {
+                rows.for_each(self, plan, depth, &mut |context, _| {
                     count = count
                         .checked_add(1)
                         .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+                    if bounds.count_charges_items {
+                        context.items(count)?;
+                    }
                     Ok(true)
                 })?;
                 Ok(Value::Int(BigInt::from(count)))
             }
-            "every" | "exists" => {
+            RelationTerminal::Every | RelationTerminal::Exists => {
                 let predicate = arguments
                     .first()
                     .ok_or_else(|| error("ORNA-EVAL-ARGUMENT"))?;
-                let want_exists = operation == "exists";
+                let want_exists = operation == RelationTerminal::Exists;
                 let mut result = !want_exists;
-                self.for_each_relation_value(plan, depth, |context, value| {
+                rows.for_each(self, plan, depth, &mut |context, value| {
                     context.step()?;
                     let value = context.invoke_predicate(predicate, value, depth + 1)?;
                     let Value::Bool(value) = value else {
@@ -7520,19 +7641,43 @@ impl Context<'_, '_> {
                 })?;
                 Ok(Value::Bool(result))
             }
-            "window" => {
-                let values = self.collect_relation_values(plan, depth)?;
+            RelationTerminal::Sum | RelationTerminal::Min | RelationTerminal::Max => {
+                self.observe_relation_aggregate(rows, bounds, plan, operation, arguments, depth)
+            }
+        }
+    }
+
+    /// Folds an aggregate terminal over the rows of `plan` using the retention
+    /// bound its driver applies.
+    fn observe_relation_aggregate(
+        &mut self,
+        rows: RelationRows,
+        bounds: RelationBounds,
+        plan: &RelationPlan,
+        operation: RelationTerminal,
+        arguments: &[Value],
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        let operation = operation.name();
+        match bounds.aggregates {
+            AggregateRetention::Collect => {
+                let mut values = Vec::new();
+                rows.for_each(self, plan, depth, &mut |context, value| {
+                    values.push(value);
+                    context.items(values.len())?;
+                    Ok(true)
+                })?;
                 self.observe_list_relation(operation, values, arguments, depth)
             }
-            "sum" | "min" | "max" => {
-                // Fold in chunks of at most one item budget. Each chunk starts
-                // with the running result, which keeps the relation's
-                // left-to-right order, so a Float sum rounds exactly like a
-                // list sum and nothing beyond one chunk is retained.
+            AggregateRetention::ChunkedFold => {
+                // Each chunk starts with the running result, which keeps the
+                // relation's left-to-right order, so a Float sum rounds
+                // exactly like a list sum and nothing beyond one chunk is
+                // retained.
                 let limit = self.limits.max_collection_items;
                 let mut chunk = Vec::new();
                 let mut digest = OutputDigest::new();
-                self.for_each_relation_value(plan, depth, |context, value| {
+                rows.for_each(self, plan, depth, &mut |context, value| {
                     digest.push(&value);
                     if chunk.len() >= limit {
                         let values = std::mem::take(&mut chunk);
@@ -7549,95 +7694,6 @@ impl Context<'_, '_> {
                 self.record_materialization(plan, digest)?;
                 self.observe_list_relation(operation, chunk, arguments, depth)
             }
-            _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
-        }
-    }
-
-    fn observe_sorted_relation(
-        &mut self,
-        plan: &RelationPlan,
-        operation: &str,
-        arguments: &[Value],
-        depth: usize,
-    ) -> Result<Value, EvaluationError> {
-        match operation {
-            "last" => {
-                let mut state = RelationLastState::new();
-                self.for_each_sorted_relation(plan, depth, |_, value| {
-                    state.push(value);
-                    Ok(true)
-                })?;
-                Ok(Value::Option(state.finish().map(Box::new)))
-            }
-            "first" => {
-                let mut first = None;
-                self.for_each_sorted_relation(plan, depth, |_, value| {
-                    first = Some(value);
-                    Ok(false)
-                })?;
-                Ok(Value::Option(first.map(Box::new)))
-            }
-            "one" => {
-                let predicate = arguments.first();
-                let mut found = None;
-                self.for_each_sorted_relation(plan, depth, |context, value| {
-                    if let Some(predicate) = predicate {
-                        context.step()?;
-                        match context.invoke_predicate(predicate, value.clone(), depth + 1)? {
-                            Value::Bool(true) => {}
-                            Value::Bool(false) => return Ok(true),
-                            _ => return Err(error("ORNA-EVAL-TYPE")),
-                        }
-                    }
-                    if found.is_some() {
-                        return Err(error("ORNA-EVAL-RELATION-ONE-MULTIPLE"));
-                    }
-                    found = Some(value);
-                    Ok(true)
-                })?;
-                found.ok_or_else(|| error("ORNA-EVAL-RELATION-ONE-ZERO"))
-            }
-            "count" => {
-                let mut count = 0usize;
-                self.for_each_sorted_relation(plan, depth, |context, _| {
-                    count = count
-                        .checked_add(1)
-                        .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
-                    context.items(count)?;
-                    Ok(true)
-                })?;
-                Ok(Value::Int(BigInt::from(count)))
-            }
-            "every" | "exists" => {
-                let predicate = arguments
-                    .first()
-                    .ok_or_else(|| error("ORNA-EVAL-ARGUMENT"))?;
-                let want_exists = operation == "exists";
-                let mut result = !want_exists;
-                self.for_each_sorted_relation(plan, depth, |context, value| {
-                    context.step()?;
-                    let value = context.invoke_predicate(predicate, value, depth + 1)?;
-                    let Value::Bool(value) = value else {
-                        return Err(error("ORNA-EVAL-TYPE"));
-                    };
-                    if value == want_exists {
-                        result = value;
-                        return Ok(false);
-                    }
-                    Ok(true)
-                })?;
-                Ok(Value::Bool(result))
-            }
-            "window" | "sum" | "min" | "max" => {
-                let mut values = Vec::new();
-                self.for_each_sorted_relation(plan, depth, |context, value| {
-                    values.push(value);
-                    context.items(values.len())?;
-                    Ok(true)
-                })?;
-                self.observe_list_relation(operation, values, arguments, depth)
-            }
-            _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
     }
 
@@ -11192,7 +11248,8 @@ impl Context<'_, '_> {
             ) => {
                 self.step()?;
                 format_duration_context(None)?;
-                self.string(format_duration(name, seconds, *nanosecond))
+                let format = duration_format(name)?;
+                self.string(format_duration(format, seconds, *nanosecond))
                     .map(Value::String)
             }
             (
@@ -11210,7 +11267,8 @@ impl Context<'_, '_> {
             ) => {
                 self.step()?;
                 format_duration_context(Some(context))?;
-                self.string(format_duration(name, seconds, *nanosecond))
+                let format = duration_format(name)?;
+                self.string(format_duration(format, seconds, *nanosecond))
                     .map(Value::String)
             }
             ("offset_at" | "resolve_local", _) => Err(error("ORNA-EVAL-TYPE")),
@@ -15553,7 +15611,49 @@ fn elapsed_total_nanoseconds(seconds: &BigInt, nanosecond: u32) -> BigInt {
     seconds * BigInt::from(1_000_000_000u32) + BigInt::from(nanosecond)
 }
 
-fn format_duration(name: &str, seconds: &BigInt, nanosecond: u32) -> String {
+/// A duration presentation spelling. The standard library admits exactly
+/// these four formats.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DurationFormat {
+    Compact,
+    Clock,
+    Words,
+    Iso,
+}
+
+impl DurationFormat {
+    fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "duration.compact.format" => Self::Compact,
+            "duration.clock.format" => Self::Clock,
+            "duration.words.format" => Self::Words,
+            "duration.iso.format" => Self::Iso,
+            _ => return None,
+        })
+    }
+}
+
+/// The admitted presentation spelling `name`.
+fn duration_format(name: &str) -> Result<DurationFormat, EvaluationError> {
+    DurationFormat::from_name(name).ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))
+}
+
+/// The day-to-nanosecond components one duration spelling renders.
+///
+/// `fractional_seconds` joins the whole seconds to the nanosecond remainder and
+/// trims trailing zeros; the renderers reuse it wherever they emit a seconds
+/// field with its fraction.
+struct DurationParts {
+    sign: &'static str,
+    days: BigInt,
+    hours: u32,
+    minutes: u32,
+    whole_seconds: u32,
+    fraction: u32,
+    fractional_seconds: String,
+}
+
+fn duration_parts(seconds: &BigInt, nanosecond: u32) -> DurationParts {
     const NANOS_PER_SECOND: u64 = 1_000_000_000;
     const NANOS_PER_MINUTE: u64 = 60 * NANOS_PER_SECOND;
     const NANOS_PER_HOUR: u64 = 60 * NANOS_PER_MINUTE;
@@ -15583,101 +15683,155 @@ fn format_duration(name: &str, seconds: &BigInt, nanosecond: u32) -> String {
             .trim_end_matches('0')
             .to_owned()
     };
-    let sign = if negative { "-" } else { "" };
-
-    match name {
-        "duration.compact.format" => {
-            let mut parts = Vec::new();
-            if !days.is_zero() {
-                parts.push(format!("{days}d"));
-            }
-            if hours > 0 {
-                parts.push(format!("{hours}h"));
-            }
-            if minutes > 0 {
-                parts.push(format!("{minutes}m"));
-            }
-            if whole_seconds > 0 || fraction > 0 || parts.is_empty() {
-                parts.push(format!("{fractional_seconds}s"));
-            }
-            format!("{sign}{}", parts.join(" "))
-        }
-        "duration.clock.format" => {
-            // This is elapsed time, not a wall clock: retain total hours
-            // beyond 23, then enforce the output byte bound at the caller.
-            let total_hours = days * BigInt::from(24u8) + BigInt::from(hours);
-            let total_hours = total_hours.to_str_radix(10);
-            let total_hours = if total_hours.len() < 2 {
-                format!("{total_hours:0>2}")
-            } else {
-                total_hours
-            };
-            // Pad the integral seconds field before its decimal tail; padding
-            // the combined fractional text leaves single-digit seconds short.
-            let clock_seconds = if fraction == 0 {
-                format!("{whole_seconds:02}")
-            } else {
-                format!("{whole_seconds:02}.{fraction:09}")
-                    .trim_end_matches('0')
-                    .to_owned()
-            };
-            format!("{sign}{total_hours}:{minutes:02}:{clock_seconds}")
-        }
-        "duration.words.format" => {
-            let mut parts = Vec::new();
-            if !days.is_zero() {
-                parts.push(format!(
-                    "{days} day{}",
-                    if days == BigInt::from(1u8) { "" } else { "s" }
-                ));
-            }
-            if hours > 0 {
-                parts.push(format!("{hours} hour{}", if hours == 1 { "" } else { "s" }));
-            }
-            if minutes > 0 {
-                parts.push(format!(
-                    "{minutes} minute{}",
-                    if minutes == 1 { "" } else { "s" }
-                ));
-            }
-            if whole_seconds > 0 || fraction > 0 || parts.is_empty() {
-                let singular = whole_seconds == 1 && fraction == 0;
-                parts.push(format!(
-                    "{fractional_seconds} second{}",
-                    if singular { "" } else { "s" }
-                ));
-            }
-            format!("{sign}{}", parts.join(", "))
-        }
-        "duration.iso.format" => {
-            let mut output = String::from(sign);
-            output.push('P');
-            if !days.is_zero() {
-                output.push_str(&days.to_str_radix(10));
-                output.push('D');
-            }
-            if hours > 0 || minutes > 0 || whole_seconds > 0 || fraction > 0 || days.is_zero() {
-                output.push('T');
-                if hours > 0 {
-                    output.push_str(&hours.to_string());
-                    output.push('H');
-                }
-                if minutes > 0 {
-                    output.push_str(&minutes.to_string());
-                    output.push('M');
-                }
-                if whole_seconds > 0
-                    || fraction > 0
-                    || (days.is_zero() && hours == 0 && minutes == 0)
-                {
-                    output.push_str(&fractional_seconds);
-                    output.push('S');
-                }
-            }
-            output
-        }
-        _ => String::new(),
+    DurationParts {
+        sign: if negative { "-" } else { "" },
+        days,
+        hours,
+        minutes,
+        whole_seconds,
+        fraction,
+        fractional_seconds,
     }
+}
+
+fn format_duration(format: DurationFormat, seconds: &BigInt, nanosecond: u32) -> String {
+    let parts = duration_parts(seconds, nanosecond);
+    match format {
+        DurationFormat::Compact => format_duration_compact(&parts),
+        DurationFormat::Clock => format_duration_clock(&parts),
+        DurationFormat::Words => format_duration_words(&parts),
+        DurationFormat::Iso => format_duration_iso(&parts),
+    }
+}
+
+fn format_duration_compact(parts: &DurationParts) -> String {
+    let DurationParts {
+        sign,
+        days,
+        hours,
+        minutes,
+        whole_seconds,
+        fraction,
+        fractional_seconds,
+    } = parts;
+    let mut components = Vec::new();
+    if !days.is_zero() {
+        components.push(format!("{days}d"));
+    }
+    if *hours > 0 {
+        components.push(format!("{hours}h"));
+    }
+    if *minutes > 0 {
+        components.push(format!("{minutes}m"));
+    }
+    if *whole_seconds > 0 || *fraction > 0 || components.is_empty() {
+        components.push(format!("{fractional_seconds}s"));
+    }
+    format!("{sign}{}", components.join(" "))
+}
+
+fn format_duration_clock(parts: &DurationParts) -> String {
+    let DurationParts {
+        sign,
+        days,
+        hours,
+        minutes,
+        whole_seconds,
+        fraction,
+        ..
+    } = parts;
+    // This is elapsed time, not a wall clock: retain total hours beyond 23,
+    // then enforce the output byte bound at the caller.
+    let total_hours = days * BigInt::from(24u8) + BigInt::from(*hours);
+    let total_hours = total_hours.to_str_radix(10);
+    let total_hours = if total_hours.len() < 2 {
+        format!("{total_hours:0>2}")
+    } else {
+        total_hours
+    };
+    // Pad the integral seconds field before its decimal tail; padding the
+    // combined fractional text leaves single-digit seconds short.
+    let clock_seconds = if *fraction == 0 {
+        format!("{whole_seconds:02}")
+    } else {
+        format!("{whole_seconds:02}.{fraction:09}")
+            .trim_end_matches('0')
+            .to_owned()
+    };
+    format!("{sign}{total_hours}:{minutes:02}:{clock_seconds}")
+}
+
+fn format_duration_words(parts: &DurationParts) -> String {
+    let DurationParts {
+        sign,
+        days,
+        hours,
+        minutes,
+        whole_seconds,
+        fraction,
+        fractional_seconds,
+    } = parts;
+    let mut components = Vec::new();
+    if !days.is_zero() {
+        components.push(format!(
+            "{days} day{}",
+            if days == &BigInt::from(1u8) { "" } else { "s" }
+        ));
+    }
+    if *hours > 0 {
+        components.push(format!(
+            "{hours} hour{}",
+            if *hours == 1 { "" } else { "s" }
+        ));
+    }
+    if *minutes > 0 {
+        components.push(format!(
+            "{minutes} minute{}",
+            if *minutes == 1 { "" } else { "s" }
+        ));
+    }
+    if *whole_seconds > 0 || *fraction > 0 || components.is_empty() {
+        let singular = *whole_seconds == 1 && *fraction == 0;
+        components.push(format!(
+            "{fractional_seconds} second{}",
+            if singular { "" } else { "s" }
+        ));
+    }
+    format!("{sign}{}", components.join(", "))
+}
+
+fn format_duration_iso(parts: &DurationParts) -> String {
+    let DurationParts {
+        sign,
+        days,
+        hours,
+        minutes,
+        whole_seconds,
+        fraction,
+        fractional_seconds,
+    } = parts;
+    let mut output = String::from(*sign);
+    output.push('P');
+    if !days.is_zero() {
+        output.push_str(&days.to_str_radix(10));
+        output.push('D');
+    }
+    if *hours > 0 || *minutes > 0 || *whole_seconds > 0 || *fraction > 0 || days.is_zero() {
+        output.push('T');
+        if *hours > 0 {
+            output.push_str(&hours.to_string());
+            output.push('H');
+        }
+        if *minutes > 0 {
+            output.push_str(&minutes.to_string());
+            output.push('M');
+        }
+        if *whole_seconds > 0 || *fraction > 0 || (days.is_zero() && *hours == 0 && *minutes == 0) {
+            output.push_str(fractional_seconds);
+            output.push('S');
+        }
+    }
+    output
 }
 
 fn parse_local_datetime(text: &str) -> Option<LocalDateTime> {

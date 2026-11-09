@@ -76,7 +76,7 @@ name = "orna-conformance"
 [crate.files]
 "src/lib.rs" = 2962
 "src/main.rs" = 1981
-"src/semantic_adapter.rs" = 14481
+"src/semantic_adapter.rs" = 14479
 [crate.functions]
 "src/lib.rs::execute_reference_project_runtime_adapter" = 208
 "src/lib.rs::run_fixture" = 123
@@ -98,7 +98,7 @@ name = "orna-conformance"
 "src/vector_suites.rs::path_vectors" = 122
 
 [[crate]]
-name = "orna-core"
+name = "orna-compat-v1"
 [crate.files]
 "src/canonical_hash.rs" = 2627
 "src/canonical_hash/tests.rs" = 3258
@@ -143,7 +143,6 @@ name = "orna-core"
 "src/revision/tests.rs::version_two_standard_snapshot_requires_complete_ordered_executable_evidence" = 238
 "src/revision/tests/record_values.rs::record_value_field_type_policy_is_closed_and_uses_pinned_standard_primitives" = 259
 "src/revision/tests/record_values.rs::record_value_types_require_version_two_at_every_revision_admission_boundary" = 196
-"src/security.rs::new_with_function_targets_local_peer_credentials_and_privilege_grants" = 122
 "src/value.rs::preflight_collection_descriptor" = 124
 "src/value.rs::validate_collection_runtime_value" = 124
 "src/value/tests/constructed.rs::active_map_revision" = 174
@@ -171,15 +170,12 @@ name = "orna-evaluator"
 "src/lib.rs::context_named_invocation_preserves_owner_context_after_ovb2_effects" = 147
 "src/lib.rs::evaluate_node" = 308
 "src/lib.rs::extreme" = 139
-"src/lib.rs::format_duration" = 126
 "src/lib.rs::named_arguments" = 202
-"src/lib.rs::observe_relation" = 121
 "src/lib.rs::raw" = 200
 "src/lib.rs::relation_call" = 173
 "src/lib.rs::route_call" = 154
 "src/lib.rs::stream" = 432
 "src/row_admission.rs::admit_row" = 147
-"src/sys_bindings.rs::dispatch_filesystem" = 174
 "src/sys_bindings.rs::rov3_descriptor_only_is_unavailable_and_self_equal" = 159
 "src/ui.rs::ui_node" = 152
 
@@ -208,14 +204,11 @@ name = "orna-live"
 [[crate]]
 name = "orna-lsp"
 [crate.files]
-"src/analysis.rs" = 1619
-"src/names.rs" = 1513
+"src/analysis.rs" = 1468
+"src/names.rs" = 1485
 "src/server.rs" = 2585
 [crate.functions]
 "src/analysis.rs::completion_at" = 183
-"src/analysis.rs::declaration_child_symbols" = 121
-"src/editor_ranges.rs::collect_expr_spans" = 133
-"src/editor_ranges.rs::collect_item_spans" = 147
 "src/names.rs::bind_pattern" = 147
 "src/names.rs::expr" = 168
 "src/names.rs::item" = 219
@@ -223,7 +216,7 @@ name = "orna-lsp"
 [[crate]]
 name = "orna-project"
 [crate.files]
-"src/attachments.rs" = 12412
+"src/attachments.rs" = 9969
 "src/lib.rs" = 3232
 "src/object_identity.rs" = 4562
 "src/typed_row.rs" = 1222
@@ -337,7 +330,7 @@ name = "orna-repository"
 name = "orna-runtime"
 [crate.files]
 "src/catalogue.rs" = 3568
-"src/invocation.rs" = 1429
+"src/invocation.rs" = 1425
 "src/lib.rs" = 35336
 "src/observation.rs" = 2068
 "src/publication.rs" = 1301
@@ -387,7 +380,7 @@ name = "orna-runtime"
 "src/lib.rs::runtime_stream_scheduler_commits_noop_and_keeps_failures_unadvanced" = 144
 "src/lib.rs::staged_table_failure_rolls_back_and_retries_the_same_list_delivery" = 198
 "src/lib.rs::stream_observation_projects_nullable_partition_and_failure_sys_dto_across_reopen" = 180
-"src/lib.rs::stream_observation_rejects_cross_run_checkpoint_rebinding_and_projects_checked_sys_dtos" = 228
+"src/lib.rs::stream_observation_rejects_cross_run_checkpoint_rebinding_and_projects_checked_sys_dtos" = 226
 "src/lib.rs::sys_admin_reset_receipt_replay_preserves_lifecycle_tail_order_across_reopen" = 272
 "src/lib.rs::sys_invocation_admission_shares_admin_receipt_id_without_tail_collision" = 123
 "src/lib.rs::sys_invocation_cancel_tail_survives_same_id_admin_receipt_replay" = 232
@@ -438,7 +431,6 @@ name = "orna-semantic"
 "src/lib.rs::collect_corresponding_snapshot_context_maps_at_path" = 243
 "src/lib.rs::collect_reset_snapshot_context_maps" = 165
 "src/lib.rs::collect_snapshot_context_maps_from_omitted_value_at_path" = 140
-"src/lib.rs::collect_use_bindings" = 149
 "src/lib.rs::infer_await_system_call" = 142
 "src/lib.rs::infer_binary" = 131
 "src/lib.rs::infer_call" = 259
@@ -473,7 +465,7 @@ name = "orna-semantic"
 "src/lib.rs::same_default_expression" = 247
 "src/lib.rs::seed_aligned_paths" = 132
 "src/lib.rs::seed_omitted_pinned_checkpoint_tuple_paths" = 153
-"src/lib.rs::specialize_dynamic_parameter_snapshot_contexts_scoped" = 287
+"src/lib.rs::specialize_dynamic_parameter_snapshot_contexts_scoped" = 235
 "src/lib.rs::tables_referenced" = 172
 "src/lib.rs::validate_loop_transfers" = 208
 "src/lib.rs::validate_nested_implementation_members" = 303
@@ -488,13 +480,11 @@ name = "orna-semantic"
 name = "orna-storage"
 [crate.files]
 "src/compact.rs" = 3529
-"src/compact_parquet.rs" = 5200
-"src/lib.rs" = 1887
+"src/compact_parquet.rs" = 5011
 [crate.functions]
 "src/compact.rs::evolution_rekey_consumes_verified_base_and_emits_writer_input" = 144
 "src/compact.rs::lower_publication_freeze" = 125
 "src/compact_parquet.rs::decode_verified_bytes_for_role" = 123
-"src/lib.rs::build_frozen_publication_store_root" = 126
 
 [[crate]]
 name = "orna-stream"
@@ -509,14 +499,10 @@ name = "orna-syntax"
 [crate.functions]
 "src/parser.rs::annotate_expr" = 143
 "src/parser.rs::annotate_item" = 154
-"src/parser.rs::item" = 294
-"src/parser.rs::parse_block_inner" = 202
 "src/parser.rs::parse_control_expression_inner" = 131
-"src/parser.rs::parse_pattern_inner" = 191
 "src/parser.rs::parse_type_expr_inner" = 177
 "src/parser.rs::pratt_from" = 214
-"src/parser.rs::prefix" = 192
-"src/parser.rs::validate_token_grammar" = 189
+"src/parser.rs::validate_token_grammar" = 129
 
 [[crate]]
 name = "orna-sys"
@@ -563,7 +549,7 @@ name = "orna-traceability"
 [[crate]]
 name = "orna-value"
 [crate.files]
-"src/blob.rs" = 1250
+"src/blob.rs" = 1248
 "src/format3_context_tests.rs" = 1426
 "src/lib.rs" = 2334
 "src/schema.rs" = 1240

@@ -99,6 +99,8 @@ async fn publication_cas_race_has_one_winner_and_consistent_state() {
         .expect("read latest checkpoint")
         .expect("capture leaves a checkpoint");
     let freeze = state
+        .publication_writer(&repository)
+        .expect("publication lease")
         .freeze([0x81; 16], &checkpoint)
         .await
         .expect("freeze captured row prefix");
@@ -204,6 +206,8 @@ async fn publication_cas_race_has_one_winner_and_consistent_state() {
         .expect("read checkpoint for second capture")
         .expect("second capture leaves a checkpoint");
     let freeze_b = state
+        .publication_writer(&repository)
+        .expect("publication lease")
         .freeze([0x82; 16], &checkpoint)
         .await
         .expect("freeze second captured row prefix");

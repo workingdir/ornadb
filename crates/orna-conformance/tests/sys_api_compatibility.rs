@@ -1,4 +1,4 @@
-use orna_core::revision::ArtifactCompatibilityCoordinates;
+use orna_compat_v1::revision::ArtifactCompatibilityCoordinates;
 use orna_sys::system_api_json;
 use serde_json::Value;
 
