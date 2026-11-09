@@ -39,6 +39,7 @@ orna-semantic = { path = "../orna-semantic" }
 orna-serving = { path = "../orna-serving" }
 orna-storage = { path = "../orna-storage" }
 orna-syntax = { path = "../orna-syntax" }
+orna-sys-id = { path = "../orna-sys-id" }
 orna-sys = { path = "../orna-sys" }
 orna-value = { path = "../orna-value" }
 serde_json = "1.0.151"

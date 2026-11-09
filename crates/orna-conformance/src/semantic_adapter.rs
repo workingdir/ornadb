@@ -64,6 +64,7 @@ use orna_sys::{
     AdmissionError, AdmissionRequest, ExecutionBoundary, FunctionDescriptor, InvocationCompletion,
     InvocationExecutor, InvocationHandle, InvocationState, RuntimeSupervisor, TypedValue,
 };
+use orna_sys_id::SysRelation;
 use orna_table::{ActivationError, DatabaseActivation, DatabaseRuntime, TableError};
 use sha2::{Digest, Sha256};
 use std::{
@@ -4062,13 +4063,17 @@ impl DurableTransactionalEvaluator {
         self.record_activation_time(context.activation_time());
         // The activation can name its admitted tables and the system relations
         // it serves from publication metadata, all at its pinned CWD snapshot.
+        let publication_relations: Vec<String> = PUBLICATION_RELATIONS
+            .iter()
+            .map(|relation| relation.name().to_owned())
+            .collect();
         let explain_catalogue = match ActivationExplainCatalogue::new(
             &context.capture().snapshot(),
             admitted
                 .key_fields
                 .keys()
-                .map(String::as_str)
-                .chain(PUBLICATION_RELATIONS),
+                .cloned()
+                .chain(publication_relations),
         ) {
             Ok(catalogue) => catalogue,
             Err(_) => {
@@ -6296,7 +6301,7 @@ impl RuntimeEvaluator for TransactionalEvaluator {
 
 /// System relations whose rows the durable run host serves from runtime
 /// publication metadata.
-const PUBLICATION_RELATIONS: [&str; 2] = ["sys.Storage", "sys.MaintenanceJob"];
+const PUBLICATION_RELATIONS: [SysRelation; 2] = [SysRelation::Storage, SysRelation::MaintenanceJob];
 
 struct TableEffectHandler<'activation, 'runtime> {
     activation: &'activation mut TransactionActivation<'runtime>,
@@ -6331,8 +6336,10 @@ impl EffectHandler for TableEffectHandler<'_, '_> {
             }));
         }
         if let Some(row) = match (source, self.publication_rows.as_ref()) {
-            ("sys.Storage", Some(rows)) => Some(&rows.sys_storage),
-            ("sys.MaintenanceJob", Some(rows)) => Some(&rows.maintenance_job),
+            (name, Some(rows)) if name == SysRelation::Storage.name() => Some(&rows.sys_storage),
+            (name, Some(rows)) if name == SysRelation::MaintenanceJob.name() => {
+                Some(&rows.maintenance_job)
+            }
             _ => None,
         } {
             if after.is_some() {

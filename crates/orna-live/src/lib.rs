@@ -50,6 +50,7 @@ use orna_security::{
 };
 use orna_serving::{Error as ServingError, Origin as ServingOrigin, Serving};
 use orna_stream::{DiagnosticClass, DiagnosticCode, SafeDiagnostic};
+use orna_sys_id::SysFailureCode;
 
 pub const SUBPROTOCOL: &str = "orna.present.v1";
 
@@ -130,7 +131,7 @@ impl Error {
             Self::UnsupportedOperation => "live.unsupported_operation",
             Self::RequestMismatch => "wire.request_mismatch",
             Self::ApplicationRejected => "live.application_rejected",
-            Self::AdminBusy => "sys.admin.busy",
+            Self::AdminBusy => SysFailureCode::AdminBusy.as_str(),
             Self::ApplicationDeferred => "live.application_deferred",
             Self::RuntimeUnavailable => "live.runtime_unavailable",
             Self::SnapshotExpired => "wire.snapshot_expired",
@@ -1260,7 +1261,7 @@ pub trait LiveAdminEffectDispatcher: Send + Sync {
             dyn Future<
                     Output = std::result::Result<
                         Option<orna_runtime::RuntimePublicationMetadataRows>,
-                        String,
+                        SysFailureCode,
                     >,
                 > + Send
                 + 'a,
@@ -1274,16 +1275,19 @@ pub trait LiveAdminEffectDispatcher: Send + Sync {
         stream: CanonicalValue,
         reason: Option<String>,
         context: &'a RuntimeActivationContext,
-    ) -> Pin<Box<dyn Future<Output = std::result::Result<CanonicalValue, String>> + Send + 'a>>;
+    ) -> Pin<
+        Box<dyn Future<Output = std::result::Result<CanonicalValue, SysFailureCode>> + Send + 'a>,
+    >;
 
     fn resume_stream<'a>(
         &'a self,
         _stream: CanonicalValue,
         _context: &'a RuntimeActivationContext,
-    ) -> Pin<Box<dyn Future<Output = std::result::Result<CanonicalValue, String>> + Send + 'a>>
-    {
+    ) -> Pin<
+        Box<dyn Future<Output = std::result::Result<CanonicalValue, SysFailureCode>> + Send + 'a>,
+    > {
         // A dispatcher without resume support cannot perform the mutation.
-        Box::pin(async { Err("sys.admin.read_only".to_owned()) })
+        Box::pin(async { Err(SysFailureCode::AdminReadOnly) })
     }
 
     fn reject_staged_admin_effect<'a>(
@@ -1292,9 +1296,10 @@ pub trait LiveAdminEffectDispatcher: Send + Sync {
         _reason: Option<String>,
         _resume: bool,
         _context: &'a RuntimeActivationContext,
-    ) -> Pin<Box<dyn Future<Output = std::result::Result<CanonicalValue, String>> + Send + 'a>>
-    {
-        Box::pin(async { Err("sys.admin.busy".to_owned()) })
+    ) -> Pin<
+        Box<dyn Future<Output = std::result::Result<CanonicalValue, SysFailureCode>> + Send + 'a>,
+    > {
+        Box::pin(async { Err(SysFailureCode::AdminBusy) })
     }
 }
 
@@ -1312,7 +1317,7 @@ impl LiveAdminEffectDispatcher for RuntimeAdminEffectDispatcher {
             dyn Future<
                     Output = std::result::Result<
                         Option<orna_runtime::RuntimePublicationMetadataRows>,
-                        String,
+                        SysFailureCode,
                     >,
                 > + Send
                 + 'a,
@@ -1323,7 +1328,7 @@ impl LiveAdminEffectDispatcher for RuntimeAdminEffectDispatcher {
                 .publication_metadata_rows()
                 .await
                 .map(Some)
-                .map_err(|_| "sys.storage.unavailable".to_owned())
+                .map_err(|_| SysFailureCode::StorageUnavailable)
         })
     }
 
@@ -1332,8 +1337,9 @@ impl LiveAdminEffectDispatcher for RuntimeAdminEffectDispatcher {
         stream: CanonicalValue,
         reason: Option<String>,
         context: &'a RuntimeActivationContext,
-    ) -> Pin<Box<dyn Future<Output = std::result::Result<CanonicalValue, String>> + Send + 'a>>
-    {
+    ) -> Pin<
+        Box<dyn Future<Output = std::result::Result<CanonicalValue, SysFailureCode>> + Send + 'a>,
+    > {
         Box::pin(async move {
             let invocation_id = admin_invocation_id(self.request);
             // The runtime call is a large future; pin it inside the closure so
@@ -1366,8 +1372,9 @@ impl LiveAdminEffectDispatcher for RuntimeAdminEffectDispatcher {
         &'a self,
         stream: CanonicalValue,
         context: &'a RuntimeActivationContext,
-    ) -> Pin<Box<dyn Future<Output = std::result::Result<CanonicalValue, String>> + Send + 'a>>
-    {
+    ) -> Pin<
+        Box<dyn Future<Output = std::result::Result<CanonicalValue, SysFailureCode>> + Send + 'a>,
+    > {
         Box::pin(async move {
             let invocation_id = admin_invocation_id(self.request);
             // Same as `pause_stream`: pin the runtime call rather than carrying
@@ -1400,8 +1407,9 @@ impl LiveAdminEffectDispatcher for RuntimeAdminEffectDispatcher {
         reason: Option<String>,
         resume: bool,
         _context: &'a RuntimeActivationContext,
-    ) -> Pin<Box<dyn Future<Output = std::result::Result<CanonicalValue, String>> + Send + 'a>>
-    {
+    ) -> Pin<
+        Box<dyn Future<Output = std::result::Result<CanonicalValue, SysFailureCode>> + Send + 'a>,
+    > {
         Box::pin(async move {
             let function = if resume {
                 orna_runtime::AdminStreamFunction::ResumeStream
@@ -1421,7 +1429,7 @@ impl LiveAdminEffectDispatcher for RuntimeAdminEffectDispatcher {
                 )
                 .await
                 .map_err(|error| admin_failure_code(&error))?;
-            Err("sys.admin.busy".to_owned())
+            Err(SysFailureCode::AdminBusy)
         })
     }
 }
@@ -1433,24 +1441,18 @@ impl LiveAdminEffectDispatcher for RuntimeAdminEffectDispatcher {
 /// owner is a missing object, `sys.admin.missing_object`; snapshot and
 /// checkpoint failures keep their more specific codes; and a runtime store
 /// that cannot complete the transition is `sys.storage.unavailable`.
-fn admin_failure_code(error: &RuntimeError) -> String {
-    error.public_code().map_or_else(
-        || {
-            match error {
-                RuntimeError::InvalidObservationReference
-                | RuntimeError::ObservationCoordinateMismatch
-                | RuntimeError::StreamIdentityMismatch => "sys.admin.missing_object",
-                RuntimeError::LeaseHeld
-                | RuntimeError::OwnerLost
-                | RuntimeError::StaleCapture { .. }
-                | RuntimeError::AdminInvocationConflict
-                | RuntimeError::RecoveryPending => "sys.admin.busy",
-                _ => "sys.storage.unavailable",
-            }
-            .to_owned()
-        },
-        |code| code.as_str().to_owned(),
-    )
+fn admin_failure_code(error: &RuntimeError) -> SysFailureCode {
+    error.public_code().unwrap_or(match error {
+        RuntimeError::InvalidObservationReference
+        | RuntimeError::ObservationCoordinateMismatch
+        | RuntimeError::StreamIdentityMismatch => SysFailureCode::AdminMissingObject,
+        RuntimeError::LeaseHeld
+        | RuntimeError::OwnerLost
+        | RuntimeError::StaleCapture { .. }
+        | RuntimeError::AdminInvocationConflict
+        | RuntimeError::RecoveryPending => SysFailureCode::AdminBusy,
+        _ => SysFailureCode::StorageUnavailable,
+    })
 }
 
 /// Refuses a transaction the transport may not commit: the transaction must

@@ -48,6 +48,7 @@ use orna_syntax::{
     CaseArm, Declaration, Expr, FieldInitializer, Item, Pattern, Statement, StringSegment,
     SyntaxTree, TableMember, UseTail, Visibility, parse_module_with_file, parse_repl,
 };
+use orna_sys_id::{SysFailureCode, SysFunction, SysGroupedHandle, SysRelation};
 use orna_value::{ContextValue, Format3Context, ValueFormat};
 use sha2::{Digest, Sha256};
 use std::{
@@ -114,7 +115,7 @@ pub enum ApplicationError {
     /// The evaluator rejected an admitted effect outside the table boundary.
     EffectRejected(String),
     /// The source requested an effect that could not be authorized or run.
-    SourceEffectFailed(String),
+    SourceEffectFailed(SysFailureCode),
     /// Committed table identity metadata did not exactly match admitted table schemas.
     InvalidTableMetadata,
     /// Async runtime effects are supported only as the activation's terminal
@@ -468,8 +469,8 @@ impl ApplicationAuthority {
         Ok(AdmittedApplication {
             logical_path,
             source_digest: Sha256::digest(source.as_bytes()).into(),
-            requires_publication_metadata: source.contains("sys.Storage")
-                || source.contains("sys.MaintenanceJob"),
+            requires_publication_metadata: source.contains(SysRelation::Storage.name())
+                || source.contains(SysRelation::MaintenanceJob.name()),
             entry,
             functions,
             table_insert_defaults,
@@ -842,7 +843,10 @@ impl ApplicationAuthority {
             tables.keys().map(String::as_str).chain(
                 publication_rows
                     .is_some()
-                    .then_some(["sys.Storage", "sys.MaintenanceJob"])
+                    .then_some([
+                        SysRelation::Storage.name(),
+                        SysRelation::MaintenanceJob.name(),
+                    ])
                     .into_iter()
                     .flatten(),
             ),
@@ -890,7 +894,7 @@ impl ApplicationAuthority {
                 .reject_staged_admin_effect(effect.clone(), context)
                 .await
                 .err()
-                .unwrap_or_else(|| "sys.admin.busy".to_owned());
+                .unwrap_or(SysFailureCode::AdminBusy);
             return Err(ApplicationError::SourceEffectFailed(code));
         }
         for effect in effects {
@@ -1206,10 +1210,11 @@ pub enum ApplicationEffectRequest {
 
 /// Async result returned by one explicitly authorized source-effect dispatch.
 pub type ApplicationEffectFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<CanonicalValue, String>> + 'a>>;
+    Pin<Box<dyn Future<Output = Result<CanonicalValue, SysFailureCode>> + 'a>>;
 
-pub type ApplicationPublicationRowsFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<Option<RuntimePublicationMetadataRows>, String>> + 'a>>;
+pub type ApplicationPublicationRowsFuture<'a> = Pin<
+    Box<dyn Future<Output = Result<Option<RuntimePublicationMetadataRows>, SysFailureCode>> + 'a>,
+>;
 
 /// Capability supplied only by a trusted local runtime coordinator.
 ///
@@ -1231,7 +1236,7 @@ pub trait AsyncApplicationEffectDispatcher {
         _effect: ApplicationEffectRequest,
         _context: &'a RuntimeActivationContext,
     ) -> ApplicationEffectFuture<'a> {
-        Box::pin(async { Err("sys.admin.busy".to_owned()) })
+        Box::pin(async { Err(SysFailureCode::AdminBusy) })
     }
 }
 
@@ -1255,7 +1260,7 @@ impl AsyncApplicationEffectDispatcher for LiveEffectAdapter<'_> {
                 self.0.resume_stream(stream, context)
             }
             ApplicationEffectRequest::CancelInvocation { .. } => {
-                Box::pin(async { Err("sys.invoke.effect_unavailable".to_owned()) })
+                Box::pin(async { Err(SysFailureCode::InvokeEffectUnavailable) })
             }
         }
     }
@@ -1273,7 +1278,7 @@ impl AsyncApplicationEffectDispatcher for LiveEffectAdapter<'_> {
                 .0
                 .reject_staged_admin_effect(stream, None, true, context),
             ApplicationEffectRequest::CancelInvocation { .. } => {
-                Box::pin(async { Err("sys.admin.busy".to_owned()) })
+                Box::pin(async { Err(SysFailureCode::AdminBusy) })
             }
         }
     }
@@ -1386,10 +1391,10 @@ impl StagedActivation {
 }
 
 /// The grouped handle that serves the admitted table catalogue.
-const SYS_CATALOGUE_TABLES_SOURCE: &str = "sys.catalog.tables";
+const SYS_CATALOGUE_TABLES_SOURCE: &str = SysGroupedHandle::CatalogTables.name();
 
 /// The grouped handle that serves the admitted column catalogue.
-const SYS_CATALOGUE_COLUMNS_SOURCE: &str = "sys.catalog.columns";
+const SYS_CATALOGUE_COLUMNS_SOURCE: &str = SysGroupedHandle::CatalogColumns.name();
 
 /// Builds a canonical record from named fields.
 ///
@@ -2480,7 +2485,7 @@ impl EffectHandler for AsyncSourceMutationEffectHandler {
         callee: &Expr,
         arguments: &[CanonicalValue],
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
-        if source_function_path(callee).as_deref() == Some("sys.admin.pause_stream") {
+        if source_function_path(callee).as_deref() == Some(SysFunction::AdminPauseStream.label()) {
             let request = match arguments {
                 [stream] => ApplicationEffectRequest::PauseStream {
                     stream: stream.clone(),
@@ -2514,7 +2519,7 @@ impl EffectHandler for AsyncSourceMutationEffectHandler {
                 .map(Some)
                 .map_err(|_| SourceMutationEffectHandler::effect_error("ORNA-EVAL-VALUE"));
         }
-        if source_function_path(callee).as_deref() == Some("sys.admin.resume_stream") {
+        if source_function_path(callee).as_deref() == Some(SysFunction::AdminResumeStream.label()) {
             let [stream] = arguments else {
                 return Err(SourceMutationEffectHandler::effect_error(
                     "ORNA-EVAL-ARGUMENT",
@@ -2527,7 +2532,7 @@ impl EffectHandler for AsyncSourceMutationEffectHandler {
                 .map(Some)
                 .map_err(|_| SourceMutationEffectHandler::effect_error("ORNA-EVAL-VALUE"));
         }
-        if source_function_path(callee).as_deref() == Some("sys.cancel") {
+        if source_function_path(callee).as_deref() == Some(SysFunction::Cancel.label()) {
             let request = match arguments {
                 [invocation] => ApplicationEffectRequest::CancelInvocation {
                     invocation: invocation.clone(),
@@ -2606,8 +2611,8 @@ impl EffectHandler for AsyncSourceMutationEffectHandler {
             return Ok(None);
         };
         let row = match source {
-            "sys.Storage" => &publication_rows.sys_storage,
-            "sys.MaintenanceJob" => &publication_rows.maintenance_job,
+            name if name == SysRelation::Storage.name() => &publication_rows.sys_storage,
+            name if name == SysRelation::MaintenanceJob.name() => &publication_rows.maintenance_job,
             _ => return Ok(None),
         };
         if after.is_some() {
@@ -2659,7 +2664,9 @@ fn validate_terminal_runtime_effect(
 fn is_runtime_source_effect_path(path: &str) -> bool {
     matches!(
         path,
-        "sys.admin.pause_stream" | "sys.admin.resume_stream" | "sys.cancel"
+        name if name == SysFunction::AdminPauseStream.label()
+                || name == SysFunction::AdminResumeStream.label()
+                || name == SysFunction::Cancel.label()
     )
 }
 
@@ -3000,8 +3007,8 @@ impl EffectHandler for SourceMutationEffectHandler {
             return Ok(None);
         };
         let row = match source {
-            "sys.Storage" => &publication_rows.sys_storage,
-            "sys.MaintenanceJob" => &publication_rows.maintenance_job,
+            name if name == SysRelation::Storage.name() => &publication_rows.sys_storage,
+            name if name == SysRelation::MaintenanceJob.name() => &publication_rows.maintenance_job,
             _ => return Ok(None),
         };
         if after.is_some() {
@@ -3280,7 +3287,7 @@ fn module_namespace(logical_path: &str) -> Namespace {
 impl From<ApplicationError> for LiveError {
     fn from(error: ApplicationError) -> Self {
         match error {
-            ApplicationError::SourceEffectFailed(code) if code == "sys.admin.busy" => {
+            ApplicationError::SourceEffectFailed(SysFailureCode::AdminBusy) => {
                 Self::AdminBusy
             }
             _ => Self::ApplicationRejected,
@@ -6033,9 +6040,14 @@ mod tests {
             _stream: CanonicalValue,
             _reason: Option<String>,
             _context: &'a RuntimeActivationContext,
-        ) -> Pin<Box<dyn Future<Output = std::result::Result<CanonicalValue, String>> + Send + 'a>>
-        {
-            Box::pin(async { Err("unexpected pause dispatch".to_owned()) })
+        ) -> Pin<
+            Box<
+                dyn Future<Output = std::result::Result<CanonicalValue, SysFailureCode>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async { Err(SysFailureCode::AdminBusy) })
         }
     }
 
@@ -14589,7 +14601,7 @@ mod tests {
                         Ok(CanonicalValue::new(OvbRaw::Bool(true)).expect("canonical bool"))
                     }
                     ApplicationEffectRequest::CancelInvocation { .. } => {
-                        Err("unexpected cancellation".to_owned())
+                        Err(SysFailureCode::InvokeEffectUnavailable)
                     }
                 }
             })

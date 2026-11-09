@@ -6,6 +6,7 @@ use orna_foundation::{CanonicalSnapshot, CanonicalValue, canonical_uuid_text};
 use orna_live::live_presentation::{LivePresentationUpdate, ResyncRequest, WatchPresentation};
 use orna_project_repl::{AdmittedReplSession, ReplDetail, ReplError};
 use orna_protocol::{Envelope, Limits, Message, PresentNode};
+use orna_sys_id::SysType;
 use orna_value::{ContextValue, Raw};
 
 const MAX_INPUT_BYTES: usize = 65_536;
@@ -1120,7 +1121,7 @@ fn inspect_raw(raw: &Raw, depth: usize) -> (String, &'static str) {
         Raw::Tag(60011, _) => ("<redacted>".into(), "Diagnostic"),
         Raw::Tag(60012, _) => ("<redacted>".into(), "Present"),
         Raw::Tag(60016, _) => ("<redacted>".into(), "Error"),
-        Raw::Tag(60026, _) => ("<redacted>".into(), "sys.Value"),
+        Raw::Tag(60026, _) => ("<redacted>".into(), SysType::Value.name()),
         // OVB tag 37 is the closed 1.0 UUID representation. Keep its
         // structural fallback human-readable without turning presentation
         // into an alternate persistence encoding.
@@ -1175,7 +1176,7 @@ fn registered_tag_name(tag: u64) -> Option<&'static str> {
         60023 => "SystemId",
         60024 => "Path",
         60025 => "Digest",
-        60026 => "sys.Value",
+        60026 => SysType::Value.name(),
         60027 => "Relation",
         _ => return None,
     })

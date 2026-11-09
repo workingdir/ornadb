@@ -16,6 +16,7 @@ use orna_runtime::{
 };
 use orna_runtime::{RuntimeIdentity, RuntimeState};
 use orna_semantic::Catalogue;
+use orna_sys_id::SysFailureCode;
 use std::{
     fs,
     path::PathBuf,
@@ -52,7 +53,7 @@ impl AsyncApplicationEffectDispatcher for SourceResumeDispatcher {
     ) -> ApplicationEffectFuture<'a> {
         Box::pin(async move {
             if !matches!(effect, ApplicationEffectRequest::ResumeStream { .. }) {
-                return Err("expected sys.admin.resume_stream".to_owned());
+                return Err(SysFailureCode::InvokeEffectUnavailable);
             }
             Ok(CanonicalValue::new(OvbRaw::Bool(true)).unwrap())
         })
@@ -207,8 +208,7 @@ impl AsyncApplicationEffectDispatcher for RuntimePauseDispatcher<'_> {
                         .map_err(|error| {
                             error
                                 .public_code()
-                                .map(|code| code.as_str().to_owned())
-                                .unwrap_or_else(|| "sys.storage.unavailable".to_owned())
+                                .unwrap_or(SysFailureCode::StorageUnavailable)
                         })?;
                     let accepted = matches!(
                         outcome,
@@ -217,12 +217,8 @@ impl AsyncApplicationEffectDispatcher for RuntimePauseDispatcher<'_> {
                     );
                     Ok(CanonicalValue::new(OvbRaw::Bool(accepted)).unwrap())
                 }
-                ApplicationEffectRequest::ResumeStream { .. } => {
-                    Err("unexpected resume".to_owned())
-                }
-                ApplicationEffectRequest::CancelInvocation { .. } => {
-                    Err("unexpected cancellation".to_owned())
-                }
+                ApplicationEffectRequest::ResumeStream { .. } => Err(SysFailureCode::AdminBusy),
+                ApplicationEffectRequest::CancelInvocation { .. } => Err(SysFailureCode::AdminBusy),
             }
         })
     }
@@ -455,7 +451,10 @@ impl LiveAdminEffectDispatcher for PublicationRowsDispatcher<'_> {
     ) -> std::pin::Pin<
         Box<
             dyn std::future::Future<
-                    Output = Result<Option<orna_runtime::RuntimePublicationMetadataRows>, String>,
+                    Output = Result<
+                        Option<orna_runtime::RuntimePublicationMetadataRows>,
+                        SysFailureCode,
+                    >,
                 > + Send
                 + 'a,
         >,
@@ -465,7 +464,7 @@ impl LiveAdminEffectDispatcher for PublicationRowsDispatcher<'_> {
                 .publication_metadata_rows()
                 .await
                 .map(Some)
-                .map_err(|_| "metadata read failed".to_owned())
+                .map_err(|_| SysFailureCode::StorageUnavailable)
         })
     }
 
@@ -475,8 +474,8 @@ impl LiveAdminEffectDispatcher for PublicationRowsDispatcher<'_> {
         _reason: Option<String>,
         _context: &'a orna_runtime::RuntimeActivationContext,
     ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<CanonicalValue, String>> + Send + 'a>,
+        Box<dyn std::future::Future<Output = Result<CanonicalValue, SysFailureCode>> + Send + 'a>,
     > {
-        Box::pin(async { Err("unexpected pause".to_owned()) })
+        Box::pin(async { Err(SysFailureCode::AdminBusy) })
     }
 }
