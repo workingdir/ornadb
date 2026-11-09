@@ -36,7 +36,9 @@ use orna_stream::{Component, ConsumerIdentity};
 use orna_value::{Raw, sov3_context_free_domain_digest};
 use sha2::{Digest as _, Sha256};
 
-use crate::{RuntimeError, RuntimeState, migration_copy_runtime_identity};
+use crate::RuntimeState;
+use crate::error::RuntimeError;
+use crate::repository_identity::migration_copy_runtime_identity;
 
 /// Stream tables whose rows a migration does not carry.
 const NON_CARRIABLE_TABLES: &[&str] = &[
