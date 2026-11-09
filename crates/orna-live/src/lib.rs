@@ -27,6 +27,7 @@ use std::{
     task::{Poll, Waker},
 };
 
+use orna_evaluator::ActivationEffectReport;
 use orna_foundation::{
     CanonicalSnapshot, CanonicalValue, Diagnostic as FoundationDiagnostic, DiagnosticSeverity,
     OvbRaw, SafeText, Value,
@@ -36,10 +37,10 @@ use orna_protocol::{
     TargetKind, canonical_request_fingerprint,
 };
 use orna_runtime::{
-    ActivationEffectReport, Component, ConsumerIdentity, FaultInjector, RecoveryDisposition,
-    RequestIdentity, RequestOwner, RequestState as DurableRequestState,
-    RequestStatus as DurableRequestStatus, RunObservationRegistration, RuntimeActivationContext,
-    RuntimeError, RuntimeState, StagedTableActivation, TableActivationCandidateValidator,
+    Component, ConsumerIdentity, FaultInjector, RecoveryDisposition, RequestIdentity, RequestOwner,
+    RequestState as DurableRequestState, RequestStatus as DurableRequestStatus,
+    RunObservationRegistration, RuntimeActivationContext, RuntimeError, RuntimeState,
+    StagedTableActivation, StagedTableParts, TableActivationCandidateValidator,
     TableActivationError, TableMutation, TerminalOutcome, ValidatedTableRequestActivationCommit,
     WriterLease, admin_invocation_id, with_terminal_admin_effect,
 };
@@ -708,6 +709,31 @@ impl Default for LiveApplicationWorkSupervisor {
     }
 }
 
+/// Witness that an application is first-party, so the host may honour its
+/// `ControlledOnly` transaction effect reports.
+///
+/// It has no public constructor. `mint` exists only under the
+/// `first-party-effect-trust` feature, which only the first-party application
+/// adapter enables, so a third-party `LiveApplication` that does not enable the
+/// feature cannot obtain one and always has its controlled reports downgraded.
+/// This is a compile-time capability, not a cryptographic proof: any crate in the
+/// same build that enables the feature (feature unification) can mint one.
+/// Residual tracked as ornadb-5il1.459.
+#[derive(Debug)]
+pub struct FirstPartyEffectTrust {
+    _private: (),
+}
+
+#[cfg(feature = "first-party-effect-trust")]
+impl FirstPartyEffectTrust {
+    /// Mints the first-party witness. Available only with the
+    /// `first-party-effect-trust` feature.
+    #[must_use]
+    pub const fn mint() -> Self {
+        Self { _private: () }
+    }
+}
+
 /// A staged, Orna-controlled table activation returned by a transactional
 /// remote Eval adapter. The host supplies the admitted CWD context and owns
 /// the writer-fenced commit; application code never commits a wire result
@@ -715,7 +741,7 @@ impl Default for LiveApplicationWorkSupervisor {
 pub struct LiveEvalTransaction {
     pub mutations: Vec<TableMutation>,
     pub next_digest: [u8; 32],
-    pub effects: ActivationEffectReport,
+    effects: ActivationEffectReport,
     pub faults: Arc<dyn FaultInjector>,
     request_identity: Option<RequestIdentity>,
     after_commit: Option<Box<dyn FnOnce() + Send>>,
@@ -764,11 +790,11 @@ impl LiveEvalTransaction {
     }
 
     /// Applies the host's trust decision to this transaction's effect report.
-    /// An untrusted application's controlled report is downgraded to
+    /// Without a first-party witness, a controlled report is downgraded to
     /// `ExternalPossible`, so its rollback cannot be recovered as proven.
     #[must_use]
-    pub fn with_effect_report_trust(mut self, trusted: bool) -> Self {
-        if !trusted {
+    fn apply_effect_report_trust(mut self, trust: Option<&FirstPartyEffectTrust>) -> Self {
+        if trust.is_none() {
             self.effects = ActivationEffectReport::ExternalPossible;
         }
         self
@@ -804,7 +830,7 @@ impl LiveEvalResponse {
     /// Applies the host's trust decision to a transactional response's effect
     /// report. Pure responses carry no effect report and pass through.
     #[must_use]
-    pub fn with_effect_report_trust(self, trusted: bool) -> Self {
+    fn apply_effect_report_trust(self, trust: Option<&FirstPartyEffectTrust>) -> Self {
         match self {
             Self::Pure(response) => Self::Pure(response),
             Self::Transaction {
@@ -812,7 +838,7 @@ impl LiveEvalResponse {
                 transaction,
             } => Self::Transaction {
                 response,
-                transaction: transaction.with_effect_report_trust(trusted),
+                transaction: transaction.apply_effect_report_trust(trust),
             },
         }
     }
@@ -1040,25 +1066,17 @@ pub trait LiveApplication {
         })
     }
 
-    /// Declares whether this application's transaction effect reports are
-    /// trusted. A `ControlledOnly` report yields the controlled marker that
-    /// lets recovery prove a rollback (REQUEST-1 step 5, ORNA-CAP-005;
-    /// ACCEPTANCE.md Gate D). The runtime cannot observe what an application
-    /// does, so the host honours a report only from an application that opts
-    /// in here. Any other report is downgraded to `ExternalPossible`, which
-    /// recovers as `ExternalEffectsUncertain` after an observed rollback.
-    /// The default is untrusted.
+    /// Returns the first-party witness that lets the host honour this
+    /// application's `ControlledOnly` transaction effect reports. Such a report
+    /// lets recovery prove a rollback (REQUEST-1 step 5, ORNA-CAP-005; ACCEPTANCE.md
+    /// Gate D). The runtime cannot observe what an application does, so the host
+    /// honours a controlled report only when this returns `Some`. Any other report
+    /// is downgraded to `ExternalPossible`, which recovers as
+    /// `ExternalEffectsUncertain` after an observed rollback. The default is `None`.
     ///
-    /// Returning `true` is an unchecked claim, not a verification: the host
-    /// cannot observe the application's effects, so an implementation that
-    /// returns `true` for an application that reaches external state defeats
-    /// the rollback downgrade. Only the first-party adapter, which is trusted
-    /// by construction, returns `true`, and only when no sys host is attached;
-    /// third-party implementations must keep the default.
-    /// Residual: the trust is a `bool`, not a gate-issued token
-    /// (ornadb-5il1.459 follow-up).
-    fn trusts_controlled_effect_reports(&self) -> bool {
-        false
+    /// The witness has no public constructor; see [`FirstPartyEffectTrust`].
+    fn first_party_effect_trust(&self) -> Option<FirstPartyEffectTrust> {
+        None
     }
 
     /// # Errors
@@ -1574,7 +1592,7 @@ impl LiveApplicationTicket {
         mut self,
         application: &mut impl LiveApplication,
     ) -> LiveApplicationCompletion {
-        let trusted = application.trusts_controlled_effect_reports();
+        let trust = application.first_party_effect_trust();
         let response = if self.invoke_callback {
             if matches!(&*self.message, Message::Eval { .. }) {
                 let session = self.session;
@@ -1631,7 +1649,7 @@ impl LiveApplicationTicket {
                 self.fingerprint,
             )))
         };
-        let response = response.map(|response| response.with_effect_report_trust(trusted));
+        let response = response.map(|response| response.apply_effect_report_trust(trust.as_ref()));
         self.work.complete();
         LiveApplicationCompletion {
             ticket: self,
@@ -3847,7 +3865,7 @@ impl LiveHost {
             .map(|dispatcher| dispatcher as &dyn LiveAdminEffectDispatcher);
         let session_id = session;
         let request_id = request;
-        let trusted = application.trusts_controlled_effect_reports();
+        let trust = application.first_party_effect_trust();
         let execute = move || async move {
             application
                 .dispatch_eval_with_effects(
@@ -3870,7 +3888,7 @@ impl LiveHost {
             _ => execute().await,
         };
         work.complete();
-        let result = result?.with_effect_report_trust(trusted);
+        let result = result?.apply_effect_report_trust(trust.as_ref());
         match result {
             LiveEvalResponse::Pure(response) => Ok(response),
             LiveEvalResponse::Transaction {
@@ -3918,7 +3936,7 @@ impl LiveHost {
             None
         };
         let mut work = self.application_work.admit(session, request)?;
-        let trusted = application.trusts_controlled_effect_reports();
+        let trust = application.first_party_effect_trust();
         let result = application
             .dispatch_event_with_work(
                 session,
@@ -3931,7 +3949,7 @@ impl LiveHost {
             )
             .await;
         work.complete();
-        match result?.with_effect_report_trust(trusted) {
+        match result?.apply_effect_report_trust(trust.as_ref()) {
             LiveEvalResponse::Pure(response) => Ok(response),
             LiveEvalResponse::Transaction {
                 response,
@@ -4558,19 +4576,26 @@ impl LiveHost {
         let committed = match self.table_candidate_validator.as_ref() {
             Some(factory) => {
                 let mut validator = factory(staged.context())?;
+                let StagedTableParts {
+                    context,
+                    mutations,
+                    next_digest,
+                    faults,
+                    effects,
+                } = staged.into_parts();
                 runtime
                     .commit_validated_table_request_activation(
                         ValidatedTableRequestActivationCommit {
                             writer: lease,
                             identity,
                             fingerprint,
-                            context: staged.context(),
-                            mutations: staged.mutations(),
-                            next_digest: staged.next_digest(),
+                            context: &context,
+                            mutations: &mutations,
+                            next_digest,
                             outcome: terminal,
                             validator: &mut *validator,
-                            faults: staged.faults(),
-                            effects: staged.effects(),
+                            faults: faults.as_ref(),
+                            effects,
                         },
                     )
                     .await
@@ -4591,7 +4616,7 @@ impl LiveHost {
                     lease,
                     identity,
                     fingerprint,
-                    &staged,
+                    staged,
                     terminal,
                 )
                 .await
@@ -11307,7 +11332,7 @@ mod tests {
             let transaction = LiveEvalTransaction::new(
                 vec![mutation],
                 [24; 32],
-                orna_runtime::EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
+                orna_evaluator::EffectGate::admit_unbound_for_test(),
                 if fail {
                     Arc::new(FailBeforeTableWrite)
                 } else {
@@ -11463,7 +11488,7 @@ mod tests {
         let transaction = LiveEvalTransaction::new(
             vec![mutation],
             [24; 32],
-            orna_runtime::EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
+            orna_evaluator::EffectGate::admit_unbound_for_test(),
             Arc::new(NoFault),
         )
         .for_request(identity)
@@ -11562,7 +11587,7 @@ mod tests {
             let mut transaction = LiveEvalTransaction::new(
                 vec![mutation],
                 [24; 32],
-                orna_runtime::EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
+                orna_evaluator::EffectGate::admit_unbound_for_test(),
                 Arc::new(NoFault),
             );
             if let Some(supplied_identity) = supplied_identity {

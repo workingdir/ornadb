@@ -6,9 +6,9 @@ use orna_live::{LiveApplication, LiveApplicationWorkSupervisor, LiveEvalResponse
 use orna_protocol::{Envelope, Message, PresentationContext, ResultStatus};
 use orna_repository::Repository;
 use orna_runtime::{
-    Component, ConsumerIdentity, EffectGate, FaultInjector, FaultPoint, RequestIdentity,
-    RequestState, RunObservationRegistration, RuntimeError, RuntimeIdentity, RuntimeState,
-    StagedTableActivation, TerminalOutcome, WriterLease,
+    Component, ConsumerIdentity, FaultInjector, FaultPoint, RequestIdentity, RequestState,
+    RunObservationRegistration, RuntimeError, RuntimeIdentity, RuntimeState, StagedTableActivation,
+    TerminalOutcome, WriterLease,
 };
 use orna_semantic::Catalogue;
 use std::{
@@ -259,14 +259,14 @@ fn admitted_source_table_mutation_commits_rolls_back_and_replays_terminally() {
         failed_transaction.mutations,
         failed_transaction.next_digest,
         Arc::new(FailAfterTableWrite),
-        EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
+        orna_evaluator::EffectGate::admit_unbound_for_test(),
     )
     .unwrap();
     let failed_commit = block_on(runtime.state.commit_staged_table_request_activation(
         runtime.lease,
         failed_identity,
         failed_fingerprint,
-        &failed_staged,
+        failed_staged,
         TerminalOutcome::new(result_bytes(&failed_response)).unwrap(),
     ));
     assert!(matches!(
@@ -376,7 +376,7 @@ fn admitted_source_table_mutation_commits_rolls_back_and_replays_terminally() {
         committed_transaction.mutations,
         committed_transaction.next_digest,
         committed_transaction.faults,
-        EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
+        orna_evaluator::EffectGate::admit_unbound_for_test(),
     )
     .unwrap();
     let committed_terminal_bytes = result_bytes(&committed_response);
@@ -384,7 +384,7 @@ fn admitted_source_table_mutation_commits_rolls_back_and_replays_terminally() {
         runtime.lease,
         committed_identity,
         committed_fingerprint,
-        &committed_staged,
+        committed_staged,
         TerminalOutcome::new(committed_terminal_bytes.clone()).unwrap(),
     ))
     .unwrap();

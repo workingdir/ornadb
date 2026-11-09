@@ -21,6 +21,7 @@ use std::{
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use libsql::{Builder, Connection, Transaction, TransactionBehavior, params};
 use num_bigint::{BigInt, Sign};
+use orna_evaluator::{ActivationEffectReport, ControlledEffectToken};
 use orna_foundation::{
     AssertionRef, CanonicalSnapshot, CanonicalValue, CheckpointRef, CwdCapture, ExpressionRef,
     FailureRef, InvocationRef, ObjectRef, OvbRaw, RowRef, RunRef, SYS_RUN_TABLE_ID,
@@ -2775,89 +2776,6 @@ pub struct RuntimeActivationContext {
     committed_rows: Option<Arc<PinnedCommittedRows>>,
 }
 
-/// Proof that an evaluation was admitted through [`EffectGate`] with no
-/// external reach (REQUEST-1 step 5, ORNA-CAP-005). It is not verification:
-/// the runtime cannot observe the effects a caller performs, so the gate
-/// decides from the external-state evidence it is given. The private field
-/// keeps struct literals outside this module impossible, and no public
-/// constructor exists; [`EffectGate::admit`] is the only minter.
-///
-/// ```compile_fail,E0603
-/// // Outside the gate the marker cannot be minted: the field is private.
-/// let _ = orna_runtime::ControlledEffectToken(());
-/// ```
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ControlledEffectToken(());
-
-/// Evidence that an evaluation may reach state outside Orna's table transaction
-/// (REQUEST-1 step 5, ORNA-CAP-005). [`EffectGate::admit`] reads only this
-/// answer. The evaluator implements it for the host objects an evaluation is
-/// bound to; that implementation is the sole first-party producer.
-///
-/// Trust: the gate cannot verify an implementation. An implementation that
-/// returns `false` for an evaluation that reaches external state defeats the
-/// gate, so the marker is only as trustworthy as the implementations linked
-/// into the process. No crate in this workspace other than `orna-evaluator`
-/// implements this trait for production admission.
-pub trait ExternalStateEvidence {
-    /// Returns `true` when the evaluation may reach external state.
-    fn may_reach_external_state(&self) -> bool;
-}
-
-#[cfg(test)]
-/// Test double for an evaluation bound to no host object (ORNA-CAP-005).
-pub(crate) struct UnboundEvaluation;
-
-#[cfg(test)]
-impl ExternalStateEvidence for UnboundEvaluation {
-    fn may_reach_external_state(&self) -> bool {
-        false
-    }
-}
-
-#[cfg(test)]
-/// Test double for an evaluation bound to an external-reaching host object.
-pub(crate) struct ReachesExternalState;
-
-#[cfg(test)]
-impl ExternalStateEvidence for ReachesExternalState {
-    fn may_reach_external_state(&self) -> bool {
-        true
-    }
-}
-
-/// The admission gate for the Orna-controlled effect token (REQUEST-1 step 5,
-/// ORNA-CAP-005). It is the only place the positive controlled marker is
-/// minted. An evaluation whose evidence reports possible external reach is
-/// admitted as `ExternalPossible`; only an evaluation reported to have none is
-/// admitted as `ControlledOnly`. A third-party application that does not pass
-/// its evaluation through this gate has no path to the controlled marker.
-#[derive(Debug)]
-pub struct EffectGate;
-
-impl EffectGate {
-    /// Admits an evaluation under its external-state evidence.
-    #[must_use]
-    pub fn admit(evidence: &dyn ExternalStateEvidence) -> ActivationEffectReport {
-        if evidence.may_reach_external_state() {
-            ActivationEffectReport::ExternalPossible
-        } else {
-            ActivationEffectReport::ControlledOnly(ControlledEffectToken(()))
-        }
-    }
-}
-
-/// The effect report every table-request activation presents to the runtime
-/// commit boundary. There is no default: an evaluation is admitted through
-/// [`EffectGate`], which yields a [`ControlledEffectToken`] only when no
-/// external reach is bound. The positive controlled marker is written only for
-/// the former; the latter stays conservatively uncertain on recovery.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ActivationEffectReport {
-    ControlledOnly(ControlledEffectToken),
-    ExternalPossible,
-}
-
 /// Reusable source-derived work for one captured table activation.
 ///
 /// The live layer may carry this owned plan across asynchronous callback
@@ -2872,7 +2790,36 @@ pub struct StagedTableActivation {
     effects: ActivationEffectReport,
 }
 
+/// The parts of a [`StagedTableActivation`], moved out once so the commit
+/// boundary takes ownership of the effect report.
+pub struct StagedTableParts {
+    pub context: RuntimeActivationContext,
+    pub mutations: Vec<TableMutation>,
+    pub next_digest: [u8; 32],
+    pub faults: Arc<dyn FaultInjector>,
+    pub effects: ActivationEffectReport,
+}
+
 impl StagedTableActivation {
+    /// Consumes the staged activation into its parts.
+    #[must_use]
+    pub fn into_parts(self) -> StagedTableParts {
+        let Self {
+            context,
+            mutations,
+            next_digest,
+            faults,
+            effects,
+        } = self;
+        StagedTableParts {
+            context,
+            mutations,
+            next_digest,
+            faults,
+            effects,
+        }
+    }
+
     pub fn from_source(
         context: RuntimeActivationContext,
         mutations: Vec<TableMutation>,
@@ -2890,11 +2837,6 @@ impl StagedTableActivation {
             faults,
             effects,
         })
-    }
-
-    /// Returns the effect report the commit boundary applies.
-    pub fn effects(&self) -> ActivationEffectReport {
-        self.effects.clone()
     }
 
     pub fn context(&self) -> &RuntimeActivationContext {
@@ -7312,7 +7254,7 @@ impl RuntimeState {
                 next_digest,
                 outcome,
                 faults,
-                effects,
+                &effects,
                 None,
                 None,
             )
@@ -7347,19 +7289,26 @@ impl RuntimeState {
         lease: WriterLease,
         identity: RequestIdentity,
         fingerprint: [u8; 32],
-        staged: &StagedTableActivation,
+        staged: StagedTableActivation,
         outcome: TerminalOutcome,
     ) -> Result<RequestActivationCommit, RuntimeError> {
+        let StagedTableParts {
+            context,
+            mutations,
+            next_digest,
+            faults,
+            effects,
+        } = staged.into_parts();
         self.commit_table_request_activation(
             lease,
             identity,
             fingerprint,
-            staged.context(),
-            staged.mutations(),
-            staged.next_digest(),
+            &context,
+            &mutations,
+            next_digest,
             outcome,
-            staged.faults(),
-            staged.effects(),
+            faults.as_ref(),
+            effects,
         )
         .await
     }
@@ -7419,7 +7368,7 @@ impl RuntimeState {
                 next_digest,
                 outcome,
                 faults,
-                effects,
+                &effects,
                 Some(validator),
                 admission,
             )
@@ -7474,7 +7423,7 @@ impl RuntimeState {
         next_digest: [u8; 32],
         outcome: TerminalOutcome,
         faults: &dyn FaultInjector,
-        effects: ActivationEffectReport,
+        effects: &ActivationEffectReport,
         mut validator: Option<&mut dyn TableActivationCandidateValidator>,
         admission: Option<&catalogue::CatalogueAdmission>,
     ) -> Result<RequestActivationCommit, RequestActivationTransactionError> {
@@ -12998,7 +12947,7 @@ impl RuntimeState {
         lease: WriterLease,
         identity: RequestIdentity,
         fingerprint: [u8; 32],
-        effects: ActivationEffectReport,
+        effects: &ActivationEffectReport,
     ) -> Result<(), RuntimeError> {
         match effects {
             ActivationEffectReport::ControlledOnly(_) => {
@@ -22239,11 +22188,12 @@ mod tests {
         // system-host attachment nor an external-reaching binding receives the
         // controlled marker.
         assert!(matches!(
-            EffectGate::admit(&crate::UnboundEvaluation),
+            orna_evaluator::EffectGate::admit_unbound_for_test(),
             ActivationEffectReport::ControlledOnly(_)
         ));
+        let registry = orna_evaluator::SysHostBindingRegistry::default();
         assert!(matches!(
-            EffectGate::admit(&crate::ReachesExternalState),
+            orna_evaluator::EffectGate::admit_sys_host(None, Some(&registry)),
             ActivationEffectReport::ExternalPossible
         ));
     }
@@ -22258,7 +22208,7 @@ mod tests {
         TerminalOutcome::new(vec![value]).unwrap()
     }
     fn controlled_token() -> ControlledEffectToken {
-        match EffectGate::admit(&crate::UnboundEvaluation) {
+        match orna_evaluator::EffectGate::admit_unbound_for_test() {
             ActivationEffectReport::ControlledOnly(token) => token,
             ActivationEffectReport::ExternalPossible => {
                 unreachable!("an unbound evaluation is admitted as controlled")
@@ -24225,7 +24175,7 @@ mod tests {
                         outcome: outcome(90),
                         validator: &mut validator,
                         faults: &NoFault,
-                        effects: EffectGate::admit(&crate::UnboundEvaluation),
+                        effects: orna_evaluator::EffectGate::admit_unbound_for_test(),
                     },
                     &admission,
                 )
@@ -24291,7 +24241,7 @@ mod tests {
                         outcome: outcome(99),
                         validator: &mut rejecting,
                         faults: &Fail(FaultPoint::BeforeTableWrite),
-                        effects: EffectGate::admit(&crate::UnboundEvaluation),
+                        effects: orna_evaluator::EffectGate::admit_unbound_for_test(),
                     },
                     &activation_catalogue(None, 199),
                 )
@@ -24383,7 +24333,7 @@ mod tests {
                         outcome: outcome(105),
                         validator: &mut validator,
                         faults: &Fail(point),
-                        effects: EffectGate::admit(&crate::UnboundEvaluation),
+                        effects: orna_evaluator::EffectGate::admit_unbound_for_test(),
                     },
                     &admission,
                 )
@@ -24432,7 +24382,7 @@ mod tests {
                     outcome: outcome(105),
                     validator: &mut rejecting,
                     faults: &NoFault,
-                    effects: EffectGate::admit(&crate::UnboundEvaluation),
+                    effects: orna_evaluator::EffectGate::admit_unbound_for_test(),
                 },
                 &admission,
             )
@@ -24468,7 +24418,7 @@ mod tests {
                         outcome: outcome(105),
                         validator: &mut validator,
                         faults: &NoFault,
-                        effects: EffectGate::admit(&crate::UnboundEvaluation),
+                        effects: orna_evaluator::EffectGate::admit_unbound_for_test(),
                     },
                     &admission,
                 )
@@ -24491,7 +24441,7 @@ mod tests {
                     outcome: outcome(105),
                     validator: &mut validator,
                     faults: &NoFault,
-                    effects: EffectGate::admit(&crate::UnboundEvaluation),
+                    effects: orna_evaluator::EffectGate::admit_unbound_for_test(),
                 },
                 &invalid,
             )
@@ -24518,7 +24468,7 @@ mod tests {
                     outcome: outcome(105),
                     validator: &mut validator,
                     faults: &NoFault,
-                    effects: EffectGate::admit(&crate::UnboundEvaluation),
+                    effects: orna_evaluator::EffectGate::admit_unbound_for_test(),
                 },
                 &admission,
             )
@@ -24545,7 +24495,7 @@ mod tests {
                     outcome: outcome(105),
                     validator: &mut validator,
                     faults: &NoFault,
-                    effects: EffectGate::admit(&crate::UnboundEvaluation),
+                    effects: orna_evaluator::EffectGate::admit_unbound_for_test(),
                 },
                 &invalid_batch,
             )
@@ -47060,7 +47010,7 @@ mod tests {
                 digest(44),
                 outcome(45),
                 &NoFault,
-                EffectGate::admit(&crate::UnboundEvaluation),
+                orna_evaluator::EffectGate::admit_unbound_for_test(),
             )
             .await
             .unwrap();
@@ -47100,7 +47050,7 @@ mod tests {
                 outcome: outcome(51),
                 validator: &mut validator,
                 faults: &NoFault,
-                effects: EffectGate::admit(&crate::UnboundEvaluation),
+                effects: orna_evaluator::EffectGate::admit_unbound_for_test(),
             })
             .await
             .unwrap();
@@ -47155,7 +47105,7 @@ mod tests {
                 outcome: outcome(57),
                 validator: &mut validator,
                 faults: &NoFault,
-                effects: EffectGate::admit(&crate::UnboundEvaluation),
+                effects: orna_evaluator::EffectGate::admit_unbound_for_test(),
             })
             .await;
 
@@ -47308,7 +47258,7 @@ mod tests {
                 digest(62),
                 outcome(63),
                 &NoFault,
-                EffectGate::admit(&crate::UnboundEvaluation),
+                orna_evaluator::EffectGate::admit_unbound_for_test(),
             )
             .await
             .unwrap();
@@ -47372,7 +47322,7 @@ mod tests {
                         digest(10),
                         outcome(11),
                         &Fail(point),
-                        EffectGate::admit(&crate::UnboundEvaluation),
+                        orna_evaluator::EffectGate::admit_unbound_for_test(),
                     )
                     .await,
                 Err(RuntimeError::FaultInjected(point))
@@ -47439,7 +47389,7 @@ mod tests {
                     digest(10),
                     outcome(11),
                     &Fail(FaultPoint::AfterTerminalClaim),
-                    EffectGate::admit(&crate::UnboundEvaluation),
+                    orna_evaluator::EffectGate::admit_unbound_for_test(),
                 )
                 .await,
             Err(RuntimeError::FaultInjected(FaultPoint::AfterTerminalClaim))
@@ -47554,7 +47504,7 @@ mod tests {
                     digest(10),
                     outcome(11),
                     &Fail(FaultPoint::BeforeTerminalClaim),
-                    EffectGate::admit(&crate::UnboundEvaluation),
+                    orna_evaluator::EffectGate::admit_unbound_for_test(),
                 )
                 .await,
             Err(RuntimeError::FaultInjected(FaultPoint::BeforeTerminalClaim))
@@ -47639,7 +47589,7 @@ mod tests {
                     digest(10),
                     outcome(11),
                     &Fail(FaultPoint::AfterTableWrite),
-                    EffectGate::admit(&crate::UnboundEvaluation),
+                    orna_evaluator::EffectGate::admit_unbound_for_test(),
                 )
                 .await,
             Err(RuntimeError::FaultInjected(FaultPoint::AfterTableWrite))
@@ -47861,7 +47811,7 @@ mod tests {
                     digest(10),
                     outcome(11),
                     &Fail(FaultPoint::BeforeTableWrite),
-                    EffectGate::admit(&crate::UnboundEvaluation),
+                    orna_evaluator::EffectGate::admit_unbound_for_test(),
                 )
                 .await,
             Err(RuntimeError::FaultInjected(FaultPoint::BeforeTableWrite))
@@ -47908,7 +47858,7 @@ mod tests {
                 digest(10),
                 outcome(11),
                 &NoFault,
-                EffectGate::admit(&crate::UnboundEvaluation),
+                orna_evaluator::EffectGate::admit_unbound_for_test(),
             )
             .await
             .unwrap();
@@ -47956,7 +47906,7 @@ mod tests {
                     digest(10),
                     outcome(11),
                     &NoFault,
-                    EffectGate::admit(&crate::UnboundEvaluation),
+                    orna_evaluator::EffectGate::admit_unbound_for_test(),
                 )
                 .await,
             Err(RuntimeError::EmptyMutationBatch)
@@ -47986,7 +47936,7 @@ mod tests {
                     digest(10),
                     outcome(11),
                     &Fail(FaultPoint::BeforeTableWrite),
-                    EffectGate::admit(&crate::UnboundEvaluation),
+                    orna_evaluator::EffectGate::admit_unbound_for_test(),
                 )
                 .await,
             Err(RuntimeError::FaultInjected(FaultPoint::BeforeTableWrite))
@@ -48008,7 +47958,7 @@ mod tests {
                     digest(10),
                     outcome(11),
                     &Fail(FaultPoint::BeforeTableWrite),
-                    EffectGate::admit(&crate::UnboundEvaluation),
+                    orna_evaluator::EffectGate::admit_unbound_for_test(),
                 )
                 .await,
             Err(RuntimeError::FaultInjected(FaultPoint::BeforeTableWrite))
@@ -48082,7 +48032,7 @@ mod tests {
                     digest(10),
                     outcome(11),
                     &NoFault,
-                    EffectGate::admit(&crate::UnboundEvaluation),
+                    orna_evaluator::EffectGate::admit_unbound_for_test(),
                 )
                 .await,
             Err(RuntimeError::OwnerLost)
@@ -48137,7 +48087,7 @@ mod tests {
                 digest(10),
                 outcome(11),
                 &NoFault,
-                EffectGate::admit(&crate::UnboundEvaluation),
+                orna_evaluator::EffectGate::admit_unbound_for_test(),
             )
             .await
             .unwrap();
@@ -48192,7 +48142,7 @@ mod tests {
                 digest(10),
                 outcome(11),
                 &NoFault,
-                EffectGate::admit(&crate::UnboundEvaluation),
+                orna_evaluator::EffectGate::admit_unbound_for_test(),
             )
             .await
             .unwrap();
@@ -48224,7 +48174,7 @@ mod tests {
                 digest(14),
                 outcome(15),
                 &NoFault,
-                EffectGate::admit(&crate::UnboundEvaluation),
+                orna_evaluator::EffectGate::admit_unbound_for_test(),
             )
             .await
             .unwrap();
@@ -51332,7 +51282,7 @@ mod tests {
                     digest(10),
                     outcome(11),
                     &Fail(FaultPoint::AfterTerminalClaim),
-                    EffectGate::admit(&crate::UnboundEvaluation),
+                    orna_evaluator::EffectGate::admit_unbound_for_test(),
                 )
                 .await,
             Err(RuntimeError::FaultInjected(FaultPoint::AfterTerminalClaim))
@@ -52076,7 +52026,7 @@ mod tests {
                 digest(176),
                 outcome(177),
                 &NoFault,
-                EffectGate::admit(&crate::UnboundEvaluation),
+                orna_evaluator::EffectGate::admit_unbound_for_test(),
             )
             .await
             .unwrap();
@@ -54270,7 +54220,7 @@ mod tests {
             mutations.clone(),
             digest(8),
             Arc::new(NoFault),
-            EffectGate::admit(&crate::UnboundEvaluation),
+            orna_evaluator::EffectGate::admit_unbound_for_test(),
         )
         .unwrap();
 
@@ -54283,7 +54233,7 @@ mod tests {
                 Vec::new(),
                 digest(8),
                 Arc::new(NoFault),
-                EffectGate::admit(&crate::UnboundEvaluation),
+                orna_evaluator::EffectGate::admit_unbound_for_test(),
             ),
             Err(RuntimeError::EmptyMutationBatch)
         ));
