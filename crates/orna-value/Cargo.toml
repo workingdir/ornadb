@@ -1,16 +1,17 @@
 [package]
 name = "orna-value"
 version.workspace = true
-edition = "2024"
-rust-version = "1.95"
+edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "Orna OVB-1 compatibility and format-3 canonical values"
 
 [dependencies]
-hex = "0.4.3"
 num-bigint = "0.4.6"
 num-integer = "0.1.47"
 num-traits = "0.2.19"
+orna-base = { path = "../orna-base" }
+serde = "1.0"
 sha2 = "0.10.9"
 unicode-normalization = "0.1.24"
 

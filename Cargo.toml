@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/orna-base",
     "crates/orna-application",
     "crates/orna-cli",
     "crates/archive/orna-compat-v1",

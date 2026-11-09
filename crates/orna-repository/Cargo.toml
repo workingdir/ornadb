@@ -16,6 +16,7 @@ bytes = "1.10.1"
 fs2 = "0.4.3"
 libc = "0.2.180"
 num-bigint = "0.4.6"
+orna-base = { path = "../orna-base" }
 orna-foundation = { path = "../orna-foundation" }
 orna-value = { path = "../orna-value" }
 orna-syntax = { path = "../orna-syntax" }

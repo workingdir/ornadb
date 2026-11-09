@@ -1362,7 +1362,7 @@ fn valid_dependency_path(path: &str) -> bool {
             !component.is_empty()
                 && component != "."
                 && component != ".."
-                && !orna_foundation::is_git_metadata_component(component.as_bytes())
+                && !orna_base::is_git_metadata_component(component.as_bytes())
         })
 }
 

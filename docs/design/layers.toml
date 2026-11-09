@@ -36,6 +36,9 @@ forbidden_in_shipped = [
 ]
 
 # Layer 0 primitives is reserved for orna-base (stage 03).
+[[crate]]
+name = "orna-base"
+layer = 0
 
 [[crate]]
 name = "orna-value"

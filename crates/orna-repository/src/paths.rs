@@ -81,9 +81,7 @@ impl ManagedPath {
         for component in path.components() {
             match component {
                 Component::Normal(value) => {
-                    if strict
-                        && orna_foundation::is_git_metadata_component(value.as_encoded_bytes())
-                    {
+                    if strict && orna_base::is_git_metadata_component(value.as_encoded_bytes()) {
                         return Err(RepositoryError::UnsafeManagedPath);
                     }
                     normalized.push(value);

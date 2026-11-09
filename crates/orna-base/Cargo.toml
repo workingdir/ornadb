@@ -1,0 +1,12 @@
+[package]
+name = "orna-base"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Primitive encodings shared by every OrnaDB layer"
+
+[dependencies]
+base64 = "0.22.1"
+hex = "0.4.3"

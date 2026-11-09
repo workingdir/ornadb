@@ -91,7 +91,7 @@ impl fmt::Display for Error {
                 digest,
             } => {
                 let code = ErrorCode::RoleMismatch.as_str();
-                let digest = hex::encode(digest);
+                let digest = orna_base::hex(digest);
                 let family = family.map_or("unknown", MediaFamily::name);
                 write!(
                     f,

@@ -2,7 +2,7 @@ use num_bigint::BigInt;
 use orna_value::{Decimal, Money, Raw, Value};
 
 fn hex_bytes(input: &str) -> Vec<u8> {
-    hex::decode(input).expect("valid test vector hex")
+    orna_base::hex_decode(input).expect("valid test vector hex")
 }
 
 fn decimal_raw(coefficient: i64, exponent10: i64) -> Raw {

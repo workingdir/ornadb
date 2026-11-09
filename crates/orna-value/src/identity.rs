@@ -67,8 +67,16 @@ pub fn parse_canonical_uuid_text(text: &str) -> Result<[u8; 16]> {
         while source < bytes.len() && bytes[source] == b'-' {
             source += 1;
         }
-        let high = hex_digit(bytes.get(source).copied()).ok_or(Error::InvalidValue)?;
-        let low = hex_digit(bytes.get(source + 1).copied()).ok_or(Error::InvalidValue)?;
+        let high = bytes
+            .get(source)
+            .copied()
+            .and_then(orna_base::hex_digit)
+            .ok_or(Error::InvalidValue)?;
+        let low = bytes
+            .get(source + 1)
+            .copied()
+            .and_then(orna_base::hex_digit)
+            .ok_or(Error::InvalidValue)?;
         *destination = high << 4 | low;
         source += 2;
     }
@@ -80,29 +88,9 @@ pub fn parse_canonical_uuid_text(text: &str) -> Result<[u8; 16]> {
 
 /// Encodes bytes with the RFC 4648 standard Base64 alphabet and mandatory
 /// padding. The output never contains whitespace.
+#[must_use]
 pub fn base64_encode(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    // `len.div_ceil(3) * 4` cannot overflow: slices are at most `isize::MAX` bytes.
-    let capacity = bytes.len().div_ceil(3) * 4;
-    let mut output = String::with_capacity(capacity);
-    for chunk in bytes.chunks(3) {
-        let first = chunk[0];
-        let second = chunk.get(1).copied();
-        let third = chunk.get(2).copied();
-        output.push(ALPHABET[(first >> 2) as usize] as char);
-        output.push(ALPHABET[((first & 0x03) << 4 | second.unwrap_or(0) >> 4) as usize] as char);
-        output.push(match second {
-            Some(second) => {
-                ALPHABET[((second & 0x0f) << 2 | third.unwrap_or(0) >> 6) as usize] as char
-            }
-            None => '=',
-        });
-        output.push(match third {
-            Some(third) => ALPHABET[(third & 0x3f) as usize] as char,
-            None => '=',
-        });
-    }
-    output
+    orna_base::base64_encode(bytes)
 }
 
 /// Decodes strict RFC 4648 standard Base64.
@@ -110,59 +98,7 @@ pub fn base64_encode(bytes: &[u8]) -> String {
 /// Whitespace, URL-safe aliases, malformed padding and nonzero unused
 /// trailing bits are rejected before any bytes are returned.
 pub fn base64_decode(input: &str) -> Result<Vec<u8>> {
-    if !input.len().is_multiple_of(4) {
-        return Err(Error::InvalidValue);
-    }
-    let capacity = (input.len() / 4).checked_mul(3).ok_or(Error::Limit)?;
-    let mut output = Vec::with_capacity(capacity);
-    for (index, chunk) in input.as_bytes().chunks_exact(4).enumerate() {
-        let last = index + 1 == input.len() / 4;
-        let first = base64_value(chunk[0]).ok_or(Error::InvalidValue)?;
-        let second = base64_value(chunk[1]).ok_or(Error::InvalidValue)?;
-        let third = if chunk[2] == b'=' {
-            if chunk[3] != b'=' || !last || second & 0x0f != 0 {
-                return Err(Error::InvalidValue);
-            }
-            None
-        } else {
-            let value = base64_value(chunk[2]).ok_or(Error::InvalidValue)?;
-            if chunk[3] == b'=' {
-                if !last || value & 0x03 != 0 {
-                    return Err(Error::InvalidValue);
-                }
-                output.push(first << 2 | second >> 4);
-                output.push(second << 4 | value >> 2);
-                continue;
-            }
-            Some(value)
-        };
-        output.push(first << 2 | second >> 4);
-        if let Some(third) = third {
-            let fourth = base64_value(chunk[3]).ok_or(Error::InvalidValue)?;
-            output.push(second << 4 | third >> 2);
-            output.push(third << 6 | fourth);
-        }
-    }
-    Ok(output)
-}
-
-fn base64_value(byte: u8) -> Option<u8> {
-    match byte {
-        b'A'..=b'Z' => Some(byte - b'A'),
-        b'a'..=b'z' => Some(byte - b'a' + 26),
-        b'0'..=b'9' => Some(byte - b'0' + 52),
-        b'+' => Some(62),
-        b'/' => Some(63),
-        _ => None,
-    }
-}
-
-fn hex_digit(byte: Option<u8>) -> Option<u8> {
-    match byte? {
-        b'0'..=b'9' => Some(byte? - b'0'),
-        b'a'..=b'f' => Some(byte? - b'a' + 10),
-        _ => None,
-    }
+    orna_base::base64_decode(input).map_err(|_| Error::InvalidValue)
 }
 
 pub(crate) fn uuid_array(r: &Raw) -> Result<[u8; 16]> {

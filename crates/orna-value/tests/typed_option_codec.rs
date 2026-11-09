@@ -1,7 +1,7 @@
 use orna_value::{Error, Raw, Value, decode_typed, encode_typed};
 
 fn hex_bytes(input: &str) -> Vec<u8> {
-    hex::decode(input).expect("valid test vector hex")
+    orna_base::hex_decode(input).expect("valid test vector hex")
 }
 
 #[test]

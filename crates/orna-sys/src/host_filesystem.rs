@@ -102,7 +102,7 @@ impl FilesystemProviderError {
 /// Absolute paths, parent traversal, symbolic links and Git metadata names are
 /// refused at any depth: `.git` in any letter case and the Windows and macOS
 /// spellings Git refuses, such as `.git.` and `git~1` (see
-/// [`orna_foundation::is_git_metadata_component`]). Only `symlink_metadata`
+/// [`orna_base::is_git_metadata_component`]). Only `symlink_metadata`
 /// reports a final link, without following it. Platforms without a
 /// handle-relative implementation refuse every operation as unavailable.
 #[derive(Clone, Debug)]
@@ -746,7 +746,7 @@ impl<'a> RootedPath<'a> {
         for component in path.components() {
             match component {
                 Component::Normal(name)
-                    if !orna_foundation::is_git_metadata_component(name.as_encoded_bytes()) => {}
+                    if !orna_base::is_git_metadata_component(name.as_encoded_bytes()) => {}
                 Component::CurDir => {}
                 Component::Normal(_)
                 | Component::ParentDir
@@ -1091,7 +1091,7 @@ mod beneath {
         while let Some(entry) = entries.read() {
             let entry = entry.map_err(filesystem_failure)?;
             let name = entry.file_name().to_bytes();
-            if matches!(name, b"." | b"..") || orna_foundation::is_git_metadata_component(name) {
+            if matches!(name, b"." | b"..") || orna_base::is_git_metadata_component(name) {
                 continue;
             }
             if names.len() == max_entries {
