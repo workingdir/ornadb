@@ -21,6 +21,9 @@ enum UndeclaredClass {
     HistoricalPin,
     /// The `std.query` private leaves are declared in `std.collection`.
     SiblingDeclaration,
+    /// The 16 core relation operations keep their `std.collection` spelling by a
+    /// source re-export in `std.query` with the same intrinsic identity (spec 09:9).
+    ReexportedInQuery,
 }
 
 fn pinned_root() -> PathBuf {
@@ -107,6 +110,15 @@ fn classification() -> BTreeMap<(&'static str, &'static str), UndeclaredClass> {
             UndeclaredClass::SiblingDeclaration,
         );
     }
+    for operation in [
+        "filter", "map", "flat_map", "sort_by", "take", "drop", "distinct", "union", "count",
+        "first", "one", "sum", "min", "max", "every", "exists",
+    ] {
+        classes.insert(
+            ("std.collection.", operation),
+            UndeclaredClass::ReexportedInQuery,
+        );
+    }
     classes
 }
 
@@ -135,13 +147,13 @@ fn the_remaining_undeclared_spellings_are_exactly_classified() {
         undeclared, classified,
         "the undeclared spelling set and its documented classes drifted"
     );
-    assert_eq!(undeclared.len(), 16);
+    assert_eq!(undeclared.len(), 32);
     assert_eq!(
         undeclared
             .iter()
             .filter(|(prefix, _)| *prefix == "std.collection.")
             .count(),
-        6
+        22
     );
     assert_eq!(
         undeclared
@@ -168,6 +180,7 @@ fn every_class_is_nonempty_and_named() {
     }
     assert_eq!(counts[&UndeclaredClass::HistoricalPin], 12);
     assert_eq!(counts[&UndeclaredClass::SiblingDeclaration], 4);
+    assert_eq!(counts[&UndeclaredClass::ReexportedInQuery], 16);
 }
 
 #[test]
@@ -195,4 +208,22 @@ fn time_submodule_names_are_mapped_to_the_declaration_leaf() {
     assert_eq!(local_name("std.text.", "trim"), "trim");
     assert!(declared("std.time.", "duration.compact.format"));
     assert!(declared("std.time.", "duration.iso.format"));
+}
+
+/// Every `std.collection` spelling classified as a re-export must be declared
+/// by `std.query`, which is what makes the class a source re-export rather than
+/// a silent native-only spelling.
+#[test]
+fn reexported_collection_spellings_are_declared_in_query() {
+    for (prefix, operation) in classification().keys() {
+        if *prefix == "std.collection."
+            && *operation != "__list_length"
+            && !operation.starts_with("__")
+        {
+            assert!(
+                declared("std.query.", operation),
+                "std.query must declare the {operation} re-export"
+            );
+        }
+    }
 }
