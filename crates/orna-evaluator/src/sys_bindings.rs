@@ -2717,31 +2717,32 @@ mod tests {
         );
     }
 
-    // Descriptor-only ROV-3 round-trip binding loss is tracked as ornadb-55op.
-    #[test]
-    fn rov3_descriptor_only_is_unavailable_and_self_equal() {
-        struct PayloadResolver(Vec<u8>);
+    /// Serves exactly one payload so the ROV-3 descriptor can be read back.
+    struct PayloadResolver(Vec<u8>);
 
-        impl orna_value::BlobResolver for PayloadResolver {
-            fn read_range(
-                &self,
-                _reference: &orna_value::ContentReference,
-                offset: u64,
-                length: u64,
-            ) -> orna_value::Result<Vec<u8>> {
-                let start = usize::try_from(offset).map_err(|_| orna_value::Error::InvalidRange)?;
-                let length =
-                    usize::try_from(length).map_err(|_| orna_value::Error::InvalidRange)?;
-                let end = start
-                    .checked_add(length)
-                    .ok_or(orna_value::Error::InvalidRange)?;
-                self.0
-                    .get(start..end)
-                    .map(<[u8]>::to_vec)
-                    .ok_or(orna_value::Error::InvalidRange)
-            }
+    impl orna_value::BlobResolver for PayloadResolver {
+        fn read_range(
+            &self,
+            _reference: &orna_value::ContentReference,
+            offset: u64,
+            length: u64,
+        ) -> orna_value::Result<Vec<u8>> {
+            let start = usize::try_from(offset).map_err(|_| orna_value::Error::InvalidRange)?;
+            let length = usize::try_from(length).map_err(|_| orna_value::Error::InvalidRange)?;
+            let end = start
+                .checked_add(length)
+                .ok_or(orna_value::Error::InvalidRange)?;
+            self.0
+                .get(start..end)
+                .map(<[u8]>::to_vec)
+                .ok_or(orna_value::Error::InvalidRange)
         }
+    }
 
+    /// Builds one ROV-3 descriptor and an inline OVB-2 value with the same
+    /// content and annotation, together with the context that owns the
+    /// descriptor.
+    fn rov3_fixture() -> (orna_value::Format3Context, ContextValue, ContextValue) {
         let payload = b"payload";
         let database = [1; 16];
         let resolver: std::sync::Arc<dyn orna_value::BlobResolver> =
@@ -2774,6 +2775,13 @@ mod tests {
                 .unwrap();
         let rov3 = ContextValue::from_blob(&rov3_source, ValueFormat::Rov3).unwrap();
         let ovb2 = ContextValue::from_blob(&ovb2_source, ValueFormat::Ovb2).unwrap();
+        (context, rov3, ovb2)
+    }
+
+    // Descriptor-only ROV-3 round-trip binding loss is tracked as ornadb-55op.
+    #[test]
+    fn rov3_descriptor_only_is_unavailable_and_self_equal() {
+        let (context, rov3, ovb2) = rov3_fixture();
 
         let rov3_text = |value: &str| {
             ContextValue::new_in_context(
