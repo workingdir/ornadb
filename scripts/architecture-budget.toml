@@ -110,8 +110,8 @@ name = "orna-conformance"
 allow_clippy = 8
 [crate.files]
 "src/lib.rs" = 2962
-"src/main.rs" = 1981
-"src/semantic_adapter.rs" = 14481
+"src/main.rs" = 1982
+"src/semantic_adapter.rs" = 14483
 [crate.functions]
 "src/lib.rs::execute_reference_project_runtime_adapter" = 208
 "src/lib.rs::run_fixture" = 123
@@ -317,8 +317,9 @@ allow_clippy = 0
 name = "orna-protocol"
 allow_clippy = 0
 [crate.files]
-"src/lib.rs" = 4448
+"src/lib.rs" = 4460
 [crate.functions]
+"src/lib.rs::apply_at" = 136
 "src/lib.rs::body" = 138
 "src/lib.rs::error_trace_values_are_redacted_on_wire_and_present_serialization" = 150
 "src/lib.rs::messages" = 131
@@ -600,7 +601,7 @@ allow_clippy = 5
 "src/system_api.rs" = 1556
 "src/tests.rs" = 2607
 [crate.functions]
-"src/host_process.rs::run" = 162
+"src/host_process.rs::run" = 165
 "src/introspection.rs::add_paired_bounded_window_spill_chain_window_restore_envelope_fold_details" = 148
 "src/introspection.rs::add_paired_window_cost_restoration_fold_details" = 365
 "src/introspection.rs::add_paired_window_spill_rule_cost_fold_details" = 172
@@ -616,6 +617,19 @@ allow_clippy = 5
 "src/introspection.rs::query_paired_wal_rotation_cost_restoration_fold" = 151
 "src/introspection.rs::query_paired_window_cost_restoration_fold" = 623
 "src/introspection.rs::query_paired_window_spill_rule_cost_fold" = 124
+
+[[crate]]
+name = "orna-sys-codegen"
+allow_clippy = 1
+[crate.files]
+"src/build_support.rs" = 2702
+[crate.functions]
+"src/build_host.rs::validate_native_method_signature" = 193
+"src/build_host.rs::validate_operation" = 154
+"src/build_host.rs::validate_schema_value" = 174
+"src/build_support.rs::validate_api_document" = 189
+"src/build_support.rs::validate_api_type_graph" = 197
+"src/build_support.rs::validate_function_metadata" = 144
 
 [[crate]]
 name = "orna-sys-macros"

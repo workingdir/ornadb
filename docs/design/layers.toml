@@ -52,12 +52,25 @@ name = "orna-syntax"
 layer = 2
 
 [[crate]]
+name = "orna-sys-model"
+layer = 1
+
+[[crate]]
 name = "orna-standard-sources"
+layer = 3
+
+[[crate]]
+name = "orna-sys-id"
 layer = 3
 
 [[crate]]
 name = "orna-sys-macros"
 layer = 3
+
+[[crate]]
+name = "orna-sys-codegen"
+layer = 2
+role = "tool"
 
 [[crate]]
 name = "orna-semantic"
@@ -198,3 +211,8 @@ reason = "production in-degree 0 and not declared a tool; the LSP is its own bin
 id = "V10"
 key = "orphan:orna-traceability"
 reason = "production in-degree 0 and not declared a tool; moves under tools/ with no production dependent"
+
+[[known]]
+id = "V11"
+key = "orphan:orna-sys-id"
+reason = "reform stage 01 adds the generated identity crate before stage 06 gives it production dependents"
