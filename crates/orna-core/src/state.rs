@@ -255,11 +255,7 @@ impl UserStateKeyWithoutPrincipal {
     pub fn with_principal(self, principal: PrincipalId) -> UserStateKey {
         UserStateKey {
             principal,
-            root_function: self.root_function,
-            state_profile: self.state_profile,
-            function: self.function,
-            instance_key: self.instance_key,
-            state_slot: self.state_slot,
+            cell: self,
         }
     }
 }
@@ -286,11 +282,7 @@ impl fmt::Display for UserStateKeyWithoutPrincipal {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct UserStateKey {
     principal: PrincipalId,
-    root_function: FunctionId,
-    state_profile: String,
-    function: FunctionId,
-    instance_key: String,
-    state_slot: StateSlotId,
+    cell: UserStateKeyWithoutPrincipal,
 }
 
 impl UserStateKey {
@@ -307,16 +299,14 @@ impl UserStateKey {
         instance_key: String,
         state_slot: StateSlotId,
     ) -> Result<Self, UserStateError> {
-        validate_state_text(&state_profile, "state profile")?;
-        validate_state_text(&instance_key, "instance key")?;
-        Ok(Self {
-            principal,
+        Ok(UserStateKeyWithoutPrincipal::new(
             root_function,
             state_profile,
             function,
             instance_key,
             state_slot,
-        })
+        )?
+        .with_principal(principal))
     }
 
     /// Returns the authenticated session principal that owns this cell.
@@ -326,50 +316,39 @@ impl UserStateKey {
 
     /// Returns the root function whose invocation owns this cell.
     pub const fn root_function(&self) -> FunctionId {
-        self.root_function
+        self.cell.root_function()
     }
 
     /// Returns the state profile; the empty string is the default profile.
     pub fn state_profile(&self) -> &str {
-        &self.state_profile
+        self.cell.state_profile()
     }
 
     /// Returns the function that owns the state slot.
     pub const fn function(&self) -> FunctionId {
-        self.function
+        self.cell.function()
     }
 
     /// Returns the function-instance identity; the empty string is the
     /// default instance.
     pub fn instance_key(&self) -> &str {
-        &self.instance_key
+        self.cell.instance_key()
     }
 
     /// Returns the stable state-slot identity.
     pub const fn state_slot(&self) -> StateSlotId {
-        self.state_slot
+        self.cell.state_slot()
     }
 
     /// Returns this key without the session principal.
-    pub fn without_principal(&self) -> UserStateKeyWithoutPrincipal {
-        UserStateKeyWithoutPrincipal {
-            root_function: self.root_function,
-            state_profile: self.state_profile.clone(),
-            function: self.function,
-            instance_key: self.instance_key.clone(),
-            state_slot: self.state_slot,
-        }
+    pub const fn without_principal(&self) -> &UserStateKeyWithoutPrincipal {
+        &self.cell
     }
 }
 
 impl fmt::Display for UserStateKey {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "principal={} {}",
-            self.principal,
-            self.without_principal()
-        )
+        write!(formatter, "principal={} {}", self.principal, self.cell)
     }
 }
 
@@ -443,11 +422,7 @@ impl UserStateCell {
 /// typed: the change carries the runtime value and its type together.
 #[derive(Clone, Debug, PartialEq)]
 pub struct UserStateChange {
-    root_function: FunctionId,
-    state_profile: String,
-    function: FunctionId,
-    instance_key: String,
-    state_slot: StateSlotId,
+    key: UserStateKeyWithoutPrincipal,
     expected_revision: Option<u64>,
     value: RuntimeValue,
     value_type: TypeId,
@@ -472,16 +447,17 @@ impl UserStateChange {
         value: RuntimeValue,
         value_type: TypeId,
     ) -> Result<Self, UserStateError> {
-        validate_state_text(&state_profile, "state profile")?;
-        validate_state_text(&instance_key, "instance key")?;
-        reject_sealed_inspect_type_id(value_type)?;
-        reject_sealed_inspect_value(&value)?;
-        Ok(Self {
+        let key = UserStateKeyWithoutPrincipal::new(
             root_function,
             state_profile,
             function,
             instance_key,
             state_slot,
+        )?;
+        reject_sealed_inspect_type_id(value_type)?;
+        reject_sealed_inspect_value(&value)?;
+        Ok(Self {
+            key,
             expected_revision,
             value,
             value_type,
@@ -490,28 +466,28 @@ impl UserStateChange {
 
     /// Returns the root function whose invocation owns the target cell.
     pub const fn root_function(&self) -> FunctionId {
-        self.root_function
+        self.key.root_function()
     }
 
     /// Returns the state profile; the empty string is the default profile.
     pub fn state_profile(&self) -> &str {
-        &self.state_profile
+        self.key.state_profile()
     }
 
     /// Returns the function that owns the state slot.
     pub const fn function(&self) -> FunctionId {
-        self.function
+        self.key.function()
     }
 
     /// Returns the function-instance identity; the empty string is the
     /// default instance.
     pub fn instance_key(&self) -> &str {
-        &self.instance_key
+        self.key.instance_key()
     }
 
     /// Returns the stable state-slot identity.
     pub const fn state_slot(&self) -> StateSlotId {
-        self.state_slot
+        self.key.state_slot()
     }
 
     /// Returns the expected current revision; `None` requires the cell not
@@ -531,14 +507,8 @@ impl UserStateChange {
     }
 
     /// Returns the affected cell key without the session principal.
-    pub fn key_without_principal(&self) -> UserStateKeyWithoutPrincipal {
-        UserStateKeyWithoutPrincipal {
-            root_function: self.root_function,
-            state_profile: self.state_profile.clone(),
-            function: self.function,
-            instance_key: self.instance_key.clone(),
-            state_slot: self.state_slot,
-        }
+    pub const fn key_without_principal(&self) -> &UserStateKeyWithoutPrincipal {
+        &self.key
     }
 }
 
@@ -720,7 +690,7 @@ pub fn apply_change(
     change: &UserStateChange,
     principal: PrincipalId,
 ) -> Result<UserStateWriteResult, UserStateError> {
-    let key = change.key_without_principal();
+    let key = change.key_without_principal().clone();
     let Some(cell) = cell else {
         reject_sealed_inspect_type_id(change.value_type())?;
         reject_sealed_inspect_value(change.value())?;
@@ -743,7 +713,7 @@ pub fn apply_change(
             session_principal: principal,
         });
     }
-    if cell.key().without_principal() != key {
+    if *cell.key().without_principal() != key {
         return Err(UserStateError::InvalidChange {
             reason: format!(
                 "the supplied cell key does not match the change key {key}: {}",
@@ -1592,12 +1562,12 @@ mod tests {
         let second_result = apply_change(None, &second, principal_id(PRINCIPAL_A))
             .expect("the second create-only write must succeed");
 
-        assert_eq!(first_result.key(), &first.key_without_principal());
+        assert_eq!(first_result.key(), first.key_without_principal());
         assert_eq!(
             first_result.outcome(),
             UserStateWriteOutcome::Written { revision: 1 }
         );
-        assert_eq!(second_result.key(), &second.key_without_principal());
+        assert_eq!(second_result.key(), second.key_without_principal());
         assert_eq!(second_result.key().state_profile(), "dark");
         assert_eq!(second_result.key().instance_key(), "tab-2");
         assert_eq!(
