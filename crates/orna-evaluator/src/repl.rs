@@ -11,7 +11,7 @@ use orna_syntax::{
 use orna_value::{ContextValue, Format3Context, Raw, ValueFormat};
 
 use crate::{
-    CallReuse, CancellationToken, Context, Environment, EvaluationError, Functions, Limits,
+    ActivationMode, CancellationToken, Context, Environment, EvaluationError, Functions, Limits,
     NominalDefinitions, PureFunction, Scope, bind, error, pattern_names, validate_limits,
     validate_nominal_definitions,
 };
@@ -362,6 +362,25 @@ impl ReplSession {
             .discard_result()
     }
 
+    /// The evaluator activation every REPL input runs in: session-owned code
+    /// that resolves names through the session's aliases only.
+    fn activation<'a, 'e>(
+        &'a self,
+        effects: Option<&'e mut dyn crate::EffectHandler>,
+        cancellation: Option<&'a CancellationToken>,
+    ) -> Context<'a, 'e> {
+        Context {
+            mode: ActivationMode::Repl,
+            aliases: Some(&self.aliases),
+            session_functions: Some(&self.session_functions),
+            repl_bindings: true,
+            effects,
+            sys_host: self.sys_host_attachment(),
+            cancellation,
+            ..Context::new(self.limits, &self.functions)
+        }
+    }
+
     fn evaluate_inner(
         &self,
         expression: &Expr,
@@ -379,25 +398,7 @@ impl ReplSession {
                 CanonicalValue::new(orna_foundation::OvbRaw::Null).expect("null is canonical")
             }),
         );
-        let mut context = Context {
-            limits: self.limits,
-            steps: 0,
-            calls: 0,
-            functions: &self.functions,
-            aliases: Some(&self.aliases),
-            session_functions: Some(&self.session_functions),
-            repl_bindings: true,
-            restrict_function_names: true,
-            reject_unhandled_field_calls: true,
-            effects,
-            namespace: None,
-            transfer: None,
-            materializations: Vec::new(),
-            materialization_clock_unavailable: false,
-            reuse: CallReuse::default(),
-            sys_host: self.sys_host_attachment(),
-            cancellation,
-        };
+        let mut context = self.activation(effects, cancellation);
         context.items(self.functions.len())?;
         let mut scope = Scope::from_repl_environment(
             &environment,
@@ -516,25 +517,7 @@ impl ReplSession {
         }
         let value_format = ValueFormat::Ovb1;
         let value_context: Option<Format3Context> = None;
-        let mut context = Context {
-            limits: self.limits,
-            steps: 0,
-            calls: 0,
-            functions: &self.functions,
-            aliases: Some(&self.aliases),
-            session_functions: Some(&self.session_functions),
-            repl_bindings: true,
-            restrict_function_names: true,
-            reject_unhandled_field_calls: true,
-            effects,
-            namespace: None,
-            transfer: None,
-            materializations: Vec::new(),
-            materialization_clock_unavailable: false,
-            reuse: CallReuse::default(),
-            sys_host: self.sys_host_attachment(),
-            cancellation,
-        };
+        let mut context = self.activation(effects, cancellation);
         let mut scope = Scope::from_repl_environment(
             &environment,
             &self.contextual_environment,
