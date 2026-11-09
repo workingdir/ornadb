@@ -258,12 +258,25 @@ dependency beyond `orna-value`.)
 
 Defects visible directly in the graph:
 
-1. **`orna-storage` sits above `orna-runtime`.** `orna-storage` (10,738 src lines,
-   described in `crates/orna-storage/src/lib.rs:1-14` as the format-3 publication
-   writer) depends on `orna-runtime`, which depends on `orna-repository`. A storage
-   crate that sits above the durable state and the Git repository is inverted: the
-   writer must be *below* the coordinator that calls it.
-2. **The conformance harness is in the shipped binary.** `orna-cli` ->
+1. **`orna-storage` is a publication coordinator wearing a layer name, and it holds
+   a format decoder.** Its own header says "Orna storage: format-3 publication through
+   the runtime publication coordinator, plus the exact-key decoder for verified
+   compact segments" (`crates/orna-storage/src/lib.rs:1-14`). The edges are correctly
+   directed (repository <- runtime <- storage), but three things are wrong: the name
+   "storage" describes a layer, not this job; the compact exact-key decoder
+   (`crates/orna-storage/src/compact.rs`) is the second half of a format whose reader
+   lives in `orna-repository/src/compact.rs`, so one format is split across two crates
+   in two layers; and the crate's only dependency on `orna-runtime` is the
+   test-fixture writer path (`#[cfg(any(test, feature = "compact-writer-fixtures"))]`,
+   6 call sites), so a production crate carries a feature-gated edge to the state layer
+   to satisfy fixtures.
+2. **`orna-semantic` reaches up two layers to `orna-sys`.** 22 call sites in
+   `crates/orna-semantic/src/system_api.rs` use `orna_sys::system_api_json`,
+   `SystemSurfaceMember`, `system_dispatch_table` and `system_provider_linkage`, all of
+   which are *catalogue data*, not host I/O. This is the one genuine upward edge in the
+   production graph, and it exists because the catalogue and the host adapters share a
+   crate. Stage 06 splits them (`orna-sys-id` at layer 3).
+3. **The conformance harness is in the shipped binary.** `orna-cli` ->
    `orna-conformance` -> (`orna-table`, and everything else). The four production
    entry points used by the CLI are assertion admission, not conformance:
    `crates/orna-cli/src/assertion_gate.rs:200,257,267,291`,
@@ -274,20 +287,20 @@ Defects visible directly in the graph:
    (`transactional_loaded_project_candidate_validator`), `:4803`
    (`transactional_loaded_project_commit_validator`), `:5433`
    (`is_table_assertion_false`) - four public functions in a 14,773-line module.
-3. **`orna-table` exists only for the harness.** Its sole production dependent is
+4. **`orna-table` exists only for the harness.** Its sole production dependent is
    `orna-conformance` (`crates/orna-conformance/Cargo.toml:29`). Its types
    (`TableRuntime`, `TableSnapshot`, `Relation`, `WindowError` at
    `crates/orna-table/src/lib.rs:132,228,346,359`) are a conformance oracle, not the
    runtime's table activation. It is a test model that a production crate links.
-4. **`orna-core` is unreachable from production and reaches nothing.** Its only
+5. **`orna-core` is unreachable from production and reaches nothing.** Its only
    consumer is `crates/orna-conformance/Cargo.toml:38`, listed under
    `[dev-dependencies]`, and `orna_core` appears in exactly two files:
    `crates/orna-conformance/tests/sys_api_compatibility.rs:1` and
    `crates/orna-conformance/tests/traceability_diff_trust_secret_batch_three.rs:4`
    (48 + 364 lines). 60,354 source lines of it are compiled only when tests run.
-5. **`orna-traceability` depends on `orna-conformance`.** A reporting tool depends on
+6. **`orna-traceability` depends on `orna-conformance`.** A reporting tool depends on
    the test harness, so the harness can never shrink without breaking a tool.
-6. **`orna-foundation` is a 16-in-degree utility dump.** 2,581 source lines holding
+7. **`orna-foundation` is a 16-in-degree utility dump.** 2,581 source lines holding
    typed row references (`TypedRowRef<Kind>` phantom kinds,
    `crates/orna-foundation/src/lib.rs:102-215`), Git-metadata filename helpers
    (`:244`), diagnostics, `CanonicalValue`/`SchemaDescriptor` aliases (`:18-20`) that
@@ -407,7 +420,7 @@ error type.
 
 **(c) Base32 identity text.** `orna-core/src/lib.rs:44,63` implements
 `encode_id`/`decode_id` with `BASE32_ALPHABET` (`:29`). This is the 1.0.0 canonical
-identifier spelling; it is unreachable from production (section 1.2 defect 4) yet
+identifier spelling; it is unreachable from production (section 1.2 defect 5) yet
 still the only implementation of that spelling in the tree.
 
 **(d) CBOR.** Hand-rolled encoder helpers `cbor_head`/`cbor_bytes` at
@@ -555,22 +568,42 @@ normative content of `docs/ARCHITECTURE.md` and the data source for
 | 3 | identity | `orna-sys-id`, `orna-std-sources`, `orna-sys-macros` | 0 (and 1 only for `orna-std-sources`) |
 | 4 | analysis | `orna-check` (was `orna-semantic`) | 0-3 |
 | 5 | evaluation | `orna-eval`, `orna-std`, `orna-query` | 0-4 |
-| 6 | hosts | `orna-sys`, `orna-security` | 0-5 |
-| 7 | formats | `orna-format3`, `orna-evolution` | 0-3 (never 5/6) |
-| 8 | state | `orna-git`, `orna-store`, `orna-vfs`, `orna-stream` | 0-4, 7 |
-| 9 | repository | `orna-repository`, `orna-publication` | 0-4, 7-8 |
-| 10 | project | `orna-project`, `orna-repl`, `orna-admission` | 0-6, 9 |
-| 11 | presentation | `orna-present-protocol`, `orna-live` | 0-6 |
-| 12 | engine | `orna-engine` (was `orna-application`), `orna-migrate` | 0-11 |
-| 13 | edges | `orna-cli`, `orna-fuse`, `orna-lsp`, `orna-conformance`, `orna-traceability` | 0-12 |
-| 14 | archive | `orna-compat-v1` (was `orna-core`) | 0-1 only; no layer 2-13 crate may depend on it |
+| 6 | hosts (I/O adapters) | `orna-sys`, `orna-security` | 0-5 |
+| 7 | formats and planning | `orna-format3`, `orna-evolution`, `orna-stream` | 0-3 |
+| 8 | repository layout | `orna-git`, `orna-repository` | 0-3, 7 |
+| 9 | durable state | `orna-store`, `orna-vfs` | 0-4, 7-8 |
+| 10 | publication | `orna-publication` | 0-4, 7-9 |
+| 11 | project | `orna-project`, `orna-repl`, `orna-admission` | 0-10 |
+| 12 | presentation | `orna-present-protocol`, `orna-live` | 0-11 |
+| 13 | engine | `orna-engine` (was `orna-application`), `orna-migrate` | 0-12 |
+| 14 | edges | `orna-cli`, `orna-fuse`, `orna-lsp`, `orna-conformance`, `orna-traceability` | 0-13 |
+| 15 | archive | `orna-compat-v1` (was `orna-core`) | 0-1 only; no layer 2-14 crate may depend on it |
+
+The ordering of layers 7-10 is the one that has to be argued, because it is easy to
+write backwards in review and the current tree is the authority on the arrows:
+
+* `orna-repository` today depends on nothing above it: `grep -rn 'orna_runtime::'
+  crates/orna-repository/src/` returns nothing. It is the lower crate. Its own doc
+  comment says the database "is intentionally below the Git boundary: callers obtain
+  its location only from `orna_repository::Repository::runtime_paths`".
+* `orna-runtime` depends on `orna-repository` (21 call sites), so the state layer is
+  above the repository-layout layer.
+* `orna-storage` depends on both (6 + 5 call sites, most of them behind
+  `compact-writer-fixtures`), so a publication coordinator is above both.
+
+Layer 7 sits below all three because a format codec must not know where a file lives:
+`orna-format3`'s readers are handed bytes. Layer 9 reaching `orna-sys` would be an
+upward violation, which is why the dispatch tables and operation contracts that
+`orna-runtime` reads today (`SystemDispatchTable`, `ProviderRoleRegistry`,
+`OperationContract`, 21 sites in `crates/orna-runtime/src/lib.rs`) move into
+`orna-sys-id` at layer 3 in stage 06.
 
 Three additional rules that are not expressible as a layer:
 
 * **R1 no optional internal dependencies.** An internal crate edge is either a
   production dependency or absent. Capability variation is expressed by traits in a
   lower layer, not by features. This is what removes the `orna-evaluator` cycle.
-* **R2 the shipped binary's production closure is exactly layers 0-13 minus the
+* **R2 the shipped binary's production closure is exactly layers 0-14 minus the
   archive, and must never contain `orna-conformance`, `orna-traceability`,
   `orna-compat-v1` or `orna-lsp`.** The CLI may depend on `orna-admission`, which is
   the extracted production half of the harness.
@@ -581,7 +614,8 @@ Three additional rules that are not expressible as a layer:
 
 ### 3.2 Target crate census
 
-31 crates: 11 splits, 3 merges, 2 relocations into an archive, 6 renames.
+33 crates: 10 new crates, 3 crates merged away, 2 relocations into an archive, 6
+renames. 26 + 10 - 3 = 33.
 
 **New crates and where their modules come from**
 
@@ -606,7 +640,7 @@ Three additional rules that are not expressible as a layer:
 | merged crate | lines | into | reason |
 |---|---:|---|---|
 | `orna-serving` | 1,270 | `orna-live` as `live::serving` | Both serve `orna.present.v1`; three crates (`protocol`, `serving`, `live`) for one protocol surface, and `serving` has no consumer except `live`, `conformance` and `cli`. |
-| `orna-table` | 2,829 | `orna-conformance` as `conformance::oracle_table` | Its only production dependent is the harness (section 1.2 defect 3). It is a test model and must not be its own top-level crate in the shipped closure. |
+| `orna-table` | 2,829 | `orna-conformance` as `conformance::oracle_table` | Its only production dependent is the harness (section 1.2 defect 4). It is a test model and must not be its own top-level crate in the shipped closure. |
 | `orna-foundation` | 2,581 | split, remainder absorbed by `orna-base` and `orna-value` | 16 dependents, no cohesive subject. `CanonicalValue`/`SchemaDescriptor` aliases (`lib.rs:18-20`) are dead indirection; the adapter traits move to `orna-store`'s port module. |
 
 **Deleted / archived**
@@ -750,9 +784,10 @@ crates/
   identity/     orna-sys-id/ orna-std-sources/ orna-sys-macros/
   evaluation/   orna-eval/ orna-std/ orna-query/
   hosts/        orna-sys/ orna-security/
-  formats/      orna-format3/ orna-evolution/
-  state/        orna-git/ orna-store/ orna-vfs/ orna-stream/
-  repository/   orna-repository/ orna-publication/
+  formats/      orna-format3/ orna-evolution/ orna-stream/
+  repository/   orna-git/ orna-repository/
+  state/        orna-store/ orna-vfs/
+  publication/  orna-publication/
   project/      orna-project/ orna-repl/ orna-admission/
   presentation/ orna-present-protocol/ orna-live/
   engine/       orna-engine/ orna-migrate/
@@ -764,7 +799,7 @@ tools/          orna-conformance/ orna-traceability/
 The directory is the layer. `crates/state/orna-store` and
 `crates/primitives/orna-value` make the graph readable from a file listing, which is
 the property the current flat `crates/orna-*` listing does not have. Cargo workspace
-members are the 31 leaf paths; the grouping costs nothing.
+members are listed individually; the grouping costs nothing.
 
 Within a crate: `src/lib.rs` declares modules and re-exports, nothing else. Target
 caps in section 3.6.
@@ -911,11 +946,11 @@ crate list.
 
 | metric | today | after | how |
 |---|---:|---:|---|
-| workspace crates | 26 | 31 | 11 splits, 3 merges, 2 archive moves |
-| crates in the shipped binary | 23 | 27 | more crates, fewer lines: `orna-conformance` (with `orna-table`), `orna-traceability`, `orna-lsp` and `orna-compat-v1` leave the closure |
-| src lines compiled into the shipped binary | 414,031 | ~393,600 | the harness (20,430 src, including the merged `orna-table`) stops being linked; nothing is deleted except by D1 |
+| workspace crates | 26 | 33 | 10 new crates, 3 merged away, 2 archive moves, 6 renames |
+| crates in the shipped binary | 23 | 29 | more crates, fewer lines: `orna-conformance` (with `orna-table`), `orna-traceability`, `orna-lsp` and `orna-compat-v1` leave the closure |
+| src lines compiled into the shipped binary | 414,031 | 390,772 | the harness (20,430 src) and the merged `orna-table` (2,829) stop being linked; nothing is deleted except by D1 |
 | largest compilation unit (one `lib.rs`) | 54,369 | < 1,200 | 14 stages of splits; < 2,500 is the stage-13 checkpoint |
-| crates publishable by default | 20 of 26 | 0 of 31 | `publish = false` on every crate (6 have it today) |
+| crates publishable by default | 20 of 26 | 0 of 33 | `publish = false` on every crate (6 have it today) |
 | largest function | 4,398 | < 120 new, 400 max by budget | `orna-query` extraction + `explain_with_inputs` decomposition |
 | public error enums | 149 | <= 40 public | layer boundary rule |
 | hex implementations | 9 + 6 | 1 + 1 | `orna-base` |
@@ -988,9 +1023,9 @@ mechanical import rewrites.
 `crates/orna-standard-sources/Cargo.toml` (`lints.workspace = true` as the opt-in
 proof).
 
-*Acceptance:* `--mode=report` prints the current 11 errors and 1 warning (Appendix A)
-plus the current budgets and exits 0; `--mode=deny` on the pre-stage tree exits 1 with
-exactly those 11 errors, proving the check has teeth; the `arch` CI job is green with
+*Acceptance:* `--mode=report` prints the current 10 errors and 1 warning (Appendix A),
+the current budgets, and exits 0; `--mode=deny` on the pre-stage tree exits 1 with
+exactly those 10 errors, proving the check has teeth; the `arch` CI job is green with
 `--mode=report`. No source file changes, so `cargo test --workspace` is unchanged by
 construction.
 
@@ -1078,8 +1113,9 @@ and explain-frame rendering.
 `STD_FUNCTIONS` equals the number of `std` declarations in the pinned
 `orna-std-sources` bundle, asserted by a new test
 `crates/orna-std/tests/definition_parity.rs`; every existing
-`orna-evaluator/tests/standard_library_*` target (114 files) passes unchanged, which
-is the byte-identical-behaviour proof for the stdlib.
+`orna-evaluator/tests/standard_library_*` target (113 files) passes unchanged, which
+is the byte-identical-behaviour proof for the stdlib; `orna-sys` drops from 31,737 to
+under 14,000 src lines once `introspection.rs` leaves.
 
 *Waits for:* 05a.
 
@@ -1184,7 +1220,7 @@ to `crates/orna-migrate/`; `contextual_snapshot.rs` and `format3_store.rs` move 
 their owning layers (`orna-value` and `orna-format3` respectively).
 
 *Acceptance:* standard block; `orna-application`'s 10 test targets (2,437 lines)
-pass; the engine's production edges are exactly layer <= 11.
+pass; the engine's production edges are exactly layer <= 12.
 
 *Waits for:* #9766, #9772.
 
@@ -1208,7 +1244,7 @@ restructuring REPL request handling.
 `conformance::oracle_table`.
 
 *Acceptance:* standard block; the three crates' test targets pass after the move; the
-workspace member count drops to 29.
+workspace member count drops from 33 to 31.
 
 *Waits for:* #9772 (touches `orna-live`).
 
@@ -1361,7 +1397,7 @@ uncontended and can be split out of stage 13 if a merge window appears.
 | Stage 10's helper closure is much larger than the four entry points suggest | medium-high | explicit measurement commit first; fallback split 10a/10b, documented in the stage |
 | Pedantic clippy on 491k lines produces an unreviewable delta | medium | the ratchet (budget file) is introduced in stage 01 in report mode; pedantic is enabled per-crate only in stage 14, after files shrink |
 | A new layer rule is wrong and blocks a legitimate dependency | medium | `layers.toml` carries a `reason` per entry; a rule change is a one-line PR reviewed like any other design change; `--mode=report` always prints the offending edge with its manifest line |
-| Public API churn breaks an external consumer | low | 20 of 26 crates do **not** set `publish = false` (`orna-application`, `orna-conformance`, `orna-runtime`, `orna-stream`, `orna-table`, `orna-traceability` do), but nothing consumes them from a registry today: the only external surfaces are the `orna` binary, `orna-lsp` and the exported `api/sys.json`. Stage 01 sets `publish = false` on all 31 target crates so the question cannot arise later |
+| Public API churn breaks an external consumer | low | 20 of 26 crates do **not** set `publish = false` (`orna-application`, `orna-conformance`, `orna-runtime`, `orna-stream`, `orna-table`, `orna-traceability` do), but nothing consumes them from a registry today: the only external surfaces are the `orna` binary, `orna-lsp` and the exported `api/sys.json`. Stage 01 sets `publish = false` on all 33 target crates so the question cannot arise later |
 | Compile time regresses from more crates | low-medium | more crates improve incremental parallelism; the split reduces the largest compilation unit from 75k to <25k lines, and the lower layers are already dev-decoupled. Stage 01's CI job adds no compile. Measure `cargo build --timings` before 05a and after 09 and record both in the stage PRs. |
 | Deleting `orna-core` loses 1.0.0 compatibility knowledge | medium | decision **D1**; the default in this plan is archive-and-quarantine, not delete |
 
@@ -1388,7 +1424,7 @@ uncontended and can be split out of stage 13 if a merge window appears.
 
 ### 7.4 Rejected alternatives
 
-1. **One mega-crate per layer (7 crates instead of 31).** Fewer manifests, but it
+1. **One mega-crate per layer (7 crates instead of 33).** Fewer manifests, but it
    recreates the exact problem at a different scale: a `orna-state` crate holding
    Git + SQLite + VFS + publication is 200k lines with no boundary. Rejected: the
    measured failure mode is intra-crate entanglement (54k-line `lib.rs`), not
@@ -1463,32 +1499,45 @@ intended shape, because that decision is what makes the evaluator cycle removabl
 
 ---
 
-## Appendix A: the 11 errors and 1 warning `check_architecture.py` will report on
+## Appendix A: the 10 errors and 1 warning `check_architecture.py` will report on
 `7c5fce9e4`
 
+Every production edge in the current graph was checked against the target table. The
+table below is exhaustive; the tree is better layered than it looks, and the one
+genuinely upward edge is not one anybody has been discussing.
+
 ```
-[V1]  orna-storage -> orna-runtime           (layer 6 -> 8: upward)
-[V2]  orna-storage -> orna-repository        (layer 6 -> 8: upward)
-[V3]  orna-cli -> orna-conformance           (R2: harness in the shipped binary)
-[V4]  orna-conformance -> orna-table         (R2: oracle in the shipped binary)
-[V5]  orna-traceability -> orna-conformance  (tool depends on harness)
-[V6]  orna-evaluator -> orna-runtime (optional)   (R1: optional internal edge)
-[V7]  orna-evaluator -> orna-repository (optional)(R1)
-[V8]  orna-evaluator -> orna-sys (optional)       (R1)
-[V9]  orna-core: production in-degree 0, not declared a tool or archive
-[V10] orna-lsp: production in-degree 0, not declared a tool
-[V11] orna-traceability: production in-degree 0, not declared a tool
-[V12] orna-foundation -> (16 dependents) exceeds max dependents for a crate
-      with no cohesive subject -- reported as a warning, not an error
+[V1]  orna-semantic -> orna-sys            (layer 4 -> 6: upward; the only
+                                            upward edge in the production graph,
+                                            22 sites in src/system_api.rs)
+[V2]  orna-cli -> orna-conformance         (R2: harness in the shipped binary)
+[V3]  orna-conformance -> orna-table       (R2: oracle in the shipped binary)
+[V4]  orna-traceability -> orna-conformance (tool depends on the harness)
+[V5]  orna-evaluator -> orna-runtime (optional)    (R1: optional internal edge)
+[V6]  orna-evaluator -> orna-repository (optional) (R1)
+[V7]  orna-evaluator -> orna-sys (optional)        (R1)
+[V8]  orna-core: production in-degree 0 and role not declared as archive
+[V9]  orna-lsp: production in-degree 0 and role not declared as tool
+[V10] orna-traceability: production in-degree 0 and role not declared as tool
+[W1]  orna-foundation: single crate, no cohesive subject, 16 production
+      dependents, 2,581 src lines -- warning, not an error
 ```
 
-Note `V1`/`V2` disappear in the target numbering because `orna-storage` becomes
-`orna-publication` at layer 9, *below* `orna-repository` is still wrong: in the target
-table `orna-publication` is layer 9 and `orna-repository` is layer 9, so the edge is
-same-layer and legal only in the documented direction
-`orna-publication -> orna-repository` (the coordinator reads committed state). The
-`layers.toml` entry carries that direction explicitly rather than relying on
-same-layer tolerance.
+Notes on what the checker must therefore *not* report, because the edge is correct:
+
+* `orna-storage -> orna-runtime` and `orna-storage -> orna-repository` are downward
+  in the target table (`orna-publication` at 10 over `orna-store` at 9 and
+  `orna-repository` at 8). The current tree already has this direction right.
+* `orna-runtime -> orna-repository`, `orna-runtime -> orna-stream`,
+  `orna-runtime -> orna-sys` are all downward (`9 -> 8`, `9 -> 7`, `9 -> 6`).
+* `orna-repository -> orna-syntax`, `-> orna-foundation`, `-> orna-value` are
+  downward (`8 -> 2`, `8 -> 0`, `8 -> 1`).
+
+After stage 06 removes `V1` (the catalogue moves to `orna-sys-id` at layer 3), the
+only remaining errors are the structural ones R1/R2, which are fixed by stages 05a,
+10 and 13. The checker's `layers.toml` records, per crate, an `allowed` list rather
+than "same layer is fine", so a same-layer edge such as `orna-present-protocol ->
+orna-live` still has to be written down.
 
 ## Appendix B: commands used for every measurement in this document
 
@@ -1539,15 +1588,16 @@ R3. A crate name states its layer or its subject, never a metaphor. "core",
 | 3 | identity | orna-sys-id, orna-std-sources, orna-sys-macros |
 | 4 | analysis | orna-check |
 | 5 | evaluation | orna-eval, orna-std, orna-query |
-| 6 | hosts | orna-sys, orna-security |
-| 7 | formats | orna-format3, orna-evolution |
-| 8 | state | orna-git, orna-store, orna-vfs, orna-stream |
-| 9 | repository | orna-repository, orna-publication |
-| 10 | project | orna-project, orna-repl, orna-admission |
-| 11 | presentation | orna-present-protocol, orna-live |
-| 12 | engine | orna-engine, orna-migrate |
-| 13 | edges | orna-cli, orna-fuse, orna-lsp |
-| 14 | archive | orna-compat-v1 (nothing may depend on it) |
+| 6 | hosts (I/O) | orna-sys, orna-security |
+| 7 | formats and planning | orna-format3, orna-evolution, orna-stream |
+| 8 | repository layout | orna-git, orna-repository |
+| 9 | durable state | orna-store, orna-vfs |
+| 10 | publication | orna-publication |
+| 11 | project | orna-project, orna-repl, orna-admission |
+| 12 | presentation | orna-present-protocol, orna-live |
+| 13 | engine | orna-engine, orna-migrate |
+| 14 | edges | orna-cli, orna-fuse, orna-lsp |
+| 15 | archive | orna-compat-v1 (nothing may depend on it) |
 
 ## Size budgets
 
