@@ -713,34 +713,40 @@ pub enum ControlKind {
     While,
     Loop,
 }
-fn pattern_span(pattern: &Pattern) -> SourceSpan {
-    match pattern {
-        Pattern::Name(_, span) | Pattern::Wildcard(span) | Pattern::Literal { span, .. } => {
-            span.clone()
+impl Pattern {
+    /// The source range of the whole pattern.
+    pub fn span(&self) -> &SourceSpan {
+        match self {
+            Self::Name(_, span)
+            | Self::Wildcard(span)
+            | Self::Literal { span, .. }
+            | Self::Tuple { span, .. }
+            | Self::List { span, .. }
+            | Self::Record { span, .. }
+            | Self::Constructor { span, .. } => span,
         }
-        Pattern::Tuple { span, .. }
-        | Pattern::List { span, .. }
-        | Pattern::Record { span, .. }
-        | Pattern::Constructor { span, .. } => span.clone(),
     }
 }
-fn assignment_target_span(target: &AssignmentTarget) -> SourceSpan {
-    match target {
-        AssignmentTarget::Name { span, .. }
-        | AssignmentTarget::Field { span, .. }
-        | AssignmentTarget::Index { span, .. } => span.clone(),
+impl AssignmentTarget {
+    /// The source range of the whole target.
+    pub fn span(&self) -> &SourceSpan {
+        match self {
+            Self::Name { span, .. } | Self::Field { span, .. } | Self::Index { span, .. } => span,
+        }
     }
 }
-#[allow(dead_code)]
-fn type_span(ty: &TypeExpr) -> SourceSpan {
-    match ty {
-        TypeExpr::Name { span, .. }
-        | TypeExpr::Optional { span, .. }
-        | TypeExpr::Product { span, .. }
-        | TypeExpr::List { span, .. }
-        | TypeExpr::Record { span, .. }
-        | TypeExpr::Tuple { span, .. }
-        | TypeExpr::Function { span, .. } => span.clone(),
+impl TypeExpr {
+    /// The source range of the whole type expression.
+    pub fn span(&self) -> &SourceSpan {
+        match self {
+            Self::Name { span, .. }
+            | Self::Optional { span, .. }
+            | Self::Product { span, .. }
+            | Self::List { span, .. }
+            | Self::Record { span, .. }
+            | Self::Tuple { span, .. }
+            | Self::Function { span, .. } => span,
+        }
     }
 }
 
@@ -966,7 +972,6 @@ pub fn parse_module(source: &str) -> Parse<SyntaxTree> {
 }
 pub fn parse_row(source: &str) -> Parse<Expr> {
     let mut p = Parser::new(source);
-    p.reset_syntax_budget();
     let result = if p.is_punct("{") {
         p.expr()
     } else {
@@ -988,7 +993,6 @@ pub fn parse_row(source: &str) -> Parse<Expr> {
 }
 pub fn parse_repl(source: &str) -> Parse<ReplInput> {
     let mut p = Parser::new(source);
-    p.reset_syntax_budget();
     let public_table = matches!(p.keyword(), Some(Keyword::Pub))
         && matches!(
             p.tokens.get(p.at + 1).map(|token| &token.kind),
@@ -1027,7 +1031,6 @@ pub fn parse_repl(source: &str) -> Parse<ReplInput> {
 }
 pub fn parse_expression(source: &str) -> Parse<Expr> {
     let mut p = Parser::new(source);
-    p.reset_syntax_budget();
     let v = p.expr();
     p.finish();
     Parse {
@@ -1040,40 +1043,44 @@ pub fn parse_expression(source: &str) -> Parse<Expr> {
     }
 }
 pub fn parse_module_with_file(source: &str, file: impl Into<String>) -> Parse<SyntaxTree> {
-    let mut parsed = parse_module(source);
-    let file = file.into();
-    let lines = SourceLines::new(source);
-    annotate_tree(&mut parsed.value, &lines, &file);
-    annotate_diagnostics(&mut parsed.diagnostics, &lines, &file);
-    parsed
+    located(parse_module(source), source, &file.into(), annotate_tree)
 }
 pub fn parse_row_with_file(source: &str, file: impl Into<String>) -> Parse<Expr> {
-    let mut parsed = parse_row(source);
-    let file = file.into();
-    let lines = SourceLines::new(source);
-    annotate_expr(&mut parsed.value, &lines, &file);
-    annotate_diagnostics(&mut parsed.diagnostics, &lines, &file);
-    parsed
+    located(parse_row(source), source, &file.into(), annotate_expr)
 }
 pub fn parse_repl_with_file(source: &str, file: impl Into<String>) -> Parse<ReplInput> {
-    let mut parsed = parse_repl(source);
-    let file = file.into();
-    let lines = SourceLines::new(source);
-    match &mut parsed.value {
-        ReplInput::Item(item) => annotate_item(item, &lines, &file),
-        ReplInput::Expression(expr) | ReplInput::ExpressionStatement(expr) => {
-            annotate_expr(expr, &lines, &file)
-        }
-    }
-    annotate_diagnostics(&mut parsed.diagnostics, &lines, &file);
-    parsed
+    located(
+        parse_repl(source),
+        source,
+        &file.into(),
+        |input, lines, file| match input {
+            ReplInput::Item(item) => annotate_item(item, lines, file),
+            ReplInput::Expression(expr) | ReplInput::ExpressionStatement(expr) => {
+                annotate_expr(expr, lines, file)
+            }
+        },
+    )
 }
 pub fn parse_expression_with_file(source: &str, file: impl Into<String>) -> Parse<Expr> {
-    let mut parsed = parse_expression(source);
-    let file = file.into();
+    located(
+        parse_expression(source),
+        source,
+        &file.into(),
+        annotate_expr,
+    )
+}
+
+/// Gives every span of `parsed`, and of its diagnostics, the file and the
+/// 1-based line and column of its offsets in `source`.
+fn located<T>(
+    mut parsed: Parse<T>,
+    source: &str,
+    file: &str,
+    annotate: impl FnOnce(&mut T, &SourceLines<'_>, &str),
+) -> Parse<T> {
     let lines = SourceLines::new(source);
-    annotate_expr(&mut parsed.value, &lines, &file);
-    annotate_diagnostics(&mut parsed.diagnostics, &lines, &file);
+    annotate(&mut parsed.value, &lines, file);
+    annotate_diagnostics(&mut parsed.diagnostics, &lines, file);
     parsed
 }
 
@@ -1634,32 +1641,25 @@ struct Parser {
 }
 impl Parser {
     fn new(source: &str) -> Self {
-        match lex(source) {
-            Ok(tokens) => Self {
-                lookahead: TokenLookahead::new(&tokens),
-                tokens,
-                at: 0,
-                errors: Vec::new(),
-                incomplete_errors: 0,
-                nesting_depth: 0,
-                syntax_limit_reported: false,
-            },
-            Err(es) => {
-                let tokens = vec![Token {
+        let (tokens, errors) = match lex(source) {
+            Ok(tokens) => (tokens, Vec::new()),
+            Err(errors) => {
+                let eof = Token {
                     kind: TokenKind::Eof,
                     text: String::new(),
                     span: SourceSpan::new(source.len(), source.len()),
-                }];
-                Self {
-                    lookahead: TokenLookahead::new(&tokens),
-                    tokens,
-                    at: 0,
-                    errors: es.into_iter().map(from_lex).collect(),
-                    incomplete_errors: 0,
-                    nesting_depth: 0,
-                    syntax_limit_reported: false,
-                }
+                };
+                (vec![eof], errors.into_iter().map(from_lex).collect())
             }
+        };
+        Self {
+            lookahead: TokenLookahead::new(&tokens),
+            tokens,
+            at: 0,
+            errors,
+            incomplete_errors: 0,
+            nesting_depth: 0,
+            syntax_limit_reported: false,
         }
     }
     fn reset_syntax_budget(&mut self) {
@@ -2877,8 +2877,12 @@ impl Parser {
             let end = default
                 .as_ref()
                 .map(Expr::span)
-                .or_else(|| annotation.as_ref().map(type_span))
-                .unwrap_or_else(|| pattern_span(&pattern));
+                .or_else(|| {
+                    annotation
+                        .as_ref()
+                        .map(|annotation| annotation.span().clone())
+                })
+                .unwrap_or_else(|| pattern.span().clone());
             parameters.push(Parameter {
                 pattern,
                 annotation,
@@ -2965,10 +2969,10 @@ impl Parser {
                             } else {
                                 None
                             };
-                            let end = pattern
-                                .as_ref()
-                                .map(pattern_span)
-                                .unwrap_or_else(|| field.span.clone());
+                            let end = pattern.as_ref().map_or_else(
+                                || field.span.clone(),
+                                |pattern| pattern.span().clone(),
+                            );
                             fields.push(PatternField {
                                 name: field.text,
                                 pattern,
@@ -3052,12 +3056,11 @@ impl Parser {
                         } else {
                             None
                         };
-                        let span = field.span.clone().join(
-                            value
-                                .as_ref()
-                                .map(pattern_span)
-                                .unwrap_or(field.span.clone()),
-                        );
+                        let span =
+                            field.span.clone().join(value.as_ref().map_or_else(
+                                || field.span.clone(),
+                                |pattern| pattern.span().clone(),
+                            ));
                         fields.push((field.text, value, span));
                         if self.is_punct(",") {
                             self.bump()
@@ -3832,10 +3835,10 @@ impl Parser {
                     }
                 }
             }
-            let end = bounds
-                .last()
-                .map(type_span)
-                .unwrap_or_else(|| self.previous().span.clone());
+            let end = bounds.last().map_or_else(
+                || self.previous().span.clone(),
+                |bound| bound.span().clone(),
+            );
             parameters.push(GenericParameter {
                 name,
                 bounds,
@@ -3873,7 +3876,7 @@ impl Parser {
                 let result = self.parse_type_expr()?;
                 TypeExpr::Function {
                     parameters,
-                    span: token.span.join(type_span(&result)),
+                    span: token.span.join(result.span().clone()),
                     result: Box::new(result),
                 }
             }
@@ -4006,7 +4009,7 @@ impl Parser {
             if !self.within_depth(type_depth(&ty) + 1) {
                 return None;
             }
-            let start = type_span(&ty);
+            let start = ty.span().clone();
             self.bump();
             ty = TypeExpr::Optional {
                 span: start.join(self.previous().span.clone()),
@@ -4020,7 +4023,7 @@ impl Parser {
             if !self.within_depth(type_depth(&ty).max(type_depth(&rhs)) + 1) {
                 return None;
             }
-            let span = type_span(&ty).join(type_span(&rhs));
+            let span = ty.span().clone().join(rhs.span().clone());
             ty = TypeExpr::Product {
                 lhs: Box::new(ty),
                 op,
@@ -4834,7 +4837,7 @@ impl Parser {
         self.bump();
         while !self.eof() && !self.is_punct(")") {
             let pattern = self.parse_pattern();
-            let span = pattern_span(&pattern);
+            let span = pattern.span().clone();
             let annotation = if self.is_punct(":") {
                 self.bump();
                 self.parse_type_expr()
@@ -4963,7 +4966,7 @@ impl Parser {
                         self.skip_assignment_target_tail();
                         break;
                     }
-                    let span = assignment_target_span(&target).join(field.span);
+                    let span = target.span().clone().join(field.span);
                     target = AssignmentTarget::Field {
                         base: Box::new(target),
                         name: field.text,
@@ -4974,7 +4977,7 @@ impl Parser {
                     break;
                 }
             } else if self.is_punct("[") {
-                let start = assignment_target_span(&target);
+                let start = target.span().clone();
                 self.bump();
                 let index = self.expr().unwrap_or_else(|| self.error_expr());
                 self.require_punct("]", "expected `]` after assignment index");
