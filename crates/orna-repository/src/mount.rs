@@ -35,12 +35,7 @@ const MOUNT_REGISTRY_OWNER_ID_FILE: &str = "mount-registry-owner-id-v1";
 fn mount_registry_lock(paths: &RuntimePaths, exclusive: bool) -> Result<fs::File, MountError> {
     let locks = paths.locks();
     fs::create_dir_all(&locks).map_err(|_| MountError::HostFilesystem)?;
-    let file = fs::OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(locks.join("mount-registry.lock"))
+    let file = crate::open_lock_file(&locks.join("mount-registry.lock"))
         .map_err(|_| MountError::HostFilesystem)?;
     if exclusive {
         file.lock_exclusive()

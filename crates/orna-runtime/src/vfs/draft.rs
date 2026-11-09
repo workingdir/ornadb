@@ -17,7 +17,7 @@ use super::{
     EditDraftError, FsyncFailure, FsyncOutcome, SharedCacheEpoch, SnapshotPin, SnapshotReadHandle,
     VfsFileSnapshot,
 };
-use crate::{DiagnosticClass, DiagnosticCode, SafeDiagnostic};
+use orna_stream::{DiagnosticClass, DiagnosticCode, SafeDiagnostic};
 
 /// The latest rejected replacement remains separately readable even after a
 /// later write starts a new candidate from its bytes.

@@ -349,7 +349,54 @@ pub enum CanonicalHashError {
 impl fmt::Display for CanonicalHashError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         use CanonicalHashError::*;
+        match self {
+            LengthExceedsU32 { .. }
+            | SourceContentHashMismatch { .. }
+            | DuplicateSourceUnitId { .. }
+            | DuplicateSourceLogicalPath { .. }
+            | SourceOrdinalOutOfSequence { .. }
+            | SourceBundleHashMismatch { .. }
+            | StandardSourceRevisionHashMismatch { .. }
+            | StandardLibraryDigestMismatch { .. }
+            | StandardLibraryDigestVersionMismatch { .. }
+            | ArtifactPayloadHashMismatch { .. } => self.write_source_message(formatter),
+            ResolvedValueRequiresCatalogueHashVersionTwo { .. }
+            | LegacyScalarRequiresCatalogueHashVersionOne { .. }
+            | ResolvedValueTypeNotInPinnedStandard { .. }
+            | OpaqueValueTypeNotAcceptedInSlot { .. }
+            | UnsupportedRecordValueFieldType { .. }
+            | AmbiguousRecordValueFieldType { .. }
+            | RecursiveRecordValueField { .. }
+            | RecordValueNestingTooDeep { .. }
+            | CatalogueFactUnsupportedByHashVersion { .. }
+            | FunctionFactUnsupportedBySemanticHashVersion { .. }
+            | FunctionOwnerSchemaNotFound { .. }
+            | ObjectTypeOwnerSchemaNotFound { .. }
+            | DefaultExpressionArtifactNotFound { .. }
+            | DuplicateExpressionArtifact { .. }
+            | FunctionRevisionFunctionNotFound { .. }
+            | DuplicateFunctionRevision { .. }
+            | DuplicateFunctionRevisionId { .. }
+            | MissingCurrentFunctionRevision { .. }
+            | FunctionRevisionIsNotCurrent { .. }
+            | FunctionArtifactDomainMismatch { .. }
+            | DuplicateReferenceOrdinal { .. }
+            | ReferenceSourceFunctionMismatch { .. }
+            | ReferenceRevisionIsNotCurrent { .. }
+            | ReferenceTargetNotFound { .. }
+            | ReferenceKindTargetMismatch { .. }
+            | OriginDefinitionNotFound { .. }
+            | DuplicateDefinitionOrigin { .. }
+            | MissingDefinitionOrigin { .. }
+            | FunctionSemanticHashMismatch { .. } => self.write_catalogue_message(formatter),
+        }
+    }
+}
 
+impl CanonicalHashError {
+    /// Writes the message of one source invariant.
+    fn write_source_message(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use CanonicalHashError::*;
         match self {
             LengthExceedsU32 { value, .. } => write!(formatter, "{value} length exceeds u32"),
             SourceContentHashMismatch { .. } => {
@@ -372,6 +419,22 @@ impl fmt::Display for CanonicalHashError {
             }
             StandardLibraryDigestVersionMismatch { .. } => formatter
                 .write_str("standard library digest contract differs from the required version"),
+            ArtifactPayloadHashMismatch { artifact } => {
+                write!(
+                    formatter,
+                    "{artifact} payload hash differs from exact payload"
+                )
+            }
+            // Display dispatches every variant to exactly one helper, so no
+            // variant can reach this arm.
+            _ => unreachable!("source invariant dispatched to the wrong helper"),
+        }
+    }
+
+    /// Writes the message of one catalogue invariant.
+    fn write_catalogue_message(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use CanonicalHashError::*;
+        match self {
             ResolvedValueRequiresCatalogueHashVersionTwo { .. } => {
                 formatter.write_str("resolved value type requires catalogue hash version 2")
             }
@@ -395,59 +458,11 @@ impl fmt::Display for CanonicalHashError {
             RecordValueNestingTooDeep { .. } => {
                 formatter.write_str("record value nesting exceeds the maximum depth")
             }
-            CatalogueFactUnsupportedByHashVersion { version, fact } => match fact {
-                CatalogueHashFact::ValueTypeDefinition(_) => write!(
-                    formatter,
-                    "catalogue hash version {} cannot include value types; use catalogue hash version 2",
-                    version.to_u32()
-                ),
-                CatalogueHashFact::RecordValueTypeDefinition(_) => write!(
-                    formatter,
-                    "catalogue hash version {} cannot include record value types; use catalogue hash version 2",
-                    version.to_u32()
-                ),
-                CatalogueHashFact::EnumTypeDefinition(_) => write!(
-                    formatter,
-                    "catalogue hash version {} cannot include enum types; use catalogue hash version 2",
-                    version.to_u32()
-                ),
-                CatalogueHashFact::TypeBinding(_) => write!(
-                    formatter,
-                    "catalogue hash version {} cannot include type-name bindings; use catalogue hash version 2",
-                    version.to_u32()
-                ),
-                CatalogueHashFact::DefinitionOrigin(_) => write!(
-                    formatter,
-                    "catalogue hash version {} cannot include value-type or binding origins; use catalogue hash version 2",
-                    version.to_u32()
-                ),
-                CatalogueHashFact::DefinitionReferenceTarget(_) => write!(
-                    formatter,
-                    "catalogue hash version {} cannot include value-type references; use catalogue hash version 2",
-                    version.to_u32()
-                ),
-                CatalogueHashFact::FunctionSemanticHashVersion {
-                    version: semantic_version,
-                    ..
-                } => write!(
-                    formatter,
-                    "catalogue hash version {} cannot include function semantic hash version {}; use catalogue hash version 2",
-                    version.to_u32(),
-                    semantic_version.to_u32()
-                ),
-            },
-            FunctionFactUnsupportedBySemanticHashVersion { version, fact, .. } => match fact {
-                FunctionSemanticHashFact::ValueTypeReference(_) => write!(
-                    formatter,
-                    "function semantic hash version {} cannot include value-type references; use function semantic hash version 2",
-                    version.to_u32()
-                ),
-            },
-            ArtifactPayloadHashMismatch { artifact } => {
-                write!(
-                    formatter,
-                    "{artifact} payload hash differs from exact payload"
-                )
+            CatalogueFactUnsupportedByHashVersion { version, fact } => {
+                write_catalogue_fact_unsupported(formatter, version, fact)
+            }
+            FunctionFactUnsupportedBySemanticHashVersion { version, fact, .. } => {
+                write_function_fact_unsupported(formatter, version, fact)
             }
             FunctionOwnerSchemaNotFound { .. } => {
                 formatter.write_str("function namespace has no exact schema owner")
@@ -502,7 +517,76 @@ impl fmt::Display for CanonicalHashError {
             FunctionSemanticHashMismatch { .. } => {
                 formatter.write_str("function semantic hash differs from canonical semantic input")
             }
+            // Display dispatches every variant to exactly one helper, so no
+            // variant can reach this arm.
+            _ => unreachable!("catalogue invariant dispatched to the wrong helper"),
         }
+    }
+}
+
+/// Writes why one catalogue fact is absent from the given catalogue hash
+/// version.
+fn write_catalogue_fact_unsupported(
+    formatter: &mut fmt::Formatter<'_>,
+    version: &CatalogueHashVersion,
+    fact: &CatalogueHashFact,
+) -> fmt::Result {
+    match fact {
+        CatalogueHashFact::ValueTypeDefinition(_) => write!(
+            formatter,
+            "catalogue hash version {} cannot include value types; use catalogue hash version 2",
+            version.to_u32()
+        ),
+        CatalogueHashFact::RecordValueTypeDefinition(_) => write!(
+            formatter,
+            "catalogue hash version {} cannot include record value types; use catalogue hash version 2",
+            version.to_u32()
+        ),
+        CatalogueHashFact::EnumTypeDefinition(_) => write!(
+            formatter,
+            "catalogue hash version {} cannot include enum types; use catalogue hash version 2",
+            version.to_u32()
+        ),
+        CatalogueHashFact::TypeBinding(_) => write!(
+            formatter,
+            "catalogue hash version {} cannot include type-name bindings; use catalogue hash version 2",
+            version.to_u32()
+        ),
+        CatalogueHashFact::DefinitionOrigin(_) => write!(
+            formatter,
+            "catalogue hash version {} cannot include value-type or binding origins; use catalogue hash version 2",
+            version.to_u32()
+        ),
+        CatalogueHashFact::DefinitionReferenceTarget(_) => write!(
+            formatter,
+            "catalogue hash version {} cannot include value-type references; use catalogue hash version 2",
+            version.to_u32()
+        ),
+        CatalogueHashFact::FunctionSemanticHashVersion {
+            version: semantic_version,
+            ..
+        } => write!(
+            formatter,
+            "catalogue hash version {} cannot include function semantic hash version {}; use catalogue hash version 2",
+            version.to_u32(),
+            semantic_version.to_u32()
+        ),
+    }
+}
+
+/// Writes why one function fact is absent from the given function semantic hash
+/// version.
+fn write_function_fact_unsupported(
+    formatter: &mut fmt::Formatter<'_>,
+    version: &FunctionSemanticHashVersion,
+    fact: &FunctionSemanticHashFact,
+) -> fmt::Result {
+    match fact {
+        FunctionSemanticHashFact::ValueTypeReference(_) => write!(
+            formatter,
+            "function semantic hash version {} cannot include value-type references; use function semantic hash version 2",
+            version.to_u32()
+        ),
     }
 }
 

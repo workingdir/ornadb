@@ -20,9 +20,8 @@ use orna_repository::{
 };
 use tokio::sync::Mutex;
 
-use super::{
-    DiagnosticCode, FaultInjector, RuntimeError, RuntimeState, SafeDiagnostic, TableActivationError,
-};
+use crate::{FaultInjector, RuntimeError, RuntimeState, TableActivationError};
+use orna_stream::{DiagnosticCode, SafeDiagnostic};
 
 mod draft;
 mod naming;

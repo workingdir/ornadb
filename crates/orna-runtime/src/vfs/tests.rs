@@ -1,11 +1,12 @@
 use super::spool::{CandidateSource, DRAFT_SPOOL_DIRECTORY};
 use super::*;
 use crate::{
-    DiagnosticClass, ProtectedContentTransferEvidence, RuntimeIdentity, RuntimeQueryError,
-    RuntimeState, RuntimeTableIdentity, RuntimeTableRows, TableActivationCandidateValidator,
-    TableMutation, TableObjectId, TableSchemaIdentity,
+    ProtectedContentTransferEvidence, RuntimeIdentity, RuntimeQueryError, RuntimeState,
+    RuntimeTableIdentity, RuntimeTableRows, TableActivationCandidateValidator, TableMutation,
+    TableObjectId, TableSchemaIdentity,
 };
 use orna_repository::{ProtectedContentTransfer, Repository};
+use orna_stream::DiagnosticClass;
 use orna_value::{Raw, SchemaDescriptor};
 use sha2::{Digest, Sha256};
 use std::fs;

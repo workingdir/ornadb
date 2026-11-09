@@ -2268,7 +2268,7 @@ fn binary_repl_evaluates_a_pinned_query_window_operator_from_its_stats_import() 
         project.standard_runtime_modules()
     );
 
-    let mut session = orna_evaluator::AdmittedReplSession::from_loaded_project(
+    let mut session = orna_project_repl::AdmittedReplSession::from_loaded_project(
         &project,
         project.standard_sources().iter().cloned(),
         orna_evaluator::Limits::default(),

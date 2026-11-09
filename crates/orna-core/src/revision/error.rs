@@ -405,227 +405,210 @@ pub enum RevisionInvariantError {
 
 impl fmt::Display for RevisionInvariantError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self::DuplicateModuleNamespace {
+            namespace,
+            first,
+            duplicate,
+        } = self
+        else {
+            return formatter.write_str(self.message());
+        };
+        write!(
+            formatter,
+            "stored source units {first:?} and {duplicate:?} define module namespace {namespace:?}"
+        )
+    }
+}
+
+impl RevisionInvariantError {
+    /// The fixed diagnostic of this error.
+    ///
+    /// Every variant names itself in one sentence. A module-namespace collision
+    /// also names its two stored units, and `Display` formats those identities
+    /// from the variant; this is the sentence that names the error itself.
+    const fn message(&self) -> &'static str {
         use RevisionInvariantError::*;
         match self {
-            SourceOriginReversed { .. } => formatter.write_str("source origin end precedes start"),
-            EmptyLogicalPath { .. } => {
-                formatter.write_str("stored source unit has an empty logical path")
-            }
-            SourceOrdinalOutOfSequence { .. } => {
-                formatter.write_str("stored source ordinals are not contiguous")
-            }
-            SourceOrdinalOutOfRange { .. } => {
-                formatter.write_str("stored source ordinal exceeds u32")
-            }
-            DuplicateSourceUnitId { .. } => {
-                formatter.write_str("duplicate stored source unit identity")
-            }
-            DuplicateLogicalPath { .. } => {
-                formatter.write_str("duplicate stored source logical path")
-            }
-            DuplicateModuleNamespace {
-                namespace,
-                first,
-                duplicate,
-            } => write!(
-                formatter,
-                "stored source units {first:?} and {duplicate:?} define module namespace {namespace:?}"
-            ),
-            SourceRevisionSelfParent { .. } => {
-                formatter.write_str("source revision is its own parent")
-            }
+            DuplicateModuleNamespace { .. } => "duplicate source unit module namespace",
+            SourceOriginReversed { .. } => "source origin end precedes start",
+            EmptyLogicalPath { .. } => "stored source unit has an empty logical path",
+            SourceOrdinalOutOfSequence { .. } => "stored source ordinals are not contiguous",
+            SourceOrdinalOutOfRange { .. } => "stored source ordinal exceeds u32",
+            DuplicateSourceUnitId { .. } => "duplicate stored source unit identity",
+            DuplicateLogicalPath { .. } => "duplicate stored source logical path",
+            SourceRevisionSelfParent { .. } => "source revision is its own parent",
             StandardLibrarySourceHasParent { .. } => {
-                formatter.write_str("standard library source revision has a parent")
+                "standard library source revision has a parent"
             }
             EmptyStandardLibraryLanguageVersion { .. } => {
-                formatter.write_str("standard library language version is empty")
+                "standard library language version is empty"
             }
             UnsupportedStandardLibraryDefinition { .. } => {
-                formatter.write_str("standard library catalogue contains an unsupported definition")
+                "standard library catalogue contains an unsupported definition"
             }
             VersionOneStandardLibraryHasExecutable { .. } => {
-                formatter.write_str("standard library digest version 1 has executable evidence")
+                "standard library digest version 1 has executable evidence"
             }
             VersionTwoStandardLibrarySourceHasNoParent { .. } => {
-                formatter.write_str("standard library digest version 2 source has no parent")
+                "standard library digest version 2 source has no parent"
             }
             StandardExecutableFunctionMismatch { .. } => {
-                formatter.write_str("standard executable function differs from its revision")
+                "standard executable function differs from its revision"
             }
             StandardExecutableSequenceLengthMismatch { .. } => {
-                formatter.write_str("standard executable sequence does not cover catalogue functions")
+                "standard executable sequence does not cover catalogue functions"
             }
             StandardExecutableSequenceFunctionMismatch { .. } => {
-                formatter.write_str("standard executable sequence function differs from catalogue")
+                "standard executable sequence function differs from catalogue"
             }
             StandardExecutableCatalogueFunctionOrder { .. } => {
-                formatter.write_str("standard executable catalogue functions are not in canonical order")
+                "standard executable catalogue functions are not in canonical order"
             }
-            StandardExecutableSemanticHashVersionMismatch { .. } => formatter
-                .write_str("standard executable requires function semantic hash version 2"),
-            StandardExecutableReferenceOrdinalOutOfRange { .. } => formatter
-                .write_str("standard executable reference position exceeds durable ordinal"),
-            StandardExecutableReferenceOrdinalOutOfSequence { .. } => formatter
-                .write_str("standard executable reference ordinals are not contiguous"),
-            StandardExecutableReferenceOwnerMismatch { .. } => formatter
-                .write_str("standard executable reference differs from its immutable owner"),
-            EmptyArtifactFormat => formatter.write_str("artifact format is empty"),
-            ZeroArtifactVersion { .. } => formatter.write_str("artifact format version is zero"),
-            EmptyArtifactPayload { .. } => formatter.write_str("artifact payload is empty"),
-            ZeroFunctionRevisionNumber { .. } => {
-                formatter.write_str("function revision number is zero")
+            StandardExecutableSemanticHashVersionMismatch { .. } => {
+                "standard executable requires function semantic hash version 2"
             }
-            EmptyLanguageVersion { .. } => {
-                formatter.write_str("function language version is empty")
+            StandardExecutableReferenceOrdinalOutOfRange { .. } => {
+                "standard executable reference position exceeds durable ordinal"
             }
+            StandardExecutableReferenceOrdinalOutOfSequence { .. } => {
+                "standard executable reference ordinals are not contiguous"
+            }
+            StandardExecutableReferenceOwnerMismatch { .. } => {
+                "standard executable reference differs from its immutable owner"
+            }
+            EmptyArtifactFormat => "artifact format is empty",
+            ZeroArtifactVersion { .. } => "artifact format version is zero",
+            EmptyArtifactPayload { .. } => "artifact payload is empty",
+            ZeroFunctionRevisionNumber { .. } => "function revision number is zero",
+            EmptyLanguageVersion { .. } => "function language version is empty",
             ResolvedValueRequiresCatalogueHashVersionTwo { .. } => {
-                formatter.write_str("resolved value type requires catalogue hash version 2")
+                "resolved value type requires catalogue hash version 2"
             }
             LegacyScalarRequiresCatalogueHashVersionOne { .. } => {
-                formatter.write_str("legacy scalar resolved type requires catalogue hash version 1")
+                "legacy scalar resolved type requires catalogue hash version 1"
             }
-            ResolvedValueTypeNotInPinnedStandard { .. } => formatter
-                .write_str("resolved value type is absent from the pinned standard library"),
+            ResolvedValueTypeNotInPinnedStandard { .. } => {
+                "resolved value type is absent from the pinned standard library"
+            }
             OpaqueValueTypeNotAcceptedInSlot { .. } => {
-                formatter.write_str("opaque value type is not accepted in a catalogue slot")
+                "opaque value type is not accepted in a catalogue slot"
             }
-            FunctionSemanticHashVersionRequiresCatalogueHashVersionTwo { .. } => formatter
-                .write_str("function semantic hash version 2 requires catalogue hash version 2"),
+            FunctionSemanticHashVersionRequiresCatalogueHashVersionTwo { .. } => {
+                "function semantic hash version 2 requires catalogue hash version 2"
+            }
             ValueTypeDefinitionRequiresCatalogueHashVersionTwo { .. } => {
-                formatter.write_str("value types require catalogue hash version 2")
+                "value types require catalogue hash version 2"
             }
             RecordValueTypeRequiresCatalogueHashVersionTwo { .. } => {
-                formatter.write_str("record value types require catalogue hash version 2")
+                "record value types require catalogue hash version 2"
             }
             UnsupportedRecordValueFieldType { .. } => {
-                formatter.write_str("record value field has an unsupported resolved type")
+                "record value field has an unsupported resolved type"
             }
-            AmbiguousRecordValueFieldType { .. } => formatter.write_str(
-                "record field type is present in both application and standard catalogues",
-            ),
+            AmbiguousRecordValueFieldType { .. } => {
+                "record field type is present in both application and standard catalogues"
+            }
             RecursiveRecordValueField { .. } => {
-                formatter.write_str("record value fields must not form a recursive cycle")
+                "record value fields must not form a recursive cycle"
             }
-            RecordValueNestingTooDeep { .. } => {
-                formatter.write_str("record value nesting exceeds the maximum depth")
-            }
+            RecordValueNestingTooDeep { .. } => "record value nesting exceeds the maximum depth",
             TypeBindingRequiresCatalogueHashVersionTwo { .. } => {
-                formatter.write_str("type-name bindings require catalogue hash version 2")
+                "type-name bindings require catalogue hash version 2"
             }
-            DefinitionOriginRequiresCatalogueHashVersionTwo { .. } => formatter
-                .write_str("value-type and type-binding origins require catalogue hash version 2"),
+            DefinitionOriginRequiresCatalogueHashVersionTwo { .. } => {
+                "value-type and type-binding origins require catalogue hash version 2"
+            }
             ValueTypeReferenceRequiresCatalogueHashVersionTwo { .. } => {
-                formatter.write_str("value-type references require catalogue hash version 2")
+                "value-type references require catalogue hash version 2"
             }
-            ValueTypeReferenceFunctionRevisionUnavailable { .. } => formatter.write_str(
-                "cannot verify a value-type reference without its function revision record",
-            ),
-            ValueTypeReferenceRequiresFunctionSemanticHashVersionTwo { .. } => formatter
-                .write_str("value-type references require function semantic hash version 2"),
+            ValueTypeReferenceFunctionRevisionUnavailable { .. } => {
+                "cannot verify a value-type reference without its function revision record"
+            }
+            ValueTypeReferenceRequiresFunctionSemanticHashVersionTwo { .. } => {
+                "value-type references require function semantic hash version 2"
+            }
             SourceRevisionPairMismatch { .. } => {
-                formatter.write_str("revision pair source does not match stored source")
+                "revision pair source does not match stored source"
             }
             CatalogueRevisionPairMismatch { .. } => {
-                formatter.write_str("revision pair catalogue does not match catalogue snapshot")
+                "revision pair catalogue does not match catalogue snapshot"
             }
-            ReservedOfflineCheckCatalogueRevision { .. } => formatter
-                .write_str("the reserved offline-check catalogue identity cannot be used in a durable revision"),
-            ReservedSystemFunctionIdentity { .. } => formatter.write_str(
-                "the reserved system function identity cannot enter an application catalogue",
-            ),
-            ReservedSystemFunctionName { .. } => formatter.write_str(
-                "the reserved system function name cannot enter an application catalogue",
-            ),
-            ReservedInvocationCarrierIdentity { .. } => formatter.write_str(
-                "the reserved invocation carrier identity cannot enter a catalogue",
-            ),
-            ReservedInvocationCarrierName { .. } => formatter
-                .write_str("the reserved invocation carrier name cannot enter a catalogue"),
+            ReservedOfflineCheckCatalogueRevision { .. } => {
+                "the reserved offline-check catalogue identity cannot be used in a durable revision"
+            }
+            ReservedSystemFunctionIdentity { .. } => {
+                "the reserved system function identity cannot enter an application catalogue"
+            }
+            ReservedSystemFunctionName { .. } => {
+                "the reserved system function name cannot enter an application catalogue"
+            }
+            ReservedInvocationCarrierIdentity { .. } => {
+                "the reserved invocation carrier identity cannot enter a catalogue"
+            }
+            ReservedInvocationCarrierName { .. } => {
+                "the reserved invocation carrier name cannot enter a catalogue"
+            }
             DeployableSourceParentMismatch { .. } => {
-                formatter.write_str("deployable source parent does not match expected base")
+                "deployable source parent does not match expected base"
             }
             DeployableCatalogueParentMismatch { .. } => {
-                formatter.write_str("deployable catalogue parent does not match expected base")
+                "deployable catalogue parent does not match expected base"
             }
-            DeployableCurrentFunctionRevisionsRequired => formatter.write_str(
-                "catalogue hash version 2 requires complete current function revision evidence",
-            ),
-            MissingDeployableCurrentFunctionRevision { .. } => formatter
-                .write_str("current function revision evidence is incomplete for the candidate"),
-            NewFunctionRevisionCurrentEvidenceMismatch { .. } => formatter.write_str(
-                "a new function revision does not match the supplied current revision evidence",
-            ),
-            CatalogueRevisionSelfParent { .. } => {
-                formatter.write_str("candidate catalogue is its own parent")
+            DeployableCurrentFunctionRevisionsRequired => {
+                "catalogue hash version 2 requires complete current function revision evidence"
             }
-            DuplicateExpressionId { .. } => formatter.write_str("duplicate expression identity"),
+            MissingDeployableCurrentFunctionRevision { .. } => {
+                "current function revision evidence is incomplete for the candidate"
+            }
+            NewFunctionRevisionCurrentEvidenceMismatch { .. } => {
+                "a new function revision does not match the supplied current revision evidence"
+            }
+            CatalogueRevisionSelfParent { .. } => "candidate catalogue is its own parent",
+            DuplicateExpressionId { .. } => "duplicate expression identity",
             SourceOriginUnitNotInRevision { .. } => {
-                formatter.write_str("source origin unit is absent from stored revision")
+                "source origin unit is absent from stored revision"
             }
-            SourceContentTooLarge { .. } => {
-                formatter.write_str("source content exceeds u32 byte offsets")
+            SourceContentTooLarge { .. } => "source content exceeds u32 byte offsets",
+            SourceOriginOutOfBounds { .. } => "source origin is outside stored source content",
+            SourceOriginNotCharacterBoundary { .. } => "source origin splits a UTF-8 character",
+            DuplicateDefinitionOrigin { .. } => "duplicate definition origin",
+            OriginDefinitionNotInRevision { .. } => "origin definition is absent from revision",
+            MissingDefinitionOrigin { .. } => "revision definition has no source origin",
+            DuplicateFunctionRevisionId { .. } => "duplicate function revision identity",
+            DuplicateFunctionRevisionNumber { .. } => "duplicate function revision number",
+            DuplicateFunctionRevisionHashPair { .. } => {
+                "duplicate function revision declaration and semantic hash pair"
             }
-            SourceOriginOutOfBounds { .. } => {
-                formatter.write_str("source origin is outside stored source content")
-            }
-            SourceOriginNotCharacterBoundary { .. } => {
-                formatter.write_str("source origin splits a UTF-8 character")
-            }
-            DuplicateDefinitionOrigin { .. } => formatter.write_str("duplicate definition origin"),
-            OriginDefinitionNotInRevision { .. } => {
-                formatter.write_str("origin definition is absent from revision")
-            }
-            MissingDefinitionOrigin { .. } => {
-                formatter.write_str("revision definition has no source origin")
-            }
-            DuplicateFunctionRevisionId { .. } => {
-                formatter.write_str("duplicate function revision identity")
-            }
-            DuplicateFunctionRevisionNumber { .. } => {
-                formatter.write_str("duplicate function revision number")
-            }
-            DuplicateFunctionRevisionHashPair { .. } => formatter
-                .write_str("duplicate function revision declaration and semantic hash pair"),
             DuplicateFunctionRevisionFunction { .. } => {
-                formatter.write_str("duplicate supplied function revision function")
+                "duplicate supplied function revision function"
             }
             FunctionRevisionFunctionNotInCatalogue { .. } => {
-                formatter.write_str("function revision function is absent from catalogue")
+                "function revision function is absent from catalogue"
             }
             FunctionRevisionNotCurrent { .. } => {
-                formatter.write_str("function revision is not catalogue current revision")
+                "function revision is not catalogue current revision"
             }
             FunctionRevisionArtifactDomainMismatch { .. } => {
-                formatter.write_str("function artifact domain differs from catalogue domain")
+                "function artifact domain differs from catalogue domain"
             }
             FunctionRevisionOriginMismatch { .. } => {
-                formatter.write_str("function revision declaration differs from definition origin")
+                "function revision declaration differs from definition origin"
             }
             MissingActiveFunctionRevision { .. } => {
-                formatter.write_str("active catalogue function has no revision record")
+                "active catalogue function has no revision record"
             }
-            ReferenceFunctionNotInCatalogue { .. } => {
-                formatter.write_str("reference function is absent from catalogue")
-            }
+            ReferenceFunctionNotInCatalogue { .. } => "reference function is absent from catalogue",
             ReferenceRevisionNotCurrent { .. } => {
-                formatter.write_str("reference revision is not catalogue current revision")
+                "reference revision is not catalogue current revision"
             }
-            ReferenceFunctionRevisionMismatch { .. } => {
-                formatter.write_str("reference function and revision differ")
-            }
-            ReferenceTargetNotInRevision { .. } => {
-                formatter.write_str("reference target is absent from revision")
-            }
+            ReferenceFunctionRevisionMismatch { .. } => "reference function and revision differ",
+            ReferenceTargetNotInRevision { .. } => "reference target is absent from revision",
             ReferenceKindTargetMismatch { .. } => {
-                formatter.write_str("reference kind cannot target that definition kind")
+                "reference kind cannot target that definition kind"
             }
-            DuplicateReferenceOrdinal { .. } => formatter.write_str("duplicate reference ordinal"),
-            ReferenceOrdinalOutOfSequence { .. } => {
-                formatter.write_str("reference ordinals are not contiguous")
-            }
-            ReferenceOrdinalOutOfRange { .. } => {
-                formatter.write_str("reference ordinal exceeds durable ordinal")
-            }
+            DuplicateReferenceOrdinal { .. } => "duplicate reference ordinal",
+            ReferenceOrdinalOutOfSequence { .. } => "reference ordinals are not contiguous",
+            ReferenceOrdinalOutOfRange { .. } => "reference ordinal exceeds durable ordinal",
         }
     }
 }

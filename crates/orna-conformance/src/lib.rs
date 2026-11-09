@@ -26,14 +26,12 @@ use std::{
 
 const EXPECTED_DIAGNOSTIC_STATUS: &str = "expected-not-executed";
 
-mod admitted_repl;
 pub mod row_admission;
 mod semantic_adapter;
 mod syntax_adapter;
 #[cfg(test)]
 mod test_support;
 mod vector_suites;
-pub use admitted_repl::{AdmittedReplSession, ReplError};
 pub use semantic_adapter::{
     BoundedEvaluator, DurableTransactionalEvaluator, PendingPublicationError,
     RunningTableRequestDisposition, RuntimeAdapter, RuntimeEvaluator, RuntimeTarget,
