@@ -461,6 +461,14 @@ class BudgetTests(unittest.TestCase):
         self.assertIn("no recorded entry or reviewed raise", result.stdout)
         self.assertIn("src/lib.rs", result.stdout)
 
+    def test_new_debt_message_names_the_split_child_escape_hatch(self) -> None:
+        fixture = self.fixture({"src/lib.rs": "// filler\n" * 101})
+        self.budget(fixture)
+        result = fixture.run("--mode=budget")
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("split child whose parent shrank", result.stdout)
+        self.assertIn("architecture-budget-raises.toml", result.stdout)
+
     def test_new_function_over_the_cap_fails(self) -> None:
         fixture = self.fixture({"src/lib.rs": function_of_lines("big", 121)})
         self.budget(fixture)
