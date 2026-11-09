@@ -17585,88 +17585,92 @@ mod tests {
         assert!(matches!(result.raw(), Raw::Tag(OVB2_BLOB_TAG, _)));
     }
 
+    /// Resolver that never serves bytes: these fixtures only need canonical
+    /// Blob identity.
+    struct EmptyResolver;
+
+    impl orna_value::BlobResolver for EmptyResolver {
+        fn read_range(
+            &self,
+            _reference: &orna_value::ContentReference,
+            _offset: u64,
+            _length: u64,
+        ) -> orna_value::Result<Vec<u8>> {
+            Err(orna_value::Error::ContentUnavailable)
+        }
+    }
+
+    /// Effect handler that swaps in a ROV-3 result, consumes the caller's owner
+    /// context and serves one scoped relation page.
+    struct ReplaceAndConsume {
+        returned: ContextValue,
+        page_row: ContextValue,
+        consumed_context: Option<[u8; 16]>,
+        page_reads: usize,
+    }
+
+    impl EffectHandler for ReplaceAndConsume {
+        fn handle(
+            &mut self,
+            _callee: &Expr,
+            _arguments: &[CanonicalValue],
+        ) -> Result<Option<CanonicalValue>, EvaluationError> {
+            Err(error("ORNA-EVAL-UNSUPPORTED"))
+        }
+        fn validate_relation_source(&mut self, source: &str) -> Result<(), EvaluationError> {
+            assert_eq!(source, "sys.Storage");
+            Ok(())
+        }
+    }
+
+    impl ContextValueEffectHandler for ReplaceAndConsume {
+        fn handle_context(
+            &mut self,
+            callee: &Expr,
+            arguments: &[ContextValue],
+        ) -> Result<Option<ContextValue>, EvaluationError> {
+            assert_eq!(arguments.len(), 1);
+            match function_name(callee).as_deref() {
+                Some("sys.test.replace_blob") => {
+                    assert_eq!(arguments[0].format(), ValueFormat::Rov3);
+                    Ok(Some(self.returned.clone()))
+                }
+                Some("sys.test.consume_blob") => {
+                    let owner = arguments[0]
+                        .context()
+                        .ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+                    self.consumed_context = Some(owner.database_uuid());
+                    Ok(Some(
+                        ContextValue::new(ValueFormat::Ovb1, Raw::Bool(true))
+                            .map_err(|_| error("ORNA-EVAL-VALUE"))?,
+                    ))
+                }
+                _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
+            }
+        }
+
+        fn scan_context_relation_page_scoped(
+            &mut self,
+            source: &str,
+            _scope: RelationReadScope,
+            after: Option<&[u8]>,
+            limit: usize,
+            budget: &mut StepBudget,
+        ) -> Result<Option<ContextValueRelationPage>, EvaluationError> {
+            assert_eq!(source, "sys.Storage");
+            assert!(after.is_none(), "the fixture source contains one row");
+            assert_eq!(limit, 1);
+            budget.debit(1)?;
+            self.page_reads += 1;
+            Ok(Some(ContextValueRelationPage {
+                rows: vec![self.page_row.clone()],
+                next: None,
+            }))
+        }
+    }
+
     #[test]
     fn context_named_invocation_adopts_effect_result_owner_context() {
-        struct EmptyResolver;
-
-        impl orna_value::BlobResolver for EmptyResolver {
-            fn read_range(
-                &self,
-                _reference: &orna_value::ContentReference,
-                _offset: u64,
-                _length: u64,
-            ) -> orna_value::Result<Vec<u8>> {
-                Err(orna_value::Error::ContentUnavailable)
-            }
-        }
-
-        struct ReplaceAndConsume {
-            returned: ContextValue,
-            page_row: ContextValue,
-            consumed_context: Option<[u8; 16]>,
-            page_reads: usize,
-        }
-
-        impl EffectHandler for ReplaceAndConsume {
-            fn handle(
-                &mut self,
-                _callee: &Expr,
-                _arguments: &[CanonicalValue],
-            ) -> Result<Option<CanonicalValue>, EvaluationError> {
-                Err(error("ORNA-EVAL-UNSUPPORTED"))
-            }
-            fn validate_relation_source(&mut self, source: &str) -> Result<(), EvaluationError> {
-                assert_eq!(source, "sys.Storage");
-                Ok(())
-            }
-        }
-
-        impl ContextValueEffectHandler for ReplaceAndConsume {
-            fn handle_context(
-                &mut self,
-                callee: &Expr,
-                arguments: &[ContextValue],
-            ) -> Result<Option<ContextValue>, EvaluationError> {
-                assert_eq!(arguments.len(), 1);
-                match function_name(callee).as_deref() {
-                    Some("sys.test.replace_blob") => {
-                        assert_eq!(arguments[0].format(), ValueFormat::Rov3);
-                        Ok(Some(self.returned.clone()))
-                    }
-                    Some("sys.test.consume_blob") => {
-                        let owner = arguments[0]
-                            .context()
-                            .ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
-                        self.consumed_context = Some(owner.database_uuid());
-                        Ok(Some(
-                            ContextValue::new(ValueFormat::Ovb1, Raw::Bool(true))
-                                .map_err(|_| error("ORNA-EVAL-VALUE"))?,
-                        ))
-                    }
-                    _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
-                }
-            }
-
-            fn scan_context_relation_page_scoped(
-                &mut self,
-                source: &str,
-                _scope: RelationReadScope,
-                after: Option<&[u8]>,
-                limit: usize,
-                budget: &mut StepBudget,
-            ) -> Result<Option<ContextValueRelationPage>, EvaluationError> {
-                assert_eq!(source, "sys.Storage");
-                assert!(after.is_none(), "the fixture source contains one row");
-                assert_eq!(limit, 1);
-                budget.debit(1)?;
-                self.page_reads += 1;
-                Ok(Some(ContextValueRelationPage {
-                    rows: vec![self.page_row.clone()],
-                    next: None,
-                }))
-            }
-        }
-
         let context = |database: [u8; 16], base: u8| {
             Format3Context::from_persisted(orna_value::Format3ContextInputs {
                 database_uuid: database,
@@ -17750,77 +17754,66 @@ mod tests {
         assert_eq!(effects.page_reads, 1);
     }
 
+    /// Effect handler that echoes once, persists the SOV-3 argument on the
+    /// second call and charges the step budget for each nested call.
+    struct ProfileEffects {
+        calls: usize,
+        persisted: Option<ContextValue>,
+    }
+
+    impl EffectHandler for ProfileEffects {
+        fn handle(
+            &mut self,
+            _callee: &Expr,
+            _arguments: &[CanonicalValue],
+        ) -> Result<Option<CanonicalValue>, EvaluationError> {
+            Err(error("ORNA-EVAL-UNSUPPORTED"))
+        }
+    }
+
+    impl ContextValueEffectHandler for ProfileEffects {
+        fn handle_context(
+            &mut self,
+            _callee: &Expr,
+            arguments: &[ContextValue],
+        ) -> Result<Option<ContextValue>, EvaluationError> {
+            let [argument] = arguments else {
+                return Err(error("ORNA-EVAL-ARGUMENT"));
+            };
+            match self.calls {
+                0 => {
+                    assert_eq!(argument.format(), ValueFormat::Sov3);
+                    self.calls = 1;
+                    Ok(Some(
+                        ContextValue::new(ValueFormat::Ovb2, Raw::Text("echo".into()))
+                            .expect("OVB-2 effect result"),
+                    ))
+                }
+                1 => {
+                    assert_eq!(argument.format(), ValueFormat::Sov3);
+                    self.persisted = Some(argument.clone());
+                    self.calls = 2;
+                    Ok(Some(
+                        ContextValue::new(ValueFormat::Ovb2, Raw::Text("saved".into()))
+                            .expect("OVB-2 effect result"),
+                    ))
+                }
+                _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
+            }
+        }
+        fn handle_context_with_budget(
+            &mut self,
+            callee: &Expr,
+            arguments: &[ContextValue],
+            budget: &mut StepBudget,
+        ) -> Result<Option<ContextValue>, EvaluationError> {
+            budget.debit(1)?;
+            self.handle_context(callee, arguments)
+        }
+    }
+
     #[test]
     fn context_named_invocation_preserves_owner_context_after_ovb2_effects() {
-        struct EmptyResolver;
-
-        impl orna_value::BlobResolver for EmptyResolver {
-            fn read_range(
-                &self,
-                _reference: &orna_value::ContentReference,
-                _offset: u64,
-                _length: u64,
-            ) -> orna_value::Result<Vec<u8>> {
-                Err(orna_value::Error::ContentUnavailable)
-            }
-        }
-
-        struct ProfileEffects {
-            calls: usize,
-            persisted: Option<ContextValue>,
-        }
-
-        impl EffectHandler for ProfileEffects {
-            fn handle(
-                &mut self,
-                _callee: &Expr,
-                _arguments: &[CanonicalValue],
-            ) -> Result<Option<CanonicalValue>, EvaluationError> {
-                Err(error("ORNA-EVAL-UNSUPPORTED"))
-            }
-        }
-
-        impl ContextValueEffectHandler for ProfileEffects {
-            fn handle_context(
-                &mut self,
-                _callee: &Expr,
-                arguments: &[ContextValue],
-            ) -> Result<Option<ContextValue>, EvaluationError> {
-                let [argument] = arguments else {
-                    return Err(error("ORNA-EVAL-ARGUMENT"));
-                };
-                match self.calls {
-                    0 => {
-                        assert_eq!(argument.format(), ValueFormat::Sov3);
-                        self.calls = 1;
-                        Ok(Some(
-                            ContextValue::new(ValueFormat::Ovb2, Raw::Text("echo".into()))
-                                .expect("OVB-2 effect result"),
-                        ))
-                    }
-                    1 => {
-                        assert_eq!(argument.format(), ValueFormat::Sov3);
-                        self.persisted = Some(argument.clone());
-                        self.calls = 2;
-                        Ok(Some(
-                            ContextValue::new(ValueFormat::Ovb2, Raw::Text("saved".into()))
-                                .expect("OVB-2 effect result"),
-                        ))
-                    }
-                    _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
-                }
-            }
-            fn handle_context_with_budget(
-                &mut self,
-                callee: &Expr,
-                arguments: &[ContextValue],
-                budget: &mut StepBudget,
-            ) -> Result<Option<ContextValue>, EvaluationError> {
-                budget.debit(1)?;
-                self.handle_context(callee, arguments)
-            }
-        }
-
         let database = [0x21; 16];
         let context = Format3Context::from_persisted(orna_value::Format3ContextInputs {
             database_uuid: database,
