@@ -9,9 +9,9 @@
 //! admitted work.
 
 pub use orna_sys_id::{
-    HostOperation, HostProvider, Origin, SysEffect, SysEnum, SysFailureCode, SysFunction,
-    SysFunctionBinding, SysFunctionHost, SysGroupedHandle, SysRelation, SysType,
-    dispatch as dispatch_sys_function,
+    HostOperation, HostProvider, Origin, PortableRemoval, SysEffect, SysEnum, SysFailureCode,
+    SysFunction, SysFunctionBinding, SysFunctionHost, SysGroupedHandle, SysRelation,
+    SysRemovedName, SysSingleton, SysType, dispatch as dispatch_sys_function,
 };
 pub use orna_sys_model::abi_version::AbiVersion;
 pub use orna_sys_model::host_registry_model::{HostBindingDeclaration, HostProviderRole};
@@ -89,8 +89,8 @@ pub use provider::{
 
 mod provider_linkage;
 pub use provider_linkage::{
-    SystemProviderHost, SystemProviderLink, SystemProviderLinkage, SystemSurfaceMember,
-    system_provider_linkage,
+    HistoricalViewMember, SystemProviderHost, SystemProviderLink, SystemProviderLinkage,
+    SystemSurfaceMember, system_provider_linkage,
 };
 
 mod host_context;

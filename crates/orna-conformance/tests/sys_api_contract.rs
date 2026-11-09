@@ -7,13 +7,91 @@ use std::sync::{
 use orna_sys::{
     AdmissionError, AdmissionRequest, ArgumentMap, ExecutionBoundary, FunctionDescriptor,
     FunctionId, FunctionIdentity, InvocationCompletion, InvocationContext, InvocationExecutor,
-    InvocationMode, RevisionId, RuntimeId, RuntimeSupervisor, SnapshotId, TransactionMode, TypeId,
-    TypeWitness, TypedValue,
+    InvocationMode, PortableRemoval, RevisionId, RuntimeId, RuntimeSupervisor, SnapshotId,
+    SysFunction, SysGroupedHandle, SysRelation, SysRemovedName, SysSingleton, TransactionMode,
+    TypeId, TypeWitness, TypedValue,
 };
 use serde_json::Value;
 
 fn sys_api_document() -> Value {
     serde_json::from_str(&orna_sys::system_api_json()).expect("generated portable sys API JSON")
+}
+
+#[test]
+fn removed_names_report_generated_identity_bytes() {
+    let document = sys_api_document();
+    let removed = document
+        .get("removed_names")
+        .and_then(Value::as_object)
+        .expect("generated sys API publishes removed names");
+    assert_eq!(removed.len(), SysRemovedName::ALL.len());
+    for name in SysRemovedName::ALL {
+        let entry = &removed[name.name()];
+        let (diagnostic, replacement) = match name.removal() {
+            PortableRemoval::Replaced { by, diagnostic } => {
+                (diagnostic.as_str().to_owned(), Some(by.to_string()))
+            }
+            PortableRemoval::Retired { diagnostic, reason } => {
+                assert_eq!(entry["reason"], reason, "{}", name.name());
+                (diagnostic.as_str().to_owned(), None)
+            }
+        };
+        assert_eq!(entry["diagnostic"], diagnostic, "{}", name.name());
+        assert_eq!(
+            entry["replacement"].as_str().map(str::to_owned),
+            replacement,
+            "{}",
+            name.name()
+        );
+    }
+}
+
+#[test]
+fn published_identity_sets_are_exactly_the_generated_identities() {
+    let document = sys_api_document();
+    let names = |section: &str, key: &str| -> BTreeSet<String> {
+        document
+            .get(section)
+            .and_then(Value::as_array)
+            .unwrap_or_else(|| panic!("{section} must be an array"))
+            .iter()
+            .map(|entry| {
+                entry
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .unwrap_or_else(|| panic!("{section} entry must carry {key}"))
+                    .to_owned()
+            })
+            .collect()
+    };
+    assert_eq!(
+        names("functions", "name"),
+        SysFunction::ALL
+            .iter()
+            .map(|function| function.label().to_owned())
+            .collect()
+    );
+    assert_eq!(
+        names("relations", "name"),
+        SysRelation::ALL
+            .iter()
+            .map(|relation| relation.name().to_owned())
+            .collect()
+    );
+    assert_eq!(
+        names("relations", "grouped_handle"),
+        SysGroupedHandle::ALL
+            .iter()
+            .map(|handle| handle.name().to_owned())
+            .collect()
+    );
+    assert_eq!(
+        names("singletons", "name"),
+        SysSingleton::ALL
+            .iter()
+            .map(|singleton| singleton.name().to_owned())
+            .collect()
+    );
 }
 
 fn array_len(document: &Value, name: &str) -> usize {

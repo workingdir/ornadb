@@ -15,8 +15,9 @@ use orna_evaluator::{
 };
 use orna_syntax::{Expr, parse_expression};
 use orna_sys::{
-    ObjectRef, SnapshotRef, SystemProviderHost, SystemSurfaceMember, system_api_json,
-    system_dispatch_table, system_provider_linkage,
+    HistoricalViewMember, ObjectRef, SnapshotRef, SysFunction, SysGroupedHandle, SysRelation,
+    SysSingleton, SystemProviderHost, SystemSurfaceMember, system_api_json, system_dispatch_table,
+    system_provider_linkage,
 };
 use orna_value::CanonicalValue;
 
@@ -120,7 +121,7 @@ fn linked_callables(host: SystemProviderHost) -> BTreeSet<&'static str> {
         .links()
         .filter(|link| link.host == host)
         .filter_map(|link| match link.member {
-            SystemSurfaceMember::Callable(label) => Some(callable_name(label)),
+            SystemSurfaceMember::Callable(function) => Some(function.path()),
             _ => None,
         })
         .collect()
@@ -200,10 +201,13 @@ fn native_sys_callables_are_exactly_the_evaluator_links() {
 fn linked_explain_query_is_dispatched_natively_through_the_host_catalogue() {
     let linkage = system_provider_linkage();
     assert!(linkage.links().any(|link| {
-        link.member == SystemSurfaceMember::Callable("sys.explain(Query)")
+        link.member == SystemSurfaceMember::Callable(SysFunction::ExplainQuery)
             && link.host == SystemProviderHost::Evaluator
     }));
-    for unlinked in ["sys.explain(FunctionRef)", "sys.explain(Diagnostic)"] {
+    for unlinked in [
+        SysFunction::ExplainFunctionRef,
+        SysFunction::ExplainDiagnostic,
+    ] {
         assert!(!linkage.is_linked(SystemSurfaceMember::Callable(unlinked)));
     }
 
@@ -235,7 +239,8 @@ fn evaluator_relation_sources_are_exactly_the_relation_links() {
         .links()
         .filter(|link| link.host == SystemProviderHost::Evaluator)
         .filter_map(|link| match link.member {
-            SystemSurfaceMember::Relation(path) => Some(path.to_owned()),
+            SystemSurfaceMember::Relation(relation) => Some(relation.name().to_owned()),
+            SystemSurfaceMember::GroupedHandle(handle) => Some(handle.name().to_owned()),
             _ => None,
         })
         .collect::<BTreeSet<_>>();
@@ -273,7 +278,8 @@ fn evaluator_relation_sources_are_exactly_the_relation_links() {
     let linked = system_provider_linkage()
         .links()
         .filter_map(|link| match link.member {
-            SystemSurfaceMember::Relation(path) => Some(path.to_owned()),
+            SystemSurfaceMember::Relation(relation) => Some(relation.name().to_owned()),
+            SystemSurfaceMember::GroupedHandle(handle) => Some(handle.name().to_owned()),
             _ => None,
         })
         .collect::<BTreeSet<_>>();
@@ -287,18 +293,28 @@ fn singleton_and_historical_views_are_linked_only_when_evaluated_natively() {
     for singleton in &published.singletons {
         let mut host = RecordingHost::default();
         let evaluated = evaluate(singleton, &mut host).is_ok();
+        let typed = SysSingleton::parse(singleton).expect("published singleton identity");
         assert_eq!(
             evaluated,
-            linkage.is_linked(SystemSurfaceMember::Singleton(singleton)),
+            linkage.is_linked(SystemSurfaceMember::Singleton(typed)),
             "{singleton}"
         );
     }
     for view in published.relations.iter().chain(&published.singletons) {
         let mut host = RecordingHost::default();
         let evaluated = evaluate(&format!("{view}.as_of(null)"), &mut host).is_ok();
+        let typed = if let Some(relation) = SysRelation::parse(view) {
+            HistoricalViewMember::Relation(relation)
+        } else if let Some(handle) = SysGroupedHandle::parse(view) {
+            HistoricalViewMember::GroupedHandle(handle)
+        } else {
+            HistoricalViewMember::Singleton(
+                SysSingleton::parse(view).expect("published historical-view identity"),
+            )
+        };
         assert_eq!(
             evaluated,
-            linkage.is_linked(SystemSurfaceMember::HistoricalView(view)),
+            linkage.is_linked(SystemSurfaceMember::HistoricalView(typed)),
             "{view}.as_of"
         );
     }
