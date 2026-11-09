@@ -1,5 +1,6 @@
 use num_bigint::BigInt;
-use orna_evaluator::{AdmittedReplSession, Limits, SysHostBindingRegistry};
+use orna_evaluator::{Limits, SysHostBindingRegistry};
+use orna_project_repl::AdmittedReplSession;
 use orna_semantic::{Catalogue, StandardDependencyProfile};
 use orna_value::Raw;
 

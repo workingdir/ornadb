@@ -1,7 +1,8 @@
 use std::{fs, path::Path, process::Command};
 
-use orna_evaluator::{AdmittedReplSession, Limits};
+use orna_evaluator::Limits;
 use orna_project::{AttachedDatabaseSession, AttachmentError, PinnedDatabase, ProjectLoader};
+use orna_project_repl::AdmittedReplSession;
 use orna_repository::Repository;
 use orna_value::Value;
 use tempfile::TempDir;

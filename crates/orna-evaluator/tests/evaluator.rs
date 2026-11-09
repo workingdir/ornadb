@@ -2,14 +2,15 @@ use std::collections::BTreeMap;
 
 use num_bigint::BigInt;
 use orna_evaluator::{
-    AdmittedReplSession, EffectHandler, Environment, EvaluationError, Functions, Limits,
-    NominalDefinition, NominalDefinitions, NominalField, NominalVariant, PureFunction,
-    RelationPage, RelationReadScope, StepBudget, SysHostBindingRegistry, evaluate_expression,
+    EffectHandler, Environment, EvaluationError, Functions, Limits, NominalDefinition,
+    NominalDefinitions, NominalField, NominalVariant, PureFunction, RelationPage,
+    RelationReadScope, StepBudget, SysHostBindingRegistry, evaluate_expression,
     evaluate_expression_with_functions, evaluate_function, evaluate_parsed,
     evaluate_parsed_with_nominals, evaluate_repl, evaluate_with_functions_and_nominals,
     invoke_named, invoke_named_with_effects, invoke_named_with_effects_and_budget,
     invoke_named_with_nominals,
 };
+use orna_project_repl::AdmittedReplSession;
 use orna_syntax::{
     AssignmentOperator, AssignmentTarget, Expr, LambdaParameter, NameSegment, Pattern, RecordField,
     Statement, SyntaxSpan, TokenKind, lex,
@@ -12203,7 +12204,7 @@ fn bucket_by_rejects_invalid_zone_and_period() {
 
 #[test]
 fn admitted_eval_producer_stages_effectful_source_without_publishing() {
-    let mut session = orna_evaluator::AdmittedReplSession::new(Limits::default());
+    let mut session = orna_project_repl::AdmittedReplSession::new(Limits::default());
     assert_eq!(
         session.submit(include_str!("fixtures/admitted_repl_seed.orna").trim()),
         Ok(None)

@@ -1,5 +1,6 @@
-use orna_evaluator::{AdmittedReplSession, Environment, Limits, evaluate_expression};
+use orna_evaluator::{Environment, Limits, evaluate_expression};
 use orna_foundation::CanonicalValue;
+use orna_project_repl::AdmittedReplSession;
 use orna_value::Raw;
 
 fn bool_value(value: bool) -> CanonicalValue {

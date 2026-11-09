@@ -1,11 +1,13 @@
 use std::cell::RefCell;
 use std::future::Future;
 
-use super::{
-    ActivationEffectReport, CatalogueAdmission, FaultInjector, RunningTableRequestContinuation,
-    RuntimeError, RuntimeState, RuntimeTableActivationSnapshot, RuntimeTableIdentity,
-    TableMutation, TerminalOutcome, WriterLease, validate_mutation_identities,
-};
+use crate::catalogue::CatalogueAdmission;
+use crate::error::{FaultInjector, RuntimeError};
+use crate::lease::WriterLease;
+use crate::request::TerminalOutcome;
+use crate::table_snapshot::RuntimeTableActivationSnapshot;
+use crate::table_store::{RuntimeTableIdentity, TableMutation, validate_mutation_identities};
+use crate::{ActivationEffectReport, RunningTableRequestContinuation, RuntimeState};
 
 tokio::task_local! {
     /// Runtime administration transitions and nested activations on the same

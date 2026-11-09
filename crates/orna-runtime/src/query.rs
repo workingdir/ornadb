@@ -7,12 +7,16 @@ use orna_foundation::{
     FunctionRef, ObjectRef, OvbRaw, RowRef, SnapshotRef, object_reference, snapshot_reference,
 };
 
-use crate::{
-    CwdCapture, InvocationObservationStatus, RuntimeError, RuntimeState, WriterLease,
-    bigint_to_i64, capture_tx, decode_capture, encode_capture, fixed, now_ms, observation_instant,
-    opaque_reference_key, row_reference_raw, validate_id, validate_observation_text,
-    validate_writer_lease,
+use crate::codec::{
+    bigint_to_i64, capture_tx, decode_capture, encode_capture, fixed, now_ms, validate_id,
+    validate_observation_text,
 };
+use crate::error::RuntimeError;
+use crate::invocation::InvocationObservationStatus;
+use crate::lease::{WriterLease, validate_writer_lease};
+use crate::observation::observation_instant;
+use crate::{RuntimeState, opaque_reference_key, row_reference_raw};
+use orna_foundation::CwdCapture;
 
 /// Stable relation identities for system rows whose typed Foundation aliases
 /// are not yet defined by this implementation's reference layer.
