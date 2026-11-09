@@ -48,8 +48,17 @@ allowed = ["orna-value"]
 warning = "single crate, no cohesive subject, 16 production dependents; absorbed by orna-base and orna-value (stage 03)"
 
 [[crate]]
+name = "orna-sys-model"
+layer = 1
+
+[[crate]]
 name = "orna-syntax"
 layer = 2
+
+[[crate]]
+name = "orna-sys-codegen"
+layer = 2
+role = "tool"
 
 [[crate]]
 name = "orna-intrinsics"

@@ -32,12 +32,6 @@ reason = "PR #9783 replaces ten positional arguments with SymbolHeader and folds
 bead = "ornadb-qvsyc"
 
 [[raise]]
-path = "crates/orna-syntax/src/visit.rs::walk_expr"
-new_limit = 146
-reason = "PR #9783 adds the exhaustive orna_syntax::visit traversal; walk_expr is the one arm over the 120-line cap"
-bead = "ornadb-41661"
-
-[[raise]]
 path = "crates/orna-evaluator/src/sys_bindings.rs"
 new_limit = 2556
 reason = "PR #9764 classifies filesystem and process dispatch once instead of an implicit god function; the split is the remaining ornadb-aok6t work"
@@ -216,6 +210,72 @@ path = "crates/orna-cli/src/fuse_mount/tests.rs::workspace_readdir_uses_lazy_ind
 new_limit = 127
 reason = "pure split: inline test modules moved to sibling files; the parent files shrank"
 bead = "ornadb-qwog6"
+
+[[raise]]
+path = "crates/orna-sys-codegen/src/build_support.rs"
+new_limit = 2702
+reason = "PR #9777 moves the sys API collector out of orna-sys/build_support.rs into the codegen crate without changing its bodies"
+bead = "ornadb-y603r"
+
+[[raise]]
+path = "crates/orna-sys-codegen/src/build_host.rs::validate_native_method_signature"
+new_limit = 193
+reason = "PR #9777 moves the host registry generator into orna-sys-codegen; the validation body is unchanged"
+bead = "ornadb-y603r"
+
+[[raise]]
+path = "crates/orna-sys-codegen/src/build_host.rs::validate_operation"
+new_limit = 154
+reason = "PR #9777 moves the host registry generator into orna-sys-codegen; the validation body is unchanged"
+bead = "ornadb-y603r"
+
+[[raise]]
+path = "crates/orna-sys-codegen/src/build_host.rs::validate_schema_value"
+new_limit = 174
+reason = "PR #9777 moves the host registry generator into orna-sys-codegen; the validation body is unchanged"
+bead = "ornadb-y603r"
+
+[[raise]]
+path = "crates/orna-sys-codegen/src/build_support.rs::validate_api_document"
+new_limit = 189
+reason = "PR #9777 moves the sys API collector into orna-sys-codegen; the validation body is unchanged"
+bead = "ornadb-y603r"
+
+[[raise]]
+path = "crates/orna-sys-codegen/src/build_support.rs::validate_api_type_graph"
+new_limit = 197
+reason = "PR #9777 moves the sys API collector into orna-sys-codegen; the validation body is unchanged"
+bead = "ornadb-y603r"
+
+[[raise]]
+path = "crates/orna-sys-codegen/src/build_support.rs::validate_function_metadata"
+new_limit = 144
+reason = "PR #9777 moves the sys API collector into orna-sys-codegen; the validation body is unchanged"
+bead = "ornadb-y603r"
+
+[[raise]]
+path = "crates/orna-protocol/src/lib.rs::apply_at"
+new_limit = 136
+reason = "PR #9777 replaces three duplicated add/remove/replace walkers with one apply_at; splitting it per operation is follow-up"
+bead = "ornadb-xssb1"
+
+[[raise]]
+path = "crates/orna-runtime/src/publication.rs"
+new_limit = 1445
+reason = "main's #9794 writer-entry fence grows publication.rs; recorded with the fence bead so the budget gate stays green"
+bead = "ornadb-5il1.127"
+
+[[raise]]
+path = "crates/orna-runtime/src/lib.rs::replaying_a_published_vfs_save_keeps_the_durable_generation"
+new_limit = 122
+reason = "main's #9794 writer-entry fence adds the replay test; recorded with the fence bead"
+bead = "ornadb-5il1.127"
+
+[[raise]]
+path = "crates/orna-runtime/src/lib.rs::replaying_a_published_vfs_save_reports_the_idempotent_outcome"
+new_limit = 124
+reason = "main's #9794 writer-entry fence adds the replay test; recorded with the fence bead"
+bead = "ornadb-5il1.127"
 
 [[raise]]
 path = "crates/orna-semantic/src/calls.rs"
@@ -541,20 +601,3 @@ new_limit = 132
 reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
 bead = "ornadb-rkn8m"
 
-[[raise]]
-path = "crates/orna-runtime/src/publication.rs"
-new_limit = 1445
-reason = "recorded on main before this branch: publication.rs was already 1445 lines when it merged; re-keying the inherited entry only"
-bead = "ornadb-7603h.1"
-
-[[raise]]
-path = "crates/orna-runtime/src/lib.rs::replaying_a_published_vfs_save_keeps_the_durable_generation"
-new_limit = 122
-reason = "recorded on main before this branch: the VFS replay test landed at 122 lines without a budget entry"
-bead = "ornadb-7603h.1"
-
-[[raise]]
-path = "crates/orna-runtime/src/lib.rs::replaying_a_published_vfs_save_reports_the_idempotent_outcome"
-new_limit = 124
-reason = "recorded on main before this branch: the VFS replay test landed at 124 lines without a budget entry"
-bead = "ornadb-7603h.1"
