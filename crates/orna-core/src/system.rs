@@ -579,6 +579,30 @@ pub fn invocation_carrier_by_name(
         .find(|definition| definition.has_name(name))
 }
 
+/// Returns whether `type_id` is one of the transient sealed Inspector carriers:
+/// the invocation handle, the snapshot and its options, the trace event, and the
+/// eight projection result carriers.
+///
+/// Durable state and catalogue declarations must never turn any of these sealed
+/// identities into persistent value type identity.
+pub(crate) fn is_sealed_inspect_type_id(type_id: TypeId) -> bool {
+    matches!(
+        type_id,
+        SYS_INSPECT_INVOCATION_TYPE_ID
+            | SYS_INSPECT_SNAPSHOT_TYPE_ID
+            | SYS_INSPECT_SNAPSHOT_OPTIONS_TYPE_ID
+            | SYS_INSPECT_TRACE_EVENT_TYPE_ID
+            | SYS_INSPECT_INVOCATION_NODES_TYPE_ID
+            | SYS_INSPECT_CALLS_TYPE_ID
+            | SYS_INSPECT_RESOURCES_TYPE_ID
+            | SYS_INSPECT_STATE_CELLS_TYPE_ID
+            | SYS_INSPECT_UI_NODES_TYPE_ID
+            | SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID
+            | SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID
+            | SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID
+    )
+}
+
 /// The immutable sealed signature of `sys.invoke`.
 ///
 /// This is not an application function signature. It has exactly one required,

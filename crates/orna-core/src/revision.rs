@@ -29,7 +29,7 @@ use crate::{
         FunctionVolatility, QualifiedSemanticName, TypeDefinition, TypeLookupName,
         ValueTypeDefinition, ValueTypeKind, ValueTypeMutability, ValueTypePersistence,
     },
-    system::{INVOCATION_CARRIERS, SYSTEM_FUNCTIONS},
+    system::{INVOCATION_CARRIERS, SYSTEM_FUNCTIONS, is_sealed_inspect_type_id},
     types::{ResolvedType, StandardScalar, TypeDescriptor, TypeDescriptorKind},
 };
 mod error;
@@ -4098,24 +4098,6 @@ fn definition_exists(
             .is_some(),
         DefinitionIdentity::Expression(id) => expression_ids.contains(&id),
     }
-}
-
-fn is_sealed_inspect_type_id(type_id: TypeId) -> bool {
-    matches!(
-        type_id,
-        crate::system::SYS_INSPECT_INVOCATION_TYPE_ID
-            | crate::system::SYS_INSPECT_SNAPSHOT_TYPE_ID
-            | crate::system::SYS_INSPECT_SNAPSHOT_OPTIONS_TYPE_ID
-            | crate::system::SYS_INSPECT_TRACE_EVENT_TYPE_ID
-            | crate::system::SYS_INSPECT_INVOCATION_NODES_TYPE_ID
-            | crate::system::SYS_INSPECT_CALLS_TYPE_ID
-            | crate::system::SYS_INSPECT_RESOURCES_TYPE_ID
-            | crate::system::SYS_INSPECT_STATE_CELLS_TYPE_ID
-            | crate::system::SYS_INSPECT_UI_NODES_TYPE_ID
-            | crate::system::SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID
-            | crate::system::SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID
-            | crate::system::SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID
-    )
 }
 
 fn reference_target_exists(

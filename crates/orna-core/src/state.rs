@@ -35,6 +35,8 @@ use std::{error::Error, fmt, time::SystemTime};
 
 use crate::{
     FunctionId, PrincipalId, StateSlotId, TypeId,
+    invocation::{InvocationEventBody, InvokeRequest},
+    system::is_sealed_inspect_type_id,
     types::{ResolvedType, TypeDescriptor, TypeDescriptorKind},
     value::{ConstructedValueKind, RuntimeType, RuntimeValue},
 };
@@ -49,27 +51,6 @@ fn validate_state_text(component: &str, what: &str) -> Result<(), UserStateError
         });
     }
     Ok(())
-}
-
-/// Returns whether a type identity is one of the transient sealed Inspector
-/// carriers. The identities are the existing sealed system registry entries;
-/// USER state must never turn any of them into durable value type identity.
-fn is_sealed_inspect_type_id(type_id: TypeId) -> bool {
-    matches!(
-        type_id,
-        crate::system::SYS_INSPECT_INVOCATION_TYPE_ID
-            | crate::system::SYS_INSPECT_SNAPSHOT_TYPE_ID
-            | crate::system::SYS_INSPECT_SNAPSHOT_OPTIONS_TYPE_ID
-            | crate::system::SYS_INSPECT_TRACE_EVENT_TYPE_ID
-            | crate::system::SYS_INSPECT_INVOCATION_NODES_TYPE_ID
-            | crate::system::SYS_INSPECT_CALLS_TYPE_ID
-            | crate::system::SYS_INSPECT_RESOURCES_TYPE_ID
-            | crate::system::SYS_INSPECT_STATE_CELLS_TYPE_ID
-            | crate::system::SYS_INSPECT_UI_NODES_TYPE_ID
-            | crate::system::SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID
-            | crate::system::SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID
-            | crate::system::SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID
-    )
 }
 
 fn descriptor_contains_sealed_inspect_type(descriptor: &TypeDescriptor) -> bool {
@@ -106,6 +87,8 @@ pub fn is_sealed_inspect_runtime_value(value: &RuntimeValue) -> bool {
         return true;
     }
 
+    // Every variant is named so that a new value shape must decide whether it
+    // can carry a sealed identity; a leaf has no nested value to inspect.
     match value {
         RuntimeValue::Record(record) => record.fields().iter().any(is_sealed_inspect_runtime_value),
         RuntimeValue::Constructed(constructed) => match constructed.kind() {
@@ -122,44 +105,9 @@ pub fn is_sealed_inspect_runtime_value(value: &RuntimeValue) -> bool {
         RuntimeValue::InvokeValue(invoke_value) => {
             is_sealed_inspect_runtime_value(invoke_value.value())
         }
-        RuntimeValue::InvokeRequest(request) => {
-            request
-                .arguments()
-                .iter()
-                .any(|argument| is_sealed_inspect_runtime_value(argument.value().value()))
-                || request
-                    .caller_context()
-                    .preference_policy()
-                    .is_some_and(|value| is_sealed_inspect_runtime_value(value.value()))
-                || request
-                    .client_offer()
-                    .limits()
-                    .is_some_and(|value| is_sealed_inspect_runtime_value(value.value()))
-                || request
-                    .client_offer()
-                    .preferences()
-                    .is_some_and(|value| is_sealed_inspect_runtime_value(value.value()))
-                || request.client_offer().sink_offers().iter().any(|offer| {
-                    descriptor_contains_sealed_inspect_type(offer.descriptor())
-                        || offer
-                            .limits()
-                            .is_some_and(|value| is_sealed_inspect_runtime_value(value.value()))
-                })
-                || request.client_offer().runtime_offers().iter().any(|offer| {
-                    offer
-                        .consumed_descriptors()
-                        .iter()
-                        .any(descriptor_contains_sealed_inspect_type)
-                        || offer
-                            .limits()
-                            .is_some_and(|value| is_sealed_inspect_runtime_value(value.value()))
-                })
-                || request
-                    .observer_context()
-                    .is_some_and(|value| is_sealed_inspect_runtime_value(value.value()))
-        }
+        RuntimeValue::InvokeRequest(request) => request_contains_sealed_inspect(request),
         RuntimeValue::InvokeEvent(event) => match event.body() {
-            crate::invocation::InvocationEventBody::ValueBatch { schema, values } => {
+            InvocationEventBody::ValueBatch { schema, values } => {
                 schema
                     .as_ref()
                     .is_some_and(|value| is_sealed_inspect_runtime_value(value.value()))
@@ -167,13 +115,56 @@ pub fn is_sealed_inspect_runtime_value(value: &RuntimeValue) -> bool {
                         .iter()
                         .any(|value| is_sealed_inspect_runtime_value(value.value()))
             }
-            crate::invocation::InvocationEventBody::Failed(failure) => failure
+            InvocationEventBody::Failed(failure) => failure
                 .details()
                 .is_some_and(|value| is_sealed_inspect_runtime_value(value.value())),
-            _ => false,
+            InvocationEventBody::Started { .. }
+            | InvocationEventBody::Diagnostic(_)
+            | InvocationEventBody::Completed { .. }
+            | InvocationEventBody::Cancelled { .. } => false,
         },
-        _ => false,
+        RuntimeValue::Null(_)
+        | RuntimeValue::Boolean(_)
+        | RuntimeValue::Integer(_)
+        | RuntimeValue::BigInt(_)
+        | RuntimeValue::Float(_)
+        | RuntimeValue::Text(_)
+        | RuntimeValue::Bytes(_)
+        | RuntimeValue::Uuid(_)
+        | RuntimeValue::Reference { .. }
+        | RuntimeValue::Enum(_)
+        | RuntimeValue::Opaque(_) => false,
     }
+}
+
+/// Reports whether any typed value or descriptor carried by a root invocation
+/// request names a sealed Inspector identity.
+fn request_contains_sealed_inspect(request: &InvokeRequest) -> bool {
+    let sealed =
+        |value: &crate::invocation::InvokeValue| is_sealed_inspect_runtime_value(value.value());
+    let offer = request.client_offer();
+    request
+        .arguments()
+        .iter()
+        .any(|argument| sealed(argument.value()))
+        || request
+            .caller_context()
+            .preference_policy()
+            .is_some_and(sealed)
+        || offer.limits().is_some_and(sealed)
+        || offer.preferences().is_some_and(sealed)
+        || offer.sink_offers().iter().any(|sink| {
+            descriptor_contains_sealed_inspect_type(sink.descriptor())
+                || sink.limits().is_some_and(sealed)
+        })
+        || offer.runtime_offers().iter().any(|runtime| {
+            runtime
+                .consumed_descriptors()
+                .iter()
+                .any(descriptor_contains_sealed_inspect_type)
+                || runtime.limits().is_some_and(sealed)
+        })
+        || request.observer_context().is_some_and(sealed)
 }
 
 fn reject_sealed_inspect_value(value: &RuntimeValue) -> Result<(), UserStateError> {
