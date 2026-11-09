@@ -661,25 +661,15 @@ async fn retained_failure_reference_capture(
              FROM runtime_catalogue_capture WHERE snapshot = ?1",
             params![snapshot_bytes],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    else {
+        .await?;
+    let Some(row) = rows.next().await? else {
         return Err(RuntimeError::RecoveryInvalid);
     };
     let database_id = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
     let runtime_id = fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
     let generation: i64 = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
     let generation_digest = fixed(row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
-    if rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-        .is_some()
-    {
+    if rows.next().await?.is_some() {
         return Err(RuntimeError::RecoveryInvalid);
     }
     let capture = CwdCapture::new(snapshot, generation_digest)
@@ -702,14 +692,9 @@ async fn load_run_observations(
             "SELECT run_id FROM sys_run_observation ORDER BY started_ms, run_id",
             (),
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     let mut observations = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    {
+    while let Some(row) = rows.next().await? {
         let id = RunObservationId(fixed(
             row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
         )?);
@@ -738,24 +723,14 @@ pub(crate) async fn load_run_observation_for_request_tx(
              ORDER BY started_ms, run_id",
             params![identity.session_id.to_vec(), identity.request_id.to_vec()],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    else {
+        .await?;
+    let Some(row) = rows.next().await? else {
         return Ok(None);
     };
     let id = RunObservationId(fixed(
         row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
     )?);
-    if rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-        .is_some()
-    {
+    if rows.next().await?.is_some() {
         return Err(RuntimeError::RecoveryInvalid);
     }
     drop(rows);
@@ -767,12 +742,8 @@ pub(crate) async fn load_run_observation_tx(
     id: RunObservationId,
     capture: &CwdCapture,
 ) -> Result<Option<RunObservation>, RuntimeError> {
-    let mut rows = connection.query("SELECT session_id, request_id, consumer_identity, function_name, source_identity, invocation_id, snapshot, generation_digest, runtime_id, runtime_generation, started_ms, ended_ms, observed_ms, status, checkpoint_count, diagnostic_code, diagnostic_class FROM sys_run_observation WHERE run_id = ?1", params![id.0.to_vec()]).await.map_err(|_| RuntimeError::StorageUnavailable)?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    else {
+    let mut rows = connection.query("SELECT session_id, request_id, consumer_identity, function_name, source_identity, invocation_id, snapshot, generation_digest, runtime_id, runtime_generation, started_ms, ended_ms, observed_ms, status, checkpoint_count, diagnostic_code, diagnostic_class FROM sys_run_observation WHERE run_id = ?1", params![id.0.to_vec()]).await?;
+    let Some(row) = rows.next().await? else {
         return Ok(None);
     };
     let snapshot_bytes: Vec<u8> = row.get(6).map_err(|_| RuntimeError::RecoveryInvalid)?;
@@ -860,14 +831,9 @@ async fn load_stream_observations(
             "SELECT stream_id FROM sys_stream_observation ORDER BY observed_ms, stream_id",
             (),
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     let mut observations = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    {
+    while let Some(row) = rows.next().await? {
         let id = StreamObservationId(fixed(
             row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
         )?);
@@ -889,15 +855,8 @@ pub(crate) async fn stream_partition_required(
         "stream_failure" => "PRAGMA table_info(stream_failure)",
         _ => return Err(RuntimeError::RecoveryInvalid),
     };
-    let mut rows = connection
-        .query(statement, ())
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    {
+    let mut rows = connection.query(statement, ()).await?;
+    while let Some(row) = rows.next().await? {
         let name: String = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
         if name == "partition" {
             let required: i64 = row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?;
@@ -912,12 +871,8 @@ async fn load_stream_observation_tx(
     id: StreamObservationId,
     capture: &CwdCapture,
 ) -> Result<Option<StreamObservation>, RuntimeError> {
-    let mut rows = connection.query("SELECT observation.run_id, observation.producer, observation.consumer_name, observation.status, observation.items_seen, observation.items_committed, observation.items_failed, observation.diagnostic_code, observation.diagnostic_class, checkpoint.consumer_principal, checkpoint.consumer_root, checkpoint.consumer_function, checkpoint.consumer_binding, checkpoint.source_format, checkpoint.source, checkpoint.partition_format, checkpoint.partition, checkpoint.position_format, run.runtime_id, run.runtime_generation, run.status, observation.consumer_identity, observation.source_identity, observation.partition, observation.last_item_ms, observation.observed_ms, observation.last_failure_identity, observation.checkpoint_key_id FROM sys_stream_observation AS observation JOIN stream_checkpoint AS checkpoint ON checkpoint.key_id = observation.checkpoint_key_id JOIN sys_run_observation AS run ON run.run_id = observation.run_id WHERE observation.stream_id = ?1", params![id.0.to_vec()]).await.map_err(|_| RuntimeError::StorageUnavailable)?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    else {
+    let mut rows = connection.query("SELECT observation.run_id, observation.producer, observation.consumer_name, observation.status, observation.items_seen, observation.items_committed, observation.items_failed, observation.diagnostic_code, observation.diagnostic_class, checkpoint.consumer_principal, checkpoint.consumer_root, checkpoint.consumer_function, checkpoint.consumer_binding, checkpoint.source_format, checkpoint.source, checkpoint.partition_format, checkpoint.partition, checkpoint.position_format, run.runtime_id, run.runtime_generation, run.status, observation.consumer_identity, observation.source_identity, observation.partition, observation.last_item_ms, observation.observed_ms, observation.last_failure_identity, observation.checkpoint_key_id FROM sys_stream_observation AS observation JOIN stream_checkpoint AS checkpoint ON checkpoint.key_id = observation.checkpoint_key_id JOIN sys_run_observation AS run ON run.run_id = observation.run_id WHERE observation.stream_id = ?1", params![id.0.to_vec()]).await?;
+    let Some(row) = rows.next().await? else {
         return Ok(None);
     };
     let parent_run_id = RunObservationId(fixed(
@@ -1077,12 +1032,8 @@ async fn load_stream_observation_failure_reference(
             params![identity.clone()],
         )
         .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    let row = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-        .ok_or(RuntimeError::RecoveryInvalid)?;
+        ?;
+    let row = rows.next().await?.ok_or(RuntimeError::RecoveryInvalid)?;
     if row_text(&row, 0)? != stream_key_id(checkpoint)
         || row_text(&row, 1)? != checkpoint.consumer.principal.as_str()
         || row_text(&row, 2)? != checkpoint.consumer.root.as_str()
@@ -1315,8 +1266,7 @@ pub(crate) async fn sync_stream_observation_tx(
                     run_status_code(RunObservationStatus::Running),
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
     }
     Ok(())
 }
@@ -1362,7 +1312,7 @@ async fn sync_stream_observation_update_tx(
     let code = update.diagnostic.map(|value| encode_code(value.code));
     let class = update.diagnostic.map(|value| encode_class(value.class));
     let key_id = stream_key_id(key);
-    let changed = connection.execute("UPDATE sys_stream_observation SET status = COALESCE(?2, status), items_seen = items_seen + ?3, items_committed = items_committed + ?4, items_failed = items_failed + ?5, checkpoint_version = COALESCE(?6, checkpoint_version), last_failure_identity = COALESCE(?7, last_failure_identity), last_item_ms = CASE WHEN ?3 + ?4 + ?5 > 0 THEN ?8 ELSE last_item_ms END, diagnostic_code = COALESCE(?9, diagnostic_code), diagnostic_class = COALESCE(?10, diagnostic_class), observed_ms = ?8 WHERE checkpoint_key_id = ?1 AND status NOT IN (?11, ?12, ?13) AND run_id IN (SELECT run_id FROM sys_run_observation WHERE status IN (?14, ?15) AND ended_ms IS NULL)", params![key_id.clone(), update.status.map(stream_observation_status_code), update.seen, update.committed, update.failed, update.checkpoint.map(|value| i64::try_from(value).map_err(|_| RuntimeError::RecoveryInvalid)).transpose()?, update.last_failure, now_ms()?, code, class, stream_observation_status_code(StreamObservationStatus::Completed), stream_observation_status_code(StreamObservationStatus::Cancelled), stream_observation_status_code(StreamObservationStatus::Orphaned), run_status_code(RunObservationStatus::Starting), run_status_code(RunObservationStatus::Running)]).await.map_err(|_| RuntimeError::StorageUnavailable)?;
+    let changed = connection.execute("UPDATE sys_stream_observation SET status = COALESCE(?2, status), items_seen = items_seen + ?3, items_committed = items_committed + ?4, items_failed = items_failed + ?5, checkpoint_version = COALESCE(?6, checkpoint_version), last_failure_identity = COALESCE(?7, last_failure_identity), last_item_ms = CASE WHEN ?3 + ?4 + ?5 > 0 THEN ?8 ELSE last_item_ms END, diagnostic_code = COALESCE(?9, diagnostic_code), diagnostic_class = COALESCE(?10, diagnostic_class), observed_ms = ?8 WHERE checkpoint_key_id = ?1 AND status NOT IN (?11, ?12, ?13) AND run_id IN (SELECT run_id FROM sys_run_observation WHERE status IN (?14, ?15) AND ended_ms IS NULL)", params![key_id.clone(), update.status.map(stream_observation_status_code), update.seen, update.committed, update.failed, update.checkpoint.map(|value| i64::try_from(value).map_err(|_| RuntimeError::RecoveryInvalid)).transpose()?, update.last_failure, now_ms()?, code, class, stream_observation_status_code(StreamObservationStatus::Completed), stream_observation_status_code(StreamObservationStatus::Cancelled), stream_observation_status_code(StreamObservationStatus::Orphaned), run_status_code(RunObservationStatus::Starting), run_status_code(RunObservationStatus::Running)]).await?;
     if changed != 0 {
         return Ok(changed);
     }
@@ -1372,14 +1322,8 @@ async fn sync_stream_observation_update_tx(
             "SELECT 1 FROM sys_stream_observation WHERE checkpoint_key_id = ?1",
             params![key_id],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    if retained
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-        .is_some()
-    {
+        .await?;
+    if retained.next().await?.is_some() {
         // A retained observation must never turn an orphaned/completed
         // stream back into a live state, and no delivery may advance after
         // its parent run has reached a terminal boundary. The enclosing
@@ -1406,9 +1350,9 @@ pub(crate) async fn sync_run_request_state_with_diagnostic_tx(
     let now = now_ms()?;
     let code = diagnostic.map(|value| encode_code(value.code));
     let class = diagnostic.map(|value| encode_class(value.class));
-    let changed = connection.execute("UPDATE sys_run_observation SET status = ?1, ended_ms = CASE WHEN ?2 THEN ?3 ELSE ended_ms END, observed_ms = ?3, diagnostic_code = COALESCE(?4, diagnostic_code), diagnostic_class = COALESCE(?5, diagnostic_class) WHERE session_id = ?6 AND request_id = ?7 AND status IN (?8, ?9)", params![run_status_code(status), status.is_terminal(), now, code, class, identity.session_id.to_vec(), identity.request_id.to_vec(), run_status_code(RunObservationStatus::Starting), run_status_code(RunObservationStatus::Running)]).await.map_err(|_| RuntimeError::StorageUnavailable)?;
+    let changed = connection.execute("UPDATE sys_run_observation SET status = ?1, ended_ms = CASE WHEN ?2 THEN ?3 ELSE ended_ms END, observed_ms = ?3, diagnostic_code = COALESCE(?4, diagnostic_code), diagnostic_class = COALESCE(?5, diagnostic_class) WHERE session_id = ?6 AND request_id = ?7 AND status IN (?8, ?9)", params![run_status_code(status), status.is_terminal(), now, code, class, identity.session_id.to_vec(), identity.request_id.to_vec(), run_status_code(RunObservationStatus::Starting), run_status_code(RunObservationStatus::Running)]).await?;
     if status.is_terminal() {
-        connection.execute("UPDATE sys_stream_observation SET status = ?1, observed_ms = ?2 WHERE run_id IN (SELECT run_id FROM sys_run_observation WHERE session_id = ?3 AND request_id = ?4) AND status IN (?5, ?6, ?7, ?8)", params![stream_observation_status_code(StreamObservationStatus::Orphaned), now, identity.session_id.to_vec(), identity.request_id.to_vec(), stream_observation_status_code(StreamObservationStatus::Starting), stream_observation_status_code(StreamObservationStatus::Running), stream_observation_status_code(StreamObservationStatus::Paused), stream_observation_status_code(StreamObservationStatus::BackingOff)]).await.map_err(|_| RuntimeError::StorageUnavailable)?;
+        connection.execute("UPDATE sys_stream_observation SET status = ?1, observed_ms = ?2 WHERE run_id IN (SELECT run_id FROM sys_run_observation WHERE session_id = ?3 AND request_id = ?4) AND status IN (?5, ?6, ?7, ?8)", params![stream_observation_status_code(StreamObservationStatus::Orphaned), now, identity.session_id.to_vec(), identity.request_id.to_vec(), stream_observation_status_code(StreamObservationStatus::Starting), stream_observation_status_code(StreamObservationStatus::Running), stream_observation_status_code(StreamObservationStatus::Paused), stream_observation_status_code(StreamObservationStatus::BackingOff)]).await?;
     }
     Ok(changed)
 }
@@ -1476,22 +1420,12 @@ impl RuntimeState {
                     position.as_str(),
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let Some(row) = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        else {
+            .await?;
+        let Some(row) = rows.next().await? else {
             return Ok(None);
         };
         let identity = row_text(&row, 0)?;
-        if rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-            .is_some()
-        {
+        if rows.next().await?.is_some() {
             return Err(RuntimeError::RecoveryInvalid);
         }
         let record = load_stream_failure_by_id(&self.connection, identity).await?;
@@ -1531,8 +1465,7 @@ impl RuntimeState {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         self.require_recovery_barrier_clear(&tx).await?;
         let request = request_status_tx(&tx, registration.request)
             .await?
@@ -1549,14 +1482,8 @@ impl RuntimeState {
                     registration.request.request_id.to_vec(),
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        if existing_rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-            .is_some()
-        {
+            .await?;
+        if existing_rows.next().await?.is_some() {
             return Err(RuntimeError::RequestStateConflict);
         }
         let capture = capture_tx(&tx).await?;
@@ -1569,10 +1496,8 @@ impl RuntimeState {
                 registration.invocation_id.to_vec(), encode_capture(&capture)?, capture.generation_digest().to_vec(), capture.runtime_id().to_vec(),
                 bigint_to_i64(capture.generation())?, now_ms()?, run_status_code(RunObservationStatus::Starting),
             ],
-        ).await.map_err(|_| RuntimeError::StorageUnavailable)?;
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        ).await?;
+        tx.commit().await?;
         self.run_observation(id)
             .await?
             .ok_or(RuntimeError::RecoveryInvalid)
@@ -1602,8 +1527,7 @@ impl RuntimeState {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         if let Some(status) = request_status_tx(&tx, registration.request).await? {
             require_fingerprint(&status, fingerprint)?;
             if status.state.is_terminal() {
@@ -1617,9 +1541,7 @@ impl RuntimeState {
                 load_run_observation_for_request_tx(&tx, registration.request, &capture)
                     .await?
                     .ok_or(RuntimeError::RecoveryInvalid)?;
-                tx.commit()
-                    .await
-                    .map_err(|_| RuntimeError::StorageUnavailable)?;
+                tx.commit().await?;
                 return Ok(ObservedRequestStart {
                     request: status,
                     run: None,
@@ -1643,7 +1565,7 @@ impl RuntimeState {
             ],
         )
         .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        ?;
         let id = RunObservationId(*Uuid::new_v4().as_bytes());
         tx.execute(
             "INSERT INTO sys_run_observation (run_id, session_id, request_id, consumer_identity, function_name, source_identity, invocation_id, snapshot, generation_digest, runtime_id, runtime_generation, started_ms, ended_ms, observed_ms, status, checkpoint_count, diagnostic_code, diagnostic_class) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, NULL, ?12, ?13, 0, NULL, NULL)",
@@ -1655,10 +1577,8 @@ impl RuntimeState {
             ],
         )
         .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        ?;
+        tx.commit().await?;
         let run = self
             .run_observation(id)
             .await?
@@ -1698,8 +1618,7 @@ impl RuntimeState {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         ensure_session_admission_open(&tx, registration.request.session_id).await?;
         self.require_owner(&tx, owner).await?;
         let current = request_status_tx(&tx, registration.request)
@@ -1718,11 +1637,9 @@ impl RuntimeState {
                     registration.request.request_id.to_vec()
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .await?
             .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .await?
             .is_some()
         {
             return Err(RuntimeError::RequestStateConflict);
@@ -1741,13 +1658,8 @@ impl RuntimeState {
                     registration.request.request_id.to_vec()
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let Some(row) = admissions
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        else {
+            .await?;
+        let Some(row) = admissions.next().await? else {
             return Err(RuntimeError::RequestStateConflict);
         };
         let admitted_fingerprint = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
@@ -1789,8 +1701,7 @@ impl RuntimeState {
                     RequestState::Reserved.code(),
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         if changed != 1 {
             return Err(RuntimeError::RequestStateConflict);
         }
@@ -1810,8 +1721,7 @@ impl RuntimeState {
                     generation,
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         if consumed != 1 {
             return Err(RuntimeError::RequestStateConflict);
         }
@@ -1824,10 +1734,8 @@ impl RuntimeState {
                 registration.invocation_id.to_vec(), encode_capture(&capture)?, capture.generation_digest().to_vec(), capture.runtime_id().to_vec(),
                 bigint_to_i64(capture.generation())?, now_ms()?, run_status_code(RunObservationStatus::Running),
             ],
-        ).await.map_err(|_| RuntimeError::StorageUnavailable)?;
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        ).await?;
+        tx.commit().await?;
         let run = self
             .run_observation(id)
             .await?
@@ -1884,8 +1792,7 @@ impl RuntimeState {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         self.require_recovery_barrier_clear(&tx).await?;
         if let Some(writer) = writer {
             self.require_owner(&tx, writer).await?;
@@ -1907,13 +1814,8 @@ impl RuntimeState {
                  WHERE observation.checkpoint_key_id = ?1",
                 params![key_id.clone()],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        while let Some(row) = existing
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        {
+            .await?;
+        while let Some(row) = existing.next().await? {
             let existing_run = RunObservationId(fixed(
                 row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
             )?);
@@ -1944,14 +1846,8 @@ impl RuntimeState {
                     partition.clone(),
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        if natural_key
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-            .is_some()
-        {
+            .await?;
+        if natural_key.next().await?.is_some() {
             return Err(RuntimeError::StreamIdentityMismatch);
         }
         let id = StreamObservationId(*Uuid::new_v4().as_bytes());
@@ -1960,10 +1856,8 @@ impl RuntimeState {
             params![id.0.to_vec(), registration.run.0.to_vec(), key_id, registration.producer, registration.consumer,
                 registration.checkpoint.consumer.canonical(), registration.checkpoint.source.as_str().to_owned(), partition,
                 stream_observation_status_code(StreamObservationStatus::Starting), now_ms()?],
-        ).await.map_err(|_| RuntimeError::StorageUnavailable)?;
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        ).await?;
+        tx.commit().await?;
         self.stream_observation(id)
             .await?
             .ok_or(RuntimeError::RecoveryInvalid)
@@ -1989,15 +1883,12 @@ impl RuntimeState {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Deferred)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let capture = capture_tx(&tx).await?;
         let queries = crate::query::load_query_observations(&tx).await?;
         let runs = load_run_observations(&tx, &capture).await?;
         let streams = load_stream_observations(&tx, &capture).await?;
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        tx.commit().await?;
         project_retained_observations(RuntimeObservationView {
             capture,
             queries,
@@ -2018,13 +1909,10 @@ impl RuntimeState {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         self.require_owner(&tx, lease).await?;
         let capture = capture_tx(&tx).await?;
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        tx.commit().await?;
         Ok(RuntimeObservationFence { lease, capture })
     }
 
@@ -2042,8 +1930,7 @@ impl RuntimeState {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         self.require_owner(&tx, fence.lease).await?;
         let capture = capture_tx(&tx).await?;
         if capture != fence.capture {
@@ -2066,9 +1953,7 @@ impl RuntimeState {
             .into_iter()
             .filter(|row| row.live)
             .collect();
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        tx.commit().await?;
         Ok(RuntimeObservationView {
             capture,
             queries,
@@ -2144,8 +2029,7 @@ impl RuntimeState {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         self.require_owner(&transaction, writer).await?;
         sync_stream_observation_event_tx(
             &transaction,
@@ -2154,10 +2038,7 @@ impl RuntimeState {
             Some(diagnostic),
         )
         .await?;
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)
+        transaction.commit().await.map_err(RuntimeError::from)
     }
 
     /// Records a completed or paused runner boundary that has no delivery
@@ -2179,13 +2060,9 @@ impl RuntimeState {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         self.require_owner(&transaction, writer).await?;
         sync_stream_observation_event_tx(&transaction, key, status, None).await?;
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)
+        transaction.commit().await.map_err(RuntimeError::from)
     }
 }

@@ -1,10 +1,9 @@
 use std::collections::BTreeMap;
 
 use orna_sys::{
-    ExpressionRef, ObjectRef, PlanDetail, PlanNode, PlanNodeKind,
+    ExplainInputs, ExpressionRef, ObjectRef, PlanDetail, PlanNode, PlanNodeKind,
     QueryDecorrelatedSubqueryDescription, QueryJoinDescription, QueryPartialIndexDescription,
-    QueryPlanDescription, QuerySourceStatistics, SnapshotRef,
-    explain_query_with_partial_indexes_and_decorrelated_subqueries,
+    QueryPlanDescription, QuerySourceStatistics, SnapshotRef, explain_query_with,
 };
 
 const FIXTURE: &str = include_str!("fixtures/planner_decorrelation_reanchoring_chain_302ax.orna");
@@ -125,10 +124,13 @@ fn explain(
     reverse_indexes: bool,
     reverse_subqueries: bool,
 ) -> orna_sys::ExplainedPlan {
-    explain_query_with_partial_indexes_and_decorrelated_subqueries(
+    explain_query_with(
         &query(anchor, reverse_joins),
-        &indexes(reverse_indexes),
-        &subqueries(reverse_subqueries),
+        ExplainInputs {
+            partial_indexes: &indexes(reverse_indexes),
+            decorrelated_subqueries: &subqueries(reverse_subqueries),
+            ..ExplainInputs::default()
+        },
     )
     .expect("paired decorrelation chains explain from exact index tuples")
 }

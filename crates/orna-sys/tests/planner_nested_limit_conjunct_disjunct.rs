@@ -1,6 +1,6 @@
 use orna_sys::{
-    ExplainError, ExpressionRef, ObjectRef, PlanDetail, PlanNodeKind, QueryPlanDescription,
-    QuerySourceStatistics, SnapshotRef, explain_query_with_input_limit_conjunct_disjunct_chain,
+    ExplainError, ExplainInputs, ExpressionRef, ObjectRef, PlanDetail, PlanNodeKind,
+    QueryPlanDescription, QuerySourceStatistics, SnapshotRef, explain_query_with,
 };
 
 const NESTED_LIMIT_FIXTURE: &str =
@@ -13,7 +13,7 @@ fn explain_nested_limit_conjunct_disjunct(
     nested_input_limits: &[u64],
     additional_limits: &[u64],
 ) -> Result<orna_sys::ExplainedPlan, ExplainError> {
-    explain_query_with_input_limit_conjunct_disjunct_chain(
+    explain_query_with(
         &QueryPlanDescription {
             snapshot: SnapshotRef::descriptive("snapshot:nested-limit-conjunct-disjunct"),
             source: ObjectRef::descriptive("table:PlannerNestedLimitConjunctDisjunct"),
@@ -31,10 +31,13 @@ fn explain_nested_limit_conjunct_disjunct(
             mutations: Vec::new(),
             materialize_into: None,
         },
-        disjunct_count,
-        conjunct_count_per_disjunct,
-        nested_input_limits,
-        additional_limits,
+        ExplainInputs {
+            disjunct_count,
+            conjunct_count_per_disjunct: Some(conjunct_count_per_disjunct),
+            nested_input_limits: Some(nested_input_limits),
+            additional_limits,
+            ..ExplainInputs::default()
+        },
     )
 }
 
