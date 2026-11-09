@@ -35,12 +35,23 @@ use-instead = "orna-base::hex"
 crate = "libsql"
 wrappers = ["orna-cli", "orna-runtime"]
 
-# The one Base64 implementation lives in orna-base. hyper-util is the
-# transitive HTTP route (reqwest -> hyper-rustls -> hyper-util); every
-# workspace crate other than orna-base must use orna-base instead.
+# The one Base64 implementation lives in orna-base. cargo-deny bans a crate
+# for every direct parent that is not a wrapper, so the external crates that
+# legitimately use base64 internally (the HTTP stack, libsql and parquet) are
+# named here; no workspace crate other than orna-base may name it.
 [[bans.deny]]
 crate = "base64"
-wrappers = ["orna-base", "hyper-util"]
+wrappers = [
+    "orna-base",
+    "base64ct",
+    "hyper-util",
+    "libsql",
+    "parquet",
+    "reqwest",
+    "rustls",
+    "rustls-webpki",
+    "tower-http",
+]
 use-instead = "orna-base::base64"
 
 [[bans.skip]]
