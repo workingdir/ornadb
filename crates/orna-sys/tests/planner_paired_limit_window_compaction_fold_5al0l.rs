@@ -1,11 +1,11 @@
 use std::collections::BTreeMap;
 
 use orna_sys::{
-    ExpressionRef, ObjectRef, PlanDetail, PlanNode, PlanNodeKind, PlanWindowFrameBound,
-    QueryJoinDescription, QueryJoinPairIdentityDescription, QueryLimitPushdownDescription,
-    QueryPlanDescription, QuerySourceStatistics, QueryWindowAggregatePushdownDescription,
-    QueryWindowSpillDescription, SnapshotRef,
-    explain_query_with_join_pair_identities_limit_window_aggregate_and_spill_pushdowns,
+    ExplainInputs, ExpressionRef, ObjectRef, PlanDetail, PlanNode, PlanNodeKind,
+    PlanWindowFrameBound, QueryJoinDescription, QueryJoinPairIdentityDescription,
+    QueryLimitPushdownDescription, QueryPlanDescription, QuerySourceStatistics,
+    QueryWindowAggregatePushdownDescription, QueryWindowSpillDescription, SnapshotRef,
+    explain_query_with,
 };
 
 const FIXTURE: &str =
@@ -227,12 +227,15 @@ fn plan(
     aggregates: &[QueryWindowAggregatePushdownDescription],
     spills: &[QueryWindowSpillDescription],
 ) -> orna_sys::ExplainedPlan {
-    explain_query_with_join_pair_identities_limit_window_aggregate_and_spill_pushdowns(
+    explain_query_with(
         &query(anchor, order),
-        pairs,
-        limits,
-        aggregates,
-        spills,
+        ExplainInputs {
+            window_aggregates: aggregates,
+            join_pair_identities: pairs,
+            input_limit_pushdowns: limits,
+            window_spills: spills,
+            ..ExplainInputs::default()
+        },
     )
     .expect("paired limit restoration and compaction chains form a sparse plan")
 }
@@ -1601,12 +1604,15 @@ fn bounded_projection_identity_tracks_paired_spill_restore_folds() {
     let explain = |query: &QueryPlanDescription,
                    projection_pairs: &[QueryJoinPairIdentityDescription],
                    projection_spills: &[QueryWindowSpillDescription]| {
-        explain_query_with_join_pair_identities_limit_window_aggregate_and_spill_pushdowns(
+        explain_query_with(
             query,
-            projection_pairs,
-            &limit_descriptors,
-            &aggregate_descriptors,
-            projection_spills,
+            ExplainInputs {
+                window_aggregates: &aggregate_descriptors,
+                join_pair_identities: projection_pairs,
+                input_limit_pushdowns: &limit_descriptors,
+                window_spills: projection_spills,
+                ..ExplainInputs::default()
+            },
         )
         .expect("bounded projections can be folded over paired sparse spill restores")
     };
@@ -1830,12 +1836,15 @@ fn bounded_window_identity_tracks_paired_restore_projection_folds() {
     let explain = |query: &QueryPlanDescription,
                    aggregates: &[QueryWindowAggregatePushdownDescription],
                    spills: &[QueryWindowSpillDescription]| {
-        explain_query_with_join_pair_identities_limit_window_aggregate_and_spill_pushdowns(
+        explain_query_with(
             query,
-            &pair_descriptors,
-            &[],
-            aggregates,
-            spills,
+            ExplainInputs {
+                window_aggregates: aggregates,
+                join_pair_identities: &pair_descriptors,
+                input_limit_pushdowns: &[],
+                window_spills: spills,
+                ..ExplainInputs::default()
+            },
         )
         .expect("bounded windows can be paired with restored projections")
     };

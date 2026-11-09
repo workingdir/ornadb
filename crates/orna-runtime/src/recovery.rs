@@ -32,13 +32,8 @@ pub(crate) async fn validate_historical_snapshot_tx(
              FROM runtime_meta WHERE singleton = 1",
             (),
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    let row = meta
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-        .ok_or(RuntimeError::RecoveryInvalid)?;
+        .await?;
+    let row = meta.next().await?.ok_or(RuntimeError::RecoveryInvalid)?;
     let database_id = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
     let runtime_id = fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
     let current_generation = decode_u64(
@@ -70,12 +65,10 @@ pub(crate) async fn validate_historical_snapshot_tx(
                 "SELECT digest, mutation_sequence FROM checkpoint WHERE generation = ?1",
                 params![i64::try_from(generation).map_err(|_| RuntimeError::SnapshotNotFound)?],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let row = checkpoint
             .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .await?
             .ok_or(RuntimeError::SnapshotNotFound)?;
         (
             fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
@@ -94,12 +87,10 @@ pub(crate) async fn validate_historical_snapshot_tx(
              FROM runtime_history_governance_boundary WHERE generation = ?1",
             params![i64::try_from(generation).map_err(|_| RuntimeError::SnapshotNotFound)?],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     let row = boundary
         .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
+        .await?
         .ok_or(RuntimeError::SnapshotIncomplete)?;
     let admin_audit_sequence = decode_u64(
         row.get::<i64>(0)
@@ -148,13 +139,8 @@ async fn validate_stream_checkpoint_reset_bridge(
                 i64::try_from(end_version).map_err(|_| RuntimeError::RecoveryInvalid)?
             ],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    {
+        .await?;
+    while let Some(row) = rows.next().await? {
         let old_version = decode_u64(
             row.get::<i64>(0)
                 .map_err(|_| RuntimeError::RecoveryInvalid)?,
@@ -217,12 +203,8 @@ impl RuntimeState {
                 (),
             )
             .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let row = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-            .ok_or(RuntimeError::RecoveryInvalid)?;
+            ?;
+        let row = rows.next().await?.ok_or(RuntimeError::RecoveryInvalid)?;
         let count: i64 = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
         let minimum: i64 = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
         let maximum: i64 = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
@@ -267,13 +249,8 @@ impl RuntimeState {
                  FROM request_ledger",
                 (),
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        while let Some(row) = request_rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        {
+            .await?;
+        while let Some(row) = request_rows.next().await? {
             let status = decode_request_status(&row).map_err(|_| RuntimeError::RecoveryInvalid)?;
             let evidence = decode_request_execution_evidence(&row, 5)?;
             validate_request_execution_evidence(&status, evidence)?;
@@ -309,14 +286,9 @@ impl RuntimeState {
                  ORDER BY pin.pin_id",
                 params![&repository_id[..], algorithm, descriptor_oid.as_bytes()],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let mut pins = Vec::new();
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        {
+        while let Some(row) = rows.next().await? {
             let pin_id: [u8; 16] = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
             let content_length: i64 = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
             let content_length =
@@ -354,13 +326,8 @@ impl RuntimeState {
                  JOIN runtime_meta AS runtime ON runtime.singleton = 1",
                 (),
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        {
+            .await?;
+        while let Some(row) = rows.next().await? {
             let pin_id: [u8; 16] = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)
                 .map_err(|_| RuntimeError::RecoveryInvalid)?;
             let repository_id: [u8; 32] =
@@ -451,12 +418,8 @@ impl RuntimeState {
                 (),
             )
             .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        while let Some(row) = checkpoints
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        {
+            ?;
+        while let Some(row) = checkpoints.next().await? {
             let generation: i64 = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
             let stored_digest: [u8; 32] =
                 fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)
@@ -495,13 +458,9 @@ impl RuntimeState {
                 (),
             )
             .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            ?;
         let mut previous_sequence = 0;
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        {
+        while let Some(row) = rows.next().await? {
             let _: u64 = u64::try_from(
                 row.get::<i64>(0)
                     .map_err(|_| RuntimeError::RecoveryInvalid)?,
@@ -546,12 +505,8 @@ impl RuntimeState {
                 (),
             )
             .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        while let Some(row) = freezes
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        {
+            ?;
+        while let Some(row) = freezes.next().await? {
             validate_id(fixed(
                 row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
             )?)
@@ -605,12 +560,8 @@ impl RuntimeState {
                 (),
             )
             .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        while let Some(row) = publications
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        {
+            ?;
+        while let Some(row) = publications.next().await? {
             let intent_id = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
             validate_id(intent_id).map_err(|_| RuntimeError::RecoveryInvalid)?;
             let commit = PublicationCommitId::new(
@@ -665,13 +616,8 @@ impl RuntimeState {
                    ON stream_checkpoint.key_id = stream_control.key_id",
                 (),
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        {
+            .await?;
+        while let Some(row) = rows.next().await? {
             let key_id: String = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
             if key_id.is_empty() {
                 return Err(RuntimeError::RecoveryInvalid);
@@ -695,13 +641,8 @@ impl RuntimeState {
                    ON checkpoint.key_id = pause.key_id",
                 (),
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        while let Some(row) = pending
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        {
+            .await?;
+        while let Some(row) = pending.next().await? {
             let key_id: String = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
             let referenced: Option<String> =
                 row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
@@ -729,18 +670,13 @@ impl RuntimeState {
                  ORDER BY history.key_id, history.version",
                 (),
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let mut active_key: Option<String> = None;
         let mut previous_version = 0_u64;
         let mut latest_position: Option<String> = None;
         let mut checkpoint_version = 0_u64;
         let mut checkpoint_position: Option<String> = None;
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        {
+        while let Some(row) = rows.next().await? {
             let key_id: String = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
             if key_id.is_empty() {
                 return Err(RuntimeError::RecoveryInvalid);
@@ -793,12 +729,10 @@ impl RuntimeState {
                                 .map_err(|_| RuntimeError::RecoveryInvalid)?
                         ],
                     )
-                    .await
-                    .map_err(|_| RuntimeError::StorageUnavailable)?;
+                    .await?;
                 let checkpoint = checkpoints
                     .next()
-                    .await
-                    .map_err(|_| RuntimeError::StorageUnavailable)?
+                    .await?
                     .ok_or(RuntimeError::RecoveryInvalid)?;
                 if fixed(
                     checkpoint
@@ -898,14 +832,9 @@ impl RuntimeState {
                    )",
                 (),
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let mut reset_only_checkpoints = Vec::new();
-        while let Some(row) = reset_only
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        {
+        while let Some(row) = reset_only.next().await? {
             let key_id: String = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
             let version = decode_u64(
                 row.get::<i64>(1)
@@ -946,13 +875,8 @@ impl RuntimeState {
                    ON checkpoint.key_id = failure.key_id",
                 (),
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        {
+            .await?;
+        while let Some(row) = rows.next().await? {
             let key_id: String = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
             if key_id.is_empty() {
                 return Err(RuntimeError::RecoveryInvalid);
@@ -1006,13 +930,8 @@ impl RuntimeState {
                    ON legacy.identity_id = failure.identity_id",
                 (),
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        {
+            .await?;
+        while let Some(row) = rows.next().await? {
             let identity_id: String = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
             if identity_id.is_empty() {
                 return Err(RuntimeError::RecoveryInvalid);
@@ -1047,14 +966,8 @@ impl RuntimeState {
                  WHERE failure.identity_id IS NULL",
                 (),
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        if orphans
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-            .is_some()
-        {
+            .await?;
+        if orphans.next().await?.is_some() {
             return Err(RuntimeError::RecoveryInvalid);
         }
         Ok(())

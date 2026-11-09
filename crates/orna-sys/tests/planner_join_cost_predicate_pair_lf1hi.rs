@@ -1,10 +1,9 @@
 use std::collections::BTreeMap;
 
 use orna_sys::{
-    ExpressionRef, ObjectRef, PlanDetail, PlanNode, PlanNodeKind, QueryJoinDescription,
-    QueryJoinPairIdentityDescription, QueryPartialIndexDescription, QueryPlanDescription,
-    QuerySourceStatistics, SnapshotRef,
-    explain_query_with_partial_indexes_and_join_pair_identities,
+    ExplainInputs, ExpressionRef, ObjectRef, PlanDetail, PlanNode, PlanNodeKind,
+    QueryJoinDescription, QueryJoinPairIdentityDescription, QueryPartialIndexDescription,
+    QueryPlanDescription, QuerySourceStatistics, SnapshotRef, explain_query_with,
 };
 
 const FIXTURE: &str = include_str!("fixtures/planner_join_cost_predicate_pair_lf1hi.orna");
@@ -126,8 +125,15 @@ fn explain(
     indexes: &[QueryPartialIndexDescription],
     pairs: &[QueryJoinPairIdentityDescription],
 ) -> orna_sys::ExplainedPlan {
-    explain_query_with_partial_indexes_and_join_pair_identities(&query(order), indexes, pairs)
-        .expect("exact pair and index identities resolve through sparse cost planning")
+    explain_query_with(
+        &query(order),
+        ExplainInputs {
+            partial_indexes: indexes,
+            join_pair_identities: pairs,
+            ..ExplainInputs::default()
+        },
+    )
+    .expect("exact pair and index identities resolve through sparse cost planning")
 }
 
 fn text(node: &PlanNode, key: &str) -> Option<String> {

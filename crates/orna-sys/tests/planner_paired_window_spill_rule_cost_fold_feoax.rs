@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 
 use orna_sys::{
-    ExpressionRef, ObjectRef, PlanDetail, PlanNode, PlanNodeKind, PlanWindowFrameBound,
-    QueryJoinDescription, QueryJoinPairIdentityDescription, QueryPlanDescription,
-    QuerySourceStatistics, QueryWindowAggregatePushdownDescription, QueryWindowSpillDescription,
-    SnapshotRef, explain_query_with_join_pair_identities_window_aggregate_and_spill_pushdowns,
+    ExplainInputs, ExpressionRef, ObjectRef, PlanDetail, PlanNode, PlanNodeKind,
+    PlanWindowFrameBound, QueryJoinDescription, QueryJoinPairIdentityDescription,
+    QueryPlanDescription, QuerySourceStatistics, QueryWindowAggregatePushdownDescription,
+    QueryWindowSpillDescription, SnapshotRef, explain_query_with,
 };
 
 const FIXTURE: &str =
@@ -168,11 +168,14 @@ fn plan(
     aggregate_descriptors: &[QueryWindowAggregatePushdownDescription],
     spill_descriptors: &[QueryWindowSpillDescription],
 ) -> orna_sys::ExplainedPlan {
-    explain_query_with_join_pair_identities_window_aggregate_and_spill_pushdowns(
+    explain_query_with(
         &query(anchor, order),
-        pair_descriptors,
-        aggregate_descriptors,
-        spill_descriptors,
+        ExplainInputs {
+            window_aggregates: aggregate_descriptors,
+            join_pair_identities: pair_descriptors,
+            window_spills: spill_descriptors,
+            ..ExplainInputs::default()
+        },
     )
     .expect("exact pair, rule, and spill descriptors produce an explain plan")
 }
