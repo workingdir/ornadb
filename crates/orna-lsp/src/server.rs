@@ -210,25 +210,27 @@ impl RequestContext {
     }
 }
 
+/// The threads behind a connected server.
+struct Workers {
+    /// Publishes diagnostics.
+    diagnostics: DiagnosticsWorker,
+    /// Answers requests.
+    requests: RequestPool<RequestContext>,
+}
+
 /// The server loop's state: the request context it keeps current, and the
-/// workers that answer requests and publish diagnostics.
+/// workers that answer requests and publish diagnostics. Without workers,
+/// which is how the tests run, the handlers are called directly.
 struct ServerState {
     context: RequestContext,
-    /// Publishes diagnostics; absent when no client is attached.
-    diagnostics: Option<DiagnosticsWorker>,
-    /// Answers requests; absent in tests, which call `dispatch` directly.
-    requests: Option<RequestPool<RequestContext>>,
-    /// Sends messages to the client; absent in tests.
-    client: Option<Arc<dyn Fn(Message) + Send + Sync>>,
+    workers: Option<Workers>,
 }
 
 impl ServerState {
     fn new() -> Self {
         Self {
             context: RequestContext::default(),
-            diagnostics: None,
-            requests: None,
-            client: None,
+            workers: None,
         }
     }
 
@@ -242,8 +244,10 @@ impl ServerState {
 
     /// Queues diagnostics for `uri` and whatever its project check changes.
     fn schedule_diagnostics(&self, uri: &Uri, home: Option<ProjectHome>) {
-        if let Some(worker) = &self.diagnostics {
-            worker.schedule(self.context.snapshot(), vec![(uri.clone(), home)]);
+        if let Some(workers) = &self.workers {
+            workers
+                .diagnostics
+                .schedule(self.context.snapshot(), vec![(uri.clone(), home)]);
         }
     }
 }
@@ -281,22 +285,25 @@ pub fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
     let mut state = ServerState::new();
     let sender = connection.sender.clone();
-    state.diagnostics = Some(DiagnosticsWorker::spawn(Publisher::new(move |message| {
+    let diagnostics = DiagnosticsWorker::spawn(Publisher::new(move |message| {
         let _ = sender.send(message);
-    })));
+    }));
     let sender = connection.sender.clone();
-    state.requests = Some(RequestPool::spawn(
+    let requests = RequestPool::spawn(
         request_threads(),
         Arc::new(dispatch),
         Arc::new(move |message| {
             let _ = sender.send(message);
         }),
-    ));
+    );
+    state.workers = Some(Workers {
+        diagnostics,
+        requests,
+    });
     let sender = connection.sender.clone();
-    state.client = Some(Arc::new(move |message| {
+    state.context.client = Some(Arc::new(move |message| {
         let _ = sender.send(message);
     }));
-    state.context.client = state.client.clone();
 
     for message in &connection.receiver {
         match message {
@@ -304,8 +311,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 if connection.handle_shutdown(&request)? {
                     break;
                 }
-                if let Some(requests) = &state.requests {
-                    requests.submit(state.context.clone(), request);
+                if let Some(workers) = &state.workers {
+                    workers.requests.submit(state.context.clone(), request);
                 }
             }
             Message::Notification(notification) => {
@@ -602,11 +609,11 @@ fn handle_notification(state: &mut ServerState, notification: Notification) -> b
             false
         }
         "$/cancelRequest" => {
-            if let Some(requests) = &state.requests
+            if let Some(workers) = &state.workers
                 && let Ok(params) =
                     serde_json::from_value::<lsp_types::CancelParams>(notification.params)
             {
-                requests.cancel(&match params.id {
+                workers.requests.cancel(&match params.id {
                     NumberOrString::Number(id) => RequestId::from(id),
                     NumberOrString::String(id) => RequestId::from(id),
                 });
@@ -2420,8 +2427,7 @@ mod persisted_object_rename_tests {
     fn capture_client(state: &mut ServerState) -> Arc<Mutex<Vec<Message>>> {
         let messages = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&messages);
-        state.client = Some(Arc::new(move |message| lock(&sink).push(message)));
-        state.context.client = state.client.clone();
+        state.context.client = Some(Arc::new(move |message| lock(&sink).push(message)));
         messages
     }
 
