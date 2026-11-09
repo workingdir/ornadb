@@ -22,10 +22,11 @@ use super::assertion_gate::{AssertionGate, GatedCommand, refusal_diagnostic};
 use orna_repository::{
     CandidateAssertionGate, FormatContextError, GraphError, publication_crash_barrier,
 };
-use orna_runtime::{RuntimeState, TableMutation};
+use orna_runtime::{RuntimeState, TableMutation, TableObjectId};
 use orna_storage::RuntimePublicationCoordinator;
 
-use super::{BTreeMap, Diagnostic, Endpoint, Exit, local_project_path, runtime_identity};
+use super::{BTreeMap, BTreeSet, Diagnostic, Endpoint, Exit, local_project_path, runtime_identity};
+use std::collections::btree_map::Entry;
 
 const USAGE_HELP: &str = "use `orna publish [--message MESSAGE]`";
 const DEFAULT_MESSAGE: &str = "orna: publish runtime data";
@@ -103,7 +104,186 @@ fn refuse_legacy_head(repository: &orna_repository::Repository) -> Result<(), Di
     ))
 }
 
-#[allow(clippy::too_many_lines)]
+const PENDING_PRESERVED: &str = "the pending range was preserved";
+
+/// A publish diagnostic for a fault in the step `title` names, with `detail`
+/// rendering the fault. Every refusal while a frozen range is validated leaves
+/// that range pending, and says so.
+fn preserved_with<E>(
+    title: &'static str,
+    detail: impl FnOnce(E) -> String,
+) -> impl FnOnce(E) -> Diagnostic {
+    move |error| publish_error(title, format!("{}; {PENDING_PRESERVED}", detail(error)))
+}
+
+/// [`preserved_with`] for a fault shown by its `Debug` form.
+fn preserved<E: std::fmt::Debug>(title: &'static str) -> impl FnOnce(E) -> Diagnostic {
+    preserved_with(title, |error| format!("{error:?}"))
+}
+
+/// [`preserved_with`] for a fault shown by its message.
+fn preserved_display<E: std::fmt::Display>(title: &'static str) -> impl FnOnce(E) -> Diagnostic {
+    preserved_with(title, |error: E| error.to_string())
+}
+
+fn table_binding_mismatch(detail: &'static str) -> Diagnostic {
+    publish_error(
+        "source row table binding does not match its committed format-3 context",
+        detail,
+    )
+}
+
+/// What the mutations of one table are validated against. It is built when the
+/// table's first mutation arrives and reused for the rest: resolving the
+/// committed source schema loads the whole committed project, so resolving it
+/// for every mutation made publication cost grow with rows times project size.
+struct TableCandidate {
+    table_id: TableObjectId,
+    schema: orna_project::ResolvedTableSchema,
+    value_context: orna_value::Format3Context,
+    /// The committed native graph is compared with the source binding once,
+    /// after the first row of the table has validated.
+    graph_verified: bool,
+}
+
+impl TableCandidate {
+    fn open(
+        repository: &orna_repository::Repository,
+        head: &orna_repository::GitCommitRef,
+        format: &orna_repository::RepositoryFormatContext,
+        table_id: TableObjectId,
+        table_name: &str,
+    ) -> Result<Self, Diagnostic> {
+        let schema = orna_project::ProjectLoader::default()
+            .resolve_committed_source_table_schema(repository, head, table_id)
+            .map_err(preserved("source row schema could not be resolved"))?;
+        let binding = schema.binding();
+        let snapshot_id = format.snapshot_pin().snapshot_id();
+        let database_id = format.require_database_id().map_err(preserved(
+            "format-3 database identity could not be verified",
+        ))?;
+        if schema.qualified_name() != table_name
+            || schema.table_object_id() != table_id
+            || schema.source_commit() != head
+            || schema.snapshot_id() != &snapshot_id
+            || schema.database_id() != database_id.as_bytes()
+            || binding.database_id() != database_id
+            || binding.snapshot_id() != &snapshot_id
+            || *binding.table_object_id() != table_id.bytes()
+            || binding.declaration_name() != Some(schema.declaration_name())
+            || binding.descriptor() != schema.descriptor()
+        {
+            return Err(table_binding_mismatch(
+                "table identity, descriptor, database or snapshot conflicts with the selected snapshot; the pending range was preserved",
+            ));
+        }
+        let value_context = format
+            .open_value_context(table_id.bytes())
+            .map_err(preserved("format-3 row value context could not be opened"))?;
+        Ok(Self {
+            table_id,
+            schema,
+            value_context,
+            graph_verified: false,
+        })
+    }
+
+    /// The check of every mutation after the table's first: the rest of the
+    /// binding was proven when the table was opened.
+    fn binds_to(&self, table_name: &str) -> Result<(), Diagnostic> {
+        if self.schema.qualified_name() == table_name {
+            Ok(())
+        } else {
+            Err(table_binding_mismatch(
+                "table identity, descriptor, database or snapshot conflicts with the selected snapshot; the pending range was preserved",
+            ))
+        }
+    }
+
+    fn validate_row(&self, mutation: &TableMutation) -> Result<(), Diagnostic> {
+        let descriptor = self.schema.binding().descriptor();
+        let table_id = self.table_id.bytes();
+        let projected = orna_storage::project_runtime_mutation_for_descriptor(
+            descriptor,
+            table_id,
+            mutation,
+            &self.value_context,
+        )
+        .map_err(|error| {
+            let title =
+                if orna_storage::canonicalize_runtime_key(descriptor, table_id, mutation.key())
+                    .is_err()
+                {
+                    "source row key is not canonical"
+                } else {
+                    "source row does not match its committed schema"
+                };
+            preserved(title)(error)
+        })?;
+        let key_bytes = projected.key;
+        orna_repository::TypedKey::decode_canonical(&key_bytes)
+            .map_err(preserved("source row key is not canonical"))?;
+        match projected.value.as_deref() {
+            Some(fields) => {
+                descriptor
+                    .validate_stored_row(table_id, &key_bytes, fields)
+                    .map_err(preserved("source row does not match its committed schema"))?;
+                if let Some(new_key_bytes) = projected.rekey_to.as_deref() {
+                    descriptor
+                        .validate_stored_row(table_id, new_key_bytes, fields)
+                        .map_err(preserved(
+                            "source row rekey does not match its committed schema",
+                        ))?;
+                }
+            }
+            None => descriptor
+                .validate_stored_key(table_id, &key_bytes)
+                .map_err(preserved(
+                    "source row key does not match its committed schema",
+                ))?,
+        }
+        Ok(())
+    }
+
+    /// Proves, once per table, that the committed native graph carries the
+    /// descriptor the source binding names.
+    fn verify_graph(
+        &mut self,
+        format: &orna_repository::RepositoryFormatContext,
+    ) -> Result<(), Diagnostic> {
+        if self.graph_verified {
+            return Ok(());
+        }
+        let row_map = format
+            .load_row_map(self.table_id.bytes())
+            .map_err(preserved_with(
+                "format-3 row map could not be loaded",
+                |error: FormatContextError| format_context_detail(&error),
+            ))?;
+        let graph = format.open_native_graph(&row_map).map_err(preserved_with(
+            "format-3 native graph could not be opened",
+            |error: FormatContextError| format_context_detail(&error),
+        ))?;
+        let scope = graph.open_read_scope().map_err(preserved_with(
+            "format-3 native graph read scope could not be opened",
+            graph_error_detail,
+        ))?;
+        let committed_descriptor = graph
+            .read_schema_descriptor(&scope)
+            .map_err(preserved_with(
+                "format-3 committed table binding could not be read",
+                graph_error_detail,
+            ))?;
+        if &committed_descriptor != self.schema.binding().descriptor() {
+            return Err(table_binding_mismatch(
+                "the native graph descriptor conflicts with the source binding; the pending range was preserved",
+            ));
+        }
+        self.graph_verified = true;
+        Ok(())
+    }
+}
+
 /// Validates format-3 mutations against the pinned graph and committed source
 /// binding. Format-3 keys remain independent of host filename rules
 /// (ORNA-KEY-004).
@@ -112,15 +292,9 @@ fn validate_candidate_source_rows(
     head: &orna_repository::GitCommitRef,
     mutations: &[TableMutation],
 ) -> Result<(), Diagnostic> {
-    let loader = orna_project::ProjectLoader::default();
     let format = repository
         .open_pinned_format_context(head.as_str())
-        .map_err(|error| {
-            publish_error(
-                "repository format context could not be opened",
-                format!("{error:?}; the pending range was preserved"),
-            )
-        })?;
+        .map_err(preserved("repository format context could not be opened"))?;
     let repository_format = format.repository_format();
     if repository_format != orna_repository::RepositoryFormat::Format3 {
         return Err(describe_storage_failure(
@@ -134,15 +308,14 @@ fn validate_candidate_source_rows(
     // schema" (PUB-3 step 4): `orna commit` admits a table's relation, and
     // publication never creates one. A row whose table has no relation in the
     // captured store stops here with that remedy.
-    let committed_relations = repository
-        .committed_store_relations(head)
-        .map_err(|error| {
-            publish_error(
+    let committed_relations =
+        repository
+            .committed_store_relations(head)
+            .map_err(preserved_display(
                 "format-3 committed store could not be read",
-                format!("{error}; the pending range was preserved"),
-            )
-        })?;
-    let mut mutation_ids = std::collections::BTreeSet::new();
+            ))?;
+    let mut tables: BTreeMap<[u8; 16], TableCandidate> = BTreeMap::new();
+    let mut mutation_ids = BTreeSet::new();
     for mutation in mutations {
         if !mutation_ids.insert(mutation.id()) {
             return Err(publish_error(
@@ -168,150 +341,22 @@ fn validate_candidate_source_rows(
                 ),
             ));
         }
-        let schema = loader
-            .resolve_committed_source_table_schema(repository, head, table_id)
-            .map_err(|error| {
-                publish_error(
-                    "source row schema could not be resolved",
-                    format!("{error:?}; the pending range was preserved"),
-                )
-            })?;
-        let binding = schema.binding();
-        let snapshot_id = format.snapshot_pin().snapshot_id();
-        let database_id = format.require_database_id().map_err(|error| {
-            publish_error(
-                "format-3 database identity could not be verified",
-                format!("{error:?}; the pending range was preserved"),
-            )
-        })?;
-        if schema.qualified_name() != mutation.table()
-            || schema.table_object_id() != table_id
-            || schema.source_commit() != head
-            || schema.snapshot_id() != &snapshot_id
-            || schema.database_id() != database_id.as_bytes()
-            || binding.database_id() != database_id
-            || binding.snapshot_id() != &snapshot_id
-            || *binding.table_object_id() != table_id.bytes()
-            || binding.declaration_name() != Some(schema.declaration_name())
-            || binding.descriptor() != schema.descriptor()
-        {
-            return Err(publish_error(
-                "source row table binding does not match its committed format-3 context",
-                "table identity, descriptor, database or snapshot conflicts with the selected snapshot; the pending range was preserved",
-            ));
-        }
-        let value_context = format
-            .open_value_context(table_id.bytes())
-            .map_err(|error| {
-                publish_error(
-                    "format-3 row value context could not be opened",
-                    format!("{error:?}; the pending range was preserved"),
-                )
-            })?;
-        let projected = orna_storage::project_runtime_mutation_for_descriptor(
-            binding.descriptor(),
-            table_id.bytes(),
-            mutation,
-            &value_context,
-        )
-        .map_err(|error| {
-            let title = if orna_storage::canonicalize_runtime_key(
-                binding.descriptor(),
-                table_id.bytes(),
-                mutation.key(),
-            )
-            .is_err()
-            {
-                "source row key is not canonical"
-            } else {
-                "source row does not match its committed schema"
-            };
-            publish_error(title, format!("{error:?}; the pending range was preserved"))
-        })?;
-        let key_bytes = projected.key;
-        orna_repository::TypedKey::decode_canonical(&key_bytes).map_err(|error| {
-            publish_error(
-                "source row key is not canonical",
-                format!("{error:?}; the pending range was preserved"),
-            )
-        })?;
-        match projected.value.as_deref() {
-            Some(fields) => {
-                binding
-                    .descriptor()
-                    .validate_stored_row(table_id.bytes(), &key_bytes, fields)
-                    .map_err(|error| {
-                        publish_error(
-                            "source row does not match its committed schema",
-                            format!("{error:?}; the pending range was preserved"),
-                        )
-                    })?;
-                if let Some(new_key_bytes) = projected.rekey_to.as_deref() {
-                    binding
-                        .descriptor()
-                        .validate_stored_row(table_id.bytes(), new_key_bytes, fields)
-                        .map_err(|error| {
-                            publish_error(
-                                "source row rekey does not match its committed schema",
-                                format!("{error:?}; the pending range was preserved"),
-                            )
-                        })?;
-                }
+        let table = match tables.entry(table_id.bytes()) {
+            Entry::Occupied(entry) => {
+                let table = entry.into_mut();
+                table.binds_to(mutation.table())?;
+                table
             }
-            None => {
-                binding
-                    .descriptor()
-                    .validate_stored_key(table_id.bytes(), &key_bytes)
-                    .map_err(|error| {
-                        publish_error(
-                            "source row key does not match its committed schema",
-                            format!("{error:?}; the pending range was preserved"),
-                        )
-                    })?;
-            }
-        }
-        let row_map = format.load_row_map(table_id.bytes()).map_err(|error| {
-            publish_error(
-                "format-3 row map could not be loaded",
-                format!(
-                    "{}; the pending range was preserved",
-                    format_context_detail(&error)
-                ),
-            )
-        })?;
-        let graph = format.open_native_graph(&row_map).map_err(|error| {
-            publish_error(
-                "format-3 native graph could not be opened",
-                format!(
-                    "{}; the pending range was preserved",
-                    format_context_detail(&error)
-                ),
-            )
-        })?;
-        let scope = graph.open_read_scope().map_err(|error| {
-            publish_error(
-                "format-3 native graph read scope could not be opened",
-                format!(
-                    "{}; the pending range was preserved",
-                    graph_error_detail(error)
-                ),
-            )
-        })?;
-        let committed_descriptor = graph.read_schema_descriptor(&scope).map_err(|error| {
-            publish_error(
-                "format-3 committed table binding could not be read",
-                format!(
-                    "{}; the pending range was preserved",
-                    graph_error_detail(error)
-                ),
-            )
-        })?;
-        if &committed_descriptor != binding.descriptor() {
-            return Err(publish_error(
-                "source row table binding does not match its committed format-3 context",
-                "the native graph descriptor conflicts with the source binding; the pending range was preserved",
-            ));
-        }
+            Entry::Vacant(entry) => entry.insert(TableCandidate::open(
+                repository,
+                head,
+                &format,
+                table_id,
+                mutation.table(),
+            )?),
+        };
+        table.validate_row(mutation)?;
+        table.verify_graph(&format)?;
     }
     Ok(())
 }
@@ -330,7 +375,6 @@ fn publication_commit_id(
     })
 }
 
-#[allow(clippy::too_many_lines)]
 pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnostic> {
     let message = parse_options(arguments)?;
     let path = local_project_path(endpoint)?;
@@ -376,29 +420,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     // Publication is coordinated by the repository publication lock (PUB-3 step 7),
     // not by the runtime writer lease. A secondary publisher may admit the durable
     // tail while a live owner holds the runtime owner lock (ORNA-TURSO-005).
-    // Reconcile an interrupted publication before reading or freezing the tail.
-    runtime
-        .block_on(RuntimePublicationCoordinator::recover(&repository, &state))
-        .map_err(|error| {
-            describe_storage_failure("pending publication could not be recovered", &error)
-        })?;
-    // Never select another range if recovery returned with a journal still
-    // present, including when a new publication raced with recovery.
-    if repository
-        .read_publication_journal()
-        .map_err(|error| {
-            publish_error(
-                "publication recovery journal could not be read",
-                format!("{error:?}; no new publication range was selected"),
-            )
-        })?
-        .is_some()
-    {
-        return Err(publish_error(
-            "publication recovery remains pending",
-            "the repository journal is still present; the journal and pending tail were preserved; no new range was selected",
-        ));
-    }
+    recover_pending_publication(&runtime, &repository, &state)?;
     let pending = runtime.block_on(state.pending_count()).map_err(|error| {
         publish_error(
             "pending runtime changes could not be read",
@@ -425,120 +447,172 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     let mut intent_id = [0_u8; 16];
     getrandom::fill(&mut intent_id)
         .map_err(|_| publish_error("publication intent could not be created", USAGE_HELP))?;
+    let publication = runtime.block_on(publish_frozen_range(
+        &repository,
+        &state,
+        &message,
+        intent_id,
+        &checkpoint,
+    ))?;
+    report_publication(publication);
+    Ok(())
+}
 
-    let commit = runtime.block_on(async {
-        let freeze = state
-            .freeze(intent_id, &checkpoint)
-            .await
-            .map_err(|error| {
-                publish_error("runtime tail could not be frozen", format!("{error:?}"))
-            })?;
-        publication_crash_barrier("capture");
-        let frozen = state
-            .pending_table_mutations_through(&freeze)
+/// Reconciles an interrupted publication before the tail is read or frozen.
+/// Recovery that returns with a journal still present, including when a new
+/// publication raced with it, blocks the run: no other range is selected.
+fn recover_pending_publication(
+    runtime: &tokio::runtime::Runtime,
+    repository: &orna_repository::Repository,
+    state: &RuntimeState,
+) -> Result<(), Diagnostic> {
+    runtime
+        .block_on(RuntimePublicationCoordinator::recover(repository, state))
+        .map_err(|error| {
+            describe_storage_failure("pending publication could not be recovered", &error)
+        })?;
+    if repository
+        .read_publication_journal()
+        .map_err(|error| {
+            publish_error(
+                "publication recovery journal could not be read",
+                format!("{error:?}; no new publication range was selected"),
+            )
+        })?
+        .is_some()
+    {
+        return Err(publish_error(
+            "publication recovery remains pending",
+            "the repository journal is still present; the journal and pending tail were preserved; no new range was selected",
+        ));
+    }
+    Ok(())
+}
+
+/// Freezes the pending tail, projects exactly that range into one commit and
+/// consumes the range. A range whose rows all match the committed snapshot is
+/// consumed without a commit.
+async fn publish_frozen_range(
+    repository: &orna_repository::Repository,
+    state: &RuntimeState,
+    message: &str,
+    intent_id: [u8; 16],
+    checkpoint: &orna_runtime::Checkpoint,
+) -> Result<Publication, Diagnostic> {
+    let freeze = state
+        .freeze(intent_id, checkpoint)
+        .await
+        .map_err(|error| publish_error("runtime tail could not be frozen", format!("{error:?}")))?;
+    publication_crash_barrier("capture");
+    let frozen = state
+        .pending_table_mutations_through(&freeze)
+        .await
+        .map_err(|error| {
+            publish_error(
+                "frozen runtime range could not be read",
+                format!("{error:?}"),
+            )
+        })?;
+    publication_crash_barrier("row");
+    let head = repository
+        .head()
+        .map_err(|error| {
+            publish_error("committed snapshot could not be read", format!("{error:?}"))
+        })?
+        .ok_or_else(|| {
+            publish_error(
+                "repository has no committed snapshot to publish onto",
+                "make an initial commit before publishing runtime data",
+            )
+        })?;
+    validate_candidate_source_rows(repository, &head, &frozen)?;
+    // The frozen range is the only content this call may commit: the
+    // candidate is built from the captured base plus exactly these rows.
+    let counts = table_row_counts(&frozen);
+    let index = repository
+        .index_generation()
+        .map_err(|error| publish_error("ordinary index could not be read", format!("{error:?}")))?;
+    let prepared = RuntimePublicationCoordinator::prepare_allow_noop(
+        repository,
+        state,
+        &head,
+        index,
+        &freeze,
+        // Format-3 rows have no loose path, so the coordinator never asks.
+        |_| Err(orna_storage::Error::InvalidKey),
+        message,
+    )
+    .await
+    .map_err(|error| {
+        describe_storage_failure("publication candidate could not be prepared", &error)
+    })?;
+    publication_crash_barrier("candidate");
+    let Some(mut coordinator) = prepared else {
+        // Every row in the frozen range already matches the committed
+        // snapshot, so there is no visible change to publish. Consume the
+        // frozen intent instead of failing on an empty commit: the save
+        // that produced the range stays successful and the pending tail
+        // does not grow without bound (ORNA-PUB-006).
+        state
+            .complete_publication(&freeze, &publication_commit_id(&head)?)
             .await
             .map_err(|error| {
                 publish_error(
-                    "frozen runtime range could not be read",
+                    "unpublishable runtime range could not be consumed",
                     format!("{error:?}"),
                 )
             })?;
-        publication_crash_barrier("row");
-        let head = repository
-            .head()
-            .map_err(|error| {
-                publish_error("committed snapshot could not be read", format!("{error:?}"))
-            })?
-            .ok_or_else(|| {
-                publish_error(
-                    "repository has no committed snapshot to publish onto",
-                    "make an initial commit before publishing runtime data",
-                )
-            })?;
-        validate_candidate_source_rows(&repository, &head, &frozen)?;
-        // The frozen range is the only content this call may commit: the
-        // candidate is built from the captured base plus exactly these rows.
-        let counts = table_row_counts(&frozen);
-        let index = repository.index_generation().map_err(|error| {
-            publish_error("ordinary index could not be read", format!("{error:?}"))
+        return Ok(Publication::NoVisibleChange(counts));
+    };
+    // ORNA-ASSERT-045: the candidate's assertions run before any ref, pin or
+    // journal names it, so a refused publication leaves no ref, pin or
+    // journal behind and the frozen range stays pending.
+    let gate = AssertionGate {
+        command: GatedCommand::Publish,
+    };
+    if let Err(refusal) = gate.validate(repository, coordinator.candidate()) {
+        let error = orna_repository::RepositoryError::CandidateAssertionRefused(refusal.clone());
+        return Err(refusal_diagnostic(&refusal, gate.command, &error));
+    }
+    coordinator
+        .publish_with_stage_hook(repository, |stage| match stage {
+            orna_repository::PublicationJournalStage::Prepared => {
+                publication_crash_barrier("prepared");
+            }
+            orna_repository::PublicationJournalStage::RefAdvanced => {
+                publication_crash_barrier("ref-cas");
+            }
+            orna_repository::PublicationJournalStage::IndexReconciled => {
+                publication_crash_barrier("index");
+            }
+            // These stages have no crash barrier of their own. Naming them keeps
+            // a new stage from passing unobserved.
+            orna_repository::PublicationJournalStage::WorktreeReconciled
+            | orna_repository::PublicationJournalStage::RuntimeCompleted
+            | orna_repository::PublicationJournalStage::Complete => {}
+        })
+        .map_err(|error| {
+            describe_storage_failure("publication commit could not be advanced", &error)
         })?;
-        let prepared = RuntimePublicationCoordinator::prepare_allow_noop(
-            &repository,
-            &state,
-            &head,
-            index,
-            &freeze,
-            // Format-3 rows have no loose path, so the coordinator never asks.
-            |_| Err(orna_storage::Error::InvalidKey),
-            &message,
-        )
+    publication_crash_barrier("ref-index");
+    coordinator
+        .complete(repository, state, &freeze)
         .await
         .map_err(|error| {
-            describe_storage_failure("publication candidate could not be prepared", &error)
+            describe_storage_failure("published runtime range could not be consumed", &error)
         })?;
-        publication_crash_barrier("candidate");
-        let Some(mut coordinator) = prepared else {
-            // Every row in the frozen range already matches the committed
-            // snapshot, so there is no visible change to publish. Consume the
-            // frozen intent instead of failing on an empty commit: the save
-            // that produced the range stays successful and the pending tail
-            // does not grow without bound (ORNA-PUB-006).
-            state
-                .complete_publication(&freeze, &publication_commit_id(&head)?)
-                .await
-                .map_err(|error| {
-                    publish_error(
-                        "unpublishable runtime range could not be consumed",
-                        format!("{error:?}"),
-                    )
-                })?;
-            return Ok::<_, Diagnostic>(Publication::NoVisibleChange(counts));
-        };
-        // ORNA-ASSERT-045: the candidate's assertions run before any ref, pin or
-        // journal names it, so a refused publication leaves no ref, pin or
-        // journal behind and the frozen range stays pending.
-        let gate = AssertionGate {
-            command: GatedCommand::Publish,
-        };
-        if let Err(refusal) = gate.validate(&repository, coordinator.candidate()) {
-            let error =
-                orna_repository::RepositoryError::CandidateAssertionRefused(refusal.clone());
-            return Err(refusal_diagnostic(&refusal, gate.command, &error));
-        }
-        coordinator
-            .publish_with_stage_hook(&repository, |stage| match stage {
-                orna_repository::PublicationJournalStage::Prepared => {
-                    publication_crash_barrier("prepared");
-                }
-                orna_repository::PublicationJournalStage::RefAdvanced => {
-                    publication_crash_barrier("ref-cas");
-                }
-                orna_repository::PublicationJournalStage::IndexReconciled => {
-                    publication_crash_barrier("index");
-                }
-                _ => {}
-            })
-            .map_err(|error| {
-                describe_storage_failure("publication commit could not be advanced", &error)
-            })?;
-        publication_crash_barrier("ref-index");
-        coordinator
-            .complete(&repository, &state, &freeze)
-            .await
-            .map_err(|error| {
-                describe_storage_failure("published runtime range could not be consumed", &error)
-            })?;
-        publication_crash_barrier("tail");
-        let commit = repository
-            .head()
-            .map_err(|error| {
-                publish_error("published snapshot could not be read", format!("{error:?}"))
-            })?
-            .ok_or_else(|| publish_error("publication left no committed snapshot", USAGE_HELP))?;
-        Ok(Publication::Published(commit.as_str().to_owned(), counts))
-    })?;
+    publication_crash_barrier("tail");
+    let commit = repository
+        .head()
+        .map_err(|error| {
+            publish_error("published snapshot could not be read", format!("{error:?}"))
+        })?
+        .ok_or_else(|| publish_error("publication left no committed snapshot", USAGE_HELP))?;
+    Ok(Publication::Published(commit.as_str().to_owned(), counts))
+}
 
-    match commit {
+fn report_publication(publication: Publication) {
+    match publication {
         Publication::Published(commit, counts) => {
             println!("published {commit}");
             for (table, rows) in counts {
@@ -563,7 +637,6 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
             }
         }
     }
-    Ok(())
 }
 
 /// What one publication did with its frozen runtime range.
