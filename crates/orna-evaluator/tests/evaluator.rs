@@ -11882,6 +11882,71 @@ fn bucket_by_elapsed_utc_preserves_group_and_row_order_for_all_call_forms() {
 }
 
 #[test]
+fn bucket_relation_one_applies_its_predicate_argument() {
+    let period = duration(86_400, 0);
+    let environment = Environment::from([("period".into(), period)]);
+    let day = 1_704_067_200;
+    // One day holds two rows and each following day holds one.
+    let rows = vec![
+        bucket_instant(day + 3_600),
+        bucket_instant(day + 43_200),
+        bucket_instant(day + 86_400 + 3_600),
+        bucket_instant(day + 2 * 86_400 + 3_600),
+    ];
+    let one_matching = |predicate: &str| {
+        relation_stage(
+            relation_bucket_by(
+                relation_source_expression("Reading"),
+                parsed_expression(include_str!(
+                    "fixtures/evaluator_source_514cb13f603464f9.orna"
+                )),
+                None,
+            ),
+            "one",
+            vec![parsed_expression(predicate)],
+        )
+    };
+
+    // `one(rows, predicate)` requires exactly one matching value
+    // (09-standard-library.md:36), so a bucketed observation applies the
+    // predicate instead of counting every bucket.
+    let mut effects = DistinctRelationEffects::new(rows.clone());
+    assert_eq!(
+        invoke_relation_with_environment(
+            one_matching("bucket => count(bucket) == 2"),
+            &environment,
+            &mut effects,
+            Limits::default(),
+        )
+        .unwrap(),
+        bucket_group(&rows[..2])
+    );
+
+    for (predicate, expected) in [
+        (
+            "bucket => count(bucket) == 1",
+            "ORNA-EVAL-RELATION-ONE-MULTIPLE",
+        ),
+        (
+            "bucket => count(bucket) == 3",
+            "ORNA-EVAL-RELATION-ONE-ZERO",
+        ),
+    ] {
+        let mut effects = DistinctRelationEffects::new(rows.clone());
+        assert_eq!(
+            code(invoke_relation_with_environment(
+                one_matching(predicate),
+                &environment,
+                &mut effects,
+                Limits::default(),
+            )),
+            expected,
+            "{predicate}"
+        );
+    }
+}
+
+#[test]
 fn bucket_by_preserves_filter_map_flat_map_window_and_sort_suffixes() {
     let period = duration(86_400, 0);
     let environment = Environment::from([("period".into(), period)]);
