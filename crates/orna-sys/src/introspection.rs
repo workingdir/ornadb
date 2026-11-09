@@ -18,7 +18,7 @@ use std::{
 use serde::{Serialize, ser::SerializeStruct};
 use sha2::{Digest, Sha256};
 
-use super::{Diagnostic, ObjectRef, PlanRef};
+use super::{Diagnostic, ObjectRef, PlanRef, hex};
 
 pub const MAX_DEPENDENCY_OBJECTS: usize = 65_536;
 pub const MAX_DEPENDENCY_EDGES: usize = 1_000_000;
@@ -476,16 +476,6 @@ fn dependency_reference(snapshot: &SnapshotRef, key: &DependencyKey) -> String {
 fn hash_part(hash: &mut Sha256, bytes: &[u8]) {
     hash.update((bytes.len() as u64).to_be_bytes());
     hash.update(bytes);
-}
-
-fn hex(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        encoded.push(char::from(DIGITS[usize::from(byte >> 4)]));
-        encoded.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
-    }
-    encoded
 }
 
 /// The operator vocabulary is kept in lock-step with `sys.PlanNodeKind`.

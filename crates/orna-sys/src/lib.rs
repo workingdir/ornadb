@@ -1382,12 +1382,10 @@ impl Runtime {
                 if value.static_type() != handle.result_type().id() {
                     self.store_terminal(
                         handle,
-                        RetainedInvocationResult::OrdinaryFailure(Diagnostic {
-                            code: "sys.invoke.return_type",
-                            message: "invocation returned a value with an incompatible type",
-                            fields: BTreeMap::new(),
-                            causes: Vec::new(),
-                        }),
+                        RetainedInvocationResult::OrdinaryFailure(Diagnostic::new(
+                            "sys.invoke.return_type",
+                            "invocation returned a value with an incompatible type",
+                        )),
                     )?;
                     return Err(AdmissionError::ReturnType);
                 }
@@ -1984,17 +1982,7 @@ impl RuntimeSupervisor {
                         .map_err(|_| AdmissionError::RuntimeUnavailable)?
                         .cancellation_token(&handle)?
                 };
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    executor.execute_controlled(&boundary, &cancellation)
-                }))
-                .unwrap_or_else(|_| {
-                    InvocationResult::Orphaned(Some(Diagnostic {
-                        code: "sys.invoke.orphaned",
-                        message: "invocation executor panicked",
-                        fields: BTreeMap::new(),
-                        causes: Vec::new(),
-                    }))
-                });
+                let result = execute_guarded(executor, &boundary, &cancellation);
                 let mut runtime = self
                     .runtime
                     .lock()
@@ -2113,17 +2101,7 @@ impl RuntimeSupervisor {
                         drop(execution);
                         return;
                     }
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        executor.execute_controlled(&boundary, &cancellation)
-                    }))
-                    .unwrap_or_else(|_| {
-                        InvocationResult::Orphaned(Some(Diagnostic {
-                            code: "sys.invoke.orphaned",
-                            message: "invocation executor panicked",
-                            fields: BTreeMap::new(),
-                            causes: Vec::new(),
-                        }))
-                    });
+                    let result = execute_guarded(&mut executor, &boundary, &cancellation);
                     let Ok(mut runtime) = runtime.lock() else {
                         return;
                     };
@@ -2409,15 +2387,37 @@ fn append(out: &mut Vec<u8>, value: &[u8]) {
     out.extend_from_slice(&(value.len() as u64).to_be_bytes());
     out.extend_from_slice(value);
 }
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+pub(crate) fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        encoded.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+    }
+    encoded
 }
 fn malformed_completion_failure() -> RetainedInvocationResult {
-    RetainedInvocationResult::OrdinaryFailure(Diagnostic {
-        code: "sys.invoke.malformed_completion",
-        message: "invocation executor returned an invalid terminal completion",
-        fields: BTreeMap::new(),
-        causes: Vec::new(),
+    RetainedInvocationResult::OrdinaryFailure(Diagnostic::new(
+        "sys.invoke.malformed_completion",
+        "invocation executor returned an invalid terminal completion",
+    ))
+}
+
+/// Runs the executor under the cancellation token. A panicking executor is an
+/// orphaned completion, never an unwind into the supervisor.
+fn execute_guarded<E: InvocationExecutor>(
+    executor: &mut E,
+    boundary: &ExecutionBoundary,
+    cancellation: &CancellationToken,
+) -> InvocationResult<TypedValue> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        executor.execute_controlled(boundary, cancellation)
+    }))
+    .unwrap_or_else(|_| {
+        InvocationResult::Orphaned(Some(Diagnostic::new(
+            "sys.invoke.orphaned",
+            "invocation executor panicked",
+        )))
     })
 }
 
@@ -2474,12 +2474,7 @@ impl AdmissionError {
         }
     }
     pub fn diagnostic(&self) -> Diagnostic {
-        Diagnostic {
-            code: self.code(),
-            message: "reflective invocation admission rejected",
-            fields: BTreeMap::new(),
-            causes: Vec::new(),
-        }
+        Diagnostic::new(self.code(), "reflective invocation admission rejected")
     }
 }
 impl fmt::Display for AdmissionError {
@@ -2522,6 +2517,19 @@ pub struct Diagnostic {
     pub message: &'static str,
     pub fields: BTreeMap<String, DiagnosticField>,
     pub causes: Vec<Diagnostic>,
+}
+
+impl Diagnostic {
+    /// A diagnostic that carries only its fixed code and message, with no
+    /// retained fields or causes.
+    pub fn new(code: &'static str, message: &'static str) -> Self {
+        Self {
+            code,
+            message,
+            fields: BTreeMap::new(),
+            causes: Vec::new(),
+        }
+    }
 }
 
 impl fmt::Debug for Diagnostic {
