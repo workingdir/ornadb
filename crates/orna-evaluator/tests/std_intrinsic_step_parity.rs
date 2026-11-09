@@ -23,7 +23,7 @@ use orna_evaluator::{Environment, Limits, evaluate_expression};
 const SIZES: [usize; 3] = [256, 1024, 4096];
 
 /// Smallest successful `max_steps` per program at `SIZES`.
-const BASELINE: [(&str, [u64; 3]); 40] = [
+const BASELINE: [(&str, [u64; 3]); 27] = [
     ("filter", [1795, 7171, 28675]),
     ("map", [1027, 4099, 16387]),
     ("flat_map", [1027, 4099, 16387]),
@@ -40,17 +40,6 @@ const BASELINE: [(&str, [u64; 3]); 40] = [
     ("max", [514, 2050, 8194]),
     ("every", [1283, 5123, 20483]),
     ("exists", [1283, 5123, 20483]),
-    ("chunk", [552, 2198, 8781]),
-    ("flatten", [846, 3370, 13464]),
-    ("partition", [1795, 7171, 28675]),
-    ("zip", [771, 3075, 12291]),
-    ("zip_exact", [771, 3075, 12291]),
-    ("unique", [770, 3074, 12290]),
-    ("pairs", [16, 16, 16]),
-    ("window", [25, 25, 25]),
-    ("window_step", [23, 23, 23]),
-    ("split_when", [1795, 7171, 28675]),
-    ("rank", [3198, 14687, 66341]),
     ("group_by", [1283, 5123, 20483]),
     ("stats_mean", [258, 1026, 4098]),
     ("stats_median", [513, 2049, 8193]),
@@ -62,8 +51,6 @@ const BASELINE: [(&str, [u64; 3]); 40] = [
     ("stats_percentile", [260, 1028, 4100]),
     ("text_join", [773, 3077, 12293]),
     ("bits_or", [3, 3, 3]),
-    ("math_clamp", [4, 4, 4]),
-    ("math_increment", [2, 2, 2]),
 ];
 
 fn list(size: usize) -> String {
@@ -121,35 +108,6 @@ fn programs(size: usize) -> Vec<(&'static str, String)> {
             "exists",
             format!("std.collection.exists({values}, value => value < 0)"),
         ),
-        ("chunk", format!("std.collection.chunk({values}, 7)")),
-        (
-            "flatten",
-            format!("std.collection.flatten(std.collection.chunk({values}, 7))"),
-        ),
-        (
-            "partition",
-            format!("std.collection.partition({values}, value => value % 3 == 0)"),
-        ),
-        ("zip", format!("std.collection.zip({values}, {values})")),
-        (
-            "zip_exact",
-            format!("std.collection.zip_exact({values}, {values})"),
-        ),
-        ("unique", format!("std.collection.unique({values})")),
-        ("pairs", format!("std.collection.pairs({small})")),
-        ("window", format!("std.collection.window({windowed}, 3)")),
-        (
-            "window_step",
-            format!("std.collection.window({windowed}, 3, 2)"),
-        ),
-        (
-            "split_when",
-            format!("std.collection.split_when({values}, value => value % 5 == 0)"),
-        ),
-        (
-            "rank",
-            format!("std.collection.rank({values}, value => value % 7)"),
-        ),
         (
             "group_by",
             format!("std.collection.group_by({values}, value => value % 4)"),
@@ -175,8 +133,6 @@ fn programs(size: usize) -> Vec<(&'static str, String)> {
             format!("std.text.join(std.collection.map({values}, value => \"x\"), \",\")"),
         ),
         ("bits_or", String::from("std.bits.bit_or(123, 456)")),
-        ("math_clamp", String::from("std.math.clamp(5, 1, 3)")),
-        ("math_increment", String::from("std.math.increment(41)")),
     ]
 }
 

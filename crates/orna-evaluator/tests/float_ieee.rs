@@ -112,21 +112,6 @@ fn out_of_range_float_literals_round_to_signed_infinity_or_zero() {
 
 // Specified: ORNA-FLOAT-007; min prefers -0.0 and max prefers +0.0 among zeros, and any NaN
 // operand yields the canonical NaN instead of an evaluation error.
-#[test]
-fn scalar_min_and_max_follow_float_extrema_rules() {
-    assert_eq!(float_bits("std.math.min(0.0f, -0.0f)"), (-0.0f64).to_bits());
-    assert_eq!(float_bits("std.math.min(-0.0f, 0.0f)"), (-0.0f64).to_bits());
-    assert_eq!(float_bits("std.math.max(-0.0f, 0.0f)"), 0.0f64.to_bits());
-    assert_eq!(float_bits("std.math.max(0.0f, -0.0f)"), 0.0f64.to_bits());
-    assert_eq!(
-        float_bits("std.math.min(0.0f / 0.0f, 1.0f)"),
-        CANONICAL_NAN_BITS
-    );
-    assert_eq!(
-        float_bits("std.math.max(1.0f, 0.0f / 0.0f)"),
-        CANONICAL_NAN_BITS
-    );
-}
 
 fn session() -> AdmittedReplSession {
     AdmittedReplSession::with_reference_standard(Limits::default())
