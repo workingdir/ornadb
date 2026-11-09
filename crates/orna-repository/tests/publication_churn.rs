@@ -128,7 +128,6 @@ async fn prepare_publication(
         &head,
         index,
         freeze,
-        |_| Err(orna_storage::Error::InvalidKey),
         "orna: publish one-row update",
     )
     .await
@@ -410,7 +409,6 @@ async fn publication_reports_a_missing_row_index_root_as_unavailable() {
         &head,
         index,
         &freeze,
-        |_| Err(orna_storage::Error::InvalidKey),
         "orna: publish one-row update",
     )
     .await

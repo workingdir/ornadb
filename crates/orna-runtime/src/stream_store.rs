@@ -918,12 +918,26 @@ async fn load_stream_failure_assertion_detail(
     )?);
     let source_span = SourceSpan::new(
         file,
-        decode_nonnegative_bigint(row.get(6).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
-        decode_nonnegative_bigint(row.get(7).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
-        decode_positive_bigint(row.get(8).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
-        decode_positive_bigint(row.get(9).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
-        decode_positive_bigint(row.get(10).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
-        decode_positive_bigint(row.get(11).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+        orna_foundation::SourceSpanExtent {
+            start_byte: decode_nonnegative_bigint(
+                row.get(6).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )?,
+            end_byte: decode_nonnegative_bigint(
+                row.get(7).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )?,
+            start_line: decode_positive_bigint(
+                row.get(8).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )?,
+            start_column: decode_positive_bigint(
+                row.get(9).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )?,
+            end_line: decode_positive_bigint(
+                row.get(10).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )?,
+            end_column: decode_positive_bigint(
+                row.get(11).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )?,
+        },
     )
     .map_err(|_| RuntimeError::RecoveryInvalid)?;
     let witness = row

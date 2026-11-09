@@ -5508,7 +5508,7 @@ mod tests {
             Err(TableActivationError::Runtime(RuntimeError::RecoveryInvalid))
         ));
         let stale_context = RuntimeActivationContext {
-            capture: CwdCapture::new(context.capture().snapshot().clone(), digest(200)).unwrap(),
+            capture: CwdCapture::new(context.capture().snapshot(), digest(200)).unwrap(),
             activation_time: context.activation_time(),
             table_object_ids: BTreeMap::new(),
             committed_rows: None,
@@ -16543,12 +16543,14 @@ mod tests {
             ExpressionRef::from_row_ref(reference("predicate")),
             SourceSpan::new(
                 file,
-                4.into(),
-                9.into(),
-                1.into(),
-                5.into(),
-                1.into(),
-                10.into(),
+                orna_foundation::SourceSpanExtent {
+                    start_byte: 4.into(),
+                    end_byte: 9.into(),
+                    start_line: 1.into(),
+                    start_column: 5.into(),
+                    end_line: 1.into(),
+                    end_column: 10.into(),
+                },
             )
             .unwrap(),
             Some(SafeAssertionWitness::from_safe_presentation(
@@ -16567,7 +16569,7 @@ mod tests {
             version: 0,
             committed: None,
         };
-        let detail = assertion_detail(state.capture().await.unwrap().snapshot().clone());
+        let detail = assertion_detail(state.capture().await.unwrap().snapshot());
         let failed = {
             let mut stream = state.stream_backend(writer);
             let lease = match stream
@@ -16637,7 +16639,7 @@ mod tests {
             version: 0,
             committed: None,
         };
-        let detail = assertion_detail(state.capture().await.unwrap().snapshot().clone());
+        let detail = assertion_detail(state.capture().await.unwrap().snapshot());
         let failed = {
             let mut stream = state.stream_backend(writer);
             let lease = match stream
@@ -17049,7 +17051,7 @@ mod tests {
         };
         let reference = failure_reference(
             capture.database_id(),
-            capture.snapshot().clone(),
+            capture.snapshot(),
             failure.identity.0.consumer.canonical(),
             failure.identity.0.source.as_str().to_owned(),
             failure
@@ -17079,7 +17081,7 @@ mod tests {
 
         let absent = failure_reference(
             capture.database_id(),
-            capture.snapshot().clone(),
+            capture.snapshot(),
             failure.identity.0.consumer.canonical(),
             failure.identity.0.source.as_str().to_owned(),
             failure
@@ -17174,7 +17176,7 @@ mod tests {
         let capture = state.capture().await.unwrap();
         let reference = failure_reference(
             capture.database_id(),
-            capture.snapshot().clone(),
+            capture.snapshot(),
             failure.identity.0.consumer.canonical(),
             failure.identity.0.source.as_str().to_owned(),
             failure
@@ -19096,7 +19098,7 @@ mod tests {
         assert_eq!(projected_query.id, query.id);
         assert_eq!(
             projected_query.snapshot,
-            snapshot_reference(capture.database_id(), capture.snapshot().clone()).unwrap()
+            snapshot_reference(capture.database_id(), capture.snapshot()).unwrap()
         );
         assert_eq!(
             projected_query.started,
@@ -33036,14 +33038,14 @@ mod tests {
         let projection = SysRunProjection::try_from(&run).unwrap();
         let expected = invocation_reference(
             run.snapshot.database_id(),
-            run.snapshot.snapshot().clone(),
+            run.snapshot.snapshot(),
             invocation_id,
         )
         .unwrap();
         assert_eq!(projection.invocation, expected);
         assert_eq!(
             projection.invocation.as_row_ref().snapshot,
-            *run.snapshot.snapshot()
+            run.snapshot.snapshot()
         );
 
         let mut mismatched_runtime = run.clone();
@@ -33317,7 +33319,7 @@ mod tests {
         );
         assert_eq!(
             run_reference.as_row_ref().snapshot,
-            *runs[0].snapshot.snapshot()
+            runs[0].snapshot.snapshot()
         );
         let mut mismatched_generation = runs[0].clone();
         mismatched_generation.runtime_generation += 1;
@@ -33339,15 +33341,13 @@ mod tests {
         let run_projection = SysRunProjection::try_from(&runs[0]).unwrap();
         assert_eq!(run_projection.reference, run_reference);
         assert_eq!(run_projection.id, runs[0].id.as_bytes());
-        let expected_snapshot = snapshot_reference(
-            runs[0].snapshot.database_id(),
-            runs[0].snapshot.snapshot().clone(),
-        )
-        .unwrap();
+        let expected_snapshot =
+            snapshot_reference(runs[0].snapshot.database_id(), runs[0].snapshot.snapshot())
+                .unwrap();
         assert_eq!(run_projection.snapshot, expected_snapshot);
         assert_eq!(
             run_projection.snapshot.as_row_ref().snapshot,
-            *runs[0].snapshot.snapshot()
+            runs[0].snapshot.snapshot()
         );
         assert_eq!(
             run_projection.status_at_snapshot,
@@ -33368,7 +33368,7 @@ mod tests {
         assert_eq!(first.parent_capture, runs[0].snapshot);
         assert_eq!(
             stream_reference.as_row_ref().snapshot,
-            *runs[0].snapshot.snapshot()
+            runs[0].snapshot.snapshot()
         );
         let OvbRaw::Array(natural_key) = &stream_reference.as_row_ref().key else {
             panic!("stream reference did not retain its natural key");
@@ -34193,7 +34193,7 @@ mod tests {
         ) -> FailureRef {
             failure_reference(
                 capture.database_id(),
-                capture.snapshot().clone(),
+                capture.snapshot(),
                 key.consumer.canonical(),
                 key.source.as_str().to_owned(),
                 key.partition
@@ -34980,7 +34980,7 @@ mod tests {
         let capture = state.capture().await.unwrap();
         let unrelated_failure = failure_reference(
             capture.database_id(),
-            capture.snapshot().clone(),
+            capture.snapshot(),
             key.consumer.canonical(),
             "another-source".into(),
             None,

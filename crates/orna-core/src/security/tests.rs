@@ -155,17 +155,16 @@ fn selected_reachable_role_grant_authorises_the_pinned_function() {
 fn durable_class_wide_execute_grant_authorises_direct_session_principal() {
     let grant = PrivilegeGrant::new(USER, PrivilegeClass::Execute, None)
         .expect("a class-wide execute grant is valid");
-    let snapshot =
-        SecuritySnapshot::new_with_function_targets_local_peer_credentials_and_privilege_grants(
-            REVISION,
-            vec![SecurityFunctionTarget::application(FUNCTION)],
-            vec![active(USER, PrincipalKind::User)],
-            vec![],
-            vec![],
-            vec![],
-            vec![grant],
-        )
-        .expect("valid durable direct-grant snapshot");
+    let snapshot = SecuritySnapshot::from_definitions(
+        REVISION,
+        SecurityDefinitions {
+            function_targets: vec![SecurityFunctionTarget::application(FUNCTION)],
+            principals: vec![active(USER, PrincipalKind::User)],
+            privilege_grants: vec![grant],
+            ..SecurityDefinitions::default()
+        },
+    )
+    .expect("valid durable direct-grant snapshot");
     let session = snapshot
         .bind_authenticated_session(USER, vec![])
         .expect("active user session should bind");
@@ -182,20 +181,20 @@ fn durable_class_wide_execute_grant_authorises_direct_session_principal() {
 fn durable_object_scoped_execute_grant_authorises_selected_active_role() {
     let grant = PrivilegeGrant::new(ROLE, PrivilegeClass::Execute, Some(FUNCTION))
         .expect("an object-scoped execute grant is valid");
-    let snapshot =
-        SecuritySnapshot::new_with_function_targets_local_peer_credentials_and_privilege_grants(
-            REVISION,
-            vec![SecurityFunctionTarget::application(FUNCTION)],
-            vec![
+    let snapshot = SecuritySnapshot::from_definitions(
+        REVISION,
+        SecurityDefinitions {
+            function_targets: vec![SecurityFunctionTarget::application(FUNCTION)],
+            principals: vec![
                 active(USER, PrincipalKind::User),
                 active(ROLE, PrincipalKind::Role),
             ],
-            vec![RoleMembership::new(ROLE, USER)],
-            vec![],
-            vec![],
-            vec![grant],
-        )
-        .expect("valid durable role-grant snapshot");
+            memberships: vec![RoleMembership::new(ROLE, USER)],
+            privilege_grants: vec![grant],
+            ..SecurityDefinitions::default()
+        },
+    )
+    .expect("valid durable role-grant snapshot");
     let session = snapshot
         .bind_authenticated_session(USER, vec![ROLE])
         .expect("reachable active role should bind");
@@ -212,20 +211,19 @@ fn durable_object_scoped_execute_grant_authorises_selected_active_role() {
 fn durable_object_scoped_execute_grant_denies_an_unrelated_function() {
     let grant = PrivilegeGrant::new(USER, PrivilegeClass::Execute, Some(OTHER_FUNCTION))
         .expect("an object-scoped execute grant is valid");
-    let snapshot =
-        SecuritySnapshot::new_with_function_targets_local_peer_credentials_and_privilege_grants(
-            REVISION,
-            vec![
+    let snapshot = SecuritySnapshot::from_definitions(
+        REVISION,
+        SecurityDefinitions {
+            function_targets: vec![
                 SecurityFunctionTarget::application(FUNCTION),
                 SecurityFunctionTarget::application(OTHER_FUNCTION),
             ],
-            vec![active(USER, PrincipalKind::User)],
-            vec![],
-            vec![],
-            vec![],
-            vec![grant],
-        )
-        .expect("valid durable unrelated-object snapshot");
+            principals: vec![active(USER, PrincipalKind::User)],
+            privilege_grants: vec![grant],
+            ..SecurityDefinitions::default()
+        },
+    )
+    .expect("valid durable unrelated-object snapshot");
     let session = snapshot
         .bind_authenticated_session(USER, vec![])
         .expect("active user session should bind");
@@ -1101,16 +1099,19 @@ fn snapshot_exposes_canonical_persistence_records() {
 
 #[test]
 fn local_peer_authentication_binds_only_the_mapped_principal() {
-    let snapshot = SecuritySnapshot::new_with_local_peer_credentials(
+    let snapshot = SecuritySnapshot::from_definitions(
         REVISION,
-        vec![FUNCTION],
-        vec![
-            active(USER, PrincipalKind::User),
-            active(ROLE, PrincipalKind::Role),
-        ],
-        vec![RoleMembership::new(ROLE, USER)],
-        vec![ExecuteGrant::new(ROLE, FUNCTION)],
-        vec![LocalPeerCredential::new(1_001, USER)],
+        SecurityDefinitions {
+            function_targets: vec![SecurityFunctionTarget::application(FUNCTION)],
+            principals: vec![
+                active(USER, PrincipalKind::User),
+                active(ROLE, PrincipalKind::Role),
+            ],
+            memberships: vec![RoleMembership::new(ROLE, USER)],
+            execute_grants: vec![ExecuteGrant::new(ROLE, FUNCTION)],
+            local_peer_credentials: vec![LocalPeerCredential::new(1_001, USER)],
+            ..SecurityDefinitions::default()
+        },
     )
     .expect("valid local peer snapshot");
 
@@ -1146,13 +1147,14 @@ fn local_peer_authentication_rejects_disabled_and_role_principals() {
             SessionBindingError::RoleCannotAuthenticate,
         ),
     ] {
-        let snapshot = SecuritySnapshot::new_with_local_peer_credentials(
+        let snapshot = SecuritySnapshot::from_definitions(
             REVISION,
-            vec![FUNCTION],
-            vec![principal],
-            vec![],
-            vec![],
-            vec![LocalPeerCredential::new(1_001, USER)],
+            SecurityDefinitions {
+                function_targets: vec![SecurityFunctionTarget::application(FUNCTION)],
+                principals: vec![principal],
+                local_peer_credentials: vec![LocalPeerCredential::new(1_001, USER)],
+                ..SecurityDefinitions::default()
+            },
         )
         .expect("existing principal may retain a local credential");
 
@@ -1174,38 +1176,41 @@ fn malformed_local_peer_credentials_reject_the_snapshot() {
     ];
 
     assert!(matches!(
-        SecuritySnapshot::new_with_local_peer_credentials(
+        SecuritySnapshot::from_definitions(
             REVISION,
-            vec![FUNCTION],
-            principals.clone(),
-            vec![],
-            vec![],
-            vec![credential, other_principal],
+            SecurityDefinitions {
+                function_targets: vec![SecurityFunctionTarget::application(FUNCTION)],
+                principals: principals.clone(),
+                local_peer_credentials: vec![credential, other_principal],
+                ..SecurityDefinitions::default()
+            },
         ),
         Err(SecuritySnapshotError::DuplicateLocalPeerUid)
     ));
     assert!(matches!(
-        SecuritySnapshot::new_with_local_peer_credentials(
+        SecuritySnapshot::from_definitions(
             REVISION,
-            vec![FUNCTION],
-            principals.clone(),
-            vec![],
-            vec![],
-            vec![credential, other_uid],
+            SecurityDefinitions {
+                function_targets: vec![SecurityFunctionTarget::application(FUNCTION)],
+                principals: principals.clone(),
+                local_peer_credentials: vec![credential, other_uid],
+                ..SecurityDefinitions::default()
+            },
         ),
         Err(SecuritySnapshotError::DuplicateLocalPeerPrincipal)
     ));
     assert!(matches!(
-        SecuritySnapshot::new_with_local_peer_credentials(
+        SecuritySnapshot::from_definitions(
             REVISION,
-            vec![FUNCTION],
-            principals,
-            vec![],
-            vec![],
-            vec![LocalPeerCredential::new(
-                1_003,
-                PrincipalId::from_bytes([0xff; 16]),
-            )],
+            SecurityDefinitions {
+                function_targets: vec![SecurityFunctionTarget::application(FUNCTION)],
+                principals,
+                local_peer_credentials: vec![LocalPeerCredential::new(
+                    1_003,
+                    PrincipalId::from_bytes([0xff; 16]),
+                )],
+                ..SecurityDefinitions::default()
+            },
         ),
         Err(SecuritySnapshotError::UnknownLocalPeerPrincipal)
     ));
@@ -1462,12 +1467,14 @@ fn two_class_union_admits_standard_grants_only_from_the_pinned_snapshot() {
     let standard_target =
         SecurityFunctionTarget::verified_standard(STD_FUNCTION, STD_REVISION, STD_EXECUTABLE);
 
-    let snapshot = SecuritySnapshot::new_with_function_targets(
+    let snapshot = SecuritySnapshot::from_definitions(
         REVISION,
-        vec![standard_target],
-        vec![active(USER, PrincipalKind::User)],
-        vec![],
-        vec![ExecuteGrant::new(USER, STD_FUNCTION)],
+        SecurityDefinitions {
+            function_targets: vec![standard_target],
+            principals: vec![active(USER, PrincipalKind::User)],
+            execute_grants: vec![ExecuteGrant::new(USER, STD_FUNCTION)],
+            ..SecurityDefinitions::default()
+        },
     )
     .expect("a grant naming a function in the pinned standard snapshot must be admitted");
     assert!(
@@ -1477,52 +1484,55 @@ fn two_class_union_admits_standard_grants_only_from_the_pinned_snapshot() {
     );
 
     assert!(matches!(
-        SecuritySnapshot::new_with_function_targets(
+        SecuritySnapshot::from_definitions(
             REVISION,
-            vec![],
-            vec![active(USER, PrincipalKind::User)],
-            vec![],
-            vec![ExecuteGrant::new(USER, STD_FUNCTION)],
+            SecurityDefinitions {
+                principals: vec![active(USER, PrincipalKind::User)],
+                execute_grants: vec![ExecuteGrant::new(USER, STD_FUNCTION)],
+                ..SecurityDefinitions::default()
+            },
         ),
         Err(SecuritySnapshotError::UnknownGrantFunction)
     ));
 
     assert!(matches!(
-        SecuritySnapshot::new_with_function_targets(
+        SecuritySnapshot::from_definitions(
             REVISION,
-            vec![
-                SecurityFunctionTarget::verified_standard(
-                    STD_FUNCTION,
-                    STD_REVISION,
-                    STD_EXECUTABLE,
-                ),
-                SecurityFunctionTarget::verified_standard(
-                    STD_FUNCTION,
-                    STD_REVISION,
-                    STD_EXECUTABLE,
-                ),
-            ],
-            vec![active(USER, PrincipalKind::User)],
-            vec![],
-            vec![],
+            SecurityDefinitions {
+                function_targets: vec![
+                    SecurityFunctionTarget::verified_standard(
+                        STD_FUNCTION,
+                        STD_REVISION,
+                        STD_EXECUTABLE,
+                    ),
+                    SecurityFunctionTarget::verified_standard(
+                        STD_FUNCTION,
+                        STD_REVISION,
+                        STD_EXECUTABLE,
+                    ),
+                ],
+                principals: vec![active(USER, PrincipalKind::User)],
+                ..SecurityDefinitions::default()
+            },
         ),
         Err(SecuritySnapshotError::DuplicateFunction)
     ));
 
     assert!(matches!(
-        SecuritySnapshot::new_with_function_targets(
+        SecuritySnapshot::from_definitions(
             REVISION,
-            vec![
-                SecurityFunctionTarget::application(STD_FUNCTION),
-                SecurityFunctionTarget::verified_standard(
-                    STD_FUNCTION,
-                    STD_REVISION,
-                    STD_EXECUTABLE,
-                ),
-            ],
-            vec![active(USER, PrincipalKind::User)],
-            vec![],
-            vec![],
+            SecurityDefinitions {
+                function_targets: vec![
+                    SecurityFunctionTarget::application(STD_FUNCTION),
+                    SecurityFunctionTarget::verified_standard(
+                        STD_FUNCTION,
+                        STD_REVISION,
+                        STD_EXECUTABLE,
+                    ),
+                ],
+                principals: vec![active(USER, PrincipalKind::User)],
+                ..SecurityDefinitions::default()
+            },
         ),
         Err(SecuritySnapshotError::DuplicateFunction)
     ));
@@ -1532,18 +1542,24 @@ fn two_class_union_admits_standard_grants_only_from_the_pinned_snapshot() {
 
 #[test]
 fn authorise_execute_enforces_class_and_immutable_standard_pins() {
-    let snapshot = SecuritySnapshot::new_with_function_targets(
+    let snapshot = SecuritySnapshot::from_definitions(
         REVISION,
-        vec![
-            SecurityFunctionTarget::application(FUNCTION),
-            SecurityFunctionTarget::verified_standard(STD_FUNCTION, STD_REVISION, STD_EXECUTABLE),
-        ],
-        vec![active(USER, PrincipalKind::User)],
-        vec![],
-        vec![
-            ExecuteGrant::new(USER, FUNCTION),
-            ExecuteGrant::new(USER, STD_FUNCTION),
-        ],
+        SecurityDefinitions {
+            function_targets: vec![
+                SecurityFunctionTarget::application(FUNCTION),
+                SecurityFunctionTarget::verified_standard(
+                    STD_FUNCTION,
+                    STD_REVISION,
+                    STD_EXECUTABLE,
+                ),
+            ],
+            principals: vec![active(USER, PrincipalKind::User)],
+            execute_grants: vec![
+                ExecuteGrant::new(USER, FUNCTION),
+                ExecuteGrant::new(USER, STD_FUNCTION),
+            ],
+            ..SecurityDefinitions::default()
+        },
     )
     .expect("a two-class snapshot with grants");
     let session = snapshot
@@ -2265,28 +2281,27 @@ fn privilege_denials_carry_closed_audit_reasons() {
 }
 
 #[test]
-fn snapshot_privilege_grants_round_trip_through_the_deepest_constructor() {
+fn snapshot_privilege_grants_round_trip_through_definitions() {
     let class_wide = PrivilegeGrant::new(USER, PrivilegeClass::SecurityAdmin, None)
         .expect("a class-wide grant is valid");
     let scoped = PrivilegeGrant::new(USER, PrivilegeClass::Execute, Some(FUNCTION))
         .expect("a known object-scoped grant is valid");
-    let snapshot =
-        SecuritySnapshot::new_with_function_targets_local_peer_credentials_and_privilege_grants(
-            REVISION,
-            vec![SecurityFunctionTarget::application(FUNCTION)],
-            vec![active(USER, PrincipalKind::User)],
-            vec![],
-            vec![],
-            vec![],
-            vec![class_wide, scoped],
-        )
-        .expect("a snapshot with privilege grants is valid");
+    let snapshot = SecuritySnapshot::from_definitions(
+        REVISION,
+        SecurityDefinitions {
+            function_targets: vec![SecurityFunctionTarget::application(FUNCTION)],
+            principals: vec![active(USER, PrincipalKind::User)],
+            privilege_grants: vec![class_wide, scoped],
+            ..SecurityDefinitions::default()
+        },
+    )
+    .expect("a snapshot with privilege grants is valid");
     assert_eq!(
         snapshot.privilege_grants().collect::<Vec<_>>(),
         vec![scoped, class_wide]
     );
 
-    // The stable existing constructors default to no privilege grants.
+    // The application-only constructor defaults to no privilege grants.
     let plain = SecuritySnapshot::new(
         REVISION,
         vec![FUNCTION],
@@ -2303,14 +2318,14 @@ fn snapshot_rejects_privilege_grants_for_unknown_objects() {
     let grant = PrivilegeGrant::new(USER, PrivilegeClass::Execute, Some(OTHER_FUNCTION))
         .expect("an unknown object-scoped grant still has a valid grant shape");
     assert!(matches!(
-        SecuritySnapshot::new_with_function_targets_local_peer_credentials_and_privilege_grants(
+        SecuritySnapshot::from_definitions(
             REVISION,
-            vec![SecurityFunctionTarget::application(FUNCTION)],
-            vec![active(USER, PrincipalKind::User)],
-            vec![],
-            vec![],
-            vec![],
-            vec![grant],
+            SecurityDefinitions {
+                function_targets: vec![SecurityFunctionTarget::application(FUNCTION)],
+                principals: vec![active(USER, PrincipalKind::User)],
+                privilege_grants: vec![grant],
+                ..SecurityDefinitions::default()
+            },
         ),
         Err(SecuritySnapshotError::UnknownPrivilegeGrantObject)
     ));
@@ -2324,17 +2339,15 @@ fn snapshot_accepts_privilege_grants_for_sealed_system_functions() {
         Some(SYS_SECURITY_GRANT_PRIVILEGE_FUNCTION_ID),
     )
     .expect("a sealed system function object has a valid grant shape");
-    let snapshot =
-        SecuritySnapshot::new_with_function_targets_local_peer_credentials_and_privilege_grants(
-            REVISION,
-            vec![],
-            vec![active(USER, PrincipalKind::User)],
-            vec![],
-            vec![],
-            vec![],
-            vec![grant],
-        )
-        .expect("sealed system function objects are valid privilege targets");
+    let snapshot = SecuritySnapshot::from_definitions(
+        REVISION,
+        SecurityDefinitions {
+            principals: vec![active(USER, PrincipalKind::User)],
+            privilege_grants: vec![grant],
+            ..SecurityDefinitions::default()
+        },
+    )
+    .expect("sealed system function objects are valid privilege targets");
     assert_eq!(snapshot.privilege_grants().collect::<Vec<_>>(), vec![grant]);
 }
 
@@ -2343,14 +2356,14 @@ fn snapshot_rejects_duplicate_privilege_grants() {
     let grant = PrivilegeGrant::new(USER, PrivilegeClass::SecurityAdmin, None)
         .expect("a class-wide grant is valid");
     assert!(matches!(
-        SecuritySnapshot::new_with_function_targets_local_peer_credentials_and_privilege_grants(
+        SecuritySnapshot::from_definitions(
             REVISION,
-            vec![SecurityFunctionTarget::application(FUNCTION)],
-            vec![active(USER, PrincipalKind::User)],
-            vec![],
-            vec![],
-            vec![],
-            vec![grant, grant],
+            SecurityDefinitions {
+                function_targets: vec![SecurityFunctionTarget::application(FUNCTION)],
+                principals: vec![active(USER, PrincipalKind::User)],
+                privilege_grants: vec![grant, grant],
+                ..SecurityDefinitions::default()
+            },
         ),
         Err(SecuritySnapshotError::DuplicatePrivilegeGrant)
     ));
@@ -2361,14 +2374,14 @@ fn snapshot_rejects_privilege_grants_for_unknown_principals() {
     let grant = PrivilegeGrant::new(OTHER_PRINCIPAL, PrivilegeClass::Execute, None)
         .expect("a class-wide grant is valid");
     assert!(matches!(
-        SecuritySnapshot::new_with_function_targets_local_peer_credentials_and_privilege_grants(
+        SecuritySnapshot::from_definitions(
             REVISION,
-            vec![SecurityFunctionTarget::application(FUNCTION)],
-            vec![active(USER, PrincipalKind::User)],
-            vec![],
-            vec![],
-            vec![],
-            vec![grant],
+            SecurityDefinitions {
+                function_targets: vec![SecurityFunctionTarget::application(FUNCTION)],
+                principals: vec![active(USER, PrincipalKind::User)],
+                privilege_grants: vec![grant],
+                ..SecurityDefinitions::default()
+            },
         ),
         Err(SecuritySnapshotError::UnknownPrivilegeGrantPrincipal)
     ));

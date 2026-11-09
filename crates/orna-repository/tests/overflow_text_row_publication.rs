@@ -169,7 +169,6 @@ async fn overflow_text_rows_publish_and_read_back_through_production_writer() {
         &head,
         index,
         &freeze,
-        |_| Err(orna_storage::Error::InvalidKey),
         "orna: publish overflow text rows",
     )
     .await

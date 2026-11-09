@@ -2,7 +2,7 @@ use std::{fs, path::Path, process::Command, sync::Barrier, thread};
 
 use orna_evaluator::SysHostBindingRegistry;
 use orna_runtime::RuntimeState;
-use orna_storage::{Error, LoosePath, RuntimePublicationCoordinator};
+use orna_storage::{Error, RuntimePublicationCoordinator};
 use orna_sys::{EnvironmentProvider, FilesystemProvider};
 use tempfile::TempDir;
 
@@ -119,7 +119,6 @@ async fn publication_cas_race_has_one_winner_and_consistent_state() {
             &head,
             index.clone(),
             &freeze,
-            |_| LoosePath::for_key("media", &[key.to_owned()]),
             "orna: publish format-3 row",
         )
         .await
@@ -223,7 +222,6 @@ async fn publication_cas_race_has_one_winner_and_consistent_state() {
         &fresh_head,
         fresh_index,
         &freeze_b,
-        |_| LoosePath::for_key("media", &[key_b.to_owned()]),
         "orna: publish format-3 row",
     )
     .await

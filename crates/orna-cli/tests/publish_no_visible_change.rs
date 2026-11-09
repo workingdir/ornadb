@@ -619,7 +619,6 @@ async fn publish_recovers_ref_advanced_journal_before_selecting_pending_tail() {
         &base_head,
         index,
         &freeze,
-        |_mutation| orna_storage::LoosePath::for_key("Object", &["image".to_owned()]),
         "orna: interrupted publication",
     )
     .await

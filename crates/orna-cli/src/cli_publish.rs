@@ -561,14 +561,7 @@ async fn publish_frozen_range(
         .index_generation()
         .map_err(|error| publish_error("ordinary index could not be read", format!("{error:?}")))?;
     let prepared = RuntimePublicationCoordinator::prepare_allow_noop(
-        repository,
-        state,
-        &head,
-        index,
-        &freeze,
-        // Format-3 rows have no loose path, so the coordinator never asks.
-        |_| Err(orna_storage::Error::InvalidKey),
-        message,
+        repository, state, &head, index, &freeze, message,
     )
     .await
     .map_err(|error| {

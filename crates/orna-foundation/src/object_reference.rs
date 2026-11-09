@@ -42,7 +42,7 @@ pub fn validate_object_reference(
     if reference.database_id != capture.database_id() {
         return Err(SystemReferenceError::DatabaseMismatch);
     }
-    if reference.snapshot != *capture.snapshot() {
+    if !capture.matches_snapshot(&reference.snapshot) {
         return Err(SystemReferenceError::SnapshotMismatch);
     }
     if reference.table_id != SYS_OBJECT_TABLE_ID {
@@ -136,7 +136,7 @@ mod tests {
     fn object_reference_uses_object_relation_and_id_snapshot_key() {
         let capture = capture();
         let reference =
-            object_reference(capture.database_id(), [5; 16], capture.snapshot().clone()).unwrap();
+            object_reference(capture.database_id(), [5; 16], capture.snapshot()).unwrap();
         assert_eq!(reference.as_row_ref().table_id, SYS_OBJECT_TABLE_ID);
         assert_eq!(
             validate_object_reference_for_id(reference.as_row_ref().clone(), &capture, [5; 16])
@@ -150,7 +150,7 @@ mod tests {
     #[test]
     fn object_reference_rejects_wrong_relation_and_identity() {
         let capture = capture();
-        let mut row = object_reference(capture.database_id(), [5; 16], capture.snapshot().clone())
+        let mut row = object_reference(capture.database_id(), [5; 16], capture.snapshot())
             .unwrap()
             .into_row_ref();
         row.table_id = [9; 16];
@@ -159,7 +159,7 @@ mod tests {
             Err(SystemReferenceError::RelationMismatch)
         );
 
-        let row = object_reference(capture.database_id(), [5; 16], capture.snapshot().clone())
+        let row = object_reference(capture.database_id(), [5; 16], capture.snapshot())
             .unwrap()
             .into_row_ref();
         assert_eq!(

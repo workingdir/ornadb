@@ -1,0 +1,134 @@
+Format-1 golden bundle provenance
+=================================
+
+Artifact: crates/orna-cli/tests/fixtures/legacy-format1-1.0.0-golden.bundle
+SHA-256: cfbc158205c0f5702785621fe47a9d2cecfe286f0057f1258a738cfb2c664bc3
+Captured: 2026-11-09
+
+Source of the writer
+--------------------
+
+The store was written by the production repository code at commit
+
+    adb70ba2f68a8822fbdce0ad9911933b6e3e255e
+    "fix(repository): harden format context authority"  2026-10-05
+
+This is the last commit before c8e2b1112 ("write canonical format-3
+metadata") changed the repository metadata writer. It still has the 1.0-era
+format-1 metadata writer (crates/orna-repository-v1/src/init.rs) and the
+production compact publication boundary (crates/orna-repository-v1/src/
+compact.rs). It is the only commit range that has both, so a store with a
+format-1 marker and compact tables can only come from this range.
+
+Generation procedure
+--------------------
+
+The generator source is committed beside this file as
+`legacy-format1-1.0.0-golden.generator.rs.txt` (not compiled here). In that
+worktree it ran as the uncommitted example
+`crates/orna-repository-v1/examples/make_a4_golden.rs`.
+
+built and run with
+
+    CARGO_TARGET_DIR=<private> CARGO_BUILD_JOBS=2 \
+        cargo build -p orna-repository-v1 --example make_a4_golden --locked
+    GIT_CONFIG_NOSYSTEM=1 make_a4_golden <empty-root>
+
+It performed only these writer operations:
+
+1. `git init --object-format=sha1 -b main` and fixed user identity.
+2. `orna_repository_v1::initialize_repository`, which writes
+   `.orna/format.orna` as exactly
+   `{repository_format: 1, storage_profile: "compact-storage-v1"}\n`
+   and `.orna/database.orna` with a newly minted random UUIDv4.
+3. A plain `git commit` of `main.orna`, `ordinary.txt` and the three tables'
+   `policy.orna` records.
+4. For each table, `Repository::prepare_compact_publication` followed by
+   `Repository::publish_compact_repository_boundary`, then
+   `Repository::clear_publication_journal`. The publication boundary wrote the
+   commit tree, `manifest.orna`, `shards/00000000.orna` and the data blobs and
+   computed the shard bounds with the production `canonical_key_extrema` over
+   the recorded segment bounds.
+5. `git bundle create golden.bundle HEAD main`. Including `HEAD` makes a
+   plain `git clone` of the bundle check out `main`; a bundle of `main` alone
+   advertises no remote HEAD and clones an empty branch.
+
+All git commands ran with GIT_AUTHOR_DATE and GIT_COMMITTER_DATE fixed to
+`1767225600 +0000`, but the database identity is a random UUIDv4, so the
+artifact is captured once and pinned rather than regenerated. The pin lives in
+`committed_1_0_0_writer_golden_decodes_min_max_key_bounds`.
+
+Commit graph
+------------
+
+    4887698b58281b2663cfd90390b045524ab89e31  initial
+    c3c7b7baf6dc3f6a95b36e228bf423bdac821a00  orna: publish compact runtime data  (Int)
+    1fc32c387dc120379f9123d394b48c411a628d17  orna: publish compact runtime data  (Str)
+    89963239f31201e2e8265a874db99fa69dcbdfef  orna: publish compact runtime data  (Date)
+
+Database identity: f63508c3-e6e2-4701-914e-da2e9327beb0
+
+Table contents
+--------------
+
+All tables are key-only compact tables; the writer records one key column and
+no stored value column. Keys and recorded segment bounds (hex of canonical
+OVB-1 key bytes):
+
+    Int  018f0000-0000-7300-0000-000000000001
+         segment 1: -2 .. -1   min_key 21, max_key 20
+         segment 2:  0 ..  1   min_key 00, max_key 01
+         shard: min_key 21, max_key 01
+    Str  018f0000-0000-7300-0000-000000000002
+         segment 1: alpha, beta, gamma   min_key 65616c706861,
+                    max_key 6567616d6d61
+    Date 018f0000-0000-7300-0000-000000000003
+         segment 1: -1, 0, 1 days   min_key d9ea616a313936392d31322d3331,
+                    max_key d9ea616a313937302d30312d3032
+
+The negative Int and Str rows are deliberate: canonical CBOR byte order sorts
+`-1` (20) before `-2` (21), and `beta` (64...) before `alpha` (65...). The
+writer's shard minima are the logical minima (-2 and alpha), so this artifact
+cannot have been produced by byte ordering. That is what the Rust test asserts
+and what the independent `scripts/orna_compact.py` reader also resolves.
+
+What is and is not the writer's own output
+------------------------------------------
+
+Written by the 1.0-era production boundary: the repository metadata records,
+the commit tree and commit graph, `manifest.orna`, `shards/00000000.orna`, the
+Git blob ids and SHA-256 digests, the segment checksum profile, and the shard
+and segment key bounds.
+
+Not written by a production encoder: the Parquet row payloads. At this commit
+range there is no production Parquet writer; the repository and storage tests
+generate them with the `test-encoder-v1` OVB encoding. The generator used that
+same encoding (ZSTD, PLAIN, PARQUET_2_0, page checksums, the profile's footer
+metadata), so `orna.encoder` in the golden is `test-encoder-v1`.
+
+Also not from the writer: `policy.orna`. Draft 23-storage.md ORNA-STORAGE-007
+requires every table to commit a placement preference, but the 1.0-era
+publication boundary does not write the record and the draft does not fix its
+shape. The fixture writes the minimal record
+`{placement: "compact", table: "<uuid>"}` and commits it before publication;
+this is a documented fixture choice, not an observed 1.0-writer byte.
+
+Cross-checks performed on this artifact
+---------------------------------------
+
+* `scripts/orna_compact.py` (independent, stdlib-only) verifies every digest,
+  byte length, row count, columns descriptor and key bound, and resolves the
+  rows to Int -2/-1/0/1, Str alpha/beta/gamma and Date -1/0/+1 days.
+* `committed_1_0_0_writer_golden_decodes_min_max_key_bounds` clones the bundle,
+  reads the rows through `Repository::read_legacy_authoritative_tables`, decodes
+  the manifest and shard bounds, and requires the reader to refuse a clone whose
+  shard or manifest minimum was rewritten away from the logical minimum.
+
+Non-claims
+----------
+
+* No published 1.0.0 binary existed (the release was never published); this is
+  the production code of the 1.0-era commit, not a shipped executable.
+* `state.db` and persistent consumers are absent.
+* No stored value column is present; the three tables are key-only.
+* ORNA-UPGRADE-008 (Blob-bearing consumer continuity) is not asserted.

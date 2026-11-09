@@ -278,7 +278,7 @@ fn index(value: usize) -> Raw {
 }
 fn origin(item: &Item) -> LocalSourceOrigin {
     LocalSourceOrigin {
-        logical_path: item.span.file.clone().unwrap_or_default(),
+        logical_path: item.span.file().unwrap_or_default().to_owned(),
         start: item.span.start,
         end: item.span.end,
     }

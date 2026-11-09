@@ -73,7 +73,7 @@ fn overdeep_control_recovers_to_the_next_top_level_declaration() {
         parsed
             .diagnostics
             .iter()
-            .all(|error| { error.span.file.as_deref() == Some("recovery.orna") })
+            .all(|error| { error.span.file() == Some("recovery.orna") })
     );
     assert!(matches!(
         parsed.value.items.get(1).map(|item| &item.declaration),
@@ -89,7 +89,7 @@ fn repl_entrypoint_reports_the_same_nesting_limit_with_file_context() {
         parsed
             .diagnostics
             .iter()
-            .all(|error| error.span.file.as_deref() == Some("repl.orna"))
+            .all(|error| error.span.file() == Some("repl.orna"))
     );
 }
 

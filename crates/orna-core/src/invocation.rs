@@ -1578,7 +1578,7 @@ mod tests {
     use crate::{
         security::{
             ExecuteGrant, InvocationTarget as SecurityInvocationTarget, Principal, PrincipalKind,
-            PrincipalStatus, SecurityFunctionTarget, SecuritySnapshot,
+            PrincipalStatus, SecurityDefinitions, SecurityFunctionTarget, SecuritySnapshot,
         },
         system::{
             CATALOGUE_HEALTH_FUNCTION_ID, SYS_INVOKE_FUNCTION_ID,
@@ -1995,20 +1995,22 @@ mod tests {
             .standard()
             .expect("a pinned standard snapshot");
         let function = standard.catalogue().functions()[0].clone();
-        SecuritySnapshot::new_with_function_targets(
+        SecuritySnapshot::from_definitions(
             active.pair(),
-            vec![SecurityFunctionTarget::verified_standard(
-                function.id(),
-                standard.revision(),
-                standard.executables()[0].revision().id(),
-            )],
-            vec![Principal::new(
-                PrincipalId::from_bytes([25; 16]),
-                PrincipalKind::User,
-                PrincipalStatus::Active,
-            )],
-            vec![],
-            grants,
+            SecurityDefinitions {
+                function_targets: vec![SecurityFunctionTarget::verified_standard(
+                    function.id(),
+                    standard.revision(),
+                    standard.executables()[0].revision().id(),
+                )],
+                principals: vec![Principal::new(
+                    PrincipalId::from_bytes([25; 16]),
+                    PrincipalKind::User,
+                    PrincipalStatus::Active,
+                )],
+                execute_grants: grants,
+                ..SecurityDefinitions::default()
+            },
         )
         .expect("a standard-class security snapshot")
     }
@@ -2826,20 +2828,22 @@ mod tests {
             ProtectedInvocationDecision::Denied
         );
 
-        let wrong_pin = SecuritySnapshot::new_with_function_targets(
+        let wrong_pin = SecuritySnapshot::from_definitions(
             active.pair(),
-            vec![SecurityFunctionTarget::verified_standard(
-                function.id(),
-                standard.revision(),
-                FunctionRevisionId::from_bytes([0x7b; 16]),
-            )],
-            vec![Principal::new(
-                PrincipalId::from_bytes([25; 16]),
-                PrincipalKind::User,
-                PrincipalStatus::Active,
-            )],
-            vec![],
-            vec![grant],
+            SecurityDefinitions {
+                function_targets: vec![SecurityFunctionTarget::verified_standard(
+                    function.id(),
+                    standard.revision(),
+                    FunctionRevisionId::from_bytes([0x7b; 16]),
+                )],
+                principals: vec![Principal::new(
+                    PrincipalId::from_bytes([25; 16]),
+                    PrincipalKind::User,
+                    PrincipalStatus::Active,
+                )],
+                execute_grants: vec![grant],
+                ..SecurityDefinitions::default()
+            },
         )
         .expect("a wrong-pin security snapshot");
         let session = wrong_pin

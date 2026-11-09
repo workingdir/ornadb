@@ -18,6 +18,10 @@
 # in-flight PR and is reported as a note; remove it once the PR lands or the
 # code shrinks below the hard cap. A raise that is no longer needed is also a
 # note, never a failure.
+#
+# A pure split that creates over-cap children records each child here with the
+# split's bead, while --mode=budget --update lowers the parent's entries. The
+# new-debt diagnostic names this escape hatch.
 
 [[raise]]
 path = "crates/orna-lsp/src/server.rs"
@@ -66,3 +70,159 @@ path = "crates/orna-repository/src/native_graph/ordered.rs::find_ordered_entry_w
 new_limit = 122
 reason = "PR #9768 shares byte-index chunk verification across the native graph splits"
 bead = "ornadb-l0ouj"
+
+[[raise]]
+path = "crates/orna-core/src/security.rs"
+new_limit = 2633
+reason = "PR #9767 replaces the SecurityAuditDecision wildcard projections with every rejected shape named, and splits SecuritySnapshot validation into one helper per definition category so from_definitions stays under the 120-line cap; the accessor expansion is the remaining ornadb-x5oag debt"
+bead = "ornadb-x5oag"
+
+[[raise]]
+path = "crates/orna-cli/src/cli_history.rs"
+new_limit = 1705
+reason = "pure split of the cli_history/cli_query god functions along parse/validate/execute; the parents and cli_dispatch shrank"
+bead = "ornadb-mankj"
+
+[[raise]]
+path = "crates/orna-cli/src/cli_query.rs"
+new_limit = 1341
+reason = "pure split of the cli_history/cli_query god functions along parse/validate/execute; the parents and cli_dispatch shrank"
+bead = "ornadb-mankj"
+
+[[raise]]
+path = "crates/orna-cli/src/fuse_mount/builder.rs"
+new_limit = 1692
+reason = "pure split of fuse_mount.rs along its implementation seams; the 12008-line parent shrank to 203 lines"
+bead = "ornadb-ahzrn"
+
+[[raise]]
+path = "crates/orna-cli/src/fuse_mount/builder.rs::project_row_files"
+new_limit = 294
+reason = "pure split of fuse_mount.rs along its implementation seams; the 12008-line parent shrank to 203 lines"
+bead = "ornadb-ahzrn"
+
+[[raise]]
+path = "crates/orna-cli/src/fuse_mount/filesystem.rs"
+new_limit = 4595
+reason = "pure split of fuse_mount.rs along its implementation seams; the 12008-line parent shrank to 203 lines"
+bead = "ornadb-ahzrn"
+
+[[raise]]
+path = "crates/orna-cli/src/fuse_mount/filesystem.rs::commit_blob_candidate"
+new_limit = 169
+reason = "pure split of fuse_mount.rs along its implementation seams; the 12008-line parent shrank to 203 lines"
+bead = "ornadb-ahzrn"
+
+[[raise]]
+path = "crates/orna-cli/src/fuse_mount/filesystem.rs::create"
+new_limit = 139
+reason = "pure split of fuse_mount.rs along its implementation seams; the 12008-line parent shrank to 203 lines"
+bead = "ornadb-ahzrn"
+
+[[raise]]
+path = "crates/orna-cli/src/fuse_mount/filesystem.rs::from_snapshot"
+new_limit = 173
+reason = "pure split of fuse_mount.rs along its implementation seams; the 12008-line parent shrank to 203 lines"
+bead = "ornadb-ahzrn"
+
+[[raise]]
+path = "crates/orna-cli/src/fuse_mount/filesystem.rs::open"
+new_limit = 346
+reason = "pure split of fuse_mount.rs along its implementation seams; the 12008-line parent shrank to 203 lines"
+bead = "ornadb-ahzrn"
+
+[[raise]]
+path = "crates/orna-cli/src/fuse_mount/filesystem.rs::prepare_edit"
+new_limit = 176
+reason = "pure split of fuse_mount.rs along its implementation seams; the 12008-line parent shrank to 203 lines"
+bead = "ornadb-ahzrn"
+
+[[raise]]
+path = "crates/orna-cli/src/fuse_mount/filesystem.rs::read"
+new_limit = 162
+reason = "pure split of fuse_mount.rs along its implementation seams; the 12008-line parent shrank to 203 lines"
+bead = "ornadb-ahzrn"
+
+[[raise]]
+path = "crates/orna-cli/src/fuse_mount/filesystem.rs::rename"
+new_limit = 338
+reason = "pure split of fuse_mount.rs along its implementation seams; the 12008-line parent shrank to 203 lines"
+bead = "ornadb-ahzrn"
+
+[[raise]]
+path = "crates/orna-cli/src/fuse_mount/filesystem.rs::retain_all_drafts"
+new_limit = 280
+reason = "pure split of fuse_mount.rs along its implementation seams; the 12008-line parent shrank to 203 lines"
+bead = "ornadb-ahzrn"
+
+[[raise]]
+path = "crates/orna-cli/src/fuse_mount/filesystem.rs::setattr"
+new_limit = 132
+reason = "pure split of fuse_mount.rs along its implementation seams; the 12008-line parent shrank to 203 lines"
+bead = "ornadb-ahzrn"
+
+[[raise]]
+path = "crates/orna-cli/src/fuse_mount/filesystem.rs::unresolved_drafts_of"
+new_limit = 131
+reason = "pure split of fuse_mount.rs along its implementation seams; the 12008-line parent shrank to 203 lines"
+bead = "ornadb-ahzrn"
+
+[[raise]]
+path = "crates/orna-cli/src/fuse_mount/projection.rs"
+new_limit = 1339
+reason = "pure split of fuse_mount.rs along its implementation seams; the 12008-line parent shrank to 203 lines"
+bead = "ornadb-ahzrn"
+
+[[raise]]
+path = "crates/orna-cli/src/fuse_mount/retained.rs::retain"
+new_limit = 124
+reason = "pure split of fuse_mount.rs along its implementation seams; the 12008-line parent shrank to 203 lines"
+bead = "ornadb-ahzrn"
+
+[[raise]]
+path = "crates/orna-cli/src/fuse_mount/writer.rs::candidate"
+new_limit = 230
+reason = "pure split of fuse_mount.rs along its implementation seams; the 12008-line parent shrank to 203 lines"
+bead = "ornadb-ahzrn"
+
+[[raise]]
+path = "crates/orna-cli/src/cli_serve/tests/mod.rs"
+new_limit = 2454
+reason = "pure split: inline test modules moved to sibling files; the parent files shrank"
+bead = "ornadb-qwog6"
+
+[[raise]]
+path = "crates/orna-cli/src/cli_serve/tests/mod.rs::smart_http_clones_and_pushes_the_selected_clones_head"
+new_limit = 143
+reason = "pure split: inline test modules moved to sibling files; the parent files shrank"
+bead = "ornadb-qwog6"
+
+[[raise]]
+path = "crates/orna-cli/src/tests/mod.rs"
+new_limit = 1624
+reason = "pure split: inline test modules moved to sibling files; the parent files shrank"
+bead = "ornadb-qwog6"
+
+[[raise]]
+path = "crates/orna-cli/src/tests/mod.rs::parsing_is_bounded_and_diagnostic_is_stable"
+new_limit = 165
+reason = "pure split: inline test modules moved to sibling files; the parent files shrank"
+bead = "ornadb-qwog6"
+
+[[raise]]
+path = "crates/orna-cli/src/tests/mod.rs::repl_snapshot_loader_keeps_a_selected_ref_stable_after_it_moves"
+new_limit = 174
+reason = "pure split: inline test modules moved to sibling files; the parent files shrank"
+bead = "ornadb-qwog6"
+
+[[raise]]
+path = "crates/orna-cli/src/fuse_mount/tests.rs::mount_blob_window_reads_charge_only_intersecting_chunks"
+new_limit = 134
+reason = "pure split: inline test modules moved to sibling files; the parent files shrank"
+bead = "ornadb-qwog6"
+
+[[raise]]
+path = "crates/orna-cli/src/fuse_mount/tests.rs::workspace_readdir_uses_lazy_indexed_pages"
+new_limit = 127
+reason = "pure split: inline test modules moved to sibling files; the parent files shrank"
+bead = "ornadb-qwog6"

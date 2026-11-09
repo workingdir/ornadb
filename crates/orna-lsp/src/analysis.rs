@@ -8,13 +8,15 @@ use lsp_types::{
     Location, MarkupContent, MarkupKind, NumberOrString, ParameterInformation, ParameterLabel,
     SignatureHelp, SignatureInformation, SymbolKind, Uri,
 };
+use orna_syntax::visit::{Visit, walk_expr};
 use orna_syntax::{
-    Argument, Declaration, Expr, ImportSegment, Item, Keyword, Parse, Pattern, Statement,
-    SyntaxSpan as SourceSpan, SyntaxTree, Token, TokenKind, TypeExpr, lex,
+    Argument, CaseArm, ControlKind, Declaration, Expr, FunctionSignature, ImportSegment, Item,
+    Keyword, Parse, Pattern, StringSegment, SyntaxSpan as SourceSpan, SyntaxTree, Token, TokenKind,
+    TypeExpr, lex,
 };
 
 use crate::documents::PositionMapper;
-use crate::names::{DeclaredKind, LocalBindingKind, key_of};
+use crate::names::{DeclaredKind, LocalBindingKind, control_arms, key_of};
 use crate::standard::{StandardLibrary, StandardSymbol};
 use crate::workspace::{FileAnalysis, Target, Workspace};
 
@@ -251,129 +253,130 @@ pub(crate) fn declaration_symbols_from_tokens(
 }
 
 pub(crate) fn symbol_for_item(item: &Item, text: &str, tokens: &[Token]) -> Option<EditorSymbol> {
-    let (name, kind, selection_scope, detail, parameters) = match &item.declaration {
-        Declaration::Function { signature, .. } => (
-            signature.name.as_str(),
+    let header = match &item.declaration {
+        Declaration::Function { signature, .. } => SymbolHeader::function(
+            &signature.name,
             EditorSymbolKind::Function,
-            &signature.span,
-            Some(source_slice(text, &signature.span).to_owned()),
-            signature
-                .parameters
-                .iter()
-                .map(|parameter| source_slice(text, &parameter.span).to_owned())
-                .collect(),
-        ),
-        Declaration::Table { name, .. } => (
-            name.as_str(),
-            EditorSymbolKind::Table,
             &item.span,
-            None,
-            Vec::new(),
+            signature,
+            text,
         ),
-        Declaration::Protocol { name, .. } => (
-            name.as_str(),
-            EditorSymbolKind::Protocol,
-            &item.span,
-            None,
-            Vec::new(),
-        ),
-        Declaration::Enum { name, .. } => (
-            name.as_str(),
-            EditorSymbolKind::Enum,
-            &item.span,
-            None,
-            Vec::new(),
-        ),
-        Declaration::Type { name, .. } => (
-            name.as_str(),
-            EditorSymbolKind::Type,
-            &item.span,
-            None,
-            Vec::new(),
-        ),
-        Declaration::Dimension { name, .. } => (
-            name.as_str(),
-            EditorSymbolKind::Dimension,
-            &item.span,
-            None,
-            Vec::new(),
-        ),
-        Declaration::Unit { name, .. } => (
-            name.as_str(),
-            EditorSymbolKind::Unit,
-            &item.span,
-            None,
-            Vec::new(),
-        ),
+        Declaration::Table { name, .. } => {
+            SymbolHeader::simple(name, EditorSymbolKind::Table, &item.span)
+        }
+        Declaration::Protocol { name, .. } => {
+            SymbolHeader::simple(name, EditorSymbolKind::Protocol, &item.span)
+        }
+        Declaration::Enum { name, .. } => {
+            SymbolHeader::simple(name, EditorSymbolKind::Enum, &item.span)
+        }
+        Declaration::Type { name, .. } => {
+            SymbolHeader::simple(name, EditorSymbolKind::Type, &item.span)
+        }
+        Declaration::Dimension { name, .. } => {
+            SymbolHeader::simple(name, EditorSymbolKind::Dimension, &item.span)
+        }
+        Declaration::Unit { name, .. } => {
+            SymbolHeader::simple(name, EditorSymbolKind::Unit, &item.span)
+        }
         _ => return None,
     };
-    let result_type = match &item.declaration {
-        Declaration::Function { signature, .. } => signature
-            .result
-            .as_ref()
-            .and_then(|result| source_type(text, result)),
-        _ => None,
-    };
-    let parameter_names = match &item.declaration {
-        Declaration::Function { signature, .. } => signature
-            .parameters
-            .iter()
-            .map(|parameter| match &parameter.pattern {
-                Pattern::Name(name, _) => Some(name.clone()),
-                _ => None,
-            })
-            .collect(),
-        _ => Vec::new(),
-    };
-    let mut symbol = symbol_from_scope(
-        name,
-        kind,
-        &item.span,
-        selection_scope,
-        detail,
-        parameters,
-        parameter_names,
-        result_type,
-        text,
-        tokens,
-    )?;
+    let mut symbol = symbol_from_scope(header, text, tokens)?;
     symbol.children = declaration_child_symbols(&item.declaration, text, tokens);
     Some(symbol)
 }
 
-/// The four signature values are the parts of one declaration header, and the
-/// ten call sites below pass them straight from the parsed member they handle,
-/// so they stay positional rather than moving into a struct built at each arm.
-#[allow(clippy::too_many_arguments)]
-fn symbol_from_scope(
-    name: &str,
+/// The declaration header of one editor symbol: everything the symbol needs
+/// except the token-derived selection and documentation, which
+/// [`symbol_from_scope`] adds from the document.
+struct SymbolHeader<'a> {
+    name: &'a str,
     kind: EditorSymbolKind,
-    full: &SourceSpan,
-    selection_scope: &SourceSpan,
+    /// The span the symbol's full range covers.
+    full: &'a SourceSpan,
+    /// The span searched for the declared identifier.
+    selection_scope: &'a SourceSpan,
     detail: Option<String>,
     parameters: Vec<String>,
     parameter_names: Vec<Option<String>>,
     result_type: Option<String>,
+}
+
+impl<'a> SymbolHeader<'a> {
+    /// A declaration without a signature: the name is its only detail.
+    fn simple(name: &'a str, kind: EditorSymbolKind, span: &'a SourceSpan) -> Self {
+        Self {
+            name,
+            kind,
+            full: span,
+            selection_scope: span,
+            detail: None,
+            parameters: Vec::new(),
+            parameter_names: Vec::new(),
+            result_type: None,
+        }
+    }
+
+    /// A function or method, whose detail and parameter lists come from its
+    /// signature written at `signature`.
+    fn function(
+        name: &'a str,
+        kind: EditorSymbolKind,
+        full: &'a SourceSpan,
+        signature: &'a FunctionSignature,
+        text: &str,
+    ) -> Self {
+        Self {
+            name,
+            kind,
+            full,
+            selection_scope: &signature.span,
+            detail: Some(source_slice(text, &signature.span).to_owned()),
+            parameters: signature
+                .parameters
+                .iter()
+                .map(|parameter| source_slice(text, &parameter.span).to_owned())
+                .collect(),
+            parameter_names: signature
+                .parameters
+                .iter()
+                .map(|parameter| match &parameter.pattern {
+                    Pattern::Name(name, _) => Some(name.clone()),
+                    _ => None,
+                })
+                .collect(),
+            result_type: signature
+                .result
+                .as_ref()
+                .and_then(|result| source_type(text, result)),
+        }
+    }
+}
+
+fn symbol_from_scope(
+    header: SymbolHeader<'_>,
     text: &str,
     tokens: &[Token],
 ) -> Option<EditorSymbol> {
-    let first = tokens.partition_point(|token| token.span.start < selection_scope.start);
+    let first = tokens.partition_point(|token| token.span.start < header.selection_scope.start);
     let selection = tokens[first..]
         .iter()
-        .take_while(|token| token.span.end <= selection_scope.end)
-        .find(|token| token.text == name && matches!(token.kind, TokenKind::Identifier { .. }))?
+        .take_while(|token| token.span.end <= header.selection_scope.end)
+        .find(|token| {
+            token.text == header.name && matches!(token.kind, TokenKind::Identifier { .. })
+        })?
         .span
         .clone();
     Some(EditorSymbol {
-        name: name.to_owned(),
-        kind,
+        name: header.name.to_owned(),
+        kind: header.kind,
         selection,
-        full: full.clone(),
-        detail,
-        documentation: leading_doc_comment(text, full.start),
-        parameters,
-        parameter_names,
-        result_type,
+        full: header.full.clone(),
+        detail: header.detail,
+        documentation: leading_doc_comment(text, header.full.start),
+        parameters: header.parameters,
+        parameter_names: header.parameter_names,
+        result_type: header.result_type,
         children: Vec::new(),
     })
 }
@@ -388,14 +391,7 @@ fn declaration_child_symbols(
             .iter()
             .flat_map(|member| match member {
                 orna_syntax::TableMember::Field { name, span, .. } => symbol_from_scope(
-                    name,
-                    EditorSymbolKind::Field,
-                    span,
-                    span,
-                    None,
-                    Vec::new(),
-                    Vec::new(),
-                    None,
+                    SymbolHeader::simple(name, EditorSymbolKind::Field, span),
                     text,
                     tokens,
                 )
@@ -411,40 +407,18 @@ fn declaration_child_symbols(
             .iter()
             .filter_map(|member| match member {
                 orna_syntax::ProtocolMember::Function { signature, span } => symbol_from_scope(
-                    &signature.name,
-                    EditorSymbolKind::Method,
-                    span,
-                    &signature.span,
-                    Some(source_slice(text, &signature.span).to_owned()),
-                    signature
-                        .parameters
-                        .iter()
-                        .map(|parameter| source_slice(text, &parameter.span).to_owned())
-                        .collect(),
-                    signature
-                        .parameters
-                        .iter()
-                        .map(|parameter| match &parameter.pattern {
-                            Pattern::Name(name, _) => Some(name.clone()),
-                            _ => None,
-                        })
-                        .collect(),
-                    signature
-                        .result
-                        .as_ref()
-                        .and_then(|result| source_type(text, result)),
+                    SymbolHeader::function(
+                        &signature.name,
+                        EditorSymbolKind::Method,
+                        span,
+                        signature,
+                        text,
+                    ),
                     text,
                     tokens,
                 ),
                 orna_syntax::ProtocolMember::Static { name, span, .. } => symbol_from_scope(
-                    name,
-                    EditorSymbolKind::Constant,
-                    span,
-                    span,
-                    None,
-                    Vec::new(),
-                    Vec::new(),
-                    None,
+                    SymbolHeader::simple(name, EditorSymbolKind::Constant, span),
                     text,
                     tokens,
                 ),
@@ -454,14 +428,11 @@ fn declaration_child_symbols(
             .iter()
             .filter_map(|variant| {
                 let mut symbol = symbol_from_scope(
-                    &variant.name,
-                    EditorSymbolKind::EnumVariant,
-                    &variant.span,
-                    &variant.span,
-                    None,
-                    Vec::new(),
-                    Vec::new(),
-                    None,
+                    SymbolHeader::simple(
+                        &variant.name,
+                        EditorSymbolKind::EnumVariant,
+                        &variant.span,
+                    ),
                     text,
                     tokens,
                 )?;
@@ -470,14 +441,7 @@ fn declaration_child_symbols(
                     .iter()
                     .filter_map(|field| {
                         symbol_from_scope(
-                            &field.name,
-                            EditorSymbolKind::Field,
-                            &field.span,
-                            &field.span,
-                            None,
-                            Vec::new(),
-                            Vec::new(),
-                            None,
+                            SymbolHeader::simple(&field.name, EditorSymbolKind::Field, &field.span),
                             text,
                             tokens,
                         )
@@ -509,14 +473,7 @@ fn type_member_symbols(
         .iter()
         .flat_map(|member| match member {
             orna_syntax::TypeMember::Field { name, span, .. } => symbol_from_scope(
-                name,
-                EditorSymbolKind::Field,
-                span,
-                span,
-                None,
-                Vec::new(),
-                Vec::new(),
-                None,
+                SymbolHeader::simple(name, EditorSymbolKind::Field, span),
                 text,
                 tokens,
             )
@@ -544,40 +501,18 @@ fn implementation_symbols(
             orna_syntax::ImplMember::Function {
                 signature, span, ..
             } => symbol_from_scope(
-                &signature.name,
-                EditorSymbolKind::Method,
-                span,
-                &signature.span,
-                Some(source_slice(text, &signature.span).to_owned()),
-                signature
-                    .parameters
-                    .iter()
-                    .map(|parameter| source_slice(text, &parameter.span).to_owned())
-                    .collect(),
-                signature
-                    .parameters
-                    .iter()
-                    .map(|parameter| match &parameter.pattern {
-                        Pattern::Name(name, _) => Some(name.clone()),
-                        _ => None,
-                    })
-                    .collect(),
-                signature
-                    .result
-                    .as_ref()
-                    .and_then(|result| source_type(text, result)),
+                SymbolHeader::function(
+                    &signature.name,
+                    EditorSymbolKind::Method,
+                    span,
+                    signature,
+                    text,
+                ),
                 text,
                 tokens,
             ),
             orna_syntax::ImplMember::Static { name, span, .. } => symbol_from_scope(
-                name,
-                EditorSymbolKind::Constant,
-                span,
-                span,
-                None,
-                Vec::new(),
-                Vec::new(),
-                None,
+                SymbolHeader::simple(name, EditorSymbolKind::Constant, span),
                 text,
                 tokens,
             ),
@@ -797,7 +732,7 @@ pub(crate) fn signature_help(
     let mut calls = Vec::new();
     for item in &file.parse.value.items {
         for body in item_bodies(item) {
-            collect_calls(body, &mut calls);
+            CallCollector { output: &mut calls }.visit_expr(body);
         }
     }
     let call = calls
@@ -1017,132 +952,46 @@ fn active_argument_index(call: &CallSite, tokens: &[Token], position: usize) -> 
     separators + usize::from(trailing_separator)
 }
 
-fn collect_calls(expression: &Expr, output: &mut Vec<CallSite>) {
-    match expression {
-        Expr::Call {
-            callee,
-            arguments,
-            span,
-        } => {
-            if expression_name(callee).is_some() {
-                output.push(CallSite {
-                    callee: callee.as_ref().clone(),
-                    span: span.clone(),
-                    arguments: arguments.clone(),
-                });
-            }
-            collect_calls(callee, output);
-            for argument in arguments {
-                collect_calls(&argument.value, output);
-            }
-        }
-        Expr::GenericCall {
-            callee,
-            arguments,
-            span,
-            ..
-        } => {
-            if expression_name(callee).is_some() {
-                output.push(CallSite {
-                    callee: callee.as_ref().clone(),
-                    span: span.clone(),
-                    arguments: arguments.clone(),
-                });
-            }
-            collect_calls(callee, output);
-            for argument in arguments {
-                collect_calls(&argument.value, output);
-            }
-        }
-        Expr::Unary { rhs, .. } => collect_calls(rhs, output),
-        Expr::Binary { lhs, rhs, .. } => {
-            collect_calls(lhs, output);
-            collect_calls(rhs, output);
-        }
-        Expr::Range { lower, upper, .. } => {
-            if let Some(value) = lower {
-                collect_calls(value, output);
-            }
-            if let Some(value) = upper {
-                collect_calls(value, output);
-            }
-        }
-        Expr::Index { base, index, .. } => {
-            collect_calls(base, output);
-            collect_calls(index, output);
-        }
-        Expr::Field { base, .. } | Expr::Group { inner: base, .. } => collect_calls(base, output),
-        Expr::Tuple { elements, .. } | Expr::List { elements, .. } => {
-            for value in elements {
-                collect_calls(value, output);
-            }
-        }
-        Expr::Record { fields, .. } => {
-            for field in fields {
-                collect_calls(&field.value, output);
-            }
-        }
-        Expr::Nominal { fields, .. } => {
-            for field in fields {
-                collect_calls(&field.value, output);
-            }
-        }
-        Expr::Lambda { body, .. } => collect_calls(body, output),
-        Expr::Block {
-            statements, tail, ..
-        } => {
-            for statement in statements {
-                collect_statement_calls(statement, output);
-            }
-            if let Some(tail) = tail {
-                collect_calls(tail, output);
-            }
-        }
-        Expr::Control {
-            kind,
-            condition,
-            body,
-            arms,
-            alternate,
-            ..
-        } => {
-            if let Some(condition) = condition {
-                collect_calls(condition, output);
-            }
-            if let Some(body) = body {
-                collect_calls(body, output);
-            }
-            for arm in crate::names::control_arms(*kind, arms) {
-                if let Some(guard) = &arm.guard {
-                    collect_calls(guard, output);
-                }
-                collect_calls(&arm.body, output);
-            }
-            if let Some(alternate) = alternate {
-                collect_calls(alternate, output);
-            }
-        }
-        Expr::Name { .. }
-        | Expr::Literal { .. }
-        | Expr::InterpolatedString { .. }
-        | Expr::ReplBinding { .. } => {}
-    }
+/// Collects the call sites of one expression tree.
+struct CallCollector<'a> {
+    output: &'a mut Vec<CallSite>,
 }
 
-fn collect_statement_calls(statement: &Statement, output: &mut Vec<CallSite>) {
-    match statement {
-        Statement::Let { value, .. }
-        | Statement::Assert { value, .. }
-        | Statement::Expression { value, .. }
-        | Statement::Control { value, .. } => collect_calls(value, output),
-        Statement::Return { value, .. } | Statement::Break { value, .. } => {
-            if let Some(value) = value {
-                collect_calls(value, output);
-            }
+impl Visit for CallCollector<'_> {
+    fn visit_expr(&mut self, expression: &Expr) {
+        if let Expr::Call {
+            callee,
+            arguments,
+            span,
         }
-        Statement::Assignment { value, .. } => collect_calls(value, output),
-        Statement::Continue { .. } => {}
+        | Expr::GenericCall {
+            callee,
+            arguments,
+            span,
+            ..
+        } = expression
+            && expression_name(callee).is_some()
+        {
+            self.output.push(CallSite {
+                callee: callee.as_ref().clone(),
+                span: span.clone(),
+                arguments: arguments.clone(),
+            });
+        }
+        walk_expr(self, expression);
     }
+
+    /// A `for` loop stores its body again as one arm (A01-17); the body is
+    /// visited once, as the loop body.
+    fn visit_control_arms(&mut self, kind: ControlKind, arms: &[CaseArm]) {
+        for arm in control_arms(kind, arms) {
+            self.visit_case_arm(arm);
+        }
+    }
+
+    /// An interpolated string's expressions are not call sites for signature
+    /// help and hover resolution.
+    fn visit_string_segment(&mut self, _segment: &StringSegment) {}
 }
 
 pub(crate) fn expression_name(expression: &Expr) -> Option<String> {

@@ -30,17 +30,17 @@ fn context(
     snapshot: Snapshot,
     resolver: Arc<FixedResolver>,
 ) -> Result<Format3Context, Error> {
-    Format3Context::from_persisted(
-        database,
-        snapshot,
-        GitHash::Sha1,
-        NativeOid::from_bytes(&[9; 20]).unwrap(),
-        NativeOid::from_bytes(&[8; 20]).unwrap(),
-        AvailabilityState::Available,
-        OwnerLifetime::new([3; 16]),
-        Format3Quota::new(2, 1024).unwrap(),
+    Format3Context::from_persisted(orna_value::Format3ContextInputs {
+        database_uuid: database,
+        pin: snapshot,
+        git_oid_algorithm: GitHash::Sha1,
+        schema_root: NativeOid::from_bytes(&[9; 20]).unwrap(),
+        store_root: NativeOid::from_bytes(&[8; 20]).unwrap(),
+        availability: AvailabilityState::Available,
+        owner: OwnerLifetime::new([3; 16]),
+        quota: Format3Quota::new(2, 1024).unwrap(),
         resolver,
-    )
+    })
 }
 
 fn authorized_blob(database: [u8; 16], resolver: Arc<FixedResolver>) -> (Format3Context, Blob) {

@@ -787,8 +787,9 @@ def check_budget(
                         violations.append(Violation(
                             f"budget:{name}:{key}",
                             "BUDGET",
-                            f"{name}/{key}: {now} lines, cap {cap}; no recorded entry or reviewed raise "
-                            f"(add a [[raise]] to {RAISES_PATH} with a reason and a bead)",
+                            f"{name}/{key}: {now} lines, cap {cap}; no recorded entry or reviewed raise. "
+                            f"If this is a split child whose parent shrank, record it as a reviewed [[raise]] "
+                            f"in {RAISES_PATH} (path, new_limit, reason, bead); otherwise split the file/function",
                         ))
                     continue
                 tolerance = growth_tolerance(limit)
@@ -798,7 +799,8 @@ def check_budget(
                         f"budget:{name}:{key}",
                         "BUDGET",
                         f"{name}/{key}: {now} lines, {origin} {limit} (tolerance {tolerance}); "
-                        f"add or update a [[raise]] in {RAISES_PATH} with a reason and a bead",
+                        f"add or update a [[raise]] in {RAISES_PATH} with a reason and a bead, "
+                        f"or record the split child with the split's bead",
                     ))
                 elif now > limit:
                     notes.append(WarningEntry(

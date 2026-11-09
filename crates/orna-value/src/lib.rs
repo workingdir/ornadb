@@ -2091,17 +2091,17 @@ mod resolver_integrity_tests {
 
     fn context_with_limit(resolver: Arc<dyn BlobResolver>, max_read_bytes: u64) -> Format3Context {
         let database = [1; 16];
-        Format3Context::from_persisted(
-            database,
-            Snapshot::cwd(database, [2; 16], 0.into()).unwrap(),
-            GitHash::Sha1,
-            NativeOid::from_bytes(&[9; 20]).unwrap(),
-            NativeOid::from_bytes(&[8; 20]).unwrap(),
-            AvailabilityState::Available,
-            OwnerLifetime::new([3; 16]),
-            Format3Quota::new(max_read_bytes, 1024).unwrap(),
+        Format3Context::from_persisted(Format3ContextInputs {
+            database_uuid: database,
+            pin: Snapshot::cwd(database, [2; 16], 0.into()).unwrap(),
+            git_oid_algorithm: GitHash::Sha1,
+            schema_root: NativeOid::from_bytes(&[9; 20]).unwrap(),
+            store_root: NativeOid::from_bytes(&[8; 20]).unwrap(),
+            availability: AvailabilityState::Available,
+            owner: OwnerLifetime::new([3; 16]),
+            quota: Format3Quota::new(max_read_bytes, 1024).unwrap(),
             resolver,
-        )
+        })
         .unwrap()
     }
 

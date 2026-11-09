@@ -83,21 +83,21 @@ fn format3_context_for_database(commit: &GitCommitRef, database_id: [u8; 16]) ->
         _ => panic!("unexpected Git object identifier width"),
     };
     let root = NativeOid::from_bytes(&vec![0x55; algorithm.oid_width()]).unwrap();
-    Format3Context::from_persisted(
-        database_id,
-        Snapshot::Commit {
+    Format3Context::from_persisted(orna_value::Format3ContextInputs {
+        database_uuid: database_id,
+        pin: Snapshot::Commit {
             database: database_id,
             algorithm,
             oid,
         },
-        algorithm,
-        root.clone(),
-        root,
-        AvailabilityState::Available,
-        OwnerLifetime::new([0x66; 16]),
-        Format3Quota::new(1, 0).unwrap(),
-        std::sync::Arc::new(UnusedResolver),
-    )
+        git_oid_algorithm: algorithm,
+        schema_root: root.clone(),
+        store_root: root,
+        availability: AvailabilityState::Available,
+        owner: OwnerLifetime::new([0x66; 16]),
+        quota: Format3Quota::new(1, 0).unwrap(),
+        resolver: std::sync::Arc::new(UnusedResolver),
+    })
     .unwrap()
 }
 const REPL_UPDATE_SOURCE: &str =

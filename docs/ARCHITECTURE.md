@@ -31,7 +31,7 @@ the unit tests assert the two agree.
 |---|---|---|
 | 0 | primitives | (empty until orna-base) |
 | 1 | value | orna-value, orna-foundation |
-| 2 | syntax | orna-syntax |
+| 2 | syntax | orna-syntax, orna-intrinsics |
 | 3 | identity | orna-sys-id, orna-standard-sources, orna-sys-macros |
 | 4 | analysis | orna-semantic |
 | 5 | evaluation | orna-evaluator |
@@ -153,6 +153,11 @@ with `path`, `new_limit`, `reason` and `bead`. The raise is the visible exceptio
 list, so no size grows silently; the budget file itself only moves down. A raise
 whose path has not landed yet is reserved for an in-flight PR and is reported as a
 note, never a failure.
+
+A pure split that moves code into new modules records each over-cap child as a
+raise with the split's bead, and `--mode=budget --update` lowers the parent's
+entries in the same PR. The checker's new-debt diagnostic names this path, so a
+split is not mistaken for new code.
 
 Scope and measurement: `crates/<crate>/src/**/*.rs`; integration tests under
 `tests/` are excluded. Lines are logical lines. A function's length is counted from

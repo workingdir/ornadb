@@ -117,7 +117,6 @@ async fn req_upgrade_003_writes_rows_only_to_the_canonical_format3_store() {
         &head,
         index,
         &freeze,
-        |_| LoosePath::for_key("media", &[key.to_owned()]),
         "orna: publish format-3 row",
     )
     .await
