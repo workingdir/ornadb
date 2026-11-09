@@ -3816,27 +3816,29 @@ fn declared_symbol(item: &Item) -> Option<(String, SymbolKind, Type)> {
                 },
             ))
         }
-        Declaration::Table { name, .. } => {
-            Some((name.clone(), SymbolKind::Table, Type::Named(name.clone())))
-        }
+        Declaration::Table { name, .. } => Some((
+            name.clone(),
+            SymbolKind::Table,
+            Type::Named(name.to_owned()),
+        )),
         Declaration::Type { name, .. } => {
-            Some((name.clone(), SymbolKind::Type, Type::Named(name.clone())))
+            Some((name.clone(), SymbolKind::Type, Type::Named(name.to_owned())))
         }
         Declaration::Enum { name, .. } => {
-            Some((name.clone(), SymbolKind::Enum, Type::Named(name.clone())))
+            Some((name.clone(), SymbolKind::Enum, Type::Named(name.to_owned())))
         }
         Declaration::Protocol { name, .. } => Some((
             name.clone(),
             SymbolKind::Protocol,
-            Type::Named(name.clone()),
+            Type::Named(name.to_owned()),
         )),
         Declaration::Dimension { name, .. } => Some((
             name.clone(),
             SymbolKind::Dimension,
-            Type::Named(name.clone()),
+            Type::Named(name.to_owned()),
         )),
         Declaration::Unit { name, .. } => {
-            Some((name.clone(), SymbolKind::Unit, Type::Named(name.clone())))
+            Some((name.clone(), SymbolKind::Unit, Type::Named(name.to_owned())))
         }
         Declaration::Let {
             pattern: Pattern::Name(name, _),
@@ -5831,344 +5833,317 @@ fn check_item(
             keys,
             members,
             ..
-        } => {
-            if name == "std" {
-                diagnostics.push(diag(DIAG_RESERVED_STD, "`std` is reserved"));
-            } else if name == "sys" {
-                diagnostics.push(diag(DIAG_RESERVED_SYS, "`sys` is reserved"));
-            }
-            let mut key_names = BTreeSet::new();
-            for key in keys {
-                match &key.pattern {
-                    Pattern::Name(key_name, _) => {
-                        if !key_names.insert(key_name.clone()) {
-                            diagnostics.push(diag(DIAG_DUPLICATE, "duplicate primary-key field"));
-                        }
-                    }
-                    // Key paths are reconstructed as an ordered list of named
-                    // columns, so destructuring patterns have no stable schema
-                    // surface here.
-                    _ => diagnostics
-                        .push(diag(DIAG_TYPE, "primary-key fields must have simple names")),
-                }
-                let annotation_resolved = match &key.annotation {
-                    Some(annotation) => {
-                        let before = diagnostics.len();
-                        validate_type_annotation(annotation, scope, &BTreeSet::new(), diagnostics);
-                        diagnostics.len() == before
-                    }
-                    None => {
-                        diagnostics.push(diag(DIAG_TYPE, "primary-key fields must declare a type"));
-                        false
-                    }
-                };
-                let ty = key
-                    .annotation
-                    .as_ref()
-                    .map(|annotation| resolved_type_of(annotation, scope))
-                    .unwrap_or(Type::Error);
-                // A key type that failed annotation validation already carries
-                // its diagnostic; it has no encoding left to judge.
-                if annotation_resolved
-                    && let Some((code, message)) =
-                        primary_key_type_error(&ty, scope, &mut BTreeSet::new())
-                {
-                    diagnostics.push(diag(code, message));
-                }
-            }
-            // Keep the catalogue's key encoding types transparent through
-            // local aliases; path admission has no source Scope to consult.
-            if let Some(schema) = symbols
-                .get_mut(name)
-                .and_then(|symbol| symbol.table_schema.as_mut())
-            {
-                for key in keys {
-                    let (Pattern::Name(key_name, _), Some(annotation)) =
-                        (&key.pattern, &key.annotation)
-                    else {
-                        continue;
-                    };
-                    let resolved = resolved_type_of(annotation, scope);
-                    schema.fields.insert(key_name.clone(), resolved.clone());
-                    if let Some((_, key_type)) = schema.admission.as_mut().and_then(|admission| {
-                        admission
-                            .keys
-                            .iter_mut()
-                            .find(|(field, _)| field == key_name)
-                    }) {
-                        *key_type = resolved;
-                    }
-                }
-            }
-            let row = table_row_type(item);
-            let target = Type::Named(canonical_nominal_name(name, scope));
-            let mut row_locals = match &row {
-                Type::Record(fields) => fields
-                    .iter()
-                    .map(|(field, ty)| {
-                        (
-                            field.clone(),
-                            Symbol {
-                                table_schema: None,
-                                kind: SymbolKind::Let,
-                                ty: ty.clone(),
-                                public: false,
-                                effects: EffectSummary::default(),
-                                generic_parameters: Vec::new(),
-                                enum_variants: BTreeSet::new(),
-                            },
-                        )
-                    })
-                    .collect(),
-                _ => BTreeMap::new(),
-            };
-            if matches!(&row, Type::Record(_)) {
-                if keys.is_empty()
-                    && members.iter().any(|member| {
-                        matches!(member, orna_syntax::TableMember::Field { name, .. } if name == "id")
-                    })
-                {
-                    // `id` is already the implicit logical key, so choosing a
-                    // body field of the same name would make row identity
-                    // depend on declaration order.
-                    diagnostics.push(diag(
-                        DIAG_DUPLICATE,
-                        "automatic primary-key field `id` conflicts with a declared field",
-                    ));
-                }
-                let mut declared_fields = key_names.clone();
-                if keys.is_empty() {
-                    declared_fields.insert("id".to_owned());
-                }
-                for member in members {
-                    if let orna_syntax::TableMember::Field { name, .. } = member
-                        && !declared_fields.insert(name.clone())
-                    {
-                        diagnostics.push(diag(
-                            DIAG_DUPLICATE,
-                            "table field conflicts with another field or primary key",
-                        ));
-                    }
-                }
-            }
-            // `self` is the complete prospective row inside key defaults and
-            // row-local field expressions. The table row shape already
-            // includes key columns and the implicit `id` where applicable.
-            if let Type::Record(fields) = &row {
-                row_locals.insert(
-                    "self".into(),
-                    Symbol {
-                        table_schema: None,
-                        kind: SymbolKind::Let,
-                        ty: Type::Record(fields.clone()),
-                        public: false,
-                        effects: EffectSummary::default(),
-                        generic_parameters: Vec::new(),
-                        enum_variants: BTreeSet::new(),
-                    },
-                );
-            }
-            for key in keys {
-                let (Some(annotation), Some(default)) = (&key.annotation, &key.default) else {
-                    continue;
-                };
-                let expected = resolved_type_of(annotation, scope);
-                let inferred =
-                    infer_contextual(default, &expected, scope, &row_locals, diagnostics);
-                require_same(&expected, &inferred.ty, diagnostics);
-            }
-            validate_non_overlapping_implementations(
-                members.iter().filter_map(|member| match member {
-                    orna_syntax::TableMember::Implementation { implementation, .. } => {
-                        Some(implementation)
-                    }
-                    _ => None,
-                }),
+        } => check_table_item(
+            TableCheck {
+                item,
+                name,
+                keys,
+                members,
+                symbols,
                 scope,
-                diagnostics,
-            );
-            for member in members {
-                if let orna_syntax::TableMember::Implementation { implementation, .. } = member {
-                    validate_nested_implementation_members(
-                        implementation,
-                        &scope.local_protocols,
-                        scope,
-                        &target,
-                        Some(&row),
-                        diagnostics,
-                    );
-                    validate_implementation_restrictions(implementation, scope, diagnostics);
-                }
-            }
-            for (source_order, member) in members.iter().enumerate() {
-                match member {
-                    orna_syntax::TableMember::Assertion { value, .. } => {
-                        let inferred = infer_table_assertion(value, name, &row, scope, diagnostics);
-                        assertion(
-                            AssertionInput {
-                                owner: AssertionOwner::Table(name.clone()),
-                                value,
-                                inferred,
-                                resolved_tables: None,
-                                scope: Some(scope),
-                                // A table assertion is always enforced at the
-                                // activation boundary.
-                                enforcement: AssertionScope::Activation,
-                                source_order,
-                            },
-                            plans,
-                            diagnostics,
-                        );
-                    }
-                    orna_syntax::TableMember::Field {
-                        initializer: None,
-                        ty,
-                        ..
-                    } => {
-                        validate_type_annotation(ty, scope, &BTreeSet::new(), diagnostics);
-                        validate_stored_field_type(ty, scope, diagnostics);
-                    }
-                    orna_syntax::TableMember::Field {
-                        initializer: Some(initializer),
-                        ty,
-                        ..
-                    } => {
-                        validate_type_annotation(ty, scope, &BTreeSet::new(), diagnostics);
-                        if matches!(initializer, FieldInitializer::Default(_)) {
-                            validate_stored_field_type(ty, scope, diagnostics);
-                        }
-                        let value = match initializer {
-                            FieldInitializer::Default(value)
-                            | FieldInitializer::Computed(value) => value,
-                        };
-                        let expected = resolved_type_of(ty, scope);
-                        let inferred =
-                            infer_contextual(value, &expected, scope, &row_locals, diagnostics);
-                        if matches!(initializer, FieldInitializer::Computed(_))
-                            && (inferred.effects.is_effectful() || inferred.effects.may_fail)
-                        {
-                            diagnostics.push(diag(
-                                DIAG_COMPUTED_NONDETERMINISTIC,
-                                "computed field must be deterministic and row-local",
-                            ));
-                        }
-                        require_same(&expected, &inferred.ty, diagnostics);
-                    }
-                    _ => {}
-                }
-            }
-        }
+                plans,
+            },
+            diagnostics,
+        ),
         Declaration::Type {
             name,
             representation: TypeRepresentation::Alias { ty, refinements },
             ..
-        } => {
-            // A refined alias keeps its own nominal identity, but its
-            // representation shape follows the transparent base alias.
-            let base = resolved_type_of(ty, scope);
-            let target = Type::Named(name.clone());
-            let target_shape = matches!(&base, Type::Record(_)).then_some(&base);
-            validate_non_overlapping_implementations(
-                refinements.iter().filter_map(|member| match member {
-                    TypeMember::Implementation { implementation, .. } => Some(implementation),
-                    _ => None,
-                }),
-                scope,
-                diagnostics,
-            );
-            for (source_order, member) in refinements.iter().enumerate() {
-                match member {
-                    TypeMember::Assertion { value, .. } => {
-                        let inferred = infer_refined_assertion(value, &base, scope, diagnostics);
-                        assertion(
-                            AssertionInput {
-                                owner: AssertionOwner::RefinedType(name.clone()),
-                                value,
-                                inferred,
-                                resolved_tables: None,
-                                scope: Some(scope),
-                                // A refined assertion runs whenever a base
-                                // value is constructed or converted into the
-                                // refined type (ORNA-ASSERT-041).
-                                enforcement: AssertionScope::ValueConstruction,
-                                source_order,
-                            },
-                            plans,
-                            diagnostics,
-                        );
-                    }
-                    TypeMember::Implementation { implementation, .. } => {
-                        validate_nested_implementation_members(
-                            implementation,
-                            &scope.local_protocols,
-                            scope,
-                            &target,
-                            target_shape,
-                            diagnostics,
-                        );
-                        validate_implementation_restrictions(implementation, scope, diagnostics);
-                    }
-                    _ => {}
-                }
-            }
-        }
+        } => check_alias_type_item(name, ty, refinements, scope, plans, diagnostics),
         Declaration::Type {
             name,
             representation: TypeRepresentation::Nominal { members },
             ..
-        } => {
-            let target = Type::Named(canonical_nominal_name(name, scope));
-            let target_name = match &target {
-                Type::Named(name) => name,
-                _ => unreachable!(),
-            };
-            let target_shape = scope
-                .nominal_rows
-                .get(target_name)
-                .or_else(|| scope.table_rows.get(target_name));
-            let mut field_locals = BTreeMap::new();
-            for member in members {
-                let TypeMember::Field {
-                    name,
-                    ty,
-                    initializer,
-                    ..
-                } = member
-                else {
-                    continue;
-                };
-                validate_type_annotation(ty, scope, &BTreeSet::new(), diagnostics);
-                let expected = resolved_type_of(ty, scope);
-                if let Some(initializer) = initializer {
-                    let inferred =
-                        infer_contextual(initializer, &expected, scope, &field_locals, diagnostics);
-                    require_same(&expected, &inferred.ty, diagnostics);
+        } => check_nominal_type_item(name, members, scope, diagnostics),
+        _ => {}
+    }
+    None
+}
+
+/// One table declaration: reserved names, key schema, row shape and
+/// member assertions.
+struct TableCheck<'a> {
+    item: &'a Item,
+    name: &'a str,
+    keys: &'a [orna_syntax::Parameter],
+    members: &'a [orna_syntax::TableMember],
+    symbols: &'a mut BTreeMap<String, Symbol>,
+    scope: &'a Scope,
+    plans: &'a mut Vec<AssertionPlan>,
+}
+
+fn check_table_item(check: TableCheck<'_>, diagnostics: &mut Vec<Diagnostic>) {
+    let TableCheck {
+        item,
+        name,
+        keys,
+        members,
+        symbols,
+        scope,
+        plans,
+    } = check;
+    if name == "std" {
+        diagnostics.push(diag(DIAG_RESERVED_STD, "`std` is reserved"));
+    } else if name == "sys" {
+        diagnostics.push(diag(DIAG_RESERVED_SYS, "`sys` is reserved"));
+    }
+    let mut key_names = BTreeSet::new();
+    for key in keys {
+        match &key.pattern {
+            Pattern::Name(key_name, _) => {
+                if !key_names.insert(key_name.clone()) {
+                    diagnostics.push(diag(DIAG_DUPLICATE, "duplicate primary-key field"));
                 }
-                field_locals.insert(
-                    name.clone(),
+            }
+            // Key paths are reconstructed as an ordered list of named
+            // columns, so destructuring patterns have no stable schema
+            // surface here.
+            _ => diagnostics.push(diag(DIAG_TYPE, "primary-key fields must have simple names")),
+        }
+        let annotation_resolved = match &key.annotation {
+            Some(annotation) => {
+                let before = diagnostics.len();
+                validate_type_annotation(annotation, scope, &BTreeSet::new(), diagnostics);
+                diagnostics.len() == before
+            }
+            None => {
+                diagnostics.push(diag(DIAG_TYPE, "primary-key fields must declare a type"));
+                false
+            }
+        };
+        let ty = key
+            .annotation
+            .as_ref()
+            .map(|annotation| resolved_type_of(annotation, scope))
+            .unwrap_or(Type::Error);
+        // A key type that failed annotation validation already carries
+        // its diagnostic; it has no encoding left to judge.
+        if annotation_resolved
+            && let Some((code, message)) = primary_key_type_error(&ty, scope, &mut BTreeSet::new())
+        {
+            diagnostics.push(diag(code, message));
+        }
+    }
+    // Keep the catalogue's key encoding types transparent through
+    // local aliases; path admission has no source Scope to consult.
+    if let Some(schema) = symbols
+        .get_mut(name)
+        .and_then(|symbol| symbol.table_schema.as_mut())
+    {
+        for key in keys {
+            let (Pattern::Name(key_name, _), Some(annotation)) = (&key.pattern, &key.annotation)
+            else {
+                continue;
+            };
+            let resolved = resolved_type_of(annotation, scope);
+            schema.fields.insert(key_name.clone(), resolved.clone());
+            if let Some((_, key_type)) = schema.admission.as_mut().and_then(|admission| {
+                admission
+                    .keys
+                    .iter_mut()
+                    .find(|(field, _)| field == key_name)
+            }) {
+                *key_type = resolved;
+            }
+        }
+    }
+    let row = table_row_type(item);
+    let target = Type::Named(canonical_nominal_name(name, scope));
+    let mut row_locals = match &row {
+        Type::Record(fields) => fields
+            .iter()
+            .map(|(field, ty)| {
+                (
+                    field.clone(),
                     Symbol {
                         table_schema: None,
                         kind: SymbolKind::Let,
-                        ty: expected,
+                        ty: ty.clone(),
                         public: false,
                         effects: EffectSummary::default(),
                         generic_parameters: Vec::new(),
                         enum_variants: BTreeSet::new(),
                     },
-                );
+                )
+            })
+            .collect(),
+        _ => BTreeMap::new(),
+    };
+    if matches!(&row, Type::Record(_)) {
+        if keys.is_empty()
+            && members.iter().any(|member| {
+                matches!(member, orna_syntax::TableMember::Field { name, .. } if name == "id")
+            })
+        {
+            // `id` is already the implicit logical key, so choosing a
+            // body field of the same name would make row identity
+            // depend on declaration order.
+            diagnostics.push(diag(
+                DIAG_DUPLICATE,
+                "automatic primary-key field `id` conflicts with a declared field",
+            ));
+        }
+        let mut declared_fields = key_names.clone();
+        if keys.is_empty() {
+            declared_fields.insert("id".to_owned());
+        }
+        for member in members {
+            if let orna_syntax::TableMember::Field { name, .. } = member
+                && !declared_fields.insert(name.clone())
+            {
+                diagnostics.push(diag(
+                    DIAG_DUPLICATE,
+                    "table field conflicts with another field or primary key",
+                ));
             }
-            validate_non_overlapping_implementations(
-                members.iter().filter_map(|member| match member {
-                    TypeMember::Implementation { implementation, .. } => Some(implementation),
-                    _ => None,
-                }),
+        }
+    }
+    // `self` is the complete prospective row inside key defaults and
+    // row-local field expressions. The table row shape already
+    // includes key columns and the implicit `id` where applicable.
+    if let Type::Record(fields) = &row {
+        row_locals.insert(
+            "self".into(),
+            Symbol {
+                table_schema: None,
+                kind: SymbolKind::Let,
+                ty: Type::Record(fields.clone()),
+                public: false,
+                effects: EffectSummary::default(),
+                generic_parameters: Vec::new(),
+                enum_variants: BTreeSet::new(),
+            },
+        );
+    }
+    for key in keys {
+        let (Some(annotation), Some(default)) = (&key.annotation, &key.default) else {
+            continue;
+        };
+        let expected = resolved_type_of(annotation, scope);
+        let inferred = infer_contextual(default, &expected, scope, &row_locals, diagnostics);
+        require_same(&expected, &inferred.ty, diagnostics);
+    }
+    validate_non_overlapping_implementations(
+        members.iter().filter_map(|member| match member {
+            orna_syntax::TableMember::Implementation { implementation, .. } => Some(implementation),
+            _ => None,
+        }),
+        scope,
+        diagnostics,
+    );
+    for member in members {
+        if let orna_syntax::TableMember::Implementation { implementation, .. } = member {
+            validate_nested_implementation_members(
+                implementation,
+                &scope.local_protocols,
                 scope,
+                &target,
+                Some(&row),
                 diagnostics,
             );
-            for member in members {
-                let TypeMember::Implementation { implementation, .. } = member else {
-                    continue;
+            validate_implementation_restrictions(implementation, scope, diagnostics);
+        }
+    }
+    for (source_order, member) in members.iter().enumerate() {
+        match member {
+            orna_syntax::TableMember::Assertion { value, .. } => {
+                let inferred = infer_table_assertion(value, name, &row, scope, diagnostics);
+                assertion(
+                    AssertionInput {
+                        owner: AssertionOwner::Table(name.to_owned()),
+                        value,
+                        inferred,
+                        resolved_tables: None,
+                        scope: Some(scope),
+                        // A table assertion is always enforced at the
+                        // activation boundary.
+                        enforcement: AssertionScope::Activation,
+                        source_order,
+                    },
+                    plans,
+                    diagnostics,
+                );
+            }
+            orna_syntax::TableMember::Field {
+                initializer: None,
+                ty,
+                ..
+            } => {
+                validate_type_annotation(ty, scope, &BTreeSet::new(), diagnostics);
+                validate_stored_field_type(ty, scope, diagnostics);
+            }
+            orna_syntax::TableMember::Field {
+                initializer: Some(initializer),
+                ty,
+                ..
+            } => {
+                validate_type_annotation(ty, scope, &BTreeSet::new(), diagnostics);
+                if matches!(initializer, FieldInitializer::Default(_)) {
+                    validate_stored_field_type(ty, scope, diagnostics);
+                }
+                let value = match initializer {
+                    FieldInitializer::Default(value) | FieldInitializer::Computed(value) => value,
                 };
+                let expected = resolved_type_of(ty, scope);
+                let inferred = infer_contextual(value, &expected, scope, &row_locals, diagnostics);
+                if matches!(initializer, FieldInitializer::Computed(_))
+                    && (inferred.effects.is_effectful() || inferred.effects.may_fail)
+                {
+                    diagnostics.push(diag(
+                        DIAG_COMPUTED_NONDETERMINISTIC,
+                        "computed field must be deterministic and row-local",
+                    ));
+                }
+                require_same(&expected, &inferred.ty, diagnostics);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn check_alias_type_item(
+    name: &str,
+    ty: &TypeExpr,
+    refinements: &[TypeMember],
+    scope: &Scope,
+    plans: &mut Vec<AssertionPlan>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    // A refined alias keeps its own nominal identity, but its
+    // representation shape follows the transparent base alias.
+    let base = resolved_type_of(ty, scope);
+    let target = Type::Named(name.to_owned());
+    let target_shape = matches!(&base, Type::Record(_)).then_some(&base);
+    validate_non_overlapping_implementations(
+        refinements.iter().filter_map(|member| match member {
+            TypeMember::Implementation { implementation, .. } => Some(implementation),
+            _ => None,
+        }),
+        scope,
+        diagnostics,
+    );
+    for (source_order, member) in refinements.iter().enumerate() {
+        match member {
+            TypeMember::Assertion { value, .. } => {
+                let inferred = infer_refined_assertion(value, &base, scope, diagnostics);
+                assertion(
+                    AssertionInput {
+                        owner: AssertionOwner::RefinedType(name.to_owned()),
+                        value,
+                        inferred,
+                        resolved_tables: None,
+                        scope: Some(scope),
+                        // A refined assertion runs whenever a base
+                        // value is constructed or converted into the
+                        // refined type (ORNA-ASSERT-041).
+                        enforcement: AssertionScope::ValueConstruction,
+                        source_order,
+                    },
+                    plans,
+                    diagnostics,
+                );
+            }
+            TypeMember::Implementation { implementation, .. } => {
                 validate_nested_implementation_members(
                     implementation,
                     &scope.local_protocols,
@@ -6179,10 +6154,79 @@ fn check_item(
                 );
                 validate_implementation_restrictions(implementation, scope, diagnostics);
             }
+            _ => {}
         }
-        _ => {}
     }
-    None
+}
+
+fn check_nominal_type_item(
+    name: &str,
+    members: &[TypeMember],
+    scope: &Scope,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let target = Type::Named(canonical_nominal_name(name, scope));
+    let target_name = match &target {
+        Type::Named(name) => name,
+        _ => unreachable!(),
+    };
+    let target_shape = scope
+        .nominal_rows
+        .get(target_name)
+        .or_else(|| scope.table_rows.get(target_name));
+    let mut field_locals = BTreeMap::new();
+    for member in members {
+        let TypeMember::Field {
+            name,
+            ty,
+            initializer,
+            ..
+        } = member
+        else {
+            continue;
+        };
+        validate_type_annotation(ty, scope, &BTreeSet::new(), diagnostics);
+        let expected = resolved_type_of(ty, scope);
+        if let Some(initializer) = initializer {
+            let inferred =
+                infer_contextual(initializer, &expected, scope, &field_locals, diagnostics);
+            require_same(&expected, &inferred.ty, diagnostics);
+        }
+        field_locals.insert(
+            name.clone(),
+            Symbol {
+                table_schema: None,
+                kind: SymbolKind::Let,
+                ty: expected,
+                public: false,
+                effects: EffectSummary::default(),
+                generic_parameters: Vec::new(),
+                enum_variants: BTreeSet::new(),
+            },
+        );
+    }
+    validate_non_overlapping_implementations(
+        members.iter().filter_map(|member| match member {
+            TypeMember::Implementation { implementation, .. } => Some(implementation),
+            _ => None,
+        }),
+        scope,
+        diagnostics,
+    );
+    for member in members {
+        let TypeMember::Implementation { implementation, .. } = member else {
+            continue;
+        };
+        validate_nested_implementation_members(
+            implementation,
+            &scope.local_protocols,
+            scope,
+            &target,
+            target_shape,
+            diagnostics,
+        );
+        validate_implementation_restrictions(implementation, scope, diagnostics);
+    }
 }
 
 /// These presentation protocol names are part of the frozen builtin surface,
@@ -7071,6 +7115,14 @@ fn same_default_expression(left: &Expr, right: &Expr) -> bool {
         (Expr::Record { fields: left, .. }, Expr::Record { fields: right, .. }) => {
             same_default_record_fields(left, right)
         }
+        _ => same_default_compound_expression(left, right),
+    }
+}
+
+/// The call, construction and control-flow forms: composite expressions whose
+/// equality recurses through their parts.
+fn same_default_compound_expression(left: &Expr, right: &Expr) -> bool {
+    match (left, right) {
         (
             Expr::Nominal {
                 path: left_path,
