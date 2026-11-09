@@ -323,7 +323,21 @@ impl Error for PhysicalMigrationArtifactError {
         match self {
             Self::Planning(error) => Some(error),
             Self::CanonicalHash(error) => Some(error),
-            _ => None,
+            Self::InvalidMagic
+            | Self::UnsupportedVersion(_)
+            | Self::ExpectedBaseMismatch { .. }
+            | Self::CandidatePairMismatch { .. }
+            | Self::InvalidOperationTag(_)
+            | Self::InvalidFieldTypeTag(_)
+            | Self::InvalidScalarTag(_)
+            | Self::InvalidDeleteTag(_)
+            | Self::InvalidBoolean { .. }
+            | Self::CollectionLimit { .. }
+            | Self::ArtifactSizeLimit { .. }
+            | Self::Truncated
+            | Self::TrailingBytes
+            | Self::CanonicalBytesMismatch
+            | Self::DigestMismatch { .. } => None,
         }
     }
 }
@@ -1114,90 +1128,122 @@ fn project_physical_field(
     object_type: TypeId,
     field: &FieldDefinition,
 ) -> Result<CreateField, PhysicalPlanError> {
+    // A non-unique default is rejected before projection so the projection
+    // error never masks it. A unique field with a default reaches the repeated
+    // check below, after the unique-shape error has had its say.
     if field.default_expression().is_some() && !field.unique() {
         return Err(PhysicalPlanError::UnsupportedFieldDefault {
             object_type,
             field: field.id(),
         });
     }
+    let field_type = project_physical_field_type(revision, object_type, field)?;
+    check_physical_field_compatibility(object_type, field, field_type)?;
+
+    Ok(CreateField {
+        field_id: field.id(),
+        field_type,
+        nullable: field.nullable(),
+        unique: field.unique(),
+    })
+}
+
+/// Projects one field type while keeping the unique-shape error authoritative
+/// for every closed type.
+fn project_physical_field_type(
+    revision: PhysicalRevision<'_>,
+    object_type: TypeId,
+    field: &FieldDefinition,
+) -> Result<PhysicalFieldType, PhysicalPlanError> {
+    let projected = project_physical_field_shape(revision, object_type, field);
+    if !field.unique() {
+        return projected;
+    }
+    match projected {
+        Ok(field_type @ PhysicalFieldType::Scalar(StandardScalar::CharacterLargeObject)) => {
+            Ok(field_type)
+        }
+        Ok(field_type @ PhysicalFieldType::Reference { .. }) if !field.nullable() => Ok(field_type),
+        Ok(_) | Err(_) => Err(PhysicalPlanError::UnsupportedUniqueField {
+            object_type,
+            field: field.id(),
+        }),
+    }
+}
+
+/// Projects one field type from its resolved type alone, ignoring the shape
+/// rules that depend on the `UNIQUE` and nullable flags.
+fn project_physical_field_shape(
+    revision: PhysicalRevision<'_>,
+    object_type: TypeId,
+    field: &FieldDefinition,
+) -> Result<PhysicalFieldType, PhysicalPlanError> {
     let resolved_type = field.resolved_type();
     let legacy_scalar = resolved_type.legacy_scalar();
     let named_type = resolved_type.named_type();
     let reference_target = resolved_type.reference_target();
     let value_type = resolved_type.value_type();
 
-    let projected = (|| {
-        if let Some(scalar) = legacy_scalar {
-            if field.unique() && revision.standard_catalogue().is_some() {
-                Err(PhysicalPlanError::UnsupportedUniqueField {
-                    object_type,
-                    field: field.id(),
-                })
-            } else {
-                Ok(PhysicalFieldType::Scalar(scalar))
-            }
-        } else if let Some(named_type) = named_type {
-            if revision.catalogue().enum_type_by_id(named_type).is_some() {
-                Ok(PhysicalFieldType::Enum(named_type))
-            } else if revision
-                .catalogue()
-                .record_value_type_by_id(named_type)
-                .is_some()
-            {
-                if field.nullable() {
-                    return Err(PhysicalPlanError::UnsupportedNullableRecordField {
-                        object_type,
-                        field: field.id(),
-                    });
-                }
-                Ok(PhysicalFieldType::Record(named_type))
-            } else {
-                Err(PhysicalPlanError::UnsupportedNamedFieldType {
-                    object_type,
-                    field: field.id(),
-                })
-            }
-        } else if let Some(target) = reference_target {
-            if revision.catalogue().object_type_by_id(target).is_none() {
-                return Err(PhysicalPlanError::UnknownReferenceTarget {
-                    object_type,
-                    field: field.id(),
-                    target,
-                });
-            }
-            Ok(PhysicalFieldType::Reference {
-                target,
-                on_delete: field.on_delete(),
-            })
-        } else if let Some(value_type) = value_type {
-            project_value_type(revision, object_type, field.id(), value_type)
-        } else {
-            // Unknown resolved-type projections must fail closed.
-            Err(PhysicalPlanError::UnsupportedNamedFieldType {
+    if let Some(scalar) = legacy_scalar {
+        if field.unique() && revision.standard_catalogue().is_some() {
+            return Err(PhysicalPlanError::UnsupportedUniqueField {
                 object_type,
                 field: field.id(),
-            })
+            });
         }
-    })();
-    let field_type = if field.unique() {
-        // The unique-shape error remains authoritative for every closed type.
-        // Projection errors stay exact for fields that do not request UNIQUE.
-        match projected {
-            Ok(field_type @ PhysicalFieldType::Scalar(StandardScalar::CharacterLargeObject)) => {
-                field_type
-            }
-            Ok(field_type @ PhysicalFieldType::Reference { .. }) if !field.nullable() => field_type,
-            Ok(_) | Err(_) => {
-                return Err(PhysicalPlanError::UnsupportedUniqueField {
+        return Ok(PhysicalFieldType::Scalar(scalar));
+    }
+    if let Some(named_type) = named_type {
+        if revision.catalogue().enum_type_by_id(named_type).is_some() {
+            return Ok(PhysicalFieldType::Enum(named_type));
+        }
+        if revision
+            .catalogue()
+            .record_value_type_by_id(named_type)
+            .is_some()
+        {
+            if field.nullable() {
+                return Err(PhysicalPlanError::UnsupportedNullableRecordField {
                     object_type,
                     field: field.id(),
                 });
             }
+            return Ok(PhysicalFieldType::Record(named_type));
         }
-    } else {
-        projected?
-    };
+        return Err(PhysicalPlanError::UnsupportedNamedFieldType {
+            object_type,
+            field: field.id(),
+        });
+    }
+    if let Some(target) = reference_target {
+        if revision.catalogue().object_type_by_id(target).is_none() {
+            return Err(PhysicalPlanError::UnknownReferenceTarget {
+                object_type,
+                field: field.id(),
+                target,
+            });
+        }
+        return Ok(PhysicalFieldType::Reference {
+            target,
+            on_delete: field.on_delete(),
+        });
+    }
+    if let Some(value_type) = value_type {
+        return project_value_type(revision, object_type, field.id(), value_type);
+    }
+    // Unknown resolved-type projections must fail closed.
+    Err(PhysicalPlanError::UnsupportedNamedFieldType {
+        object_type,
+        field: field.id(),
+    })
+}
 
+/// Rejects a projected field type the physical schema cannot store.
+fn check_physical_field_compatibility(
+    object_type: TypeId,
+    field: &FieldDefinition,
+    field_type: PhysicalFieldType,
+) -> Result<(), PhysicalPlanError> {
     if field_type == PhysicalFieldType::Scalar(StandardScalar::Void) {
         return Err(PhysicalPlanError::UnsupportedVoidField {
             object_type,
@@ -1225,13 +1271,7 @@ fn project_physical_field(
             field: field.id(),
         });
     }
-
-    Ok(CreateField {
-        field_id: field.id(),
-        field_type,
-        nullable: field.nullable(),
-        unique: field.unique(),
-    })
+    Ok(())
 }
 
 fn project_value_type(
