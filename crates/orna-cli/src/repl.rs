@@ -1,10 +1,12 @@
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Write as _;
 use std::io::{self, BufRead, Write};
 
 use orna_conformance::AdmittedReplSession;
 use orna_evaluator::{ReplDetail, ReplError};
-use orna_foundation::{CanonicalValue, canonical_uuid_text};
+use orna_foundation::{CanonicalSnapshot, CanonicalValue, canonical_uuid_text};
 use orna_live::live_presentation::{LivePresentationUpdate, ResyncRequest, WatchPresentation};
+use orna_protocol::{Envelope, Limits, Message, PresentNode};
 use orna_value::{ContextValue, Raw};
 
 const MAX_INPUT_BYTES: usize = 65_536;
@@ -109,14 +111,28 @@ pub trait SnapshotSessionLoader {
 
 /// A host-owned subscription source yielding complete encoded live frames.
 /// The host sends the Watch request and supplies its negotiated presentation;
-/// the REPL neither opens a connection nor encodes protocol messages.
+/// the REPL neither opens a connection nor encodes protocol messages. The
+/// session is the environment the watch expression resolves in, the same one
+/// the console evaluates in (Orna-1.1.0 17-repl).
 pub trait WatchFrameSource {
     type Error;
 
-    fn start_watch(&mut self, source: &str) -> Result<WatchPresentation, Self::Error>;
+    fn start_watch(
+        &mut self,
+        source: &str,
+        session: &AdmittedReplSession,
+    ) -> Result<WatchPresentation, Self::Error>;
     fn next_frame(&mut self, watch: [u8; 16]) -> Result<Option<Vec<u8>>, Self::Error>;
-    fn request_resync(&mut self, request: ResyncRequest) -> Result<(), Self::Error>;
+    fn request_resync(
+        &mut self,
+        request: ResyncRequest,
+        session: &AdmittedReplSession,
+    ) -> Result<(), Self::Error>;
     fn close_watch(&mut self, watch: [u8; 16]) -> Result<(), Self::Error>;
+    /// Re-evaluates the subscription once at a prompt boundary and retains a
+    /// frame when the observation changed. A source without a scheduler does
+    /// nothing.
+    fn poll(&mut self, watch: [u8; 16], session: &AdmittedReplSession) -> Result<(), Self::Error>;
 }
 
 /// Observable state for the currently subscribed REPL watch.
@@ -198,6 +214,184 @@ impl WatchCommandState {
 struct WatchBinding<'a, S: ?Sized> {
     source: &'a mut S,
     state: &'a mut WatchCommandState,
+}
+
+/// The most watches one REPL host keeps. The console owns one subscription at
+/// a time; a host that fails to close one must not grow without bound.
+const MAX_REPL_WATCHES: usize = 64;
+
+/// Why the production REPL watch host could not serve a `:watch` request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReplWatchError {
+    /// The host has no repository identity to pin an observation to.
+    Unavailable,
+    /// The source was not a read-only, externally effect-free expression.
+    Rejected,
+    /// The observation could not be encoded within the protocol limits.
+    FrameRejected,
+}
+
+/// One watch the host observes, independent of its client presentation.
+struct ObservedWatch {
+    source: String,
+    present: PresentNode,
+    revision: u64,
+    pending: VecDeque<Vec<u8>>,
+}
+
+/// The production `:watch` host for `orna repl`.
+///
+/// The watch expression is evaluated in the REPL session, the environment the
+/// console uses, and only a read-only, externally effect-free expression is
+/// admitted (30-protocol "eval and watch sources"). Observations are delivered
+/// as complete Present snapshots through the same live presentation machinery
+/// page sessions use (ORNA-REPL-006). This build has no dependency scheduler,
+/// so the host re-evaluates once per prompt and on every resync, and a changed
+/// tree advances the watch revision; a complete snapshot is the universal
+/// fallback ORNA-WIRE-001 requires.
+pub struct ReplWatchHost {
+    identity: Option<([u8; 16], [u8; 16])>,
+    limits: Limits,
+    watches: BTreeMap<[u8; 16], ObservedWatch>,
+}
+
+impl ReplWatchHost {
+    /// Builds the host for a session's database and repository identities.
+    /// Without them the console stays usable but `:watch` is refused, because
+    /// a presentation update must name the runtime it observes.
+    #[must_use]
+    pub fn new(identity: Option<([u8; 16], [u8; 16])>, limits: Limits) -> Self {
+        Self {
+            identity,
+            limits,
+            watches: BTreeMap::new(),
+        }
+    }
+}
+
+/// Encodes one complete Present snapshot for `watch`.
+fn watch_snapshot(
+    identity: Option<([u8; 16], [u8; 16])>,
+    limits: Limits,
+    watch: [u8; 16],
+    observed: &ObservedWatch,
+) -> Result<Vec<u8>, ReplWatchError> {
+    let (database, repository) = identity.ok_or(ReplWatchError::Unavailable)?;
+    let mut request = [0; 16];
+    getrandom::fill(&mut request).map_err(|_| ReplWatchError::Unavailable)?;
+    let snapshot = CanonicalSnapshot::cwd(database, repository, 0.into())
+        .map_err(|_| ReplWatchError::FrameRejected)?;
+    Envelope {
+        request: Some(request),
+        watch: Some(watch),
+        message: Message::Snapshot {
+            revision: observed.revision,
+            present: observed.present.clone(),
+            snapshot,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(limits)
+    .map_err(|_| ReplWatchError::FrameRejected)
+}
+
+/// Evaluates one observation and queues a complete snapshot when the visible
+/// tree changed, or when `force` requires the current tree regardless.
+fn observe_watch(
+    identity: Option<([u8; 16], [u8; 16])>,
+    limits: Limits,
+    watch: [u8; 16],
+    observed: &mut ObservedWatch,
+    session: &AdmittedReplSession,
+    force: bool,
+) -> Result<(), ReplWatchError> {
+    let value = session
+        .preview(&observed.source)
+        .map_err(|_| ReplWatchError::Rejected)?;
+    let present = PresentNode::from_value(value).map_err(|_| ReplWatchError::Rejected)?;
+    if present == observed.present {
+        if !force {
+            return Ok(());
+        }
+    } else {
+        observed.present = present;
+        observed.revision = observed
+            .revision
+            .checked_add(1)
+            .ok_or(ReplWatchError::FrameRejected)?;
+    }
+    let frame = watch_snapshot(identity, limits, watch, observed)?;
+    observed.pending.push_back(frame);
+    Ok(())
+}
+
+impl WatchFrameSource for ReplWatchHost {
+    type Error = ReplWatchError;
+
+    fn start_watch(
+        &mut self,
+        source: &str,
+        session: &AdmittedReplSession,
+    ) -> Result<WatchPresentation, Self::Error> {
+        let identity = self.identity.ok_or(ReplWatchError::Unavailable)?;
+        if self.watches.len() >= MAX_REPL_WATCHES {
+            return Err(ReplWatchError::Rejected);
+        }
+        let value = session
+            .preview(source)
+            .map_err(|_| ReplWatchError::Rejected)?;
+        let present = PresentNode::from_value(value).map_err(|_| ReplWatchError::Rejected)?;
+        let mut watch = [0; 16];
+        getrandom::fill(&mut watch).map_err(|_| ReplWatchError::Unavailable)?;
+        if self.watches.contains_key(&watch) {
+            return Err(ReplWatchError::Unavailable);
+        }
+        let mut observed = ObservedWatch {
+            source: source.to_owned(),
+            present,
+            revision: 0,
+            pending: VecDeque::new(),
+        };
+        let frame = watch_snapshot(Some(identity), self.limits, watch, &observed)?;
+        observed.pending.push_back(frame);
+        self.watches.insert(watch, observed);
+        WatchPresentation::new(watch, self.limits).map_err(|_| ReplWatchError::FrameRejected)
+    }
+
+    fn next_frame(&mut self, watch: [u8; 16]) -> Result<Option<Vec<u8>>, Self::Error> {
+        Ok(self
+            .watches
+            .get_mut(&watch)
+            .and_then(|observed| observed.pending.pop_front()))
+    }
+
+    fn request_resync(
+        &mut self,
+        request: ResyncRequest,
+        session: &AdmittedReplSession,
+    ) -> Result<(), Self::Error> {
+        let watch = request.watch();
+        let identity = self.identity;
+        let limits = self.limits;
+        let Some(observed) = self.watches.get_mut(&watch) else {
+            return Err(ReplWatchError::Unavailable);
+        };
+        observe_watch(identity, limits, watch, observed, session, true)
+    }
+
+    fn close_watch(&mut self, watch: [u8; 16]) -> Result<(), Self::Error> {
+        self.watches.remove(&watch);
+        Ok(())
+    }
+
+    fn poll(&mut self, watch: [u8; 16], session: &AdmittedReplSession) -> Result<(), Self::Error> {
+        let identity = self.identity;
+        let limits = self.limits;
+        let Some(observed) = self.watches.get_mut(&watch) else {
+            return Ok(());
+        };
+        observe_watch(identity, limits, watch, observed, session, false)
+    }
 }
 
 fn repl_error_documentation(code: &str) -> (&'static str, &'static str) {
@@ -477,29 +671,33 @@ pub fn run_with_snapshot_loader<R: BufRead, W: Write, L: SnapshotSessionLoader +
     )
 }
 
-/// Run an admitted REPL with a host-provided submission adapter. The adapter is
-/// discarded after successful snapshot replacement because its transaction
-/// authority is bound to the initial committed source snapshot.
+/// Run an admitted REPL with a host-provided submission adapter and the
+/// production `:watch` host. The adapter is discarded after successful
+/// snapshot replacement because its transaction authority is bound to the
+/// initial committed source snapshot.
 pub fn run_with_loader_and_submitter<
     R: BufRead,
     W: Write,
     L: SnapshotSessionLoader + ?Sized,
     S: FnMut(&mut AdmittedReplSession, &str) -> Result<Option<CanonicalValue>, ReplFailure>,
+    F: WatchFrameSource + ?Sized,
 >(
     reader: &mut R,
     writer: &mut W,
     session: &mut AdmittedReplSession,
     loader: &L,
     submitter: &mut S,
+    watch: (&mut F, &mut WatchCommandState),
     color_enabled: bool,
 ) -> io::Result<()> {
     let submitter: &mut ReplSubmissionHandler<'_> = submitter;
+    let (source, state) = watch;
     run_loop(
         reader,
         writer,
         session,
         Some(loader),
-        None::<WatchBinding<'_, dyn WatchFrameSource<Error = ()>>>,
+        Some(WatchBinding { source, state }),
         color_enabled,
         Some(submitter),
     )
@@ -507,8 +705,8 @@ pub fn run_with_loader_and_submitter<
 
 /// Run with a host-owned live watch frame source. The REPL receives complete
 /// encoded frames, while the host owns the subscription and resync transport.
-/// The binary has no watch host yet; the watch command is driven by
-/// `tests/watch_command.rs` through this entry point.
+/// The production host is [`ReplWatchHost`]; this entry point lets tests drive
+/// the watch command with a scripted source.
 #[cfg(test)]
 #[allow(
     dead_code,
@@ -547,7 +745,7 @@ fn run_loop<
     mut submitter: Option<&mut ReplSubmissionHandler<'_>>,
 ) -> io::Result<()> {
     loop {
-        pump_watch_frames(&mut watch, writer, color_enabled)?;
+        pump_watch_frames(&mut watch, session, writer, color_enabled)?;
         write_styled(writer, AnsiColor::Dim, b"> ", color_enabled)?;
         writer.flush()?;
         match read_submission(reader)? {
@@ -592,7 +790,7 @@ fn run_loop<
                         Err(()) => write_repl_error(writer, "ORNA-REPL-AT", color_enabled)?,
                     }
                 } else if let Some(rest) = parse_watch_source(command) {
-                    dispatch_watch(rest, &mut watch, writer, color_enabled)?;
+                    dispatch_watch(rest, &mut watch, session, writer, color_enabled)?;
                 } else if source.trim_start().starts_with(':') {
                     write_repl_error(writer, "ORNA-REPL-COMMAND", color_enabled)?;
                 } else {
@@ -616,6 +814,7 @@ fn run_loop<
 fn dispatch_watch<W: Write, S: WatchFrameSource + ?Sized>(
     source: &str,
     watch: &mut Option<WatchBinding<'_, S>>,
+    session: &AdmittedReplSession,
     writer: &mut W,
     color_enabled: bool,
 ) -> io::Result<()> {
@@ -623,14 +822,14 @@ fn dispatch_watch<W: Write, S: WatchFrameSource + ?Sized>(
         write_repl_error(writer, "ORNA-REPL-COMMAND", color_enabled)?;
         return Ok(());
     };
-    match binding.source.start_watch(source) {
+    match binding.source.start_watch(source, session) {
         Ok(presentation) => {
             if let Some(previous) = binding.state.install(presentation)
                 && binding.source.close_watch(previous).is_err()
             {
                 write_repl_error(writer, "ORNA-REPL-WATCH-SOURCE", color_enabled)?;
             }
-            drain_available_frames(binding, writer, color_enabled)?;
+            drain_available_frames(binding, session, writer, color_enabled)?;
         }
         Err(_) => write_repl_error(writer, "ORNA-REPL-COMMAND", color_enabled)?,
     }
@@ -654,43 +853,25 @@ fn close_session_watch<W: Write, S: WatchFrameSource + ?Sized>(
     Ok(())
 }
 
-#[allow(clippy::needless_pass_by_value)]
 /// Applies one frame to the owning presentation and prints its outcome.
 fn accept_frame<W: Write>(
     state: &mut WatchCommandState,
-    frame: Vec<u8>,
+    frame: &[u8],
     writer: &mut W,
     color_enabled: bool,
 ) -> io::Result<()> {
     let Some(presentation) = state.presentation.as_mut() else {
         return Ok(());
     };
-    match presentation.receive_encoded(&frame) {
-        Ok(LivePresentationUpdate::SnapshotInstalled) => {
-            if let Some(published) = presentation.published() {
-                write_styled(
-                    writer,
-                    AnsiColor::Green,
-                    b"watch: snapshot installed",
-                    color_enabled,
-                )?;
-                writer.write_all(b" (rev ")?;
-                write_styled_display(writer, AnsiColor::Dim, published.revision(), color_enabled)?;
-                writer.write_all(b")\n")?;
-            }
-        }
+    match presentation.receive_encoded(frame) {
+        Ok(LivePresentationUpdate::SnapshotInstalled) => write_watch_observation(
+            writer,
+            presentation,
+            b"watch: snapshot installed",
+            color_enabled,
+        ),
         Ok(LivePresentationUpdate::DeltaApplied) => {
-            if let Some(published) = presentation.published() {
-                write_styled(
-                    writer,
-                    AnsiColor::Green,
-                    b"watch: delta applied",
-                    color_enabled,
-                )?;
-                writer.write_all(b" (rev ")?;
-                write_styled_display(writer, AnsiColor::Dim, published.revision(), color_enabled)?;
-                writer.write_all(b")\n")?;
-            }
+            write_watch_observation(writer, presentation, b"watch: delta applied", color_enabled)
         }
         Ok(LivePresentationUpdate::ResyncRequired) => {
             write_styled(
@@ -699,21 +880,38 @@ fn accept_frame<W: Write>(
                 b"watch: resync required\n",
                 color_enabled,
             )?;
+            Ok(())
         }
-        Err(_) => write_repl_error(writer, "ORNA-REPL-WATCH-FRAME", color_enabled)?,
+        Err(_) => write_repl_error(writer, "ORNA-REPL-WATCH-FRAME", color_enabled),
     }
-    Ok(())
 }
 
-#[allow(clippy::needless_pass_by_value)]
+/// Reports an installed observation with its revision. A complete snapshot and
+/// an applied delta both publish a new visible revision of the watched tree.
+fn write_watch_observation<W: Write>(
+    writer: &mut W,
+    presentation: &WatchPresentation,
+    label: &[u8],
+    color_enabled: bool,
+) -> io::Result<()> {
+    let Some(published) = presentation.published() else {
+        return Ok(());
+    };
+    write_styled(writer, AnsiColor::Green, label, color_enabled)?;
+    writer.write_all(b" (rev ")?;
+    write_styled_display(writer, AnsiColor::Dim, published.revision(), color_enabled)?;
+    writer.write_all(b")\n")
+}
+
 /// Drains every immediately available frame; `Ok(None)` keeps the REPL
 /// interactive instead of blocking the line loop.
 fn drain_available_frames<W: Write, S: WatchFrameSource + ?Sized>(
     binding: &mut WatchBinding<'_, S>,
+    session: &AdmittedReplSession,
     writer: &mut W,
     color_enabled: bool,
 ) -> io::Result<()> {
-    if !send_pending_resync(binding, writer, color_enabled)? {
+    if !send_pending_resync(binding, session, writer, color_enabled)? {
         return Ok(());
     }
     let Some(watch) = binding.state.watch() else {
@@ -722,8 +920,8 @@ fn drain_available_frames<W: Write, S: WatchFrameSource + ?Sized>(
     loop {
         match binding.source.next_frame(watch) {
             Ok(Some(frame)) => {
-                accept_frame(binding.state, frame, writer, color_enabled)?;
-                if !send_pending_resync(binding, writer, color_enabled)? {
+                accept_frame(binding.state, &frame, writer, color_enabled)?;
+                if !send_pending_resync(binding, session, writer, color_enabled)? {
                     return Ok(());
                 }
             }
@@ -740,13 +938,14 @@ fn drain_available_frames<W: Write, S: WatchFrameSource + ?Sized>(
 /// A failed send remains pending and is retried at the next loop boundary.
 fn send_pending_resync<W: Write, S: WatchFrameSource + ?Sized>(
     binding: &mut WatchBinding<'_, S>,
+    session: &AdmittedReplSession,
     writer: &mut W,
     color_enabled: bool,
 ) -> io::Result<bool> {
     let Some(request) = binding.state.take_resync_request() else {
         return Ok(true);
     };
-    if let Ok(()) = binding.source.request_resync(request) {
+    if binding.source.request_resync(request, session).is_ok() {
         binding.state.acknowledge_resync_request(request);
         Ok(true)
     } else {
@@ -754,13 +953,22 @@ fn send_pending_resync<W: Write, S: WatchFrameSource + ?Sized>(
         Ok(false)
     }
 }
+
+/// Re-evaluates the watch once at a prompt boundary, then drains every frame
+/// it queued.
 fn pump_watch_frames<W: Write, S: WatchFrameSource + ?Sized>(
     watch: &mut Option<WatchBinding<'_, S>>,
+    session: &AdmittedReplSession,
     writer: &mut W,
     color_enabled: bool,
 ) -> io::Result<()> {
     if let Some(binding) = watch.as_mut() {
-        drain_available_frames(binding, writer, color_enabled)?;
+        if let Some(id) = binding.state.watch()
+            && binding.source.poll(id, session).is_err()
+        {
+            write_repl_error(writer, "ORNA-REPL-WATCH-SOURCE", color_enabled)?;
+        }
+        drain_available_frames(binding, session, writer, color_enabled)?;
     }
     Ok(())
 }

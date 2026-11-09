@@ -420,7 +420,8 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     // Publication is coordinated by the repository publication lock (PUB-3 step 7),
     // not by the runtime writer lease. A secondary publisher may admit the durable
     // tail while a live owner holds the runtime owner lock (ORNA-TURSO-005).
-    recover_pending_publication(&runtime, &repository, &state)?;
+    recover_pending_publication(&runtime, &repository, &state)
+        .map_err(publication_recovery_diagnostic)?;
     let pending = runtime.block_on(state.pending_count()).map_err(|error| {
         publish_error(
             "pending runtime changes could not be read",
@@ -458,35 +459,55 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     Ok(())
 }
 
-/// Reconciles an interrupted publication before the tail is read or frozen.
+/// Why the shared pending-publication recovery sequence failed. `push` and
+/// `publish` recover through the same sequence but report their own remedy, so
+/// the failure stays typed and each command renders it in its own words.
+pub(super) enum PublicationRecoveryFailure {
+    /// The publication coordinator could not recover the pending range.
+    Recover(orna_storage::Error),
+    /// The journal could not be read back after recovery.
+    Unreadable(orna_repository::RepositoryError),
+    /// Recovery returned with the journal still present.
+    StillPending,
+}
+
+/// Reconciles an interrupted publication against the opened runtime state and
+/// verifies that no journal remains. `Ok(())` means no publication is pending.
 /// Recovery that returns with a journal still present, including when a new
-/// publication raced with it, blocks the run: no other range is selected.
-fn recover_pending_publication(
+/// publication raced with it, is a failure: no other range is selected.
+pub(super) fn recover_pending_publication(
     runtime: &tokio::runtime::Runtime,
     repository: &orna_repository::Repository,
     state: &RuntimeState,
-) -> Result<(), Diagnostic> {
+) -> Result<(), PublicationRecoveryFailure> {
     runtime
         .block_on(RuntimePublicationCoordinator::recover(repository, state))
-        .map_err(|error| {
-            describe_storage_failure("pending publication could not be recovered", &error)
-        })?;
+        .map_err(PublicationRecoveryFailure::Recover)?;
     if repository
         .read_publication_journal()
-        .map_err(|error| {
-            publish_error(
-                "publication recovery journal could not be read",
-                format!("{error:?}; no new publication range was selected"),
-            )
-        })?
+        .map_err(PublicationRecoveryFailure::Unreadable)?
         .is_some()
     {
-        return Err(publish_error(
-            "publication recovery remains pending",
-            "the repository journal is still present; the journal and pending tail were preserved; no new range was selected",
-        ));
+        return Err(PublicationRecoveryFailure::StillPending);
     }
     Ok(())
+}
+
+/// Renders a recovered-publication failure for `orna publish`.
+fn publication_recovery_diagnostic(failure: PublicationRecoveryFailure) -> Diagnostic {
+    match failure {
+        PublicationRecoveryFailure::Recover(error) => {
+            describe_storage_failure("pending publication could not be recovered", &error)
+        }
+        PublicationRecoveryFailure::Unreadable(error) => publish_error(
+            "publication recovery journal could not be read",
+            format!("{error:?}; no new publication range was selected"),
+        ),
+        PublicationRecoveryFailure::StillPending => publish_error(
+            "publication recovery remains pending",
+            "the repository journal is still present; the journal and pending tail were preserved; no new range was selected",
+        ),
+    }
 }
 
 /// Freezes the pending tail, projects exactly that range into one commit and

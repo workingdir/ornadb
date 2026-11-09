@@ -5,6 +5,7 @@
 //! diagnostic and wire contracts.
 
 mod admission;
+mod budget;
 pub mod editor;
 mod lexer;
 mod parser;
