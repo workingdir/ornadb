@@ -15,10 +15,9 @@ use orna_foundation::{
 };
 use uuid::Uuid;
 
-use crate::{
-    RuntimeError as RuntimeFailure, RuntimeState, capture_tx, fixed, now_ms,
-    validate_observation_text,
-};
+use crate::RuntimeState;
+use crate::codec::{capture_tx, fixed, now_ms, validate_observation_text};
+use crate::error::RuntimeError as RuntimeFailure;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CatalogueError {
@@ -56,10 +55,10 @@ impl From<RuntimeFailure> for CatalogueError {
 #[cfg(test)]
 mod batch_tests {
     use super::*;
-    use crate::{
-        ActivationError, ActivationWork, FaultInjector, FaultPoint, NoFault, RuntimeError,
-        RuntimeIdentity, TableMutation, run_table_activation,
-    };
+    use crate::RuntimeIdentity;
+    use crate::activation::{ActivationError, ActivationWork, run_table_activation};
+    use crate::error::{FaultInjector, FaultPoint, NoFault, RuntimeError};
+    use crate::table_store::TableMutation;
     use orna_foundation::CwdCapture;
     use tempfile::tempdir;
 
@@ -131,7 +130,7 @@ mod batch_tests {
 
     async fn admit(
         state: &RuntimeState,
-        writer: crate::WriterLease,
+        writer: crate::lease::WriterLease,
         admission: CatalogueAdmission,
     ) -> Result<CatalogueAdmissionResult, CatalogueError> {
         let capture = capture_tx(&state.connection).await?;
@@ -146,7 +145,11 @@ mod batch_tests {
         admit(state, writer, admission).await
     }
 
-    async fn advance(state: &RuntimeState, lease: crate::WriterLease, value: u8) -> CwdCapture {
+    async fn advance(
+        state: &RuntimeState,
+        lease: crate::lease::WriterLease,
+        value: u8,
+    ) -> CwdCapture {
         let context = state.begin_activation().await.unwrap();
         let mutation = TableMutation::new(
             [value; 16],
@@ -356,7 +359,7 @@ mod batch_tests {
         let (_directory, state) = state().await;
         let owned = state.acquire_lease([5; 16]).await.unwrap();
         let current = capture_tx(&state.connection).await.unwrap();
-        let unowned = crate::WriterLease {
+        let unowned = crate::lease::WriterLease {
             owner_id: [6; 16],
             epoch: owned.epoch,
         };
@@ -652,7 +655,7 @@ mod batch_tests {
             assert_eq!(runtime_id, capture.runtime_id().to_vec());
             assert_eq!(
                 generation,
-                crate::bigint_to_i64(capture.generation()).unwrap()
+                crate::codec::bigint_to_i64(capture.generation()).unwrap()
             );
             assert_eq!(generation_digest, capture.generation_digest().to_vec());
         }
@@ -894,7 +897,9 @@ mod batch_tests {
 #[cfg(test)]
 mod module_tests {
     use super::*;
-    use crate::{NoFault, RuntimeIdentity, TableMutation};
+    use crate::RuntimeIdentity;
+    use crate::error::NoFault;
+    use crate::table_store::TableMutation;
     use orna_foundation::CwdCapture;
     use tempfile::tempdir;
 
@@ -934,7 +939,7 @@ mod module_tests {
 
     async fn admit(
         state: &RuntimeState,
-        writer: crate::WriterLease,
+        writer: crate::lease::WriterLease,
         predecessor: Option<CwdCapture>,
         declaration: CatalogueModuleDeclaration,
     ) -> Result<CatalogueModule, CatalogueError> {
@@ -944,7 +949,11 @@ mod module_tests {
             .await
     }
 
-    async fn advance(state: &RuntimeState, lease: crate::WriterLease, value: u8) -> CwdCapture {
+    async fn advance(
+        state: &RuntimeState,
+        lease: crate::lease::WriterLease,
+        value: u8,
+    ) -> CwdCapture {
         let context = state.begin_activation().await.unwrap();
         let mutation = TableMutation::new(
             [value; 16],
@@ -1388,13 +1397,13 @@ pub(crate) async fn admit_activation_catalogue_tx(
     predecessor: &orna_foundation::CwdCapture,
     capture: &orna_foundation::CwdCapture,
     admission: &CatalogueAdmission,
-) -> Result<crate::Mutation, crate::RuntimeError> {
+) -> Result<crate::table_store::Mutation, crate::error::RuntimeError> {
     use orna_foundation::OvbRaw;
     use sha2::{Digest, Sha256};
 
     // The outer request boundary checks this before any candidate writes.
     if admission.predecessor_capture.as_ref() != Some(predecessor) {
-        return Err(crate::RuntimeError::RecoveryInvalid);
+        return Err(crate::error::RuntimeError::RecoveryInvalid);
     }
     persist_capture_tx(transaction, predecessor)
         .await
@@ -1457,7 +1466,7 @@ pub(crate) async fn admit_activation_catalogue_tx(
         OvbRaw::Array(functions),
     ]))
     .and_then(|value| value.encode())
-    .map_err(|_| crate::RuntimeError::RecoveryInvalid)?;
+    .map_err(|_| crate::error::RuntimeError::RecoveryInvalid)?;
     let payload = Value::new(OvbRaw::Array(vec![
         OvbRaw::Text("orna.runtime.catalogue-change.v1".into()),
         predecessor.snapshot().raw(),
@@ -1467,8 +1476,8 @@ pub(crate) async fn admit_activation_catalogue_tx(
         OvbRaw::Bytes(Sha256::digest(&batch).to_vec()),
     ]))
     .and_then(|value| value.encode())
-    .map_err(|_| crate::RuntimeError::RecoveryInvalid)?;
-    Ok(crate::Mutation {
+    .map_err(|_| crate::error::RuntimeError::RecoveryInvalid)?;
+    Ok(crate::table_store::Mutation {
         id: *Uuid::new_v4().as_bytes(),
         digest: Sha256::digest(&payload).into(),
         payload,
@@ -1608,39 +1617,39 @@ impl RuntimeState {
     /// the same transaction.
     pub async fn commit_catalogue_table_activation(
         &self,
-        writer: crate::WriterLease,
+        writer: crate::lease::WriterLease,
         context: &crate::RuntimeActivationContext,
         admission: &CatalogueAdmission,
-        mutations: &[crate::TableMutation],
+        mutations: &[crate::table_store::TableMutation],
         next_digest: [u8; 32],
-        faults: &dyn crate::FaultInjector,
-    ) -> Result<orna_foundation::CwdCapture, crate::RuntimeError> {
-        crate::validate_id(writer.owner_id)?;
+        faults: &dyn crate::error::FaultInjector,
+    ) -> Result<orna_foundation::CwdCapture, crate::error::RuntimeError> {
+        crate::codec::validate_id(writer.owner_id)?;
         if writer.epoch == 0 {
-            return Err(crate::RuntimeError::InvalidIdentity);
+            return Err(crate::error::RuntimeError::InvalidIdentity);
         }
         let mut encoded = mutations
             .iter()
-            .map(crate::TableMutation::runtime_mutation)
+            .map(crate::table_store::TableMutation::runtime_mutation)
             .collect::<Result<Vec<_>, _>>()?;
-        crate::validate_stream_mutations(&encoded, next_digest)?;
+        crate::table_store::validate_stream_mutations(&encoded, next_digest)?;
 
         let transaction = self
             .connection
             .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
             .await
-            .map_err(|_| crate::RuntimeError::StorageUnavailable)?;
+            .map_err(|_| crate::error::RuntimeError::StorageUnavailable)?;
         let current = capture_tx(&transaction).await?;
         if &current != context.capture() {
-            return Err(crate::RuntimeError::StaleCapture {
+            return Err(crate::error::RuntimeError::StaleCapture {
                 current: Box::new(current),
             });
         }
         self.require_owner(&transaction, writer).await?;
         if admission.predecessor_capture.as_ref() != Some(context.capture()) {
-            return Err(crate::RuntimeError::RecoveryInvalid);
+            return Err(crate::error::RuntimeError::RecoveryInvalid);
         }
-        faults.check(crate::FaultPoint::BeforeTableWrite)?;
+        faults.check(crate::error::FaultPoint::BeforeTableWrite)?;
 
         let next_capture = orna_foundation::CwdCapture::new(
             Snapshot::cwd(
@@ -1648,10 +1657,10 @@ impl RuntimeState {
                 current.runtime_id(),
                 current.generation() + num_bigint::BigInt::from(1),
             )
-            .map_err(|_| crate::RuntimeError::RecoveryInvalid)?,
+            .map_err(|_| crate::error::RuntimeError::RecoveryInvalid)?,
             next_digest,
         )
-        .map_err(|_| crate::RuntimeError::RecoveryInvalid)?;
+        .map_err(|_| crate::error::RuntimeError::RecoveryInvalid)?;
         let catalogue_mutation = admit_activation_catalogue_tx(
             &transaction,
             context.capture(),
@@ -1660,7 +1669,7 @@ impl RuntimeState {
         )
         .await?;
         encoded.push(catalogue_mutation);
-        let mut base = crate::load_candidate_base_tx(
+        let mut base = crate::table_store::load_candidate_base_tx(
             &transaction,
             context.committed_rows.as_deref(),
             mutations,
@@ -1668,10 +1677,10 @@ impl RuntimeState {
         )
         .await?;
         for mutation in mutations {
-            crate::apply_table_mutation_tx(&transaction, mutation, &mut base).await?;
+            crate::table_store::apply_table_mutation_tx(&transaction, mutation, &mut base).await?;
         }
-        faults.check(crate::FaultPoint::AfterTableWrite)?;
-        let committed_capture = crate::append_mutations_with_catalogue_tx(
+        faults.check(crate::error::FaultPoint::AfterTableWrite)?;
+        let committed_capture = crate::table_store::append_mutations_with_catalogue_tx(
             &transaction,
             context.capture(),
             &encoded,
@@ -1681,12 +1690,12 @@ impl RuntimeState {
         )
         .await?;
         if committed_capture != next_capture {
-            return Err(crate::RuntimeError::RecoveryInvalid);
+            return Err(crate::error::RuntimeError::RecoveryInvalid);
         }
         transaction
             .commit()
             .await
-            .map_err(|_| crate::RuntimeError::StorageUnavailable)?;
+            .map_err(|_| crate::error::RuntimeError::StorageUnavailable)?;
         Ok(committed_capture)
     }
 
@@ -1711,7 +1720,7 @@ impl RuntimeState {
     /// boundary rather than replacing an already observable capture.
     pub async fn admit_catalogue_at(
         &self,
-        writer: crate::WriterLease,
+        writer: crate::lease::WriterLease,
         expected_capture: &orna_foundation::CwdCapture,
         admission: CatalogueAdmission,
     ) -> Result<CatalogueAdmissionResult, RuntimeError> {
@@ -1741,7 +1750,7 @@ impl RuntimeState {
     /// claim to be the complete source-catalogue or activation bridge.
     pub async fn admit_catalogue_module_at(
         &self,
-        writer: crate::WriterLease,
+        writer: crate::lease::WriterLease,
         expected_capture: &orna_foundation::CwdCapture,
         predecessor_capture: Option<orna_foundation::CwdCapture>,
         declaration: CatalogueModuleDeclaration,
@@ -2317,7 +2326,7 @@ pub(crate) async fn persist_capture_tx(
                 snapshot.clone(),
                 capture.database_id().to_vec(),
                 capture.runtime_id().to_vec(),
-                crate::bigint_to_i64(capture.generation())?,
+                crate::codec::bigint_to_i64(capture.generation())?,
                 capture.generation_digest().to_vec()
             ],
         )
@@ -2341,7 +2350,7 @@ pub(crate) async fn persist_capture_tx(
         || row
             .get::<i64>(2)
             .map_err(|_| RuntimeError::CatalogueCorrupt)?
-            != crate::bigint_to_i64(capture.generation())?
+            != crate::codec::bigint_to_i64(capture.generation())?
         || fixed(row.get(3).map_err(|_| RuntimeError::CatalogueCorrupt)?)?
             != capture.generation_digest()
     {
@@ -2358,7 +2367,7 @@ pub(crate) async fn persist_capture_for_runtime_tx(
     connection: &Connection,
     predecessor: &orna_foundation::CwdCapture,
     capture: &orna_foundation::CwdCapture,
-) -> Result<(), crate::RuntimeError> {
+) -> Result<(), crate::error::RuntimeError> {
     persist_capture_tx(connection, predecessor)
         .await
         .map_err(map_catalogue_runtime_error)?;
@@ -2370,9 +2379,9 @@ pub(crate) async fn persist_capture_for_runtime_tx(
         .map_err(map_catalogue_runtime_error)
 }
 
-fn map_catalogue_runtime_error(error: CatalogueError) -> crate::RuntimeError {
+fn map_catalogue_runtime_error(error: CatalogueError) -> crate::error::RuntimeError {
     match error {
-        CatalogueError::StorageUnavailable => crate::RuntimeError::StorageUnavailable,
+        CatalogueError::StorageUnavailable => crate::error::RuntimeError::StorageUnavailable,
         CatalogueError::StaleCapture { .. }
         | CatalogueError::CatalogueCorrupt
         | CatalogueError::CataloguePredecessorInvalid
@@ -2389,7 +2398,9 @@ fn map_catalogue_runtime_error(error: CatalogueError) -> crate::RuntimeError {
         | CatalogueError::CatalogueFunctionMissing
         | CatalogueError::CatalogueParameterConflict
         | CatalogueError::CatalogueIdentityMissing
-        | CatalogueError::InvalidObservationReference => crate::RuntimeError::RecoveryInvalid,
+        | CatalogueError::InvalidObservationReference => {
+            crate::error::RuntimeError::RecoveryInvalid
+        }
     }
 }
 
@@ -2649,7 +2660,7 @@ async fn validate_predecessor_capture_tx(
         || row
             .get::<i64>(2)
             .map_err(|_| RuntimeError::CatalogueCorrupt)?
-            != crate::bigint_to_i64(predecessor.generation())?
+            != crate::codec::bigint_to_i64(predecessor.generation())?
         || fixed(row.get(3).map_err(|_| RuntimeError::CatalogueCorrupt)?)?
             != predecessor.generation_digest()
     {
@@ -2690,7 +2701,7 @@ async fn retained_capture_row_tx(
         || row
             .get::<i64>(2)
             .map_err(|_| RuntimeError::CatalogueCorrupt)?
-            != crate::bigint_to_i64(capture.generation())?
+            != crate::codec::bigint_to_i64(capture.generation())?
         || fixed(row.get(3).map_err(|_| RuntimeError::CatalogueCorrupt)?)?
             != capture.generation_digest()
     {
@@ -3403,13 +3414,15 @@ fn validate_function_shape(declaration: &CatalogueFunctionDeclaration) -> Result
 }
 
 fn capture_bytes(capture: &orna_foundation::CwdCapture) -> Result<Vec<u8>, RuntimeError> {
-    Ok(crate::encode_capture(capture)?)
+    Ok(crate::codec::encode_capture(capture)?)
 }
 
 #[cfg(any())]
 mod tests {
     use super::*;
-    use crate::{NoFault, RuntimeIdentity, TableMutation};
+    use crate::RuntimeIdentity;
+    use crate::error::NoFault;
+    use crate::table_store::TableMutation;
     use orna_foundation::CwdCapture;
     use tempfile::Builder;
 
@@ -3454,7 +3467,11 @@ mod tests {
         (directory, state)
     }
 
-    async fn advance(state: &RuntimeState, lease: crate::WriterLease, value: u8) -> CwdCapture {
+    async fn advance(
+        state: &RuntimeState,
+        lease: crate::lease::WriterLease,
+        value: u8,
+    ) -> CwdCapture {
         let context = state.begin_activation().await.unwrap();
         let mutation = TableMutation::new(
             [value; 16],

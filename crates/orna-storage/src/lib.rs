@@ -1,10 +1,16 @@
 //! Orna storage: format-3 publication through the runtime publication
-//! coordinator, plus the retained readers for legacy compact segments.
+//! coordinator, plus the exact-key decoder for verified compact segments.
 //!
 //! Publication writes only the format-3 native row store. Format-1/2 commits
 //! keep their versioned readers, but their loose and compact row writers are
 //! retired (ORNA-UPGRADE-003, ORNA-ROW-013): publishing onto such a snapshot
 //! fails with [`Error::LegacyReadOnly`] until the repository is migrated.
+//!
+//! Format-1/2 compact histories are read by `orna-repository`'s verified
+//! reader (ORNA-ROW-013, ORNA-UPGRADE-002): it walks the committed manifest,
+//! shards and segments and resolves one authoritative row per key. This crate
+//! decodes key columns of segment bytes that reader has already verified; it
+//! walks no history and decodes no row.
 
 mod compact;
 mod compact_parquet;
@@ -12,9 +18,9 @@ mod publication_policy;
 
 pub use compact::{
     COMPACT_STORAGE_PROFILE, CompactBaseProjectionError, CompactBaseRow, CompactBaseState,
-    CompactEditableRekey, CompactExactKeyIndex, CompactExactKeySource, CompactHybridRekey,
-    CompactKeyError, CompactKeyIdentity, CompactLogicalKeyError, CompactLogicalReader,
-    CompactOvbProfile, EditableBaseRow, HybridBaseState, OVB_PROFILE, fold_compact_committed_base,
+    CompactExactKeyIndex, CompactExactKeySource, CompactKeyError, CompactKeyIdentity,
+    CompactLogicalKeyError, CompactLogicalReader, CompactOvbProfile, OVB_PROFILE,
+    fold_compact_committed_base,
 };
 // Retired compact and loose row writers. Nothing in production reaches them:
 // publication writes ORP rows and a legacy HEAD is refused before any freeze
@@ -22,9 +28,9 @@ pub use compact::{
 // base enable `compact-writer-fixtures`.
 #[cfg(any(test, feature = "compact-writer-fixtures"))]
 pub use compact::{
-    CompactHybridEvolution, CompactLoweringError, CompactWriterBatch, CompactWriterInput,
-    CompactWriterMutation, CompactWriterMutationState, CompactWriterRow,
-    apply_migration_plan_to_compact, lower_publication_freeze,
+    CompactLoweringError, CompactWriterBatch, CompactWriterInput, CompactWriterMutation,
+    CompactWriterMutationState, CompactWriterRow, apply_migration_plan_to_compact,
+    lower_publication_freeze,
 };
 pub use compact_parquet::{CompactParquetError, CompactParquetKeySource};
 pub use publication_policy::{

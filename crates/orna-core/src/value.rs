@@ -444,26 +444,20 @@ impl RuntimeValue {
         descriptor: TypeDescriptor,
         value: Option<RuntimeValue>,
     ) -> Result<Self, CollectionValueError> {
-        if !matches!(descriptor.kind(), TypeDescriptorKind::Option(_)) {
+        let TypeDescriptorKind::Option(child) = descriptor.kind() else {
             return Err(CollectionValueError::WrongConstructor {
                 expected: CollectionKind::Option,
                 descriptor,
             });
-        }
+        };
         let mut path = Vec::new();
         preflight_collection_descriptor(active, &descriptor, &mut path)?;
 
-        let mut node_count = 1;
+        let node_count = count_constructed_nodes(Some(1), value.iter())?;
         if let Some(value) = &value {
-            count_runtime_value_nodes(value, &mut node_count)?;
-        }
-
-        let TypeDescriptorKind::Option(child) = descriptor.kind() else {
-            unreachable!("checked option descriptor must retain its option child");
-        };
-        if let Some(value) = &value {
-            path.push(CollectionValuePathSegment::OptionChild);
-            validate_collection_runtime_value(active, child, value, &mut path)?;
+            at_segment(&mut path, CollectionValuePathSegment::OptionChild, |path| {
+                validate_collection_runtime_value(active, child, value, path)
+            })?;
         }
 
         Ok(Self::Constructed(ConstructedValue {
@@ -479,29 +473,23 @@ impl RuntimeValue {
         descriptor: TypeDescriptor,
         values: Vec<RuntimeValue>,
     ) -> Result<Self, CollectionValueError> {
-        if !matches!(descriptor.kind(), TypeDescriptorKind::List(_)) {
+        let TypeDescriptorKind::List(child) = descriptor.kind() else {
             return Err(CollectionValueError::WrongConstructor {
                 expected: CollectionKind::List,
                 descriptor,
             });
-        }
+        };
         let mut path = Vec::new();
         preflight_collection_descriptor(active, &descriptor, &mut path)?;
 
-        let mut node_count = 1;
-        check_runtime_value_lower_bound(values.len().checked_add(1))?;
-        for value in &values {
-            count_runtime_value_nodes(value, &mut node_count)?;
-        }
-
-        let TypeDescriptorKind::List(child) = descriptor.kind() else {
-            unreachable!("checked list descriptor must retain its list child");
-        };
-        for (index, value) in values.iter().enumerate() {
-            path.push(CollectionValuePathSegment::ListElement(index));
-            validate_collection_runtime_value(active, child, value, &mut path)?;
-            path.pop();
-        }
+        let node_count = count_constructed_nodes(values.len().checked_add(1), &values)?;
+        check_collection_elements(
+            active,
+            child,
+            &mut path,
+            &values,
+            CollectionValuePathSegment::ListElement,
+        )?;
 
         Ok(Self::Constructed(ConstructedValue {
             descriptor,
@@ -509,51 +497,37 @@ impl RuntimeValue {
             node_count,
         }))
     }
+
     /// Creates one checked immutable canonically ordered `SET` value.
     pub fn set(
         active: &ActiveDatabaseRevision,
         descriptor: TypeDescriptor,
         values: Vec<RuntimeValue>,
     ) -> Result<Self, CollectionValueError> {
-        if !matches!(descriptor.kind(), TypeDescriptorKind::Set(_)) {
+        let TypeDescriptorKind::Set(child) = descriptor.kind() else {
             return Err(CollectionValueError::WrongConstructor {
                 expected: CollectionKind::Set,
                 descriptor,
             });
-        }
+        };
         let mut path = Vec::new();
         preflight_collection_descriptor(active, &descriptor, &mut path)?;
 
-        let mut node_count = 1;
-        check_runtime_value_lower_bound(values.len().checked_add(1))?;
-        for value in &values {
-            count_runtime_value_nodes(value, &mut node_count)?;
-        }
-
-        let TypeDescriptorKind::Set(child) = descriptor.kind() else {
-            unreachable!("checked set descriptor must retain its set child");
-        };
-        for (index, value) in values.iter().enumerate() {
-            path.push(CollectionValuePathSegment::SetElement(index));
-            validate_collection_runtime_value(active, child, value, &mut path)?;
-            path.pop();
-        }
-
-        let mut indexed = values.into_iter().enumerate().collect::<Vec<_>>();
-        indexed.sort_by(|(left_index, left), (right_index, right)| {
-            compare_map_key(active, child, left, right).then(left_index.cmp(right_index))
-        });
-        for pair in indexed.windows(2) {
-            let (left_index, left) = &pair[0];
-            let (right_index, right) = &pair[1];
-            if compare_map_key(active, child, left, right) == Ordering::Equal {
-                return Err(CollectionValueError::DuplicateSetElement {
-                    first: *left_index,
-                    duplicate: *right_index,
-                });
-            }
-        }
-        let values = indexed.into_iter().map(|(_, value)| value).collect();
+        let node_count = count_constructed_nodes(values.len().checked_add(1), &values)?;
+        check_collection_elements(
+            active,
+            child,
+            &mut path,
+            &values,
+            CollectionValuePathSegment::SetElement,
+        )?;
+        let values = sort_canonically(
+            active,
+            child,
+            values,
+            |value| value,
+            |first, duplicate| CollectionValueError::DuplicateSetElement { first, duplicate },
+        )?;
 
         Ok(Self::Constructed(ConstructedValue {
             descriptor,
@@ -568,54 +542,43 @@ impl RuntimeValue {
         descriptor: TypeDescriptor,
         entries: Vec<(RuntimeValue, RuntimeValue)>,
     ) -> Result<Self, CollectionValueError> {
-        if !matches!(descriptor.kind(), TypeDescriptorKind::Map { .. }) {
+        let TypeDescriptorKind::Map { key, value } = descriptor.kind() else {
             return Err(CollectionValueError::WrongConstructor {
                 expected: CollectionKind::Map,
                 descriptor,
             });
-        }
+        };
         let mut path = Vec::new();
         preflight_collection_descriptor(active, &descriptor, &mut path)?;
 
-        let mut node_count = 1;
-        check_runtime_value_lower_bound(
+        let node_count = count_constructed_nodes(
             entries
                 .len()
                 .checked_mul(2)
                 .and_then(|count| count.checked_add(1)),
+            entries
+                .iter()
+                .flat_map(|(entry_key, entry_value)| [entry_key, entry_value]),
         )?;
-        for (key, value) in &entries {
-            count_runtime_value_nodes(key, &mut node_count)?;
-            count_runtime_value_nodes(value, &mut node_count)?;
-        }
-
-        let TypeDescriptorKind::Map { key, value } = descriptor.kind() else {
-            unreachable!("checked map descriptor must retain its map children");
-        };
         for (index, (entry_key, entry_value)) in entries.iter().enumerate() {
-            path.push(CollectionValuePathSegment::MapKey(index));
-            validate_collection_runtime_value(active, key, entry_key, &mut path)?;
-            path.pop();
-            path.push(CollectionValuePathSegment::MapValue(index));
-            validate_collection_runtime_value(active, value, entry_value, &mut path)?;
-            path.pop();
+            at_segment(
+                &mut path,
+                CollectionValuePathSegment::MapKey(index),
+                |path| validate_collection_runtime_value(active, key, entry_key, path),
+            )?;
+            at_segment(
+                &mut path,
+                CollectionValuePathSegment::MapValue(index),
+                |path| validate_collection_runtime_value(active, value, entry_value, path),
+            )?;
         }
-
-        let mut indexed = entries.into_iter().enumerate().collect::<Vec<_>>();
-        indexed.sort_by(|(left_index, (left, _)), (right_index, (right, _))| {
-            compare_map_key(active, key, left, right).then(left_index.cmp(right_index))
-        });
-        for pair in indexed.windows(2) {
-            let (left_index, (left, _)) = &pair[0];
-            let (right_index, (right, _)) = &pair[1];
-            if compare_map_key(active, key, left, right) == Ordering::Equal {
-                return Err(CollectionValueError::DuplicateMapKey {
-                    first: *left_index,
-                    duplicate: *right_index,
-                });
-            }
-        }
-        let entries = indexed.into_iter().map(|(_, entry)| entry).collect();
+        let entries = sort_canonically(
+            active,
+            key,
+            entries,
+            |(entry_key, _)| entry_key,
+            |first, duplicate| CollectionValueError::DuplicateMapKey { first, duplicate },
+        )?;
 
         Ok(Self::Constructed(ConstructedValue {
             descriptor,
@@ -660,6 +623,82 @@ fn check_runtime_value_lower_bound(minimum: Option<usize>) -> Result<(), Collect
         return Err(too_many_runtime_value_nodes());
     }
     Ok(())
+}
+
+/// Counts one constructed value plus every child node, after rejecting a child
+/// count whose lower bound alone already exceeds the node limit.
+fn count_constructed_nodes<'a>(
+    lower_bound: Option<usize>,
+    children: impl IntoIterator<Item = &'a RuntimeValue>,
+) -> Result<usize, CollectionValueError> {
+    check_runtime_value_lower_bound(lower_bound)?;
+    let mut node_count = 1;
+    for child in children {
+        count_runtime_value_nodes(child, &mut node_count)?;
+    }
+    Ok(node_count)
+}
+
+/// Runs `check` with `segment` pushed onto the value path, restoring the path
+/// afterwards so that a sibling starts from the parent location.
+///
+/// A failure keeps its segment on the path: the error already quoted the full
+/// location, and every caller returns that error without looking at the path
+/// again.
+fn at_segment<T>(
+    path: &mut Vec<CollectionValuePathSegment>,
+    segment: CollectionValuePathSegment,
+    check: impl FnOnce(&mut Vec<CollectionValuePathSegment>) -> Result<T, CollectionValueError>,
+) -> Result<T, CollectionValueError> {
+    path.push(segment);
+    let result = check(path);
+    if result.is_ok() {
+        path.pop();
+    }
+    result
+}
+
+/// Validates every element of one repeated collection field against its child
+/// descriptor.
+fn check_collection_elements(
+    active: &ActiveDatabaseRevision,
+    child: &TypeDescriptor,
+    path: &mut Vec<CollectionValuePathSegment>,
+    elements: &[RuntimeValue],
+    segment: fn(usize) -> CollectionValuePathSegment,
+) -> Result<(), CollectionValueError> {
+    for (index, element) in elements.iter().enumerate() {
+        at_segment(path, segment(index), |path| {
+            validate_collection_runtime_value(active, child, element, path)
+        })?;
+    }
+    Ok(())
+}
+
+/// Orders `items` canonically by key and rejects two equal keys.
+///
+/// Input positions break ties so the sort is stable and so a duplicate names
+/// the two positions the caller supplied, not their sorted neighbours.
+fn sort_canonically<T>(
+    active: &ActiveDatabaseRevision,
+    key_descriptor: &TypeDescriptor,
+    items: Vec<T>,
+    key_of: impl Fn(&T) -> &RuntimeValue,
+    duplicate: impl Fn(usize, usize) -> CollectionValueError,
+) -> Result<Vec<T>, CollectionValueError> {
+    let mut indexed = items.into_iter().enumerate().collect::<Vec<_>>();
+    indexed.sort_by(|(left_index, left), (right_index, right)| {
+        compare_map_key(active, key_descriptor, key_of(left), key_of(right))
+            .then(left_index.cmp(right_index))
+    });
+    for pair in indexed.windows(2) {
+        let (left_index, left) = &pair[0];
+        let (right_index, right) = &pair[1];
+        if compare_map_key(active, key_descriptor, key_of(left), key_of(right)) == Ordering::Equal {
+            return Err(duplicate(*left_index, *right_index));
+        }
+    }
+    Ok(indexed.into_iter().map(|(_, item)| item).collect())
 }
 
 fn count_runtime_value_nodes(
@@ -991,22 +1030,16 @@ fn validate_collection_runtime_value(
                 expected
             };
             if value.runtime_type() != RuntimeType::Flat(expected) {
-                return Err(CollectionValueError::ValueTypeMismatch {
-                    path: collection_value_path(path),
-                });
+                return Err(value_type_mismatch(path));
             }
             match class {
-                RecordValueFieldDescriptorClass::ApplicationEnum(type_id) => {
-                    validate_collection_enum_label(active, type_id, value, path)
-                }
-                RecordValueFieldDescriptorClass::StandardEnum(type_id) => {
+                RecordValueFieldDescriptorClass::ApplicationEnum(type_id)
+                | RecordValueFieldDescriptorClass::StandardEnum(type_id) => {
                     validate_collection_enum_label(active, type_id, value, path)
                 }
                 RecordValueFieldDescriptorClass::ApplicationRecord(_) => {
                     let RuntimeValue::Record(record) = value else {
-                        return Err(CollectionValueError::ValueTypeMismatch {
-                            path: collection_value_path(path),
-                        });
+                        return Err(value_type_mismatch(path));
                     };
                     validate_record_value_semantics(active, record, path)
                         .map_err(|failure| collection_error_from_record_failure(failure, path))
@@ -1017,9 +1050,7 @@ fn validate_collection_runtime_value(
         }
         TypeDescriptorKind::Reference(target) => {
             if value.runtime_type() != RuntimeType::Flat(ResolvedType::reference(target)) {
-                return Err(CollectionValueError::ValueTypeMismatch {
-                    path: collection_value_path(path),
-                });
+                return Err(value_type_mismatch(path));
             }
             if active.catalogue().object_type_by_id(target).is_none()
                 && target != crate::system::SYS_SECURITY_PRINCIPAL_TYPE_ID
@@ -1031,109 +1062,86 @@ fn validate_collection_runtime_value(
             Ok(())
         }
         TypeDescriptorKind::Option(child) => {
-            if value.runtime_type() != RuntimeType::Constructed(descriptor) {
-                return Err(CollectionValueError::ValueTypeMismatch {
-                    path: collection_value_path(path),
-                });
-            }
-            let RuntimeValue::Constructed(value) = value else {
-                return Err(CollectionValueError::ValueTypeMismatch {
-                    path: collection_value_path(path),
-                });
-            };
-            let ConstructedValueKind::Option(value) = value.kind() else {
-                return Err(CollectionValueError::ValueTypeMismatch {
-                    path: collection_value_path(path),
-                });
+            let ConstructedValueKind::Option(value) = constructed_kind(descriptor, value, path)?
+            else {
+                return Err(value_type_mismatch(path));
             };
             if let Some(value) = value {
-                path.push(CollectionValuePathSegment::OptionChild);
-                let result = validate_collection_runtime_value(active, child, value, path);
-                if result.is_ok() {
-                    path.pop();
-                }
-                result?;
+                at_segment(path, CollectionValuePathSegment::OptionChild, |path| {
+                    validate_collection_runtime_value(active, child, value, path)
+                })?;
             }
             Ok(())
         }
         TypeDescriptorKind::List(child) => {
-            if value.runtime_type() != RuntimeType::Constructed(descriptor) {
-                return Err(CollectionValueError::ValueTypeMismatch {
-                    path: collection_value_path(path),
-                });
-            }
-            let RuntimeValue::Constructed(value) = value else {
-                return Err(CollectionValueError::ValueTypeMismatch {
-                    path: collection_value_path(path),
-                });
+            let ConstructedValueKind::List(values) = constructed_kind(descriptor, value, path)?
+            else {
+                return Err(value_type_mismatch(path));
             };
-            let ConstructedValueKind::List(values) = value.kind() else {
-                return Err(CollectionValueError::ValueTypeMismatch {
-                    path: collection_value_path(path),
-                });
-            };
-            for (index, value) in values.iter().enumerate() {
-                path.push(CollectionValuePathSegment::ListElement(index));
-                validate_collection_runtime_value(active, child, value, path)?;
-                path.pop();
-            }
-            Ok(())
+            check_collection_elements(
+                active,
+                child,
+                path,
+                values,
+                CollectionValuePathSegment::ListElement,
+            )
         }
         TypeDescriptorKind::Map {
             key,
             value: map_value,
         } => {
-            if value.runtime_type() != RuntimeType::Constructed(descriptor) {
-                return Err(CollectionValueError::ValueTypeMismatch {
-                    path: collection_value_path(path),
-                });
-            }
-            let RuntimeValue::Constructed(value) = value else {
-                return Err(CollectionValueError::ValueTypeMismatch {
-                    path: collection_value_path(path),
-                });
-            };
-            let ConstructedValueKind::Map(entries) = value.kind() else {
-                return Err(CollectionValueError::ValueTypeMismatch {
-                    path: collection_value_path(path),
-                });
+            let ConstructedValueKind::Map(entries) = constructed_kind(descriptor, value, path)?
+            else {
+                return Err(value_type_mismatch(path));
             };
             for (index, (entry_key, entry_value)) in entries.iter().enumerate() {
-                path.push(CollectionValuePathSegment::MapKey(index));
-                validate_collection_runtime_value(active, key, entry_key, path)?;
-                path.pop();
-                path.push(CollectionValuePathSegment::MapValue(index));
-                validate_collection_runtime_value(active, map_value, entry_value, path)?;
-                path.pop();
+                at_segment(path, CollectionValuePathSegment::MapKey(index), |path| {
+                    validate_collection_runtime_value(active, key, entry_key, path)
+                })?;
+                at_segment(path, CollectionValuePathSegment::MapValue(index), |path| {
+                    validate_collection_runtime_value(active, map_value, entry_value, path)
+                })?;
             }
             Ok(())
         }
         TypeDescriptorKind::Set(child) => {
-            if value.runtime_type() != RuntimeType::Constructed(descriptor) {
-                return Err(CollectionValueError::ValueTypeMismatch {
-                    path: collection_value_path(path),
-                });
-            }
-            let RuntimeValue::Constructed(value) = value else {
-                return Err(CollectionValueError::ValueTypeMismatch {
-                    path: collection_value_path(path),
-                });
+            let ConstructedValueKind::Set(values) = constructed_kind(descriptor, value, path)?
+            else {
+                return Err(value_type_mismatch(path));
             };
-            let ConstructedValueKind::Set(values) = value.kind() else {
-                return Err(CollectionValueError::ValueTypeMismatch {
-                    path: collection_value_path(path),
-                });
-            };
-            for (index, value) in values.iter().enumerate() {
-                path.push(CollectionValuePathSegment::SetElement(index));
-                validate_collection_runtime_value(active, child, value, path)?;
-                path.pop();
-            }
-            Ok(())
+            check_collection_elements(
+                active,
+                child,
+                path,
+                values,
+                CollectionValuePathSegment::SetElement,
+            )
         }
         TypeDescriptorKind::Stream(_) => Err(CollectionValueError::InactiveValue {
             path: collection_value_path(path),
         }),
+    }
+}
+
+/// Returns the stored constructor of `value`, which must be exactly the
+/// constructed value `descriptor` describes.
+fn constructed_kind<'value>(
+    descriptor: &TypeDescriptor,
+    value: &'value RuntimeValue,
+    path: &[CollectionValuePathSegment],
+) -> Result<ConstructedValueKind<'value>, CollectionValueError> {
+    if value.runtime_type() != RuntimeType::Constructed(descriptor) {
+        return Err(value_type_mismatch(path));
+    }
+    let RuntimeValue::Constructed(value) = value else {
+        return Err(value_type_mismatch(path));
+    };
+    Ok(value.kind())
+}
+
+fn value_type_mismatch(path: &[CollectionValuePathSegment]) -> CollectionValueError {
+    CollectionValueError::ValueTypeMismatch {
+        path: collection_value_path(path),
     }
 }
 

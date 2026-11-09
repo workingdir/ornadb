@@ -1,10 +1,16 @@
-use super::{
-    CheckpointKey, GitCommitRef, Repository, RuntimeError, RuntimeState, StreamCheckpoint,
-    StreamHandler, StreamSource, StreamStep, StreamStepError, WriterLease,
-    ensure_stream_checkpoint, load_stream_checkpoint, load_stream_lease,
-    read_checkpoint_snapshot_watermark, stream_key_id,
+use crate::RuntimeState;
+use crate::checkpoint_snapshot::read_checkpoint_snapshot_watermark;
+use crate::error::RuntimeError;
+use crate::lease::WriterLease;
+use crate::stream_run::{StreamStep, StreamStepError};
+use crate::stream_source::{StreamHandler, StreamSource};
+use crate::stream_store::{
+    ensure_stream_checkpoint, load_stream_checkpoint, load_stream_lease, stream_key_id,
 };
 use libsql::{TransactionBehavior, params};
+use orna_repository::{GitCommitRef, Repository};
+use orna_stream::Checkpoint as StreamCheckpoint;
+use orna_stream::CheckpointKey;
 
 impl RuntimeState {
     /// Bootstraps from the selected immutable fetched commit and performs the
