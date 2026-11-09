@@ -41,6 +41,65 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+  # Structural gate: no compile, so it reports in about a minute instead of
+  # waiting behind the clippy compile. The checker reads `cargo metadata` and the
+  # size budgets; scripts/check_architecture.py owns the crate layer DAG, while
+  # cargo-deny owns the external dependency policy.
+  arch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.95.0
+
+      # The fixture tests build synthetic metadata documents; the repository
+      # tests at the end of the module assert that the checked-in layer table,
+      # budgets and docs describe this tree, which is the stage acceptance.
+      - name: Prove architecture checker behavior
+        run: python3 -m unittest scripts.test_check_architecture
+
+      - name: Check the crate layer table
+        run: python3 scripts/check_architecture.py --mode=deny
+
+      - name: Check the size budgets
+        run: python3 scripts/check_architecture.py --mode=budget
+
+      # Pinned and hash-verified because a cargo-deny upgrade changes the
+      # dependency policy without any repository change. `gh release download`
+      # goes through the API; the release asset redirect returned HTTP 504 on
+      # three attempts in a row from this network, while the API path succeeded.
+      - name: Install pinned cargo-deny
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version=0.20.2
+          archive="cargo-deny-${version}-x86_64-unknown-linux-musl.tar.gz"
+          for attempt in 1 2 3 4 5; do
+            if gh release download "$version" --repo EmbarkStudios/cargo-deny \
+                --pattern "$archive*" --dir "$RUNNER_TEMP" --clobber; then
+              break
+            fi
+            echo "::warning::cargo-deny download attempt $attempt failed"
+            sleep $((attempt * 15))
+          done
+          expected=$(grep -oE '[0-9a-f]{64}' "$RUNNER_TEMP/$archive.sha256" | head -n1)
+          actual=$(sha256sum "$RUNNER_TEMP/$archive" | cut -d' ' -f1)
+          test "$actual" = "$expected"
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP"
+          mkdir -p "$RUNNER_TEMP/bin"
+          installer="$RUNNER_TEMP/cargo-deny-${version}-x86_64-unknown-linux-musl/cargo-deny"
+          install -m 0755 "$installer" "$RUNNER_TEMP/bin/cargo-deny"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Check external dependency policy
+        run: cargo deny --locked check bans licenses sources
+
   clippy:
     runs-on: ubuntu-latest
     timeout-minutes: 90
