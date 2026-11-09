@@ -1,6 +1,6 @@
 use orna_sys::{
-    ExplainError, ExpressionRef, ObjectRef, PlanDetail, PlanNodeKind, QueryPlanDescription,
-    QuerySourceStatistics, SnapshotRef, explain_query_with_disjunct_limit_chain,
+    ExplainError, ExplainInputs, ExpressionRef, ObjectRef, PlanDetail, PlanNodeKind,
+    QueryPlanDescription, QuerySourceStatistics, SnapshotRef, explain_query_with,
 };
 
 const DISJUNCT_FIXTURE: &str = include_str!("fixtures/planner_disjunct_limit_overflow.orna");
@@ -11,7 +11,7 @@ fn explain_disjunct_limit_chain(
     first_limit: Option<u64>,
     following_limits: &[u64],
 ) -> Result<orna_sys::ExplainedPlan, ExplainError> {
-    explain_query_with_disjunct_limit_chain(
+    explain_query_with(
         &QueryPlanDescription {
             snapshot: SnapshotRef::descriptive("snapshot:disjunct-limit-chain"),
             source: ObjectRef::descriptive("table:PlannerDisjunctLimitOverflow"),
@@ -29,8 +29,11 @@ fn explain_disjunct_limit_chain(
             mutations: Vec::new(),
             materialize_into: None,
         },
-        disjunct_count,
-        following_limits,
+        ExplainInputs {
+            disjunct_count,
+            additional_limits: following_limits,
+            ..ExplainInputs::default()
+        },
     )
 }
 

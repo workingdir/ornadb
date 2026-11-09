@@ -1,10 +1,9 @@
 use std::collections::BTreeMap;
 
 use orna_sys::{
-    ExpressionRef, ObjectRef, PlanDetail, PlanNode, PlanNodeKind, QueryJoinDescription,
-    QueryJoinPairIdentityDescription, QueryLimitPushdownDescription, QueryPlanDescription,
-    QuerySourceStatistics, SnapshotRef,
-    explain_query_with_join_pair_identities_and_limit_pushdowns,
+    ExplainInputs, ExpressionRef, ObjectRef, PlanDetail, PlanNode, PlanNodeKind,
+    QueryJoinDescription, QueryJoinPairIdentityDescription, QueryLimitPushdownDescription,
+    QueryPlanDescription, QuerySourceStatistics, SnapshotRef, explain_query_with,
 };
 
 const FIXTURE: &str = include_str!("fixtures/planner_paired_limit_pushdown_anchor_fold_oabpa.orna");
@@ -124,10 +123,13 @@ fn plan_with(
     pairs: &[QueryJoinPairIdentityDescription],
     pushdowns: &[QueryLimitPushdownDescription],
 ) -> orna_sys::ExplainedPlan {
-    explain_query_with_join_pair_identities_and_limit_pushdowns(
+    explain_query_with(
         &query(anchor, order),
-        pairs,
-        pushdowns,
+        ExplainInputs {
+            join_pair_identities: pairs,
+            input_limit_pushdowns: pushdowns,
+            ..ExplainInputs::default()
+        },
     )
     .expect("exact-pair input limits plan through sparse cost reordering")
 }

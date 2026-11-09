@@ -251,24 +251,15 @@ impl RuntimeState {
         &self,
         generation: u64,
     ) -> Result<HistoricalSnapshot, RuntimeError> {
-        let transaction = self
-            .connection
-            .transaction()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let transaction = self.connection.transaction().await?;
         let mut rows = transaction
             .query(
                 "SELECT database_id, runtime_id, generation FROM runtime_meta
                  WHERE singleton = 1",
                 (),
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let meta = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-            .ok_or(RuntimeError::RecoveryInvalid)?;
+            .await?;
+        let meta = rows.next().await?.ok_or(RuntimeError::RecoveryInvalid)?;
         let database_id = fixed(meta.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
         let runtime_id = fixed(meta.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
         let current_generation = decode_u64(
@@ -294,13 +285,8 @@ impl RuntimeState {
                     "SELECT digest, mutation_sequence FROM checkpoint WHERE generation = ?1",
                     params![i64::try_from(generation).map_err(|_| RuntimeError::SnapshotNotFound)?],
                 )
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
-            let Some(row) = rows
-                .next()
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?
-            else {
+                .await?;
+            let Some(row) = rows.next().await? else {
                 return Err(RuntimeError::SnapshotNotFound);
             };
             (
@@ -317,12 +303,10 @@ impl RuntimeState {
                  FROM runtime_history_governance_boundary WHERE generation = ?1",
                 params![i64::try_from(generation).map_err(|_| RuntimeError::SnapshotNotFound)?],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let boundary = boundary_rows
             .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .await?
             .ok_or(RuntimeError::SnapshotIncomplete)?;
         let admin_audit_sequence = decode_u64(
             boundary
@@ -340,10 +324,7 @@ impl RuntimeState {
             digest,
         )
         .map_err(|_| RuntimeError::RecoveryInvalid)?;
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction.commit().await?;
         Ok(HistoricalSnapshot {
             capture,
             generation,
@@ -373,13 +354,8 @@ impl RuntimeState {
                  ON publication_commit.intent_id = publication_freeze.intent_id",
                 (),
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let row = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-            .ok_or(RuntimeError::RecoveryInvalid)?;
+            .await?;
+        let row = rows.next().await?.ok_or(RuntimeError::RecoveryInvalid)?;
         let published: Option<i64> = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
         let generation = u64::try_from(published.ok_or(RuntimeError::SnapshotNotFound)?)
             .map_err(|_| RuntimeError::RecoveryInvalid)?;
@@ -504,24 +480,15 @@ impl RuntimeState {
     ) -> Result<HistoricalTableRows, RuntimeError> {
         validate_table_name(table)?;
         let storage = table_storage_key(table, object_id);
-        let transaction = self
-            .connection
-            .transaction()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let transaction = self.connection.transaction().await?;
         let mut rows = transaction
             .query(
                 "SELECT database_id, runtime_id, generation FROM runtime_meta
                  WHERE singleton = 1",
                 (),
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let meta = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-            .ok_or(RuntimeError::RecoveryInvalid)?;
+            .await?;
+        let meta = rows.next().await?.ok_or(RuntimeError::RecoveryInvalid)?;
         let database_id = fixed(meta.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
         let runtime_id = fixed(meta.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
         let current_generation = decode_u64(
@@ -557,13 +524,8 @@ impl RuntimeState {
                     "SELECT digest, mutation_sequence FROM checkpoint WHERE generation = ?1",
                     params![i64::try_from(generation).map_err(|_| RuntimeError::SnapshotNotFound)?],
                 )
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
-            let Some(row) = rows
-                .next()
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?
-            else {
+                .await?;
+            let Some(row) = rows.next().await? else {
                 return Err(RuntimeError::SnapshotNotFound);
             };
             (
@@ -599,14 +561,9 @@ impl RuntimeState {
                     i64::try_from(mutation_sequence).map_err(|_| RuntimeError::RecoveryInvalid)?
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let mut table_rows = Vec::new();
-        while let Some(row) = query
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        {
+        while let Some(row) = query.next().await? {
             let key: Vec<u8> = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
             let value: Vec<u8> = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
             let row_digest: [u8; 32] =
@@ -616,10 +573,7 @@ impl RuntimeState {
             }
             table_rows.push((key, value));
         }
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction.commit().await?;
         Ok(HistoricalTableRows {
             capture: capture.clone(),
             table: table.to_owned(),
@@ -633,16 +587,9 @@ impl RuntimeState {
         &self,
         snapshot: &HistoricalSnapshot,
     ) -> Result<HistoricalAuditRows<AdminInvocationAudit>, RuntimeError> {
-        let transaction = self
-            .connection
-            .transaction()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let transaction = self.connection.transaction().await?;
         validate_historical_snapshot_tx(&transaction, snapshot).await?;
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction.commit().await?;
         let rows =
             load_admin_invocation_audits_through(&self.connection, snapshot.admin_audit_sequence)
                 .await?;
@@ -661,16 +608,9 @@ impl RuntimeState {
         key: &CheckpointKey,
         snapshot: &HistoricalSnapshot,
     ) -> Result<HistoricalAuditRows<CheckpointResetAudit>, RuntimeError> {
-        let transaction = self
-            .connection
-            .transaction()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let transaction = self.connection.transaction().await?;
         validate_historical_snapshot_tx(&transaction, snapshot).await?;
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction.commit().await?;
         let rows = load_stream_checkpoint_reset_audits_through(
             &self.connection,
             key,
@@ -693,11 +633,7 @@ impl RuntimeState {
         &self,
         snapshot: &HistoricalSnapshot,
     ) -> Result<HistoricalSnapshotAttestation, RuntimeError> {
-        let transaction = self
-            .connection
-            .transaction()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let transaction = self.connection.transaction().await?;
         validate_historical_snapshot_tx(&transaction, snapshot).await?;
         let mut rows = transaction
             .query(
@@ -717,16 +653,11 @@ impl RuntimeState {
                         .map_err(|_| RuntimeError::RecoveryInvalid)?
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let mut row_count = 0_u64;
         let mut table_count = 0_u64;
         let mut previous_table: Option<String> = None;
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        {
+        while let Some(row) = rows.next().await? {
             let table: String = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
             validate_table_name(&table)?;
             let value: Option<Vec<u8>> = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
@@ -760,10 +691,7 @@ impl RuntimeState {
                 .checked_add(1)
                 .ok_or(RuntimeError::RecoveryInvalid)?;
         }
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction.commit().await?;
         Ok(HistoricalSnapshotAttestation {
             capture: snapshot.capture.clone(),
             generation: snapshot.generation,

@@ -1,14 +1,14 @@
 use std::collections::BTreeMap;
 
 use orna_sys::{
-    ExplainError, ExpressionRef, MutableBranchSnapshot, ObjectRef, PlanDetail, PlanNode,
-    PlanNodeKind, QueryJoinDescription, QueryJoinPairIdentityDescription,
+    ExplainError, ExplainInputs, ExpressionRef, MutableBranchSnapshot, ObjectRef, PlanDetail,
+    PlanNode, PlanNodeKind, QueryJoinDescription, QueryJoinPairIdentityDescription,
     QueryPairedCheckpointSegmentCompactionChainDescription,
     QueryPairedCheckpointSegmentCompactionStepDescription,
     QueryPairedSegmentRotationChainDescription, QueryPairedSegmentRotationDescription,
     QueryPairedStreamCompactionChainDescription, QueryPairedStreamCompactionOccurrenceDescription,
     QueryPartialIndexDescription, QueryPlanDescription, QuerySourceStatistics, SnapshotRef,
-    explain_query_with_partial_indexes_and_paired_checkpoint_rotation_and_stream_compaction_chains,
+    explain_query_with,
 };
 
 const FIXTURE: &str =
@@ -249,13 +249,16 @@ fn plan(
     generation_a: u64,
     streams: &[QueryPairedStreamCompactionChainDescription],
 ) -> orna_sys::ExplainedPlan {
-    explain_query_with_partial_indexes_and_paired_checkpoint_rotation_and_stream_compaction_chains(
+    explain_query_with(
         &query(generation_a),
-        &indexes(),
-        &pairs(),
-        &checkpoint_chains(generation_a),
-        &rotation_chains(generation_a),
-        streams,
+        ExplainInputs {
+            partial_indexes: &indexes(),
+            join_pair_identities: &pairs(),
+            checkpoint_compaction_chains: &checkpoint_chains(generation_a),
+            segment_rotation_chains: &rotation_chains(generation_a),
+            stream_compaction_chains: streams,
+            ..ExplainInputs::default()
+        },
     )
     .expect("stream compaction lineage folds into its branch-local plan")
 }
@@ -541,13 +544,16 @@ fn stream_compaction_chains_reject_mismatched_branch_and_duplicate_pair() {
     let mut mismatched = stream_chains(4, "v1");
     mismatched[0].branch.generation = 44;
     assert_eq!(
-        explain_query_with_partial_indexes_and_paired_checkpoint_rotation_and_stream_compaction_chains(
+        explain_query_with(
             &query(4),
-            &indexes(),
-            &pairs(),
-            &checkpoint_chains(4),
-            &rotation_chains(4),
-            &mismatched,
+            ExplainInputs {
+                partial_indexes: &indexes(),
+                join_pair_identities: &pairs(),
+                checkpoint_compaction_chains: &checkpoint_chains(4),
+                segment_rotation_chains: &rotation_chains(4),
+                stream_compaction_chains: &mismatched,
+                ..ExplainInputs::default()
+            },
         ),
         Err(ExplainError::InvalidObject),
     );
@@ -555,13 +561,16 @@ fn stream_compaction_chains_reject_mismatched_branch_and_duplicate_pair() {
     let mut duplicate_pair = stream_chains(4, "v1");
     duplicate_pair.push(duplicate_pair[0].clone());
     assert_eq!(
-        explain_query_with_partial_indexes_and_paired_checkpoint_rotation_and_stream_compaction_chains(
+        explain_query_with(
             &query(4),
-            &indexes(),
-            &pairs(),
-            &checkpoint_chains(4),
-            &rotation_chains(4),
-            &duplicate_pair,
+            ExplainInputs {
+                partial_indexes: &indexes(),
+                join_pair_identities: &pairs(),
+                checkpoint_compaction_chains: &checkpoint_chains(4),
+                segment_rotation_chains: &rotation_chains(4),
+                stream_compaction_chains: &duplicate_pair,
+                ..ExplainInputs::default()
+            },
         ),
         Err(ExplainError::InvalidObject),
     );
@@ -569,13 +578,16 @@ fn stream_compaction_chains_reject_mismatched_branch_and_duplicate_pair() {
     let mut invalid_segment = stream_chains(4, "v1");
     invalid_segment[0].occurrences[0].right_segment_identity = object("");
     assert_eq!(
-        explain_query_with_partial_indexes_and_paired_checkpoint_rotation_and_stream_compaction_chains(
+        explain_query_with(
             &query(4),
-            &indexes(),
-            &pairs(),
-            &checkpoint_chains(4),
-            &rotation_chains(4),
-            &invalid_segment,
+            ExplainInputs {
+                partial_indexes: &indexes(),
+                join_pair_identities: &pairs(),
+                checkpoint_compaction_chains: &checkpoint_chains(4),
+                segment_rotation_chains: &rotation_chains(4),
+                stream_compaction_chains: &invalid_segment,
+                ..ExplainInputs::default()
+            },
         ),
         Err(ExplainError::InvalidObject),
     );

@@ -1,8 +1,8 @@
 use orna_sys::{
     DisjunctStormBranchDescription, DisjunctStormCascadeDescription,
-    DisjunctStormLimitRebindDescription, ExpressionRef, ObjectRef, PlanByteCapScopeSegment,
-    PlanDetail, PlanNodeKind, QueryPlanDescription, SnapshotRef,
-    explain_query_with_disjunct_storm_branch_limit_chains,
+    DisjunctStormLimitRebindDescription, ExplainInputs, ExpressionRef, ObjectRef,
+    PlanByteCapScopeSegment, PlanDetail, PlanNodeKind, QueryPlanDescription, SnapshotRef,
+    explain_query_with,
 };
 
 const FIXTURE: &str =
@@ -68,20 +68,23 @@ fn unknown_rebind_outputs_keep_consolidated_ancestry_across_limit_chains() {
             vec![branch(&[limit], Vec::new())],
         )
     });
-    let explained = explain_query_with_disjunct_storm_branch_limit_chains(
+    let explained = explain_query_with(
         &query(),
-        &[storm(
-            "expr:unknown-consolidation-root",
-            vec![branch(
-                &[96, 48],
-                vec![
-                    rebind(1, vec![cascades[0].clone(), cascades[1].clone()]),
-                    rebind(1, vec![cascades[2].clone()]),
-                    rebind(2, vec![cascades[3].clone()]),
-                ],
-            )],
-        )],
-        &[],
+        ExplainInputs {
+            additional_limits: &[],
+            disjunct_storm_cascades: Some(&[storm(
+                "expr:unknown-consolidation-root",
+                vec![branch(
+                    &[96, 48],
+                    vec![
+                        rebind(1, vec![cascades[0].clone(), cascades[1].clone()]),
+                        rebind(1, vec![cascades[2].clone()]),
+                        rebind(2, vec![cascades[3].clone()]),
+                    ],
+                )],
+            )]),
+            ..ExplainInputs::default()
+        },
     )
     .expect("unknown rebind results retain ancestry at each later handoff");
     let filter = explained

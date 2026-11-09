@@ -1,7 +1,7 @@
 use orna_sys::{
-    DisjunctStormBranchDescription, DisjunctStormCascadeDescription, ExplainError, ExpressionRef,
-    ObjectRef, PlanDetail, PlanNodeKind, QueryPlanDescription, QuerySourceStatistics, SnapshotRef,
-    explain_query_with_disjunct_storm_branch_limit_chains,
+    DisjunctStormBranchDescription, DisjunctStormCascadeDescription, ExplainError, ExplainInputs,
+    ExpressionRef, ObjectRef, PlanDetail, PlanNodeKind, QueryPlanDescription,
+    QuerySourceStatistics, SnapshotRef, explain_query_with,
 };
 
 const FIXTURE: &str = include_str!("fixtures/planner_storm_branch_limit_chains.orna");
@@ -59,23 +59,26 @@ fn nested_storms_keep_distinct_branch_limit_chains_and_feed_the_next_stage() {
     // ORNA-PLAN leaves this branch-local cost composition unspecified. Apply
     // each limit/conjunct chain independently, then combine disjoint matches
     // in source order; each later storm consumes the prior storm's output.
-    let explained = explain_query_with_disjunct_storm_branch_limit_chains(
+    let explained = explain_query_with(
         &query(Some(240), Some(0), Some(6), false),
-        &[
-            cascade(
-                "expr:first-cascade",
-                vec![
-                    branch(&[120, 30], 2),
-                    branch(&[90, 20, 10], 1),
-                    branch(&[60], 3),
-                ],
-            ),
-            cascade(
-                "expr:second-cascade",
-                vec![branch(&[12, 7], 1), branch(&[9], 2), branch(&[5, 2], 2)],
-            ),
-        ],
-        &[4, 0],
+        ExplainInputs {
+            additional_limits: &[4, 0],
+            disjunct_storm_cascades: Some(&[
+                cascade(
+                    "expr:first-cascade",
+                    vec![
+                        branch(&[120, 30], 2),
+                        branch(&[90, 20, 10], 1),
+                        branch(&[60], 3),
+                    ],
+                ),
+                cascade(
+                    "expr:second-cascade",
+                    vec![branch(&[12, 7], 1), branch(&[9], 2), branch(&[5, 2], 2)],
+                ),
+            ]),
+            ..ExplainInputs::default()
+        },
     )
     .expect("branch-local chains cascade across two nested storms");
 
@@ -136,16 +139,19 @@ fn nested_storms_keep_distinct_branch_limit_chains_and_feed_the_next_stage() {
 
 #[test]
 fn known_work_overflow_survives_later_zero_limits_and_unknown_rows_stay_unknown() {
-    let overflow = explain_query_with_disjunct_storm_branch_limit_chains(
+    let overflow = explain_query_with(
         &query(Some(u64::MAX / 2 + 1), Some(0), None, false),
-        &[
-            cascade(
-                "expr:overflowing-branch-chains",
-                vec![branch(&[u64::MAX], 1), branch(&[u64::MAX], 1)],
-            ),
-            cascade("expr:later-zero-branch", vec![branch(&[0], 1)]),
-        ],
-        &[0],
+        ExplainInputs {
+            additional_limits: &[0],
+            disjunct_storm_cascades: Some(&[
+                cascade(
+                    "expr:overflowing-branch-chains",
+                    vec![branch(&[u64::MAX], 1), branch(&[u64::MAX], 1)],
+                ),
+                cascade("expr:later-zero-branch", vec![branch(&[0], 1)]),
+            ]),
+            ..ExplainInputs::default()
+        },
     )
     .expect("known branch-work overflow remains part of the plan");
     assert_eq!(overflow.root().estimated_rows(), Some(0));
@@ -158,13 +164,16 @@ fn known_work_overflow_survives_later_zero_limits_and_unknown_rows_stay_unknown(
             && node.details().get("estimated_work_overflow") == Some(&PlanDetail::Boolean(true))
     }));
 
-    let unknown = explain_query_with_disjunct_storm_branch_limit_chains(
+    let unknown = explain_query_with(
         &query(None, Some(4096), None, false),
-        &[cascade(
-            "expr:unknown-branch-chains",
-            vec![branch(&[u64::MAX], 2), branch(&[1, 0], 1)],
-        )],
-        &[],
+        ExplainInputs {
+            additional_limits: &[],
+            disjunct_storm_cascades: Some(&[cascade(
+                "expr:unknown-branch-chains",
+                vec![branch(&[u64::MAX], 2), branch(&[1, 0], 1)],
+            )]),
+            ..ExplainInputs::default()
+        },
     )
     .expect("unknown source rows remain unknown");
     assert_eq!(unknown.root().estimated_rows(), None);
@@ -179,56 +188,77 @@ fn known_work_overflow_survives_later_zero_limits_and_unknown_rows_stay_unknown(
 #[test]
 fn branch_chain_cascades_reject_empty_invalid_and_oversized_shapes() {
     assert_eq!(
-        explain_query_with_disjunct_storm_branch_limit_chains(
+        explain_query_with(
             &query(Some(10), Some(0), None, false),
-            &[],
-            &[]
+            ExplainInputs {
+                additional_limits: &[],
+                disjunct_storm_cascades: Some(&[]),
+                ..ExplainInputs::default()
+            },
         ),
         Err(ExplainError::InvalidExpression)
     );
     assert_eq!(
-        explain_query_with_disjunct_storm_branch_limit_chains(
+        explain_query_with(
             &query(Some(10), Some(0), None, false),
-            &[cascade("expr:no-branches", vec![])],
-            &[],
+            ExplainInputs {
+                additional_limits: &[],
+                disjunct_storm_cascades: Some(&[cascade("expr:no-branches", vec![])]),
+                ..ExplainInputs::default()
+            },
         ),
         Err(ExplainError::InvalidExpression)
     );
     assert_eq!(
-        explain_query_with_disjunct_storm_branch_limit_chains(
+        explain_query_with(
             &query(Some(10), Some(0), None, false),
-            &[cascade("expr:no-limits", vec![branch(&[], 1)])],
-            &[],
+            ExplainInputs {
+                additional_limits: &[],
+                disjunct_storm_cascades: Some(&[cascade("expr:no-limits", vec![branch(&[], 1)])]),
+                ..ExplainInputs::default()
+            },
         ),
         Err(ExplainError::InvalidExpression)
     );
     assert_eq!(
-        explain_query_with_disjunct_storm_branch_limit_chains(
+        explain_query_with(
             &query(Some(10), Some(0), None, false),
-            &[cascade("expr:no-conjuncts", vec![branch(&[4], 0)])],
-            &[],
+            ExplainInputs {
+                additional_limits: &[],
+                disjunct_storm_cascades: Some(&[cascade(
+                    "expr:no-conjuncts",
+                    vec![branch(&[4], 0)]
+                )]),
+                ..ExplainInputs::default()
+            },
         ),
         Err(ExplainError::InvalidExpression)
     );
     assert_eq!(
-        explain_query_with_disjunct_storm_branch_limit_chains(
+        explain_query_with(
             &query(Some(10), Some(0), None, true),
-            &[cascade(
-                "expr:duplicate-query-predicate",
-                vec![branch(&[4], 1)]
-            )],
-            &[],
+            ExplainInputs {
+                additional_limits: &[],
+                disjunct_storm_cascades: Some(&[cascade(
+                    "expr:duplicate-query-predicate",
+                    vec![branch(&[4], 1)]
+                )]),
+                ..ExplainInputs::default()
+            },
         ),
         Err(ExplainError::InvalidExpression)
     );
     assert_eq!(
-        explain_query_with_disjunct_storm_branch_limit_chains(
+        explain_query_with(
             &query(Some(10), Some(0), None, false),
-            &[cascade(
-                "expr:too-many-conjuncts",
-                vec![branch(&[4], 8_193)]
-            )],
-            &[],
+            ExplainInputs {
+                additional_limits: &[],
+                disjunct_storm_cascades: Some(&[cascade(
+                    "expr:too-many-conjuncts",
+                    vec![branch(&[4], 8_193)]
+                )]),
+                ..ExplainInputs::default()
+            },
         ),
         Err(ExplainError::TooManyExpressions)
     );

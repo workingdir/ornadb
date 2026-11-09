@@ -687,8 +687,7 @@ pub(crate) async fn store_admin_invocation_audit(
                 if descriptor.redacted { 1_i64 } else { 0_i64 },
             ],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     if let Some(checkpoint) = checkpoint_result {
         let position = checkpoint
             .committed
@@ -704,8 +703,7 @@ pub(crate) async fn store_admin_invocation_audit(
                     position.token.as_str(),
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
     }
     Ok(())
 }
@@ -728,8 +726,7 @@ async fn store_admin_stale_capture(
                 capture.generation_digest().to_vec(),
             ],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     Ok(())
 }
 
@@ -743,13 +740,8 @@ async fn load_admin_stale_capture(
              FROM admin_invocation_stale_capture WHERE invocation_id = ?1",
             params![invocation_id.to_vec()],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    else {
+        .await?;
+    let Some(row) = rows.next().await? else {
         return Ok(None);
     };
     let database_id = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
@@ -781,14 +773,9 @@ pub(crate) async fn load_admin_invocation_audits_through(
              FROM admin_invocation_audit a WHERE sequence <= ?1 ORDER BY sequence",
             params![i64::try_from(through_sequence).map_err(|_| RuntimeError::RecoveryInvalid)?],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     let mut audits = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    {
+    while let Some(row) = rows.next().await? {
         let sequence = decode_u64(
             row.get::<i64>(0)
                 .map_err(|_| RuntimeError::RecoveryInvalid)?,
@@ -858,13 +845,8 @@ async fn load_admin_invocation_receipt(
              FROM admin_invocation_audit a WHERE a.invocation_id = ?1",
             params![invocation_id.to_vec()],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    else {
+        .await?;
+    let Some(row) = rows.next().await? else {
         return Ok(None);
     };
     let sequence = decode_u64(
@@ -983,8 +965,7 @@ async fn store_stream_checkpoint_reset_audit(
                 if audit_reason.1 { 1 } else { 0 },
             ],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     Ok(())
 }
 
@@ -1019,14 +1000,9 @@ pub(crate) async fn load_stream_checkpoint_reset_audits_through(
                 }
             ],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     let mut audits = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    {
+    while let Some(row) = rows.next().await? {
         let sequence = decode_u64(
             row.get::<i64>(0)
                 .map_err(|_| RuntimeError::RecoveryInvalid)?,
@@ -1492,8 +1468,7 @@ impl RuntimeState {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let mut admitted_generation: Option<u64> = None;
         let attempt = async {
             self.require_owner(&transaction, lease).await?;
@@ -1538,10 +1513,7 @@ impl RuntimeState {
         .await;
         match attempt {
             Ok(result) => {
-                transaction
-                    .commit()
-                    .await
-                    .map_err(|_| RuntimeError::StorageUnavailable)?;
+                transaction.commit().await?;
                 Ok(result)
             }
             Err(error) => {
@@ -1578,8 +1550,7 @@ impl RuntimeState {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         self.require_owner(&transaction, lease).await?;
         let receipt = load_admin_invocation_receipt(&transaction, descriptor.invocation_id).await?;
         let result = match receipt.as_ref() {
@@ -1588,10 +1559,7 @@ impl RuntimeState {
             }
             None => None,
         };
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction.commit().await?;
         Ok(result)
     }
 
@@ -1628,8 +1596,7 @@ impl RuntimeState {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         self.require_owner(&transaction, lease).await?;
         if let Some(receipt) =
             load_admin_invocation_receipt(&transaction, descriptor.invocation_id).await?
@@ -1637,10 +1604,7 @@ impl RuntimeState {
             let same_invocation = receipt.function == descriptor.function
                 && receipt.safe_arguments == descriptor.safe_arguments
                 && receipt.redacted == descriptor.redacted;
-            transaction
-                .commit()
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            transaction.commit().await?;
             return if same_invocation {
                 Ok(())
             } else {
@@ -1677,10 +1641,7 @@ impl RuntimeState {
         if let Some(current) = stale_capture {
             store_admin_stale_capture(&transaction, descriptor.invocation_id, current).await?;
         }
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)
+        transaction.commit().await.map_err(RuntimeError::from)
     }
 
     async fn record_failed_admin_and_return(
