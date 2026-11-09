@@ -4,6 +4,7 @@ members = [
     "crates/orna-cli",
     "crates/orna-core",
     "crates/orna-foundation",
+    "crates/orna-intrinsics",
     "crates/orna-conformance",
     "crates/orna-evolution",
     "crates/orna-evaluator",

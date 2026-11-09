@@ -1,0 +1,2155 @@
+{
+  "schema": "orna.std_intrinsics.v1",
+  "source_digest": "9cddff0953342357",
+  "intrinsics": [
+    {
+      "id": "CoreSome",
+      "id_value": 0,
+      "module": "core",
+      "name": "Some",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "value", "type": "Param(0)", "has_default": false, "pipeline": false }],
+        "result": "Param(0)?"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "CoreIntrinsic",
+      "note": "constructs the core optional value; available without an import",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "CoreNow",
+      "id_value": 1,
+      "module": "core",
+      "name": "now",
+      "leaf": null,
+      "signature": {
+        "type_params": [],
+        "params": [],
+        "result": "Instant"
+      },
+      "effect": "Clock",
+      "dispatch": { "kind": "Native" },
+      "justification": "CoreIntrinsic",
+      "note": "reads the activation-scoped host clock through the effect boundary",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "CoreUuid7",
+      "id_value": 2,
+      "module": "core",
+      "name": "uuid7",
+      "leaf": null,
+      "signature": {
+        "type_params": [],
+        "params": [],
+        "result": "Uuid"
+      },
+      "effect": "Entropy",
+      "dispatch": { "kind": "Native" },
+      "justification": "CoreIntrinsic",
+      "note": "reads the activation-scoped clock and entropy for a time-ordered UUID",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "CoreError",
+      "id_value": 3,
+      "module": "core",
+      "name": "error",
+      "leaf": null,
+      "signature": {
+        "type_params": [],
+        "params": [{ "name": "code", "type": "Str", "has_default": false, "pipeline": false }, { "name": "message", "type": "Str", "has_default": false, "pipeline": false }],
+        "result": "Error"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "CoreIntrinsic",
+      "note": "constructs the core Error value from a code and message",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "CoreFail",
+      "id_value": 4,
+      "module": "core",
+      "name": "fail",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "error", "type": "Error", "has_default": false, "pipeline": false }],
+        "result": "Param(0)"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "CoreIntrinsic",
+      "note": "raises the core failure channel with a declared result type",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "CoreFilter",
+      "id_value": 5,
+      "module": "std.collection",
+      "name": "filter",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "predicate", "type": "fn(Param(0)): Bool", "has_default": false, "pipeline": false }],
+        "result": "[Param(0)]"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "CoreIntrinsic",
+      "note": "retains matching values in input order; the relation overload shares this id",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "CoreMap",
+      "id_value": 6,
+      "module": "std.collection",
+      "name": "map",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T", "U"],
+        "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "transform", "type": "fn(Param(0)): Param(1)", "has_default": false, "pipeline": false }],
+        "result": "[Param(1)]"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "CoreIntrinsic",
+      "note": "maps one result per input in order; the relation overload shares this id",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "CoreFlatMap",
+      "id_value": 7,
+      "module": "std.collection",
+      "name": "flat_map",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T", "U"],
+        "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "transform", "type": "fn(Param(0)): [Param(1)]", "has_default": false, "pipeline": false }],
+        "result": "[Param(1)]"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "CoreIntrinsic",
+      "note": "concatenates each returned collection in order; the relation overload shares this id",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "CoreSortBy",
+      "id_value": 8,
+      "module": "std.collection",
+      "name": "sort_by",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T", "K"],
+        "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "key", "type": "fn(Param(0)): Param(1)", "has_default": false, "pipeline": false }],
+        "result": "[Param(0)]"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "CoreIntrinsic",
+      "note": "stable ascending sort by key; the relation overload shares this id",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "CoreTake",
+      "id_value": 9,
+      "module": "std.collection",
+      "name": "take",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "count", "type": "Int", "has_default": false, "pipeline": false }],
+        "result": "[Param(0)]"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "CoreIntrinsic",
+      "note": "keeps the first count values without enumerating the remainder",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "CoreDrop",
+      "id_value": 10,
+      "module": "std.collection",
+      "name": "drop",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "count", "type": "Int", "has_default": false, "pipeline": false }],
+        "result": "[Param(0)]"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "CoreIntrinsic",
+      "note": "drops the first count values without enumerating beyond the result",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "CoreDistinct",
+      "id_value": 11,
+      "module": "std.collection",
+      "name": "distinct",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }],
+        "result": "[Param(0)]"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "SuperlinearCanonicalKey",
+      "note": "keeps the first value in each lawful equality class without quadratic source folding",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "CoreUnion",
+      "id_value": 12,
+      "module": "std.collection",
+      "name": "union",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "left", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "right", "type": "[Param(0)]", "has_default": false, "pipeline": false }],
+        "result": "[Param(0)]"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "CoreIntrinsic",
+      "note": "concatenates left then right, preserving duplicates",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "CoreCount",
+      "id_value": 13,
+      "module": "std.collection",
+      "name": "count",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }],
+        "result": "Int"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "CoreIntrinsic",
+      "note": "returns the exact finite count; the relation overload shares this id",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "CoreFirst",
+      "id_value": 14,
+      "module": "std.collection",
+      "name": "first",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }],
+        "result": "Param(0)?"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "CoreIntrinsic",
+      "note": "returns the first value without enumerating the remainder",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "CoreLast",
+      "id_value": 15,
+      "module": "std.collection",
+      "name": "last",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }],
+        "result": "Param(0)?"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "CoreIntrinsic",
+      "note": "returns the last value; spec example 06-expressions.md:146 uses it and section 9 omits it (D1)",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "CoreOne",
+      "id_value": 16,
+      "module": "std.collection",
+      "name": "one",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "predicate", "type": "fn(Param(0)): Bool", "has_default": true, "pipeline": false }],
+        "result": "Param(0)"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "CoreIntrinsic",
+      "note": "requires exactly one matching value; zero and multiple matches are cardinality errors",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "CoreSum",
+      "id_value": 17,
+      "module": "std.collection",
+      "name": "sum",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }],
+        "result": "Param(0)"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "CoreIntrinsic",
+      "note": "exact addition with the additive zero for empty input",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "CoreMin",
+      "id_value": 18,
+      "module": "std.collection",
+      "name": "min",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }],
+        "result": "Param(0)?"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "CoreIntrinsic",
+      "note": "returns the least value under the canonical order",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "CoreMax",
+      "id_value": 19,
+      "module": "std.collection",
+      "name": "max",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }],
+        "result": "Param(0)?"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "CoreIntrinsic",
+      "note": "returns the greatest value under the canonical order",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "CoreEvery",
+      "id_value": 20,
+      "module": "std.collection",
+      "name": "every",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "predicate", "type": "fn(Param(0)): Bool", "has_default": false, "pipeline": false }],
+        "result": "Bool"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "CoreIntrinsic",
+      "note": "true for empty input and short-circuits at the first false value",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "CoreExists",
+      "id_value": 21,
+      "module": "std.collection",
+      "name": "exists",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "predicate", "type": "fn(Param(0)): Bool", "has_default": false, "pipeline": false }],
+        "result": "Bool"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "CoreIntrinsic",
+      "note": "false for empty input and short-circuits at the first true value",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "CollectionChunk",
+      "id_value": 22,
+      "module": "std.collection",
+      "name": "chunk",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "values", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "size", "type": "Int", "has_default": false, "pipeline": false }],
+        "result": "[[Param(0)]]"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "SourceExpressible",
+      "note": "consecutive nonempty chunks; the pinned source form is scheduled for the std repo",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "CollectionFlatten",
+      "id_value": 23,
+      "module": "std.collection",
+      "name": "flatten",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "values", "type": "[[Param(0)]]", "has_default": false, "pipeline": true }],
+        "result": "[Param(0)]"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "SourceExpressible",
+      "note": "one level of concatenation preserving outer and inner order",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "CollectionPartition",
+      "id_value": 24,
+      "module": "std.collection",
+      "name": "partition",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "values", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "predicate", "type": "fn(Param(0)): Bool", "has_default": false, "pipeline": false }],
+        "result": "([Param(0)], [Param(0)])"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "SourceExpressible",
+      "note": "returns matching and remaining values in input order",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "CollectionZip",
+      "id_value": 25,
+      "module": "std.collection",
+      "name": "zip",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T", "U"],
+        "params": [{ "name": "left", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "right", "type": "[Param(1)]", "has_default": false, "pipeline": false }],
+        "result": "[(Param(0), Param(1))]"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "SourceExpressible",
+      "note": "ordered pairs until the shorter input ends",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "CollectionZipExact",
+      "id_value": 26,
+      "module": "std.collection",
+      "name": "zip_exact",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T", "U"],
+        "params": [{ "name": "left", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "right", "type": "[Param(1)]", "has_default": false, "pipeline": false }],
+        "result": "[(Param(0), Param(1))]"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "SourceExpressible",
+      "note": "ordered pairs and a failure when the inputs differ in length",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "CollectionUnique",
+      "id_value": 27,
+      "module": "std.collection",
+      "name": "unique",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "values", "type": "[Param(0)]", "has_default": false, "pipeline": true }],
+        "result": "[Param(0)]"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "SourceExpressible",
+      "note": "first-occurrence semantics identical to core distinct",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "CollectionPairs",
+      "id_value": 28,
+      "module": "std.collection",
+      "name": "pairs",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "values", "type": "[Param(0)]", "has_default": false, "pipeline": true }],
+        "result": "[(Param(0), Param(0))]"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "SourceExpressible",
+      "note": "adjacent overlapping pairs; length n produces max(0, n-1) pairs",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "CollectionWindow",
+      "id_value": 29,
+      "module": "std.collection",
+      "name": "window",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "values", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "size", "type": "Int", "has_default": false, "pipeline": false }, { "name": "step", "type": "Int", "has_default": true, "pipeline": false }],
+        "result": "[[Param(0)]]"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "SourceExpressible",
+      "note": "complete positional windows only, with positive size and step",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "CollectionSplitWhen",
+      "id_value": 30,
+      "module": "std.collection",
+      "name": "split_when",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "values", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "predicate", "type": "fn(Param(0)): Bool", "has_default": false, "pipeline": false }],
+        "result": "[[Param(0)]]"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "SourceExpressible",
+      "note": "starts a new group before a matching item and never inserts an empty group",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "CollectionRank",
+      "id_value": 31,
+      "module": "std.collection",
+      "name": "rank",
+      "leaf": "__rank",
+      "signature": {
+        "type_params": ["T", "K"],
+        "params": [{ "name": "values", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "key", "type": "fn(Param(0)): Param(1)", "has_default": false, "pipeline": false }],
+        "result": "[(Param(0), Int)]"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "SourceExpressible",
+      "note": "competition ranks over a stable key sort; the relation overload shares this id",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "CollectionGroupBy",
+      "id_value": 32,
+      "module": "std.collection",
+      "name": "group_by",
+      "leaf": "__group_by",
+      "signature": {
+        "type_params": ["T", "K"],
+        "params": [{ "name": "values", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "key", "type": "fn(Param(0)): Param(1)", "has_default": false, "pipeline": false }],
+        "result": "[(Param(1), [Param(0)])]"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "SuperlinearCanonicalKey",
+      "note": "groups in key order without quadratic source key folding",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "CollectionBucketBy",
+      "id_value": 33,
+      "module": "std.collection",
+      "name": "bucket_by",
+      "leaf": "__bucket_by",
+      "signature": {
+        "type_params": ["T", "P"],
+        "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "period", "type": "Param(1)", "has_default": false, "pipeline": false }, { "name": "zone", "type": "Str", "has_default": false, "pipeline": false }],
+        "result": "[[Param(0)]]"
+      },
+      "effect": "PinnedData",
+      "dispatch": { "kind": "Native" },
+      "justification": "RepresentationAccess",
+      "note": "calendar bucketing uses the pinned time-zone edition and never a host zone database",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "CollectionAsofJoin",
+      "id_value": 34,
+      "module": "std.collection",
+      "name": "asof_join",
+      "leaf": "__asof_join",
+      "signature": {
+        "type_params": ["T", "Time", "Key"],
+        "params": [{ "name": "left", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "right", "type": "[Param(0)]", "has_default": false, "pipeline": false }, { "name": "time", "type": "fn(Param(0)): Param(1)", "has_default": false, "pipeline": false }, { "name": "by", "type": "fn(Param(0)): Param(2)", "has_default": false, "pipeline": false }],
+        "result": "[(Param(0), Param(0)?)]"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "SuperlinearCanonicalKey",
+      "note": "chooses the latest right row at or before each left time within the equal by group",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "CollectionRecursiveCte",
+      "id_value": 35,
+      "module": "std.query",
+      "name": "recursive_cte",
+      "leaf": "__recursive_cte",
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "anchor", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "recursive_term", "type": "fn(Param(0)): [Param(0)]", "has_default": false, "pipeline": false }],
+        "result": "[Param(0)]"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "PlanOrStreamMachinery",
+      "note": "breadth-first recursive query with a canonical identity fold; declared by the addendum (D2)",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "CollectionStrictlyOrderedTimeSeries",
+      "id_value": 36,
+      "module": "std.query",
+      "name": "__strictly_ordered_time_series",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "points", "type": "[(Instant, Param(0))]", "has_default": false, "pipeline": false }],
+        "result": "Bool"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "PlanOrStreamMachinery",
+      "note": "iterative strict-order scan for sparse time series",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "CollectionWindowRate",
+      "id_value": 37,
+      "module": "std.query",
+      "name": "window_rate",
+      "leaf": "__window_rate",
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "points", "type": "[(Instant, Param(0))]", "has_default": false, "pipeline": true }, { "name": "size", "type": "Int", "has_default": false, "pipeline": false }, { "name": "step", "type": "Int", "has_default": true, "pipeline": false }],
+        "result": "[Param(0)?]"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "PlanOrStreamMachinery",
+      "note": "per-window endpoint rate over strictly ordered timestamps",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "CollectionWindowRateIntegrate",
+      "id_value": 38,
+      "module": "std.query",
+      "name": "window_rate_integrate",
+      "leaf": "__window_rate_integrate",
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "points", "type": "[(Instant, Param(0))]", "has_default": false, "pipeline": true }, { "name": "size", "type": "Int", "has_default": false, "pipeline": false }, { "name": "step", "type": "Int", "has_default": true, "pipeline": false }],
+        "result": "[(Param(0)?, Param(0)?)]"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "PlanOrStreamMachinery",
+      "note": "paired per-window rate and integral in one sparse-timestamp pass",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "CollectionWindowDerivative",
+      "id_value": 39,
+      "module": "std.query",
+      "name": "window_derivative",
+      "leaf": "__window_derivative",
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "points", "type": "[(Instant, Param(0))]", "has_default": false, "pipeline": true }, { "name": "size", "type": "Int", "has_default": false, "pipeline": false }, { "name": "step", "type": "Int", "has_default": true, "pipeline": false }],
+        "result": "[[(Instant, Param(0))]]"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "PlanOrStreamMachinery",
+      "note": "per-window adjacent slopes timestamped at each right endpoint",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "CollectionWindowIntegrate",
+      "id_value": 40,
+      "module": "std.query",
+      "name": "window_integrate",
+      "leaf": "__window_integrate",
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "points", "type": "[(Instant, Param(0))]", "has_default": false, "pipeline": true }, { "name": "size", "type": "Int", "has_default": false, "pipeline": false }, { "name": "step", "type": "Int", "has_default": true, "pipeline": false }],
+        "result": "[Param(0)?]"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "PlanOrStreamMachinery",
+      "note": "per-window trapezoidal integration over strictly ordered timestamps",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "CollectionListLength",
+      "id_value": 41,
+      "module": "std.collection",
+      "name": "__list_length",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "values", "type": "[Param(0)]", "has_default": false, "pipeline": false }],
+        "result": "Int"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "HistoricalPin",
+      "note": "historical v4/v5 list length helper; no current-pin declaration",
+      "pins": { "since": "module-upgrade-std-collection-v4", "until": "module-upgrade-std-collection-v5" }
+    },
+    {
+      "id": "CollectionListConcat",
+      "id_value": 42,
+      "module": "std.collection",
+      "name": "__list_concat",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "left", "type": "[Param(0)]", "has_default": false, "pipeline": false }, { "name": "right", "type": "[Param(0)]", "has_default": false, "pipeline": false }],
+        "result": "[Param(0)]"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "HistoricalPin",
+      "note": "historical v4/v5 list concatenation helper; no current-pin declaration",
+      "pins": { "since": "module-upgrade-std-collection-v4", "until": "module-upgrade-std-collection-v5" }
+    },
+    {
+      "id": "CollectionNumericSum",
+      "id_value": 43,
+      "module": "std.collection",
+      "name": "__numeric_sum",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "values", "type": "[Param(0)]", "has_default": false, "pipeline": false }],
+        "result": "Param(0)"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "HistoricalPin",
+      "note": "historical v4/v5 numeric sum helper; no current-pin declaration",
+      "pins": { "since": "module-upgrade-std-collection-v4", "until": "module-upgrade-std-collection-v5" }
+    },
+    {
+      "id": "CollectionStableSort",
+      "id_value": 44,
+      "module": "std.collection",
+      "name": "__stable_sort",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T", "K"],
+        "params": [{ "name": "values", "type": "[Param(0)]", "has_default": false, "pipeline": false }, { "name": "key", "type": "fn(Param(0)): Param(1)", "has_default": false, "pipeline": false }],
+        "result": "[Param(0)]"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "HistoricalPin",
+      "note": "historical v4/v5 stable sort helper; no current-pin declaration",
+      "pins": { "since": "module-upgrade-std-collection-v4", "until": "module-upgrade-std-collection-v5" }
+    },
+    {
+      "id": "CollectionMinimum",
+      "id_value": 45,
+      "module": "std.collection",
+      "name": "__minimum",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "values", "type": "[Param(0)]", "has_default": false, "pipeline": false }],
+        "result": "Param(0)?"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "HistoricalPin",
+      "note": "historical v4/v5 minimum helper; no current-pin declaration",
+      "pins": { "since": "module-upgrade-std-collection-v4", "until": "module-upgrade-std-collection-v5" }
+    },
+    {
+      "id": "CollectionMaximum",
+      "id_value": 46,
+      "module": "std.collection",
+      "name": "__maximum",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "values", "type": "[Param(0)]", "has_default": false, "pipeline": false }],
+        "result": "Param(0)?"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "HistoricalPin",
+      "note": "historical v4/v5 maximum helper; no current-pin declaration",
+      "pins": { "since": "module-upgrade-std-collection-v4", "until": "module-upgrade-std-collection-v5" }
+    },
+    {
+      "id": "MathIncrement",
+      "id_value": 47,
+      "module": "std.math",
+      "name": "increment",
+      "leaf": null,
+      "signature": {
+        "type_params": [],
+        "params": [{ "name": "value", "type": "Int", "has_default": false, "pipeline": true }],
+        "result": "Int"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "SourceOnly" },
+      "justification": "SourceExpressible",
+      "note": "pinned source implements exact successor; the unreachable Rust arm is deleted in S5",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "MathDecrement",
+      "id_value": 48,
+      "module": "std.math",
+      "name": "decrement",
+      "leaf": null,
+      "signature": {
+        "type_params": [],
+        "params": [{ "name": "value", "type": "Int", "has_default": false, "pipeline": true }],
+        "result": "Int"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "SourceOnly" },
+      "justification": "SourceExpressible",
+      "note": "pinned source implements exact predecessor; the unreachable Rust arm is deleted in S5",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "MathIsZero",
+      "id_value": 49,
+      "module": "std.math",
+      "name": "is_zero",
+      "leaf": null,
+      "signature": {
+        "type_params": [],
+        "params": [{ "name": "value", "type": "Int", "has_default": false, "pipeline": true }],
+        "result": "Bool"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "SourceOnly" },
+      "justification": "SourceExpressible",
+      "note": "pinned source reports exact zero; the unreachable Rust arm is deleted in S5",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "MathMin",
+      "id_value": 50,
+      "module": "std.math",
+      "name": "min",
+      "leaf": null,
+      "signature": {
+        "type_params": [],
+        "params": [{ "name": "left", "type": "Int", "has_default": false, "pipeline": true }, { "name": "right", "type": "Int", "has_default": false, "pipeline": false }],
+        "result": "Int"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "SourceOnly" },
+      "justification": "SourceExpressible",
+      "note": "pinned source returns the lesser Int; the unreachable Rust arm widened the declared signature",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "MathMax",
+      "id_value": 51,
+      "module": "std.math",
+      "name": "max",
+      "leaf": null,
+      "signature": {
+        "type_params": [],
+        "params": [{ "name": "left", "type": "Int", "has_default": false, "pipeline": true }, { "name": "right", "type": "Int", "has_default": false, "pipeline": false }],
+        "result": "Int"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "SourceOnly" },
+      "justification": "SourceExpressible",
+      "note": "pinned source returns the greater Int; the unreachable Rust arm widened the declared signature",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "MathClamp",
+      "id_value": 52,
+      "module": "std.math",
+      "name": "clamp",
+      "leaf": null,
+      "signature": {
+        "type_params": [],
+        "params": [{ "name": "value", "type": "Int", "has_default": false, "pipeline": true }, { "name": "lower", "type": "Int", "has_default": false, "pipeline": false }, { "name": "upper", "type": "Int", "has_default": false, "pipeline": false }],
+        "result": "Int"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "SourceOnly" },
+      "justification": "SourceExpressible",
+      "note": "pinned source bounds the value and returns lower for reversed bounds",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "TextTrim",
+      "id_value": 53,
+      "module": "std.text",
+      "name": "trim",
+      "leaf": "__trim",
+      "signature": {
+        "type_params": [],
+        "params": [{ "name": "value", "type": "Str", "has_default": false, "pipeline": true }],
+        "result": "Str"
+      },
+      "effect": "PinnedData",
+      "dispatch": { "kind": "Native" },
+      "justification": "PinnedUnicodeData",
+      "note": "trims the pinned Unicode 16.0.0 White_Space set; the Rust toolchain's tables are not a substitute",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "TextSplit",
+      "id_value": 54,
+      "module": "std.text",
+      "name": "split",
+      "leaf": "__split",
+      "signature": {
+        "type_params": [],
+        "params": [{ "name": "value", "type": "Str", "has_default": false, "pipeline": true }, { "name": "separator", "type": "Str", "has_default": false, "pipeline": false }],
+        "result": "[Str]"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "RepresentationAccess",
+      "note": "splits on Unicode scalar boundaries and preserves empty fields at either edge",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "TextJoin",
+      "id_value": 55,
+      "module": "std.text",
+      "name": "join",
+      "leaf": "__join",
+      "signature": {
+        "type_params": [],
+        "params": [{ "name": "values", "type": "[Str]", "has_default": false, "pipeline": true }, { "name": "separator", "type": "Str", "has_default": false, "pipeline": false }],
+        "result": "Str"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "RepresentationAccess",
+      "note": "recomposes Str without exposing its UTF-8 representation to source",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "TextStartsWith",
+      "id_value": 56,
+      "module": "std.text",
+      "name": "starts_with",
+      "leaf": "__starts_with",
+      "signature": {
+        "type_params": [],
+        "params": [{ "name": "value", "type": "Str", "has_default": false, "pipeline": true }, { "name": "prefix", "type": "Str", "has_default": false, "pipeline": false }],
+        "result": "Bool"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "MeasuredWorse",
+      "note": "the source form must materialise a scalar list; the measured threshold keeps this native",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "TextEndsWith",
+      "id_value": 57,
+      "module": "std.text",
+      "name": "ends_with",
+      "leaf": "__ends_with",
+      "signature": {
+        "type_params": [],
+        "params": [{ "name": "value", "type": "Str", "has_default": false, "pipeline": true }, { "name": "suffix", "type": "Str", "has_default": false, "pipeline": false }],
+        "result": "Bool"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "MeasuredWorse",
+      "note": "the source form must materialise a scalar list; the measured threshold keeps this native",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "TextContains",
+      "id_value": 58,
+      "module": "std.text",
+      "name": "contains",
+      "leaf": "__contains",
+      "signature": {
+        "type_params": [],
+        "params": [{ "name": "value", "type": "Str", "has_default": false, "pipeline": true }, { "name": "needle", "type": "Str", "has_default": false, "pipeline": false }],
+        "result": "Bool"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "MeasuredWorse",
+      "note": "the source form must materialise a scalar list; the measured threshold keeps this native",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "TextReplace",
+      "id_value": 59,
+      "module": "std.text",
+      "name": "replace",
+      "leaf": "__replace",
+      "signature": {
+        "type_params": [],
+        "params": [{ "name": "value", "type": "Str", "has_default": false, "pipeline": true }, { "name": "from", "type": "Str", "has_default": false, "pipeline": false }, { "name": "to", "type": "Str", "has_default": false, "pipeline": false }],
+        "result": "Str"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "MeasuredWorse",
+      "note": "replace is join(split(value, from), to); the measured threshold keeps this native",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "TextNormalise",
+      "id_value": 60,
+      "module": "std.text",
+      "name": "normalise",
+      "leaf": "__normalise",
+      "signature": {
+        "type_params": [],
+        "params": [{ "name": "value", "type": "Str", "has_default": false, "pipeline": true }, { "name": "form", "type": "Str", "has_default": false, "pipeline": false }],
+        "result": "Str"
+      },
+      "effect": "PinnedData",
+      "dispatch": { "kind": "Native" },
+      "justification": "PinnedUnicodeData",
+      "note": "canonical NFC/NFD normalisation from the pinned Unicode 16.0.0 tables",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "TextLower",
+      "id_value": 61,
+      "module": "std.text",
+      "name": "lower",
+      "leaf": "__lower",
+      "signature": {
+        "type_params": [],
+        "params": [{ "name": "value", "type": "Str", "has_default": false, "pipeline": true }],
+        "result": "Str"
+      },
+      "effect": "PinnedData",
+      "dispatch": { "kind": "Native" },
+      "justification": "PinnedUnicodeData",
+      "note": "full Unicode 16.0.0 lowercase from the pinned tables",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "TextUpper",
+      "id_value": 62,
+      "module": "std.text",
+      "name": "upper",
+      "leaf": "__upper",
+      "signature": {
+        "type_params": [],
+        "params": [{ "name": "value", "type": "Str", "has_default": false, "pipeline": true }],
+        "result": "Str"
+      },
+      "effect": "PinnedData",
+      "dispatch": { "kind": "Native" },
+      "justification": "PinnedUnicodeData",
+      "note": "full Unicode 16.0.0 uppercase including Final_Sigma-adjacent expansions",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "BitsBitOr",
+      "id_value": 63,
+      "module": "std.bits",
+      "name": "bit_or",
+      "leaf": "__bit_or",
+      "signature": {
+        "type_params": [],
+        "params": [{ "name": "left", "type": "Int", "has_default": false, "pipeline": true }, { "name": "right", "type": "Int", "has_default": false, "pipeline": false }],
+        "result": "Int"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "RepresentationAccess",
+      "note": "bitwise OR over the unbounded signed two's-complement Int model",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "BitsBitAnd",
+      "id_value": 64,
+      "module": "std.bits",
+      "name": "bit_and",
+      "leaf": "__bit_and",
+      "signature": {
+        "type_params": [],
+        "params": [{ "name": "left", "type": "Int", "has_default": false, "pipeline": true }, { "name": "right", "type": "Int", "has_default": false, "pipeline": false }],
+        "result": "Int"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "RepresentationAccess",
+      "note": "bitwise AND over the unbounded signed two's-complement Int model",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "BitsBitXor",
+      "id_value": 65,
+      "module": "std.bits",
+      "name": "bit_xor",
+      "leaf": "__bit_xor",
+      "signature": {
+        "type_params": [],
+        "params": [{ "name": "left", "type": "Int", "has_default": false, "pipeline": true }, { "name": "right", "type": "Int", "has_default": false, "pipeline": false }],
+        "result": "Int"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "RepresentationAccess",
+      "note": "bitwise XOR over the unbounded signed two's-complement Int model",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "BitsBitNot",
+      "id_value": 66,
+      "module": "std.bits",
+      "name": "bit_not",
+      "leaf": "__bit_not",
+      "signature": {
+        "type_params": [],
+        "params": [{ "name": "value", "type": "Int", "has_default": false, "pipeline": true }],
+        "result": "Int"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "RepresentationAccess",
+      "note": "bit_not(x) = -x - 1 over the unbounded signed two's-complement model",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "BitsShiftLeft",
+      "id_value": 67,
+      "module": "std.bits",
+      "name": "shift_left",
+      "leaf": "__shift_left",
+      "signature": {
+        "type_params": [],
+        "params": [{ "name": "value", "type": "Int", "has_default": false, "pipeline": true }, { "name": "count", "type": "Int", "has_default": false, "pipeline": false }],
+        "result": "Int"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "RepresentationAccess",
+      "note": "exact left shift with a nonnegative count and resource bounds",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "BitsShiftRight",
+      "id_value": 68,
+      "module": "std.bits",
+      "name": "shift_right",
+      "leaf": "__shift_right",
+      "signature": {
+        "type_params": [],
+        "params": [{ "name": "value", "type": "Int", "has_default": false, "pipeline": true }, { "name": "count", "type": "Int", "has_default": false, "pipeline": false }],
+        "result": "Int"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "RepresentationAccess",
+      "note": "arithmetic right shift with a nonnegative count",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "StreamFromList",
+      "id_value": 69,
+      "module": "std.stream",
+      "name": "from_list",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "values", "type": "[Param(0)]", "has_default": false, "pipeline": false }, { "name": "source_identity", "type": "Str", "has_default": false, "pipeline": false }],
+        "result": "Stream<Param(0)>"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "PlanOrStreamMachinery",
+      "note": "constructs a replayable finite list-backed source with a captured typed identity",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "StreamFromProvider",
+      "id_value": 70,
+      "module": "std.stream",
+      "name": "from_provider",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "source", "type": "Str", "has_default": false, "pipeline": false }, { "name": "identity", "type": "Str", "has_default": false, "pipeline": false }],
+        "result": "Stream<Param(0)>"
+      },
+      "effect": "Stream",
+      "dispatch": { "kind": "Native" },
+      "justification": "PlanOrStreamMachinery",
+      "note": "evaluator-only provider constructor; the pinned declaration is added in S4 (D3)",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "StreamForEach",
+      "id_value": 71,
+      "module": "std.stream",
+      "name": "for_each",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "stream", "type": "Stream<Param(0)>", "has_default": false, "pipeline": true }, { "name": "action", "type": "fn(Param(0)): Unit", "has_default": false, "pipeline": false }],
+        "result": "Unit"
+      },
+      "effect": "Stream",
+      "dispatch": { "kind": "Native" },
+      "justification": "PlanOrStreamMachinery",
+      "note": "processes one item and checkpoint movement per activation",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "StreamBatch",
+      "id_value": 72,
+      "module": "std.stream",
+      "name": "batch",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "stream", "type": "Stream<Param(0)>", "has_default": false, "pipeline": true }, { "name": "size", "type": "Int", "has_default": false, "pipeline": false }],
+        "result": "Stream<[Param(0)]>"
+      },
+      "effect": "Stream",
+      "dispatch": { "kind": "Native" },
+      "justification": "PlanOrStreamMachinery",
+      "note": "emits ordered positive-size batches and commits the final short batch",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "StreamBuffer",
+      "id_value": 73,
+      "module": "std.stream",
+      "name": "buffer",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "stream", "type": "Stream<Param(0)>", "has_default": false, "pipeline": true }, { "name": "capacity", "type": "Int", "has_default": false, "pipeline": false }],
+        "result": "Stream<Param(0)>"
+      },
+      "effect": "Stream",
+      "dispatch": { "kind": "Native" },
+      "justification": "PlanOrStreamMachinery",
+      "note": "bounded queue with default backpressure and no implicit drop",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "StreamMerge",
+      "id_value": 74,
+      "module": "std.stream",
+      "name": "merge",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "streams", "type": "[Stream<Param(0)>]", "has_default": false, "pipeline": false }],
+        "result": "Stream<Param(0)>"
+      },
+      "effect": "Stream",
+      "dispatch": { "kind": "Native" },
+      "justification": "PlanOrStreamMachinery",
+      "note": "interleaves by observed arrival order while preserving each input's order",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "StreamThrottle",
+      "id_value": 75,
+      "module": "std.stream",
+      "name": "throttle",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "stream", "type": "Stream<Param(0)>", "has_default": false, "pipeline": true }, { "name": "duration", "type": "Duration", "has_default": false, "pipeline": false }, { "name": "drop_policy", "type": "Str", "has_default": false, "pipeline": false }],
+        "result": "Stream<Param(0)>"
+      },
+      "effect": "Host",
+      "dispatch": { "kind": "Native" },
+      "justification": "HostResource",
+      "note": "elapsed-time throttling with an explicit caller-recorded drop policy",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "StreamDebounce",
+      "id_value": 76,
+      "module": "std.stream",
+      "name": "debounce",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "stream", "type": "Stream<Param(0)>", "has_default": false, "pipeline": true }, { "name": "duration", "type": "Duration", "has_default": false, "pipeline": false }, { "name": "delivery_policy", "type": "Str", "has_default": false, "pipeline": false }],
+        "result": "Stream<Param(0)>"
+      },
+      "effect": "Host",
+      "dispatch": { "kind": "Native" },
+      "justification": "HostResource",
+      "note": "retains the latest item until a positive quiet interval elapses",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "StreamRetry",
+      "id_value": 77,
+      "module": "std.stream",
+      "name": "retry",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "stream", "type": "Stream<Param(0)>", "has_default": false, "pipeline": true }, { "name": "policy", "type": "{ max_attempts: Int, initial_delay: Duration, max_delay: Duration }", "has_default": false, "pipeline": false }],
+        "result": "Stream<Param(0)>"
+      },
+      "effect": "Stream",
+      "dispatch": { "kind": "Native" },
+      "justification": "PlanOrStreamMachinery",
+      "note": "retries the same blocked delivery under a bounded provider contract",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "StreamRecover",
+      "id_value": 78,
+      "module": "std.stream",
+      "name": "recover",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "stream", "type": "Stream<Param(0)>", "has_default": false, "pipeline": true }, { "name": "handler", "type": "fn(Error): Param(0)", "has_default": false, "pipeline": false }],
+        "result": "Stream<Param(0)>"
+      },
+      "effect": "Stream",
+      "dispatch": { "kind": "Native" },
+      "justification": "PlanOrStreamMachinery",
+      "note": "replaces a permitted source failure with one explicit value",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "ConcurrentParallel",
+      "id_value": 79,
+      "module": "std.concurrent",
+      "name": "parallel",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "callbacks", "type": "[fn(): Param(0)]", "has_default": false, "pipeline": false }],
+        "result": "[Param(0)]"
+      },
+      "effect": "Host",
+      "dispatch": { "kind": "Native" },
+      "justification": "HostResource",
+      "note": "runs one owned child activation per callback and joins results in input order",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "ConcurrentRace",
+      "id_value": 80,
+      "module": "std.concurrent",
+      "name": "race",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "callbacks", "type": "[fn(): Param(0)]", "has_default": false, "pipeline": false }],
+        "result": "Param(0)"
+      },
+      "effect": "Host",
+      "dispatch": { "kind": "Native" },
+      "justification": "HostResource",
+      "note": "returns the first observed success and cancels every losing child",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "ConcurrentTimeout",
+      "id_value": 81,
+      "module": "std.concurrent",
+      "name": "timeout",
+      "leaf": null,
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "callback", "type": "fn(): Param(0)", "has_default": false, "pipeline": false }, { "name": "duration", "type": "Duration", "has_default": false, "pipeline": false }],
+        "result": "Param(0)"
+      },
+      "effect": "Host",
+      "dispatch": { "kind": "Native" },
+      "justification": "HostResource",
+      "note": "runs one owned child under an elapsed-time deadline and joins it on expiry",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "UiNode",
+      "id_value": 82,
+      "module": "std.ui",
+      "name": "node",
+      "leaf": "__node",
+      "signature": {
+        "type_params": ["P", "A"],
+        "params": [{ "name": "kind", "type": "Str", "has_default": false, "pipeline": false }, { "name": "properties", "type": "Param(0)", "has_default": false, "pipeline": false }, { "name": "children", "type": "[Ui]", "has_default": false, "pipeline": false }, { "name": "actions", "type": "[(Str, Param(1))]", "has_default": false, "pipeline": false }, { "name": "property_types", "type": "[(Str, Str)]", "has_default": false, "pipeline": false }],
+        "result": "Ui"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "RepresentationAccess",
+      "note": "constructs the core presentation tree without executing an action descriptor",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "StatsMean",
+      "id_value": 83,
+      "module": "std.stats",
+      "name": "mean",
+      "leaf": "__mean",
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "scale", "type": "Int?", "has_default": true, "pipeline": false }, { "name": "rounding", "type": "Str?", "has_default": true, "pipeline": false }],
+        "result": "Param(0)?"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "MeasuredWorse",
+      "note": "mean returns null for empty input and keeps exact inputs exact; the source form is measured worse",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "StatsMedian",
+      "id_value": 84,
+      "module": "std.stats",
+      "name": "median",
+      "leaf": "__median",
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "scale", "type": "Int?", "has_default": true, "pipeline": false }, { "name": "rounding", "type": "Str?", "has_default": true, "pipeline": false }],
+        "result": "Param(0)?"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "MeasuredWorse",
+      "note": "median uses total-order sorting and an explicitly rounded middle mean; the source form is measured worse",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "StatsPercentile",
+      "id_value": 85,
+      "module": "std.stats",
+      "name": "percentile",
+      "leaf": "__percentile",
+      "signature": {
+        "type_params": ["T", "P"],
+        "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "p", "type": "Param(1)", "has_default": false, "pipeline": false }, { "name": "interpolation", "type": "Str", "has_default": false, "pipeline": false }, { "name": "scale", "type": "Int?", "has_default": true, "pipeline": false }, { "name": "rounding", "type": "Str?", "has_default": true, "pipeline": false }],
+        "result": "Param(0)?"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "MeasuredWorse",
+      "note": "percentile requires a probability in [0,1] and a named interpolation method",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "StatsSum",
+      "id_value": 86,
+      "module": "std.stats",
+      "name": "sum",
+      "leaf": "__sum",
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }],
+        "result": "Param(0)"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "CoreIntrinsic",
+      "note": "empty sum is the additive zero; affine absolute quantities are rejected",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "StatsMin",
+      "id_value": 87,
+      "module": "std.stats",
+      "name": "min",
+      "leaf": "__min",
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }],
+        "result": "Param(0)?"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "CoreIntrinsic",
+      "note": "empty selection returns null and Float min uses the canonical NaN rule",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "StatsMax",
+      "id_value": 88,
+      "module": "std.stats",
+      "name": "max",
+      "leaf": "__max",
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }],
+        "result": "Param(0)?"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "CoreIntrinsic",
+      "note": "empty selection returns null and Float max uses the canonical NaN rule",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "StatsRange",
+      "id_value": 89,
+      "module": "std.stats",
+      "name": "range",
+      "leaf": "__range",
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }],
+        "result": "Param(0)?"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "MeasuredWorse",
+      "note": "range is max minus min and returns a delta for affine absolute quantities",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "StatsMode",
+      "id_value": 90,
+      "module": "std.stats",
+      "name": "mode",
+      "leaf": "__mode",
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }],
+        "result": "[Param(0)]"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "SuperlinearCanonicalKey",
+      "note": "every mode is returned once in first-appearance order without quadratic key folding",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "StatsVariance",
+      "id_value": 91,
+      "module": "std.stats",
+      "name": "variance",
+      "leaf": "__variance",
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "scale", "type": "Int?", "has_default": true, "pipeline": false }, { "name": "rounding", "type": "Str?", "has_default": true, "pipeline": false }],
+        "result": "Param(0)?"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "RepresentationAccess",
+      "note": "population variance with exact square roots and explicit rounding for inexact results",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "StatsStandardDeviation",
+      "id_value": 92,
+      "module": "std.stats",
+      "name": "standard_deviation",
+      "leaf": "__standard_deviation",
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "scale", "type": "Int?", "has_default": true, "pipeline": false }, { "name": "rounding", "type": "Str?", "has_default": true, "pipeline": false }],
+        "result": "Param(0)?"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "RepresentationAccess",
+      "note": "exact square roots are preserved and inexact results require explicit scale and rounding",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "StatsHistogram",
+      "id_value": 93,
+      "module": "std.stats",
+      "name": "histogram",
+      "leaf": "__histogram",
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "bins", "type": "[(Param(0), Param(0))]", "has_default": false, "pipeline": false }, { "name": "include_final_upper", "type": "Bool", "has_default": true, "pipeline": false }],
+        "result": "[Int]"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "MeasuredWorse",
+      "note": "ordered nonoverlapping half-open bins except an explicitly closed final upper bound",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "StatsRate",
+      "id_value": 94,
+      "module": "std.stats",
+      "name": "rate",
+      "leaf": "__rate",
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "points", "type": "[(Instant, Param(0))]", "has_default": false, "pipeline": true }],
+        "result": "Param(0)?"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "MeasuredWorse",
+      "note": "endpoint change per elapsed time over strictly increasing timestamps",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "StatsDerivative",
+      "id_value": 95,
+      "module": "std.stats",
+      "name": "derivative",
+      "leaf": "__derivative",
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "points", "type": "[(Instant, Param(0))]", "has_default": false, "pipeline": true }],
+        "result": "[(Instant, Param(0))]"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "MeasuredWorse",
+      "note": "adjacent slopes timestamped at each right endpoint",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "StatsIntegrate",
+      "id_value": 96,
+      "module": "std.stats",
+      "name": "integrate",
+      "leaf": "__integrate",
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "points", "type": "[(Instant, Param(0))]", "has_default": false, "pipeline": true }],
+        "result": "Param(0)?"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "MeasuredWorse",
+      "note": "trapezoidal integration with value-times-time units",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "TimeOffsetAt",
+      "id_value": 97,
+      "module": "std.time",
+      "name": "offset_at",
+      "leaf": null,
+      "signature": {
+        "type_params": [],
+        "params": [{ "name": "instant", "type": "Instant", "has_default": false, "pipeline": true }, { "name": "zone", "type": "Str", "has_default": false, "pipeline": false }],
+        "result": "Int"
+      },
+      "effect": "PinnedData",
+      "dispatch": { "kind": "Native" },
+      "justification": "HostResource",
+      "note": "returns signed seconds east of UTC from the pinned IANA edition, including at a transition",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "TimeResolveLocal",
+      "id_value": 98,
+      "module": "std.time",
+      "name": "resolve_local",
+      "leaf": null,
+      "signature": {
+        "type_params": [],
+        "params": [{ "name": "local", "type": "Str", "has_default": false, "pipeline": true }, { "name": "zone", "type": "Str", "has_default": false, "pipeline": false }, { "name": "ambiguous", "type": "Str", "has_default": false, "pipeline": false }, { "name": "gap", "type": "Str?", "has_default": true, "pipeline": false }],
+        "result": "Instant"
+      },
+      "effect": "PinnedData",
+      "dispatch": { "kind": "Native" },
+      "justification": "HostResource",
+      "note": "resolves a local timestamp against the pinned zone edition with explicit ambiguous and gap policies",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "TimeDurationCompactFormat",
+      "id_value": 99,
+      "module": "std.time",
+      "name": "duration.compact.format",
+      "leaf": null,
+      "signature": {
+        "type_params": [],
+        "params": [{ "name": "duration", "type": "Duration", "has_default": false, "pipeline": true }, { "name": "context", "type": "{ locale: Str, time_zone: Str }", "has_default": true, "pipeline": false }],
+        "result": "Str"
+      },
+      "effect": "PinnedData",
+      "dispatch": { "kind": "Native" },
+      "justification": "HostResource",
+      "note": "compact elapsed form from the pinned English profile with an immutable validated context",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "TimeDurationClockFormat",
+      "id_value": 100,
+      "module": "std.time",
+      "name": "duration.clock.format",
+      "leaf": null,
+      "signature": {
+        "type_params": [],
+        "params": [{ "name": "duration", "type": "Duration", "has_default": false, "pipeline": true }, { "name": "context", "type": "{ locale: Str, time_zone: Str }", "has_default": true, "pipeline": false }],
+        "result": "Str"
+      },
+      "effect": "PinnedData",
+      "dispatch": { "kind": "Native" },
+      "justification": "HostResource",
+      "note": "clock elapsed form from the pinned English profile with an immutable validated context",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "TimeDurationWordsFormat",
+      "id_value": 101,
+      "module": "std.time",
+      "name": "duration.words.format",
+      "leaf": null,
+      "signature": {
+        "type_params": [],
+        "params": [{ "name": "duration", "type": "Duration", "has_default": false, "pipeline": true }, { "name": "context", "type": "{ locale: Str, time_zone: Str }", "has_default": true, "pipeline": false }],
+        "result": "Str"
+      },
+      "effect": "PinnedData",
+      "dispatch": { "kind": "Native" },
+      "justification": "HostResource",
+      "note": "words elapsed form from the pinned English profile with an immutable validated context",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "TimeDurationIsoFormat",
+      "id_value": 102,
+      "module": "std.time",
+      "name": "duration.iso.format",
+      "leaf": null,
+      "signature": {
+        "type_params": [],
+        "params": [{ "name": "duration", "type": "Duration", "has_default": false, "pipeline": true }, { "name": "context", "type": "{ locale: Str, time_zone: Str }", "has_default": true, "pipeline": false }],
+        "result": "Str"
+      },
+      "effect": "PinnedData",
+      "dispatch": { "kind": "Native" },
+      "justification": "HostResource",
+      "note": "ISO elapsed form from the pinned profile; calendar periods are not converted to fixed seconds",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "HashSha256",
+      "id_value": 103,
+      "module": "std.hash",
+      "name": "sha256",
+      "leaf": null,
+      "signature": {
+        "type_params": [],
+        "params": [{ "name": "input", "type": "Blob", "has_default": false, "pipeline": true }],
+        "result": "Digest"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "CanonicalFormat",
+      "note": "SHA-256 over the complete Blob returning the 32-byte digest value",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "HashSha256Text",
+      "id_value": 104,
+      "module": "std.hash",
+      "name": "sha256_text",
+      "leaf": null,
+      "signature": {
+        "type_params": [],
+        "params": [{ "name": "input", "type": "Str", "has_default": false, "pipeline": true }],
+        "result": "Digest"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "CanonicalFormat",
+      "note": "hashes exact UTF-8 bytes without normalisation, case folding or locale conversion",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "HashDomainSha256",
+      "id_value": 105,
+      "module": "std.hash",
+      "name": "domain_sha256",
+      "leaf": null,
+      "signature": {
+        "type_params": [],
+        "params": [{ "name": "domain", "type": "Str", "has_default": false, "pipeline": true }, { "name": "payload", "type": "Blob", "has_default": false, "pipeline": false }],
+        "result": "Digest"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "CanonicalFormat",
+      "note": "computes SHA256(ASCII(domain) || 00 || payload) with a nonempty ASCII domain",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "HashToHex",
+      "id_value": 106,
+      "module": "std.hash",
+      "name": "to_hex",
+      "leaf": null,
+      "signature": {
+        "type_params": [],
+        "params": [{ "name": "digest", "type": "Digest", "has_default": false, "pipeline": true }],
+        "result": "Str"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "RepresentationAccess",
+      "note": "renders a Digest as exactly 64 lowercase hexadecimal characters",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "HashFromHex",
+      "id_value": 107,
+      "module": "std.hash",
+      "name": "from_hex",
+      "leaf": null,
+      "signature": {
+        "type_params": [],
+        "params": [{ "name": "value", "type": "Str", "has_default": false, "pipeline": true }],
+        "result": "Digest?"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "RepresentationAccess",
+      "note": "parses exactly 64 lowercase hexadecimal characters and returns null otherwise",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "RandomBytes",
+      "id_value": 108,
+      "module": "std.random",
+      "name": "bytes",
+      "leaf": "__bytes",
+      "signature": {
+        "type_params": [],
+        "params": [{ "name": "count", "type": "Int", "has_default": false, "pipeline": true }],
+        "result": "Blob"
+      },
+      "effect": "Entropy",
+      "dispatch": { "kind": "Native" },
+      "justification": "HostResource",
+      "note": "returns exactly count bytes from the host cryptographically secure random source",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "RandomInteger",
+      "id_value": 109,
+      "module": "std.random",
+      "name": "integer",
+      "leaf": "__integer",
+      "signature": {
+        "type_params": [],
+        "params": [{ "name": "lower_inclusive", "type": "Int", "has_default": false, "pipeline": true }, { "name": "upper_exclusive", "type": "Int", "has_default": false, "pipeline": false }],
+        "result": "Int"
+      },
+      "effect": "Entropy",
+      "dispatch": { "kind": "Native" },
+      "justification": "HostResource",
+      "note": "uniform rejection sampling from a half-open interval without modulo bias",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "RandomChoose",
+      "id_value": 110,
+      "module": "std.random",
+      "name": "choose",
+      "leaf": "__choose",
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "values", "type": "[Param(0)]", "has_default": false, "pipeline": true }],
+        "result": "Param(0)?"
+      },
+      "effect": "Entropy",
+      "dispatch": { "kind": "Native" },
+      "justification": "HostResource",
+      "note": "selects one list position uniformly and returns null for an empty list",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "RandomShuffle",
+      "id_value": 111,
+      "module": "std.random",
+      "name": "shuffle",
+      "leaf": "__shuffle",
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "values", "type": "[Param(0)]", "has_default": false, "pipeline": true }],
+        "result": "[Param(0)]"
+      },
+      "effect": "Entropy",
+      "dispatch": { "kind": "Native" },
+      "justification": "HostResource",
+      "note": "unbiased Fisher-Yates permutation retaining every input position exactly once",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "Base64Encode",
+      "id_value": 112,
+      "module": "std.encoding.base64",
+      "name": "encode",
+      "leaf": "__encode",
+      "signature": {
+        "type_params": [],
+        "params": [{ "name": "input", "type": "Blob", "has_default": false, "pipeline": true }],
+        "result": "Str"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "CanonicalFormat",
+      "note": "RFC 4648 standard alphabet with required padding and no inserted whitespace",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "Base64Decode",
+      "id_value": 113,
+      "module": "std.encoding.base64",
+      "name": "decode",
+      "leaf": "__decode",
+      "signature": {
+        "type_params": [],
+        "params": [{ "name": "input", "type": "Str", "has_default": false, "pipeline": true }],
+        "result": "Blob"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "CanonicalFormat",
+      "note": "rejects invalid characters, noncanonical padding and nonzero unused trailing bits",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "JsonEncode",
+      "id_value": 114,
+      "module": "std.encoding.json",
+      "name": "encode",
+      "leaf": "__encode",
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "value", "type": "Param(0)", "has_default": false, "pipeline": true }],
+        "result": "Str"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "CanonicalFormat",
+      "note": "schema-directed encoding that fails on unsupported values instead of dropping fields",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "JsonDecode",
+      "id_value": 115,
+      "module": "std.encoding.json",
+      "name": "decode",
+      "leaf": "__decode",
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "input", "type": "Str", "has_default": false, "pipeline": true }],
+        "result": "Param(0)"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "CanonicalFormat",
+      "note": "schema-directed decoding that rejects duplicate keys and distinguishes missing from null",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "JsonDecodeWithOptions",
+      "id_value": 116,
+      "module": "std.encoding.json",
+      "name": "decode_with_options",
+      "leaf": "__decode_with_options",
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "input", "type": "Str", "has_default": false, "pipeline": true }, { "name": "ignore_unknown_fields", "type": "Bool", "has_default": true, "pipeline": false }],
+        "result": "Param(0)"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "CanonicalFormat",
+      "note": "unknown fields are ignored only when the caller opts in explicitly",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "OrnaCodecEncode",
+      "id_value": 117,
+      "module": "std.encoding.orna",
+      "name": "encode",
+      "leaf": "__encode",
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "value", "type": "Param(0)", "has_default": false, "pipeline": true }],
+        "result": "Str"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "CanonicalFormat",
+      "note": "canonical Orna text is schema directed and never executes declarations",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "OrnaCodecDecode",
+      "id_value": 118,
+      "module": "std.encoding.orna",
+      "name": "decode",
+      "leaf": "__decode",
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "input", "type": "Str", "has_default": false, "pipeline": true }],
+        "result": "Param(0)"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "CanonicalFormat",
+      "note": "accepts only the data subset for the supplied type and revalidates refinements",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "OvbCodecEncode",
+      "id_value": 119,
+      "module": "std.encoding.ovb",
+      "name": "encode",
+      "leaf": "__encode",
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "value", "type": "Param(0)", "has_default": false, "pipeline": true }],
+        "result": "Blob"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "CanonicalFormat",
+      "note": "OVB-1 uses shortest heads, definite lengths and deterministic map-key order",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "OvbCodecDecode",
+      "id_value": 120,
+      "module": "std.encoding.ovb",
+      "name": "decode",
+      "leaf": "__decode",
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "input", "type": "Blob", "has_default": false, "pipeline": true }],
+        "result": "Param(0)"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "CanonicalFormat",
+      "note": "strict OVB-1 decoding rejects duplicate keys, indefinite items and noncanonical aliases",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "MoneyQuantize",
+      "id_value": 121,
+      "module": "std.money",
+      "name": "quantize",
+      "leaf": "__quantize",
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "amount", "type": "Param(0)", "has_default": false, "pipeline": true }, { "name": "minor_digits", "type": "Int", "has_default": false, "pipeline": false }, { "name": "rounding", "type": "Str", "has_default": false, "pipeline": false }],
+        "result": "Param(0)"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "MeasuredWorse",
+      "note": "exact minor-unit quantisation with an explicit rounding rule; the source form is measured worse",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "MoneyAllocate",
+      "id_value": 122,
+      "module": "std.money",
+      "name": "allocate",
+      "leaf": "__allocate",
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "amount", "type": "Param(0)", "has_default": false, "pipeline": true }, { "name": "weights", "type": "[Int]", "has_default": false, "pipeline": false }, { "name": "minor_digits", "type": "Int", "has_default": false, "pipeline": false }, { "name": "rounding", "type": "Str?", "has_default": true, "pipeline": false }],
+        "result": "[Param(0)]"
+      },
+      "effect": "Pure",
+      "dispatch": { "kind": "Native" },
+      "justification": "MeasuredWorse",
+      "note": "allocates exact minor units by descending fractional remainder with input-index ties",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    },
+    {
+      "id": "MoneyFormat",
+      "id_value": 123,
+      "module": "std.money",
+      "name": "format",
+      "leaf": "__format",
+      "signature": {
+        "type_params": ["T"],
+        "params": [{ "name": "amount", "type": "Param(0)", "has_default": false, "pipeline": true }, { "name": "currency_code", "type": "Str", "has_default": false, "pipeline": false }, { "name": "minor_digits", "type": "Int", "has_default": false, "pipeline": false }, { "name": "rounding", "type": "Str", "has_default": false, "pipeline": false }, { "name": "locale", "type": "Str", "has_default": false, "pipeline": false }],
+        "result": "Str"
+      },
+      "effect": "PinnedData",
+      "dispatch": { "kind": "Native" },
+      "justification": "HostResource",
+      "note": "symbols, grouping and decimal marks come from the captured locale profile",
+      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+    }
+  ],
+  "reexports": [
+    { "module": "std.query", "name": "chunk", "id": "CollectionChunk" },
+    { "module": "std.query", "name": "flatten", "id": "CollectionFlatten" },
+    { "module": "std.query", "name": "filter", "id": "CoreFilter" },
+    { "module": "std.query", "name": "map", "id": "CoreMap" },
+    { "module": "std.query", "name": "flat_map", "id": "CoreFlatMap" },
+    { "module": "std.query", "name": "sort_by", "id": "CoreSortBy" },
+    { "module": "std.query", "name": "rank", "id": "CollectionRank" },
+    { "module": "std.query", "name": "take", "id": "CoreTake" },
+    { "module": "std.query", "name": "drop", "id": "CoreDrop" },
+    { "module": "std.query", "name": "distinct", "id": "CoreDistinct" },
+    { "module": "std.query", "name": "unique", "id": "CollectionUnique" },
+    { "module": "std.query", "name": "union", "id": "CoreUnion" },
+    { "module": "std.query", "name": "count", "id": "CoreCount" },
+    { "module": "std.query", "name": "first", "id": "CoreFirst" },
+    { "module": "std.query", "name": "one", "id": "CoreOne" },
+    { "module": "std.query", "name": "sum", "id": "CoreSum" },
+    { "module": "std.query", "name": "min", "id": "CoreMin" },
+    { "module": "std.query", "name": "max", "id": "CoreMax" },
+    { "module": "std.query", "name": "every", "id": "CoreEvery" },
+    { "module": "std.query", "name": "exists", "id": "CoreExists" },
+    { "module": "std.query", "name": "partition", "id": "CollectionPartition" },
+    { "module": "std.query", "name": "zip", "id": "CollectionZip" },
+    { "module": "std.query", "name": "zip_exact", "id": "CollectionZipExact" },
+    { "module": "std.query", "name": "group_by", "id": "CollectionGroupBy" },
+    { "module": "std.query", "name": "pairs", "id": "CollectionPairs" },
+    { "module": "std.query", "name": "window", "id": "CollectionWindow" },
+    { "module": "std.query", "name": "split_when", "id": "CollectionSplitWhen" },
+    { "module": "std.query", "name": "bucket_by", "id": "CollectionBucketBy" },
+    { "module": "std.query", "name": "asof_join", "id": "CollectionAsofJoin" },
+    { "module": "std.query", "name": "__list_length", "id": "CollectionListLength" },
+    { "module": "std.query", "name": "__list_concat", "id": "CollectionListConcat" },
+    { "module": "std.query", "name": "__numeric_sum", "id": "CollectionNumericSum" },
+    { "module": "std.query", "name": "__stable_sort", "id": "CollectionStableSort" },
+    { "module": "std.query", "name": "__minimum", "id": "CollectionMinimum" },
+    { "module": "std.query", "name": "__maximum", "id": "CollectionMaximum" },
+    { "module": "std.query", "name": "__group_by", "id": "CollectionGroupBy" },
+    { "module": "std.query", "name": "__rank", "id": "CollectionRank" },
+    { "module": "std.query", "name": "__asof_join", "id": "CollectionAsofJoin" },
+    { "module": "std.query", "name": "__bucket_by", "id": "CollectionBucketBy" }
+  ]
+}
