@@ -5202,6 +5202,29 @@ struct ReadyStreamItem {
     recovery_error: Option<EvaluationError>,
 }
 
+/// Callback pipeline state for one provider stream: ready items waiting for
+/// the batch boundary and the single debounced item.
+struct StreamCallbackState {
+    batch: Vec<ReadyStreamItem>,
+    debounced: Option<ReadyStreamItem>,
+}
+
+/// Fixed per-consumption inputs shared by every stream callback helper.
+struct StreamRunContext<'a> {
+    provider: &'a ProviderStream,
+    action: &'a Value,
+    depth: usize,
+}
+
+impl StreamCallbackState {
+    /// Moves a pending debounced item into the batch for the final flush.
+    fn release_debounced(&mut self) {
+        if let Some(item) = self.debounced.take() {
+            self.batch.push(item);
+        }
+    }
+}
+
 fn stream_elapsed_nanoseconds(later: Instant, earlier: Instant) -> Option<BigInt> {
     if later < earlier {
         return None;
@@ -10916,19 +10939,19 @@ impl Context<'_, '_> {
         else {
             return Err(error("ORNA-EVAL-TYPE"));
         };
-        self.items(provider.sources.len())?;
-        let mut cursors = provider.sources.clone();
-        let mut source_names = BTreeSet::new();
-        for cursor in &cursors {
-            if cursor.source.is_empty() || !source_names.insert(cursor.source.clone()) {
-                return Err(error("ORNA-EVAL-VALUE"));
-            }
-        }
+        let mut cursors = self.stream_source_cursors(provider)?;
         let mut ended = BTreeSet::<String>::new();
         let mut last_watermark = None;
         let mut last_throttle_event = None;
-        let mut debounced = None::<ReadyStreamItem>;
-        let mut batch = Vec::<ReadyStreamItem>::new();
+        let mut state = StreamCallbackState {
+            batch: Vec::new(),
+            debounced: None,
+        };
+        let run = StreamRunContext {
+            provider,
+            action,
+            depth,
+        };
 
         loop {
             let active = cursors
@@ -10937,19 +10960,8 @@ impl Context<'_, '_> {
                 .cloned()
                 .collect::<Vec<_>>();
             if active.is_empty() {
-                if let Some(item) = debounced.take() {
-                    batch.push(item);
-                }
-                if !batch.is_empty() {
-                    self.commit_stream_callback(
-                        &batch,
-                        action,
-                        provider.recover.as_deref(),
-                        provider.batch_size,
-                        depth,
-                    )?;
-                    batch.clear();
-                }
+                state.release_debounced();
+                self.flush_stream_batch(&mut state, &run)?;
                 break;
             }
 
@@ -10957,240 +10969,267 @@ impl Context<'_, '_> {
             let page = self.stream_effect(|effects, budget, cancellation| {
                 effects.poll_stream_sources(&active, provider.buffer_capacity, budget, cancellation)
             })?;
-            if page.events.len() > provider.buffer_capacity
-                || last_watermark.is_some_and(|last| page.watermark < last)
-                || (page.events.is_empty()
-                    && page.ended_sources.is_empty()
-                    && last_watermark.is_some_and(|last| page.watermark <= last))
-                || page
-                    .ended_sources
-                    .iter()
-                    .any(|source| !active.iter().any(|cursor| &cursor.source == source))
-            {
-                return Err(error("ORNA-EVAL-VALUE"));
-            }
-
-            // Validate the entire bounded page before executing any callback
-            // from it, so malformed later events cannot follow committed work.
-            let mut observed = cursors
-                .iter()
-                .map(|cursor| {
-                    (
-                        (cursor.source.clone(), cursor.identity),
-                        cursor.after.clone(),
-                    )
-                })
-                .collect::<BTreeMap<_, _>>();
-            let mut blocked = BTreeSet::<(String, [u8; 32])>::new();
-            for event in &page.events {
-                let (source, identity, checkpoint, event_time) = match event {
-                    StreamEvent::Delivery(delivery) => (
-                        &delivery.source,
-                        delivery.identity,
-                        Some(&delivery.checkpoint),
-                        delivery.event_time,
-                    ),
-                    StreamEvent::Failure(failure) => (
-                        &failure.source,
-                        failure.identity,
-                        failure.checkpoint.as_ref(),
-                        failure.event_time,
-                    ),
-                };
-                let key = (source.clone(), identity);
-                let Some(previous) = observed.get_mut(&key) else {
-                    return Err(error("ORNA-EVAL-VALUE"));
-                };
-                if event_time > page.watermark || blocked.contains(&key) {
-                    return Err(error("ORNA-EVAL-VALUE"));
-                }
-                if let Some(checkpoint) = checkpoint {
-                    if previous
-                        .as_ref()
-                        .is_some_and(|previous| checkpoint <= previous)
-                    {
-                        return Err(error("ORNA-EVAL-VALUE"));
-                    }
-                    *previous = Some(checkpoint.clone());
-                }
-                if matches!(event, StreamEvent::Failure(_)) {
-                    blocked.insert(key);
-                }
-            }
+            Self::validate_stream_page(
+                &cursors,
+                &active,
+                &page,
+                provider.buffer_capacity,
+                last_watermark,
+            )?;
             last_watermark = Some(page.watermark);
 
             for event in page.events {
-                let ready = match event {
-                    StreamEvent::Delivery(delivery) => {
-                        let Some(cursor) = cursors.iter_mut().find(|cursor| {
-                            cursor.source == delivery.source && cursor.identity == delivery.identity
-                        }) else {
-                            return Err(error("ORNA-EVAL-VALUE"));
-                        };
-                        cursor.after = Some(delivery.checkpoint.clone());
-                        ReadyStreamItem {
-                            source: delivery.source,
-                            identity: delivery.identity,
-                            checkpoint: delivery.checkpoint,
-                            event_time: delivery.event_time,
-                            value: Value::from_canonical(&delivery.value, self, 0)?,
-                            recovery_error: None,
-                        }
-                    }
-                    StreamEvent::Failure(failure) => {
-                        let cursor = cursors
-                            .iter()
-                            .find(|cursor| {
-                                cursor.source == failure.source
-                                    && cursor.identity == failure.identity
-                            })
-                            .cloned()
-                            .ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
-                        if let Some(previous) = debounced.take() {
-                            batch.push(previous);
-                        }
-                        if !batch.is_empty() {
-                            self.commit_stream_callback(
-                                &batch,
-                                action,
-                                provider.recover.as_deref(),
-                                provider.batch_size,
-                                depth,
-                            )?;
-                            batch.clear();
-                        }
-                        self.retry_provider_delivery(
-                            provider,
-                            &cursor,
-                            failure,
-                            last_watermark
-                                .as_mut()
-                                .expect("a validated page has a watermark"),
-                        )?
-                    }
-                };
-
-                if let (Some(interval), Some(pending)) =
-                    (&provider.debounce_nanoseconds, debounced.as_ref())
-                    && stream_elapsed_nanoseconds(ready.event_time, pending.event_time)
-                        .is_some_and(|elapsed| elapsed >= *interval)
-                {
-                    let expired = debounced.take().expect("pending debounce value exists");
-                    batch.push(expired);
-                    let target = provider.batch_size.unwrap_or(1);
-                    if batch.len() >= target {
-                        self.commit_stream_callback(
-                            &batch,
-                            action,
-                            provider.recover.as_deref(),
-                            provider.batch_size,
-                            depth,
-                        )?;
-                        batch.clear();
-                    }
-                }
-
-                if provider.debounce_nanoseconds.is_some() {
-                    // `latest` may acknowledge a replaced item only after all
-                    // older buffered items from that same source have run.
-                    if let Some(previous) = debounced.take() {
-                        let checkpoints = Self::stream_checkpoints(std::slice::from_ref(&previous));
-                        if batch.iter().any(|item| {
-                            item.source == previous.source && item.identity == previous.identity
-                        }) {
-                            self.commit_stream_callback(
-                                &batch,
-                                action,
-                                provider.recover.as_deref(),
-                                provider.batch_size,
-                                depth,
-                            )?;
-                            batch.clear();
-                        }
-                        self.commit_stream_checkpoints(&checkpoints)?;
-                    }
-                    debounced = Some(ready);
-                } else if let Some(interval) = &provider.throttle_nanoseconds {
-                    // Equal event-time ties retain provider arrival order: the
-                    // first eligible value wins and every drop is checkpointed.
-                    let emit = last_throttle_event.is_none_or(|last| {
-                        stream_elapsed_nanoseconds(ready.event_time, last)
-                            .is_some_and(|elapsed| elapsed >= *interval)
-                    });
-                    if emit {
-                        last_throttle_event = Some(ready.event_time);
-                        batch.push(ready);
-                    } else {
-                        let checkpoints = Self::stream_checkpoints(std::slice::from_ref(&ready));
-                        if batch.iter().any(|item| {
-                            item.source == ready.source && item.identity == ready.identity
-                        }) {
-                            self.commit_stream_callback(
-                                &batch,
-                                action,
-                                provider.recover.as_deref(),
-                                provider.batch_size,
-                                depth,
-                            )?;
-                            batch.clear();
-                        }
-                        self.commit_stream_checkpoints(&checkpoints)?;
-                    }
-                } else {
-                    batch.push(ready);
-                }
-
-                let target = provider.batch_size.unwrap_or(1);
-                if batch.len() >= target {
-                    self.commit_stream_callback(
-                        &batch,
-                        action,
-                        provider.recover.as_deref(),
-                        provider.batch_size,
-                        depth,
-                    )?;
-                    batch.clear();
-                }
+                let ready = self.ready_stream_item(
+                    event,
+                    &mut cursors,
+                    &mut last_watermark,
+                    &mut state,
+                    &run,
+                )?;
+                self.accept_stream_item(ready, &run, &mut state, &mut last_throttle_event)?;
             }
 
-            if let (Some(interval), Some(pending)) =
-                (&provider.debounce_nanoseconds, debounced.as_ref())
-                && stream_elapsed_nanoseconds(page.watermark, pending.event_time)
-                    .is_some_and(|elapsed| elapsed >= *interval)
-            {
-                batch.push(debounced.take().expect("pending debounce value exists"));
-                let target = provider.batch_size.unwrap_or(1);
-                if batch.len() >= target {
-                    self.commit_stream_callback(
-                        &batch,
-                        action,
-                        provider.recover.as_deref(),
-                        provider.batch_size,
-                        depth,
-                    )?;
-                    batch.clear();
-                }
-            }
+            self.expire_debounced(page.watermark, &run, &mut state)?;
 
             ended.extend(page.ended_sources);
             if cursors.iter().all(|cursor| ended.contains(&cursor.source)) {
-                if let Some(item) = debounced.take() {
-                    batch.push(item);
-                }
-                if !batch.is_empty() {
-                    self.commit_stream_callback(
-                        &batch,
-                        action,
-                        provider.recover.as_deref(),
-                        provider.batch_size,
-                        depth,
-                    )?;
-                    batch.clear();
-                }
+                state.release_debounced();
+                self.flush_stream_batch(&mut state, &run)?;
                 break;
             }
         }
         Ok(Value::Unit)
+    }
+
+    /// Validates the provider's source cursors before any page is requested:
+    /// every source needs a non-empty, unique name.
+    fn stream_source_cursors(
+        &self,
+        provider: &ProviderStream,
+    ) -> Result<Vec<StreamSourceCursor>, EvaluationError> {
+        self.items(provider.sources.len())?;
+        let mut source_names = BTreeSet::new();
+        for cursor in &provider.sources {
+            if cursor.source.is_empty() || !source_names.insert(cursor.source.clone()) {
+                return Err(error("ORNA-EVAL-VALUE"));
+            }
+        }
+        Ok(provider.sources.clone())
+    }
+
+    /// Rejects a page whose bounds, watermark or per-source checkpoints are
+    /// inconsistent with the cursors the request was issued from. Validation
+    /// finishes before any callback runs, so malformed later events cannot
+    /// follow committed work.
+    fn validate_stream_page(
+        cursors: &[StreamSourceCursor],
+        active: &[StreamSourceCursor],
+        page: &StreamPage,
+        buffer_capacity: usize,
+        last_watermark: Option<Instant>,
+    ) -> Result<(), EvaluationError> {
+        if page.events.len() > buffer_capacity
+            || last_watermark.is_some_and(|last| page.watermark < last)
+            || (page.events.is_empty()
+                && page.ended_sources.is_empty()
+                && last_watermark.is_some_and(|last| page.watermark <= last))
+            || page
+                .ended_sources
+                .iter()
+                .any(|source| !active.iter().any(|cursor| &cursor.source == source))
+        {
+            return Err(error("ORNA-EVAL-VALUE"));
+        }
+        let mut observed = cursors
+            .iter()
+            .map(|cursor| {
+                (
+                    (cursor.source.clone(), cursor.identity),
+                    cursor.after.clone(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut blocked = BTreeSet::<(String, [u8; 32])>::new();
+        for event in &page.events {
+            let (source, identity, checkpoint, event_time) = match event {
+                StreamEvent::Delivery(delivery) => (
+                    &delivery.source,
+                    delivery.identity,
+                    Some(&delivery.checkpoint),
+                    delivery.event_time,
+                ),
+                StreamEvent::Failure(failure) => (
+                    &failure.source,
+                    failure.identity,
+                    failure.checkpoint.as_ref(),
+                    failure.event_time,
+                ),
+            };
+            let key = (source.clone(), identity);
+            let Some(previous) = observed.get_mut(&key) else {
+                return Err(error("ORNA-EVAL-VALUE"));
+            };
+            if event_time > page.watermark || blocked.contains(&key) {
+                return Err(error("ORNA-EVAL-VALUE"));
+            }
+            if let Some(checkpoint) = checkpoint {
+                if previous
+                    .as_ref()
+                    .is_some_and(|previous| checkpoint <= previous)
+                {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+                *previous = Some(checkpoint.clone());
+            }
+            if matches!(event, StreamEvent::Failure(_)) {
+                blocked.insert(key);
+            }
+        }
+        Ok(())
+    }
+
+    /// Converts one validated page event into the item the callback pipeline
+    /// consumes, applying cursor and retry bookkeeping first.
+    fn ready_stream_item(
+        &mut self,
+        event: StreamEvent,
+        cursors: &mut [StreamSourceCursor],
+        last_watermark: &mut Option<Instant>,
+        state: &mut StreamCallbackState,
+        run: &StreamRunContext<'_>,
+    ) -> Result<ReadyStreamItem, EvaluationError> {
+        match event {
+            StreamEvent::Delivery(delivery) => {
+                let Some(cursor) = cursors.iter_mut().find(|cursor| {
+                    cursor.source == delivery.source && cursor.identity == delivery.identity
+                }) else {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                };
+                cursor.after = Some(delivery.checkpoint.clone());
+                Ok(ReadyStreamItem {
+                    source: delivery.source,
+                    identity: delivery.identity,
+                    checkpoint: delivery.checkpoint,
+                    event_time: delivery.event_time,
+                    value: Value::from_canonical(&delivery.value, self, 0)?,
+                    recovery_error: None,
+                })
+            }
+            StreamEvent::Failure(failure) => {
+                let cursor = cursors
+                    .iter()
+                    .find(|cursor| {
+                        cursor.source == failure.source && cursor.identity == failure.identity
+                    })
+                    .cloned()
+                    .ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+                state.release_debounced();
+                self.flush_stream_batch(state, run)?;
+                self.retry_provider_delivery(
+                    run.provider,
+                    &cursor,
+                    failure,
+                    last_watermark
+                        .as_mut()
+                        .expect("a validated page has a watermark"),
+                )
+            }
+        }
+    }
+
+    /// Applies debounce and throttle policy to one ready item and flushes the
+    /// batch once it reaches the provider's target size.
+    fn accept_stream_item(
+        &mut self,
+        ready: ReadyStreamItem,
+        run: &StreamRunContext<'_>,
+        state: &mut StreamCallbackState,
+        last_throttle_event: &mut Option<Instant>,
+    ) -> Result<(), EvaluationError> {
+        self.expire_debounced(ready.event_time, run, state)?;
+        if run.provider.debounce_nanoseconds.is_some() {
+            // `latest` may acknowledge a replaced item only after all older
+            // buffered items from that same source have run.
+            if let Some(previous) = state.debounced.take() {
+                let checkpoints = Self::stream_checkpoints(std::slice::from_ref(&previous));
+                if state.batch.iter().any(|item| {
+                    item.source == previous.source && item.identity == previous.identity
+                }) {
+                    self.flush_stream_batch(state, run)?;
+                }
+                self.commit_stream_checkpoints(&checkpoints)?;
+            }
+            state.debounced = Some(ready);
+        } else if let Some(interval) = &run.provider.throttle_nanoseconds {
+            // Equal event-time ties retain provider arrival order: the first
+            // eligible value wins and every drop is checkpointed.
+            let emit = last_throttle_event.is_none_or(|last| {
+                stream_elapsed_nanoseconds(ready.event_time, last)
+                    .is_some_and(|elapsed| elapsed >= *interval)
+            });
+            if emit {
+                *last_throttle_event = Some(ready.event_time);
+                state.batch.push(ready);
+            } else {
+                let checkpoints = Self::stream_checkpoints(std::slice::from_ref(&ready));
+                if state
+                    .batch
+                    .iter()
+                    .any(|item| item.source == ready.source && item.identity == ready.identity)
+                {
+                    self.flush_stream_batch(state, run)?;
+                }
+                self.commit_stream_checkpoints(&checkpoints)?;
+            }
+        } else {
+            state.batch.push(ready);
+        }
+        let target = run.provider.batch_size.unwrap_or(1);
+        if state.batch.len() >= target {
+            self.flush_stream_batch(state, run)?;
+        }
+        Ok(())
+    }
+
+    /// Releases one debounced item once `now` is far enough past its event time.
+    fn expire_debounced(
+        &mut self,
+        now: Instant,
+        run: &StreamRunContext<'_>,
+        state: &mut StreamCallbackState,
+    ) -> Result<(), EvaluationError> {
+        if let (Some(interval), Some(pending)) =
+            (&run.provider.debounce_nanoseconds, state.debounced.as_ref())
+            && stream_elapsed_nanoseconds(now, pending.event_time)
+                .is_some_and(|elapsed| elapsed >= *interval)
+        {
+            state.release_debounced();
+            let target = run.provider.batch_size.unwrap_or(1);
+            if state.batch.len() >= target {
+                self.flush_stream_batch(state, run)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Runs the callback for a non-empty batch and resets it.
+    fn flush_stream_batch(
+        &mut self,
+        state: &mut StreamCallbackState,
+        run: &StreamRunContext<'_>,
+    ) -> Result<(), EvaluationError> {
+        if state.batch.is_empty() {
+            return Ok(());
+        }
+        self.commit_stream_callback(
+            &state.batch,
+            run.action,
+            run.provider.recover.as_deref(),
+            run.provider.batch_size,
+            run.depth,
+        )?;
+        state.batch.clear();
+        Ok(())
     }
 
     fn stream(

@@ -163,7 +163,6 @@ name = "orna-evaluator"
 "src/lib.rs::call_blob_operation" = 123
 "src/lib.rs::collection" = 187
 "src/lib.rs::concurrent" = 134
-"src/lib.rs::consume_provider_stream" = 289
 "src/lib.rs::context_named_invocation_adopts_effect_result_owner_context" = 163
 "src/lib.rs::context_named_invocation_preserves_owner_context_after_ovb2_effects" = 147
 "src/lib.rs::extreme" = 139
