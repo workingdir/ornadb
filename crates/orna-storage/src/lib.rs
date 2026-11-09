@@ -9,7 +9,6 @@
 mod compact;
 mod compact_parquet;
 mod maintenance;
-mod placement;
 mod publication_policy;
 mod scan_planner;
 
@@ -34,14 +33,6 @@ pub use maintenance::{
     CompactConsolidationError, CompactConsolidationPlan, ConsolidatedRow,
     ConsolidationVerification, MIN_OVERLAY_BYTES_SHARE_PERCENT,
     MIN_OVERLAY_SEGMENTS_FOR_CONSOLIDATION, plan_compact_consolidation,
-};
-pub use placement::{
-    AUTOMATIC_EDITABLE_MAX_PUBLICATION_BYTES, AUTOMATIC_EDITABLE_MAX_ROWS, MAX_EDITABLE_ROW_BYTES,
-    MAX_STORAGE_REWRITE_BYTES, MAX_STORAGE_REWRITE_ROWS, PhysicalPlacement, PlacementAction,
-    PlacementCandidate, PlacementDecision, PlacementPlan, PlacementReason, StoragePlacementError,
-    StoragePlacementPolicy, StoragePreference, StorageProfile, StorageRewriteError,
-    StorageRewritePlan, StorageRewriteRow, StorageRewriteTarget, StorageRewriteVerification,
-    plan_storage_placement, plan_storage_rewrite,
 };
 pub use publication_policy::{
     COMPACT_FILE_BOUND_BYTES, CompactPublicationPolicy, CompactPublicationPolicyError,
