@@ -5008,7 +5008,7 @@ mod tests {
         assert_eq!(checked.len(), checkout.preconditions.len());
         assert_eq!(admitted.id, checkout.id);
 
-        let precondition_failure = orna_sys::FailureCode::new("sys.abi.precondition_failed")
+        let precondition_failure = orna_sys::FailureCode::parse("sys.abi.precondition_failed")
             .expect("shared precondition failure code is valid");
         assert!(
             state
@@ -5032,7 +5032,7 @@ mod tests {
         let rejected = state
             .dispatch_system_operation(
                 checkout.id.as_str(),
-                |_| Err(precondition_failure.clone()),
+                |_| Err(precondition_failure),
                 |_| {
                     native_handler_ran = true;
                     Ok(())
@@ -5041,20 +5041,20 @@ mod tests {
             .expect("a declared precondition failure is returned at the boundary");
         assert_eq!(
             rejected,
-            orna_sys::SystemDispatchResult::Failed(precondition_failure.clone())
+            orna_sys::SystemDispatchResult::Failed(precondition_failure)
         );
         assert!(
             !native_handler_ran,
             "failed checks must stop native dispatch"
         );
 
-        let undeclared_failure = orna_sys::FailureCode::new("sys.storage.corrupt")
+        let undeclared_failure = orna_sys::FailureCode::parse("sys.storage.corrupt")
             .expect("failure code syntax is valid");
         assert!(matches!(
             state.dispatch_system_operation(
                 checkout.id.as_str(),
                 |_| Ok(()),
-                |_| Err::<(), _>(undeclared_failure.clone()),
+                |_| Err::<(), _>(undeclared_failure),
             ),
             Err(orna_sys::ProviderDiagnostic::UndeclaredFailure { .. })
         ));
@@ -5064,7 +5064,7 @@ mod tests {
         ));
         assert!(matches!(
             state.check_system_operation_preconditions(checkout.id.as_str(), |_| {
-                Err(precondition_failure.clone())
+                Err(precondition_failure)
             }),
             Err(orna_sys::ProviderDiagnostic::PreconditionFailed { .. })
         ));

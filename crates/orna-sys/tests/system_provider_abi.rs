@@ -1,3 +1,6 @@
+// `FailureCode` is `Copy`; the retained fixture clones keep the historical shape.
+#![allow(clippy::clone_on_copy)]
+
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -395,24 +398,25 @@ fn generated_provider_abi_carries_typed_operation_contracts_and_roles() {
     );
     assert!(!checkout.preconditions.is_empty());
     assert!(
-        checkout
-            .declares_failure(&orna_sys::FailureCode::new("sys.abi.precondition_failed").unwrap())
+        checkout.declares_failure(
+            &orna_sys::FailureCode::parse("sys.abi.precondition_failed").unwrap()
+        )
     );
     assert!(
         abi.validate_failure(
             checkout.id.as_str(),
-            &orna_sys::FailureCode::new("sys.abi.precondition_failed").unwrap(),
+            &orna_sys::FailureCode::parse("sys.abi.precondition_failed").unwrap(),
         )
         .is_ok()
     );
     assert_eq!(
         abi.validate_failure(
             checkout.id.as_str(),
-            &orna_sys::FailureCode::new("sys.storage.corrupt").unwrap(),
+            &orna_sys::FailureCode::parse("sys.storage.corrupt").unwrap(),
         ),
         Err(ProviderDiagnostic::UndeclaredFailure {
             operation: checkout.id.clone(),
-            code: orna_sys::FailureCode::new("sys.storage.corrupt").unwrap(),
+            code: orna_sys::FailureCode::parse("sys.storage.corrupt").unwrap(),
         })
     );
 
@@ -441,7 +445,7 @@ fn generated_provider_abi_carries_typed_operation_contracts_and_roles() {
     assert!(
         abi.validate_failure(
             "sys.invoke(Value)",
-            &orna_sys::FailureCode::new("sys.invoke.argument_missing").unwrap(),
+            &orna_sys::FailureCode::parse("sys.invoke.argument_missing").unwrap(),
         )
         .is_ok()
     );
@@ -601,7 +605,7 @@ fn round_tripped_registry_matches_direct_undeclared_failure_diagnostics() {
     let round_tripped = round_trip_generated_provider_artifacts();
     let registry = ProviderRoleRegistry::from_baked_abi(&round_tripped)
         .expect("round-tripped typed registry resolves generated provider offers");
-    let undeclared = FailureCode::new("sys.conformance.dispatch_error").unwrap();
+    let undeclared = FailureCode::parse("sys.context.repl_unavailable").unwrap();
     let mut generated_bindings = 0;
     let mut provider_bound_cases = 0;
 
@@ -1208,7 +1212,7 @@ fn dispatch_table_enforces_registered_preconditions_and_failure_vocabularies() {
         orna_sys::SystemDispatchResult::Returned("native")
     );
 
-    let precondition_failure = FailureCode::new("sys.abi.precondition_failed").unwrap();
+    let precondition_failure = FailureCode::parse("sys.abi.precondition_failed").unwrap();
     assert_eq!(
         table.check_preconditions(operation, |_| Err(precondition_failure.clone())),
         Err(ProviderDiagnostic::PreconditionFailed {
@@ -1232,7 +1236,7 @@ fn dispatch_table_enforces_registered_preconditions_and_failure_vocabularies() {
     );
     assert!(!handler_called, "a failed precondition prevents dispatch");
 
-    let undeclared = FailureCode::new("sys.storage.corrupt").unwrap();
+    let undeclared = FailureCode::parse("sys.storage.corrupt").unwrap();
     assert_eq!(
         table.validate_failure(operation, &undeclared),
         Err(ProviderDiagnostic::UndeclaredFailure {
@@ -1338,7 +1342,7 @@ fn every_dispatch_operation_declares_its_portable_failure_vocabulary() {
         for code in contract
             .failures
             .iter()
-            .map(FailureCode::as_str)
+            .map(|code| code.as_str())
             .filter(|code| !SHARED_PROVIDER_FAILURES.contains(code))
         {
             assert!(
@@ -1356,7 +1360,7 @@ fn every_dispatch_operation_declares_its_portable_failure_vocabulary() {
             .chain(SHARED_PROVIDER_FAILURES)
         {
             assert!(
-                contract.declares_failure(&FailureCode::new(code).unwrap()),
+                contract.declares_failure(&FailureCode::parse(code).unwrap()),
                 "`{operation_id}` does not declare `{code}`"
             );
         }
@@ -1380,7 +1384,7 @@ fn every_dispatch_operation_declares_its_portable_failure_vocabulary() {
             .unwrap_or_else(|| panic!("missing typed operation `{operation_id}`"));
         for code in *codes {
             assert!(
-                contract.declares_failure(&FailureCode::new(*code).unwrap()),
+                contract.declares_failure(&FailureCode::parse(code).unwrap()),
                 "`{operation_id}` must declare `{code}`"
             );
         }
@@ -1395,7 +1399,7 @@ fn every_dispatch_operation_declares_its_portable_failure_vocabulary() {
             .unwrap_or_else(|| panic!("host operation `{}` has no portable contract", host.name));
         for code in &host.failures {
             assert!(
-                contract.declares_failure(&FailureCode::new(code.as_str()).unwrap()),
+                contract.declares_failure(&FailureCode::parse(code.as_str()).unwrap()),
                 "host operation `{}` declares `{code}` outside its portable contract",
                 host.name
             );
@@ -1414,7 +1418,7 @@ fn provider_diagnostic_codes_stay_outside_the_public_failure_catalog() {
         .collect::<BTreeSet<_>>();
     let role = SemanticRoleId::new("langitem.fixture.role").unwrap();
     let operation = orna_sys::OperationId::new("sys.fixture.operation").unwrap();
-    let failure = FailureCode::new("sys.abi.precondition_failed").unwrap();
+    let failure = FailureCode::parse("sys.abi.precondition_failed").unwrap();
     let diagnostics = [
         ProviderDiagnostic::UnknownRole(role.clone()),
         ProviderDiagnostic::UnknownOperation(operation.clone()),
@@ -1452,7 +1456,7 @@ fn provider_diagnostic_codes_stay_outside_the_public_failure_catalog() {
         },
         ProviderDiagnostic::UndeclaredFailure {
             operation,
-            code: FailureCode::new("sys.storage.corrupt").unwrap(),
+            code: FailureCode::parse("sys.storage.corrupt").unwrap(),
         },
         ProviderDiagnostic::ProviderNotExecutable(
             SemanticRoleId::new("langitem.fixture.provider").unwrap(),
@@ -1509,14 +1513,14 @@ fn dispatch_enforces_the_full_failure_set_for_every_operation() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|code| FailureCode::new(code.as_str().unwrap()).unwrap())
+        .map(|code| FailureCode::parse(code.as_str().unwrap()).unwrap())
         .collect::<BTreeSet<_>>();
     candidate_failures.extend(
         SHARED_PROVIDER_FAILURES
             .into_iter()
-            .map(|code| FailureCode::new(code).unwrap()),
+            .map(|code| FailureCode::parse(code).unwrap()),
     );
-    let arbitrary = FailureCode::new("vendor.unregistered.failure").unwrap();
+    let arbitrary = FailureCode::parse("sys.context.repl_unavailable").unwrap();
     candidate_failures.insert(arbitrary);
 
     let table = system_dispatch_table();
@@ -1585,14 +1589,14 @@ fn dispatch_checks_each_precondition_and_stops_at_the_failing_position() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|code| FailureCode::new(code.as_str().unwrap()).unwrap())
+        .map(|code| FailureCode::parse(code.as_str().unwrap()).unwrap())
         .collect::<BTreeSet<_>>();
     candidate_failures.extend(
         SHARED_PROVIDER_FAILURES
             .into_iter()
-            .map(|code| FailureCode::new(code).unwrap()),
+            .map(|code| FailureCode::parse(code).unwrap()),
     );
-    candidate_failures.insert(FailureCode::new("vendor.unregistered.failure").unwrap());
+    candidate_failures.insert(FailureCode::parse("sys.context.repl_unavailable").unwrap());
 
     let table = system_dispatch_table();
     for contract in table.operations() {
@@ -4143,7 +4147,7 @@ fn dispatch_to_provider_routes_typed_value_and_declared_failure() {
     assert_eq!(checked_preconditions, contract.preconditions.len());
     assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
 
-    let failure_code = FailureCode::new("sys.invoke.argument_missing").unwrap();
+    let failure_code = FailureCode::parse("sys.invoke.argument_missing").unwrap();
     assert!(contract.declares_failure(&failure_code));
     let failing_provider = InvokeValueProvider {
         offer,
@@ -4234,7 +4238,7 @@ fn provider_error_contracts_preserve_variadic_argument_map_edges() {
             .collect::<BTreeSet<_>>();
         for code in &raw_failure_codes {
             assert!(
-                contract.declares_failure(&FailureCode::new(*code).unwrap()),
+                contract.declares_failure(&FailureCode::parse(code).unwrap()),
                 "typed contract retains schema failure `{code}` for {operation_name}"
             );
         }
@@ -4247,7 +4251,7 @@ fn provider_error_contracts_preserve_variadic_argument_map_edges() {
             .resolve(role.as_str())
             .expect("variadic error role has a selected provider")
             .clone();
-        let mut declared_failures = vec![FailureCode::new("sys.abi.provider_failed").unwrap()];
+        let mut declared_failures = vec![FailureCode::parse("sys.abi.provider_failed").unwrap()];
         assert!(contract.declares_failure(&declared_failures[0]));
         if let Some(operation_failure) = contract
             .failures
@@ -4272,7 +4276,7 @@ fn provider_error_contracts_preserve_variadic_argument_map_edges() {
                 }
             })
             .collect::<Vec<_>>();
-        let undeclared_failure = FailureCode::new("sys.conformance.variadic_map_error").unwrap();
+        let undeclared_failure = FailureCode::parse("sys.context.repl_unavailable").unwrap();
         assert!(!contract.declares_failure(&undeclared_failure));
 
         for cardinality in EDGE_CARDINALITIES {
@@ -6453,7 +6457,7 @@ fn provider_closure_callbacks_match_precondition_order_and_short_circuit_edges()
     assert_eq!(successful_registry_trace, PRECONDITION_DECLARATIONS);
     assert_eq!(successful_registry_provider.calls.load(Ordering::SeqCst), 1);
 
-    let declared_failure = FailureCode::new("sys.invoke.argument_missing").unwrap();
+    let declared_failure = FailureCode::parse("sys.invoke.argument_missing").unwrap();
     assert!(callback_contract.declares_failure(&declared_failure));
     let mut declared_short_circuit_routes = 0;
     let mut callback_visits = PRECONDITION_DECLARATIONS.len() * 2;
@@ -6515,7 +6519,7 @@ fn provider_closure_callbacks_match_precondition_order_and_short_circuit_edges()
         declared_short_circuit_routes += 1;
     }
 
-    let undeclared_failure = FailureCode::new("sys.callback.rejected").unwrap();
+    let undeclared_failure = FailureCode::parse("sys.context.repl_unavailable").unwrap();
     let expected_undeclared = ProviderDiagnostic::UndeclaredFailure {
         operation: callback_contract.id.clone(),
         code: undeclared_failure.clone(),
@@ -6885,9 +6889,8 @@ fn generated_bindings_preserve_registry_precondition_failure_edges() {
         .collect::<Vec<_>>();
     assert_eq!(idl_operation_ids, typed_operation_ids);
 
-    let declared_precondition = FailureCode::new("sys.abi.precondition_failed").unwrap();
-    let undeclared_precondition =
-        FailureCode::new("sys.conformance.registry_precondition").unwrap();
+    let declared_precondition = FailureCode::parse("sys.abi.precondition_failed").unwrap();
+    let undeclared_precondition = FailureCode::parse("sys.context.repl_unavailable").unwrap();
     let fallback_role = table
         .roles()
         .next()
@@ -7034,10 +7037,10 @@ fn generated_bindings_preserve_registry_provider_failure_edges() {
         .map(|contract| contract.id.as_str())
         .collect::<Vec<_>>();
     assert_eq!(idl_operation_ids, typed_operation_ids);
-    let undeclared = FailureCode::new("sys.conformance.registry_provider_failure").unwrap();
+    let undeclared = FailureCode::parse("sys.context.repl_unavailable").unwrap();
     let response_codes = SHARED_FAILURES
         .into_iter()
-        .map(|code| FailureCode::new(code).unwrap())
+        .map(|code| FailureCode::parse(code).unwrap())
         .chain([undeclared])
         .collect::<Vec<_>>();
     let mut generated_bindings = 0;

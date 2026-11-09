@@ -9,8 +9,9 @@
 //! admitted work.
 
 pub use orna_sys_id::{
-    HostOperation, HostProvider, Origin, SysEffect, SysFailureCode, SysFunction,
-    SysFunctionBinding, SysFunctionHost, dispatch as dispatch_sys_function,
+    HostOperation, HostProvider, Origin, SysEffect, SysEnum, SysFailureCode, SysFunction,
+    SysFunctionBinding, SysFunctionHost, SysGroupedHandle, SysRelation, SysType,
+    dispatch as dispatch_sys_function,
 };
 pub use orna_sys_model::abi_version::AbiVersion;
 pub use orna_sys_model::host_registry_model::{HostBindingDeclaration, HostProviderRole};

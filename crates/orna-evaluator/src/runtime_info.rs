@@ -8,7 +8,8 @@
 use orna_foundation::{CanonicalSnapshot, CanonicalValue, GitHash, snapshot_reference};
 use orna_sys::{
     BUILD_ID, IMPLEMENTATION_NAME, IMPLEMENTATION_VERSION, LANGUAGE_VERSION,
-    PRESENTATION_PROTOCOL_VERSION, SUPPORTED_PROFILES, SYS_VERSION, StdSnapshotPin, SysHostContext,
+    PRESENTATION_PROTOCOL_VERSION, SUPPORTED_PROFILES, SYS_VERSION, StdSnapshotPin, SysEnum,
+    SysFailureCode, SysHostContext,
 };
 use orna_value::{OVB2_VERSION, Raw};
 
@@ -86,7 +87,7 @@ pub(crate) fn runtime_info(context: &SysHostContext) -> Result<Value, Evaluation
         (
             "mode",
             Value::Enum {
-                type_id: Raw::Text("sys.RuntimeMode".to_owned()),
+                type_id: Raw::Text(SysEnum::RuntimeMode.name().to_owned()),
                 variant_id: Raw::Text(context.mode.label().to_owned()),
                 payload: None,
             },
@@ -114,16 +115,20 @@ pub(crate) fn runtime_info(context: &SysHostContext) -> Result<Value, Evaluation
 ///
 /// The commit is keyed under the attached database. A pin whose commit id
 /// cannot be read back is reported as `sys.snapshot.incomplete`, never guessed.
+fn sys_failure(code: SysFailureCode) -> EvaluationError {
+    error(code.as_str())
+}
+
 fn std_snapshot_field(context: &SysHostContext) -> Result<Value, EvaluationError> {
     let oid = match &context.std_snapshot {
         StdSnapshotPin::Unpinned => return Ok(Value::Option(None)),
-        StdSnapshotPin::Unreadable => return Err(error("sys.snapshot.incomplete")),
+        StdSnapshotPin::Unreadable => return Err(sys_failure(SysFailureCode::SnapshotIncomplete)),
         StdSnapshotPin::Commit(oid) => oid,
     };
     let algorithm = match oid.len() {
         20 => GitHash::Sha1,
         32 => GitHash::Sha256,
-        _ => return Err(error("sys.snapshot.incomplete")),
+        _ => return Err(sys_failure(SysFailureCode::SnapshotIncomplete)),
     };
     let snapshot = CanonicalSnapshot::Commit {
         database: context.database_id,
@@ -131,11 +136,12 @@ fn std_snapshot_field(context: &SysHostContext) -> Result<Value, EvaluationError
         oid: oid.clone(),
     };
     let encoded = snapshot_reference(context.database_id, snapshot)
-        .map_err(|_| error("sys.snapshot.incomplete"))?
+        .map_err(|_| sys_failure(SysFailureCode::SnapshotIncomplete))?
         .into_row_ref()
         .encode()
-        .map_err(|_| error("sys.snapshot.incomplete"))?;
-    let value = CanonicalValue::decode(&encoded).map_err(|_| error("sys.snapshot.incomplete"))?;
+        .map_err(|_| sys_failure(SysFailureCode::SnapshotIncomplete))?;
+    let value = CanonicalValue::decode(&encoded)
+        .map_err(|_| sys_failure(SysFailureCode::SnapshotIncomplete))?;
     Ok(Value::Option(Some(Box::new(Value::Reference(value)))))
 }
 
@@ -149,7 +155,7 @@ fn unicode_version() -> String {
 mod tests {
     use super::runtime_info;
     use crate::{EvaluationError, Value};
-    use orna_sys::{RuntimeMode, StdSnapshotPin, SysHostContext};
+    use orna_sys::{RuntimeMode, StdSnapshotPin, SysHostContext, SysType};
     use std::path::PathBuf;
 
     fn context_pinned(std_snapshot: StdSnapshotPin) -> SysHostContext {
@@ -169,11 +175,11 @@ mod tests {
     /// Extracts the `std_snapshot` field from the record `sys.rt.info` builds.
     fn std_snapshot_field(context: &SysHostContext) -> Result<Value, EvaluationError> {
         let Value::Record(mut fields) = runtime_info(context)? else {
-            panic!("sys.RuntimeInfo must be a record");
+            panic!("{} must be a record", SysType::RuntimeInfo.name());
         };
         Ok(fields
             .remove("std_snapshot")
-            .expect("sys.RuntimeInfo carries std_snapshot"))
+            .unwrap_or_else(|| panic!("{} carries std_snapshot", SysType::RuntimeInfo.name())))
     }
 
     #[test]

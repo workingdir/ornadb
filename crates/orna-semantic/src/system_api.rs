@@ -295,9 +295,8 @@ impl SystemApi {
             let failures_published = contract
                 .failures
                 .iter()
-                .map(orna_sys::FailureCode::as_str)
-                .filter(|code| !code.starts_with("sys.abi."))
-                .all(|code| self.failure_codes.contains(code));
+                .filter(|code| !code.is_provider_abi())
+                .all(|code| self.failure_codes.contains(code.as_str()));
             if contract.signature.source != descriptor.signature
                 || contract.effects.iter().count() != 1
                 || expected_effect != descriptor.effect
