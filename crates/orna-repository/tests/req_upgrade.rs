@@ -99,6 +99,8 @@ async fn req_upgrade_003_writes_rows_only_to_the_canonical_format3_store() {
         .expect("read latest checkpoint")
         .expect("capture leaves a checkpoint");
     let freeze = state
+        .publication_writer(&repository)
+        .expect("publication lease")
         .freeze([0x81; 16], &checkpoint)
         .await
         .expect("freeze captured row prefix");

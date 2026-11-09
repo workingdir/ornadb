@@ -9188,6 +9188,17 @@ impl Repository {
         Ok(CoordinationLock { file })
     }
 
+    /// Acquires the worktree publication lock as a typed lease (PUB-3 step 2
+    /// and step 7).
+    ///
+    /// Publication-state writes below the CLI require this lease, so callers
+    /// cannot freeze or complete a publication without joining the worktree's
+    /// publication boundary. A held lock is reported as `RepositoryBusy` once
+    /// the bounded wait elapses; it never blocks indefinitely.
+    pub fn acquire_publication_lease(&self) -> Result<PublicationLease, RepositoryError> {
+        self.acquire_coordination_lock_for_publication()
+    }
+
     /// Acquires the coordination lock for publication, waiting at most
     /// `COORDINATION_LOCK_WAIT`. A publisher that loses a race queues briefly
     /// behind the winner and then fails its compare-and-set (ORNA-PUB-009).
@@ -9195,11 +9206,12 @@ impl Repository {
     /// `RepositoryBusy` once the bound elapses; it never blocks indefinitely.
     fn acquire_coordination_lock_for_publication(
         &self,
-    ) -> Result<CoordinationLock, RepositoryError> {
+    ) -> Result<PublicationLease, RepositoryError> {
         let file = self.open_coordination_lock_file()?;
         let deadline = std::time::Instant::now() + self.coordination_lock_wait;
-        Ok(CoordinationLock {
+        Ok(PublicationLease {
             file: lock_before_deadline(file, deadline, |file| file.try_lock_exclusive())?,
+            runtime_root: self.runtime.root().to_path_buf(),
         })
     }
 
@@ -9704,6 +9716,32 @@ struct CoordinationLock {
 }
 
 impl Drop for CoordinationLock {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
+
+/// The held worktree publication lock (PUB-3 step 2 and step 7).
+///
+/// The lock is an advisory `flock` on the worktree's coordination file. The
+/// kernel owns it: a killed publisher cannot leave it held, so an abandoned
+/// publisher cannot keep writing publication state (ORNA-TURSO-006). The lease
+/// is the coordination primitive cooperating Orna worktree mutators and
+/// publishers share (ORNA-TURSO-005), and it names the runtime root it covers
+/// so a lease taken in one worktree cannot authorise writes in another.
+pub struct PublicationLease {
+    file: fs::File,
+    runtime_root: PathBuf,
+}
+
+impl PublicationLease {
+    /// The runtime root whose publication lock this lease holds.
+    pub fn runtime_root(&self) -> &Path {
+        &self.runtime_root
+    }
+}
+
+impl Drop for PublicationLease {
     fn drop(&mut self) {
         let _ = self.file.unlock();
     }
@@ -12096,12 +12134,8 @@ mod tests {
     #[test]
     fn runtime_owner_lock_excludes_a_second_owner_until_drop() {
         let root = tempfile::TempDir::new().unwrap();
-        git(root.path(), &["init", "-b", "main"]);
-        crate::test_support::configure_fixture_git_identity(root.path());
-        git(root.path(), &["config", "commit.gpgsign", "false"]);
-        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
-        git(root.path(), &["add", "main.orna"]);
-        git(root.path(), &["commit", "-m", "initial"]);
+        crate::test_support::initialize_fixture_repository(root.path());
+        crate::test_support::commit_initial_module(root.path());
 
         let repository = Repository::discover(root.path()).unwrap();
         let first = repository.acquire_runtime_owner_lock([1; 16]).unwrap();
@@ -12130,12 +12164,8 @@ mod tests {
         }
 
         let root = tempfile::TempDir::new().unwrap();
-        git(root.path(), &["init", "-b", "main"]);
-        crate::test_support::configure_fixture_git_identity(root.path());
-        git(root.path(), &["config", "commit.gpgsign", "false"]);
-        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
-        git(root.path(), &["add", "main.orna"]);
-        git(root.path(), &["commit", "-m", "initial"]);
+        crate::test_support::initialize_fixture_repository(root.path());
+        crate::test_support::commit_initial_module(root.path());
 
         let binary = std::env::current_exe().unwrap();
         for owner in [1_u8, 2, 3] {
@@ -13522,12 +13552,8 @@ mod tests {
     #[test]
     fn checkout_preflight_rejects_same_commit_branch_attachment_drift() {
         let root = tempfile::TempDir::new().unwrap();
-        git(root.path(), &["init", "-b", "main"]);
-        crate::test_support::configure_fixture_git_identity(root.path());
-        git(root.path(), &["config", "commit.gpgsign", "false"]);
-        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
-        git(root.path(), &["add", "main.orna"]);
-        git(root.path(), &["commit", "-m", "initial"]);
+        crate::test_support::initialize_fixture_repository(root.path());
+        crate::test_support::commit_initial_module(root.path());
         git(root.path(), &["branch", "target"]);
         git(root.path(), &["branch", "interleaved"]);
 
@@ -13634,12 +13660,8 @@ mod tests {
     #[test]
     fn journaled_materialization_replaces_and_deletes_without_quarantine_leaks() {
         let root = tempfile::TempDir::new().unwrap();
-        git(root.path(), &["init", "-b", "main"]);
-        crate::test_support::configure_fixture_git_identity(root.path());
-        git(root.path(), &["config", "commit.gpgsign", "false"]);
-        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
-        git(root.path(), &["add", "main.orna"]);
-        git(root.path(), &["commit", "-m", "initial"]);
+        crate::test_support::initialize_fixture_repository(root.path());
+        crate::test_support::commit_initial_module(root.path());
 
         let repository = Repository::discover(root.path()).unwrap();
         let path = ManagedPath::new("generated/row.orna").unwrap();
@@ -13719,12 +13741,8 @@ mod tests {
     #[test]
     fn journaled_materialization_preserves_quarantine_on_install_conflict_and_deletion_cleanup() {
         let root = tempfile::TempDir::new().unwrap();
-        git(root.path(), &["init", "-b", "main"]);
-        crate::test_support::configure_fixture_git_identity(root.path());
-        git(root.path(), &["config", "commit.gpgsign", "false"]);
-        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
-        git(root.path(), &["add", "main.orna"]);
-        git(root.path(), &["commit", "-m", "initial"]);
+        crate::test_support::initialize_fixture_repository(root.path());
+        crate::test_support::commit_initial_module(root.path());
 
         let repository = Repository::discover(root.path()).unwrap();
         let conflict_path = ManagedPath::new("generated/conflict.orna").unwrap();
@@ -13820,12 +13838,8 @@ mod tests {
     /// crafted journal state, so a refusal can only come from the guard it names.
     fn managed_guard_fixture() -> (tempfile::TempDir, Repository) {
         let root = tempfile::TempDir::new().unwrap();
-        git(root.path(), &["init", "-b", "main"]);
-        crate::test_support::configure_fixture_git_identity(root.path());
-        git(root.path(), &["config", "commit.gpgsign", "false"]);
-        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
-        git(root.path(), &["add", "main.orna"]);
-        git(root.path(), &["commit", "-m", "initial"]);
+        crate::test_support::initialize_fixture_repository(root.path());
+        crate::test_support::commit_initial_module(root.path());
         let repository = Repository::discover(root.path()).unwrap();
         (root, repository)
     }
@@ -14950,12 +14964,8 @@ mod tests {
     #[test]
     fn final_quarantine_replacement_is_preserved_and_reports_conflict() {
         let root = tempfile::TempDir::new().unwrap();
-        git(root.path(), &["init", "-b", "main"]);
-        crate::test_support::configure_fixture_git_identity(root.path());
-        git(root.path(), &["config", "commit.gpgsign", "false"]);
-        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
-        git(root.path(), &["add", "main.orna"]);
-        git(root.path(), &["commit", "-m", "initial"]);
+        crate::test_support::initialize_fixture_repository(root.path());
+        crate::test_support::commit_initial_module(root.path());
 
         let repository = Repository::discover(root.path()).unwrap();
         let parent = root.path().join("generated");
@@ -14995,12 +15005,8 @@ mod tests {
     #[test]
     fn journaled_materialization_recovers_a_persisted_quarantine_phase() {
         let root = tempfile::TempDir::new().unwrap();
-        git(root.path(), &["init", "-b", "main"]);
-        crate::test_support::configure_fixture_git_identity(root.path());
-        git(root.path(), &["config", "commit.gpgsign", "false"]);
-        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
-        git(root.path(), &["add", "main.orna"]);
-        git(root.path(), &["commit", "-m", "initial"]);
+        crate::test_support::initialize_fixture_repository(root.path());
+        crate::test_support::commit_initial_module(root.path());
 
         let repository = Repository::discover(root.path()).unwrap();
         let path = ManagedPath::new("generated/row.orna").unwrap();
@@ -15062,12 +15068,8 @@ mod tests {
     #[test]
     fn replacement_preserves_editor_race_after_final_check() {
         let root = tempfile::TempDir::new().unwrap();
-        git(root.path(), &["init", "-b", "main"]);
-        crate::test_support::configure_fixture_git_identity(root.path());
-        git(root.path(), &["config", "commit.gpgsign", "false"]);
-        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
-        git(root.path(), &["add", "main.orna"]);
-        git(root.path(), &["commit", "-m", "initial"]);
+        crate::test_support::initialize_fixture_repository(root.path());
+        crate::test_support::commit_initial_module(root.path());
 
         let repository = Repository::discover(root.path()).unwrap();
         let path = super::ManagedPath::new("generated/row.orna").unwrap();
@@ -15111,12 +15113,8 @@ mod tests {
     #[test]
     fn quarantine_restore_preserves_newer_editor_race_after_absence_check() {
         let root = tempfile::TempDir::new().unwrap();
-        git(root.path(), &["init", "-b", "main"]);
-        crate::test_support::configure_fixture_git_identity(root.path());
-        git(root.path(), &["config", "commit.gpgsign", "false"]);
-        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
-        git(root.path(), &["add", "main.orna"]);
-        git(root.path(), &["commit", "-m", "initial"]);
+        crate::test_support::initialize_fixture_repository(root.path());
+        crate::test_support::commit_initial_module(root.path());
 
         let repository = Repository::discover(root.path()).unwrap();
         let parent = root.path().join("generated");
@@ -15144,12 +15142,8 @@ mod tests {
     #[test]
     fn quarantine_replacement_race_preserves_both_files() {
         let root = tempfile::TempDir::new().unwrap();
-        git(root.path(), &["init", "-b", "main"]);
-        crate::test_support::configure_fixture_git_identity(root.path());
-        git(root.path(), &["config", "commit.gpgsign", "false"]);
-        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
-        git(root.path(), &["add", "main.orna"]);
-        git(root.path(), &["commit", "-m", "initial"]);
+        crate::test_support::initialize_fixture_repository(root.path());
+        crate::test_support::commit_initial_module(root.path());
 
         let repository = Repository::discover(root.path()).unwrap();
         let path = ManagedPath::new("generated/row.orna").unwrap();
@@ -15184,12 +15178,8 @@ mod tests {
     #[test]
     fn quarantine_deletion_race_preserves_both_files() {
         let root = tempfile::TempDir::new().unwrap();
-        git(root.path(), &["init", "-b", "main"]);
-        crate::test_support::configure_fixture_git_identity(root.path());
-        git(root.path(), &["config", "commit.gpgsign", "false"]);
-        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
-        git(root.path(), &["add", "main.orna"]);
-        git(root.path(), &["commit", "-m", "initial"]);
+        crate::test_support::initialize_fixture_repository(root.path());
+        crate::test_support::commit_initial_module(root.path());
 
         let repository = Repository::discover(root.path()).unwrap();
         let path = ManagedPath::new("generated/row.orna").unwrap();
@@ -15223,12 +15213,8 @@ mod tests {
     #[test]
     fn fresh_materialization_invokes_before_install_once_at_absence_boundary() {
         let root = tempfile::TempDir::new().unwrap();
-        git(root.path(), &["init", "-b", "main"]);
-        crate::test_support::configure_fixture_git_identity(root.path());
-        git(root.path(), &["config", "commit.gpgsign", "false"]);
-        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
-        git(root.path(), &["add", "main.orna"]);
-        git(root.path(), &["commit", "-m", "initial"]);
+        crate::test_support::initialize_fixture_repository(root.path());
+        crate::test_support::commit_initial_module(root.path());
 
         let repository = Repository::discover(root.path()).unwrap();
         let path = ManagedPath::new("generated/row.orna").unwrap();
@@ -15256,12 +15242,8 @@ mod tests {
     #[test]
     fn deletion_revalidates_editor_race_and_retries_idempotently() {
         let root = tempfile::TempDir::new().unwrap();
-        git(root.path(), &["init", "-b", "main"]);
-        crate::test_support::configure_fixture_git_identity(root.path());
-        git(root.path(), &["config", "commit.gpgsign", "false"]);
-        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
-        git(root.path(), &["add", "main.orna"]);
-        git(root.path(), &["commit", "-m", "initial"]);
+        crate::test_support::initialize_fixture_repository(root.path());
+        crate::test_support::commit_initial_module(root.path());
 
         let repository = Repository::discover(root.path()).unwrap();
         let path = super::ManagedPath::new("generated/row.orna").unwrap();
@@ -15300,12 +15282,8 @@ mod tests {
     #[test]
     fn reviewed_candidate_publication_recovers_and_clears_its_journal() {
         let root = tempfile::TempDir::new().unwrap();
-        git(root.path(), &["init", "-b", "main"]);
-        crate::test_support::configure_fixture_git_identity(root.path());
-        git(root.path(), &["config", "commit.gpgsign", "false"]);
-        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
-        git(root.path(), &["add", "main.orna"]);
-        git(root.path(), &["commit", "-m", "initial"]);
+        crate::test_support::initialize_fixture_repository(root.path());
+        crate::test_support::commit_initial_module(root.path());
 
         let staged = b"module main;\n// reviewed\n";
         fs::write(root.path().join("main.orna"), staged).unwrap();
@@ -15401,12 +15379,8 @@ mod tests {
     #[test]
     fn reviewed_candidate_detects_same_size_same_mtime_edit_before_ref_advance() {
         let root = tempfile::TempDir::new().unwrap();
-        git(root.path(), &["init", "-b", "main"]);
-        crate::test_support::configure_fixture_git_identity(root.path());
-        git(root.path(), &["config", "commit.gpgsign", "false"]);
-        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
-        git(root.path(), &["add", "main.orna"]);
-        git(root.path(), &["commit", "-m", "initial"]);
+        crate::test_support::initialize_fixture_repository(root.path());
+        crate::test_support::commit_initial_module(root.path());
 
         let staged = b"module main;\n// reviewed\n";
         fs::write(root.path().join("main.orna"), staged).unwrap();
@@ -15444,12 +15418,8 @@ mod tests {
     #[test]
     fn reviewed_candidate_detects_same_size_same_mtime_edit_after_ref_advance() {
         let root = tempfile::TempDir::new().unwrap();
-        git(root.path(), &["init", "-b", "main"]);
-        crate::test_support::configure_fixture_git_identity(root.path());
-        git(root.path(), &["config", "commit.gpgsign", "false"]);
-        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
-        git(root.path(), &["add", "main.orna"]);
-        git(root.path(), &["commit", "-m", "initial"]);
+        crate::test_support::initialize_fixture_repository(root.path());
+        crate::test_support::commit_initial_module(root.path());
 
         let staged = b"module main;\n// reviewed\n";
         fs::write(root.path().join("main.orna"), staged).unwrap();
@@ -15871,12 +15841,8 @@ mod tests {
     #[test]
     fn reviewed_candidate_rejects_forged_and_stale_index_reviews() {
         let root = tempfile::TempDir::new().unwrap();
-        git(root.path(), &["init", "-b", "main"]);
-        crate::test_support::configure_fixture_git_identity(root.path());
-        git(root.path(), &["config", "commit.gpgsign", "false"]);
-        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
-        git(root.path(), &["add", "main.orna"]);
-        git(root.path(), &["commit", "-m", "initial"]);
+        crate::test_support::initialize_fixture_repository(root.path());
+        crate::test_support::commit_initial_module(root.path());
         fs::write(root.path().join("main.orna"), "module main;\n// staged\n").unwrap();
         git(root.path(), &["add", "main.orna"]);
 
@@ -15954,12 +15920,8 @@ mod tests {
     #[test]
     fn deletion_preserves_editor_race_after_final_check() {
         let root = tempfile::TempDir::new().unwrap();
-        git(root.path(), &["init", "-b", "main"]);
-        crate::test_support::configure_fixture_git_identity(root.path());
-        git(root.path(), &["config", "commit.gpgsign", "false"]);
-        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
-        git(root.path(), &["add", "main.orna"]);
-        git(root.path(), &["commit", "-m", "initial"]);
+        crate::test_support::initialize_fixture_repository(root.path());
+        crate::test_support::commit_initial_module(root.path());
 
         let repository = Repository::discover(root.path()).unwrap();
         let path = super::ManagedPath::new("generated/row.orna").unwrap();

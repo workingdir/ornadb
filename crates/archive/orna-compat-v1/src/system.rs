@@ -1,6 +1,6 @@
 //! The sealed registry of mandatory ring-1 system functions.
 //!
-//! Work ADR 0042 defines one compiled registry in `orna-core` for functions
+//! Work ADR 0042 defines one compiled registry in `orna-compat-v1` for functions
 //! that must exist before an application catalogue is available. The registry
 //! is not reconstructed from application source, the standard library,
 //! persisted rows, environment values, or configuration. The first two
@@ -423,7 +423,7 @@ pub const SYS_INSPECT_TRACE_EVENT_TYPE_NAME: &str = "sys.inspect.trace_event";
 pub const SYS_INSPECT_TRACE_EVENT_REPRESENTATION_CONTRACT: &str = "orna.sys.inspect.trace_event@1";
 
 // `BIGINT` is the retained standard scalar identity (...0x03). Keeping this
-// local avoids a dependency from `orna-core` back to `orna-standard`.
+// local avoids a dependency from `orna-compat-v1` back to `orna-standard`.
 const SYS_INSPECT_TRACE_AFTER_SEQUENCE_TYPE_ID: TypeId =
     TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x03]);
 

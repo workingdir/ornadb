@@ -47,23 +47,7 @@ use crate::test_support::git;
 
 fn repository() -> TempDir {
     let temp = TempDir::new().unwrap();
-    git(temp.path(), &["init", "-b", "main"]);
-    test_support::configure_fixture_git_identity(temp.path());
-    git(temp.path(), &["config", "commit.gpgsign", "false"]);
-    fs::write(
-        temp.path().join("main.orna"),
-        include_str!("../../tests/fixtures/git-repository-main.orna"),
-    )
-    .unwrap();
-    fs::write(temp.path().join("ordinary.txt"), "base\n").unwrap();
-    fs::create_dir_all(temp.path().join(".orna")).unwrap();
-    fs::write(
-        temp.path().join(".orna/format.orna"),
-        "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n",
-    )
-    .unwrap();
-    git(temp.path(), &["add", "."]);
-    git(temp.path(), &["commit", "-m", "initial"]);
+    test_support::populate_compact_fixture(temp.path());
     temp
 }
 
