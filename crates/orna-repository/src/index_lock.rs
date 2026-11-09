@@ -506,7 +506,7 @@ impl GitIndexLock {
 
     #[cfg(target_os = "linux")]
     fn digest_hex(bytes: &[u8]) -> String {
-        orna_base::hex(bytes)
+        orna_base::hex(&Sha256::digest(bytes))
     }
 
     #[cfg(target_os = "linux")]
