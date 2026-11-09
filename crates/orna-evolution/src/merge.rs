@@ -11,6 +11,7 @@ use super::{
     CanonicalValue, Field, ObjectId, Schema, SchemaSide, Table, VersionFence, validate_schema,
 };
 use std::{
+    cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
     fmt,
 };
@@ -98,7 +99,7 @@ impl SchemaConflictCollector {
 
     fn failure(mut self) -> SchemaMergeFailure {
         self.conflicts
-            .sort_by_key(|conflict| format!("{conflict:?}"));
+            .sort_by_cached_key(|conflict| format!("{conflict:?}"));
         self.conflicts.dedup();
         SchemaMergeFailure {
             conflicts: self.conflicts,
@@ -123,34 +124,74 @@ impl SchemaMergeConflict {
     }
 }
 
-fn choose<T: Clone + Eq>(base: &T, left: &T, right: &T) -> Result<T, ()> {
+/// Three-way pick of one value: when both branches agree, or only one of them
+/// changed the base, the surviving side wins. `None` means both branches
+/// changed the value differently, which is a conflict.
+fn three_way_pick<'a, T: PartialEq + ?Sized>(base: &T, left: &'a T, right: &'a T) -> Option<&'a T> {
     if left == right {
-        Ok(left.clone())
+        Some(left)
     } else if left == base {
-        Ok(right.clone())
+        Some(right)
     } else if right == base {
-        Ok(left.clone())
+        Some(left)
     } else {
-        Err(())
+        None
     }
 }
 
-fn merge_optional<T: Clone + Eq>(
-    base: Option<&T>,
-    left: Option<&T>,
-    right: Option<&T>,
-) -> Option<T> {
-    if left == right {
-        left.cloned()
-    } else if left == base {
-        right.cloned()
-    } else if right == base {
-        left.cloned()
-    } else {
-        // A caller must record the delete/edit conflict before using this
-        // fallback. Retaining the base value only makes candidate construction
-        // total; conflicted candidates are never returned to the caller.
-        base.cloned()
+/// Picks one schema property, recording the conflict `conflict` builds when
+/// both branches changed it differently. Retaining the base value only makes
+/// candidate construction total; conflicted candidates are never returned.
+fn resolve<T: Clone + PartialEq>(
+    base: &T,
+    left: &T,
+    right: &T,
+    conflict: impl FnOnce() -> SchemaMergeConflict,
+    conflicts: &mut SchemaConflictCollector,
+) -> T {
+    match three_way_pick(base, left, right) {
+        Some(value) => value.clone(),
+        None => {
+            conflicts.push(conflict());
+            base.clone()
+        }
+    }
+}
+
+/// How the presence of one stable identity across base, left and right
+/// decides its outcome before any contents are compared.
+enum Presence<'a, T> {
+    /// The identity does not survive: it never existed, or one branch deleted
+    /// it while the other left it unchanged.
+    Absent,
+    /// Presence alone settles the outcome and this entry survives.
+    Retain(&'a T),
+    /// Present on all three sides: the contents must be merged.
+    Merge {
+        base: &'a T,
+        left: &'a T,
+        right: &'a T,
+    },
+    /// Both branches added different entries under one identity.
+    AdditionConflict,
+    /// One branch deleted an entry the other edited.
+    DeletionEditConflict,
+}
+
+fn classify_presence<'a, T: PartialEq>(
+    base: Option<&'a T>,
+    left: Option<&'a T>,
+    right: Option<&'a T>,
+) -> Presence<'a, T> {
+    match (base, left, right) {
+        (None, None, None) | (Some(_), None, None) => Presence::Absent,
+        (None, Some(only), None) | (None, None, Some(only)) => Presence::Retain(only),
+        (None, Some(left), Some(right)) if left == right => Presence::Retain(left),
+        (None, Some(_), Some(_)) => Presence::AdditionConflict,
+        (Some(base), Some(left), Some(right)) => Presence::Merge { base, left, right },
+        (Some(base), Some(left), None) if left == base => Presence::Absent,
+        (Some(base), None, Some(right)) if right == base => Presence::Absent,
+        (Some(_), Some(_), None) | (Some(_), None, Some(_)) => Presence::DeletionEditConflict,
     }
 }
 
@@ -193,12 +234,9 @@ pub fn merge_schema_bounded(
         return Err(conflicts.failure());
     }
 
-    let version = match choose(&base.version, &left.version, &right.version) {
-        Ok(version) => version,
-        Err(()) => {
-            conflicts.push(SchemaMergeConflict::Version);
-            return Err(conflicts.failure());
-        }
+    let Some(&version) = three_way_pick(&base.version, &left.version, &right.version) else {
+        conflicts.push(SchemaMergeConflict::Version);
+        return Err(conflicts.failure());
     };
     let base_tables = tables_by_id(base);
     let left_tables = tables_by_id(left);
@@ -211,26 +249,21 @@ pub fn merge_schema_bounded(
         .collect();
     let mut tables = Vec::new();
     for id in ids {
-        let b = base_tables.get(&id).copied();
-        let l = left_tables.get(&id).copied();
-        let r = right_tables.get(&id).copied();
-        match (b, l, r) {
-            (None, None, None) => {}
-            (None, Some(table), None) | (None, None, Some(table)) => tables.push(table.clone()),
-            (None, Some(l), Some(r)) if l == r => tables.push(l.clone()),
-            (None, Some(_), Some(_)) => {
-                conflicts.push(SchemaMergeConflict::TableAddition { table: id })
+        match classify_presence(
+            base_tables.get(&id).copied(),
+            left_tables.get(&id).copied(),
+            right_tables.get(&id).copied(),
+        ) {
+            Presence::Absent => {}
+            Presence::Retain(table) => tables.push(table.clone()),
+            Presence::Merge { base, left, right } => {
+                tables.push(merge_table(base, left, right, &mut conflicts));
             }
-            (Some(_), None, None) => {}
-            (Some(base), Some(left), Some(right)) => {
-                if let Some(table) = merge_table(base, left, right, &mut conflicts) {
-                    tables.push(table);
-                }
+            Presence::AdditionConflict => {
+                conflicts.push(SchemaMergeConflict::TableAddition { table: id });
             }
-            (Some(base), Some(left), None) if left == base => {}
-            (Some(base), None, Some(right)) if right == base => {}
-            (Some(_), Some(_), None) | (Some(_), None, Some(_)) => {
-                conflicts.push(SchemaMergeConflict::TableDeletionAndEdit { table: id })
+            Presence::DeletionEditConflict => {
+                conflicts.push(SchemaMergeConflict::TableDeletionAndEdit { table: id });
             }
         }
         if conflicts.exceeded() {
@@ -284,34 +317,34 @@ fn merge_table(
     left: &Table,
     right: &Table,
     conflicts: &mut SchemaConflictCollector,
-) -> Option<Table> {
-    let name = match choose(&base.name, &left.name, &right.name) {
-        Ok(value) => value,
-        Err(()) => {
-            conflicts.push(SchemaMergeConflict::TableProperty {
-                table: base.id,
-                property: "name",
-            });
-            base.name.clone()
+) -> Table {
+    let table_conflict = |property: &'static str| {
+        move || SchemaMergeConflict::TableProperty {
+            table: base.id,
+            property,
         }
     };
-    let explicit_key = match choose(&base.explicit_key, &left.explicit_key, &right.explicit_key) {
-        Ok(value) => value,
-        Err(()) => {
-            conflicts.push(SchemaMergeConflict::TableProperty {
-                table: base.id,
-                property: "explicit_key",
-            });
-            base.explicit_key
-        }
-    };
+    let name = resolve(
+        &base.name,
+        &left.name,
+        &right.name,
+        table_conflict("name"),
+        conflicts,
+    );
+    let explicit_key = resolve(
+        &base.explicit_key,
+        &left.explicit_key,
+        &right.explicit_key,
+        table_conflict("explicit_key"),
+        conflicts,
+    );
     if conflicts.exceeded() {
-        return Some(Table {
+        return Table {
             id: base.id,
             name,
             explicit_key,
             fields: Vec::new(),
-        });
+        };
     }
     let base_fields = fields_by_id(base);
     let left_fields = fields_by_id(left);
@@ -324,70 +357,53 @@ fn merge_table(
         .collect();
     let mut fields = Vec::new();
     for id in ids {
-        let b = base_fields.get(&id).copied();
-        let l = left_fields.get(&id).copied();
-        let r = right_fields.get(&id).copied();
-        match (b, l, r) {
-            (None, None, None) => {}
-            (None, Some(field), None) | (None, None, Some(field)) => fields.push(field.clone()),
-            (None, Some(left), Some(right)) if left == right => fields.push(left.clone()),
-            (None, Some(_), Some(_)) => conflicts.push(SchemaMergeConflict::FieldAddition {
-                table: base.id,
-                field: id,
-            }),
-            (Some(_), None, None) => {}
-            (Some(base_field), Some(left_field), Some(right_field)) => {
-                if let Some(field) =
-                    merge_field(base.id, base_field, left_field, right_field, conflicts)
-                {
-                    fields.push(field);
-                }
+        match classify_presence(
+            base_fields.get(&id).copied(),
+            left_fields.get(&id).copied(),
+            right_fields.get(&id).copied(),
+        ) {
+            Presence::Absent => {}
+            Presence::Retain(field) => fields.push(field.clone()),
+            Presence::Merge {
+                base: base_field,
+                left: left_field,
+                right: right_field,
+            } => {
+                fields.push(merge_field(
+                    base.id,
+                    base_field,
+                    left_field,
+                    right_field,
+                    conflicts,
+                ));
             }
-            (Some(base_field), Some(left_field), None) if left_field == base_field => {}
-            (Some(base_field), None, Some(right_field)) if right_field == base_field => {}
-            (Some(_), Some(_), None) | (Some(_), None, Some(_)) => {
+            Presence::AdditionConflict => {
+                conflicts.push(SchemaMergeConflict::FieldAddition {
+                    table: base.id,
+                    field: id,
+                });
+            }
+            Presence::DeletionEditConflict => {
                 conflicts.push(SchemaMergeConflict::FieldDeletionAndEdit {
                     table: base.id,
                     field: id,
-                })
+                });
             }
         }
         if conflicts.exceeded() {
             break;
         }
     }
-    Some(Table {
+    Table {
         id: base.id,
         name,
         explicit_key,
         fields,
-    })
+    }
 }
 
 fn fields_by_id(table: &Table) -> BTreeMap<ObjectId, &Field> {
     table.fields.iter().map(|field| (field.id, field)).collect()
-}
-
-fn property<T: Clone + Eq>(
-    table: ObjectId,
-    field: ObjectId,
-    name: &'static str,
-    base: &T,
-    left: &T,
-    right: &T,
-    conflicts: &mut SchemaConflictCollector,
-) -> T {
-    match choose(base, left, right) {
-        Ok(value) => value,
-        Err(()) => {
-            conflicts.push(SchemaMergeConflict::FieldProperty {
-                table,
-                field,
-                property: name,
-            });
-            base.clone()
-        }
-    }
 }
 
 fn merge_field(
@@ -396,49 +412,52 @@ fn merge_field(
     left: &Field,
     right: &Field,
     conflicts: &mut SchemaConflictCollector,
-) -> Option<Field> {
-    Some(Field {
-        id: base.id,
-        name: property(
+) -> Field {
+    let field_conflict = |property: &'static str| {
+        move || SchemaMergeConflict::FieldProperty {
             table,
-            base.id,
-            "name",
+            field: base.id,
+            property,
+        }
+    };
+    Field {
+        id: base.id,
+        name: resolve(
             &base.name,
             &left.name,
             &right.name,
+            field_conflict("name"),
             conflicts,
         ),
-        ty: property(
-            table, base.id, "type", &base.ty, &left.ty, &right.ty, conflicts,
+        ty: resolve(
+            &base.ty,
+            &left.ty,
+            &right.ty,
+            field_conflict("type"),
+            conflicts,
         ),
-        role: property(
-            table,
-            base.id,
-            "role",
+        role: resolve(
             &base.role,
             &left.role,
             &right.role,
+            field_conflict("role"),
             conflicts,
         ),
-        optional: property(
-            table,
-            base.id,
-            "optional",
+        optional: resolve(
             &base.optional,
             &left.optional,
             &right.optional,
+            field_conflict("optional"),
             conflicts,
         ),
-        introduction_fallback: property(
-            table,
-            base.id,
-            "introduction_fallback",
+        introduction_fallback: resolve(
             &base.introduction_fallback,
             &left.introduction_fallback,
             &right.introduction_fallback,
+            field_conflict("introduction_fallback"),
             conflicts,
         ),
-    })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -533,6 +552,19 @@ pub enum RowSnapshotMergeError {
     Conflict(RowMergeConflict),
 }
 
+/// Canonical order of row identities: the table first, then the canonical
+/// encoding of the key. Row keys are validated canonical values, so encoding
+/// them cannot fail.
+fn compare_row_identity(
+    left: (ObjectId, &CanonicalValue),
+    right: (ObjectId, &CanonicalValue),
+) -> Ordering {
+    let encoded = |key: &CanonicalValue| key.encode().expect("validated row keys remain encodable");
+    left.0
+        .cmp(&right.0)
+        .then_with(|| encoded(left.1).cmp(&encoded(right.1)))
+}
+
 /// Reconcile one key while retaining the distinction between known absence
 /// and unavailable history. Manifest digest equality can still bypass this
 /// function for an unchanged subtree; if a pruned side must be inspected, the
@@ -573,18 +605,7 @@ pub fn merge_keyed_row_states(
     let anchor = identities
         .iter()
         .flatten()
-        .min_by(|(left_table, left_key), (right_table, right_key)| {
-            left_table.cmp(right_table).then_with(|| {
-                left_key
-                    .encode()
-                    .expect("validated row keys remain encodable")
-                    .cmp(
-                        &right_key
-                            .encode()
-                            .expect("validated row keys remain encodable"),
-                    )
-            })
-        })
+        .min_by(|left, right| compare_row_identity(**left, **right))
         .copied();
     // A supplied base is authoritative for conflict reporting. Without one,
     // use canonical identity order so swapping branch arguments cannot change
@@ -634,17 +655,7 @@ pub fn merge_keyed_row(
     right: Option<&KeyedRow>,
 ) -> Result<Option<KeyedRow>, RowMergeConflict> {
     let stable_branch_identity = [left, right].into_iter().flatten().min_by(|left, right| {
-        left.table.cmp(&right.table).then_with(|| {
-            left.key
-                .encode()
-                .expect("validated row keys remain encodable")
-                .cmp(
-                    &right
-                        .key
-                        .encode()
-                        .expect("validated row keys remain encodable"),
-                )
-        })
+        compare_row_identity((left.table, &left.key), (right.table, &right.key))
     });
     // Keep a supplied base as the diagnostic anchor; where there is no base,
     // canonical table/key order makes identity conflicts invariant under
@@ -719,18 +730,16 @@ pub fn merge_keyed_row(
             let mut fields = BTreeMap::new();
             let mut conflicts = Vec::new();
             for id in ids {
-                let value = merge_optional(
-                    base.fields.get(&id),
-                    left.fields.get(&id),
-                    right.fields.get(&id),
-                );
-                if left.fields.get(&id) != right.fields.get(&id)
-                    && left.fields.get(&id) != base.fields.get(&id)
-                    && right.fields.get(&id) != base.fields.get(&id)
-                {
-                    conflicts.push(id);
-                } else if let Some(value) = value {
-                    fields.insert(id, value);
+                match three_way_pick(
+                    &base.fields.get(&id),
+                    &left.fields.get(&id),
+                    &right.fields.get(&id),
+                ) {
+                    Some(Some(value)) => {
+                        fields.insert(id, CanonicalValue::clone(value));
+                    }
+                    Some(None) => {}
+                    None => conflicts.push(id),
                 }
             }
             if conflicts.is_empty() {
@@ -778,19 +787,13 @@ pub fn merge_checkpoint_generation(
     // The outer Option represents checkpoint existence; `position: None` is
     // still a present opaque checkpoint (for example, after a cursor reset).
     // Keep that state distinct from deletion so delete-versus-change conflicts.
-    if left == right {
-        Ok(left.cloned())
-    } else if left == base {
-        Ok(right.cloned())
-    } else if right == base {
-        Ok(left.cloned())
-    } else {
-        Err(CheckpointMergeConflict {
+    three_way_pick(&base, &left, &right)
+        .map(|picked| (*picked).cloned())
+        .ok_or_else(|| CheckpointMergeConflict {
             base: base.cloned(),
             left: left.cloned(),
             right: right.cloned(),
         })
-    }
 }
 
 /// Stable checkpoint row identity copied into portable snapshot metadata.
@@ -1048,27 +1051,16 @@ pub fn merge_checkpoint_snapshots_bounded(
         let base_position = base.checkpoints.get(&identity);
         let left_position = left.checkpoints.get(&identity);
         let right_position = right.checkpoints.get(&identity);
-        let result = if left_position == right_position {
-            Ok(left_position.cloned())
-        } else if left_position == base_position {
-            // A unilateral format change is explicit in the changed snapshot;
-            // validating its provider-specific migration remains adapter-owned.
-            Ok(right_position.cloned())
-        } else if right_position == base_position {
-            Ok(left_position.cloned())
-        } else {
-            Err(checkpoint_conflict_reason(
-                base_position,
-                left_position,
-                right_position,
-            ))
-        };
-        match result {
-            Ok(Some(position)) => {
-                merged.insert(identity, position);
+        // A unilateral format change is explicit in the changed snapshot;
+        // validating its provider-specific migration remains adapter-owned.
+        match three_way_pick(&base_position, &left_position, &right_position) {
+            Some(Some(position)) => {
+                merged.insert(identity, CheckpointPosition::clone(position));
             }
-            Ok(None) => {}
-            Err(reason) => {
+            Some(None) => {}
+            None => {
+                let reason =
+                    checkpoint_conflict_reason(base_position, left_position, right_position);
                 conflict_count = conflict_count.saturating_add(1);
                 if conflicts.len() < max_conflicts {
                     conflicts.push(CheckpointSnapshotMergeConflict {

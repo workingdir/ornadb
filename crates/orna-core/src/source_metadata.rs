@@ -539,14 +539,16 @@ impl Reader<'_> {
         self.offset = end;
         Ok(output)
     }
+    fn array<const N: usize>(&mut self) -> Result<[u8; N], SourceMetadataError> {
+        self.take(N)?
+            .try_into()
+            .map_err(|_| SourceMetadataError::Truncated)
+    }
     fn u8(&mut self) -> Result<u8, SourceMetadataError> {
-        Ok(self.take(1)?[0])
+        Ok(u8::from_be_bytes(self.array()?))
     }
     fn u32(&mut self) -> Result<u32, SourceMetadataError> {
-        Ok(u32::from_be_bytes(self.take(4)?.try_into().unwrap()))
-    }
-    fn array<const N: usize>(&mut self) -> Result<[u8; N], SourceMetadataError> {
-        Ok(self.take(N)?.try_into().unwrap())
+        Ok(u32::from_be_bytes(self.array()?))
     }
     fn count(&mut self, maximum: usize) -> Result<usize, SourceMetadataError> {
         let count = self.u32()? as usize;

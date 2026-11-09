@@ -6,9 +6,10 @@ use crate::{
     CatalogueRevisionId, ExpressionId, FieldId, SchemaId, SourceBundleId, SourceRevisionId,
     SourceUnitId, StandardLibraryRevisionId, TypeId,
     catalogue::{
-        CatalogueSnapshot, EnumTypeDefinition, FieldDefinition, ObjectTypeDefinition,
-        QualifiedSemanticName, RecordValueFieldDefinition, RecordValueTypeDefinition,
-        SchemaDefinition, ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
+        CatalogueDefinitions, CatalogueSnapshot, EnumTypeDefinition, FieldDefinition,
+        ObjectTypeDefinition, QualifiedSemanticName, RecordValueFieldDefinition,
+        RecordValueTypeDefinition, SchemaDefinition, ValueTypeDefinition, ValueTypeMutability,
+        ValueTypePersistence,
     },
     revision::{
         ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
@@ -1492,27 +1493,28 @@ fn projects_catalogue_enums_as_named_physical_fields() {
     let standard = verified_standard(Vec::new());
     let active = active_version_two(Vec::new(), standard.clone(), 1);
     let source = source(2, Some(active.pair().source()));
-    let catalogue = CatalogueSnapshot::new_with_enum_types(
+    let catalogue = CatalogueSnapshot::from_definitions(
         CatalogueRevisionId::from_bytes([3; 16]),
-        vec![schema()],
-        vec![object(
-            FIRST_TYPE,
-            "first",
-            vec![field(
-                FIRST_FIELD,
-                "stage",
-                0,
-                ResolvedType::named(enum_type),
-                false,
+        CatalogueDefinitions {
+            schemas: vec![schema()],
+            object_types: vec![object(
+                FIRST_TYPE,
+                "first",
+                vec![field(
+                    FIRST_FIELD,
+                    "stage",
+                    0,
+                    ResolvedType::named(enum_type),
+                    false,
+                )],
             )],
-        )],
-        vec![],
-        vec![EnumTypeDefinition::new(
-            enum_type,
-            name(&["demo", "stage"]),
-            ["lead", "qualified"],
-        )],
-        vec![],
+            enum_types: vec![EnumTypeDefinition::new(
+                enum_type,
+                name(&["demo", "stage"]),
+                ["lead", "qualified"],
+            )],
+            ..CatalogueDefinitions::default()
+        },
     )
     .unwrap();
     let origins = origins(&source, &catalogue);
@@ -1556,37 +1558,36 @@ fn projects_record_values_as_canonical_byte_fields() {
     )]);
     let active = active_version_two(Vec::new(), standard.clone(), 1);
     let source = source(2, Some(active.pair().source()));
-    let catalogue = CatalogueSnapshot::new_with_functions_and_record_value_types(
+    let catalogue = CatalogueSnapshot::from_definitions(
         CatalogueRevisionId::from_bytes([3; 16]),
-        vec![schema()],
-        vec![object(
-            FIRST_TYPE,
-            "first",
-            vec![field(
-                FIRST_FIELD,
-                "status",
-                0,
-                ResolvedType::named(record_type),
-                false,
-            )],
-        )],
-        vec![],
-        vec![],
-        vec![RecordValueTypeDefinition::new(
-            record_type,
-            name(&["demo", "status"]),
-            vec![
-                RecordValueFieldDefinition::try_new_descriptor(
-                    SECOND_FIELD,
-                    "active",
+        CatalogueDefinitions {
+            schemas: vec![schema()],
+            object_types: vec![object(
+                FIRST_TYPE,
+                "first",
+                vec![field(
+                    FIRST_FIELD,
+                    "status",
                     0,
-                    TypeDescriptor::named(TypeId::from_bytes([0xa4; 16])),
-                )
-                .unwrap(),
-            ],
-        )],
-        vec![],
-        vec![],
+                    ResolvedType::named(record_type),
+                    false,
+                )],
+            )],
+            record_value_types: vec![RecordValueTypeDefinition::new(
+                record_type,
+                name(&["demo", "status"]),
+                vec![
+                    RecordValueFieldDefinition::try_new_descriptor(
+                        SECOND_FIELD,
+                        "active",
+                        0,
+                        TypeDescriptor::named(TypeId::from_bytes([0xa4; 16])),
+                    )
+                    .unwrap(),
+                ],
+            )],
+            ..CatalogueDefinitions::default()
+        },
     )
     .unwrap();
     let origins = origins(&source, &catalogue);
@@ -3446,15 +3447,16 @@ fn verified_standard(
     value_types: Vec<ValueTypeDefinition>,
 ) -> crate::revision::VerifiedStandardLibrarySnapshot {
     let source = standard_source();
-    let catalogue = CatalogueSnapshot::new_with_types(
+    let catalogue = CatalogueSnapshot::from_definitions(
         CatalogueRevisionId::from_bytes([0xa2; 16]),
-        vec![
-            SchemaDefinition::new(STANDARD_SCHEMA_ID, name(&["std"])),
-            SchemaDefinition::new(STANDARD_TYPES_SCHEMA_ID, name(&["std", "types"])),
-        ],
-        Vec::new(),
-        value_types,
-        Vec::new(),
+        CatalogueDefinitions {
+            schemas: vec![
+                SchemaDefinition::new(STANDARD_SCHEMA_ID, name(&["std"])),
+                SchemaDefinition::new(STANDARD_TYPES_SCHEMA_ID, name(&["std", "types"])),
+            ],
+            value_types,
+            ..CatalogueDefinitions::default()
+        },
     )
     .unwrap();
     let origins = standard_origins(&source, &catalogue);
