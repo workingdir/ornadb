@@ -12,7 +12,8 @@ use orna_syntax::{Declaration, Expr, LiteralKind, RecordField, parse_module, par
 use sha2::{Digest, Sha256};
 
 use crate::native_graph::{
-    GitHashAlgorithm, GraphError, NativeGraphContext, NativeOid, RepositoryCaptureCapability,
+    GitHashAlgorithm, GraphError, NativeGraphContext, NativeGraphIssuance, NativeOid,
+    RepositoryCaptureCapability,
 };
 use crate::object_reader::{ObjectKind, ObjectReader, TreeEntry, TreeEntryMode};
 use crate::row_store::RowMapSnapshot;
@@ -308,6 +309,20 @@ impl CommittedTableBinding {
     pub fn descriptor(&self) -> &SchemaDescriptor {
         &self.descriptor
     }
+}
+
+/// One request to bind a qualified source table to a committed snapshot: the
+/// module namespace, repository-relative source path and declaration name the
+/// project analysis resolved, the relation ID the descriptor must select, and
+/// the repository UUID, snapshot and descriptor the binding is checked against.
+pub struct CommittedTableBindingRequest<'a> {
+    pub module_name: &'a str,
+    pub source_path: &'a str,
+    pub declaration_name: &'a str,
+    pub table_object_id: [u8; 16],
+    pub database_id: DatabaseId,
+    pub snapshot_id: &'a [u8; 32],
+    pub schema: &'a SchemaDescriptor,
 }
 
 fn source_module_name(source_path: &str) -> Option<String> {
@@ -735,18 +750,18 @@ impl RepositoryFormatContext {
         identity_hash.update(authority);
         let identity: [u8; 32] = identity_hash.finalize().into();
 
-        NativeGraphContext::issue(
-            self.repository.clone(),
+        NativeGraphContext::issue(NativeGraphIssuance {
+            repository: self.repository.clone(),
             repository_id,
             identity,
-            *database_id.as_bytes(),
+            database_id: *database_id.as_bytes(),
             owner_id,
             snapshot_id,
             algorithm,
-            store.oid,
+            store_root: store.oid,
             schema_digest,
-            rows.clone(),
-        )
+            row_snapshot: rows.clone(),
+        })
         .map(|graph| graph.with_accepted_pin_fallback_owner(derived_owner_id))
         .map_err(|_| FormatContextError::GraphContextInvalid)
     }
@@ -891,8 +906,6 @@ impl RepositoryFormatContext {
         Ok(())
     }
 
-    /// The parameters describe one record; each caller passes them straight through.
-    #[allow(clippy::too_many_arguments)]
     /// Binds a qualified source table and its expected schema to this exact
     /// repository UUID and committed snapshot. The caller supplies the module
     /// namespace and repository-relative path from project analysis; the
@@ -900,24 +913,27 @@ impl RepositoryFormatContext {
     /// and complete expected descriptor before issuing source-bound authority.
     pub fn bind_committed_table(
         &self,
-        module_name: &str,
-        source_path: &str,
-        declaration_name: &str,
-        table_object_id: [u8; 16],
-        expected_database_id: DatabaseId,
-        expected_snapshot_id: &[u8; 32],
-        expected_schema: &SchemaDescriptor,
+        request: CommittedTableBindingRequest<'_>,
     ) -> Result<CommittedTableBinding, FormatContextError> {
+        let CommittedTableBindingRequest {
+            module_name,
+            source_path,
+            declaration_name,
+            table_object_id,
+            database_id,
+            snapshot_id,
+            schema,
+        } = request;
         self.require_format3()?;
-        if self.require_database_id()? != expected_database_id
-            || *expected_snapshot_id != self.snapshot.snapshot_id()
-            || schema_descriptor_table_id(expected_schema) != Some(table_object_id)
+        if self.require_database_id()? != database_id
+            || *snapshot_id != self.snapshot.snapshot_id()
+            || schema_descriptor_table_id(schema) != Some(table_object_id)
         {
             return Err(FormatContextError::TableBindingMismatch);
         }
         self.validate_committed_source_table(module_name, source_path, declaration_name)?;
         let mut binding = self.resolve_committed_table_by_relation_id(table_object_id)?;
-        if binding.descriptor() != expected_schema {
+        if binding.descriptor() != schema {
             return Err(FormatContextError::TableBindingMismatch);
         }
         binding.module_name = Some(module_name.to_owned());
@@ -1101,27 +1117,11 @@ impl HistoricalFormatContext {
             .resolve_committed_table_by_relation_id(relation_id)
     }
 
-    /// The parameters describe one record; each caller passes them straight through.
-    #[allow(clippy::too_many_arguments)]
     pub fn bind_committed_table(
         &self,
-        module_name: &str,
-        source_path: &str,
-        declaration_name: &str,
-        table_object_id: [u8; 16],
-        expected_database_id: DatabaseId,
-        expected_snapshot_id: &[u8; 32],
-        expected_schema: &SchemaDescriptor,
+        request: CommittedTableBindingRequest<'_>,
     ) -> Result<CommittedTableBinding, FormatContextError> {
-        self.context.bind_committed_table(
-            module_name,
-            source_path,
-            declaration_name,
-            table_object_id,
-            expected_database_id,
-            expected_snapshot_id,
-            expected_schema,
-        )
+        self.context.bind_committed_table(request)
     }
 
     pub fn bind_committed_table_by_relation_id(
@@ -1898,8 +1898,8 @@ mod graph_bridge_tests {
             decode_canonical_cbor,
         },
         row_store::{
-            KeyRange, MAX_ROW_RANGE_LIMIT, RowEntry, RowMapSnapshot, RowMapVersion, RowValue,
-            SchemaGeneration, TypedKey,
+            KeyRange, MAX_ROW_RANGE_LIMIT, RowEntry, RowMapSnapshot, RowMapVersion,
+            RowMapVersionRecord, RowValue, SchemaGeneration, TypedKey,
         },
     };
     use orna_value::{Raw, SchemaDescriptor};
@@ -2266,15 +2266,15 @@ mod graph_bridge_tests {
         assert_eq!(resolved.descriptor(), &descriptor);
 
         let binding = context
-            .bind_committed_table(
-                "media",
-                "media.orna",
-                "Audio",
-                relation_id,
+            .bind_committed_table(super::CommittedTableBindingRequest {
+                module_name: "media",
+                source_path: "media.orna",
+                declaration_name: "Audio",
+                table_object_id: relation_id,
                 database_id,
-                &snapshot_id,
-                &descriptor,
-            )
+                snapshot_id: &snapshot_id,
+                schema: &descriptor,
+            })
             .expect("bind imported source analysis to committed descriptor");
         assert_eq!(binding.database_id(), database_id);
         assert_eq!(binding.snapshot_id(), &snapshot_id);
@@ -2284,73 +2284,73 @@ mod graph_bridge_tests {
         assert_eq!(binding.descriptor(), &descriptor);
 
         assert_eq!(
-            context.bind_committed_table(
-                "other",
-                "media.orna",
-                "Audio",
-                relation_id,
+            context.bind_committed_table(super::CommittedTableBindingRequest {
+                module_name: "other",
+                source_path: "media.orna",
+                declaration_name: "Audio",
+                table_object_id: relation_id,
                 database_id,
-                &snapshot_id,
-                &descriptor,
-            ),
+                snapshot_id: &snapshot_id,
+                schema: &descriptor,
+            }),
             Err(super::FormatContextError::TableBindingMismatch),
             "binding rejects a namespace/path disagreement"
         );
         let mut wrong_snapshot = snapshot_id;
         wrong_snapshot[0] ^= 1;
         assert_eq!(
-            context.bind_committed_table(
-                "media",
-                "media.orna",
-                "Audio",
-                relation_id,
+            context.bind_committed_table(super::CommittedTableBindingRequest {
+                module_name: "media",
+                source_path: "media.orna",
+                declaration_name: "Audio",
+                table_object_id: relation_id,
                 database_id,
-                &wrong_snapshot,
-                &descriptor,
-            ),
+                snapshot_id: &wrong_snapshot,
+                schema: &descriptor,
+            }),
             Err(super::FormatContextError::TableBindingMismatch),
             "binding rejects a foreign source snapshot"
         );
 
         let wrong_descriptor = descriptor_for_table(relation_id, "Str");
         assert_eq!(
-            context.bind_committed_table(
-                "media",
-                "media.orna",
-                "Audio",
-                relation_id,
+            context.bind_committed_table(super::CommittedTableBindingRequest {
+                module_name: "media",
+                source_path: "media.orna",
+                declaration_name: "Audio",
+                table_object_id: relation_id,
                 database_id,
-                &snapshot_id,
-                &wrong_descriptor,
-            ),
+                snapshot_id: &snapshot_id,
+                schema: &wrong_descriptor,
+            }),
             Err(super::FormatContextError::TableBindingMismatch),
             "binding rejects a differing field type under the same table ID"
         );
         let other_id = [0xa2; 16];
         let wrong_table_descriptor = descriptor_for_table(other_id, "Int");
         assert_eq!(
-            context.bind_committed_table(
-                "media",
-                "media.orna",
-                "Audio",
-                relation_id,
+            context.bind_committed_table(super::CommittedTableBindingRequest {
+                module_name: "media",
+                source_path: "media.orna",
+                declaration_name: "Audio",
+                table_object_id: relation_id,
                 database_id,
-                &snapshot_id,
-                &wrong_table_descriptor,
-            ),
+                snapshot_id: &snapshot_id,
+                schema: &wrong_table_descriptor,
+            }),
             Err(super::FormatContextError::TableBindingMismatch),
             "binding rejects an expected descriptor for another table"
         );
         assert_eq!(
-            context.bind_committed_table(
-                "media",
-                "media.orna",
-                "Missing",
-                relation_id,
+            context.bind_committed_table(super::CommittedTableBindingRequest {
+                module_name: "media",
+                source_path: "media.orna",
+                declaration_name: "Missing",
+                table_object_id: relation_id,
                 database_id,
-                &snapshot_id,
-                &descriptor,
-            ),
+                snapshot_id: &snapshot_id,
+                schema: &descriptor,
+            }),
             Err(super::FormatContextError::TableBindingMismatch),
             "binding rejects a source declaration absent from the imported module"
         );
@@ -2377,15 +2377,15 @@ mod graph_bridge_tests {
             .expect("open large imported-module context");
         let large_snapshot_id = large_context.snapshot_pin().snapshot_id();
         let large_binding = large_context
-            .bind_committed_table(
-                "media",
-                "media.orna",
-                "Audio",
-                relation_id,
+            .bind_committed_table(super::CommittedTableBindingRequest {
+                module_name: "media",
+                source_path: "media.orna",
+                declaration_name: "Audio",
+                table_object_id: relation_id,
                 database_id,
-                &large_snapshot_id,
-                &descriptor,
-            )
+                snapshot_id: &large_snapshot_id,
+                schema: &descriptor,
+            })
             .expect("bind valid imported source within project byte budget");
         assert_eq!(large_binding.descriptor(), &descriptor);
 
@@ -2406,15 +2406,15 @@ mod graph_bridge_tests {
         );
         assert_ne!(foreign_database_id, database_id);
         assert_eq!(
-            context.bind_committed_table(
-                "media",
-                "media.orna",
-                "Audio",
-                relation_id,
-                foreign_database_id,
-                &snapshot_id,
-                &descriptor,
-            ),
+            context.bind_committed_table(super::CommittedTableBindingRequest {
+                module_name: "media",
+                source_path: "media.orna",
+                declaration_name: "Audio",
+                table_object_id: relation_id,
+                database_id: foreign_database_id,
+                snapshot_id: &snapshot_id,
+                schema: &descriptor,
+            }),
             Err(super::FormatContextError::TableBindingMismatch),
             "binding rejects a foreign repository UUID"
         );
@@ -2428,15 +2428,15 @@ mod graph_bridge_tests {
             .expect("open malformed imported-module context");
         let malformed_snapshot_id = malformed_context.snapshot_pin().snapshot_id();
         assert_eq!(
-            malformed_context.bind_committed_table(
-                "media",
-                "media.orna",
-                "Audio",
-                relation_id,
-                foreign_database_id,
-                &malformed_snapshot_id,
-                &descriptor,
-            ),
+            malformed_context.bind_committed_table(super::CommittedTableBindingRequest {
+                module_name: "media",
+                source_path: "media.orna",
+                declaration_name: "Audio",
+                table_object_id: relation_id,
+                database_id: foreign_database_id,
+                snapshot_id: &malformed_snapshot_id,
+                schema: &descriptor,
+            }),
             Err(super::FormatContextError::SchemaRootInvalid),
             "binding rejects a recovered declaration from a malformed module"
         );
@@ -4002,15 +4002,15 @@ mod graph_bridge_tests {
             schema_digest,
             0,
         );
-        let version = RowMapVersion::issue(
-            *database_id.as_bytes(),
+        let version = RowMapVersion::issue(RowMapVersionRecord {
+            database_id: *database_id.as_bytes(),
             relation_id,
-            store.oid.clone(),
-            schema_generation,
-            store.oid.clone(),
-            0,
-            Some(0),
-        )
+            store_root: store.oid.clone(),
+            schema: schema_generation,
+            primary_root: store.oid.clone(),
+            generation: 0,
+            row_count: Some(0),
+        })
         .expect("consistent row-map identity");
 
         let snapshot_id = context.snapshot.snapshot_id();
@@ -4775,15 +4775,15 @@ mod graph_bridge_tests {
         let snapshot_id = pinned.snapshot_pin().snapshot_id();
         let database_id = pinned.require_database_id().expect("repository identity");
         let binding = pinned
-            .bind_committed_table(
-                "media",
-                "media.orna",
-                "Audio",
-                relation_id,
+            .bind_committed_table(super::CommittedTableBindingRequest {
+                module_name: "media",
+                source_path: "media.orna",
+                declaration_name: "Audio",
+                table_object_id: relation_id,
                 database_id,
-                &snapshot_id,
-                &descriptor,
-            )
+                snapshot_id: &snapshot_id,
+                schema: &descriptor,
+            })
             .expect("source-qualified committed TableManifest");
         let snapshot = pinned.load_row_map(relation_id).expect("pinned row map");
         let graph = pinned

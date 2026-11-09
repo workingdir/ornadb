@@ -8,38 +8,46 @@
 
 use std::{
     any::Any,
-    collections::{BTreeMap, HashMap},
-    fs,
+    collections::HashMap,
     future::Future,
     io,
-    os::unix::fs::{DirBuilderExt as _, FileExt as _, OpenOptionsExt as _, PermissionsExt as _},
     path::Path,
-    sync::{
-        Arc, LazyLock, Mutex as StdMutex, OnceLock, Weak,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, Mutex as StdMutex, OnceLock, Weak},
 };
 
 use orna_repository::{
-    ContentIdentity, GraphError, NativeObjectId, OrpBlobBinding, ProtectedContentTransfer,
-    RepositoryCaptureCapability,
+    ContentIdentity, NativeObjectId, OrpBlobBinding, RepositoryCaptureCapability,
 };
-use orna_value::{MimeRegistry, Raw, Value as OvbValue};
-use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
-use uuid::Uuid;
 
-use crate::error::{FaultInjector, RuntimeError, TableActivationError};
-use crate::lease::WriterLease;
-use crate::table_snapshot::{RuntimeQueryError, RuntimeTableActivationSnapshot};
-use crate::table_store::{ProtectedContentTransferEvidence, RuntimeTableIdentity, TableMutation};
-use crate::{
-    RuntimeActivationContext, RuntimeState, TableActivationCandidateValidator, TableSchemaIdentity,
-    ValidatedTableActivationCommit,
+use crate::{FaultInjector, RuntimeError, RuntimeState, TableActivationError};
+use orna_stream::{DiagnosticCode, SafeDiagnostic};
+
+mod draft;
+mod naming;
+mod save;
+mod spool;
+
+pub use draft::{EditDraft, EditReadBaseline, RetainedInvalidDraft};
+pub use naming::{
+    VFS_EAGAIN, VFS_EINVAL, VFS_EIO, VFS_ENOENT, VFS_EOPNOTSUPP, VFS_EPERM,
+    VFS_MAX_COMPONENT_BYTES, VFS_MAX_PATH_BYTES, VFS_ROW_DOCUMENT, VfsComponent, VfsNameNamespace,
+    VfsPathError, classify_content_suffix, content_suffix_is_compatible, field_name_digest,
+    project_colliding_table_component, project_component, project_content_name, project_field_name,
+    project_key_component, project_text_name, unproject_component,
 };
-use orna_foundation::CwdCapture;
-use orna_repository::{CwdGeneration, ProtectedContentPin};
-use orna_stream::{DiagnosticClass, DiagnosticCode, SafeDiagnostic};
+pub use save::{
+    VfsBlobReplacementError, VfsDurableSave, VfsSaveAdmission, VfsSaveCandidate,
+    VfsSaveCoordinates, VfsSaveError, VfsTableRowReplacement, commit_vfs_table_activation,
+};
+pub use spool::QuotaCharge;
+pub use spool::{
+    CANDIDATE_CHUNK_BYTES, CandidateReader, CandidateSnapshot, DraftQuota, DraftStorage,
+    EditDraftError, default_draft_quota,
+};
+
+use draft::{FsyncMemo, retain_rejected_draft, stale_baseline_diagnostic};
+use save::{VfsSaveAdmissionError, capture_vfs_blob_replacement};
 
 /// One repository-wide invalidation clock shared by projections in a VFS
 /// repository scope.
@@ -294,10 +302,7 @@ impl VfsRepositoryCache {
 
     fn managed_file_for_image<S>(&self, image: Arc<VfsFileSnapshot<S>>) -> Arc<ManagedFile<S>> {
         Arc::new(ManagedFile {
-            state: Mutex::new(ManagedFileState {
-                image,
-                unlinked: false,
-            }),
+            state: Mutex::new(ManagedFileState::Live { image }),
             operation: Mutex::new(()),
             cache_epoch: self.epoch.clone(),
             draft_storage: self.draft_storage.clone(),
@@ -592,734 +597,46 @@ pub enum FsyncOutcome<S> {
     Unchanged(SnapshotReadHandle<S>),
 }
 
-/// The latest rejected replacement remains separately readable even after a
-/// later write starts a new candidate from its bytes.
-pub struct RetainedInvalidDraft<S> {
-    id: [u8; 16],
-    baseline: SnapshotPin<S>,
-    revision: u64,
-    replacement: Arc<CandidateSnapshot>,
-    diagnostic: SafeDiagnostic,
+/// Whether a managed destination still names a live row file.
+pub(super) enum ManagedFileState<S> {
+    /// The destination is linked. New opens and replacements observe this
+    /// image, and an accepted replacement advances it.
+    Live { image: Arc<VfsFileSnapshot<S>> },
+    /// An accepted unlink removed the destination. Existing handles keep the
+    /// image they captured, and a destination-level read still serves it, but
+    /// no new open, stat or replacement observes it.
+    Unlinked { image: Arc<VfsFileSnapshot<S>> },
 }
 
-impl<S> Clone for RetainedInvalidDraft<S> {
-    fn clone(&self) -> Self {
-        Self {
-            id: self.id,
-            baseline: self.baseline.clone(),
-            revision: self.revision,
-            replacement: Arc::clone(&self.replacement),
-            diagnostic: self.diagnostic,
-        }
-    }
-}
-
-impl<S> RetainedInvalidDraft<S> {
-    /// The unique local-state identity of this retained draft, issued when the
-    /// rejection was recorded. A later rejection of the same revision keeps the
-    /// identity it was first given (ORNA-VFS-009).
-    pub const fn id(&self) -> [u8; 16] {
-        self.id
-    }
-
-    pub fn baseline(&self) -> &SnapshotPin<S> {
-        &self.baseline
-    }
-
-    pub fn revision(&self) -> u64 {
-        self.revision
-    }
-
-    /// The retained candidate bytes, read from the retained view. The copy is
-    /// made only for the caller, so the retained record holds no bytes in RAM.
-    pub fn replacement_bytes(&self) -> Result<Vec<u8>, EditDraftError> {
-        self.replacement
-            .to_arc()
-            .map(|bytes| bytes.to_vec())
-            .map_err(|_| EditDraftError::BackingIo)
-    }
-
-    pub fn diagnostic(&self) -> SafeDiagnostic {
-        self.diagnostic
-    }
-}
-
-struct DraftState<S> {
-    quota: Arc<DraftQuota>,
-    baseline: Arc<VfsFileSnapshot<S>>,
-    candidate: Option<DraftSpool>,
-    revision: u64,
-    last_rejection: Option<(u64, SafeDiagnostic)>,
-    last_accepted: Option<(u64, Arc<VfsFileSnapshot<S>>)>,
-    retained_invalid: Option<RetainedRejection<S>>,
-}
-
-/// The retained rejected draft together with the identity of the rejection
-/// that recorded it. One rejection has one identity, so a repeated validation
-/// of the same revision is distinguishable from a fresh one (ORNA-VFS-009).
-/// The retained copy is charged to the draft quota for as long as it is held
-/// (profiles/vfs-1.md: rejected candidates are quota accounted).
-struct RetainedRejection<S> {
-    charge: QuotaCharge,
-    /// True while `draft` aliases the candidate spool's file; the candidate then
-    /// holds the charge until a change moves it here (`unalias_retained`).
-    live: bool,
-    draft: RetainedInvalidDraft<S>,
-}
-
-/// Quota charge for bytes held beyond a live spool: one retained rejected
-/// candidate, or one on-disk retained draft record. Dropping the charge
-/// releases its bytes.
-pub struct QuotaCharge {
-    quota: Arc<DraftQuota>,
-    bytes: u64,
-}
-
-impl QuotaCharge {
-    /// Charges `bytes` to `quota`, refusing with [`EditDraftError::QuotaExceeded`]
-    /// when the quota cannot hold them.
-    pub fn reserve(quota: &Arc<DraftQuota>, bytes: u64) -> Result<Self, EditDraftError> {
-        quota.reserve(bytes)?;
-        Ok(Self {
-            quota: Arc::clone(quota),
-            bytes,
-        })
-    }
-
-    /// Charges `bytes` that already exist on disk, even past the limit. Only new
-    /// reservations are refused until enough charges are released.
-    pub fn restore(quota: &Arc<DraftQuota>, bytes: u64) -> Self {
-        quota.used.fetch_add(bytes, Ordering::AcqRel);
-        Self {
-            quota: Arc::clone(quota),
-            bytes,
+impl<S> ManagedFileState<S> {
+    /// The last accepted image, readable even after an unlink.
+    fn image(&self) -> &Arc<VfsFileSnapshot<S>> {
+        match self {
+            Self::Live { image } | Self::Unlinked { image } => image,
         }
     }
 
-    pub fn bytes(&self) -> u64 {
-        self.bytes
-    }
-
-    /// A charge that holds no bytes yet, to be grown or absorbed into.
-    pub fn empty(quota: &Arc<DraftQuota>) -> Self {
-        Self {
-            quota: Arc::clone(quota),
-            bytes: 0,
+    /// The image a new open observes, or `None` once the destination is gone.
+    fn live_image(&self) -> Option<&Arc<VfsFileSnapshot<S>>> {
+        match self {
+            Self::Live { image } => Some(image),
+            Self::Unlinked { .. } => None,
         }
     }
 
-    /// Charges `bytes` more, refusing (and changing nothing) when the quota cannot hold them.
-    fn grow(&mut self, bytes: u64) -> Result<(), EditDraftError> {
-        self.quota.reserve(bytes)?;
-        self.bytes += bytes;
-        Ok(())
+    fn is_unlinked(&self) -> bool {
+        matches!(self, Self::Unlinked { .. })
     }
 
-    /// Releases up to `bytes` of this charge.
-    fn shrink(&mut self, bytes: u64) {
-        let released = bytes.min(self.bytes);
-        self.quota.release(released);
-        self.bytes -= released;
-    }
-
-    /// Moves every byte of `other` into this charge, which must share its quota.
-    /// `other` is left holding none.
-    pub fn absorb(&mut self, other: &mut QuotaCharge) {
-        self.bytes += other.bytes;
-        other.bytes = 0;
-    }
-
-    /// Moves every byte of this charge into a new charge, leaving this one holding none.
-    pub fn take(&mut self) -> QuotaCharge {
-        let mut moved = QuotaCharge::empty(&self.quota);
-        moved.absorb(self);
-        moved
-    }
-}
-
-impl Drop for QuotaCharge {
-    fn drop(&mut self) {
-        self.quota.release(self.bytes);
-    }
-}
-
-impl<S> DraftState<S> {
-    fn candidate_len(&self) -> u64 {
-        self.candidate
-            .as_ref()
-            .map_or(self.baseline.bytes.len(), |spool| spool.len)
-    }
-
-    /// Materialises the whole candidate for activation. Ranged reads and writes
-    /// stay on the spool, and a spool read failure is a typed backing error.
-    fn candidate_arc(&self) -> Result<Arc<[u8]>, EditDraftError> {
-        match &self.candidate {
-            Some(spool) => spool.read_all().map_err(|_| EditDraftError::BackingIo),
-            None => self
-                .baseline
-                .bytes
-                .to_arc()
-                .map_err(|_| EditDraftError::BackingIo),
+    /// Retires the destination while keeping its last image readable for
+    /// handles that already hold it. A second unlink changes nothing.
+    fn mark_unlinked(&mut self) {
+        if let Self::Live { image } = self {
+            *self = Self::Unlinked {
+                image: Arc::clone(image),
+            };
         }
     }
-
-    /// Opens a streaming view of the candidate for one fsync callback. A spool
-    /// is shared through a cloned handle and the baseline through its `Arc`, so
-    /// no candidate bytes are copied. Writers hold the operation lock, so the
-    /// candidate cannot change while the view is in use.
-    fn candidate_snapshot(&self) -> Result<CandidateSnapshot, EditDraftError> {
-        match &self.candidate {
-            Some(spool) => Ok(CandidateSnapshot {
-                len: spool.len,
-                source: CandidateSource::Spool(
-                    spool
-                        .file
-                        .try_clone()
-                        .map_err(|_| EditDraftError::BackingIo)?,
-                ),
-            }),
-            None => self
-                .baseline
-                .bytes
-                .duplicate()
-                .map_err(|_| EditDraftError::BackingIo),
-        }
-    }
-
-    /// Reads `[offset, offset + length)` of the candidate, clamped to its
-    /// length. Holds at most `length` bytes.
-    fn read_range(&self, offset: u64, length: usize) -> Result<Vec<u8>, EditDraftError> {
-        match &self.candidate {
-            Some(spool) => spool
-                .read_range(offset, length)
-                .map_err(|_| EditDraftError::BackingIo),
-            None => self
-                .baseline
-                .bytes
-                .read_range(offset, length)
-                .map_err(|_| EditDraftError::BackingIo),
-        }
-    }
-
-    /// Returns the private spool, creating it from the baseline on first use.
-    fn ensure_spool(&mut self, storage: &DraftStorage) -> Result<&mut DraftSpool, EditDraftError> {
-        if self.candidate.is_none() {
-            self.candidate = Some(DraftSpool::from_baseline(&self.baseline.bytes, storage)?);
-        } else if self.retained_is_live() {
-            self.unalias_retained(storage)?;
-        }
-        self.candidate.as_mut().ok_or(EditDraftError::BackingIo)
-    }
-
-    /// Records one terminal rejection of `revision`, issuing a fresh identity
-    /// unless the same revision was already retained. The rejection is cached
-    /// only once its bytes are retained, so a failed retention stays retryable.
-    fn retain_rejection(
-        &mut self,
-        revision: u64,
-        diagnostic: SafeDiagnostic,
-    ) -> Result<(), EditDraftError> {
-        self.retain_draft(revision, diagnostic)?;
-        self.last_rejection = Some((revision, diagnostic));
-        Ok(())
-    }
-
-    /// Retains a stale compare-and-swap candidate without caching the outcome.
-    /// A caller may retry these same bytes against a newly captured baseline.
-    fn retain_retryable_conflict(
-        &mut self,
-        revision: u64,
-        diagnostic: SafeDiagnostic,
-    ) -> Result<(), EditDraftError> {
-        self.retain_draft(revision, diagnostic)
-    }
-
-    /// Keeps the candidate of `revision` as its retained copy without copying
-    /// its bytes. While the candidate is a spool, the copy aliases that spool's
-    /// file and the candidate keeps the charge. A baseline-only candidate shares
-    /// the baseline bytes and reserves their length. A revision keeps its identity
-    /// and its existing copy. A new revision reserves before anything is
-    /// replaced, so a refused reservation (EDQUOT) leaves the previous copy in place.
-    fn retain_draft(
-        &mut self,
-        revision: u64,
-        diagnostic: SafeDiagnostic,
-    ) -> Result<(), EditDraftError> {
-        if let Some(previous) = self.retained_invalid.as_mut()
-            && previous.draft.revision == revision
-        {
-            previous.draft.baseline = self.baseline.pin.clone();
-            previous.draft.diagnostic = diagnostic;
-            return Ok(());
-        }
-        let replacement = Arc::new(self.candidate_snapshot()?);
-        let live = self.candidate.is_some();
-        let charge = if live {
-            QuotaCharge::empty(&self.quota)
-        } else {
-            QuotaCharge::reserve(&self.quota, replacement.len())?
-        };
-        let id = *Uuid::new_v4().as_bytes();
-        self.retained_invalid = Some(RetainedRejection {
-            charge,
-            live,
-            draft: RetainedInvalidDraft {
-                id,
-                baseline: self.baseline.pin.clone(),
-                revision,
-                replacement,
-                diagnostic,
-            },
-        });
-        Ok(())
-    }
-
-    /// Whether the retained copy aliases the live candidate's spool file.
-    fn retained_is_live(&self) -> bool {
-        self.retained_invalid
-            .as_ref()
-            .is_some_and(|retained| retained.live)
-    }
-
-    /// Moves the retained copy off the candidate spool before the spool changes.
-    /// The old spool's file and its charge move to the retained copy, and the
-    /// candidate continues on a copy of those bytes. A refused copy (EDQUOT)
-    /// changes nothing.
-    fn unalias_retained(&mut self, storage: &DraftStorage) -> Result<(), EditDraftError> {
-        let copy = DraftSpool::from_baseline(&self.candidate_snapshot()?, storage)?;
-        let mut previous = self
-            .candidate
-            .replace(copy)
-            .ok_or(EditDraftError::BackingIo)?;
-        if let Some(retained) = self.retained_invalid.as_mut() {
-            retained.charge.absorb(&mut previous.charge);
-            retained.live = false;
-        }
-        Ok(())
-    }
-
-    /// Drops the candidate spool. A retained copy that aliases it takes over the
-    /// spool's charge, so the bytes stay charged while they are retained.
-    fn drop_candidate(&mut self) {
-        if let Some(mut spool) = self.candidate.take()
-            && let Some(retained) = self.retained_invalid.as_mut()
-            && retained.live
-        {
-            retained.charge.absorb(&mut spool.charge);
-            retained.live = false;
-        }
-    }
-}
-
-/// Aggregate byte budget shared by every open EDIT-1 candidate spool.
-#[derive(Debug)]
-pub struct DraftQuota {
-    limit: u64,
-    used: AtomicU64,
-}
-
-impl DraftQuota {
-    pub fn new(limit: u64) -> Self {
-        Self {
-            limit,
-            used: AtomicU64::new(0),
-        }
-    }
-
-    fn reserve(&self, bytes: u64) -> Result<(), EditDraftError> {
-        let mut current = self.used.load(Ordering::Acquire);
-        loop {
-            let next = current
-                .checked_add(bytes)
-                .filter(|next| *next <= self.limit)
-                .ok_or(EditDraftError::QuotaExceeded)?;
-            match self.used.compare_exchange_weak(
-                current,
-                next,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => return Ok(()),
-                Err(observed) => current = observed,
-            }
-        }
-    }
-
-    fn release(&self, bytes: u64) {
-        // Saturating: a release that exceeds the charged total must not wrap the
-        // aggregate budget, which would admit reservations past the limit.
-        let _ = self
-            .used
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
-                Some(used.saturating_sub(bytes))
-            });
-    }
-}
-
-/// Process-wide default budget for [`EditDraft::open`]. The spec names an
-/// aggregate draft quota without a value; this bound is conservative and is
-/// flagged for review.
-const DEFAULT_DRAFT_QUOTA_BYTES: u64 = 1 << 30;
-
-static DEFAULT_DRAFT_QUOTA: LazyLock<Arc<DraftQuota>> =
-    LazyLock::new(|| Arc::new(DraftQuota::new(DEFAULT_DRAFT_QUOTA_BYTES)));
-
-/// The process-wide default aggregate draft quota that
-/// [`VfsRepositoryCache::in_runtime_root`] charges when no budget is supplied.
-pub fn default_draft_quota() -> Arc<DraftQuota> {
-    Arc::clone(&DEFAULT_DRAFT_QUOTA)
-}
-
-/// Where EDIT-1 candidate spools are created and which aggregate quota charges
-/// them. Production routes through the runtime root's private draft directory.
-#[derive(Clone)]
-pub struct DraftStorage {
-    directory: Arc<Path>,
-    quota: Arc<DraftQuota>,
-}
-
-impl DraftStorage {
-    /// Spools in the process temp directory under the process-wide default
-    /// quota. Used by repository views that have no runtime root.
-    pub fn with_default_quota() -> Self {
-        Self::new(&std::env::temp_dir(), Arc::clone(&DEFAULT_DRAFT_QUOTA))
-    }
-
-    /// Spools in `directory`, charged to `quota`.
-    pub fn new(directory: &Path, quota: Arc<DraftQuota>) -> Self {
-        Self {
-            directory: Arc::from(directory),
-            quota,
-        }
-    }
-
-    /// The aggregate quota that charges this storage's spools.
-    pub fn quota(&self) -> Arc<DraftQuota> {
-        Arc::clone(&self.quota)
-    }
-
-    /// Creates or reuses the private spool directory under the runtime root.
-    /// A pre-existing path is accepted only if it is a real directory (not a
-    /// symlink) owned by the same user this process creates files as; stale
-    /// spool files left by an earlier crash are removed.
-    fn in_runtime_root(root: &Path, quota: Arc<DraftQuota>) -> io::Result<Self> {
-        use std::os::unix::fs::MetadataExt as _;
-        let directory = root.join(DRAFT_SPOOL_DIRECTORY);
-        match fs::DirBuilder::new().mode(0o700).create(&directory) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error),
-        }
-        let metadata = fs::symlink_metadata(&directory)?;
-        if !metadata.file_type().is_dir() {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "draft spool path is not a real directory",
-            ));
-        }
-        let probe = directory.join(format!("orna-probe-{}", Uuid::new_v4().simple()));
-        let probe_file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&probe)?;
-        let probe_owner = probe_file.metadata()?.uid();
-        drop(probe_file);
-        fs::remove_file(&probe)?;
-        if metadata.uid() != probe_owner {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "draft spool directory is owned by another user",
-            ));
-        }
-        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
-        for entry in fs::read_dir(&directory)? {
-            let entry = entry?;
-            let stale = entry
-                .file_name()
-                .to_str()
-                .is_some_and(|name| name.starts_with("orna-draft-"));
-            if stale && entry.file_type()?.is_file() {
-                match fs::remove_file(entry.path()) {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error),
-                }
-            }
-        }
-        Ok(Self::new(&directory, quota))
-    }
-}
-
-/// Subdirectory of the runtime root that holds private EDIT-1 candidate spools.
-const DRAFT_SPOOL_DIRECTORY: &str = "vfs-draft-spool-v1";
-
-/// Largest slice of a candidate that a live-mount read, copy or digest holds in
-/// memory at once. Candidates stream through this bound, so memory does not
-/// grow with candidate size.
-pub const CANDIDATE_CHUNK_BYTES: usize = 1 << 20;
-
-/// Logical bytes of one EDIT-1 candidate, held in an unlinked private file in
-/// the storage directory. Holes are sparse and cost no RAM; every logical byte
-/// is charged to the quota until the spool drops.
-struct DraftSpool {
-    file: fs::File,
-    len: u64,
-    charge: QuotaCharge,
-}
-
-impl DraftSpool {
-    fn create(storage: &DraftStorage) -> Result<Self, EditDraftError> {
-        let directory = &storage.directory;
-        for _ in 0..8 {
-            let path = directory.join(format!("orna-draft-{}", Uuid::new_v4().simple()));
-            let mut options = fs::OpenOptions::new();
-            options.read(true).write(true).create_new(true).mode(0o600);
-            match options.open(&path) {
-                Ok(file) => {
-                    // Unlink at once so the spool lives only through this handle.
-                    fs::remove_file(&path).map_err(|_| EditDraftError::BackingIo)?;
-                    return Ok(Self {
-                        file,
-                        len: 0,
-                        charge: QuotaCharge::empty(&storage.quota),
-                    });
-                }
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-                Err(_) => return Err(EditDraftError::BackingIo),
-            }
-        }
-        Err(EditDraftError::BackingIo)
-    }
-
-    fn from_baseline(
-        bytes: &CandidateSnapshot,
-        storage: &DraftStorage,
-    ) -> Result<Self, EditDraftError> {
-        let mut spool = Self::create(storage)?;
-        spool.set_len(bytes.len())?;
-        let mut reader = bytes.reader();
-        let chunk = usize::try_from(bytes.len())
-            .map_or(CANDIDATE_CHUNK_BYTES, |len| len.min(CANDIDATE_CHUNK_BYTES));
-        let mut buffer = vec![0; chunk];
-        let mut offset = 0_u64;
-        loop {
-            let count =
-                io::Read::read(&mut reader, &mut buffer).map_err(|_| EditDraftError::BackingIo)?;
-            if count == 0 {
-                return Ok(spool);
-            }
-            spool
-                .file
-                .write_all_at(&buffer[..count], offset)
-                .map_err(|_| EditDraftError::BackingIo)?;
-            offset += count as u64;
-        }
-    }
-
-    /// Grows (sparse, zero-filled) or shrinks the spool to `length`, moving the
-    /// quota charge with it. A growth that the quota refuses changes nothing.
-    fn set_len(&mut self, length: u64) -> Result<(), EditDraftError> {
-        if length > self.len {
-            let grow = length - self.len;
-            self.charge.grow(grow)?;
-            if self.file.set_len(length).is_err() {
-                self.charge.shrink(grow);
-                return Err(EditDraftError::BackingIo);
-            }
-        } else if length < self.len {
-            self.file
-                .set_len(length)
-                .map_err(|_| EditDraftError::BackingIo)?;
-            self.charge.shrink(self.len - length);
-        }
-        self.len = length;
-        Ok(())
-    }
-
-    fn write_at(&mut self, offset: u64, bytes: &[u8]) -> Result<(), EditDraftError> {
-        let length = u64::try_from(bytes.len()).map_err(|_| EditDraftError::OffsetOverflow)?;
-        let end = offset
-            .checked_add(length)
-            .ok_or(EditDraftError::OffsetOverflow)?;
-        self.set_len(self.len.max(end))?;
-        self.file
-            .write_all_at(bytes, offset)
-            .map_err(|_| EditDraftError::BackingIo)
-    }
-
-    fn read_all(&self) -> io::Result<Arc<[u8]>> {
-        let length = usize::try_from(self.len).map_err(|_| io::Error::other("draft too large"))?;
-        // One allocation: the zeroed buffer is read in place, so no intermediate `Vec` is copied
-        // into a second `Arc` buffer.
-        let zeroed = Arc::<[u8]>::new_zeroed_slice(length);
-        // SAFETY: every byte of the buffer is zero, which is a valid `u8`, so it is initialised.
-        let mut bytes = unsafe { zeroed.assume_init() };
-        let buffer = Arc::get_mut(&mut bytes).expect("a fresh Arc is unique");
-        self.file.read_exact_at(buffer, 0)?;
-        Ok(bytes)
-    }
-
-    /// Reads `[offset, offset + length)` clamped to the spool length. Holds at
-    /// most `length` bytes.
-    fn read_range(&self, offset: u64, length: usize) -> io::Result<Vec<u8>> {
-        let end = offset.saturating_add(length as u64).min(self.len);
-        if offset >= end {
-            return Ok(Vec::new());
-        }
-        let size =
-            usize::try_from(end - offset).map_err(|_| io::Error::other("range too large"))?;
-        let mut bytes = vec![0; size];
-        self.file.read_exact_at(&mut bytes, offset)?;
-        Ok(bytes)
-    }
-}
-
-/// A read-only, ranged view of one candidate revision, valid for the fsync
-/// callback that receives it. It holds a private handle on the spool or a
-/// share of the baseline bytes, never a copy of the candidate, so a consumer
-/// streams it through [`CANDIDATE_CHUNK_BYTES`]-sized reads.
-pub struct CandidateSnapshot {
-    len: u64,
-    source: CandidateSource,
-}
-
-enum CandidateSource {
-    Spool(fs::File),
-    Baseline(Arc<[u8]>),
-}
-
-impl From<Arc<[u8]>> for CandidateSnapshot {
-    fn from(bytes: Arc<[u8]>) -> Self {
-        Self {
-            len: bytes.len() as u64,
-            source: CandidateSource::Baseline(bytes),
-        }
-    }
-}
-
-impl CandidateSnapshot {
-    /// The candidate's length in bytes.
-    pub fn len(&self) -> u64 {
-        self.len
-    }
-
-    /// Whether the candidate has no bytes.
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    /// Another view of the same candidate. A spool gets a duplicate handle on
-    /// its private file and a baseline shares its bytes; no candidate bytes
-    /// are copied.
-    pub fn duplicate(&self) -> io::Result<Self> {
-        let source = match &self.source {
-            CandidateSource::Spool(file) => CandidateSource::Spool(file.try_clone()?),
-            CandidateSource::Baseline(bytes) => CandidateSource::Baseline(Arc::clone(bytes)),
-        };
-        Ok(Self {
-            len: self.len,
-            source,
-        })
-    }
-
-    /// Materialises the whole candidate in one allocation. Only retention and
-    /// whole-value activation need it; streaming consumers use
-    /// [`Self::reader`] or [`Self::read_range`].
-    pub fn to_arc(&self) -> io::Result<Arc<[u8]>> {
-        let length =
-            usize::try_from(self.len).map_err(|_| io::Error::other("candidate too large"))?;
-        // The zeroed buffer is read in place, so no intermediate copy is made.
-        let zeroed = Arc::<[u8]>::new_zeroed_slice(length);
-        // SAFETY: every byte of the buffer is zero, which is a valid `u8`, so it is initialised.
-        let mut bytes = unsafe { zeroed.assume_init() };
-        let buffer = Arc::get_mut(&mut bytes).expect("a fresh Arc is unique");
-        self.read_into(0, buffer)?;
-        Ok(bytes)
-    }
-
-    /// Reads `[offset, offset + length)` clamped to the candidate length. Holds
-    /// at most `length` bytes.
-    pub fn read_range(&self, offset: u64, length: usize) -> io::Result<Vec<u8>> {
-        let end = offset.saturating_add(length as u64).min(self.len);
-        if offset >= end {
-            return Ok(Vec::new());
-        }
-        let size =
-            usize::try_from(end - offset).map_err(|_| io::Error::other("range too large"))?;
-        let mut bytes = vec![0; size];
-        self.read_into(offset, &mut bytes)?;
-        Ok(bytes)
-    }
-
-    /// A sequential reader over the whole candidate. Each call holds at most
-    /// [`CANDIDATE_CHUNK_BYTES`] of it, so streaming never copies the candidate.
-    pub fn reader(&self) -> CandidateReader<'_> {
-        CandidateReader {
-            snapshot: self,
-            offset: 0,
-        }
-    }
-
-    /// Fills `buffer` from `offset`; the range must lie within the candidate.
-    fn read_into(&self, offset: u64, buffer: &mut [u8]) -> io::Result<()> {
-        match &self.source {
-            CandidateSource::Spool(file) => file.read_exact_at(buffer, offset),
-            CandidateSource::Baseline(source) => {
-                let start =
-                    usize::try_from(offset).map_err(|_| io::Error::other("range too large"))?;
-                buffer.copy_from_slice(&source[start..start + buffer.len()]);
-                Ok(())
-            }
-        }
-    }
-}
-
-/// Sequential [`io::Read`] over a [`CandidateSnapshot`], one bounded chunk per call.
-pub struct CandidateReader<'a> {
-    snapshot: &'a CandidateSnapshot,
-    offset: u64,
-}
-
-impl io::Read for CandidateReader<'_> {
-    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        let remaining =
-            usize::try_from(self.snapshot.len.saturating_sub(self.offset)).unwrap_or(usize::MAX);
-        let size = buffer.len().min(CANDIDATE_CHUNK_BYTES).min(remaining);
-        self.snapshot.read_into(self.offset, &mut buffer[..size])?;
-        self.offset += size as u64;
-        Ok(size)
-    }
-}
-
-/// A private EDIT-1 replacement draft. Writes land in a disk-backed spool
-/// charged to a shared quota; fsync serializes against writes and invokes the
-/// caller's validated table activation path. Dropping or releasing the draft
-/// never accepts it.
-pub struct EditDraft<S> {
-    state: Mutex<DraftState<S>>,
-    operation: Mutex<()>,
-    max_file_bytes: usize,
-    storage: DraftStorage,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum EditDraftError {
-    FileTooLarge,
-    OffsetOverflow,
-    RevisionExhausted,
-    AlreadyApplied,
-    /// The aggregate draft quota cannot hold the requested bytes.
-    QuotaExceeded,
-    /// The private candidate spool could not be created, read, or written.
-    BackingIo,
-}
-
-struct ManagedFileState<S> {
-    image: Arc<VfsFileSnapshot<S>>,
-    /// Set by an accepted unlink. Once set, no new open or replacement can
-    /// observe or change this destination; existing handles keep their pins.
-    unlinked: bool,
 }
 
 /// Stat of one managed destination's accepted image, from [`ManagedFile::stat`].
@@ -1381,14 +698,16 @@ pub struct ManagedFile<S> {
 
 impl<S> ManagedFile<S> {
     pub async fn open_read(&self) -> SnapshotReadHandle<S> {
-        SnapshotReadHandle::open(Arc::clone(&self.state.lock().await.image))
+        SnapshotReadHandle::open(Arc::clone(self.state.lock().await.image()))
     }
 
     /// Opens the destination as it currently exists. Returns `None` after an
     /// accepted unlink, so a new open can never see the removed file's bytes.
     pub async fn open_current(&self) -> Option<SnapshotReadHandle<S>> {
         let state = self.state.lock().await;
-        (!state.unlinked).then(|| SnapshotReadHandle::open(Arc::clone(&state.image)))
+        state
+            .live_image()
+            .map(|image| SnapshotReadHandle::open(Arc::clone(image)))
     }
 
     /// Returns the repository-wide invalidation generation.
@@ -1403,10 +722,8 @@ impl<S> ManagedFile<S> {
     pub async fn stat(&self) -> Option<ManagedFileStat<S>> {
         let (size, pin) = {
             let state = self.state.lock().await;
-            if state.unlinked {
-                return None;
-            }
-            (state.image.len(), state.image.pin().clone_pin())
+            let image = state.live_image()?;
+            (image.len(), image.pin().clone_pin())
         };
         Some(ManagedFileStat {
             size,
@@ -1421,7 +738,7 @@ impl<S> ManagedFile<S> {
         self: &Arc<Self>,
         max_file_bytes: usize,
     ) -> TemporarySave<S> {
-        let baseline = Arc::clone(&self.state.lock().await.image);
+        let baseline = Arc::clone(self.state.lock().await.image());
         let draft = Arc::new(EditDraft::open(
             Arc::clone(&baseline),
             max_file_bytes,
@@ -1439,8 +756,7 @@ impl<S> ManagedFile<S> {
             operation: Mutex::new(()),
             state: Mutex::new(TemporarySaveState {
                 draft,
-                synced_revision: None,
-                applied: None,
+                sync: ScratchSync::Unsaved,
             }),
         }
     }
@@ -1455,7 +771,7 @@ impl<S> ManagedFile<S> {
         self: &Arc<Self>,
         max_file_bytes: usize,
     ) -> TemporarySave<S> {
-        let baseline = Arc::clone(&self.state.lock().await.image);
+        let baseline = Arc::clone(self.state.lock().await.image());
         TemporarySave {
             target: Arc::clone(self),
             baseline: Arc::clone(&baseline),
@@ -1466,8 +782,7 @@ impl<S> ManagedFile<S> {
                     max_file_bytes,
                     self.draft_storage.clone(),
                 )),
-                synced_revision: None,
-                applied: None,
+                sync: ScratchSync::Unsaved,
             }),
         }
     }
@@ -1493,13 +808,13 @@ impl<S> ManagedFile<S> {
         let mut destination = self.state.lock().await;
         let _scratch_operation = scratch.operation.lock().await;
         let mut scratch_state = scratch.state.lock().await;
-        if let Some((generation, handle)) = &scratch_state.applied {
+        if let ScratchSync::Applied { generation, handle } = &scratch_state.sync {
             return Ok(TemporaryRenameOutcome::Applied {
                 generation: *generation,
                 handle: handle.clone(),
             });
         }
-        if destination.unlinked || !Arc::ptr_eq(&destination.image, &scratch.baseline) {
+        if destination.is_unlinked() || !Arc::ptr_eq(destination.image(), &scratch.baseline) {
             let diagnostic = stale_baseline_diagnostic();
             let mut draft = scratch_state.draft.state.lock().await;
             let revision = draft.revision;
@@ -1529,10 +844,15 @@ impl<S> ManagedFile<S> {
                         generation: next_generation,
                     },
                 ));
-                destination.image = Arc::clone(&image);
+                *destination = ManagedFileState::Live {
+                    image: Arc::clone(&image),
+                };
                 *cache_generation = next_generation;
                 let handle = SnapshotReadHandle::open(image);
-                scratch_state.applied = Some((next_generation, handle.clone()));
+                scratch_state.sync = ScratchSync::Applied {
+                    generation: next_generation,
+                    handle: handle.clone(),
+                };
                 Ok(TemporaryRenameOutcome::Applied {
                     generation: next_generation,
                     handle,
@@ -1545,7 +865,7 @@ impl<S> ManagedFile<S> {
     /// Opens a private EDIT-1 draft over this destination's current image. The
     /// draft commits only through [`ManagedFile::commit_draft_with`].
     pub async fn open_draft(self: &Arc<Self>, max_file_bytes: usize) -> EditDraft<S> {
-        let baseline = Arc::clone(&self.state.lock().await.image);
+        let baseline = Arc::clone(self.state.lock().await.image());
         EditDraft::open(baseline, max_file_bytes, self.draft_storage.clone())
     }
 
@@ -1565,7 +885,7 @@ impl<S> ManagedFile<S> {
         self: &Arc<Self>,
         max_file_bytes: usize,
     ) -> EditReadBaseline<S> {
-        let image = Arc::clone(&self.state.lock().await.image);
+        let image = Arc::clone(self.state.lock().await.image());
         EditReadBaseline {
             image: Arc::clone(&image),
             draft: EditDraft::open(image, max_file_bytes, self.draft_storage.clone()),
@@ -1601,7 +921,7 @@ impl<S> ManagedFile<S> {
         let _operation = self.operation.lock().await;
         let mut destination = self.state.lock().await;
         let reads_baseline =
-            !destination.unlinked && Arc::ptr_eq(&destination.image, &baseline.image) && {
+            !destination.is_unlinked() && Arc::ptr_eq(destination.image(), &baseline.image) && {
                 let draft_state = baseline.draft.state.lock().await;
                 Arc::ptr_eq(&draft_state.baseline, &baseline.image)
             };
@@ -1630,7 +950,9 @@ impl<S> ManagedFile<S> {
                     },
                 ));
                 baseline.draft.rebase_accepted(Arc::clone(&image)).await;
-                destination.image = Arc::clone(&image);
+                *destination = ManagedFileState::Live {
+                    image: Arc::clone(&image),
+                };
                 *cache_generation = next_generation;
                 Ok(TemporaryRenameOutcome::Applied {
                     generation: next_generation,
@@ -1661,7 +983,8 @@ impl<S> ManagedFile<S> {
         let (based_on_current, revision) = {
             let draft_state = draft.state.lock().await;
             (
-                !destination.unlinked && Arc::ptr_eq(&destination.image, &draft_state.baseline),
+                !destination.is_unlinked()
+                    && Arc::ptr_eq(destination.image(), &draft_state.baseline),
                 draft_state.revision,
             )
         };
@@ -1697,7 +1020,9 @@ impl<S> ManagedFile<S> {
                     },
                 ));
                 draft.rebase_accepted(Arc::clone(&image)).await;
-                destination.image = Arc::clone(&image);
+                *destination = ManagedFileState::Live {
+                    image: Arc::clone(&image),
+                };
                 *cache_generation = next_generation;
                 Ok(TemporaryRenameOutcome::Applied {
                     generation: next_generation,
@@ -1723,7 +1048,7 @@ impl<S> ManagedFile<S> {
     {
         let _operation = self.operation.lock().await;
         let mut destination = self.state.lock().await;
-        if destination.unlinked {
+        if destination.is_unlinked() {
             return Ok(UnlinkOutcome::AlreadyUnlinked);
         }
         let mut cache_generation = self.cache_epoch.generation.lock().await;
@@ -1731,7 +1056,7 @@ impl<S> ManagedFile<S> {
             .checked_add(1)
             .ok_or(TemporaryRenameError::GenerationExhausted)?;
         let candidate = ActivationCandidate {
-            baseline: destination.image.pin.clone_pin(),
+            baseline: destination.image().pin.clone_pin(),
             revision: 0,
             replacement: Arc::from(&[][..]),
             removal: true,
@@ -1741,7 +1066,7 @@ impl<S> ManagedFile<S> {
             .map_err(TemporaryRenameError::Activation)?
         {
             ActivationDecision::Accepted(_) => {
-                destination.unlinked = true;
+                destination.mark_unlinked();
                 *cache_generation = next_generation;
                 Ok(UnlinkOutcome::Applied {
                     generation: next_generation,
@@ -1762,8 +1087,27 @@ pub enum UnlinkOutcome {
 
 struct TemporarySaveState<S> {
     draft: Arc<EditDraft<S>>,
-    synced_revision: Option<u64>,
-    applied: Option<(u64, SnapshotReadHandle<S>)>,
+    sync: ScratchSync<S>,
+}
+
+/// How far a temporary file's scratch sequence has advanced.
+pub(super) enum ScratchSync<S> {
+    /// No scratch sequence has been persisted yet.
+    Unsaved,
+    /// `fsync` persisted one draft revision as scratch.
+    Synced { revision: u64 },
+    /// A rename admitted the scratch file. Later writes are refused, and a
+    /// repeated save returns this recorded outcome.
+    Applied {
+        generation: u64,
+        handle: SnapshotReadHandle<S>,
+    },
+}
+
+impl<S> TemporarySaveState<S> {
+    fn is_applied(&self) -> bool {
+        matches!(&self.sync, ScratchSync::Applied { .. })
+    }
 }
 
 /// A temp-file save tied to the managed destination that admitted its
@@ -1780,7 +1124,7 @@ impl<S> TemporarySave<S> {
     pub async fn write_at(&self, offset: u64, bytes: &[u8]) -> Result<(), EditDraftError> {
         let _operation = self.operation.lock().await;
         let state = self.state.lock().await;
-        if state.applied.is_some() {
+        if state.is_applied() {
             return Err(EditDraftError::AlreadyApplied);
         }
         state.draft.write_at(offset, bytes).await
@@ -1789,7 +1133,7 @@ impl<S> TemporarySave<S> {
     pub async fn truncate(&self, length: u64) -> Result<(), EditDraftError> {
         let _operation = self.operation.lock().await;
         let state = self.state.lock().await;
-        if state.applied.is_some() {
+        if state.is_applied() {
             return Err(EditDraftError::AlreadyApplied);
         }
         state.draft.truncate(length).await
@@ -1838,12 +1182,14 @@ impl<S> TemporarySave<S> {
         let _operation = self.operation.lock().await;
         let (revision, snapshot) = {
             let state = self.state.lock().await;
-            if let Some((revision, _)) = &state.applied {
-                return Ok(*revision);
-            }
+            let synced = match &state.sync {
+                ScratchSync::Applied { generation, .. } => return Ok(*generation),
+                ScratchSync::Synced { revision } => Some(*revision),
+                ScratchSync::Unsaved => None,
+            };
             let draft = state.draft.state.lock().await;
             let revision = draft.revision;
-            if state.synced_revision == Some(revision) {
+            if synced == Some(revision) {
                 return Ok(revision);
             }
             let snapshot = draft.candidate_snapshot().map_err(FsyncFailure::Backing)?;
@@ -1852,46 +1198,8 @@ impl<S> TemporarySave<S> {
         persist(revision, snapshot)
             .await
             .map_err(FsyncFailure::Activation)?;
-        self.state.lock().await.synced_revision = Some(revision);
+        self.state.lock().await.sync = ScratchSync::Synced { revision };
         Ok(revision)
-    }
-}
-
-/// A retained `orna edit` read-to-save baseline.
-///
-/// The image is the exact destination version the editor read at capture time,
-/// kept readable for the whole edit, and the draft holds this edit's private
-/// bytes over it. [`ManagedFile::save_strong_with`] is its only accepting route:
-/// a save proves the retained image is still the accepted version before the
-/// candidate reaches activation. A superseded read still reads its own version,
-/// because this type owns the retained image — a later accepted replacement
-/// only ends what new opens observe, never what this handle already holds.
-pub struct EditReadBaseline<S> {
-    image: Arc<VfsFileSnapshot<S>>,
-    draft: EditDraft<S>,
-    epoch: SharedCacheEpoch,
-}
-
-impl<S> EditReadBaseline<S> {
-    /// Opens the retained read version. This reads the exact image captured at
-    /// edit start, never the destination's live image.
-    pub fn baseline(&self) -> SnapshotReadHandle<S> {
-        SnapshotReadHandle::open(Arc::clone(&self.image))
-    }
-
-    /// This edit's private draft over the retained read version.
-    pub fn draft(&self) -> &EditDraft<S> {
-        &self.draft
-    }
-}
-
-/// The safe diagnostic a superseded read-to-save baseline reports. It carries
-/// no repository detail: the retained draft and its bytes are what the caller
-/// keeps, and the code is the profile's `sys.vfs.stale_edit` refusal.
-fn stale_baseline_diagnostic() -> SafeDiagnostic {
-    SafeDiagnostic {
-        code: DiagnosticCode::StaleBaseline,
-        class: DiagnosticClass::Transient,
     }
 }
 
@@ -1903,27 +1211,6 @@ pub const fn vfs_stale_failure_code(code: DiagnosticCode) -> Option<&'static str
         DiagnosticCode::StaleBaseline => Some("sys.vfs.stale_edit"),
         _ => None,
     }
-}
-
-/// Keeps a refused draft's bytes and its stable diagnostic, so a rejected
-/// strong save is recoverable and is never silently dropped.
-///
-/// This records the rejection through the draft's own retention, so a strong
-/// save that is refused because its read baseline went stale keeps the same
-/// retained-draft identity rules as every other rejection (ORNA-VFS-009): the
-/// identity is issued once per rejected revision and reused while that
-/// revision stays unchanged.
-///
-/// [`DraftState::retain_rejection`] is the one authority for a retained
-/// rejection, so this route and the direct draft routes cannot disagree about
-/// a draft's retained identity.
-async fn retain_rejected_draft<S>(
-    draft: &EditDraft<S>,
-    diagnostic: SafeDiagnostic,
-) -> Result<(), EditDraftError> {
-    let mut draft_state = draft.state.lock().await;
-    let revision = draft_state.revision;
-    draft_state.retain_rejection(revision, diagnostic)
 }
 
 pub enum TemporaryRenameOutcome<S> {
@@ -1964,675 +1251,6 @@ fn rename_failure<E>(failure: FsyncFailure<E>) -> TemporaryRenameError<E> {
         FsyncFailure::Backing(error) => TemporaryRenameError::Backing(error),
         FsyncFailure::Activation(error) => TemporaryRenameError::Activation(error),
     }
-}
-
-impl<S> EditDraft<S> {
-    /// Opens a draft whose candidate spool is created under `storage`.
-    pub fn open(
-        image: Arc<VfsFileSnapshot<S>>,
-        max_file_bytes: usize,
-        storage: DraftStorage,
-    ) -> Self {
-        Self {
-            state: Mutex::new(DraftState {
-                quota: Arc::clone(&storage.quota),
-                baseline: image,
-                candidate: None,
-                revision: 0,
-                last_rejection: None,
-                last_accepted: None,
-                retained_invalid: None,
-            }),
-            operation: Mutex::new(()),
-            max_file_bytes,
-            storage,
-        }
-    }
-
-    pub async fn baseline(&self) -> SnapshotReadHandle<S> {
-        SnapshotReadHandle::open(Arc::clone(&self.state.lock().await.baseline))
-    }
-
-    /// Re-anchors an accepted draft on the projected image its destination now
-    /// holds, so the next commit's CAS compares against the live image.
-    async fn rebase_accepted(&self, image: Arc<VfsFileSnapshot<S>>) {
-        self.state.lock().await.baseline = image;
-    }
-
-    /// Applies a positional write, zero-filling any gap in the private copy.
-    pub async fn write_at(&self, offset: u64, bytes: &[u8]) -> Result<(), EditDraftError> {
-        if bytes.is_empty() {
-            return Ok(());
-        }
-        let length = u64::try_from(bytes.len()).map_err(|_| EditDraftError::OffsetOverflow)?;
-        let end = offset
-            .checked_add(length)
-            .ok_or(EditDraftError::OffsetOverflow)?;
-
-        let _operation = self.operation.lock().await;
-        let mut guard = self.state.lock().await;
-        let state = &mut *guard;
-        let max_file_bytes = u64::try_from(self.max_file_bytes).unwrap_or(u64::MAX);
-        if end > state.candidate_len() && end > max_file_bytes {
-            return Err(EditDraftError::FileTooLarge);
-        }
-        let next_revision = state
-            .revision
-            .checked_add(1)
-            .ok_or(EditDraftError::RevisionExhausted)?;
-        // A quota or offset refusal happens before any byte moves, so it
-        // changes nothing and keeps the revision. A backing failure can leave
-        // a partial pwrite, so it advances the revision rather than vouch for
-        // the old contents.
-        let result = state
-            .ensure_spool(&self.storage)
-            .and_then(|spool| spool.write_at(offset, bytes));
-        if !matches!(
-            result,
-            Err(EditDraftError::QuotaExceeded | EditDraftError::OffsetOverflow)
-        ) {
-            state.revision = next_revision;
-        }
-        result
-    }
-
-    /// Changes the candidate length. Extending creates zero-filled holes.
-    pub async fn truncate(&self, length: u64) -> Result<(), EditDraftError> {
-        let _operation = self.operation.lock().await;
-        let mut guard = self.state.lock().await;
-        let state = &mut *guard;
-        let max_file_bytes = u64::try_from(self.max_file_bytes).unwrap_or(u64::MAX);
-        let current_len = state.candidate_len();
-        if length > current_len && length > max_file_bytes {
-            return Err(EditDraftError::FileTooLarge);
-        }
-        if current_len == length {
-            return Ok(());
-        }
-        let next_revision = state
-            .revision
-            .checked_add(1)
-            .ok_or(EditDraftError::RevisionExhausted)?;
-        let result = state
-            .ensure_spool(&self.storage)
-            .and_then(|spool| spool.set_len(length));
-        if result.is_ok() {
-            state.revision = next_revision;
-        }
-        result
-    }
-    /// Whole-value copy for commit and activation only, which own the value.
-    /// Live-mount reads, writes and retention use [`Self::read_range`].
-    pub async fn candidate_bytes(&self) -> Result<Arc<[u8]>, EditDraftError> {
-        let state = self.state.lock().await;
-        state.candidate_arc()
-    }
-
-    /// A streaming view of the candidate that may be retained past the commit. A
-    /// spool is shared through a duplicate handle, so no candidate bytes are copied.
-    pub async fn candidate_snapshot(&self) -> Result<CandidateSnapshot, EditDraftError> {
-        let state = self.state.lock().await;
-        state.candidate_snapshot()
-    }
-
-    /// The candidate's length in bytes.
-    pub async fn candidate_len(&self) -> u64 {
-        self.state.lock().await.candidate_len()
-    }
-
-    /// Moves the live candidate's quota charge to the caller, which returns
-    /// what is left through [`Self::restore_candidate_charge`]. A baseline-only
-    /// candidate holds no charge, so this returns an empty one.
-    pub async fn take_candidate_charge(&self) -> QuotaCharge {
-        let mut guard = self.state.lock().await;
-        let state = &mut *guard;
-        match state.candidate.as_mut() {
-            Some(spool) => spool.charge.take(),
-            None => QuotaCharge::empty(&state.quota),
-        }
-    }
-
-    /// Returns a charge taken by [`Self::take_candidate_charge`] to the live
-    /// candidate. Bytes still held when no candidate is live are released.
-    pub async fn restore_candidate_charge(&self, mut charge: QuotaCharge) {
-        let mut guard = self.state.lock().await;
-        if let Some(spool) = guard.candidate.as_mut() {
-            spool.charge.absorb(&mut charge);
-        }
-    }
-
-    /// Whether the draft holds submitted candidate bytes. A draft that never
-    /// submitted bytes has nothing for a commit to accept or refuse, the same
-    /// condition `commit_durable_save` tests before it judges staleness.
-    pub async fn has_candidate(&self) -> bool {
-        self.state.lock().await.candidate.is_some()
-    }
-
-    /// Reads `[offset, offset + length)` of the candidate, clamped to its
-    /// length. Live-mount paths pass a chunk-sized `length`, at most
-    /// [`CANDIDATE_CHUNK_BYTES`], so no whole copy is made.
-    pub async fn read_range(&self, offset: u64, length: usize) -> Result<Vec<u8>, EditDraftError> {
-        self.state.lock().await.read_range(offset, length)
-    }
-
-    pub async fn retained_invalid_draft(&self) -> Option<RetainedInvalidDraft<S>> {
-        self.state
-            .lock()
-            .await
-            .retained_invalid
-            .as_ref()
-            .map(|retained| retained.draft.clone())
-    }
-
-    /// Calls the validated activation adapter exactly once for a changed
-    /// revision. A failed callback leaves the draft retryable; a validation
-    /// rejection is cached and retained until the draft changes or is dropped.
-    pub async fn fsync_with<F, Fut, E>(
-        &self,
-        activate: F,
-    ) -> Result<FsyncOutcome<S>, FsyncFailure<E>>
-    where
-        S: Send + Sync + 'static,
-        F: FnOnce(ActivationCandidate<S>) -> Fut,
-        Fut: Future<Output = Result<ActivationDecision<S>, E>>,
-    {
-        let _operation = self.operation.lock().await;
-        let mut state = self.state.lock().await;
-        if state.candidate.is_none() {
-            if let Some((revision, image)) = &state.last_accepted
-                && *revision == state.revision
-            {
-                return Ok(FsyncOutcome::Accepted(SnapshotReadHandle::open(
-                    Arc::clone(image),
-                )));
-            }
-            return Ok(FsyncOutcome::Unchanged(SnapshotReadHandle::open(
-                Arc::clone(&state.baseline),
-            )));
-        }
-        if let Some((revision, diagnostic)) = state.last_rejection
-            && revision == state.revision
-        {
-            return Ok(FsyncOutcome::Rejected(diagnostic));
-        }
-
-        let revision = state.revision;
-        let bytes = state.candidate_arc().map_err(FsyncFailure::Backing)?;
-        let candidate = ActivationCandidate {
-            baseline: state.baseline.pin.clone(),
-            revision,
-            replacement: Arc::clone(&bytes),
-            removal: false,
-        };
-        let decision = activate(candidate)
-            .await
-            .map_err(FsyncFailure::Activation)?;
-        match decision {
-            ActivationDecision::Accepted(pin) => {
-                let image = Arc::new(VfsFileSnapshot::new(pin, bytes));
-                state.drop_candidate();
-                state.baseline = Arc::clone(&image);
-                state.last_rejection = None;
-                state.last_accepted = Some((revision, Arc::clone(&image)));
-                Ok(FsyncOutcome::Accepted(SnapshotReadHandle::open(image)))
-            }
-            ActivationDecision::Rejected(diagnostic) => {
-                state
-                    .retain_rejection(revision, diagnostic)
-                    .map_err(FsyncFailure::Backing)?;
-                Ok(FsyncOutcome::Rejected(diagnostic))
-            }
-        }
-    }
-
-    /// Explicit close path. It drops private state and never invokes activation.
-    pub fn release(self) {}
-}
-
-// ---------------------------------------------------------------------------
-// VFS-1 host namespace projection (ORNA-VFS-001, 002, 004, 016, 017, 018)
-//
-// A row directory addresses database/table/typed key. `data.orna` encodes the
-// stored non-key fields and each stored Blob becomes an escaped sibling file
-// named from its MIME-1 annotation. Nothing here materialises a competing
-// authoritative copy: the projection records which stored field owns each host
-// name, and it renders the row document from the stored field values the owner
-// snapshot already holds.
-// ---------------------------------------------------------------------------
-
-/// Encoded component bound from the VFS-1 profile.
-pub const VFS_MAX_COMPONENT_BYTES: usize = 200;
-/// Repository-relative path bound from the VFS-1 profile.
-pub const VFS_MAX_PATH_BYTES: usize = 1024;
-/// The reserved projected name of the row document.
-pub const VFS_ROW_DOCUMENT: &str = "data.orna";
-
-/// `EAGAIN`: the captured baseline is no longer the accepted row (VFS-011).
-pub const VFS_EAGAIN: i32 = 11;
-/// `EINVAL`: malformed candidate, name, or document (VFS-001, VFS-016).
-pub const VFS_EINVAL: i32 = 22;
-/// `ENOENT`: no projected field or row at that address.
-pub const VFS_ENOENT: i32 = 2;
-/// `EPERM`: authority-refusing path or mutation (VFS-004, VFS-013).
-pub const VFS_EPERM: i32 = 1;
-/// `EOPNOTSUPP`: a VFS-1 unsupported operation (VFS-014).
-pub const VFS_EOPNOTSUPP: i32 = 95;
-/// `EIO`: corrupt or unavailable backing data.
-pub const VFS_EIO: i32 = 5;
-
-/// Why a projected name, a resolved path, or a candidate document was refused.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum VfsPathError {
-    /// Absolute paths, traversal spellings, separators inside one component,
-    /// and any name outside the field's registered projection (VFS-004).
-    OutsideProjection,
-    /// The name does not belong to this row/field namespace (VFS-001).
-    WrongNamespace,
-    /// The encoded component or the whole path exceeds the VFS-1 bound (VFS-016).
-    NameTooLong,
-    /// Two distinct canonical names project to one host name (VFS-016).
-    NameCollision,
-    /// The candidate is not a complete stored non-key-field document (VFS-001).
-    InvalidDocument,
-    /// No stored field or row exists at that address (VFS-001).
-    UnknownRow,
-    /// The operation is unsupported in VFS-1 (VFS-013, VFS-014).
-    Unsupported,
-    /// The write baseline no longer matches the accepted row (VFS-011).
-    StaleBaseline,
-    /// A stored Blob annotation the MIME-1 registry refuses. Stored annotations
-    /// are validated when captured, so this is corrupt backing metadata and no
-    /// host name is guessed for it (EIO).
-    CorruptAnnotation,
-}
-
-impl VfsPathError {
-    /// The exact `errno` required by the VFS-1 profile error table.
-    pub const fn errno(self) -> i32 {
-        match self {
-            Self::OutsideProjection => VFS_EPERM,
-            Self::WrongNamespace | Self::NameTooLong | Self::NameCollision => VFS_EINVAL,
-            Self::InvalidDocument => VFS_EINVAL,
-            Self::UnknownRow => VFS_ENOENT,
-            Self::Unsupported => VFS_EOPNOTSUPP,
-            Self::StaleBaseline => VFS_EAGAIN,
-            Self::CorruptAnnotation => VFS_EIO,
-        }
-    }
-
-    /// The stable Orna cause code kept alongside the host `errno`. Unknown
-    /// rows report `ENOENT` and corrupt stored metadata reports `EIO`, neither
-    /// with an Orna failure code of its own.
-    pub const fn failure_code(self) -> Option<&'static str> {
-        match self {
-            Self::OutsideProjection | Self::Unsupported => Some("sys.vfs.unsupported"),
-            Self::WrongNamespace | Self::NameTooLong | Self::InvalidDocument => {
-                Some("sys.vfs.invalid_document")
-            }
-            Self::NameCollision => Some("sys.vfs.name_collision"),
-            Self::StaleBaseline => Some("sys.vfs.stale_edit"),
-            Self::UnknownRow | Self::CorruptAnnotation => None,
-        }
-    }
-}
-
-/// One addressable projected component.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum VfsComponent {
-    /// A component that spells its canonical typed key/field text directly.
-    Canonical(String),
-    /// A `~key-`/`~field-<digest>` long alias for a canonical name over the
-    /// byte bound. Resolving it needs the snapshot-bound long-name index; the
-    /// digest is verified there against the full retained name (VFS-016).
-    LongAlias { digest: [u8; 32] },
-}
-
-/// The projection namespace a canonical component belongs to. Key and field
-/// components share one host shape but keep distinct alias prefixes, so a key
-/// alias can never resolve as a field name and vice versa (VFS-016).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum VfsNameNamespace {
-    /// One component of a typed table key.
-    Key,
-    /// One stored field path inside a row.
-    Field,
-}
-
-impl VfsNameNamespace {
-    const fn alias_prefix(self) -> &'static str {
-        match self {
-            Self::Key => "~key-",
-            Self::Field => "~field-",
-        }
-    }
-}
-
-/// Projects one Str key component (or a Str-named table or namespace) to its
-/// host component, escaping every byte outside `[A-Za-z0-9._-]` as uppercase
-/// `%HH` and escaping the reserved names, trailing dots and DOS device
-/// basenames that would otherwise alias. A name over the component bound
-/// becomes the deterministic `~key-` alias of its canonical OVB-1 encoding
-/// instead of being dropped or merged (VFS-016).
-///
-/// # Two surfaces, two documents
-///
-/// The mount names rows by `profiles/vfs-1.md:35-45`: `%HH` with uppercase
-/// hex, a literal `%` and `~` always escaped, and `~empty` for the empty key.
-/// A repository *key path* (`tests/path-vectors.json`, ORNA-PATH-001 through
-/// 012) names the same rows by `~hh` with lowercase hex and `~ff` for the empty
-/// component. Those are separate surfaces and neither is the other's alias: in
-/// a mount component `~hh` is a literal `~` followed by hex digits, because the
-/// mount escapes every literal `~`, so a key `~2e` is `%7E2e` and a key `~ff`
-/// is `%7Eff`. Accepting `~hh` here would give one canonical key two host
-/// spellings, the aliasing profiles/vfs-1.md:40-43 forbids for `~empty`.
-/// Work ADR 0122 and `crates/orna-cli/tests/vfs_key_escape_spellings.rs`
-/// record and exercise the split.
-pub fn project_component(text: &str) -> String {
-    project_namespaced(text, VfsNameNamespace::Key, || str_component_digest(text))
-}
-
-/// Projects one typed key component from its canonical key text and its
-/// canonical OVB-1 encoding (for a row key, `TypedKey::canonical_bytes`). The
-/// text decides the spelling; a component over the bound becomes the `~key-`
-/// alias of the encoding's SHA-256, because VFS-1 digests the canonical typed
-/// key component, so the text `1` and the integer 1 never share an alias
-/// (VFS-016).
-pub fn project_key_component(text: &str, canonical_encoding: &[u8]) -> String {
-    project_namespaced(text, VfsNameNamespace::Key, || {
-        Sha256::digest(canonical_encoding).into()
-    })
-}
-
-/// Projects one stored field name to its host component. Field components use
-/// the `~field-` alias prefix for names over the byte bound, so the same long
-/// text in a key and in a field never lands on one host name (VFS-016).
-pub fn project_field_name(text: &str) -> String {
-    project_namespaced(text, VfsNameNamespace::Field, || field_name_digest(text))
-}
-
-/// Projects a generated table directory whose plain name a source path already
-/// occupies. The source path keeps the name; the generated component escapes its
-/// first byte, not the schema name (profiles/vfs-1.md:31-33).
-pub fn project_colliding_table_component(text: &str) -> String {
-    project_namespaced_escaping(text, VfsNameNamespace::Key, true, || {
-        str_component_digest(text)
-    })
-}
-
-fn project_namespaced(
-    text: &str,
-    namespace: VfsNameNamespace,
-    component_digest: impl FnOnce() -> [u8; 32],
-) -> String {
-    project_namespaced_escaping(
-        text,
-        namespace,
-        is_reserved_component(text),
-        component_digest,
-    )
-}
-
-fn project_namespaced_escaping(
-    text: &str,
-    namespace: VfsNameNamespace,
-    force_first: bool,
-    component_digest: impl FnOnce() -> [u8; 32],
-) -> String {
-    if text.is_empty() {
-        return "~empty".to_owned();
-    }
-    // Every byte outside `[A-Za-z0-9._-]` is escaped, `~` and `%` included, so a
-    // spelling under the bound can never claim the alias namespace and always
-    // stays an exact, reversible `%HH` encoding of the canonical text.
-    let out = escape_component_bytes(text.bytes().enumerate(), force_first);
-    if out.len() > VFS_MAX_COMPONENT_BYTES {
-        long_alias(namespace, &component_digest())
-    } else {
-        out
-    }
-}
-
-/// Escapes one canonical component's bytes: every byte outside
-/// `[A-Za-z0-9._-]` becomes uppercase `%HH`, a reserved first byte is escaped,
-/// and trailing dots are escaped so no host spelling ends in `.`.
-fn escape_component_bytes<I>(bytes: I, force_first: bool) -> String
-where
-    I: Iterator<Item = (usize, u8)>,
-{
-    let mut out = String::new();
-    for (index, byte) in bytes {
-        let allowed = byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-');
-        if allowed && !(force_first && index == 0) {
-            out.push(byte as char);
-        } else {
-            out.push_str(&percent_byte(byte));
-        }
-    }
-    let trailing = out.len() - out.trim_end_matches('.').len();
-    if trailing > 0 {
-        let stem = out.len() - trailing;
-        out.truncate(stem);
-        for _ in 0..trailing {
-            out.push_str(&percent_byte(b'.'));
-        }
-    }
-    out
-}
-
-fn percent_byte(byte: u8) -> String {
-    format!("%{byte:02X}")
-}
-
-/// True for the names the profile reserves: `.`, `..`, `.orna`, the row document `data.orna`
-/// (profiles/vfs-1.md:44-50), every Git metadata spelling, and Windows device basenames in any
-/// case with any extension.
-fn is_reserved_component(text: &str) -> bool {
-    if matches!(text, "." | ".." | ".orna" | VFS_ROW_DOCUMENT)
-        || orna_foundation::is_git_metadata_component(text.as_bytes())
-    {
-        return true;
-    }
-    let stem = text
-        .trim_end_matches([' ', '.'])
-        .split('.')
-        .next()
-        .unwrap_or("")
-        .to_ascii_uppercase();
-    if matches!(
-        stem.as_str(),
-        "CON" | "PRN" | "AUX" | "NUL" | "CLOCK$" | "CONIN$" | "CONOUT$"
-    ) {
-        return true;
-    }
-    let bytes = stem.as_bytes();
-    bytes.len() == 4
-        && matches!(stem.get(..3), Some("COM" | "LPT"))
-        && matches!(bytes[3], b'1'..=b'9')
-}
-
-/// `~key-<64 hex SHA-256 of the canonical typed key component>` for keys and
-/// `~field-<the same digest form>` for stored field names (VFS-1, "Row/key
-/// directory mapping"). The digest names the component's canonical OVB-1
-/// encoding, never its host spelling or raw UTF-8 bytes, so one derivation
-/// serves projection and verification and a digest can never name a
-/// component it did not come from (VFS-016).
-fn long_alias(namespace: VfsNameNamespace, digest: &[u8; 32]) -> String {
-    let mut alias = String::with_capacity(namespace.alias_prefix().len() + 64);
-    alias.push_str(namespace.alias_prefix());
-    for byte in digest {
-        alias.push_str(&format!("{byte:02x}"));
-    }
-    alias
-}
-
-/// The SHA-256 of one Str component's canonical OVB-1 encoding: the typed
-/// component a long key or field alias names.
-fn str_component_digest(text: &str) -> [u8; 32] {
-    let encoding = OvbValue::new(Raw::Text(text.to_owned()))
-        .and_then(|value| value.encode())
-        .expect("every Str has a canonical OVB-1 encoding");
-    Sha256::digest(encoding).into()
-}
-
-/// The digest bound into a `~field-` alias for one stored field name: the
-/// SHA-256 of the name's canonical OVB-1 Str encoding. The snapshot-bound
-/// long-name index re-derives it from the full retained name, so a colliding
-/// digest is detected instead of merged (VFS-016).
-pub fn field_name_digest(field: &str) -> [u8; 32] {
-    str_component_digest(field)
-}
-
-/// Projects one stored Blob field name to its sibling content-file name:
-/// escaped field name plus the MIME-1 selected suffix. A field that would spell
-/// the reserved row document keeps its own distinct name (VFS-016).
-///
-/// Stored annotations are canonical MIME-1, so a pair the registry refuses is
-/// corrupt backing metadata. It is reported as `CorruptAnnotation` (EIO)
-/// instead of being projected under a guessed `bin` name (W08-09).
-pub fn project_content_name(
-    field: &str,
-    media_type: &str,
-    suffix: Option<&str>,
-) -> Result<String, VfsPathError> {
-    let annotation = MimeRegistry::mime1()
-        .canonical_annotation(media_type, suffix)
-        .map_err(|_| VfsPathError::CorruptAnnotation)?;
-    let selected = annotation.selected_suffix();
-    // The suffix is part of the projected component, so VFS-016's component
-    // bound covers the whole `field + "." + suffix` spelling rather than the
-    // escaped field base alone. A base that leaves no room for the suffix takes
-    // the same `~field-` digest alias an over-bound field name takes: the alias
-    // is derived from the stored field name, so the full name is still
-    // re-derivable and verified by the long-name index (VFS-016).
-    if project_field_name(field).len() + 1 + selected.len() > VFS_MAX_COMPONENT_BYTES {
-        return Ok(format!(
-            "{}.{}",
-            long_alias(VfsNameNamespace::Field, &field_name_digest(field)),
-            selected
-        ));
-    }
-    let mut name = project_field_name(field);
-    name.push('.');
-    name.push_str(selected);
-    if name == VFS_ROW_DOCUMENT {
-        name.replace_range(..1, &format!("%{:02X}", b'd'));
-    }
-    Ok(name)
-}
-
-/// The projected sibling name of a stored Str projected as text: the escaped
-/// field name plus `.txt`. A field whose name cannot fit the component bound
-/// takes the same digest alias a Blob takes.
-pub fn project_text_name(field: &str) -> Result<String, VfsPathError> {
-    const TEXT_SUFFIX: &str = "txt";
-    if project_field_name(field).len() + 1 + TEXT_SUFFIX.len() > VFS_MAX_COMPONENT_BYTES {
-        return Ok(format!(
-            "{}.{}",
-            long_alias(VfsNameNamespace::Field, &field_name_digest(field)),
-            TEXT_SUFFIX
-        ));
-    }
-    let mut name = project_field_name(field);
-    name.push('.');
-    name.push_str(TEXT_SUFFIX);
-    Ok(name)
-}
-
-/// Whether `suffix` is a hint MIME-1 admits for this media type: a compatible
-/// suffix of a registered type, or any safe suffix for octet-stream and
-/// unregistered types (MIME-1, VFS-012).
-pub fn content_suffix_is_compatible(media_type: &str, suffix: &str) -> bool {
-    classify_content_suffix(media_type, Some(suffix)).is_ok()
-}
-
-/// The canonical stored hint for an editor-selected suffix (MIME-1, VFS-012).
-///
-/// `selected` is the suffix the sibling file now spells; `None` means the
-/// projected preferred suffix. The result is the hint to record, or `None` when
-/// the selection is the field's preferred suffix, which the profile stores as
-/// an absent hint rather than a redundant one. The registry's hint rules
-/// decide: a registered type takes only a compatible suffix, while
-/// octet-stream and unregistered types take any safe suffix.
-///
-/// A rename changes only this hint: it never transcodes the stored bytes,
-/// renames a column, or rekeys the row, and a refused suffix is a malformed
-/// candidate. The caller applies the result through the normal CAS/activation
-/// boundary.
-pub fn classify_content_suffix(
-    media_type: &str,
-    selected: Option<&str>,
-) -> Result<Option<String>, VfsPathError> {
-    let Some(selected) = selected else {
-        return Ok(None);
-    };
-    MimeRegistry::mime1()
-        .canonical_annotation(media_type, Some(selected))
-        .map(|annotation| annotation.suffix().map(str::to_owned))
-        .map_err(|_| VfsPathError::InvalidDocument)
-}
-
-/// Decodes one projected component back to its canonical text, refusing any
-/// spelling that is not exactly what the projection would produce. Aliases
-/// therefore cannot target a different row or field.
-///
-/// `~empty` is the mount's one empty-key spelling; the repository key path's
-/// `~ff` and every other `~hh` spelling are refused (see
-/// [`project_component`] and work ADR 0122).
-pub fn unproject_component(component: &str) -> Result<VfsComponent, VfsPathError> {
-    if let Some(hex) = component.strip_prefix("~key-") {
-        if hex.len() == 64
-            && hex
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        {
-            let mut digest = [0u8; 32];
-            for (index, slot) in digest.iter_mut().enumerate() {
-                *slot = u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16)
-                    .map_err(|_| VfsPathError::WrongNamespace)?;
-            }
-            return Ok(VfsComponent::LongAlias { digest });
-        }
-        return Err(VfsPathError::WrongNamespace);
-    }
-    if component == "~empty" {
-        return Ok(VfsComponent::Canonical(String::new()));
-    }
-    if component.contains('~') {
-        return Err(VfsPathError::WrongNamespace);
-    }
-    if component.len() > VFS_MAX_COMPONENT_BYTES {
-        return Err(VfsPathError::NameTooLong);
-    }
-    let mut text = Vec::with_capacity(component.len());
-    let bytes = component.as_bytes();
-    let mut at = 0;
-    while at < bytes.len() {
-        if bytes[at] == b'%' {
-            let hex = component
-                .get(at + 1..at + 3)
-                .ok_or(VfsPathError::WrongNamespace)?;
-            if !hex
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'A'..=b'F').contains(&b))
-            {
-                return Err(VfsPathError::WrongNamespace);
-            }
-            text.push(u8::from_str_radix(hex, 16).map_err(|_| VfsPathError::WrongNamespace)?);
-            at += 3;
-            continue;
-        }
-        let byte = bytes[at];
-        if !(byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')) {
-            return Err(VfsPathError::WrongNamespace);
-        }
-        text.push(byte);
-        at += 1;
-    }
-    let text = String::from_utf8(text).map_err(|_| VfsPathError::WrongNamespace)?;
-    if project_component(&text) != component {
-        return Err(VfsPathError::WrongNamespace);
-    }
-    Ok(VfsComponent::Canonical(text))
 }
 
 /// One stored field of a row as the shared store reports it. Content fields
@@ -3142,570 +1760,6 @@ fn render_field_name(name: &str) -> Result<String, VfsPathError> {
     Ok(name.to_owned())
 }
 
-/// One complete VFS row replacement routed into the runtime's validated table
-/// activation boundary. The table identity is repository-issued admission
-/// metadata; host paths never supply or override it.
-pub struct VfsTableRowReplacement {
-    mutation: TableMutation,
-    table: RuntimeTableIdentity,
-    content_pins: Vec<ProtectedContentPin>,
-}
-
-impl VfsTableRowReplacement {
-    pub fn new(
-        mutation_id: [u8; 16],
-        table: RuntimeTableIdentity,
-        key: Vec<u8>,
-        value: Option<Vec<u8>>,
-    ) -> Result<Self, RuntimeError> {
-        let mutation = TableMutation::new(mutation_id, table.table(), key, value)?
-            .with_table_object_id(table.object_id());
-        Ok(Self {
-            mutation,
-            table,
-            content_pins: Vec::new(),
-        })
-    }
-
-    /// Wraps the complete mutation returned by the source producer's
-    /// `AdmittedSourceRow::into_mutation_and_bindings` with its owned field
-    /// pins. The pins must match the mutation's transfer evidence in order.
-    pub fn from_admitted_mutation(
-        table: RuntimeTableIdentity,
-        mutation: TableMutation,
-        content_pins: Vec<ProtectedContentPin>,
-    ) -> Result<Self, RuntimeError> {
-        if mutation.table() != table.table()
-            || mutation.table_object_id() != Some(table.object_id())
-            || mutation.value().is_none()
-            || mutation.is_insert()
-            || mutation.rekey_to().is_some()
-        {
-            return Err(RuntimeError::InvalidTableMutation);
-        }
-        let transfers = content_pins
-            .iter()
-            .map(|pin| ProtectedContentTransferEvidence::from_transfer(&pin.transfer_record()))
-            .collect::<Vec<_>>();
-        if transfers.as_slice() != mutation.protected_content_transfers() {
-            return Err(RuntimeError::InvalidTableMutation);
-        }
-        Ok(Self {
-            mutation,
-            table,
-            content_pins,
-        })
-    }
-
-    pub fn from_candidate<S>(
-        mutation_id: [u8; 16],
-        table: RuntimeTableIdentity,
-        key: Vec<u8>,
-        candidate: &ActivationCandidate<S>,
-    ) -> Result<Self, RuntimeError> {
-        let value = (!candidate.is_removal()).then(|| candidate.replacement_bytes().to_vec());
-        Self::new(mutation_id, table, key, value)
-    }
-
-    pub fn table(&self) -> &RuntimeTableIdentity {
-        &self.table
-    }
-
-    pub fn key(&self) -> &[u8] {
-        self.mutation.key()
-    }
-
-    pub fn value(&self) -> Option<&[u8]> {
-        self.mutation.value()
-    }
-
-    /// Carries graph-issued native content pins with the saved row so the
-    /// durable transaction can atomically attach them to its mutation and
-    /// accepted-pin manifest (VFS-003, VFS-021).
-    pub fn with_protected_content_pin(
-        mut self,
-        pin: ProtectedContentPin,
-    ) -> Result<Self, RuntimeError> {
-        self.mutation = self.mutation.with_protected_content_pin(&pin)?;
-        self.content_pins.push(pin);
-        Ok(self)
-    }
-
-    pub fn mutation(&self) -> Result<TableMutation, RuntimeError> {
-        Ok(self.mutation.clone())
-    }
-}
-
-/// The VFS call boundary into the runtime's single validated table transaction.
-/// Callers prepare complete typed row mutations and graph-issued pin transfers
-/// in the request; this wrapper adds no journal or publication authority.
-pub async fn commit_vfs_table_activation(
-    runtime: &RuntimeState,
-    request: ValidatedTableActivationCommit<'_>,
-) -> Result<CwdCapture, TableActivationError> {
-    runtime.commit_validated_table_activation(request).await
-}
-
-/// The repository-issued coordinates one durable document save commits under.
-///
-/// The writer that owns the repository, the admitted relation identity and
-/// typed key, and the table schema identity it is validated under are one unit:
-/// a save cannot combine a schema identity from one committed state with a row
-/// identity from another (`ORNA-STATE-003`, VFS-002).
-pub struct VfsDurableSave {
-    owner_id: [u8; 16],
-    expected_schema: TableSchemaIdentity,
-    table: RuntimeTableIdentity,
-    key: Vec<u8>,
-    expected_baseline_row: Option<Option<Vec<u8>>>,
-}
-
-impl VfsDurableSave {
-    pub fn new(
-        owner_id: [u8; 16],
-        expected_schema: TableSchemaIdentity,
-        table: RuntimeTableIdentity,
-        key: Vec<u8>,
-    ) -> Self {
-        Self {
-            owner_id,
-            expected_schema,
-            table,
-            key,
-            expected_baseline_row: None,
-        }
-    }
-
-    /// Binds a save to the exact encoded row observed when its edit began.
-    /// `None` means the row was absent; an unconfigured baseline is distinct.
-    pub fn with_expected_baseline_row(mut self, row: Option<Vec<u8>>) -> Self {
-        self.expected_baseline_row = Some(row);
-        self
-    }
-
-    /// The admitted committed identity of the saved row's relation.
-    pub fn table(&self) -> &RuntimeTableIdentity {
-        &self.table
-    }
-
-    /// The admitted typed key of the saved row.
-    pub fn key(&self) -> &[u8] {
-        &self.key
-    }
-}
-
-/// The admitted coordinates one save hands to its caller: the committed
-/// relation identity and typed key the candidate row must address. Owned, so a
-/// caller's async candidate builder borrows nothing from the admission.
-pub struct VfsSaveCoordinates {
-    table: RuntimeTableIdentity,
-    key: Vec<u8>,
-}
-
-impl VfsSaveCoordinates {
-    /// The admitted committed identity of the saved row's relation.
-    pub fn table(&self) -> &RuntimeTableIdentity {
-        &self.table
-    }
-
-    /// The admitted typed key of the saved row.
-    pub fn key(&self) -> &[u8] {
-        &self.key
-    }
-}
-
-/// One admitted VFS row save, held open across the activation.
-///
-/// A save is admitted once: the runtime leases the repository, captures the
-/// generation the candidate is based on, and commits under the digest of that
-/// capture. `S` is the repository owner's opaque row-map snapshot, so the
-/// baseline carried by the draft and this admission's capture travel together.
-pub struct VfsSaveAdmission<'a, S> {
-    runtime: &'a RuntimeState,
-    snapshot: RuntimeTableActivationSnapshot,
-    context: RuntimeActivationContext,
-    save: VfsDurableSave,
-    writer: WriterLease,
-    expected_baseline_row: Option<Option<Vec<u8>>>,
-    digest: [u8; 32],
-    faults: &'a dyn FaultInjector,
-    _baseline: std::marker::PhantomData<fn() -> S>,
-}
-
-/// One complete VFS row save: the exact row replacement plus the caller's
-/// candidate validator. The validator carries the schema, key/field and
-/// assertion authority for the relation, so this module never invents a second
-/// row authority and never validates rows it does not own (VFS-002).
-pub struct VfsSaveCandidate {
-    replacement: VfsTableRowReplacement,
-    validator: Box<dyn TableActivationCandidateValidator>,
-}
-
-impl VfsSaveCandidate {
-    pub fn new(
-        replacement: VfsTableRowReplacement,
-        validator: Box<dyn TableActivationCandidateValidator>,
-    ) -> Self {
-        Self {
-            replacement,
-            validator,
-        }
-    }
-    /// Requires every protected content transfer to match the row value
-    /// generated from those transfers in the accepted candidate snapshot.
-    pub fn with_protected_content_transfers(
-        self,
-        row_value: Vec<u8>,
-        expected_transfers: Vec<ProtectedContentTransfer>,
-    ) -> Self {
-        if expected_transfers.is_empty() {
-            return self;
-        }
-        let table = self.replacement.table().table().to_owned();
-        let key = self.replacement.key().to_vec();
-        Self {
-            replacement: self.replacement,
-            validator: Box::new(ContentPinCandidateValidator {
-                inner: self.validator,
-                table,
-                key,
-                row_value,
-                expected_transfers,
-            }),
-        }
-    }
-
-    /// The row replacement the activation will commit.
-    pub fn replacement(&self) -> &VfsTableRowReplacement {
-        &self.replacement
-    }
-
-    /// Makes the commit read the table schema identity inside the writer
-    /// transaction and refuse when it differs from the one this save was
-    /// admitted under.
-    pub fn with_live_schema_identity(
-        self,
-        read: impl FnMut() -> Option<TableSchemaIdentity> + Send + 'static,
-    ) -> Self {
-        Self {
-            replacement: self.replacement,
-            validator: Box::new(LiveSchemaCandidateValidator {
-                inner: self.validator,
-                read: Box::new(read),
-            }),
-        }
-    }
-}
-struct ContentPinCandidateValidator {
-    inner: Box<dyn TableActivationCandidateValidator>,
-    table: String,
-    key: Vec<u8>,
-    row_value: Vec<u8>,
-    expected_transfers: Vec<ProtectedContentTransfer>,
-}
-
-impl TableActivationCandidateValidator for ContentPinCandidateValidator {
-    fn tables(&self) -> &[String] {
-        self.inner.tables()
-    }
-
-    fn table_object_ids(&self) -> BTreeMap<String, crate::table_store::TableObjectId> {
-        self.inner.table_object_ids()
-    }
-
-    fn cwd_generation(&self) -> Option<&CwdGeneration> {
-        self.inner.cwd_generation()
-    }
-
-    fn schema_identity(&mut self) -> Option<TableSchemaIdentity> {
-        self.inner.schema_identity()
-    }
-
-    fn validate(
-        &mut self,
-        rows: &crate::table_snapshot::RuntimeTableRows,
-    ) -> Result<(), SafeDiagnostic> {
-        self.inner.validate(rows)
-    }
-
-    fn validate_content_pins(
-        &mut self,
-        rows: &crate::table_snapshot::RuntimeTableRows,
-        transfers: &[ProtectedContentTransfer],
-    ) -> bool {
-        self.inner.validate_content_pins(rows, &[])
-            && transfers == self.expected_transfers.as_slice()
-            && rows.get(&self.table).is_some_and(|table_rows| {
-                table_rows
-                    .iter()
-                    .any(|(key, value)| key == &self.key && value == &self.row_value)
-            })
-    }
-}
-
-/// Reads the table schema identity inside the writer transaction, so a save
-/// admitted under one schema cannot commit under another (ORNA-VFS-019).
-struct LiveSchemaCandidateValidator {
-    inner: Box<dyn TableActivationCandidateValidator>,
-    read: Box<dyn FnMut() -> Option<TableSchemaIdentity> + Send>,
-}
-
-impl TableActivationCandidateValidator for LiveSchemaCandidateValidator {
-    fn tables(&self) -> &[String] {
-        self.inner.tables()
-    }
-
-    fn table_object_ids(&self) -> BTreeMap<String, crate::table_store::TableObjectId> {
-        self.inner.table_object_ids()
-    }
-
-    fn committed_rows(&self) -> Option<&crate::table_snapshot::PinnedCommittedRows> {
-        self.inner.committed_rows()
-    }
-
-    fn cwd_generation(&self) -> Option<&CwdGeneration> {
-        self.inner.cwd_generation()
-    }
-
-    fn schema_identity(&mut self) -> Option<TableSchemaIdentity> {
-        (self.read)()
-    }
-
-    fn validate(
-        &mut self,
-        rows: &crate::table_snapshot::RuntimeTableRows,
-    ) -> Result<(), SafeDiagnostic> {
-        self.inner.validate(rows)
-    }
-
-    fn validate_changed(
-        &mut self,
-        rows: &crate::table_snapshot::RuntimeTableRows,
-        changed_tables: &std::collections::BTreeSet<String>,
-    ) -> Result<(), SafeDiagnostic> {
-        self.inner.validate_changed(rows, changed_tables)
-    }
-
-    fn failed_module_assertion(&self) -> Option<String> {
-        self.inner.failed_module_assertion()
-    }
-
-    fn validate_content_pins(
-        &mut self,
-        rows: &crate::table_snapshot::RuntimeTableRows,
-        transfers: &[ProtectedContentTransfer],
-    ) -> bool {
-        self.inner.validate_content_pins(rows, transfers)
-    }
-}
-
-impl<'a, S: Send + Sync + 'static> VfsSaveAdmission<'a, S> {
-    /// Leases the repository and captures the generation this save is based on.
-    ///
-    /// The capture is the runtime's admitted-table activation, so the row's
-    /// committed relation identity is verified against committed metadata in the
-    /// same read transaction that captures the generation (VFS-002).
-    pub async fn begin(
-        runtime: &'a RuntimeState,
-        save: VfsDurableSave,
-        faults: &'a dyn FaultInjector,
-    ) -> Result<Self, TableActivationError> {
-        if super::activation::runtime_activation_active(runtime) {
-            return Err(TableActivationError::Runtime(RuntimeError::AdminBusy));
-        }
-        let writer = runtime
-            .acquire_lease(save.owner_id)
-            .await
-            .map_err(TableActivationError::Runtime)?;
-        let snapshot = runtime
-            .begin_admitted_table_activation(std::slice::from_ref(&save.table))
-            .await
-            .map_err(TableActivationError::Runtime)?;
-        let context = snapshot.context().clone();
-        let digest = context.capture().generation_digest();
-        let expected_baseline_row = save.expected_baseline_row.clone();
-        Ok(Self {
-            runtime,
-            snapshot,
-            context,
-            save,
-            expected_baseline_row,
-            writer,
-            digest,
-            faults,
-            _baseline: std::marker::PhantomData,
-        })
-    }
-
-    /// The admitted coordinates the candidate row must address. Owned so the
-    /// caller's candidate builder can own them across its own await points.
-    pub fn coordinates(&self) -> VfsSaveCoordinates {
-        VfsSaveCoordinates {
-            table: self.save.table.clone(),
-            key: self.save.key.clone(),
-        }
-    }
-
-    /// The digest the activation commits under.
-    pub fn digest(&self) -> [u8; 32] {
-        self.digest
-    }
-
-    /// The admitted relation row this save is replacing, as read inside the
-    /// admission's own committed capture. It is checked against the captured
-    /// baseline before the replacement can be committed.
-    pub fn admitted_row(&self) -> Result<Option<&[u8]>, RuntimeQueryError> {
-        self.snapshot
-            .query_exact(self.save.table.table(), &self.save.key)
-    }
-    fn expected_baseline_matches(&self, current: Option<&[u8]>) -> Option<bool> {
-        self.expected_baseline_row
-            .as_ref()
-            .map(|expected| current == expected.as_deref())
-    }
-    fn validate_replacement(
-        &self,
-        replacement: &VfsTableRowReplacement,
-    ) -> Result<(), TableActivationError> {
-        if replacement.table() != &self.save.table || replacement.key() != self.save.key.as_slice()
-        {
-            return Err(TableActivationError::Runtime(
-                RuntimeError::InvalidTableMutation,
-            ));
-        }
-        Ok(())
-    }
-
-    /// Commits one complete row replacement through the runtime's single
-    /// validated transaction. The candidate relation is validated before any
-    /// row, mutation record, or checkpoint becomes visible, so a rejected save
-    /// leaves the row store byte-identical and publishes no checkpoint. The
-    /// returned capture is a reopenable durable acknowledgement (VFS-021).
-    pub async fn commit(
-        &self,
-        candidate: VfsSaveCandidate,
-    ) -> Result<CwdCapture, TableActivationError> {
-        if super::activation::runtime_activation_active(self.runtime) {
-            return Err(TableActivationError::Runtime(RuntimeError::AdminBusy));
-        }
-        let VfsSaveCandidate {
-            replacement,
-            mut validator,
-        } = candidate;
-        self.validate_replacement(&replacement)?;
-        let VfsTableRowReplacement {
-            mutation,
-            content_pins,
-            ..
-        } = replacement;
-        let mut content_pins = content_pins;
-        commit_vfs_table_activation(
-            self.runtime,
-            ValidatedTableActivationCommit {
-                writer: self.writer,
-                context: &self.context,
-                cwd_generation: None,
-                expected_schema: Some(self.save.expected_schema.clone()),
-                mutations: std::slice::from_ref(&mutation),
-                content_pins: &mut content_pins,
-                next_digest: self.digest,
-                validator: validator.as_mut(),
-                faults: self.faults,
-            },
-        )
-        .await
-    }
-}
-
-/// Failure while streaming and protecting a replacement Blob.
-#[derive(Debug)]
-pub enum VfsBlobReplacementError {
-    Capture(GraphError),
-    IdentityMismatch {
-        expected: ContentIdentity,
-        actual: ContentIdentity,
-    },
-}
-
-impl std::fmt::Display for VfsBlobReplacementError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Capture(error) => write!(formatter, "Blob capture failed: {error}"),
-            Self::IdentityMismatch { expected, actual } => write!(
-                formatter,
-                "Blob identity mismatch: expected {expected:?}, captured {actual:?}"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for VfsBlobReplacementError {}
-
-fn capture_vfs_blob_replacement(
-    capture: &RepositoryCaptureCapability,
-    bytes: &CandidateSnapshot,
-    expected: ContentIdentity,
-    media_type: &str,
-    suffix: Option<&str>,
-) -> Result<OrpBlobBinding, VfsBlobReplacementError> {
-    let candidate = capture
-        .capture_blob_candidate(bytes.reader(), expected.length())
-        .map_err(VfsBlobReplacementError::Capture)?;
-    let actual = candidate.content_identity();
-    if actual != expected {
-        return Err(VfsBlobReplacementError::IdentityMismatch { expected, actual });
-    }
-    capture
-        .accept_captured_blob(candidate, media_type, suffix)
-        .map_err(VfsBlobReplacementError::Capture)
-}
-/// Why a durable save was not admitted. Every variant is decided before the
-/// row store is touched except `Activation`, which the runtime refuses inside
-/// its own transaction.
-#[derive(Debug)]
-pub enum VfsSaveError<E> {
-    /// The activated destination already accepted this draft.
-    AlreadyApplied {
-        /// The cache generation the accepted image was published at.
-        generation: u64,
-    },
-    /// The captured baseline is no longer the destination's image, so the
-    /// candidate is stale and the destination keeps its accepted row (VFS-011).
-    Stale {
-        /// The repository's cache generation observed at admission.
-        generation: u64,
-        diagnostic: SafeDiagnostic,
-    },
-    /// The runtime refused the saved row. The row store keeps the accepted row
-    /// and this is the stable diagnostic association in local state (VFS-009).
-    Rejected {
-        /// The repository's cache generation observed at admission.
-        generation: u64,
-        diagnostic: SafeDiagnostic,
-    },
-    /// The file holds no candidate bytes to admit (VFS-001).
-    NoCandidate,
-    /// The temporary rename route requires an admitted durable baseline.
-    MissingBaseline,
-    /// The temporary file belongs to a different managed destination.
-    WrongDestination,
-    /// The target belongs to another runtime's projection/cache scope.
-    WrongRepositoryScope,
-    /// The admitted row lookup failed before any candidate commit.
-    AdmissionLookup(RuntimeQueryError),
-    /// Repository capture failed before the shared row-transaction boundary.
-    BlobCapture(VfsBlobReplacementError),
-    /// The private candidate spool could not be read; the draft is kept.
-    Backing(EditDraftError),
-    Activation(E),
-}
-
-#[derive(Debug)]
-enum VfsSaveAdmissionError {
-    BlobCapture(VfsBlobReplacementError),
-    Activation(TableActivationError),
-    Backing(EditDraftError),
-}
 impl<S: Send + Sync + 'static> ManagedFile<S> {
     /// Saves an editor document through the durable shared-row transaction.
     pub async fn commit_durable_document_save<A, AFut>(
@@ -3823,7 +1877,7 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
         if draft_state.candidate.is_none() {
             return Err(VfsSaveError::NoCandidate);
         }
-        if destination.unlinked || !Arc::ptr_eq(&destination.image, &draft_state.baseline) {
+        if destination.is_unlinked() || !Arc::ptr_eq(destination.image(), &draft_state.baseline) {
             let diagnostic = stale_baseline_diagnostic();
             let generation = *self.cache_epoch.generation.lock().await;
             let revision = draft_state.revision;
@@ -3839,18 +1893,14 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
         // Repeated callbacks for one sequence return the recorded outcome; a
         // later write begins a new candidate based on accepted state, so one
         // revision is never admitted twice (VFS-008).
-        if let Some((rejected, diagnostic)) = draft_state.last_rejection
-            && rejected == revision
-        {
+        if let Some(diagnostic) = draft_state.rejection_for(revision) {
             let generation = *self.cache_epoch.generation.lock().await;
             return Err(VfsSaveError::Rejected {
                 generation,
                 diagnostic,
             });
         }
-        if let Some((accepted_revision, image)) = &draft_state.last_accepted
-            && *accepted_revision == revision
-        {
+        if let Some(image) = draft_state.accepted_for(revision) {
             let generation = *self.cache_epoch.generation.lock().await;
             return Ok(TemporaryRenameOutcome::Applied {
                 generation,
@@ -3871,7 +1921,7 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
         let admission = VfsSaveAdmission::<S>::begin(runtime, save, faults)
             .await
             .map_err(VfsSaveError::Activation)?;
-        // A repeated accepted rename is served from `scratch_state.applied`
+        // A repeated accepted rename is served from `scratch_state.sync`
         // above. Matching replacement bytes alone cannot prove that another
         // writer committed this save; baseline mismatches therefore fail closed.
         let admitted_row = admission
@@ -3970,11 +2020,15 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
                 },
             ));
             draft_state.drop_candidate();
-            draft_state.last_rejection = None;
             draft_state.retained_invalid = None;
             draft_state.baseline = Arc::clone(&image);
-            draft_state.last_accepted = Some((revision, Arc::clone(&image)));
-            destination.image = Arc::clone(&image);
+            draft_state.memo = FsyncMemo::Accepted {
+                revision,
+                image: Arc::clone(&image),
+            };
+            *destination = ManagedFileState::Live {
+                image: Arc::clone(&image),
+            };
             *cache_generation = next_generation;
             Ok(TemporaryRenameOutcome::Applied {
                 generation: next_generation,
@@ -4050,7 +2104,7 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
         let _scratch_operation = scratch.operation.lock().await;
         let draft = {
             let scratch_state = scratch.state.lock().await;
-            if let Some((generation, handle)) = &scratch_state.applied {
+            if let ScratchSync::Applied { generation, handle } = &scratch_state.sync {
                 return Ok(TemporaryRenameOutcome::Applied {
                     generation: *generation,
                     handle: handle.clone(),
@@ -4063,7 +2117,10 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
             .commit_durable_save(&draft, runtime, save, admit, faults)
             .await?;
         if let TemporaryRenameOutcome::Applied { generation, handle } = &outcome {
-            scratch.state.lock().await.applied = Some((*generation, handle.clone()));
+            scratch.state.lock().await.sync = ScratchSync::Applied {
+                generation: *generation,
+                handle: handle.clone(),
+            };
         }
         Ok(outcome)
     }
@@ -4071,12 +2128,18 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
 
 #[cfg(test)]
 mod tests {
+    use super::spool::{CandidateSource, DRAFT_SPOOL_DIRECTORY};
     use super::*;
-    use crate::table_snapshot::RuntimeTableRows;
-    use crate::table_store::TableObjectId;
-    use crate::{RuntimeIdentity, RuntimeState, TableActivationCandidateValidator};
+    use crate::{
+        ProtectedContentTransferEvidence, RuntimeIdentity, RuntimeQueryError, RuntimeState,
+        RuntimeTableIdentity, RuntimeTableRows, TableActivationCandidateValidator, TableMutation,
+        TableObjectId, TableSchemaIdentity,
+    };
     use orna_repository::{ProtectedContentTransfer, Repository};
+    use orna_stream::DiagnosticClass;
     use orna_value::{Raw, SchemaDescriptor};
+    use sha2::{Digest, Sha256};
+    use std::fs;
     use std::sync::{
         Mutex as TestMutex,
         atomic::{AtomicUsize, Ordering},
@@ -4087,6 +2150,7 @@ mod tests {
         path::Path,
         process::{Command, Stdio},
     };
+    use uuid::Uuid;
 
     fn fixture_image() -> Arc<VfsFileSnapshot<u64>> {
         let contents = include_str!("../tests/fixtures/publication-repository-main.orna");
@@ -4527,9 +2591,8 @@ mod tests {
 
     #[test]
     fn vfs_table_row_replacement_preserves_admitted_table_identity() {
-        let table =
-            RuntimeTableIdentity::new("Song", crate::table_store::TableObjectId::new([0x71; 16]))
-                .expect("valid table identity");
+        let table = RuntimeTableIdentity::new("Song", crate::TableObjectId::new([0x71; 16]))
+            .expect("valid table identity");
         let replacement = VfsTableRowReplacement::new(
             [0x55; 16],
             table.clone(),
@@ -5163,10 +3226,7 @@ mod tests {
         let image = fixture_image();
         let expected_len = image.len();
         let managed = ManagedFile {
-            state: Mutex::new(ManagedFileState {
-                image,
-                unlinked: false,
-            }),
+            state: Mutex::new(ManagedFileState::Live { image }),
             operation: Mutex::new(()),
             cache_epoch: SharedCacheEpoch::default(),
             draft_storage: DraftStorage::with_default_quota(),
@@ -5177,7 +3237,7 @@ mod tests {
         assert_eq!(*stat.pin().snapshot(), 7);
         assert_eq!(stat.generation(), 0);
 
-        managed.state.lock().await.unlinked = true;
+        managed.state.lock().await.mark_unlinked();
         assert!(managed.stat().await.is_none());
     }
 
@@ -6133,7 +4193,7 @@ mod tests {
                         }),
                     ))
                 },
-                &crate::error::NoFault,
+                &crate::NoFault,
             )
             .await
             .unwrap();
@@ -6153,7 +4213,7 @@ mod tests {
                 VfsDurableSave::new([4; 16], schema.clone(), identity.clone(), key.clone())
                     .with_expected_baseline_row(None),
                 |_, _| async { panic!("an accepted temp rename must replay its outcome") },
-                &crate::error::NoFault,
+                &crate::NoFault,
             )
             .await
             .unwrap();
@@ -6199,7 +4259,7 @@ mod tests {
                         }),
                     ))
                 },
-                &crate::error::NoFault,
+                &crate::NoFault,
             )
             .await;
         let Err(VfsSaveError::Stale { diagnostic, .. }) = identical else {
@@ -6241,7 +4301,7 @@ mod tests {
                         }),
                     ))
                 },
-                &crate::error::NoFault,
+                &crate::NoFault,
             )
             .await;
         let Err(VfsSaveError::Stale { diagnostic, .. }) = stale else {
@@ -6281,7 +4341,7 @@ mod tests {
                         }),
                     ))
                 },
-                &crate::error::NoFault,
+                &crate::NoFault,
             )
             .await
             .unwrap();
@@ -6294,7 +4354,7 @@ mod tests {
         let mut failed_lookup = VfsSaveAdmission::<u64>::begin(
             &state,
             VfsDurableSave::new([4; 16], schema.clone(), identity.clone(), key.clone()),
-            &crate::error::NoFault,
+            &crate::NoFault,
         )
         .await
         .unwrap();
@@ -6461,7 +4521,7 @@ mod tests {
                 "image/png",
                 Some("png"),
                 |_, _, _| async { panic!("identity mismatch must stop before row admission") },
-                &crate::error::NoFault,
+                &crate::NoFault,
             )
             .await;
         assert!(matches!(
@@ -6563,7 +4623,7 @@ mod tests {
                         }),
                     ))
                 },
-                &crate::error::NoFault,
+                &crate::NoFault,
             )
             .await;
         let diagnostic = match stale {
@@ -6645,7 +4705,7 @@ mod tests {
                         VfsSaveAdmission::<u64>::begin(
                             state_for_admit,
                             nested_save,
-                            &crate::error::NoFault,
+                            &crate::NoFault,
                         )
                         .await,
                         Err(TableActivationError::Runtime(RuntimeError::AdminBusy))
@@ -6661,7 +4721,7 @@ mod tests {
                                     TableActivationError::Runtime(RuntimeError::AdminBusy),
                                 )
                             },
-                            &crate::error::NoFault,
+                            &crate::NoFault,
                         )
                         .await;
                     assert!(matches!(
@@ -6703,7 +4763,7 @@ mod tests {
                         }),
                     ))
                 },
-                &crate::error::NoFault,
+                &crate::NoFault,
             )
             .await
             .unwrap();
@@ -6787,25 +4847,25 @@ mod tests {
             protected_refs
         );
     }
-}
 
-#[cfg(test)]
-mod git_metadata_reserved_tests {
-    use super::is_reserved_component;
+    #[cfg(test)]
+    mod git_metadata_reserved_tests {
+        use super::naming::is_reserved_component;
 
-    #[test]
-    fn git_metadata_spellings_are_reserved_components() {
-        for name in [".git", ".GIT", "git~1", ".git. "] {
-            assert!(is_reserved_component(name), "{name:?} must be reserved");
+        #[test]
+        fn git_metadata_spellings_are_reserved_components() {
+            for name in [".git", ".GIT", "git~1", ".git. "] {
+                assert!(is_reserved_component(name), "{name:?} must be reserved");
+            }
+            assert!(!is_reserved_component("git-notes"));
+            assert!(!is_reserved_component("gitfile"));
         }
-        assert!(!is_reserved_component("git-notes"));
-        assert!(!is_reserved_component("gitfile"));
-    }
 
-    #[test]
-    fn row_document_spelling_is_a_reserved_component() {
-        assert!(is_reserved_component("data.orna"));
-        assert!(!is_reserved_component("data"));
-        assert!(!is_reserved_component("data.orna.bak"));
+        #[test]
+        fn row_document_spelling_is_a_reserved_component() {
+            assert!(is_reserved_component("data.orna"));
+            assert!(!is_reserved_component("data"));
+            assert!(!is_reserved_component("data.orna.bak"));
+        }
     }
 }

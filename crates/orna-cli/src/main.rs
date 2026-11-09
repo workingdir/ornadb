@@ -15,11 +15,15 @@ mod cli_help;
 mod cli_history;
 mod cli_import;
 mod cli_legacy;
+mod cli_migrate;
 mod cli_mount;
+mod cli_mv;
+mod cli_options;
 mod cli_publish;
 mod cli_query;
 mod cli_row_key;
 mod cli_serve;
+mod cli_source_edit;
 mod cli_stage;
 mod cli_status;
 mod encoding;
@@ -1661,7 +1665,6 @@ fn run_project_stream_invocation(
         color_enabled,
     )
 }
-#[allow(clippy::too_many_lines)]
 fn run_project_invocation_with_arguments(
     endpoint: &Endpoint,
     root_entry: &str,
@@ -1677,19 +1680,7 @@ fn run_project_invocation_with_arguments(
             )
         })?;
     let project = load_project(endpoint)?;
-    let catalogue = std::sync::Arc::new(semantic_catalogue(&project)?);
-    let analysis = orna_semantic::analyze_with_providers(
-        project.modules(),
-        &catalogue,
-        orna_semantic::SystemProviders::Production,
-    );
-    if !analysis.is_ok() {
-        return Err(Diagnostic::target(
-            "E2101",
-            "project semantic analysis failed",
-            "fix the first reported source contract error, then run the project again",
-        ));
-    }
+    let catalogue = admit_project_analysis(&project)?;
     let (identity, initial_digest) = runtime_identity(&repository)?;
     refuse_legacy_bare_module_rows(&repository, identity, initial_digest, &project)?;
     let (request, fingerprint) = DurableTransactionalEvaluator::project_request_identity(
@@ -1757,6 +1748,38 @@ fn run_project_invocation_with_arguments(
                 ),
         )
         .map_err(|error| durable_invocation_failed(&error))?;
+    report_project_outcome(endpoint, root_entry, arguments, color_enabled, outcome)
+}
+
+/// The production catalogue of a project that passes semantic analysis.
+fn admit_project_analysis(
+    project: &orna_project::LoadedProject,
+) -> Result<std::sync::Arc<orna_semantic::Catalogue>, Diagnostic> {
+    let catalogue = std::sync::Arc::new(semantic_catalogue(project)?);
+    let analysis = orna_semantic::analyze_with_providers(
+        project.modules(),
+        &catalogue,
+        orna_semantic::SystemProviders::Production,
+    );
+    if !analysis.is_ok() {
+        return Err(Diagnostic::target(
+            "E2101",
+            "project semantic analysis failed",
+            "fix the first reported source contract error, then run the project again",
+        ));
+    }
+    Ok(catalogue)
+}
+
+/// Routes a stream-root skip to the stream seam and reports the transaction's
+/// outcome.
+fn report_project_outcome(
+    endpoint: &Endpoint,
+    root_entry: &str,
+    arguments: &Environment,
+    color_enabled: bool,
+    outcome: StageOutcome<orna_foundation::Diagnostic>,
+) -> Result<(), Diagnostic> {
     // Project transaction admission does not run stream roots; those route to
     // the explicit finite-list stream seam. The adapter reports that skip as a
     // typed reason, so the routing cannot drift from its text.
@@ -1930,123 +1953,137 @@ fn multi_module_declares_tables(project: &orna_project::LoadedProject) -> bool {
         })
 }
 
-#[allow(clippy::too_many_lines)]
 fn run_pure_invocation(
     endpoint: &Endpoint,
     target: &str,
     color_enabled: bool,
 ) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
+    if run_authority_invocation(endpoint, &project, target, color_enabled)? {
+        return Ok(());
+    }
+    admit_function_only_project(&project)?;
+    run_bounded_invocation(&project, target, color_enabled)
+}
+
+/// Admits and evaluates `target` through the authority route when the only
+/// module is the one `target` names. Returns whether it answered, so every
+/// other project takes the bounded function-only path.
+fn run_authority_invocation(
+    endpoint: &Endpoint,
+    project: &orna_project::LoadedProject,
+    target: &str,
+    color_enabled: bool,
+) -> Result<bool, Diagnostic> {
     // Single-module projects that import pinned standard modules take the
     // authority route only when they need publication metadata. Every other
     // standard-importing project takes the bounded path below, which loads the
     // reachable standard bodies through the verified profile.
     let std_imports = !project.standard_runtime_modules().is_empty();
-    if project.modules().len() == 1 {
-        let identity = &project.identities()[0];
-        let module = &project.modules()[0];
-        let (module_name, function) = target.rsplit_once('.').unwrap_or(("", target));
-        let namespace = if module_name.is_empty() {
-            Vec::new()
-        } else {
-            module_name
-                .split('.')
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        };
-        if identity.namespace() == namespace {
-            let authority = ApplicationAuthority::new(
-                orna_semantic::Catalogue::authoritative_core(),
-                Limits::default(),
+    if project.modules().len() != 1 {
+        return Ok(false);
+    }
+    let identity = &project.identities()[0];
+    let module = &project.modules()[0];
+    let (module_name, function) = target.rsplit_once('.').unwrap_or(("", target));
+    let namespace = if module_name.is_empty() {
+        Vec::new()
+    } else {
+        module_name
+            .split('.')
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    if identity.namespace() != namespace {
+        return Ok(false);
+    }
+    let authority = ApplicationAuthority::new(
+        orna_semantic::Catalogue::authoritative_core(),
+        Limits::default(),
+    )
+    .with_loaded_standard(project)
+    .map_err(|_| {
+        Diagnostic::target(
+            "ORNA-S010-IMPORT",
+            "imported module is unavailable",
+            "use a captured standard dependency or remove the import",
+        )
+    })?;
+    let admission = authority
+        .admit_module(identity.logical_path(), module.source.clone(), function)
+        .map_err(|error| {
+            Diagnostic::target_with_detail(
+                "E2101",
+                "project semantic analysis failed",
+                "fix the first reported source contract error, then run check again",
+                error.to_string(),
             )
-            .with_loaded_standard(&project)
-            .map_err(|_| {
-                Diagnostic::target(
-                    "ORNA-S010-IMPORT",
-                    "imported module is unavailable",
-                    "use a captured standard dependency or remove the import",
+        });
+    let admitted = match admission {
+        Ok(admitted) => Some(admitted),
+        // The bounded path reports the analysis error for std-importing projects.
+        Err(_) if std_imports => None,
+        Err(error) => return Err(error),
+    };
+    let Some(admitted) =
+        admitted.filter(|candidate| !std_imports || candidate.requires_publication_metadata())
+    else {
+        return Ok(false);
+    };
+    if !admitted.table_schemas().is_empty() && admitted.entry_references_tables() {
+        run_committed_table_invocation(
+            endpoint,
+            authority,
+            &admitted,
+            identity.logical_path(),
+            &module.source,
+            sys_host::std_snapshot_pin(project),
+        )?;
+    } else if admitted.requires_publication_metadata() {
+        let (publication_rows, sys_host_context) =
+            runtime_publication_metadata_rows(endpoint, sys_host::std_snapshot_pin(project))?;
+        let authority = authority.with_sys_host_context(sys_host_context);
+        let activation = authority
+            .evaluate_staged_with_publication_rows(&admitted, &Environment::new(), publication_rows)
+            .map_err(|error| {
+                Diagnostic::target_with_detail(
+                    "E2200",
+                    "pure project invocation failed",
+                    "fix the admitted function or retry the invocation",
+                    error.to_string(),
                 )
             })?;
-            let admission = authority
-                .admit_module(identity.logical_path(), module.source.clone(), function)
-                .map_err(|error| {
-                    Diagnostic::target_with_detail(
-                        "E2101",
-                        "project semantic analysis failed",
-                        "fix the first reported source contract error, then run check again",
-                        error.to_string(),
-                    )
-                });
-            let admitted = match admission {
-                Ok(admitted) => Some(admitted),
-                // The bounded path reports the analysis error for std-importing projects.
-                Err(_) if std_imports => None,
-                Err(error) => return Err(error),
-            };
-            if let Some(admitted) = admitted
-                .filter(|candidate| !std_imports || candidate.requires_publication_metadata())
-            {
-                if !admitted.table_schemas().is_empty() && admitted.entry_references_tables() {
-                    run_committed_table_invocation(
-                        endpoint,
-                        authority,
-                        &admitted,
-                        identity.logical_path(),
-                        &module.source,
-                        sys_host::std_snapshot_pin(&project),
-                    )?;
-                    write_success_line("invocation completed", color_enabled)?;
-                    return Ok(());
-                }
-                if admitted.requires_publication_metadata() {
-                    let (publication_rows, sys_host_context) = runtime_publication_metadata_rows(
-                        endpoint,
-                        sys_host::std_snapshot_pin(&project),
-                    )?;
-                    let authority = authority.with_sys_host_context(sys_host_context);
-                    let activation = authority
-                        .evaluate_staged_with_publication_rows(
-                            &admitted,
-                            &Environment::new(),
-                            publication_rows,
-                        )
-                        .map_err(|error| {
-                            Diagnostic::target_with_detail(
-                                "E2200",
-                                "pure project invocation failed",
-                                "fix the admitted function or retry the invocation",
-                                error.to_string(),
-                            )
-                        })?;
-                    if !activation.mutations().is_empty() {
-                        return Err(Diagnostic::unavailable(
-                            "one-shot invocation cannot commit table mutations",
-                            "use a supported table transaction; stream roots require the explicit stream runtime",
-                        ));
-                    }
-                } else {
-                    let std_snapshot = sys_host::std_snapshot_pin(&project);
-                    let authority = match pure_sys_host_context(endpoint, std_snapshot) {
-                        Some(sys_host_context) => authority.with_sys_host_context(sys_host_context),
-                        None => authority,
-                    };
-                    authority
-                        .evaluate(&admitted, &Environment::new())
-                        .map_err(|error| {
-                            Diagnostic::target_with_detail(
-                                "E2200",
-                                "pure project invocation failed",
-                                "fix the admitted function or retry the invocation",
-                                error.to_string(),
-                            )
-                        })?;
-                }
-                write_success_line("invocation completed", color_enabled)?;
-                return Ok(());
-            }
+        if !activation.mutations().is_empty() {
+            return Err(Diagnostic::unavailable(
+                "one-shot invocation cannot commit table mutations",
+                "use a supported table transaction; stream roots require the explicit stream runtime",
+            ));
         }
+    } else {
+        let std_snapshot = sys_host::std_snapshot_pin(project);
+        let authority = match pure_sys_host_context(endpoint, std_snapshot) {
+            Some(sys_host_context) => authority.with_sys_host_context(sys_host_context),
+            None => authority,
+        };
+        authority
+            .evaluate(&admitted, &Environment::new())
+            .map_err(|error| {
+                Diagnostic::target_with_detail(
+                    "E2200",
+                    "pure project invocation failed",
+                    "fix the admitted function or retry the invocation",
+                    error.to_string(),
+                )
+            })?;
     }
-    let catalogue = semantic_catalogue(&project)?;
+    write_success_line("invocation completed", color_enabled)?;
+    Ok(true)
+}
+
+/// Proves the project is function-only and can be read by the bounded
+/// evaluator.
+fn admit_function_only_project(project: &orna_project::LoadedProject) -> Result<(), Diagnostic> {
+    let catalogue = semantic_catalogue(project)?;
     let analysis = orna_semantic::analyze_with_providers(
         project.modules(),
         &catalogue,
@@ -2059,14 +2096,23 @@ fn run_pure_invocation(
             "fix the first reported source contract error, then run check again",
         ));
     }
-    if multi_module_declares_tables(&project) {
+    if multi_module_declares_tables(project) {
         return Err(Diagnostic::target(
             "E2200",
             "table reads in multi-module projects are not supported by one-shot invocation; use the REPL or orna run",
             "one-shot invocation admits table declarations only in single-module projects",
         ));
     }
+    Ok(())
+}
 
+/// Runs `target` through the bounded function-only evaluator, loading the
+/// verified standard profile first when the project pins one.
+fn run_bounded_invocation(
+    project: &orna_project::LoadedProject,
+    target: &str,
+    color_enabled: bool,
+) -> Result<(), Diagnostic> {
     let mut evaluator = BoundedEvaluator::default();
     if let Some(profile) = project.standard_profile() {
         // Admission supplies the runtime-reachable closure (requested roots plus
@@ -2100,7 +2146,7 @@ fn run_pure_invocation(
             }
         }
     }
-    match evaluator.evaluate_project(&pure_execution_project(&project)) {
+    match evaluator.evaluate_project(&pure_execution_project(project)) {
         StageOutcome::Passed => {}
         StageOutcome::Cancelled(diagnostic) => return Err(cancellation_diagnostic(&diagnostic)),
         StageOutcome::Failed(diagnostic) => {
@@ -2626,7 +2672,6 @@ fn committed_rows_at(
     Ok((rows, storage_orders))
 }
 
-#[allow(clippy::too_many_lines)]
 /// One-shot `run` of a single admitted module that declares tables and reads
 /// them. Tables bind to their committed identities at `HEAD`, so reads see the
 /// same committed rows as the REPL. The sys host context and publication
@@ -2641,105 +2686,14 @@ fn run_committed_table_invocation(
     source: &str,
     std_snapshot: StdSnapshotPin,
 ) -> Result<(), Diagnostic> {
-    let path = local_project_path(endpoint)?;
-    let repository = orna_repository::Repository::discover(path).map_err(|_| {
-        Diagnostic::target(
-            "E2200",
-            "committed table identities could not be read",
-            "run the command inside an initialized local Orna repository",
-        )
-    })?;
-    let commit = repository.head().ok().flatten().ok_or_else(|| {
-        Diagnostic::target(
-            "E2200",
-            "table reads need a committed project",
-            "commit the project, then run the command again",
-        )
-    })?;
-    let names = admitted.table_schemas().keys().cloned().collect::<Vec<_>>();
-    let tables = committed_table_identities(&repository, &commit, names)?;
-    let entry = admitted.entry().to_owned();
-    let committed = tables
-        .iter()
-        .map(|table| CommittedTableIdentity::new(table.table(), table.object_id()));
-    let admitted = authority
-        .admit_module_with_committed_table_metadata(logical_path, source, entry, committed)
-        .map_err(|error| {
-            Diagnostic::target_with_detail(
-                "E2101",
-                "project semantic analysis failed",
-                "fix the first reported source contract error, then run check again",
-                error.to_string(),
-            )
-        })?;
+    let repository = discover_committed_repository(endpoint)?;
+    let commit = committed_head(&repository)?;
+    let tables = committed_tables(&repository, &commit, admitted)?;
+    let admitted = admit_committed_metadata(&authority, admitted, logical_path, source, &tables)?;
     let (identity, initial_digest) = runtime_identity(&repository)?;
-    let mode = if admitted.requires_publication_metadata() {
-        RuntimeMode::Embedded
-    } else {
-        RuntimeMode::Run
-    };
-    let authority = authority.with_sys_host_context(sys_host::sys_host_context(
-        repository.worktree(),
-        identity,
-        mode,
-        std_snapshot,
-    ));
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|_| {
-            Diagnostic::target(
-                "E2200",
-                "committed table rows could not be read",
-                "retry the invocation after checking local runtime state",
-            )
-        })?;
-    let state = runtime
-        .block_on(RuntimeState::open(&repository, identity, initial_digest))
-        .map_err(|_| {
-            Diagnostic::target(
-                "E2200",
-                "committed table rows could not be read",
-                "retry the invocation after checking local runtime state",
-            )
-        })?;
-    let table_names = admitted
-        .table_schemas()
-        .keys()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
-    let candidates = legacy_bare_module_candidates(&repository, Some(&commit), &table_names)
-        .map_err(|_| {
-            Diagnostic::target(
-                "E2200",
-                "committed table rows could not be read",
-                "retry the invocation after checking local runtime state",
-            )
-        })?;
-    if let Some(table) = legacy_bare_module_table(&state, &runtime, &candidates).map_err(|_| {
-        Diagnostic::target(
-            "E2200",
-            "committed table rows could not be read",
-            "retry the invocation after checking local runtime state",
-        )
-    })? {
-        return Err(legacy_module_table_diagnostic(&table));
-    }
-    let publication_rows = if admitted.requires_publication_metadata() {
-        Some(
-            runtime
-                .block_on(state.publication_metadata_rows())
-                .map_err(|_| {
-                    Diagnostic::target(
-                        "E2200",
-                        "local runtime publication metadata could not be read",
-                        "retry the invocation after checking local runtime state",
-                    )
-                })?,
-        )
-    } else {
-        None
-    };
+    let authority = invocation_host(authority, &repository, identity, &admitted, std_snapshot);
+    let (runtime, state, publication_rows) =
+        open_committed_runtime(&repository, identity, initial_digest, &admitted, &commit)?;
     let committed =
         committed_invocation_rows(&repository, &commit, &runtime, &state, &admitted, &tables)?;
     let (_snapshot, activation) = evaluate_over_committed_tables(
@@ -2758,6 +2712,147 @@ fn run_committed_table_invocation(
         ));
     }
     Ok(())
+}
+
+/// The repository a committed-table invocation reads.
+fn discover_committed_repository(
+    endpoint: &Endpoint,
+) -> Result<orna_repository::Repository, Diagnostic> {
+    orna_repository::Repository::discover(local_project_path(endpoint)?).map_err(|_| {
+        Diagnostic::target(
+            "E2200",
+            "committed table identities could not be read",
+            "run the command inside an initialized local Orna repository",
+        )
+    })
+}
+
+/// The commit whose table identities bind the invocation.
+fn committed_head(
+    repository: &orna_repository::Repository,
+) -> Result<orna_repository::GitCommitRef, Diagnostic> {
+    repository.head().ok().flatten().ok_or_else(|| {
+        Diagnostic::target(
+            "E2200",
+            "table reads need a committed project",
+            "commit the project, then run the command again",
+        )
+    })
+}
+
+/// The committed identities of the admitted tables.
+fn committed_tables(
+    repository: &orna_repository::Repository,
+    commit: &orna_repository::GitCommitRef,
+    admitted: &AdmittedApplication,
+) -> Result<Vec<RuntimeTableIdentity>, Diagnostic> {
+    let names = admitted.table_schemas().keys().cloned().collect::<Vec<_>>();
+    committed_table_identities(repository, commit, names)
+}
+
+/// Re-admits the module with the committed table metadata its reads bind.
+fn admit_committed_metadata(
+    authority: &ApplicationAuthority,
+    admitted: &AdmittedApplication,
+    logical_path: &str,
+    source: &str,
+    tables: &[RuntimeTableIdentity],
+) -> Result<AdmittedApplication, Diagnostic> {
+    let entry = admitted.entry().to_owned();
+    let committed = tables
+        .iter()
+        .map(|table| CommittedTableIdentity::new(table.table(), table.object_id()));
+    authority
+        .admit_module_with_committed_table_metadata(logical_path, source, entry, committed)
+        .map_err(|error| {
+            Diagnostic::target_with_detail(
+                "E2101",
+                "project semantic analysis failed",
+                "fix the first reported source contract error, then run check again",
+                error.to_string(),
+            )
+        })
+}
+
+/// The authority with the host context a committed-table read runs under.
+fn invocation_host(
+    authority: ApplicationAuthority,
+    repository: &orna_repository::Repository,
+    identity: RuntimeIdentity,
+    admitted: &AdmittedApplication,
+    std_snapshot: StdSnapshotPin,
+) -> ApplicationAuthority {
+    let mode = if admitted.requires_publication_metadata() {
+        RuntimeMode::Embedded
+    } else {
+        RuntimeMode::Run
+    };
+    authority.with_sys_host_context(sys_host::sys_host_context(
+        repository.worktree(),
+        identity,
+        mode,
+        std_snapshot,
+    ))
+}
+
+/// The runtime and state a committed-table read needs, with the publication
+/// metadata rows it must see before any row is read.
+fn open_committed_runtime(
+    repository: &orna_repository::Repository,
+    identity: RuntimeIdentity,
+    initial_digest: [u8; 32],
+    admitted: &AdmittedApplication,
+    commit: &orna_repository::GitCommitRef,
+) -> Result<
+    (
+        tokio::runtime::Runtime,
+        RuntimeState,
+        Option<RuntimePublicationMetadataRows>,
+    ),
+    Diagnostic,
+> {
+    let unavailable = || {
+        Diagnostic::target(
+            "E2200",
+            "committed table rows could not be read",
+            "retry the invocation after checking local runtime state",
+        )
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| unavailable())?;
+    let state = runtime
+        .block_on(RuntimeState::open(repository, identity, initial_digest))
+        .map_err(|_| unavailable())?;
+    let table_names = admitted
+        .table_schemas()
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let candidates = legacy_bare_module_candidates(repository, Some(commit), &table_names)
+        .map_err(|_| unavailable())?;
+    if let Some(table) =
+        legacy_bare_module_table(&state, &runtime, &candidates).map_err(|_| unavailable())?
+    {
+        return Err(legacy_module_table_diagnostic(&table));
+    }
+    let publication_rows = if admitted.requires_publication_metadata() {
+        Some(
+            runtime
+                .block_on(state.publication_metadata_rows())
+                .map_err(|_| {
+                    Diagnostic::target(
+                        "E2200",
+                        "local runtime publication metadata could not be read",
+                        "retry the invocation after checking local runtime state",
+                    )
+                })?,
+        )
+    } else {
+        None
+    };
+    Ok((runtime, state, publication_rows))
 }
 
 fn repl_transactions(
@@ -4110,7 +4205,6 @@ fn run_fetch(
     Ok(())
 }
 
-#[allow(clippy::too_many_lines)]
 /// Publishes the checked-out branch together with the continuity refs an
 /// ordinary push synchronizes (`ORNA-GIT-008`).
 ///
@@ -4259,1937 +4353,7 @@ fn fetch_continuity_diagnostic(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::cli_args::parse_cli;
-    use orna_runtime::{Mutation, NoFault, RunObservationStatus, RuntimeState};
-    use sha2::{Digest, Sha256};
-    use std::path::PathBuf;
-    #[test]
-    fn color_mode_respects_stream_tty_and_explicit_overrides() {
-        assert!(!ColorMode::Auto.enabled(false));
-        assert!(ColorMode::Auto.enabled(true));
-        assert!(ColorMode::Always.enabled(false));
-        assert!(ColorMode::Always.enabled(true));
-        assert!(!ColorMode::Never.enabled(false));
-        assert!(!ColorMode::Never.enabled(true));
-    }
-
-    #[test]
-    fn fetch_accepts_only_continuous_witnesses() {
-        assert!(
-            fetch_continuity_diagnostic(orna_repository::RemoteContinuity::Continuous).is_none()
-        );
-
-        for continuity in [
-            orna_repository::RemoteContinuity::Missing,
-            orna_repository::RemoteContinuity::Stale,
-            orna_repository::RemoteContinuity::InvalidEvidence,
-            orna_repository::RemoteContinuity::Unverifiable,
-        ] {
-            let diagnostic = fetch_continuity_diagnostic(continuity)
-                .expect("non-continuous witnesses are rejected");
-            assert_eq!(diagnostic.code, "E2100");
-            assert_eq!(diagnostic.title, "Orna continuity witness was rejected");
-            assert_eq!(
-                diagnostic.help,
-                "do not claim allocator or checkpoint continuity until required refs/orna witnesses match"
-            );
-            assert_eq!(
-                diagnostic.detail.as_deref(),
-                Some(format!("remote continuity state: {continuity:?}").as_str())
-            );
-        }
-    }
-
-    #[test]
-    #[allow(
-        clippy::too_many_lines,
-        reason = "one table-driven behavioral scenario documents stable CLI parse precedence"
-    )]
-    fn parsing_is_bounded_and_diagnostic_is_stable() {
-        let parsed = parse_cli(&[
-            "--db".into(),
-            "orna://host/reference".into(),
-            "run".into(),
-            "seed".into(),
-        ])
-        .expect("parses");
-        assert_eq!(parsed.command, Command::Run(Invocation::Seed));
-        assert_eq!(
-            parsed.endpoint,
-            Endpoint::RemoteTls("orna://host/reference".into())
-        );
-        assert_eq!(
-            parse_cli(&["status".into()])
-                .expect("default color mode parses")
-                .color,
-            ColorMode::Auto
-        );
-        let colored = parse_cli(&[
-            "--color".into(),
-            "always".into(),
-            "--db".into(),
-            "project".into(),
-            "status".into(),
-        ])
-        .expect("global color and database options parse before the command");
-        assert_eq!(colored.color, ColorMode::Always);
-        assert_eq!(colored.endpoint, Endpoint::Path("project".into()));
-        assert_eq!(
-            parse_cli(&["--color".into(), "never".into(), "status".into()])
-                .expect("never mode parses")
-                .color,
-            ColorMode::Never
-        );
-        let error = parse_cli(&["--color".into(), "invalid".into(), "status".into()])
-            .expect_err("invalid color mode is rejected");
-        assert_eq!(
-            (error.code, error.title.as_ref(), error.help),
-            (
-                "E1002",
-                "unsupported value for `--color`",
-                "choose `auto`, `always`, or `never`"
-            )
-        );
-        let error = parse_cli(&["--color".into()]).expect_err("color mode value is required");
-        assert_eq!(
-            (error.code, error.title.as_ref()),
-            ("E1001", "option `--color` needs a value")
-        );
-        assert_eq!(
-            parse_cli(&["check".into()]).unwrap().command,
-            Command::Check
-        );
-        assert_eq!(
-            parse_cli(&["invoke".into(), "library.value".into()])
-                .expect("parses")
-                .command,
-            Command::Invoke("library.value".into())
-        );
-        assert_eq!(
-            parse_cli(&["repl".into(), "1 + 2".into()])
-                .expect("parses")
-                .command,
-            Command::Repl(Some("1 + 2".into()))
-        );
-        assert_eq!(
-            parse_cli(&["status".into(), "--porcelain".into()])
-                .expect("parses")
-                .command,
-            Command::Status {
-                format: StatusFormat::Porcelain,
-            }
-        );
-        assert_eq!(
-            parse_cli(&["status".into()])
-                .expect("human status parses")
-                .command,
-            Command::Status {
-                format: StatusFormat::Human,
-            }
-        );
-        assert_eq!(
-            parse_cli(&["status".into(), "--short".into()])
-                .expect("short status parses")
-                .command,
-            Command::Status {
-                format: StatusFormat::Short,
-            }
-        );
-        assert_eq!(
-            parse_cli(&["status".into(), "--format".into(), "json".into()])
-                .expect("JSON status parses")
-                .command,
-            Command::Status {
-                format: StatusFormat::Json,
-            }
-        );
-        let error = parse_cli(&["status".into(), "--porcelain=v2".into()])
-            .expect_err("status format is exact");
-        assert_eq!(error.code, "E1002");
-        assert_eq!(
-            (error.title.as_ref(), error.help),
-            (
-                "unsupported `status` option or option placement",
-                "use `status`, `status --porcelain`, `status --short`, `status --format human|short|json`, or `--format human|short|json status`"
-            )
-        );
-        assert_eq!(
-            parse_cli(&["init".into()]).expect("parses").command,
-            Command::Init(None)
-        );
-        assert_eq!(
-            parse_cli(&["init".into(), "project".into()])
-                .expect("parses")
-                .command,
-            Command::Init(Some(PathBuf::from("project")))
-        );
-        assert_eq!(
-            parse_cli(&["init".into(), "--".into(), "--bare".into()])
-                .expect("literal target parses")
-                .command,
-            Command::Init(Some(PathBuf::from("--bare")))
-        );
-        assert_eq!(
-            parse_cli(&["--db".into(), "project".into(), "init".into()])
-                .expect_err("init must not use a database endpoint")
-                .code,
-            "E1002"
-        );
-        assert_eq!(
-            parse_cli(&["init".into(), "--bare".into()])
-                .expect_err("unsupported init option")
-                .code,
-            "E1002"
-        );
-        assert_eq!(
-            parse_cli(&["init".into(), "one".into(), "two".into()])
-                .expect_err("only one target is accepted")
-                .code,
-            "E1003"
-        );
-        assert_eq!(
-            parse_cli(&["invoke".into()])
-                .expect_err("target is required")
-                .code,
-            "E1001"
-        );
-        assert_eq!(
-            parse_cli(&["serve".into()]).unwrap().command,
-            Command::Serve {
-                port: 8080,
-                allow_push: false
-            }
-        );
-        assert_eq!(
-            parse_cli(&["serve".into(), "--port".into(), "0".into()])
-                .unwrap()
-                .command,
-            Command::Serve {
-                port: 0,
-                allow_push: false
-            }
-        );
-    }
-
-    #[test]
-    fn explain_documents_a_stable_diagnostic_and_rejects_unknown_codes() {
-        assert_eq!(
-            parse_cli(&["explain".into(), "ORNA-S010-IMPORT".into()])
-                .expect("explain parses")
-                .command,
-            Command::Explain("ORNA-S010-IMPORT".into())
-        );
-        assert_eq!(
-            explain_diagnostic("ORNA-S010-IMPORT").expect("known diagnostic"),
-            "ORNA-S010-IMPORT: imported module is unavailable\nThe project names a module that is not part of its captured dependencies, so the module cannot be checked or executed.\nhelp: use a captured standard dependency or remove the import"
-        );
-        let error = explain_diagnostic("ORNA-NOT-A-CODE").expect_err("unknown diagnostic");
-        assert_eq!((error.code, error.exit), ("E1002", Exit::Usage));
-    }
-
-    #[test]
-    fn semantic_legend_unknown_class_or_option_exits_with_usage_code_two() {
-        for words in [
-            &["semantic-legend", "--class", "string"][..],
-            &["semantic-legend", "--format", "xml"][..],
-            &["semantic-legend", "--limit", "0"][..],
-        ] {
-            let arguments = words
-                .iter()
-                .map(|word| (*word).to_owned())
-                .collect::<Vec<_>>();
-            match parse_cli(&arguments) {
-                Ok(_) => panic!("{words:?} should be rejected"),
-                Err(error) => {
-                    assert_eq!((error.code, error.exit as i32), ("E1002", 2), "{words:?}");
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn explain_documents_frozen_assertion_and_syntax_diagnostics() {
-        assert_eq!(
-            explain_diagnostic("ORNA-A091-001").expect("assertion diagnostic is documented"),
-            "ORNA-A091-001: refined type uses the legacy `where self` form\nRefined Orna types state their invariant in a brace-delimited assertion block owned by the type.\nhelp: replace `where self` with a brace-delimited `assert` block"
-        );
-        for code in [
-            "ORNA-A091-002",
-            "ORNA-A091-003",
-            "ORNA-A091-004",
-            "ORNA-A091-005",
-            "ORNA-A091-006",
-            "ORNA-A091-007",
-            "ORNA-A091-008",
-            "ORNA-A091-009",
-            "ORNA-A091-010",
-            "ORNA-A091-011",
-            "ORNA-A091-012",
-            "ORNA091-E-MATCH",
-            "ORNA091-E-RESULT",
-            "ORNA091-E-POSTFIX-QUESTION",
-            "ORNA091-E-CURRENCY",
-            "ORNA091-E-CURRENCY-SYMBOL",
-            "ORNA091-E-IMPL-FOR",
-            "ORNA091-E-BOUND-COLON",
-            "ORNA091-E-STATIC-FN",
-            "ORNA091-E-TRYFROM",
-            "ORNA091-E-CONVERSION-CHAIN",
-            "ORNA091-E-OPAQUE",
-            "ORNA091-E-FIELD-CONSTRAINT",
-        ] {
-            assert!(
-                explain_diagnostic(code).is_ok(),
-                "frozen diagnostic {code} must have user guidance"
-            );
-        }
-    }
-
-    /// ORNA-CLI-006: supported terminals receive safe OSC 8 status-path hyperlinks.
-    #[test]
-    #[allow(clippy::too_many_lines)]
-    fn human_status_links_safe_paths_only_for_supported_terminal_capabilities() {
-        const FIXTURE: &str = include_str!("../tests/fixtures/function-expression.orna");
-        let directory = tempfile::tempdir().expect("status repository");
-        assert!(
-            std::process::Command::new("git")
-                .args(["init", "--quiet"])
-                .current_dir(directory.path())
-                .status()
-                .expect("git init")
-                .success()
-        );
-        for name in ["function-expression.orna", "function expression#?.orna"] {
-            std::fs::write(directory.path().join(name), FIXTURE).expect("fixture source");
-        }
-
-        let human_output = std::process::Command::new("git")
-            .args([
-                "-c",
-                "color.status=false",
-                "status",
-                "--untracked-files=all",
-            ])
-            .current_dir(directory.path())
-            .output()
-            .expect("human Git status");
-        assert!(human_output.status.success());
-        let root = directory
-            .path()
-            .canonicalize()
-            .expect("absolute repository root");
-        let mut without_links = Vec::new();
-        write_human_status(&human_output.stdout, &mut without_links, true, None)
-            .expect("unlinked human status");
-        let mut linked = Vec::new();
-        write_human_status(&human_output.stdout, &mut linked, true, Some(&root))
-            .expect("linked human status");
-
-        let linked_text = std::str::from_utf8(&linked).expect("UTF-8 human status");
-        for (name, encoded_suffix) in [
-            ("function-expression.orna", "/function-expression.orna"),
-            (
-                "function expression#?.orna",
-                "/function%20expression%23%3F.orna",
-            ),
-        ] {
-            let url = file_url_for_status_path(&root, name.as_bytes()).expect("safe file URL");
-            assert!(url.starts_with("file:///"));
-            assert!(url.ends_with(encoded_suffix), "{url}");
-            assert!(
-                linked_text.contains(&format!("\x1b]8;;{url}\x1b\\")),
-                "missing OSC 8 URL for {name:?}"
-            );
-            assert!(linked_text.contains(name), "missing visible path {name:?}");
-        }
-        assert_eq!(visible_without_osc8(&linked), without_links);
-        assert!(file_url_for_status_path(&root, b"\"quoted path\"").is_none());
-        assert!(file_url_for_status_path(&root, b"control\npath").is_none());
-        assert!(file_url_for_status_path(&root, b"../outside").is_none());
-        assert!(file_url_for_status_path(&root, &[0xff]).is_none());
-
-        assert!(osc8_terminal_supports(
-            Some("xterm-kitty"),
-            None,
-            None,
-            None,
-            None,
-            false,
-        ));
-        assert!(!osc8_terminal_supports(
-            Some("xterm-256color"),
-            None,
-            None,
-            None,
-            None,
-            false,
-        ));
-        assert!(!osc8_terminal_supports(
-            Some("xterm-kitty"),
-            None,
-            None,
-            None,
-            None,
-            true,
-        ));
-        assert!(osc8_terminal_supports(
-            None,
-            Some("iTerm.app"),
-            Some("3.1.0"),
-            None,
-            None,
-            false,
-        ));
-        assert!(!osc8_terminal_supports(
-            None,
-            Some("iTerm.app"),
-            Some("3.0.9"),
-            None,
-            None,
-            false,
-        ));
-
-        let short_output = std::process::Command::new("git")
-            .args(["status", "--short", "--untracked-files=all"])
-            .current_dir(directory.path())
-            .output()
-            .expect("short Git status");
-        assert!(short_output.status.success());
-        let mut rendered_short = Vec::new();
-        write_short_status(&short_output.stdout, &mut rendered_short, false)
-            .expect("rendered short status");
-        assert_eq!(rendered_short, short_output.stdout);
-    }
-
-    #[test]
-    fn unpublished_status_summary_reports_zero_and_remaining_runtime_mutations() {
-        let mut rendered = Vec::new();
-        write_unpublished_summary(&mut rendered, 0).expect("empty unpublished summary");
-        write_unpublished_summary(&mut rendered, 1).expect("singular unpublished summary");
-        write_unpublished_summary(&mut rendered, 2).expect("plural unpublished summary");
-        assert_eq!(
-            rendered,
-            b"Unpublished CWD changes: 0 runtime mutations\nUnpublished CWD changes: 1 runtime mutation\nUnpublished CWD changes: 2 runtime mutations\n"
-        );
-    }
-
-    #[test]
-    fn json_status_includes_unpublished_runtime_mutation_count() {
-        assert_eq!(
-            append_unpublished_count_json(b"{\"branch\":\"main\",\"changes\":[]}\n".to_vec(), 4,)
-                .expect("JSON status terminator"),
-            b"{\"branch\":\"main\",\"changes\":[],\"unpublished_runtime_mutations\":4}\n"
-        );
-        assert!(append_unpublished_count_json(b"{}".to_vec(), 0).is_none());
-    }
-
-    #[test]
-    fn unpublished_mutation_count_reads_the_runtime_pending_tail() {
-        let directory = tempfile::tempdir().expect("status repository");
-        assert!(
-            std::process::Command::new("git")
-                .args(["init", "--quiet"])
-                .current_dir(directory.path())
-                .status()
-                .expect("git init")
-                .success()
-        );
-        orna_repository::initialize_repository(directory.path())
-            .expect("initialize Orna repository");
-        let repository = orna_repository::Repository::discover(directory.path())
-            .expect("discover initialized repository");
-        let (identity, initial_digest) = runtime_identity(&repository).expect("runtime identity");
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime executor");
-        let state = runtime
-            .block_on(RuntimeState::open(&repository, identity, initial_digest))
-            .expect("open runtime state");
-        assert_eq!(unpublished_mutation_count(&repository), Ok(0));
-
-        let payload = b"pending table mutation".to_vec();
-        let mutation = Mutation {
-            id: [1; 16],
-            digest: Sha256::digest(&payload).into(),
-            payload,
-        };
-        runtime
-            .block_on(async {
-                let lease = state.acquire_lease(identity.repository_id).await?;
-                let capture = state.capture().await?;
-                state
-                    .commit(lease, &capture, &mutation, [2; 32], &NoFault)
-                    .await
-            })
-            .expect("append durable runtime mutation");
-        drop(state);
-
-        assert_eq!(unpublished_mutation_count(&repository), Ok(1));
-    }
-
-    fn visible_without_osc8(output: &[u8]) -> Vec<u8> {
-        let mut visible = Vec::with_capacity(output.len());
-        let mut remaining = output;
-        while let Some(start) = remaining.windows(4).position(|window| window == b"\x1b]8;") {
-            visible.extend_from_slice(&remaining[..start]);
-            let link = &remaining[start..];
-            let end = link
-                .windows(2)
-                .position(|window| window == b"\x1b\\")
-                .expect("OSC 8 terminator");
-            remaining = &link[end + 2..];
-        }
-        visible.extend_from_slice(remaining);
-        visible
-    }
-
-    #[test]
-    fn bare_status_dispatches_to_git_human_status() {
-        let directory = tempfile::tempdir().expect("status repository");
-        assert!(
-            std::process::Command::new("git")
-                .args(["init", "--quiet"])
-                .current_dir(directory.path())
-                .status()
-                .expect("git init")
-                .success()
-        );
-        let parsed = parse_cli(&["status".into()]).expect("human status parses");
-        assert_eq!(
-            execute(&Parsed {
-                endpoint: Endpoint::Path(directory.path().to_string_lossy().into_owned()),
-                command: parsed.command,
-                color: ColorMode::Auto,
-            }),
-            Ok(())
-        );
-    }
-
-    #[test]
-    fn project_repl_factory_retains_imports_in_a_scripted_session() {
-        let directory = tempfile::tempdir().expect("temporary project");
-        std::fs::write(
-            directory.path().join("main.orna"),
-            "use library; pub fn run(): Int = library.twice(21);",
-        )
-        .expect("main source");
-        std::fs::write(
-            directory.path().join("library.orna"),
-            "pub fn twice(value: Int): Int = value + value; fn hidden(value: Int): Int = value;",
-        )
-        .expect("library source");
-        assert!(
-            std::process::Command::new("git")
-                .args(["init", "--quiet"])
-                .current_dir(directory.path())
-                .status()
-                .expect("git")
-                .success()
-        );
-
-        let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
-        let mut runtime = repl_session(&endpoint).expect("project session");
-        let mut input =
-            b"use library;\nlet n: Int = 21;\nlibrary.hidden(n)\nlibrary.twice(n)\n:quit\n"
-                .as_slice();
-        let mut output = Vec::new();
-        repl::run(&mut input, &mut output, &mut runtime.session).expect("scripted session");
-        let output = String::from_utf8(output).expect("UTF-8");
-        assert!(output.contains("error[ORNA-S012-UNRESOLVED]: "), "{output}");
-        assert!(output.contains("hidden"), "{output}");
-        assert!(output.contains("line 1, column 9"), "{output}");
-        assert!(output.contains("> 42 : Int\n> "), "{output}");
-    }
-
-    #[test]
-    fn project_repl_rejects_an_uncaptured_standard_import() {
-        let directory = tempfile::tempdir().expect("temporary project");
-        std::fs::write(
-            directory.path().join("main.orna"),
-            include_str!("../tests/fixtures/reference-project/page.orna"),
-        )
-        .expect("accepted source");
-        assert!(
-            std::process::Command::new("git")
-                .args(["init", "--quiet"])
-                .current_dir(directory.path())
-                .status()
-                .expect("git")
-                .success()
-        );
-
-        let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
-        let error = repl_session(&endpoint)
-            .err()
-            .expect("uncaptured standard module");
-        assert_eq!(error.code, "ORNA-S010-IMPORT");
-        assert_eq!(error.exit, Exit::Target);
-        assert_eq!(error.title, "imported module is unavailable");
-        assert_eq!(
-            error.help,
-            "use a captured standard dependency or remove the import"
-        );
-    }
-
-    #[test]
-    fn repl_repository_authority_is_reused_for_cwd_head_and_named_refs_without_git_mutation() {
-        let directory = tempfile::tempdir().expect("temporary project");
-        assert!(
-            std::process::Command::new("git")
-                .args(["init", "--quiet"])
-                .current_dir(directory.path())
-                .status()
-                .expect("git init")
-                .success()
-        );
-        std::fs::write(directory.path().join("main.orna"), "use library;")
-            .expect("committed source");
-        std::fs::write(
-            directory.path().join("library.orna"),
-            "pub fn answer(): Int = 42;",
-        )
-        .expect("committed library source");
-        assert!(
-            std::process::Command::new("git")
-                .args(["add", "main.orna", "library.orna"])
-                .current_dir(directory.path())
-                .status()
-                .expect("git add")
-                .success()
-        );
-        assert!(
-            std::process::Command::new("git")
-                .args([
-                    "-c",
-                    "user.email=kieran@drewett.dev",
-                    "-c",
-                    "user.name=kierandrewett",
-                    "-c",
-                    "commit.gpgsign=false",
-                    "commit",
-                    "--quiet",
-                    "-m",
-                    "snapshot",
-                ])
-                .current_dir(directory.path())
-                .status()
-                .expect("git commit")
-                .success()
-        );
-        assert!(
-            std::process::Command::new("git")
-                .args(["branch", "snapshot"])
-                .current_dir(directory.path())
-                .status()
-                .expect("git branch")
-                .success()
-        );
-        std::fs::write(
-            directory.path().join("library.orna"),
-            "pub fn answer(): Int = 7;",
-        )
-        .expect("CWD source");
-        let status = std::process::Command::new("git")
-            .args(["status", "--porcelain"])
-            .current_dir(directory.path())
-            .output()
-            .expect("Git status before snapshot reads");
-
-        let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
-        let runtime = repl_session(&endpoint).expect("project REPL runtime");
-        let repository = runtime
-            .repository
-            .as_ref()
-            .expect("opened project repository remains session authority");
-        assert_eq!(repository.worktree(), directory.path());
-        let loader = ReplSnapshotSessionLoader {
-            repository: Some(repository),
-            host_bindings: Rc::new(RefCell::new(None)),
-        };
-        for (target, expected) in [
-            (repl::SnapshotTarget::Cwd, "7 : Int"),
-            (repl::SnapshotTarget::Head, "42 : Int"),
-            (repl::SnapshotTarget::Ref("snapshot".into()), "42 : Int"),
-        ] {
-            let mut session = repl::SnapshotSessionLoader::load_snapshot(&loader, target)
-                .expect("snapshot project is admitted");
-            let imported = session.submit("use library;");
-            assert!(imported.is_ok(), "snapshot import failed: {imported:?}");
-            let value = session
-                .submit("library.answer()")
-                .expect("snapshot function evaluates")
-                .expect("visible result");
-            assert_eq!(repl::inspect(&value), expected);
-        }
-
-        let after = std::process::Command::new("git")
-            .args(["status", "--porcelain"])
-            .current_dir(directory.path())
-            .output()
-            .expect("Git status after snapshot reads");
-        assert_eq!(after.stdout, status.stdout);
-        assert_eq!(after.stderr, status.stderr);
-    }
-
-    #[test]
-    #[allow(
-        clippy::too_many_lines,
-        reason = "the regression preserves every Git observation needed to prove read-only snapshot selection"
-    )]
-    fn repl_snapshot_loader_keeps_a_selected_ref_stable_after_it_moves() {
-        let directory = tempfile::tempdir().expect("temporary project");
-        assert!(
-            std::process::Command::new("git")
-                .args(["init", "--quiet"])
-                .current_dir(directory.path())
-                .status()
-                .expect("git init")
-                .success()
-        );
-        std::fs::write(directory.path().join("main.orna"), "use library;")
-            .expect("initial main source");
-        std::fs::write(
-            directory.path().join("library.orna"),
-            "pub fn answer(): Int = 42;",
-        )
-        .expect("initial library source");
-        assert!(
-            std::process::Command::new("git")
-                .args(["add", "main.orna", "library.orna"])
-                .current_dir(directory.path())
-                .status()
-                .expect("git add")
-                .success()
-        );
-        assert!(
-            std::process::Command::new("git")
-                .args([
-                    "-c",
-                    "user.email=orna@example.test",
-                    "-c",
-                    "user.name=Orna Test",
-                    "-c",
-                    "commit.gpgsign=false",
-                    "commit",
-                    "--quiet",
-                    "-m",
-                    "selected snapshot",
-                ])
-                .current_dir(directory.path())
-                .status()
-                .expect("initial git commit")
-                .success()
-        );
-        assert!(
-            std::process::Command::new("git")
-                .args(["branch", "snapshot"])
-                .current_dir(directory.path())
-                .status()
-                .expect("snapshot branch")
-                .success()
-        );
-        std::fs::write(
-            directory.path().join("library.orna"),
-            "pub fn answer(): Int = 7;",
-        )
-        .expect("advanced library source");
-        assert!(
-            std::process::Command::new("git")
-                .args(["add", "library.orna"])
-                .current_dir(directory.path())
-                .status()
-                .expect("git add advanced source")
-                .success()
-        );
-        assert!(
-            std::process::Command::new("git")
-                .args([
-                    "-c",
-                    "user.email=orna@example.test",
-                    "-c",
-                    "user.name=Orna Test",
-                    "-c",
-                    "commit.gpgsign=false",
-                    "commit",
-                    "--quiet",
-                    "-m",
-                    "advanced source",
-                ])
-                .current_dir(directory.path())
-                .status()
-                .expect("advanced git commit")
-                .success()
-        );
-
-        let git_output = |arguments: &[&str]| {
-            std::process::Command::new("git")
-                .args(arguments)
-                .current_dir(directory.path())
-                .output()
-                .expect("git output")
-        };
-        let selected_ref = git_output(&["rev-parse", "snapshot"]);
-        assert!(selected_ref.status.success());
-        let head = git_output(&["rev-parse", "HEAD"]);
-        assert!(head.status.success());
-        assert_ne!(selected_ref.stdout, head.stdout);
-        let symbolic_head = git_output(&["symbolic-ref", "--quiet", "HEAD"]);
-        assert!(symbolic_head.status.success());
-        let index_path = git_output(&["rev-parse", "--git-path", "index"]);
-        assert!(index_path.status.success());
-        let index_path = directory.path().join(
-            std::str::from_utf8(&index_path.stdout)
-                .expect("UTF-8 index path")
-                .trim(),
-        );
-        let index = std::fs::read(&index_path).expect("index before snapshot selection");
-        let main =
-            std::fs::read(directory.path().join("main.orna")).expect("main before selection");
-        let library =
-            std::fs::read(directory.path().join("library.orna")).expect("library before selection");
-        let status = git_output(&["status", "--porcelain=v1", "-z"]);
-        assert!(status.status.success());
-
-        let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
-        let runtime = repl_session(&endpoint).expect("project REPL runtime");
-        let repository = runtime
-            .repository
-            .as_ref()
-            .expect("opened project repository remains session authority");
-        let host_bindings = Rc::new(RefCell::new(Some(SysHostBindingRegistry::new(
-            EnvironmentProvider::default(),
-        ))));
-        let loader = ReplSnapshotSessionLoader {
-            repository: Some(repository),
-            host_bindings: host_bindings.clone(),
-        };
-        let mut session = repl::SnapshotSessionLoader::load_snapshot(
-            &loader,
-            repl::SnapshotTarget::Ref("snapshot".into()),
-        )
-        .expect("selected snapshot project is admitted");
-        assert!(host_bindings.borrow().is_none());
-
-        assert!(
-            std::process::Command::new("git")
-                .args(["branch", "--force", "snapshot", "HEAD"])
-                .current_dir(directory.path())
-                .status()
-                .expect("move selected branch")
-                .success()
-        );
-        let moved_ref = git_output(&["rev-parse", "snapshot"]);
-        assert!(moved_ref.status.success());
-        assert_eq!(moved_ref.stdout, head.stdout);
-
-        session
-            .submit("use library;")
-            .expect("selected import succeeds");
-        let value = session
-            .submit("library.answer()")
-            .expect("selected function evaluates")
-            .expect("visible result");
-        assert_eq!(repl::inspect(&value), "42 : Int");
-
-        let after_head = git_output(&["rev-parse", "HEAD"]);
-        let after_symbolic_head = git_output(&["symbolic-ref", "--quiet", "HEAD"]);
-        let after_status = git_output(&["status", "--porcelain=v1", "-z"]);
-        assert_eq!(after_head.stdout, head.stdout);
-        assert_eq!(after_symbolic_head.stdout, symbolic_head.stdout);
-        assert_eq!(
-            std::fs::read(&index_path).expect("index after selection"),
-            index
-        );
-        assert_eq!(
-            std::fs::read(directory.path().join("main.orna")).expect("main after selection"),
-            main
-        );
-        assert_eq!(
-            std::fs::read(directory.path().join("library.orna")).expect("library after selection"),
-            library
-        );
-        assert_eq!(after_status.stdout, status.stdout);
-        assert_eq!(after_status.stderr, status.stderr);
-    }
-
-    #[test]
-    fn repl_snapshot_loader_rejects_non_local_endpoints_as_at_errors() {
-        let endpoint = Endpoint::RemoteTls("orna://host/project".into());
-        let mut runtime = repl_session(&endpoint).expect("core-only remote REPL session");
-        let loader = ReplSnapshotSessionLoader {
-            repository: runtime.repository.as_ref(),
-            host_bindings: Rc::new(RefCell::new(None)),
-        };
-        let mut input = b":at HEAD\n:at snapshot\n:quit\n".as_slice();
-        let mut output = Vec::new();
-
-        repl::run_with_snapshot_loader(&mut input, &mut output, &mut runtime.session, &loader)
-            .expect("REPL runs");
-
-        assert_eq!(
-            String::from_utf8(output).expect("UTF-8"),
-            "> error[ORNA-REPL-AT]: requested project snapshot could not be loaded\nhelp: choose an available snapshot with `:at CWD`, `:at HEAD`, or `:at ref`\n> error[ORNA-REPL-AT]: requested project snapshot could not be loaded\nhelp: choose an available snapshot with `:at CWD`, `:at HEAD`, or `:at ref`\n> "
-        );
-    }
-
-    #[test]
-    fn project_source_rejects_repl_only_bindings() {
-        let directory = tempfile::tempdir().expect("temporary project");
-        std::fs::write(directory.path().join("main.orna"), "pub fn status() = $?;")
-            .expect("main source");
-        assert!(
-            std::process::Command::new("git")
-                .args(["init", "--quiet"])
-                .current_dir(directory.path())
-                .status()
-                .expect("git")
-                .success()
-        );
-
-        let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
-        assert_eq!(
-            repl_session(&endpoint)
-                .err()
-                .expect("module source rejects status binding")
-                .code,
-            "E2101"
-        );
-    }
-
-    #[test]
-    fn diagnostic_output_preserves_detail_help_and_final_newline() {
-        let diagnostic = Diagnostic::target_with_detail(
-            "E2300",
-            "request failed",
-            "retry the operation",
-            "the expected remote response was unavailable",
-        );
-        let mut plain = Vec::new();
-        write_diagnostic(&mut plain, &diagnostic, false, false).expect("plain diagnostic write");
-        assert_eq!(
-            plain, b"error[E2300]: request failed\nhelp: retry the operation\n",
-            "technical details are hidden in normal output"
-        );
-
-        let mut colored = Vec::new();
-        write_diagnostic(&mut colored, &diagnostic, true, true).expect("colored diagnostic write");
-        assert_eq!(
-            String::from_utf8(colored).expect("diagnostic is UTF-8"),
-            "\x1b[31merror\x1b[0m[\x1b[31mE2300\x1b[0m]: \x1b[31mrequest failed\x1b[0m\n  \x1b[2mthe expected remote response was unavailable\x1b[0m\nhelp: \x1b[2mretry the operation\x1b[0m\n"
-        );
-    }
-
-    #[test]
-    fn durable_invocation_failure_carries_public_code_and_hides_it_without_debug() {
-        let diagnostic = durable_invocation_failed(&orna_runtime::RuntimeError::AdminBusy);
-        assert_eq!(diagnostic.code, "E2200");
-        assert_eq!(
-            diagnostic.detail.as_deref(),
-            Some("runtime failure: sys.admin.busy")
-        );
-
-        let mut plain = Vec::new();
-        write_diagnostic(&mut plain, &diagnostic, false, false).expect("plain write");
-        let plain = String::from_utf8(plain).expect("diagnostic is UTF-8");
-        assert!(!plain.contains("sys.admin.busy"), "plain output: {plain}");
-        assert!(!plain.contains("runtime failure"), "plain output: {plain}");
-
-        let mut debug = Vec::new();
-        write_diagnostic(&mut debug, &diagnostic, false, true).expect("debug write");
-        let debug = String::from_utf8(debug).expect("diagnostic is UTF-8");
-        assert!(
-            debug.contains("runtime failure: sys.admin.busy"),
-            "debug output: {debug}"
-        );
-    }
-
-    #[test]
-    fn durable_invocation_failure_without_public_code_carries_display_text() {
-        let diagnostic = durable_invocation_failed(&orna_runtime::RuntimeError::LeaseHeld);
-        assert_eq!(diagnostic.code, "E2200");
-        assert_eq!(
-            diagnostic.detail.as_deref(),
-            Some("runtime failure: runtime writer is held")
-        );
-    }
-
-    #[test]
-    fn failure_detail_formats_attached_cause_codes() {
-        let severity = orna_foundation::DiagnosticSeverity::Error;
-        let message = || orna_foundation::SafeText::new("redacted").expect("safe text");
-        let cause = orna_foundation::Diagnostic::new(
-            orna_foundation::SafeText::new("ORNA-EVAL-DIVIDE-BY-ZERO").expect("safe code"),
-            severity,
-            message(),
-        )
-        .expect("cause diagnostic");
-        let failure = orna_foundation::Diagnostic::new(
-            orna_foundation::SafeText::new("ORNA-EVAL-SURFACE").expect("safe code"),
-            severity,
-            message(),
-        )
-        .expect("failure diagnostic")
-        .with_cause(cause);
-
-        let delivery = stream_delivery_failed(&failure);
-        assert_eq!(delivery.code, "E2200");
-        assert_eq!(
-            delivery.detail.as_deref(),
-            Some("failure code: ORNA-EVAL-SURFACE (causes: ORNA-EVAL-DIVIDE-BY-ZERO)")
-        );
-    }
-
-    /// One single-expression REPL submission against a bare session, the path
-    /// `orna repl EXPR` takes without a project transaction authority.
-    fn run_repl_submission<W: io::Write>(
-        session: &mut AdmittedReplSession,
-        source: &str,
-        writer: &mut W,
-        color_enabled: bool,
-    ) -> Result<(), Diagnostic> {
-        let mut submitter = |session: &mut AdmittedReplSession, source: &str| {
-            session.submit(source).map_err(repl::ReplFailure::from)
-        };
-        run_repl_submission_with(session, source, writer, color_enabled, &mut submitter)
-    }
-
-    #[test]
-    fn single_expression_repl_reports_visible_success_failure_and_quit() {
-        let mut session = AdmittedReplSession::new(Limits::default());
-        let mut output = Vec::new();
-        assert_eq!(
-            run_repl_submission(&mut session, "1 + 2", &mut output, false),
-            Ok(())
-        );
-        let error = run_repl_submission(&mut session, "missing()", &mut output, false)
-            .expect_err("failure is reported");
-        assert_eq!(error.code, "ORNA-S012-UNRESOLVED");
-        assert_eq!(error.exit, Exit::Target);
-        let rendered = error.to_string();
-        assert_eq!(
-            rendered,
-            "error[ORNA-S012-UNRESOLVED]: name `missing` cannot be resolved\n  --> line 1, column 1\n  |\n1 | missing()\n  | ^^^^^^^\nnote: `missing` is not declared in this session and is not imported\nhelp: declare `missing` before using it, for example `let missing = <value>`"
-        );
-        assert_eq!(
-            run_repl_submission(&mut session, ":quit", &mut output, false),
-            Ok(())
-        );
-        assert_eq!(String::from_utf8(output).expect("UTF-8"), "3 : Int\n");
-    }
-
-    struct BrokenWriter;
-
-    impl std::io::Write for BrokenWriter {
-        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
-            Err(std::io::Error::other("writer failed"))
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn single_expression_repl_converts_writer_failure_to_console_diagnostic() {
-        let mut session = AdmittedReplSession::new(Limits::default());
-        let error = run_repl_submission(&mut session, "1", &mut BrokenWriter, false)
-            .expect_err("writer failure");
-        assert_eq!((error.code, error.exit), ("E2200", Exit::Target));
-    }
-    #[test]
-    fn execution_project_preserves_reachable_loose_row_metadata() {
-        let directory = tempfile::tempdir().expect("temporary project");
-        std::fs::create_dir_all(directory.path().join("contacts/Contact")).expect("row directory");
-        std::fs::write(
-            directory.path().join("main.orna"),
-            "use contacts.main; pub fn run() {}",
-        )
-        .expect("root source");
-        std::fs::write(
-            directory.path().join("contacts/main.orna"),
-            "pub table Contact(id: Str) { name: Str, }",
-        )
-        .expect("table source");
-        let row_source = "{ name: \"Alice Smith\" }\n";
-        std::fs::write(
-            directory.path().join("contacts/Contact/alice-smith.orna"),
-            row_source,
-        )
-        .expect("row source");
-        assert!(
-            std::process::Command::new("git")
-                .args(["init", "--quiet"])
-                .current_dir(directory.path())
-                .status()
-                .expect("git")
-                .success()
-        );
-
-        let repository =
-            orna_repository::Repository::discover(directory.path()).expect("repository");
-        let project = orna_project::ProjectLoader::default()
-            .load(&repository)
-            .expect("project loads");
-        let execution = execution_project(&project);
-        assert_eq!(execution.loose_rows.len(), 1);
-        let row = &execution.loose_rows[0];
-        assert_eq!(row.source_id, "contacts/Contact/alice-smith.orna");
-        assert_eq!(row.parse_as, "row_unit");
-        assert_eq!(row.source.as_bytes(), row_source.as_bytes());
-    }
-
-    #[test]
-    fn check_loads_reachable_project_sources_and_ignores_unreachable_modules() {
-        let directory = tempfile::tempdir().expect("temporary project");
-        std::fs::write(
-            directory.path().join("main.orna"),
-            "use library; pub fn run() {}",
-        )
-        .expect("main source");
-        std::fs::write(directory.path().join("library.orna"), "pub fn seed() {}").expect("library");
-        std::fs::write(directory.path().join("unused.orna"), "not a module").expect("unused");
-        assert!(
-            std::process::Command::new("git")
-                .args(["init", "--quiet"])
-                .current_dir(directory.path())
-                .status()
-                .expect("git")
-                .success()
-        );
-
-        let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
-        assert_eq!(check_project(&endpoint, false), Ok(()));
-    }
-
-    #[test]
-    fn authoritative_reference_project_runs_seed_exercise_and_sensor_stream() {
-        let directory = tempfile::tempdir().expect("temporary reference project");
-        for (name, source) in [
-            (
-                "main.orna",
-                include_str!("../tests/fixtures/reference-project/main.orna"),
-            ),
-            (
-                "library.orna",
-                include_str!("../tests/fixtures/reference-project/library.orna"),
-            ),
-            (
-                "warehouse.orna",
-                include_str!("../tests/fixtures/reference-project/warehouse.orna"),
-            ),
-            (
-                "sensors.orna",
-                include_str!("../tests/fixtures/reference-project/sensors.orna"),
-            ),
-            (
-                "values.orna",
-                include_str!("../tests/fixtures/reference-project/values.orna"),
-            ),
-        ] {
-            std::fs::write(directory.path().join(name), source).expect("reference source");
-        }
-        assert!(
-            std::process::Command::new("git")
-                .args(["init", "--quiet"])
-                .current_dir(directory.path())
-                .status()
-                .expect("git")
-                .success()
-        );
-        assert!(
-            std::process::Command::new("git")
-                .args(["add", "."])
-                .current_dir(directory.path())
-                .status()
-                .expect("git")
-                .success()
-        );
-        orna_repository::initialize_repository(directory.path()).expect("runtime metadata");
-        let endpoint = Endpoint::Path(directory.path().display().to_string());
-        assert_eq!(
-            execute(&Parsed {
-                endpoint: endpoint.clone(),
-                command: Command::Check,
-                color: ColorMode::Auto,
-            }),
-            Ok(())
-        );
-        assert_eq!(
-            execute(&Parsed {
-                endpoint: endpoint.clone(),
-                command: Command::Run(Invocation::Seed),
-                color: ColorMode::Auto,
-            }),
-            Ok(())
-        );
-        let repository =
-            orna_repository::Repository::discover(directory.path()).expect("repository");
-        let (identity, initial_digest) = runtime_identity(&repository).expect("runtime identity");
-        let observations = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime")
-            .block_on(async {
-                RuntimeState::open(&repository, identity, initial_digest)
-                    .await
-                    .expect("reopened runtime")
-                    .run_observations()
-                    .await
-                    .expect("run observations")
-            });
-        assert_eq!(observations.len(), 1);
-        assert_eq!(observations[0].status, RunObservationStatus::Completed);
-        assert!(!observations[0].live);
-        let error = execute(&Parsed {
-            endpoint: endpoint.clone(),
-            command: Command::Run(Invocation::Seed),
-            color: ColorMode::Auto,
-        })
-        .expect_err("duplicate seed must be rejected");
-        assert_eq!((error.code, error.exit), ("E2200", Exit::Target));
-        assert_eq!(
-            execute(&Parsed {
-                endpoint: endpoint.clone(),
-                command: Command::Run(Invocation::Exercise),
-                color: ColorMode::Auto,
-            }),
-            Ok(())
-        );
-        assert_eq!(
-            execute(&Parsed {
-                endpoint,
-                command: Command::Run(Invocation::SensorsIngest),
-                color: ColorMode::Auto,
-            }),
-            Ok(())
-        );
-    }
-
-    #[test]
-    fn run_seed_executes_a_reachable_standard_free_project() {
-        let directory = tempfile::tempdir().expect("temporary project");
-        std::fs::write(
-            directory.path().join("main.orna"),
-            "use library; pub fn seed(): Int = library.value();",
-        )
-        .expect("main source");
-        std::fs::write(
-            directory.path().join("library.orna"),
-            "pub fn value(): Int = 42;",
-        )
-        .expect("library source");
-        assert!(
-            std::process::Command::new("git")
-                .args(["init", "--quiet"])
-                .current_dir(directory.path())
-                .status()
-                .expect("git")
-                .success()
-        );
-        orna_repository::initialize_repository(directory.path()).expect("runtime metadata");
-
-        let parsed = Parsed {
-            endpoint: Endpoint::Path(directory.path().to_string_lossy().into_owned()),
-            command: Command::Run(Invocation::Seed),
-            color: ColorMode::Auto,
-        };
-        assert_eq!(execute(&parsed), Ok(()));
-    }
-
-    #[test]
-    fn invoke_executes_a_qualified_reachable_pure_function() {
-        let directory = tempfile::tempdir().expect("temporary project");
-        std::fs::write(
-            directory.path().join("main.orna"),
-            "use library; pub fn seed(): Int = library.value();",
-        )
-        .expect("main source");
-        std::fs::write(
-            directory.path().join("library.orna"),
-            "pub fn value(): Int = 42;",
-        )
-        .expect("library source");
-        assert!(
-            std::process::Command::new("git")
-                .args(["init", "--quiet"])
-                .current_dir(directory.path())
-                .status()
-                .expect("git")
-                .success()
-        );
-        let parsed = Parsed {
-            endpoint: Endpoint::Path(directory.path().to_string_lossy().into_owned()),
-            command: Command::Invoke("library.value".into()),
-            color: ColorMode::Auto,
-        };
-        assert_eq!(execute(&parsed), Ok(()));
-    }
-
-    #[test]
-    fn check_rejects_an_uncaptured_standard_module() {
-        let directory = tempfile::tempdir().expect("temporary project");
-        std::fs::write(
-            directory.path().join("main.orna"),
-            "use std.math; pub fn run(): Int = std.math.increment(41);",
-        )
-        .expect("main source");
-        assert!(
-            std::process::Command::new("git")
-                .args(["init", "--quiet"])
-                .current_dir(directory.path())
-                .status()
-                .expect("git")
-                .success()
-        );
-
-        let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
-        let error = check_project(&endpoint, false).expect_err("uncaptured standard module");
-        assert_eq!(
-            (error.code, error.exit, error.title.as_ref(), error.help),
-            (
-                "ORNA-S010-IMPORT",
-                Exit::Target,
-                "imported module is unavailable",
-                "use a captured standard dependency or remove the import",
-            )
-        );
-    }
-
-    #[test]
-    fn check_rejects_each_uncaptured_standard_module() {
-        let directory = tempfile::tempdir().expect("temporary project");
-        std::fs::write(
-            directory.path().join("main.orna"),
-            "use std.math; use std.text; use std.json; use std.prelude as _; pub fn run() {}",
-        )
-        .expect("main source");
-        assert!(
-            std::process::Command::new("git")
-                .args(["init", "--quiet"])
-                .current_dir(directory.path())
-                .status()
-                .expect("git")
-                .success()
-        );
-
-        let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
-        let error = check_project(&endpoint, false).expect_err("unbundled standard module");
-        assert_eq!(
-            (error.code, error.exit, error.title.as_ref(), error.help),
-            (
-                "ORNA-S010-IMPORT",
-                Exit::Target,
-                "imported module is unavailable",
-                "use a captured standard dependency or remove the import",
-            )
-        );
-    }
-
-    #[test]
-    fn invoke_rejects_an_uncaptured_standard_function() {
-        let directory = tempfile::tempdir().expect("temporary project");
-        std::fs::write(
-            directory.path().join("main.orna"),
-            "use std.math; pub fn seed(): Bool = std.math.is_zero(std.math.decrement(1));",
-        )
-        .expect("main source");
-        assert!(
-            std::process::Command::new("git")
-                .args(["init", "--quiet"])
-                .current_dir(directory.path())
-                .status()
-                .expect("git")
-                .success()
-        );
-        let parsed = Parsed {
-            endpoint: Endpoint::Path(directory.path().to_string_lossy().into_owned()),
-            command: Command::Invoke("seed".into()),
-            color: ColorMode::Auto,
-        };
-        let error = execute(&parsed).expect_err("uncaptured standard module");
-        assert_eq!(
-            (error.code, error.exit, error.title.as_ref(), error.help),
-            (
-                "ORNA-S010-IMPORT",
-                Exit::Target,
-                "imported module is unavailable",
-                "use a captured standard dependency or remove the import",
-            )
-        );
-    }
-
-    #[test]
-    fn invoke_rejects_composed_uncaptured_standard_math() {
-        let directory = tempfile::tempdir().expect("temporary project");
-        std::fs::write(
-            directory.path().join("main.orna"),
-            "use std.math; pub fn seed(): Int = std.math.clamp(std.math.max(2, 9), 3, 7);",
-        )
-        .expect("main source");
-        assert!(
-            std::process::Command::new("git")
-                .args(["init", "--quiet"])
-                .current_dir(directory.path())
-                .status()
-                .expect("git")
-                .success()
-        );
-        let parsed = Parsed {
-            endpoint: Endpoint::Path(directory.path().to_string_lossy().into_owned()),
-            command: Command::Invoke("seed".into()),
-            color: ColorMode::Auto,
-        };
-        let error = execute(&parsed).expect_err("uncaptured standard module");
-        assert_eq!(
-            (error.code, error.exit, error.title.as_ref(), error.help),
-            (
-                "ORNA-S010-IMPORT",
-                Exit::Target,
-                "imported module is unavailable",
-                "use a captured standard dependency or remove the import",
-            )
-        );
-    }
-
-    #[test]
-    fn check_rejects_semantic_errors_with_a_stable_cli_diagnostic() {
-        let directory = tempfile::tempdir().expect("temporary project");
-        std::fs::write(
-            directory.path().join("main.orna"),
-            "pub fn run(): Int = true;",
-        )
-        .expect("main source");
-        assert!(
-            std::process::Command::new("git")
-                .args(["init", "--quiet"])
-                .current_dir(directory.path())
-                .status()
-                .expect("git")
-                .success()
-        );
-
-        let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
-        let error = check_project(&endpoint, false).expect_err("semantic error");
-        let rendered = error.to_string();
-        assert_eq!((error.code, error.exit), ("E2101", Exit::Target));
-        assert!(rendered.contains("ORNA-S021-TYPE"));
-        assert!(rendered.contains("static types are incompatible"));
-        assert!(rendered.contains("fix the first reported source contract error"));
-    }
-
-    #[test]
-    fn stream_failure_diagnostic_describes_delivery_scoped_rollback() {
-        let diagnostic = Diagnostic::target(
-            "E2200",
-            "durable project stream delivery failed",
-            "the failed delivery was rolled back; prior committed deliveries and their checkpoint progress remain; inspect the recorded failure before retrying the stream",
-        );
-        let rendered = diagnostic.to_string();
-
-        assert!(rendered.contains("the failed delivery was rolled back"));
-        assert!(
-            rendered.contains("prior committed deliveries and their checkpoint progress remain")
-        );
-        assert!(rendered.contains("inspect the recorded failure before retrying the stream"));
-        assert!(!rendered.contains("failed atomically"));
-    }
-
-    #[test]
-    fn cancellation_mapping_retains_safe_identity_and_cancelled_exit() {
-        let diagnostic = orna_foundation::Diagnostic::new(
-            orna_foundation::SafeText::new("ORNA-LIST-STREAM-CANCELLED").unwrap(),
-            orna_foundation::DiagnosticSeverity::Error,
-            orna_foundation::SafeText::redacted(),
-        )
-        .unwrap();
-        let mapped = cancellation_diagnostic(&diagnostic);
-
-        assert_eq!(mapped.code, "ORNA-LIST-STREAM-CANCELLED");
-        assert_eq!(mapped.exit, Exit::Cancelled);
-        assert!(mapped.detail.is_none());
-    }
-
-    #[test]
-    fn endpoints_reject_secrets() {
-        assert_eq!(
-            Endpoint::parse("orna://a@host/db")
-                .expect_err("credentials")
-                .code,
-            "E1005"
-        );
-        assert_eq!(
-            Endpoint::parse("orna://host")
-                .expect_err("no database")
-                .code,
-            "E1004"
-        );
-    }
-
-    #[test]
-    fn endpoint_parsing_matches_the_closed_client_transport_grammar() {
-        for (endpoint, code) in [
-            ("postgres://host/db", "E1004"),
-            ("orna+unix://relative.sock", "E1004"),
-            ("orna+unix:///tmp/orna.sock?debug=1", "E1005"),
-            ("orna://local:7443/default", "E1004"),
-            ("orna://db.example.test:0/work", "E1004"),
-            ("orna://db.example.test/%zz", "E1004"),
-            ("orna://[::1/work", "E1004"),
-            ("orna://db.example.test/work\u{1f}", "E1004"),
-        ] {
-            let error = Endpoint::parse(endpoint).expect_err(endpoint);
-            assert_eq!(error.code, code, "{endpoint}");
-            assert_eq!(error.exit, Exit::Usage, "{endpoint}");
-        }
-        assert_eq!(
-            Endpoint::parse("orna+unix:///tmp/orna.sock").expect("absolute Unix socket"),
-            Endpoint::UnixSocket("/tmp/orna.sock".into())
-        );
-        assert_eq!(
-            Endpoint::parse("orna://[::1]:7443/team%2Fwork").expect("IPv6 TLS endpoint"),
-            Endpoint::RemoteTls("orna://[::1]:7443/team%2Fwork".into())
-        );
-    }
-    #[test]
-    fn init_parse_defaults_to_the_current_directory_target() {
-        assert_eq!(
-            parse_cli(&["init".into()]).expect("parses").command,
-            Command::Init(None)
-        );
-    }
-
-    #[test]
-    fn repository_initialization_errors_keep_codes_and_give_specific_remedies() {
-        for (error, code, help) in [
-            (
-                orna_repository::RepositoryInitError::GitUnavailable,
-                "ORNA-REPO-INIT-001",
-                "install or enable Git, then retry `orna init`",
-            ),
-            (
-                orna_repository::RepositoryInitError::GitOperationFailed,
-                "ORNA-REPO-INIT-002",
-                "check that Git can initialize the target directory, then retry `orna init`",
-            ),
-            (
-                orna_repository::RepositoryInitError::LocalStateUnavailable,
-                "ORNA-REPO-INIT-003",
-                "check local filesystem access for the target directory, then retry `orna init`",
-            ),
-            (
-                orna_repository::RepositoryInitError::UnsafeMetadataPath,
-                "ORNA-REPO-INIT-004",
-                "replace unsafe metadata links or non-regular entries before retrying `orna init`",
-            ),
-            (
-                orna_repository::RepositoryInitError::MetadataIncomplete,
-                "ORNA-REPO-INIT-005",
-                "restore complete metadata from a valid snapshot or initialize a new repository",
-            ),
-            (
-                orna_repository::RepositoryInitError::MetadataMalformed,
-                "ORNA-REPO-INIT-006",
-                "restore valid metadata from a compatible repository snapshot before retrying",
-            ),
-            (
-                orna_repository::RepositoryInitError::MetadataUnsupported,
-                "ORNA-REPO-INIT-007",
-                "use an Orna version that supports this repository format",
-            ),
-            (
-                orna_repository::RepositoryInitError::MetadataChanged,
-                "ORNA-REPO-INIT-008",
-                "ensure no other process changes repository metadata, then retry `orna init`",
-            ),
-            (
-                orna_repository::RepositoryInitError::RepositoryBusy,
-                "ORNA-REPO-INIT-009",
-                "wait for the other initialization to finish, then retry `orna init`",
-            ),
-            (
-                orna_repository::RepositoryInitError::PlatformUnsupported,
-                "ORNA-REPO-INIT-010",
-                "use a supported platform to initialize this repository",
-            ),
-        ] {
-            let diagnostic = repository_init_diagnostic(&error);
-            assert_eq!(diagnostic.code, code);
-            assert_eq!(diagnostic.help, help);
-        }
-    }
-    #[test]
-    fn fetch_command_consumes_git_transport_without_mutating_head_or_worktree() {
-        let root = tempfile::tempdir().expect("fetch fixture");
-        let remote = root.path().join("remote.git");
-        let local = root.path().join("local");
-        let updater = root.path().join("updater");
-        let git = |directory: &std::path::Path, arguments: &[&str]| -> String {
-            let output = std::process::Command::new("git")
-                .current_dir(directory)
-                .args(arguments)
-                .output()
-                .expect("git starts");
-            assert!(
-                output.status.success(),
-                "git failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            String::from_utf8(output.stdout)
-                .expect("git output is UTF-8")
-                .trim()
-                .to_owned()
-        };
-        std::fs::create_dir_all(&local).expect("local directory");
-        git(root.path(), &["init", "--bare", "remote.git"]);
-        git(&local, &["init", "-b", "main"]);
-        git(&local, &["config", "user.email", "kieran@drewett.dev"]);
-        git(&local, &["config", "user.name", "kierandrewett"]);
-        std::fs::write(local.join("tracked.txt"), "base\n").expect("base file");
-        git(&local, &["add", "tracked.txt"]);
-        git(&local, &["commit", "-m", "base"]);
-        let initial = git(&local, &["rev-parse", "HEAD"]);
-        let remote_path = remote.to_str().expect("remote path");
-        git(&local, &["remote", "add", "origin", remote_path]);
-        git(&local, &["push", "origin", "HEAD:refs/heads/main"]);
-        git(
-            root.path(),
-            &[
-                "--git-dir",
-                "remote.git",
-                "symbolic-ref",
-                "HEAD",
-                "refs/heads/main",
-            ],
-        );
-        git(
-            root.path(),
-            &["clone", "--branch", "main", remote_path, "updater"],
-        );
-        assert_eq!(git(&updater, &["rev-parse", "HEAD"]), initial);
-        git(&updater, &["config", "user.email", "kieran@drewett.dev"]);
-        git(&updater, &["config", "user.name", "kierandrewett"]);
-        std::fs::write(updater.join("tracked.txt"), "advanced\n").expect("advanced file");
-        git(&updater, &["add", "tracked.txt"]);
-        git(&updater, &["commit", "-m", "advance"]);
-        let advanced = git(&updater, &["rev-parse", "HEAD"]);
-        git(&updater, &["push", "origin", "HEAD:refs/heads/main"]);
-
-        let endpoint = Endpoint::Path(local.display().to_string());
-        execute(&Parsed {
-            endpoint,
-            command: Command::Fetch {
-                remote: "origin".into(),
-                branch: "main".into(),
-            },
-            color: ColorMode::Auto,
-        })
-        .expect("fetch command");
-        assert_eq!(git(&local, &["rev-parse", "HEAD"]), initial);
-        assert_eq!(
-            git(&local, &["rev-parse", "refs/remotes/origin/main"]),
-            advanced
-        );
-        assert!(git(&local, &["status", "--porcelain"]).is_empty());
-    }
-}
+mod tests;
 
 #[cfg(test)]
-mod repl_request_effect_tests {
-    use super::*;
-    use crate::format3::format3_repository_for_table;
-    use orna_runtime::{FaultPoint, RecoveryDisposition, RuntimeError};
-
-    const MUSIC_SOURCE: &str = "pub table Music(id: Str) { title: Str, }\n";
-    const INSERT_LONDON: &str = r#"main.Music.insert({ id: "london", title: "Live in London" })"#;
-
-    struct FailAt(FaultPoint);
-
-    impl FaultInjector for FailAt {
-        fn check(&self, point: FaultPoint) -> Result<(), RuntimeError> {
-            if point == self.0 {
-                Err(RuntimeError::FaultInjected(point))
-            } else {
-                Ok(())
-            }
-        }
-    }
-
-    #[test]
-    fn committed_repl_insert_finishes_its_request_row() {
-        let (_directory, repository, _relation) =
-            format3_repository_for_table(MUSIC_SOURCE, "Music");
-        let ReplRuntime {
-            repository,
-            mut session,
-            transactions,
-        } = repl_runtime(Some(repository)).expect("repl runtime");
-        let mut transactions = transactions.expect("repl transactions");
-        assert!(
-            run_repl_input(
-                repository.as_ref(),
-                Some(&mut transactions),
-                &mut session,
-                INSERT_LONDON,
-            )
-            .is_ok(),
-            "the REPL insert commits"
-        );
-        let state = &transactions.writer.as_ref().expect("runtime writer").state;
-        let running = transactions
-            .runtime
-            .block_on(state.running_requests())
-            .expect("running requests");
-        assert!(
-            running.is_empty(),
-            "a committed REPL insert leaves no running request"
-        );
-    }
-
-    #[test]
-    fn sys_dispatch_observes_request_row_already_running() {
-        let (directory, repository, _relation) =
-            format3_repository_for_table(MUSIC_SOURCE, "Music");
-        let ReplRuntime {
-            repository,
-            mut session,
-            transactions,
-        } = repl_runtime(Some(repository)).expect("repl runtime");
-        let mut transactions = transactions.expect("repl transactions");
-        FIRST_SYS_DISPATCH_RUNNING.with(|first| first.set(None));
-        std::fs::write(directory.path().join("probe.bin"), b"probe").expect("probe file");
-        let input = format!(
-            "sys.blob.capture_file({:?}, \"probe.bin\", 65536)",
-            directory.path().to_string_lossy().as_ref()
-        );
-        run_repl_input(
-            repository.as_ref(),
-            Some(&mut transactions),
-            &mut session,
-            &input,
-        )
-        .expect("the blob capture succeeds");
-        let running_at_first_dispatch = FIRST_SYS_DISPATCH_RUNNING.with(std::cell::Cell::get);
-        assert_eq!(
-            running_at_first_dispatch,
-            Some(1),
-            "the request row is reserved before the first sys binding runs"
-        );
-    }
-
-    /// Runs an insert whose commit fails at `point` and asserts the uncertain
-    /// diagnostic and the still-running request row, then that fenced recovery
-    /// settles it without proving a rollback.
-    fn assert_commit_fault_reports_uncertain(point: FaultPoint) {
-        let (_directory, repository, _relation) =
-            format3_repository_for_table(MUSIC_SOURCE, "Music");
-        let ReplRuntime {
-            repository,
-            mut session,
-            transactions,
-        } = repl_runtime(Some(repository)).expect("repl runtime");
-        let mut transactions = transactions.expect("repl transactions");
-        transactions.faults = Arc::new(FailAt(point));
-        let failure = run_repl_input(
-            repository.as_ref(),
-            Some(&mut transactions),
-            &mut session,
-            INSERT_LONDON,
-        )
-        .err()
-        .unwrap_or_else(|| panic!("{point:?}: the injected fault fails the REPL request"));
-        assert_eq!(failure.code, "ORNA-REPL-EFFECT-UNCERTAIN", "{point:?}");
-
-        let state = &transactions.writer.as_ref().expect("runtime writer").state;
-        let running = transactions
-            .runtime
-            .block_on(state.running_requests())
-            .expect("running requests");
-        assert_eq!(
-            running.len(),
-            1,
-            "{point:?}: the failed commit leaves its own row running"
-        );
-        let row = &running[0];
-        let lost = transactions
-            .runtime
-            .block_on(state.request_owner(row.identity, row.fingerprint))
-            .expect("request owner")
-            .expect("the running row has an owner");
-        let fence = transactions
-            .runtime
-            .block_on(state.recover_abandoned(lost.owner_id, [0x52; 16]))
-            .expect("fence the abandoned writer");
-        let rollback = TerminalOutcome::new(b"orna.repl.rollback.v1".to_vec()).expect("outcome");
-        let uncertain = TerminalOutcome::new(b"orna.repl.uncertain.v1".to_vec()).expect("outcome");
-        let recovered = transactions
-            .runtime
-            .block_on(state.recover_running_request_with_outcomes(
-                row.identity,
-                row.fingerprint,
-                lost,
-                fence,
-                rollback,
-                uncertain,
-            ))
-            .expect("recover the running request");
-        assert_ne!(
-            recovered.disposition,
-            RecoveryDisposition::RollbackProven,
-            "{point:?}: a REPL activation declares ExternalPossible effects, so a rollback is never proven"
-        );
-        assert_eq!(
-            recovered.disposition,
-            RecoveryDisposition::ExternalEffectsUncertain,
-            "{point:?}"
-        );
-        let after = transactions
-            .runtime
-            .block_on(state.running_requests())
-            .expect("running requests after recovery");
-        assert!(
-            after.is_empty(),
-            "{point:?}: recovery settles the fenced request row"
-        );
-    }
-
-    #[test]
-    fn repl_commit_fault_reports_uncertain_and_keeps_its_request_row_running() {
-        for point in [
-            FaultPoint::BeforeTableWrite,
-            FaultPoint::AfterTableWrite,
-            FaultPoint::BeforeTerminalClaim,
-            FaultPoint::AfterTerminalClaim,
-        ] {
-            assert_commit_fault_reports_uncertain(point);
-        }
-    }
-
-    #[test]
-    fn repl_pure_evaluation_failure_keeps_its_evaluator_code() {
-        let (_directory, repository, _relation) =
-            format3_repository_for_table(MUSIC_SOURCE, "Music");
-        let ReplRuntime {
-            repository,
-            mut session,
-            transactions,
-        } = repl_runtime(Some(repository)).expect("repl runtime");
-        let mut transactions = transactions.expect("repl transactions");
-        let failure = run_repl_input(
-            repository.as_ref(),
-            Some(&mut transactions),
-            &mut session,
-            "1 / 0",
-        )
-        .expect_err("the division by zero fails");
-        assert_eq!(
-            failure.code, "ORNA-EVAL-DIVIDE-BY-ZERO",
-            "a failure with no external effect keeps the evaluator code"
-        );
-    }
-
-    #[test]
-    fn repl_effect_uncertain_failure_keeps_the_evaluation_cause() {
-        let failure = repl_evaluation_failure(ReplEvaluationFailure {
-            error: ApplicationError::Evaluation("ORNA-EVAL-DIVIDE-BY-ZERO".to_owned()),
-            external_effects_possible: true,
-        });
-        assert_eq!(failure.code, REPL_EFFECT_UNCERTAIN);
-        let detail = failure
-            .detail
-            .expect("an uncertain outcome carries its cause in the detail");
-        assert_eq!(detail.code, REPL_EFFECT_UNCERTAIN);
-        assert!(
-            detail.message.contains("ORNA-EVAL-DIVIDE-BY-ZERO"),
-            "the detail names the evaluation cause: {}",
-            detail.message
-        );
-    }
-
-    #[test]
-    fn repl_effect_free_failure_keeps_its_own_code_without_detail() {
-        let failure = repl_evaluation_failure(ReplEvaluationFailure {
-            error: ApplicationError::Evaluation("ORNA-EVAL-DIVIDE-BY-ZERO".to_owned()),
-            external_effects_possible: false,
-        });
-        assert_eq!(failure.code, "ORNA-EVAL-DIVIDE-BY-ZERO");
-        assert!(failure.detail.is_none());
-    }
-
-    #[test]
-    fn repl_effectful_failure_before_any_external_binding_leaves_no_running_row() {
-        // `n` is an Int, so `1 / 0` type-checks and the insert stages as an
-        // effectful activation that fails during evaluation, before any binding.
-        let (_directory, repository, _relation) =
-            format3_repository_for_table("pub table Counter(id: Str) { n: Int, }\n", "Counter");
-        let ReplRuntime {
-            repository,
-            mut session,
-            transactions,
-        } = repl_runtime(Some(repository)).expect("repl runtime");
-        let mut transactions = transactions.expect("repl transactions");
-        let failure = run_repl_input(
-            repository.as_ref(),
-            Some(&mut transactions),
-            &mut session,
-            r#"main.Counter.insert({ id: "zero", n: 1 / 0 })"#,
-        )
-        .expect_err("the division by zero fails before any write");
-        assert_ne!(
-            failure.code, "ORNA-REPL-EFFECT-UNCERTAIN",
-            "no external binding ran, so the failure is not uncertain"
-        );
-        let state = transactions
-            .writer_state()
-            .expect("the effectful input opened the runtime state");
-        let running = transactions
-            .runtime
-            .block_on(state.running_requests())
-            .expect("running requests");
-        assert!(
-            running.is_empty(),
-            "a failure before any external effect cancels its reserved row"
-        );
-    }
-
-    #[test]
-    fn repl_enum_keyed_assertion_write_is_refused_as_repl_effect() {
-        // The candidate seam accepts only scalar primary-key components and
-        // checks every table of an asserting project, so an enum key anywhere in
-        // the project refuses the write before it is published (ornadb-gq4g).
-        // The refused write's reserved row is cancelled; it is never admitted.
-        let (_directory, repository, _relation) = format3_repository_for_table(
-            "pub enum Level {\n    low,\n    high,\n}\n\
-             pub table Task(level: Level) {\n    title: Str,\n    \
-             assert every(row => row.title != \"\");\n}\n",
-            "Task",
-        );
-        let ReplRuntime {
-            repository,
-            mut session,
-            transactions,
-        } = repl_runtime(Some(repository)).expect("repl runtime");
-        let mut transactions = transactions.expect("repl transactions");
-        let failure = run_repl_input(
-            repository.as_ref(),
-            Some(&mut transactions),
-            &mut session,
-            r#"main.Task.insert({ level: main.Level.low, title: "Ship" })"#,
-        )
-        .expect_err("the enum-keyed write is refused before it is published");
-        assert_eq!(failure.code, "ORNA-REPL-EFFECT");
-        let state = transactions
-            .writer_state()
-            .expect("the effectful input opened the runtime state");
-        let running = transactions
-            .runtime
-            .block_on(state.running_requests())
-            .expect("running requests");
-        assert!(
-            running.is_empty(),
-            "a refused candidate cancels its reserved row"
-        );
-    }
-}
+mod repl_request_effect_tests;

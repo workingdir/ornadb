@@ -336,9 +336,14 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@1.95.0
 
-      - name: Run the one-million-row Gate C case
+      - name: Run the one-million-row Gate C cases
         # The recorder stops the case 20 minutes before the job cap and still
         # writes its record, so a run that outgrows the cap keeps its evidence.
+        # Two ignored cases share this one record: the test-side ORP-1 fixture
+        # (read, scan and churn counters) and the production-written graph, which
+        # admits its rows in one runtime request and publishes through the
+        # production writer. They run one at a time so two million-row graphs are
+        # never live at once.
         run: >-
           python3 scripts/gate_evidence.py run
           --record gate-c-million-rows
@@ -348,7 +353,7 @@ jobs:
           --input-env ORNA_ORP1_MILLION_ROWS
           --input-env ORNA_ORP1_SCALE_ROWS
           -- cargo test --locked -p orna-repository --test row_store_scale
-          -- --ignored --exact orp1_row_store_one_million_rows
+          -- --ignored --test-threads=1 orp1_row_store_one_million
 
       - name: Upload the evidence record and log
         if: ${{ !cancelled() }}

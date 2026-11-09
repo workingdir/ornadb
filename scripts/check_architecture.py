@@ -15,9 +15,19 @@ Modes:
                     list of layers.toml. Recorded violations are the ratchet
                     baseline and do not fail the job. With --strict the baseline
                     is ignored, which proves the check still has teeth.
-    --mode=budget   exit 1 when any recorded size number grows, or when a new
-                    file, function or crate exceeds its hard cap. A recorded
-                    number may only shrink.
+    --mode=budget   exit 1 on new debt: a file or function over its hard cap
+                    with no recorded entry or reviewed raise, or a recorded
+                    entry growing by more than max(5%, 25 lines). Shrinkage and
+                    growth inside that tolerance are non-failing notes, so a PR
+                    that is behind a merged refactor is never failed by another
+                    PR's good news. There is no crate-level line budget.
+
+With `--mode=budget --update` the budget file is rewritten downwards: entries that
+shrank are lowered or removed, and an entry that grew is left unchanged. The
+update never raises or adds an entry. A deliberate raise is a reviewed [[raise]]
+in `scripts/architecture-budget-raises.toml` (path, new_limit, reason, bead); the
+raise is the visible exception and the budget file only moves down. The CI job
+never passes --update.
 
 The rules, in the order ARCHITECTURE.md states them:
 
@@ -53,11 +63,44 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 LAYERS_PATH = Path("docs/design/layers.toml")
 BUDGET_PATH = Path("scripts/architecture-budget.toml")
+RAISES_PATH = Path("scripts/architecture-budget-raises.toml")
+
+BUDGET_HEADER = """\
+# Size budgets for the OrnaDB workspace.
+#
+# Enforced by `python3 scripts/check_architecture.py --mode=budget` in the
+# `arch` job of .github/workflows/lint.yml. ARCHITECTURE.md is the policy;
+# this file is the recorded debt.
+#
+# Only per-file and per-function entries are recorded. There is no crate-level
+# line budget: adding a few types to a large crate is not a violation.
+#
+# `--mode=budget` fails when a file or function appears over its hard cap with
+# no entry, or when a recorded entry grows by more than max(5%, 25 lines).
+# Shrinkage and growth inside that tolerance are non-failing notes, so a PR
+# that is behind a merged refactor is never failed by another PR's good news.
+#
+# Lower the drift after a merge with:
+#
+#   python3 scripts/check_architecture.py --mode=budget --update
+#
+# It lowers or removes entries that shrank and never raises one.
+#
+# A deliberate raise is not written here: add or update a reviewed [[raise]] in
+# scripts/architecture-budget-raises.toml with a reason and a bead. That file is
+# the visible exception list; this file only ever moves down.
+#
+#   file_lines       hard cap on one source file; a file above it needs an
+#                    explicit files entry or a raise
+#   function_lines   hard cap on one function; a function above it needs an
+#                    explicit functions entry or a raise
+#"""
+
+BUDGET_KEYS = ("limits", "crate")
+
 
 ROLES = ("production", "tool", "harness", "oracle", "archive")
 NON_PRODUCTION_ROLES = frozenset(ROLES) - {"production"}
-
-BUDGET_KEYS = ("limits", "crate")
 
 
 class ConfigError(Exception):
@@ -195,7 +238,7 @@ def load_budget(path: Path) -> dict:
     limits = data.get("limits")
     if not isinstance(limits, dict):
         raise ConfigError(f"{path}: missing [limits] table")
-    for key in ("crate_src_lines", "file_lines", "function_lines"):
+    for key in ("file_lines", "function_lines"):
         value = limits.get(key)
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
             raise ConfigError(f"{path}: [limits] {key} must be a positive integer")
@@ -208,19 +251,75 @@ def load_budget(path: Path) -> dict:
             raise ConfigError(f"{path}: [[crate]] entry without a name")
         if name in crates:
             raise ConfigError(f"{path}: crate {name} is listed twice")
-        for key in ("src_lines", "allow_clippy"):
-            value = raw.get(key, 0)
-            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-                raise ConfigError(f"{path}: crate {name} {key} must be a non-negative integer")
+        entry: dict = {"files": {}, "functions": {}}
         for table in ("files", "functions"):
             entries = raw.get(table, {})
             if not isinstance(entries, dict):
                 raise ConfigError(f"{path}: crate {name} {table} must be a table")
-            for entry, value in entries.items():
+            for item, value in entries.items():
                 if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-                    raise ConfigError(f"{path}: crate {name} {table} {entry!r} must be a positive integer")
-        crates[name] = raw
+                    raise ConfigError(f"{path}: crate {name} {table} {item!r} must be a positive integer")
+            entry[table] = dict(entries)
+        if entry["files"] or entry["functions"]:
+            crates[name] = entry
     return {"limits": limits, "crates": crates}
+
+
+def parse_raise_path(path: Path, text: str) -> tuple[str, str, str]:
+    """Split `crates/<crate>/<relative>[::<function>]` into its budget key."""
+    if not isinstance(text, str) or not text:
+        raise ConfigError(f"{path}: every [[raise]] needs a path")
+    if "::" in text:
+        prefix, key = text.split("::", 1)
+        kind = "functions"
+        if not key:
+            raise ConfigError(f"{path}: raise path {text!r} has an empty function name")
+    else:
+        prefix, key = text, ""
+        kind = "files"
+    parts = prefix.split("/")
+    if len(parts) < 3 or parts[0] != "crates" or not parts[1]:
+        raise ConfigError(f"{path}: raise path {text!r} must start with crates/<crate>/")
+    relative = "/".join(parts[2:])
+    if not relative:
+        raise ConfigError(f"{path}: raise path {text!r} has no file part")
+    if kind == "functions":
+        return parts[1], kind, f"{relative}::{key}"
+    return parts[1], kind, relative
+
+
+def load_raises(path: Path) -> dict[tuple[str, str, str], dict]:
+    if not path.exists():
+        return {}
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except OSError as error:
+        raise ConfigError(f"cannot read raises {path}: {error}") from error
+    except tomllib.TOMLDecodeError as error:
+        raise ConfigError(f"invalid TOML in {path}: {error}") from error
+
+    raises: dict[tuple[str, str, str], dict] = {}
+    for raw in data.get("raise", []):
+        if not isinstance(raw, dict):
+            raise ConfigError(f"{path}: every [[raise]] entry must be a table")
+        text = raw.get("path")
+        key = parse_raise_path(path, text)
+        new_limit = raw.get("new_limit")
+        if not isinstance(new_limit, int) or isinstance(new_limit, bool) or new_limit <= 0:
+            raise ConfigError(f"{path}: raise {text!r} new_limit must be a positive integer")
+        for field in ("reason", "bead"):
+            value = raw.get(field)
+            if not isinstance(value, str) or not value.strip():
+                raise ConfigError(f"{path}: raise {text!r} needs a non-empty {field}")
+        if key in raises:
+            raise ConfigError(f"{path}: raise path {text!r} is listed twice")
+        raises[key] = {
+            "path": text,
+            "new_limit": new_limit,
+            "reason": raw["reason"],
+            "bead": raw["bead"],
+        }
+    return raises
 
 
 # --------------------------------------------------------------------------
@@ -642,100 +741,105 @@ def measure_crate(directory: Path) -> CrateMeasure:
     return CrateMeasure(sum(files.values()), allow_clippy, files, functions)
 
 
-def check_budget(workspace: Workspace, budget: dict) -> tuple[list[Violation], list[WarningEntry]]:
+def growth_tolerance(limit: int) -> int:
+    """The growth a recorded entry may absorb before it needs a reviewed raise."""
+    return max((limit * 5 + 99) // 100, 25)
+
+
+def budget_limit(base: int | None, raise_spec: dict | None) -> int:
+    values = [value for value in (base, raise_spec["new_limit"] if raise_spec else None) if value]
+    return max(values) if values else 0
+
+
+def check_budget(
+    workspace: Workspace, budget: dict, raises: dict[tuple[str, str, str], dict]
+) -> tuple[list[Violation], list[WarningEntry]]:
     violations: list[Violation] = []
-    warnings: list[WarningEntry] = []
+    notes: list[WarningEntry] = []
     limits = budget["limits"]
     recorded = budget["crates"]
 
     for name in sorted(recorded):
         if name not in workspace.members:
-            violations.append(Violation(
-                f"budget:unknown-crate:{name}",
-                "BUDGET",
-                f"{name}: recorded in {BUDGET_PATH} but not a workspace member; remove the entry",
+            notes.append(WarningEntry(
+                f"stale-budget:{name}",
+                f"{name}: recorded in {BUDGET_PATH} but not a workspace member; "
+                f"run --mode=budget --update",
             ))
 
+    seen_raises: set[tuple[str, str, str]] = set()
     for name in sorted(workspace.members):
         measure = measure_crate(workspace.members[name])
         record = recorded.get(name, {})
-        if "src_lines" in record:
-            if measure.src_lines > record["src_lines"]:
-                violations.append(Violation(
-                    f"budget:{name}:src_lines",
-                    "BUDGET",
-                    f"{name}: src grew to {measure.src_lines} lines, recorded {record['src_lines']}",
-                ))
-        elif measure.src_lines > limits["crate_src_lines"]:
-            violations.append(Violation(
-                f"budget:{name}:src_lines",
-                "BUDGET",
-                f"{name}: src has {measure.src_lines} lines, cap {limits['crate_src_lines']}; "
-                f"no budget entry records the debt",
-            ))
-
-        allow_cap = record.get("allow_clippy", 0)
-        if measure.allow_clippy > allow_cap:
-            violations.append(Violation(
-                f"budget:{name}:allow_clippy",
-                "BUDGET",
-                f"{name}: {measure.allow_clippy} #[allow(clippy::...)] attributes, recorded {allow_cap}",
-            ))
-
-        file_records = record.get("files", {})
-        for relative, lines in sorted(measure.files.items()):
-            if relative in file_records:
-                if lines > file_records[relative]:
-                    violations.append(Violation(
-                        f"budget:{name}:{relative}",
-                        "BUDGET",
-                        f"{name}/{relative}: {lines} lines, recorded {file_records[relative]}",
-                    ))
-            elif lines > limits["file_lines"]:
-                violations.append(Violation(
-                    f"budget:{name}:{relative}",
-                    "BUDGET",
-                    f"{name}/{relative}: {lines} lines, cap {limits['file_lines']}; no budget entry records the debt",
-                ))
-        for relative, lines in sorted(file_records.items()):
-            if relative not in measure.files:
-                warnings.append(WarningEntry(
-                    f"stale-budget:{name}:{relative}",
-                    f"{name}/{relative}: recorded {lines} lines but the file is gone or empty; remove the entry",
-                ))
-            elif measure.files[relative] < lines:
-                warnings.append(WarningEntry(
-                    f"stale-budget:{name}:{relative}",
-                    f"{name}/{relative}: recorded {lines} lines, now {measure.files[relative]}; lower the entry",
-                ))
-
-        function_records = record.get("functions", {})
-        for key, lines in sorted(measure.functions.items()):
-            if key in function_records:
-                if lines > function_records[key]:
+        for kind, limit_key, measured, entries in (
+            ("files", "file_lines", measure.files, record.get("files", {})),
+            ("functions", "function_lines", measure.functions, record.get("functions", {})),
+        ):
+            cap = limits[limit_key]
+            for key, now in sorted(measured.items()):
+                base = entries.get(key)
+                spec = raises.get((name, kind, key))
+                if spec is not None:
+                    seen_raises.add((name, kind, key))
+                limit = budget_limit(base, spec)
+                if limit == 0:
+                    if now > cap:
+                        violations.append(Violation(
+                            f"budget:{name}:{key}",
+                            "BUDGET",
+                            f"{name}/{key}: {now} lines, cap {cap}; no recorded entry or reviewed raise "
+                            f"(add a [[raise]] to {RAISES_PATH} with a reason and a bead)",
+                        ))
+                    continue
+                tolerance = growth_tolerance(limit)
+                if now > limit + tolerance:
+                    origin = "reviewed raise" if spec is not None else "recorded entry"
                     violations.append(Violation(
                         f"budget:{name}:{key}",
                         "BUDGET",
-                        f"{name}/{key}: {lines} lines, recorded {function_records[key]}",
+                        f"{name}/{key}: {now} lines, {origin} {limit} (tolerance {tolerance}); "
+                        f"add or update a [[raise]] in {RAISES_PATH} with a reason and a bead",
                     ))
-            elif lines > limits["function_lines"]:
-                violations.append(Violation(
-                    f"budget:{name}:{key}",
-                    "BUDGET",
-                    f"{name}/{key}: {lines} lines, cap {limits['function_lines']}; no budget entry records the debt",
-                ))
-        for key, lines in sorted(function_records.items()):
-            if key not in measure.functions:
-                warnings.append(WarningEntry(
-                    f"stale-budget:{name}:{key}",
-                    f"{name}/{key}: recorded {lines} lines but the function is gone; remove the entry",
-                ))
-            elif measure.functions[key] < lines:
-                warnings.append(WarningEntry(
-                    f"stale-budget:{name}:{key}",
-                    f"{name}/{key}: recorded {lines} lines, now {measure.functions[key]}; lower the entry",
-                ))
-    return violations, warnings
+                elif now > limit:
+                    notes.append(WarningEntry(
+                        f"growth:{name}:{key}",
+                        f"{name}/{key}: {limit} -> {now} lines, within tolerance {tolerance}",
+                    ))
+                if spec is not None:
+                    needed_above = (base + growth_tolerance(base)) if base is not None else cap
+                    if now <= needed_above:
+                        notes.append(WarningEntry(
+                            f"unused-raise:{name}:{key}",
+                            f"{name}/{key}: raise to {spec['new_limit']} is not needed "
+                            f"(measured {now}); remove it from {RAISES_PATH}",
+                        ))
+            for key, old in sorted(entries.items()):
+                if key not in measured:
+                    notes.append(WarningEntry(
+                        f"stale-budget:{name}:{key}",
+                        f"{name}/{key}: recorded {old} lines but the file or function is gone; "
+                        f"run --mode=budget --update",
+                    ))
+                elif measured[key] < old:
+                    notes.append(WarningEntry(
+                        f"shrink:{name}:{key}",
+                        f"{name}/{key}: recorded {old} lines, now {measured[key]}; "
+                        f"run --mode=budget --update",
+                    ))
+
+    for (crate, kind, key), spec in sorted(raises.items()):
+        if crate not in workspace.members:
+            notes.append(WarningEntry(
+                f"unused-raise:{crate}:{kind}:{key}",
+                f"{spec['path']}: raise names a crate that is not in the workspace; remove it",
+            ))
+        elif (crate, kind, key) not in seen_raises:
+            notes.append(WarningEntry(
+                f"unused-raise:{crate}:{kind}:{key}",
+                f"{spec['path']}: raise path is not present in the workspace; "
+                f"it is reserved for an in-flight PR and should be removed once stale",
+            ))
+    return violations, notes
 
 
 # --------------------------------------------------------------------------
@@ -802,15 +906,75 @@ def print_report(
         print(budget_summary)
 
 
+def render_budget(limits: dict, entries: list[dict]) -> str:
+    lines = [BUDGET_HEADER.rstrip("\n"), "", "[limits]"]
+    for key in ("file_lines", "function_lines"):
+        lines.append(f"{key} = {limits[key]}")
+    lines.append("")
+    for entry in entries:
+        lines.append("[[crate]]")
+        lines.append(f'name = "{entry["name"]}"')
+        if entry["files"]:
+            lines.append("[crate.files]")
+            for path, count in sorted(entry["files"].items()):
+                lines.append(f'"{path}" = {count}')
+        if entry["functions"]:
+            lines.append("[crate.functions]")
+            for key, count in sorted(entry["functions"].items()):
+                lines.append(f'"{key}" = {count}')
+        lines.append("")
+    return "\n".join(lines).rstrip("\n") + "\n"
+
+
+def update_budget(workspace: Workspace, budget: dict, path: Path) -> list[str]:
+    """Rewrite the budget downwards; never raise or add an entry.
+
+    Growth is not recorded here: check_budget reports it, and a deliberate raise
+    goes in scripts/architecture-budget-raises.toml.
+    """
+    limits = budget["limits"]
+    changes: list[str] = []
+    entries: list[dict] = []
+    for name, record in budget["crates"].items():
+        if name not in workspace.members:
+            changes.append(f"dropped crate entry {name}: not a workspace member")
+            continue
+        measure = measure_crate(workspace.members[name])
+        entry: dict = {"name": name, "files": {}, "functions": {}}
+        for kind, cap_key, measured, old_entries in (
+            ("files", "file_lines", measure.files, record.get("files", {})),
+            ("functions", "function_lines", measure.functions, record.get("functions", {})),
+        ):
+            cap = limits[cap_key]
+            for key in sorted(old_entries):
+                old = old_entries[key]
+                if key not in measured:
+                    changes.append(f"removed {name}/{key} (gone)")
+                    continue
+                now = measured[key]
+                if now <= cap:
+                    changes.append(f"removed {name}/{key} (now {now}, below cap {cap})")
+                elif now > old:
+                    entry[kind][key] = old
+                else:
+                    entry[kind][key] = now
+                    if now < old:
+                        changes.append(f"lowered {name}/{key} {old} -> {now}")
+        if entry["files"] or entry["functions"]:
+            entries.append(entry)
+        elif record.get("files") or record.get("functions"):
+            changes.append(f"removed empty crate entry {name}")
+    path.write_text(render_budget(limits, entries), encoding="utf-8")
+    return changes
+
+
 def summarize_budget(budget: dict) -> str:
     crates = budget["crates"]
-    over_crates = sum(1 for record in crates.values() if "src_lines" in record)
-    over_files = sum(len(record.get("files", {})) for record in crates.values())
-    over_functions = sum(len(record.get("functions", {})) for record in crates.values())
+    recorded_files = sum(len(record.get("files", {})) for record in crates.values())
+    recorded_functions = sum(len(record.get("functions", {})) for record in crates.values())
     return (
-        f"budgets: {over_crates} crates with a recorded src_lines entry, "
-        f"{over_files} files over {budget['limits']['file_lines']} lines, "
-        f"{over_functions} functions over {budget['limits']['function_lines']} lines "
+        f"budgets: {recorded_files} files over {budget['limits']['file_lines']} lines, "
+        f"{recorded_functions} functions over {budget['limits']['function_lines']} lines "
         f"recorded in {BUDGET_PATH}"
     )
 
@@ -824,6 +988,10 @@ def run(args: argparse.Namespace) -> int:
     root = args.root.resolve()
     layers_path = args.layers if args.layers is not None else root / LAYERS_PATH
     budget_path = args.budget if args.budget is not None else root / BUDGET_PATH
+    raises_path = args.raises if args.raises is not None else root / RAISES_PATH
+
+    if args.update and args.mode != "budget":
+        raise ConfigError("--update requires --mode=budget")
 
     table = load_layer_table(layers_path)
     metadata = load_metadata(root, args.metadata)
@@ -831,16 +999,24 @@ def run(args: argparse.Namespace) -> int:
 
     if args.mode == "budget":
         budget = load_budget(budget_path)
-        violations, warnings = check_budget(workspace, budget)
+        raises = load_raises(raises_path)
+        if args.update:
+            changes = update_budget(workspace, budget, budget_path)
+            if not changes:
+                print("[note] no downward changes; every entry already matches or is above")
+            for change in changes:
+                print(f"[note] {change}")
+            budget = load_budget(budget_path)
+        violations, notes = check_budget(workspace, budget, raises)
         for violation in violations:
             print(describe(violation))
-        for warning in warnings:
-            print(f"[warn] WARNING {warning.message}")
+        for note in notes:
+            print(f"[note] {note.message}")
         print(summarize_budget(budget))
         if violations:
-            print(f"{len(violations)} budget violation(s): a recorded number may only shrink")
+            print(f"{len(violations)} budget violation(s): new debt or growth beyond a reviewed limit")
             return 1
-        print("budgets: no growth")
+        print("budgets: no new debt or over-limit growth")
         return 0
 
     violations, warnings = check_layers(workspace, table)
@@ -878,10 +1054,20 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="deny mode: ignore the known-violation baseline, so every violation fails",
     )
+    parser.add_argument(
+        "--update",
+        action="store_true",
+        help="budget mode: lower or remove entries that shrank; never raises an entry",
+    )
     parser.add_argument("--root", type=Path, default=ROOT, help="workspace root (default: repository root)")
     parser.add_argument("--metadata", type=Path, help="cargo metadata JSON instead of running cargo")
     parser.add_argument("--layers", type=Path, help="layer table path (default: docs/design/layers.toml)")
     parser.add_argument("--budget", type=Path, help="budget path (default: scripts/architecture-budget.toml)")
+    parser.add_argument(
+        "--raises",
+        type=Path,
+        help="reviewed raise path (default: scripts/architecture-budget-raises.toml)",
+    )
     return parser
 
 

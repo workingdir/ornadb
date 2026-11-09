@@ -4,7 +4,6 @@ mod test_support;
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::Command,
 };
 
 #[cfg(unix)]
@@ -34,19 +33,7 @@ fn watermark(directory: &Path, value: &str) -> String {
     object
 }
 
-fn git(directory: &Path, arguments: &[&str]) -> String {
-    let output = Command::new("git")
-        .current_dir(directory)
-        .args(arguments)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "git {arguments:?}: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).unwrap().trim().to_owned()
-}
+use test_support::git;
 
 struct Fixture {
     root: TempDir,

@@ -14,7 +14,7 @@ use std::{
     fmt,
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
-    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
+    process::{Child, ChildStdin, ChildStdout, Stdio},
     sync::{Mutex, MutexGuard, OnceLock},
 };
 
@@ -22,7 +22,6 @@ use crate::hex::hex_encode;
 use crate::{
     CommittedTreeEntry, CommittedTreeEntryKind, GitCommitRef, ManagedPath, PrivateCommit,
     Repository, RepositoryError, format_context::STORE_PATH, native_graph::GitHashAlgorithm,
-    scrub_git_routing_environment,
 };
 
 /// Most entries a committed tree walk may visit, counting every occurrence of
@@ -201,10 +200,7 @@ impl ObjectReader {
         if let Some(algorithm) = self.algorithm.get() {
             return Ok(*algorithm);
         }
-        let mut command = Command::new("git");
-        command.current_dir(&self.worktree);
-        scrub_git_routing_environment(&mut command);
-        crate::bind_git_discovery_to_worktree(&mut command, &self.worktree);
+        let mut command = crate::git_command_in(&self.worktree);
         command.args(["rev-parse", "--show-object-format"]);
         let output = command
             .output()
@@ -580,10 +576,7 @@ struct Session {
 
 impl Session {
     fn start(worktree: &Path) -> Result<Self, RepositoryError> {
-        let mut command = Command::new("git");
-        command.current_dir(worktree);
-        scrub_git_routing_environment(&mut command);
-        crate::bind_git_discovery_to_worktree(&mut command, worktree);
+        let mut command = crate::git_command_in(worktree);
         // Set after scrubbing, which removes inherited replace-object settings.
         command
             .env("GIT_NO_LAZY_FETCH", "1")
