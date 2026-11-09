@@ -52,6 +52,21 @@ pub struct ProcessRunOutput {
     pub stderr: Vec<u8>,
 }
 
+/// One bounded native process-run request.
+///
+/// The portable `std.io.process.run` signature has seven fields; passing them
+/// as one value keeps call sites from transposing same-shaped arguments.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProcessRequest<'a> {
+    pub executable: &'a str,
+    pub arguments: &'a [String],
+    pub working_directory: &'a str,
+    pub environment: &'a [(String, String)],
+    pub input: Option<&'a [u8]>,
+    pub timeout: Option<Duration>,
+    pub max_output_bytes: usize,
+}
+
 /// Native process capability restricted to exact executables, directory roots,
 /// child environment names, timeouts, and combined output bytes.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -127,19 +142,22 @@ impl ProcessProvider {
     #[sys_host_operation(
         r###"{"name":"std.io.process.run","version":{"major":1,"minor":0},"signature":"fn std.io.process.run(executable: Str, arguments: [Str], working_directory: Str, environment: [(Str, Str)], input: Blob?, timeout: Duration?, max_output_bytes: Int): (Int?, Blob, Blob)","effects":["invoke"],"preconditions":["executable resolves to an exact host-allowlisted binary","working_directory resolves below an allowlisted root","child environment names are explicitly allowlisted","timeout and combined output are within provider limits"],"failures":["sys.host.process.denied","sys.host.process.invalid_request","sys.host.process.timeout","sys.host.process.output_limit","sys.host.process.unavailable"],"role":"host.std.io.process@1.0","provider":"orna.sys.host.process.v1","implementation":"run"}"###
     )]
-    /// The parameter list is the registry-declared operation signature above;
-    /// it mirrors the `#[sys_host_operation]` attribute field for field.
-    #[allow(clippy::too_many_arguments)]
+    /// The parameter value carries the registry-declared operation signature
+    /// above; the build-time registry proof maps each field to the portable
+    /// parameter list.
     pub fn run(
         &self,
-        executable: &str,
-        arguments: &[String],
-        working_directory: &str,
-        environment: &[(String, String)],
-        input: Option<&[u8]>,
-        timeout: Option<Duration>,
-        max_output_bytes: usize,
+        request: &ProcessRequest<'_>,
     ) -> Result<ProcessRunOutput, ProcessProviderError> {
+        let ProcessRequest {
+            executable,
+            arguments,
+            working_directory,
+            environment,
+            input,
+            timeout,
+            max_output_bytes,
+        } = *request;
         if executable.contains('\0')
             || working_directory.contains('\0')
             || arguments.iter().any(|argument| argument.contains('\0'))
@@ -418,15 +436,16 @@ mod tests {
             .unwrap();
 
         let started = Instant::now();
-        let result = provider.run(
-            "/bin/sh",
-            &["-c".to_owned(), "sleep 30 & wait".to_owned()],
-            root.to_str().unwrap(),
-            &[],
-            None,
-            Some(Duration::from_millis(500)),
-            4096,
-        );
+        let arguments = ["-c".to_owned(), "sleep 30 & wait".to_owned()];
+        let result = provider.run(&ProcessRequest {
+            executable: "/bin/sh",
+            arguments: &arguments,
+            working_directory: root.to_str().unwrap(),
+            environment: &[],
+            input: None,
+            timeout: Some(Duration::from_millis(500)),
+            max_output_bytes: 4096,
+        });
 
         assert_eq!(result, Err(ProcessProviderError::TimedOut));
         assert!(
@@ -447,15 +466,16 @@ mod tests {
             .unwrap();
 
         let started = Instant::now();
-        let result = provider.run(
-            "/bin/sh",
-            &["-c".to_owned(), "sleep 30 & exit 0".to_owned()],
-            root.to_str().unwrap(),
-            &[],
-            None,
-            Some(Duration::from_secs(60)),
-            4096,
-        );
+        let arguments = ["-c".to_owned(), "sleep 30 & exit 0".to_owned()];
+        let result = provider.run(&ProcessRequest {
+            executable: "/bin/sh",
+            arguments: &arguments,
+            working_directory: root.to_str().unwrap(),
+            environment: &[],
+            input: None,
+            timeout: Some(Duration::from_secs(60)),
+            max_output_bytes: 4096,
+        });
 
         assert_eq!(result.map(|output| output.exit_status), Ok(Some(0)),);
         assert!(

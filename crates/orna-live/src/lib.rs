@@ -47,9 +47,7 @@ use orna_security::{
     AttachOutcome, AttachmentId, BoundaryError, CredentialIssuer, OpaqueCredential, Origin,
     SessionBoundary, SessionDeletionAdapter, SessionId,
 };
-use orna_serving::{
-    Credential as ServingCredential, Error as ServingError, Origin as ServingOrigin, Serving,
-};
+use orna_serving::{Error as ServingError, Origin as ServingOrigin, Serving};
 use orna_stream::{DiagnosticClass, DiagnosticCode, SafeDiagnostic};
 
 pub const SUBPROTOCOL: &str = "orna.present.v1";
@@ -1687,7 +1685,7 @@ struct DeletedSession {
 #[derive(Clone, Eq, PartialEq)]
 pub struct SessionCredential {
     pub security: OpaqueCredential,
-    pub serving: ServingCredential,
+    pub serving: OpaqueCredential,
 }
 
 impl fmt::Debug for SessionCredential {
@@ -2070,7 +2068,7 @@ impl LiveHost {
         // same trusted material to both APIs without placing it in diagnostics.
         let serving = issuer
             .last_issued()
-            .map(ServingCredential::new)
+            .map(OpaqueCredential::from_bytes)
             .ok_or(Error::Denied)?;
         if let Err(error) = self.serving.admit(
             request.id,
@@ -2189,7 +2187,7 @@ impl LiveHost {
             .map_err(map_boundary)?;
         let serving = issuer
             .last_issued()
-            .map(ServingCredential::new)
+            .map(OpaqueCredential::from_bytes)
             .ok_or(Error::Denied)?;
         self.serving
             .rotate_credential(id, &credential.serving, serving.clone())
@@ -7038,7 +7036,7 @@ impl LiveTransport {
                 };
                 let supplied = SessionCredential {
                     security: OpaqueCredential::from_bytes(token),
-                    serving: ServingCredential::new(token),
+                    serving: OpaqueCredential::from_bytes(token),
                 };
                 let Some(record) = self.sessions.get(&id) else {
                     return wire_error(410, "live.expired");
@@ -7089,7 +7087,7 @@ impl LiveTransport {
                 };
                 let credential = SessionCredential {
                     security: OpaqueCredential::from_bytes(token),
-                    serving: ServingCredential::new(token),
+                    serving: OpaqueCredential::from_bytes(token),
                 };
                 let delete_request = DeleteRequest {
                     id,
@@ -7997,7 +7995,7 @@ impl LiveTransport {
         }
         let credential = SessionCredential {
             security: OpaqueCredential::from_bytes(cookie),
-            serving: ServingCredential::new(cookie),
+            serving: OpaqueCredential::from_bytes(cookie),
         };
         if credential != record.credential {
             return Err(wire_error(401, "live.unauthenticated"));
@@ -9197,7 +9195,7 @@ mod tests {
         let origin = Origin::parse("https://app.example").unwrap();
         let credential = SessionCredential {
             security: OpaqueCredential::from_bytes([7; 32]),
-            serving: ServingCredential::new([7; 32]),
+            serving: OpaqueCredential::from_bytes([7; 32]),
         };
         let mut host = subscribed_host(None);
         let ticket = match futures::executor::block_on(host.prepare_application_frame(
@@ -11627,7 +11625,7 @@ mod tests {
         host.application_sessions.insert([1; 16]);
         let credential = SessionCredential {
             security: OpaqueCredential::from_bytes([7; 32]),
-            serving: ServingCredential::new([7; 32]),
+            serving: OpaqueCredential::from_bytes([7; 32]),
         };
         let mut transport = LiveTransport::new(host, TransportLimits::default()).unwrap();
         transport.sessions.insert(
@@ -11700,7 +11698,7 @@ mod tests {
         host.application_sessions.insert([1; 16]);
         let credential = SessionCredential {
             security: OpaqueCredential::from_bytes([7; 32]),
-            serving: ServingCredential::new([7; 32]),
+            serving: OpaqueCredential::from_bytes([7; 32]),
         };
         let mut transport = LiveTransport::new(host, TransportLimits::default()).unwrap();
         transport.sessions.insert(
@@ -11784,7 +11782,7 @@ mod tests {
         host.application_sessions.insert([1; 16]);
         let credential = SessionCredential {
             security: OpaqueCredential::from_bytes([7; 32]),
-            serving: ServingCredential::new([7; 32]),
+            serving: OpaqueCredential::from_bytes([7; 32]),
         };
         let mut transport = LiveTransport::new(host, TransportLimits::default()).unwrap();
         transport.sessions.insert(
@@ -11983,7 +11981,7 @@ mod tests {
                 },
                 credential: SessionCredential {
                     security: OpaqueCredential::from_bytes([7; 32]),
-                    serving: ServingCredential::new([7; 32]),
+                    serving: OpaqueCredential::from_bytes([7; 32]),
                 },
                 origin,
             },
@@ -12051,7 +12049,7 @@ mod tests {
                     origin: Origin::parse("https://app.example").unwrap(),
                     credential: SessionCredential {
                         security: OpaqueCredential::from_bytes([7; 32]),
-                        serving: ServingCredential::new([7; 32]),
+                        serving: OpaqueCredential::from_bytes([7; 32]),
                     },
                     attachment: [13; 16],
                     response,

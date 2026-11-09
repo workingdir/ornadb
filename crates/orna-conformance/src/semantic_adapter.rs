@@ -61,8 +61,8 @@ use orna_syntax::{
     parse_expression, parse_module,
 };
 use orna_sys::{
-    AdmissionError, AdmissionRequest, ExecutionBoundary, FunctionDescriptor, InvocationExecutor,
-    InvocationHandle, InvocationResult, InvocationState, RuntimeSupervisor, TypedValue,
+    AdmissionError, AdmissionRequest, ExecutionBoundary, FunctionDescriptor, InvocationCompletion,
+    InvocationExecutor, InvocationHandle, InvocationState, RuntimeSupervisor, TypedValue,
 };
 use orna_table::{ActivationError, DatabaseActivation, DatabaseRuntime, TableError};
 use sha2::{Digest, Sha256};
@@ -348,21 +348,23 @@ struct BoundedSourceExecutor {
 }
 
 impl InvocationExecutor for BoundedSourceExecutor {
-    fn execute(&mut self, boundary: &ExecutionBoundary) -> InvocationResult<TypedValue> {
+    fn execute(&mut self, boundary: &ExecutionBoundary) -> InvocationCompletion<TypedValue> {
         // The supervisor admits arguments and result witnesses first. Retain
         // the independent function/snapshot pin at the evaluator edge too.
         if boundary.function != self.descriptor.identity {
-            return InvocationResult::OrdinaryFailure(AdmissionError::SourceMismatch.diagnostic());
+            return InvocationCompletion::OrdinaryFailure(
+                AdmissionError::SourceMismatch.diagnostic(),
+            );
         }
         let mut arguments = Environment::new();
         for (name, value) in boundary.arguments.entries() {
             let Some(canonical) = value.canonical() else {
-                return InvocationResult::OrdinaryFailure(
+                return InvocationCompletion::OrdinaryFailure(
                     AdmissionError::SourceMismatch.diagnostic(),
                 );
             };
             let Ok(value) = Value::decode(canonical) else {
-                return InvocationResult::OrdinaryFailure(
+                return InvocationCompletion::OrdinaryFailure(
                     AdmissionError::SourceMismatch.diagnostic(),
                 );
             };
@@ -376,16 +378,16 @@ impl InvocationExecutor for BoundedSourceExecutor {
             self.limits,
         ) {
             Ok(value) => match value.encode() {
-                Ok(canonical) => InvocationResult::Success(TypedValue::public(
+                Ok(canonical) => InvocationCompletion::Success(TypedValue::public(
                     self.descriptor.result_type.clone(),
                     canonical,
                 )),
-                Err(_) => {
-                    InvocationResult::OrdinaryFailure(AdmissionError::SourceMismatch.diagnostic())
-                }
+                Err(_) => InvocationCompletion::OrdinaryFailure(
+                    AdmissionError::SourceMismatch.diagnostic(),
+                ),
             },
             Err(_) => {
-                InvocationResult::OrdinaryFailure(AdmissionError::SourceMismatch.diagnostic())
+                InvocationCompletion::OrdinaryFailure(AdmissionError::SourceMismatch.diagnostic())
             }
         }
     }

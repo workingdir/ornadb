@@ -29,10 +29,10 @@ use orna_runtime::{
     RuntimeState, TableMutation, TerminalOutcome,
 };
 use orna_security::{
-    AttachmentId, BoundaryError, CredentialIssuer, Origin, OriginPolicy, SessionBoundary,
-    SessionDeletionAdapter,
+    AttachmentId, BoundaryError, CredentialIssuer, OpaqueCredential, Origin, OriginPolicy,
+    SessionBoundary, SessionDeletionAdapter,
 };
-use orna_serving::{Credential as ServingCredential, Limits as ServingLimits, Serving};
+use orna_serving::{Limits as ServingLimits, Serving};
 use std::{
     collections::BTreeMap,
     fs,
@@ -4108,7 +4108,7 @@ fn rejected_cross_layer_reconnect_preserves_a_valid_session() {
     let credential = create(&mut host, &mut issuer);
     let mismatched = SessionCredential {
         security: credential.security.clone(),
-        serving: ServingCredential::new([9; 32]),
+        serving: OpaqueCredential::from_bytes([9; 32]),
     };
 
     assert_eq!(

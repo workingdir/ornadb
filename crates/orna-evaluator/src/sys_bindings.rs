@@ -13,7 +13,7 @@ use orna_sys::{
     CaptureFileError, ClockProvider, EnvironmentDispatchValue, EnvironmentProvider,
     EnvironmentProviderError, FailureCode, FilesystemProvider, HostHttpResponse,
     HostOperationDescriptor, HttpProvider, OperationContract, OperationId, ProcessProvider,
-    ProviderDiagnostic, ProviderFailure, ProviderOffer, SemanticRoleContract,
+    ProcessRequest, ProviderDiagnostic, ProviderFailure, ProviderOffer, SemanticRoleContract,
     SystemOperationProvider, TypeId, TypedValue, system_host_operation_registry,
 };
 use orna_value::{Blob, ContextValue, Error as ValueError, ValueFormat};
@@ -619,15 +619,15 @@ impl SysHostBindingRegistry {
             .to_usize()
             .ok_or_else(|| redacted_error("ORNA-EVAL-VALUE"))?;
         let output = provider
-            .run(
+            .run(&ProcessRequest {
                 executable,
-                &args,
+                arguments: &args,
                 working_directory,
-                &environment,
+                environment: &environment,
                 input,
                 timeout,
-                output_limit,
-            )
+                max_output_bytes: output_limit,
+            })
             .map_err(|failure| self.failure(operation, failure.code()))?;
         let exit_status = match output.exit_status {
             Some(status) => OvbRaw::Tag(

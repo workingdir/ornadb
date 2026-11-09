@@ -24,21 +24,7 @@ const PROVIDER_FUNCTION_REFERENCE_EDGE_FIXTURE: &str =
 const PROVIDER_CANCEL_EDGE_FIXTURE: &str = include_str!("fixtures/provider-cancel-edges.json");
 const PROVIDER_METADATA_EDGE_FIXTURE: &str = include_str!("fixtures/provider-metadata-edges.json");
 
-#[path = "../src/abi_version.rs"]
-#[allow(dead_code)]
-mod abi_version;
-#[path = "../build_host.rs"]
-#[allow(dead_code)]
-mod build_host;
-#[path = "../build_provider.rs"]
-#[allow(dead_code)]
-mod build_provider;
-#[path = "../build_support.rs"]
-#[allow(dead_code)]
-mod build_support;
-#[path = "../src/host_registry_model.rs"]
-#[allow(dead_code)]
-mod host_registry_model;
+use orna_sys_codegen::{build_host, build_provider, build_support};
 
 const SHARED_PROVIDER_FAILURES: [&str; 3] = [
     "sys.abi.precondition_failed",

@@ -1,5 +1,6 @@
 use orna_protocol::{Envelope, Message, PresentationContext};
-use orna_serving::{Credential, Error, Id, Limits, Origin, Patch, RetainedPin, Serving};
+use orna_security::OpaqueCredential;
+use orna_serving::{Error, Id, Limits, Origin, Patch, RetainedPin, Serving};
 
 fn id(value: u8) -> Id {
     [value; 16]
@@ -39,7 +40,7 @@ fn admitted() -> Serving {
     state
         .admit(
             id(1),
-            Credential::new([7; 32]),
+            OpaqueCredential::from_bytes([7; 32]),
             Origin(id(2)),
             &subscribe(id(3)),
         )

@@ -1715,6 +1715,7 @@ version = "1.0.0"
 dependencies = [
  "image",
  "orna-protocol",
+ "orna-security",
  "orna-value",
 ]
 
@@ -1766,21 +1767,40 @@ dependencies = [
  "orna-foundation",
  "orna-security",
  "orna-syntax",
+ "orna-sys-codegen",
  "orna-sys-macros",
- "quote",
+ "orna-sys-model",
  "reqwest",
  "rustix 0.38.44",
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "syn 2.0.119",
  "tempfile",
  "uuid",
 ]
 
 [[package]]
+name = "orna-sys-codegen"
+version = "1.1.0"
+dependencies = [
+ "orna-sys-model",
+ "quote",
+ "serde",
+ "serde_json",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "orna-sys-macros"
 version = "1.0.0"
+
+[[package]]
+name = "orna-sys-model"
+version = "1.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "orna-table"

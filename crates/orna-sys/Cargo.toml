@@ -22,6 +22,7 @@ bench = false
 orna-foundation = { path = "../orna-foundation" }
 orna-security = { path = "../orna-security" }
 orna-sys-macros = { path = "../orna-sys-macros" }
+orna-sys-model = { path = "../orna-sys-model" }
 serde = { version = "1.0.229", features = ["derive"] }
 sha2 = "0.10.9"
 serde_json = "1.0.151"
@@ -29,15 +30,12 @@ uuid = { version = "1.26.0", features = ["v4"] }
 reqwest = { version = "0.12.7", default-features = false, features = ["blocking", "rustls-tls-webpki-roots"] }
 
 [build-dependencies]
-quote = "1.0.45"
-serde = { version = "1.0.229", features = ["derive"] }
-serde_json = { version = "1.0.151", features = ["preserve_order"] }
-syn = { version = "2.0.119", features = ["full", "visit"] }
+orna-sys-codegen = { path = "../orna-sys-codegen" }
 
 [dev-dependencies]
-quote = "1.0.45"
+orna-sys-codegen = { path = "../orna-sys-codegen" }
+orna-sys-model = { path = "../orna-sys-model" }
 orna-syntax = { path = "../orna-syntax" }
-syn = { version = "2.0.119", features = ["full", "visit"] }
 serde_json = { version = "1.0.151", features = ["preserve_order"] }
 tempfile = "3.23.0"
 

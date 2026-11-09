@@ -8,5 +8,6 @@ description = "Bounded, fail-closed serving session state for Orna 1.0"
 
 [dependencies]
 orna-protocol = { path = "../orna-protocol" }
+orna-security = { path = "../orna-security" }
 orna-value = { path = "../orna-value" }
 image = { version = "=0.25.9", default-features = false, features = ["gif", "jpeg", "png", "webp"] }

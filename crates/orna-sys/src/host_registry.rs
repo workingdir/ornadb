@@ -1,8 +1,6 @@
 //! Runtime accessors for build-generated native host metadata and declarations.
 
-use serde::Deserialize;
-
-use crate::{AbiVersion, HostOperationDescriptor, HostProviderRole, SystemHostOperationRegistry};
+use crate::SystemHostOperationRegistry;
 
 const GENERATED_HOST_OPERATIONS: &str =
     include_str!(concat!(env!("OUT_DIR"), "/system_host_operations.json"));
@@ -16,21 +14,6 @@ const GENERATED_HOST_BINDING_MODULES: &str = include_str!(concat!(
     env!("OUT_DIR"),
     "/system_host_binding_modules.json"
 ));
-
-#[derive(Deserialize)]
-struct RawHostRegistry {
-    abi_version: AbiVersion,
-    operations: Vec<HostOperationDescriptor>,
-    roles: Vec<HostProviderRole>,
-}
-
-impl SystemHostOperationRegistry {
-    fn from_json(source: &str) -> Result<Self, serde_json::Error> {
-        let raw: RawHostRegistry = serde_json::from_str(source)?;
-        Self::from_parts(raw.abi_version, raw.operations, raw.roles)
-            .map_err(<serde_json::Error as serde::de::Error>::custom)
-    }
-}
 
 pub fn system_host_operation_registry() -> &'static SystemHostOperationRegistry {
     static REGISTRY: std::sync::LazyLock<SystemHostOperationRegistry> =
