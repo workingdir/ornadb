@@ -1950,6 +1950,13 @@ struct CachedFileDigest {
     digest: [u8; 32],
 }
 
+/// One scanned worktree path: the stamp to record, and the cache entry to
+/// carry forward when the path is a regular file whose section was reused.
+struct ScannedWorktreePath {
+    stamp: ManagedStamp,
+    cache_entry: Option<(Vec<u8>, CachedFileDigest)>,
+}
+
 /// How long before a read a file's mtime and ctime must lie for its stamp to
 /// prove its bytes unchanged. Filesystems store timestamps coarsely, so a write
 /// in the same tick as an earlier read can leave the stamp equal.
@@ -6497,9 +6504,9 @@ impl Repository {
             // Worktree paths are local user data: untracked `Sub/.GIT/` is legal,
             // so only the structural check applies here.
             let path = ManagedPath::from_worktree_listing(&path)?;
-            let (stamp, cache_entry) = self.scan_worktree_path(&path, &previous, &mut digest)?;
-            stamps.push(stamp);
-            if let Some((key, entry)) = cache_entry {
+            let scanned = self.scan_worktree_path(&path, &previous, &mut digest)?;
+            stamps.push(scanned.stamp);
+            if let Some((key, entry)) = scanned.cache_entry {
                 next.insert(key, entry);
             }
         }
@@ -6575,7 +6582,7 @@ impl Repository {
         path: &ManagedPath,
         previous: &HashMap<Vec<u8>, CachedFileDigest>,
         digest: &mut Sha256,
-    ) -> Result<(ManagedStamp, Option<(Vec<u8>, CachedFileDigest)>), RepositoryError> {
+    ) -> Result<ScannedWorktreePath, RepositoryError> {
         let encoded_path = path.as_path().as_os_str().as_encoded_bytes();
         digest.update((encoded_path.len() as u64).to_be_bytes());
         digest.update(encoded_path);
@@ -6619,12 +6626,18 @@ impl Repository {
                     }
                 };
                 digest.update(section);
-                return Ok((stamp, entry.map(|entry| (key, entry))));
+                return Ok(ScannedWorktreePath {
+                    stamp,
+                    cache_entry: entry.map(|entry| (key, entry)),
+                });
             }
             Some(_) => digest.update([3]),
             None => digest.update([0]),
         }
-        Ok((stamp, None))
+        Ok(ScannedWorktreePath {
+            stamp,
+            cache_entry: None,
+        })
     }
 
     /// Hashes one regular file's length and bytes as a standalone section, so
