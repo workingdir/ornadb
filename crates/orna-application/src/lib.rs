@@ -345,13 +345,11 @@ impl ApplicationAuthority {
                         });
                         if let Some(intrinsic) =
                             module.and_then(|module| orna_intrinsics::lookup(module, &lookup_name))
+                            && intrinsic.dispatch != orna_intrinsics::Dispatch::SourceOnly
+                            && intrinsic.binds_declaration(&lookup_name)
+                            && intrinsic.pins.contains(orna_intrinsics::CURRENT_STD_PIN)
                         {
-                            if intrinsic.dispatch != orna_intrinsics::Dispatch::SourceOnly
-                                && intrinsic.binds_declaration(&lookup_name)
-                                && intrinsic.pins.contains(orna_intrinsics::CURRENT_STD_PIN)
-                            {
-                                intrinsics.insert(key.clone(), intrinsic.id);
-                            }
+                            intrinsics.insert(key.clone(), intrinsic.id);
                         }
                         if is_public {
                             public.insert(key.clone());

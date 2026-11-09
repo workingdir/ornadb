@@ -226,3 +226,9 @@ path = "crates/orna-cli/src/fuse_mount/tests.rs::workspace_readdir_uses_lazy_ind
 new_limit = 127
 reason = "pure split: inline test modules moved to sibling files; the parent files shrank"
 bead = "ornadb-qwog6"
+
+[[raise]]
+path = "crates/orna-evaluator/src/lib.rs::dispatch"
+new_limit = 153
+reason = "S2 replaces the per-kind native string tables with one match on IntrinsicId; the arms are scheduled to move beside their handlers as the catalogue grows"
+bead = "ornadb-yuzot.2"
