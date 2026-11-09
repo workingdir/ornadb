@@ -17,7 +17,7 @@
 # A raise whose path is not present in the workspace is reserved for an
 # in-flight PR and is reported as a note; remove it once the PR lands or the
 # code shrinks below the hard cap. A raise that is no longer needed is also a
-# note, never a failure.
+# note, never a failure; --mode=budget --update removes it automatically.
 #
 # A pure split that creates over-cap children records each child here with the
 # split's bead, while --mode=budget --update lowers the parent's entries. The
@@ -28,18 +28,6 @@ path = "crates/orna-lsp/src/server.rs"
 new_limit = 2728
 reason = "PR #9783 replaces ten positional arguments with SymbolHeader and folds the position/document requests into one locate_request/workspace_request path"
 bead = "ornadb-qvsyc"
-
-[[raise]]
-path = "crates/orna-syntax/src/parser.rs"
-new_limit = 5784
-reason = "PR #9783 splits Parser::item per declaration kind and adds the located-span accessors; the remaining long parser functions are on the bead"
-bead = "ornadb-18ky0"
-
-[[raise]]
-path = "crates/orna-syntax/src/parser.rs::parse_block_inner"
-new_limit = 205
-reason = "PR #9783's located-span accessors touch parse_block_inner; splitting it is the remaining ornadb-18ky0 work"
-bead = "ornadb-18ky0"
 
 [[raise]]
 path = "crates/orna-syntax/src/visit.rs::walk_expr"
