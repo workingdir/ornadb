@@ -23,6 +23,7 @@ use orna_syntax::{Declaration, SyntaxSpan, SyntaxTree, parse_module};
 
 use crate::analysis;
 use crate::documents::PositionMapper;
+use crate::sync::lock;
 
 /// The root module every project check starts from.
 pub(crate) const ROOT_MODULE: &str = "main.orna";
@@ -72,10 +73,7 @@ impl ProjectLocator {
         }
         let directory = fs::canonicalize(path.parent()?).ok()?;
         let project = {
-            let mut cache = self
-                .by_directory
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut cache = lock(&self.by_directory);
             cache
                 .entry(directory.clone())
                 .or_insert_with(|| discover(&directory))

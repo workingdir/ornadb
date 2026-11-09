@@ -10,10 +10,12 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use lsp_server::{ErrorCode, Message, Request, RequestId, Response, ResponseError};
+
+use crate::sync::lock;
 
 /// Answers one request from its context.
 pub(crate) type Handler<C> =
@@ -127,12 +129,6 @@ fn work<C>(
             response_result,
         }));
     }
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[cfg(test)]

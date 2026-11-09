@@ -30,6 +30,7 @@ mod requests;
 mod semantic;
 mod server;
 mod standard;
+mod sync;
 mod views;
 mod workspace;
 

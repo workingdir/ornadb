@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::io::{self, BufReader};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use crate::analysis;
@@ -19,6 +19,7 @@ use crate::names::{DeclaredKind, Role};
 use crate::project::{ProjectHome, ProjectLocator};
 use crate::rename::{self, ModuleEdits, Refusal};
 use crate::requests::RequestPool;
+use crate::sync::lock;
 use crate::views::{Documents, Views};
 use crate::workspace::{OpenDocument, Target, Workspace};
 use crate::{editor_ranges, hierarchy, inlay, semantic};
@@ -245,12 +246,6 @@ impl ServerState {
             worker.schedule(self.context.snapshot(), vec![(uri.clone(), home)]);
         }
     }
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// A request that cannot be served, with a reason for the user
