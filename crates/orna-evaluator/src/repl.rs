@@ -1058,7 +1058,7 @@ mod tests {
     // Sources of the REPL inline fixtures that the project-repl crate also
     // consumes; the fixture files live in crates/orna-project-repl, and a
     // fixture may only be included from its own crate.
-    const REPL_INLINE_USE_LIBRARY: &str = "use library";
+    const REPL_INLINE_USE_LIBRARY: &str = "use library;";
     const REPL_INLINE_SOURCE: &str = "$_";
     const REPL_INLINE_42: &str = "42";
     const REPL_INLINE_40_2: &str = "40 + 2";
