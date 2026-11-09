@@ -1055,6 +1055,16 @@ mod tests {
     use orna_syntax::parse_module;
     use orna_value::Value;
 
+    // Sources of the REPL inline fixtures that the project-repl crate also
+    // consumes; the fixture files live in crates/orna-project-repl, and a
+    // fixture may only be included from its own crate.
+    const REPL_INLINE_USE_LIBRARY: &str = "use library";
+    const REPL_INLINE_SOURCE: &str = "$_";
+    const REPL_INLINE_42: &str = "42";
+    const REPL_INLINE_40_2: &str = "40 + 2";
+    const REPL_INLINE_1_1: &str = "1 + 1";
+    const REPL_INLINE_N: &str = "n";
+
     fn library_functions() -> Functions {
         let parsed = parse_module(include_str!("fixtures/repl-library-functions.orna"));
         assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
@@ -1175,14 +1185,7 @@ mod tests {
         let mut session =
             ReplSession::with_bindings(Limits::default(), Environment::new(), library_functions())
                 .expect("admitted library");
-        assert_eq!(
-            session
-                .submit(include_str!(
-                    "fixtures/repl-inline-use-library-a84bcc62.orna"
-                ))
-                .unwrap(),
-            None
-        );
+        assert_eq!(session.submit(REPL_INLINE_USE_LIBRARY).unwrap(), None);
         assert_eq!(
             session
                 .submit(include_str!(
@@ -1495,9 +1498,7 @@ mod tests {
             Some(Value::int(42.into()))
         );
         assert_eq!(
-            session
-                .submit(include_str!("fixtures/repl-inline-source-ba1da4b7.orna"))
-                .unwrap(),
+            session.submit(REPL_INLINE_SOURCE).unwrap(),
             Some(Value::int(42.into()))
         );
         assert_eq!(
@@ -1561,9 +1562,7 @@ mod tests {
             None
         );
         assert_eq!(
-            session
-                .submit(include_str!("fixtures/repl-inline-42-73475cb4.orna"))
-                .unwrap(),
+            session.submit(REPL_INLINE_42).unwrap(),
             Some(Value::int(42.into()))
         );
         assert_eq!(
@@ -1579,15 +1578,11 @@ mod tests {
     fn previews_and_unsupported_submissions_do_not_change_session_state() {
         let mut session = ReplSession::new(Limits::default());
         assert_eq!(
-            session
-                .submit(include_str!("fixtures/repl-inline-40-2-0fcd2493.orna"))
-                .unwrap(),
+            session.submit(REPL_INLINE_40_2).unwrap(),
             Some(Value::int(42.into()))
         );
         assert_eq!(
-            session
-                .preview(include_str!("fixtures/repl-inline-1-1-72fce594.orna"))
-                .unwrap(),
+            session.preview(REPL_INLINE_1_1).unwrap(),
             Value::int(2.into())
         );
         assert_eq!(
@@ -1600,9 +1595,7 @@ mod tests {
             "ORNA-EVAL-UNSUPPORTED"
         );
         assert_eq!(
-            session
-                .submit(include_str!("fixtures/repl-inline-source-ba1da4b7.orna"))
-                .unwrap(),
+            session.submit(REPL_INLINE_SOURCE).unwrap(),
             Some(Value::int(42.into()))
         );
     }
@@ -1666,10 +1659,7 @@ mod tests {
             "ORNA-EVAL-UNSUPPORTED"
         );
         assert_eq!(
-            session
-                .submit(include_str!("fixtures/repl-inline-n-1b16b1df.orna"))
-                .unwrap_err()
-                .code(),
+            session.submit(REPL_INLINE_N).unwrap_err().code(),
             "ORNA-EVAL-NAME"
         );
     }
@@ -1678,13 +1668,9 @@ mod tests {
     fn repl_bindings_are_session_only_even_with_a_spoofed_environment() {
         let environment = Environment::from([("$_".into(), Value::int(42.into()))]);
         assert_eq!(
-            crate::evaluate_expression(
-                include_str!("fixtures/repl-inline-source-ba1da4b7.orna"),
-                &environment,
-                Limits::default()
-            )
-            .unwrap_err()
-            .code(),
+            crate::evaluate_expression(REPL_INLINE_SOURCE, &environment, Limits::default())
+                .unwrap_err()
+                .code(),
             "ORNA-EVAL-UNSUPPORTED"
         );
         assert_eq!(
@@ -1734,19 +1720,10 @@ mod tests {
             ReplSession::with_bindings(Limits::default(), Environment::new(), functions)
                 .expect("admitted function");
         assert_eq!(
-            session
-                .submit(include_str!("fixtures/repl-inline-40-2-0fcd2493.orna"))
-                .unwrap(),
+            session.submit(REPL_INLINE_40_2).unwrap(),
             Some(Value::int(42.into()))
         );
-        assert_eq!(
-            session
-                .submit(include_str!(
-                    "fixtures/repl-inline-use-library-a84bcc62.orna"
-                ))
-                .unwrap(),
-            None
-        );
+        assert_eq!(session.submit(REPL_INLINE_USE_LIBRARY).unwrap(), None);
         assert_eq!(
             session
                 .submit(include_str!(
@@ -1780,11 +1757,7 @@ mod tests {
         );
         let mut session =
             ReplSession::with_bindings(Limits::default(), Environment::new(), functions).unwrap();
-        session
-            .submit(include_str!(
-                "fixtures/repl-inline-use-library-a84bcc62.orna"
-            ))
-            .unwrap();
+        session.submit(REPL_INLINE_USE_LIBRARY).unwrap();
         assert_eq!(
             session.submit(include_str!(
                 "fixtures/repl-inline-library-local-left-right-left-right-7146287e.orna"

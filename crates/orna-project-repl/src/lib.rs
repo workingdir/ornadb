@@ -1423,7 +1423,7 @@ mod tests {
         let mut session = AdmittedReplSession::new(Limits::default());
         let staged = session
             .stage_activation(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-std-net-http-get-https-example-com-74c176f7.orna"
+                "fixtures/repl-inline-std-net-http-get-https-example-com-74c176f7.orna"
             ))
             .expect("effectful source is semantically admitted");
 
@@ -1440,16 +1440,14 @@ mod tests {
         assert_eq!(
             session
                 .submit(include_str!(
-                    "../../orna-evaluator/src/fixtures/repl-inline-std-net-http-get-https-example-com-74c176f7.orna"
+                    "fixtures/repl-inline-std-net-http-get-https-example-com-74c176f7.orna"
                 ))
                 .unwrap_err()
                 .code(),
             "ORNA-REPL-EFFECT"
         );
         assert_eq!(
-            session.submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-40-2-0fcd2493.orna"
-            )),
+            session.submit(include_str!("fixtures/repl-inline-40-2-0fcd2493.orna")),
             Ok(Some(Value::int(42.into())))
         );
     }
@@ -1459,20 +1457,18 @@ mod tests {
         let mut session = AdmittedReplSession::new(Limits::default());
         assert_eq!(
             session.submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-let-n-int-21-fe1325a7.orna"
+                "fixtures/repl-inline-let-n-int-21-fe1325a7.orna"
             )),
             Ok(None)
         );
         assert_eq!(
             session.submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-fn-twice-value-int-int-value-value-596adf3f.orna"
+                "fixtures/repl-inline-fn-twice-value-int-int-value-value-596adf3f.orna"
             )),
             Ok(None)
         );
         assert_eq!(
-            session.submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-twice-n-21d0ebc9.orna"
-            )),
+            session.submit(include_str!("fixtures/repl-inline-twice-n-21d0ebc9.orna")),
             Ok(Some(Value::int(42.into())))
         );
     }
@@ -1482,45 +1478,37 @@ mod tests {
         let mut session = AdmittedReplSession::new(Limits::default());
         let mismatch = session
             .submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-let-text-int-wrong-12395f03.orna"
+                "fixtures/repl-inline-let-text-int-wrong-12395f03.orna"
             ))
             .unwrap_err();
         assert_eq!(mismatch.code(), "ORNA-S021-TYPE");
         assert_eq!(
             session
-                .submit(include_str!(
-                    "../../orna-evaluator/src/fixtures/repl-inline-text-982d9e3e.orna"
-                ))
+                .submit(include_str!("fixtures/repl-inline-text-982d9e3e.orna"))
                 .unwrap_err()
                 .code(),
             "ORNA-S012-UNRESOLVED"
         );
 
         assert_eq!(
-            session.submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-40-2-0fcd2493.orna"
-            )),
+            session.submit(include_str!("fixtures/repl-inline-40-2-0fcd2493.orna")),
             Ok(Some(Value::int(42.into())))
         );
         let runtime = session
             .submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-let-pending-int-1-0-9baa0e02.orna"
+                "fixtures/repl-inline-let-pending-int-1-0-9baa0e02.orna"
             ))
             .unwrap_err();
         assert_eq!(runtime.code(), "ORNA-EVAL-DIVIDE-BY-ZERO");
         assert_eq!(
             session
-                .submit(include_str!(
-                    "../../orna-evaluator/src/fixtures/repl-inline-pending-62a2fed3.orna"
-                ))
+                .submit(include_str!("fixtures/repl-inline-pending-62a2fed3.orna"))
                 .unwrap_err()
                 .code(),
             "ORNA-S012-UNRESOLVED"
         );
         assert_eq!(
-            session.submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-source-ba1da4b7.orna"
-            )),
+            session.submit(include_str!("fixtures/repl-inline-source-ba1da4b7.orna")),
             Ok(Some(Value::int(42.into())))
         );
     }
@@ -1530,29 +1518,23 @@ mod tests {
         let mut session = AdmittedReplSession::new(Limits::default());
         assert_eq!(
             session.submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-let-n-int-41-1debaaa2.orna"
+                "fixtures/repl-inline-let-n-int-41-1debaaa2.orna"
             )),
             Ok(None)
         );
         assert_eq!(
-            session.preview(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-n-1-60910b50.orna"
-            )),
+            session.preview(include_str!("fixtures/repl-inline-n-1-60910b50.orna")),
             Ok(Value::int(42.into()))
         );
         assert_eq!(
             session
-                .submit(include_str!(
-                    "../../orna-evaluator/src/fixtures/repl-inline-source-ba1da4b7.orna"
-                ))
+                .submit(include_str!("fixtures/repl-inline-source-ba1da4b7.orna"))
                 .unwrap_err()
                 .code(),
             "ORNA-S012-UNRESOLVED"
         );
         assert_eq!(
-            session.submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-n-1b16b1df.orna"
-            )),
+            session.submit(include_str!("fixtures/repl-inline-n-1b16b1df.orna")),
             Ok(Some(Value::int(41.into())))
         );
     }
@@ -1561,23 +1543,19 @@ mod tests {
     fn effectful_sources_are_rejected_before_runtime_execution() {
         let mut session = AdmittedReplSession::new(Limits::default());
         assert_eq!(
-            session.submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-42-73475cb4.orna"
-            )),
+            session.submit(include_str!("fixtures/repl-inline-42-73475cb4.orna")),
             Ok(Some(Value::int(42.into())))
         );
 
         let error = session
             .submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-std-net-http-get-https-example-com-74c176f7.orna"
+                "fixtures/repl-inline-std-net-http-get-https-example-com-74c176f7.orna"
             ))
             .unwrap_err();
         assert_eq!(error.code(), "ORNA-REPL-EFFECT");
         assert_eq!(error.diagnostic().message(), "<redacted>");
         assert_eq!(
-            session.submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-source-ba1da4b7.orna"
-            )),
+            session.submit(include_str!("fixtures/repl-inline-source-ba1da4b7.orna")),
             Ok(Some(Value::int(42.into())))
         );
     }
@@ -1588,7 +1566,7 @@ mod tests {
         assert_eq!(
             session
                 .submit(include_str!(
-                    "../../orna-evaluator/src/fixtures/repl-inline-fn-identity-t-value-t-t-value-ab04ee2f.orna"
+                    "fixtures/repl-inline-fn-identity-t-value-t-t-value-ab04ee2f.orna"
                 ))
                 .unwrap_err()
                 .code(),
@@ -1597,7 +1575,7 @@ mod tests {
         assert_eq!(
             session
                 .submit(include_str!(
-                    "../../orna-evaluator/src/fixtures/repl-inline-identity-1-4a47b267.orna"
+                    "fixtures/repl-inline-identity-1-4a47b267.orna"
                 ))
                 .unwrap_err()
                 .code(),
@@ -1608,7 +1586,7 @@ mod tests {
     #[test]
     fn standard_bytes_are_verified_before_runtime_seeding() {
         let standard = include_str!(
-            "../../orna-evaluator/src/fixtures/repl-inline-pub-fn-increment-value-int-int-value-1-97766a10.orna"
+            "fixtures/repl-inline-pub-fn-increment-value-int-int-value-1-97766a10.orna"
         );
         let profile = StandardDependencyProfile::from_sources(
             "std-snapshot",
@@ -1619,7 +1597,7 @@ mod tests {
             &[(
                 "main.orna",
                 include_str!(
-                    "../../orna-evaluator/src/fixtures/repl-inline-use-std-math-increment-pub-fn-run-valu-83d2a2a0.orna"
+                    "fixtures/repl-inline-use-std-math-increment-pub-fn-run-valu-83d2a2a0.orna"
                 ),
             )],
             Some(profile),
@@ -1630,7 +1608,7 @@ mod tests {
                 [(
                     "std/math.orna".into(),
                     include_str!(
-                        "../../orna-evaluator/src/fixtures/repl-inline-pub-fn-increment-value-int-int-value-2-724ecb19.orna"
+                        "fixtures/repl-inline-pub-fn-increment-value-int-int-value-2-724ecb19.orna"
                     )
                     .into(),
                 )],
@@ -1649,13 +1627,13 @@ mod tests {
         .unwrap();
         assert_eq!(
             session.submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-use-std-math-increment-477a9dd9.orna"
+                "fixtures/repl-inline-use-std-math-increment-477a9dd9.orna"
             )),
             Ok(None)
         );
         assert_eq!(
             session.submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-increment-41-fa3331ac.orna"
+                "fixtures/repl-inline-increment-41-fa3331ac.orna"
             )),
             Ok(Some(Value::int(42.into())))
         );
@@ -1667,7 +1645,7 @@ mod tests {
         let (_directory, project) = loaded_project(
             &[(
                 "main.orna",
-                include_str!("../../orna-evaluator/src/fixtures/repl-inline-empty-module.orna"),
+                include_str!("fixtures/repl-inline-empty-module.orna"),
             )],
             Some(profile),
         );
@@ -1680,20 +1658,20 @@ mod tests {
 
         assert_eq!(
             session.submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-use-std-math-6b6c1741.orna"
+                "fixtures/repl-inline-use-std-math-6b6c1741.orna"
             )),
             Ok(None)
         );
         assert_eq!(
             session.submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-math-clamp-value-99-lower-20-upper-22-5a6b11dc.orna"
+                "fixtures/repl-inline-math-clamp-value-99-lower-20-upper-22-5a6b11dc.orna"
             )),
             Ok(Some(Value::int(22.into())))
         );
         assert_eq!(
             session
                 .submit(include_str!(
-                    "../../orna-evaluator/src/fixtures/repl-inline-math-clamp-value-99-min-20-max-22-9984937d.orna"
+                    "fixtures/repl-inline-math-clamp-value-99-min-20-max-22-9984937d.orna"
                 ))
                 .unwrap_err()
                 .code(),
@@ -1706,26 +1684,24 @@ mod tests {
         let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
         assert_eq!(
             session.submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-use-std-query-collection-2165.orna"
+                "fixtures/repl-inline-use-std-query-collection-2165.orna"
             )),
             Ok(None)
         );
         assert_eq!(
             session.submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-use-std-collection-2165.orna"
+                "fixtures/repl-inline-use-std-collection-2165.orna"
             )),
             Ok(None)
         );
         assert_eq!(
             session.submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-use-std-query-alias-2165.orna"
+                "fixtures/repl-inline-use-std-query-alias-2165.orna"
             )),
             Ok(None)
         );
         assert_eq!(
-            session.submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-std-query-map-2165.orna"
-            )),
+            session.submit(include_str!("fixtures/repl-inline-std-query-map-2165.orna")),
             Ok(Some(
                 Value::new(Raw::Array(vec![
                     Raw::Int(2.into()),
@@ -1737,7 +1713,7 @@ mod tests {
         );
         assert_eq!(
             session.submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-std-query-alias-map-2165.orna"
+                "fixtures/repl-inline-std-query-alias-map-2165.orna"
             )),
             Ok(Some(
                 Value::new(Raw::Array(vec![
@@ -1750,7 +1726,7 @@ mod tests {
         );
         assert_eq!(
             session.submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-std-query-filter-2165.orna"
+                "fixtures/repl-inline-std-query-filter-2165.orna"
             )),
             Ok(Some(
                 Value::new(Raw::Array(vec![Raw::Int(2.into()), Raw::Int(3.into())])).unwrap(),
@@ -1758,19 +1734,19 @@ mod tests {
         );
         assert_eq!(
             session.submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-std-collection-one-2165.orna"
+                "fixtures/repl-inline-std-collection-one-2165.orna"
             )),
             Ok(Some(Value::int(4.into())))
         );
         assert_eq!(
             session.submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-std-query-every-2165.orna"
+                "fixtures/repl-inline-std-query-every-2165.orna"
             )),
             Ok(Some(Value::new(Raw::Bool(true)).unwrap()))
         );
         assert_eq!(
             session.submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-std-collection-first-2165.orna"
+                "fixtures/repl-inline-std-collection-first-2165.orna"
             )),
             Ok(Some(Value::option(Some(Value::int(4.into()))).unwrap()))
         );
@@ -1781,24 +1757,18 @@ mod tests {
         let mut session = AdmittedReplSession::new(Limits::default());
         assert_eq!(
             session.submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-let-answer-int-40-32ff602e.orna"
+                "fixtures/repl-inline-let-answer-int-40-32ff602e.orna"
             )),
             Ok(None)
         );
         assert_eq!(
-            session.submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-answer-2-1e6074ea.orna"
-            )),
+            session.submit(include_str!("fixtures/repl-inline-answer-2-1e6074ea.orna")),
             Ok(Some(Value::int(42.into())))
         );
 
         for source in [
-            include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-std-collection-first-1-2-3-07a8406e.orna"
-            ),
-            include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-std-collection-map-1-2-3-value-value-401a69f4.orna"
-            ),
+            include_str!("fixtures/repl-inline-std-collection-first-1-2-3-07a8406e.orna"),
+            include_str!("fixtures/repl-inline-std-collection-map-1-2-3-value-value-401a69f4.orna"),
         ] {
             assert_eq!(
                 session.submit(source).unwrap_err().code(),
@@ -1808,15 +1778,11 @@ mod tests {
         }
 
         assert_eq!(
-            session.submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-answer-0db52f40.orna"
-            )),
+            session.submit(include_str!("fixtures/repl-inline-answer-0db52f40.orna")),
             Ok(Some(Value::int(40.into())))
         );
         assert_eq!(
-            session.submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-source-ba1da4b7.orna"
-            )),
+            session.submit(include_str!("fixtures/repl-inline-source-ba1da4b7.orna")),
             Ok(Some(Value::int(40.into())))
         );
     }
@@ -1824,7 +1790,7 @@ mod tests {
     #[test]
     fn repl_can_import_verified_standard_modules_absent_from_project_source() {
         let standard = include_str!(
-            "../../orna-evaluator/src/fixtures/repl-inline-pub-fn-increment-value-int-int-value-1-97766a10.orna"
+            "fixtures/repl-inline-pub-fn-increment-value-int-int-value-1-97766a10.orna"
         );
         let profile = StandardDependencyProfile::from_sources(
             "std-snapshot",
@@ -1836,13 +1802,13 @@ mod tests {
                 (
                     "main.orna",
                     include_str!(
-                        "../../orna-evaluator/src/fixtures/repl-inline-use-library-pub-fn-run-int-library-loc-22e03d25.orna"
+                        "fixtures/repl-inline-use-library-pub-fn-run-int-library-loc-22e03d25.orna"
                     ),
                 ),
                 (
                     "library.orna",
                     include_str!(
-                        "../../orna-evaluator/src/fixtures/repl-inline-pub-fn-local-value-int-int-value-1-be07d8e1.orna"
+                        "fixtures/repl-inline-pub-fn-local-value-int-int-value-1-be07d8e1.orna"
                     ),
                 ),
             ],
@@ -1856,19 +1822,19 @@ mod tests {
         .unwrap();
         assert_eq!(
             session.submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-use-std-math-6b6c1741.orna"
+                "fixtures/repl-inline-use-std-math-6b6c1741.orna"
             )),
             Ok(None)
         );
         assert_eq!(
             session.submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-use-library-a84bcc62.orna"
+                "fixtures/repl-inline-use-library-a84bcc62.orna"
             )),
             Ok(None)
         );
         assert_eq!(
             session.submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-math-increment-library-local-40-c176360e.orna"
+                "fixtures/repl-inline-math-increment-library-local-40-c176360e.orna"
             )),
             Ok(Some(Value::int(42.into())))
         );
@@ -1887,13 +1853,13 @@ mod tests {
         );
         fs::write(
             directory.path().join("main.orna"),
-            include_str!("../../orna-evaluator/src/fixtures/repl-inline-use-library-a84bcc62.orna"),
+            include_str!("fixtures/repl-inline-use-library-a84bcc62.orna"),
         )
         .unwrap();
         let library = directory.path().join("library.orna");
         fs::write(
             &library,
-            include_str!("../../orna-evaluator/src/fixtures/repl-inline-pub-fn-value-int-42-fn-hidden-int-99-3655e003.orna"),
+            include_str!("fixtures/repl-inline-pub-fn-value-int-42-fn-hidden-int-99-3655e003.orna"),
         )
         .unwrap();
         let repository = Repository::discover(directory.path()).unwrap();
@@ -1902,7 +1868,7 @@ mod tests {
         fs::write(
             &library,
             include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-pub-fn-value-str-changed-pub-fn-hidden-4a870d7d.orna"
+                "fixtures/repl-inline-pub-fn-value-str-changed-pub-fn-hidden-4a870d7d.orna"
             ),
         )
         .unwrap();
@@ -1914,20 +1880,20 @@ mod tests {
         .unwrap();
         assert_eq!(
             session.submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-use-library-a84bcc62.orna"
+                "fixtures/repl-inline-use-library-a84bcc62.orna"
             )),
             Ok(None)
         );
         assert_eq!(
             session.submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-library-value-43f7e801.orna"
+                "fixtures/repl-inline-library-value-43f7e801.orna"
             )),
             Ok(Some(Value::int(42.into())))
         );
         assert_eq!(
             session
                 .submit(include_str!(
-                    "../../orna-evaluator/src/fixtures/repl-inline-library-hidden-eddb18cc.orna"
+                    "fixtures/repl-inline-library-hidden-eddb18cc.orna"
                 ))
                 .unwrap_err()
                 .code(),
@@ -1941,15 +1907,11 @@ mod tests {
             &[
                 (
                     "main.orna",
-                    include_str!(
-                        "../../orna-evaluator/src/fixtures/repl-inline-use-sensors-greenhouse-7575c118.orna"
-                    ),
+                    include_str!("fixtures/repl-inline-use-sensors-greenhouse-7575c118.orna"),
                 ),
                 (
                     "sensors/greenhouse/main.orna",
-                    include_str!(
-                        "../../orna-evaluator/src/fixtures/repl-inline-pub-fn-seeded-int-40-d5abd82d.orna"
-                    ),
+                    include_str!("fixtures/repl-inline-pub-fn-seeded-int-40-d5abd82d.orna"),
                 ),
             ],
             None,
@@ -1971,13 +1933,13 @@ mod tests {
         .unwrap();
         assert_eq!(
             session.submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-use-sensors-greenhouse-7575c118.orna"
+                "fixtures/repl-inline-use-sensors-greenhouse-7575c118.orna"
             )),
             Ok(None)
         );
         assert_eq!(
             session.submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-greenhouse-seeded-2-8fad7abb.orna"
+                "fixtures/repl-inline-greenhouse-seeded-2-8fad7abb.orna"
             )),
             Ok(Some(Value::int(42.into())))
         );
@@ -1988,29 +1950,25 @@ mod tests {
         let mut session = AdmittedReplSession::new(Limits::default());
         assert_eq!(
             session.submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-let-answer-int-40-32ff602e.orna"
+                "fixtures/repl-inline-let-answer-int-40-32ff602e.orna"
             )),
             Ok(None)
         );
         assert_eq!(
-            session.submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-answer-2-1e6074ea.orna"
-            )),
+            session.submit(include_str!("fixtures/repl-inline-answer-2-1e6074ea.orna")),
             Ok(Some(Value::int(42.into())))
         );
         assert_eq!(
             session
                 .submit(include_str!(
-                    "../../orna-evaluator/src/fixtures/repl-inline-let-answer-int-wrong-13d92e60.orna"
+                    "fixtures/repl-inline-let-answer-int-wrong-13d92e60.orna"
                 ))
                 .unwrap_err()
                 .code(),
             "ORNA-S021-TYPE"
         );
         assert_eq!(
-            session.submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-answer-0db52f40.orna"
-            )),
+            session.submit(include_str!("fixtures/repl-inline-answer-0db52f40.orna")),
             Ok(Some(Value::int(40.into())))
         );
     }
@@ -2092,13 +2050,13 @@ mod tests {
                 (
                     "main.orna",
                     include_str!(
-                        "../../orna-evaluator/src/fixtures/repl-inline-use-library-pub-fn-run-int-library-loc-22e03d25.orna"
+                        "fixtures/repl-inline-use-library-pub-fn-run-int-library-loc-22e03d25.orna"
                     ),
                 ),
                 (
                     "library.orna",
                     include_str!(
-                        "../../orna-evaluator/src/fixtures/repl-inline-pub-fn-local-value-int-int-value-1-be07d8e1.orna"
+                        "fixtures/repl-inline-pub-fn-local-value-int-int-value-1-be07d8e1.orna"
                     ),
                 ),
             ],
@@ -2140,13 +2098,13 @@ mod tests {
                 (
                     "main.orna",
                     include_str!(
-                        "../../orna-evaluator/src/fixtures/repl-inline-use-library-pub-fn-run-int-library-loc-22e03d25.orna"
+                        "fixtures/repl-inline-use-library-pub-fn-run-int-library-loc-22e03d25.orna"
                     ),
                 ),
                 (
                     "library.orna",
                     include_str!(
-                        "../../orna-evaluator/src/fixtures/repl-inline-pub-fn-local-value-int-int-value-1-be07d8e1.orna"
+                        "fixtures/repl-inline-pub-fn-local-value-int-int-value-1-be07d8e1.orna"
                     ),
                 ),
             ],
@@ -2206,7 +2164,7 @@ mod tests {
         let mut session = AdmittedReplSession::new(Limits::default());
         let error = session
             .submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-let-secret-name-int-private-178755d6.orna"
+                "fixtures/repl-inline-let-secret-name-int-private-178755d6.orna"
             ))
             .unwrap_err();
 
@@ -2224,21 +2182,17 @@ mod tests {
     fn last_status_tracks_redacted_failures_and_successes_without_preview_mutation() {
         let mut session = AdmittedReplSession::new(Limits::default());
         assert_eq!(
-            session.preview(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-source-3a7494a2.orna"
-            )),
+            session.preview(include_str!("fixtures/repl-inline-source-3a7494a2.orna")),
             Ok(CanonicalValue::new(orna_foundation::OvbRaw::Null).unwrap())
         );
         let error = session
             .submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-let-secret-name-int-private-178755d6.orna"
+                "fixtures/repl-inline-let-secret-name-int-private-178755d6.orna"
             ))
             .unwrap_err();
         assert_eq!(error.code(), "ORNA-S021-TYPE");
         let status = session
-            .preview(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-source-3a7494a2.orna"
-            ))
+            .preview(include_str!("fixtures/repl-inline-source-3a7494a2.orna"))
             .expect("status value");
         assert_eq!(
             status.raw(),
@@ -2263,15 +2217,11 @@ mod tests {
         );
 
         assert_eq!(
-            session.preview(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-1-1-72fce594.orna"
-            )),
+            session.preview(include_str!("fixtures/repl-inline-1-1-72fce594.orna")),
             Ok(Value::int(2.into()))
         );
         let status = session
-            .preview(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-source-3a7494a2.orna"
-            ))
+            .preview(include_str!("fixtures/repl-inline-source-3a7494a2.orna"))
             .expect("status value");
         assert_eq!(
             status.raw(),
@@ -2296,15 +2246,11 @@ mod tests {
         );
 
         assert_eq!(
-            session.submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-40-2-0fcd2493.orna"
-            )),
+            session.submit(include_str!("fixtures/repl-inline-40-2-0fcd2493.orna")),
             Ok(Some(Value::int(42.into())))
         );
         assert_eq!(
-            session.preview(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-source-3a7494a2.orna"
-            )),
+            session.preview(include_str!("fixtures/repl-inline-source-3a7494a2.orna")),
             Ok(CanonicalValue::new(orna_foundation::OvbRaw::Null).unwrap())
         );
     }
@@ -2314,24 +2260,20 @@ mod tests {
         let mut session = ReplSession::new(Limits::default());
         assert_eq!(
             session.submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-let-answer-41-c31c6eb5.orna"
+                "fixtures/repl-inline-let-answer-41-c31c6eb5.orna"
             )),
             Ok(None)
         );
         assert_eq!(
-            session.submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-answer-0db52f40.orna"
-            )),
+            session.submit(include_str!("fixtures/repl-inline-answer-0db52f40.orna")),
             Ok(Some(Value::int(41.into())))
         );
         let before_status = session
-            .preview(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-source-3a7494a2.orna"
-            ))
+            .preview(include_str!("fixtures/repl-inline-source-3a7494a2.orna"))
             .unwrap();
         let input = parse_admitted_repl(
             include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-if-true-for-value-in-1-100000-value-0-cb81a3a8.orna"
+                "fixtures/repl-inline-if-true-for-value-in-1-100000-value-0-cb81a3a8.orna"
             ),
             Limits::default(),
         )
@@ -2344,15 +2286,11 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code(), "ORNA-EVAL-CANCELLED");
         assert_eq!(
-            session.preview(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-answer-0db52f40.orna"
-            )),
+            session.preview(include_str!("fixtures/repl-inline-answer-0db52f40.orna")),
             Ok(Value::int(41.into()))
         );
         assert_eq!(
-            session.preview(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-source-3a7494a2.orna"
-            )),
+            session.preview(include_str!("fixtures/repl-inline-source-3a7494a2.orna")),
             Ok(before_status)
         );
     }
@@ -2362,14 +2300,12 @@ mod tests {
         let mut session = AdmittedReplSession::new(Limits::default());
         assert_eq!(
             session.submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-fn-recurse-n-if-n-0-0-else-recurse-n-1-5cd2a50e.orna"
+                "fixtures/repl-inline-fn-recurse-n-if-n-0-0-else-recurse-n-1-5cd2a50e.orna"
             )),
             Ok(None)
         );
         let input = parse_admitted_repl(
-            include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-recurse-100000-6ed6c372.orna"
-            ),
+            include_str!("fixtures/repl-inline-recurse-100000-6ed6c372.orna"),
             Limits::default(),
         )
         .unwrap();
@@ -2381,9 +2317,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code(), "ORNA-EVAL-CANCELLED");
         assert_eq!(
-            session.submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-recurse-0-d5e629d3.orna"
-            )),
+            session.submit(include_str!("fixtures/repl-inline-recurse-0-d5e629d3.orna")),
             Ok(Some(Value::int(0.into())))
         );
     }
@@ -2393,9 +2327,7 @@ mod tests {
         let (_directory, project) = loaded_project(
             &[(
                 "main.orna",
-                include_str!(
-                    "../../orna-evaluator/src/fixtures/repl-inline-pub-fn-status-988936de.orna"
-                ),
+                include_str!("fixtures/repl-inline-pub-fn-status-988936de.orna"),
             )],
             None,
         );
@@ -2412,14 +2344,12 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(
             directory.path().join("main.orna"),
-            include_str!("../../orna-evaluator/src/fixtures/repl-inline-use-library-f2cd609f.orna"),
+            include_str!("fixtures/repl-inline-use-library-f2cd609f.orna"),
         )
         .unwrap();
         std::fs::write(
             directory.path().join("library.orna"),
-            include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-pub-fn-seeded-int-40-df4e01cd.orna"
-            ),
+            include_str!("fixtures/repl-inline-pub-fn-seeded-int-40-df4e01cd.orna"),
         )
         .unwrap();
         assert!(
@@ -2436,13 +2366,13 @@ mod tests {
             AdmittedReplSession::from_loaded_project(&project, [], Limits::default()).unwrap();
         assert_eq!(
             session.submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-use-library-a84bcc62.orna"
+                "fixtures/repl-inline-use-library-a84bcc62.orna"
             )),
             Ok(None)
         );
         assert_eq!(
             session.submit(include_str!(
-                "../../orna-evaluator/src/fixtures/repl-inline-library-seeded-2-7f27f8c8.orna"
+                "fixtures/repl-inline-library-seeded-2-7f27f8c8.orna"
             )),
             Ok(Some(Value::int(42.into())))
         );
@@ -2482,12 +2412,10 @@ mod tests {
             (directory, repository, commit)
         }
 
-        let (_primary_dir, primary_repository, primary_commit) = pinned_repo(include_str!(
-            "../../orna-evaluator/src/fixtures/attached-primary-main.orna"
-        ));
-        let (_package_dir, package_repository, package_commit) = pinned_repo(include_str!(
-            "../../orna-evaluator/src/fixtures/attached-package-main.orna"
-        ));
+        let (_primary_dir, primary_repository, primary_commit) =
+            pinned_repo(include_str!("fixtures/attached-primary-main.orna"));
+        let (_package_dir, package_repository, package_commit) =
+            pinned_repo(include_str!("fixtures/attached-package-main.orna"));
         let loader = ProjectLoader::default();
         let primary =
             PinnedDatabase::resolve("app", primary_repository, &primary_commit, loader).unwrap();
