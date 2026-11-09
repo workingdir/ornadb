@@ -2398,6 +2398,9 @@ fn identity<T>(request: &AdmissionRequest<T>, arguments: &ArgumentMap) -> Invoca
         &request.context.trace_owner,
         &request.context.cancellation_owner,
     ] {
+        // An absent field and an empty one are different contexts; length
+        // framing alone would hash both to the same bytes.
+        bytes.push(u8::from(value.is_some()));
         append(&mut bytes, value.as_deref().unwrap_or_default().as_bytes());
     }
     InvocationIdentity(hex(&Sha256::digest(bytes)))
@@ -2708,6 +2711,27 @@ mod tests {
         let changed_bound = bind(&changed.function, &changed.arguments).unwrap();
 
         assert_ne!(original, identity(&changed, &changed_bound));
+    }
+    #[test]
+    fn an_absent_context_field_and_an_empty_one_have_different_invocation_identities() {
+        // ORNA-SYS-079: the idempotency tuple includes the relevant context, so a
+        // key bound with no locale must not match a reuse that supplies "".
+        let absent = request(Some(value("Int", "1")), ArgumentMap::default());
+        let bound = bind(&absent.function, &absent.arguments).unwrap();
+        let original = identity(&absent, &bound);
+
+        type Field = fn(&mut InvocationContext) -> &mut Option<String>;
+        let fields: [Field; 4] = [
+            |context| &mut context.locale,
+            |context| &mut context.timezone,
+            |context| &mut context.trace_owner,
+            |context| &mut context.cancellation_owner,
+        ];
+        for field in fields {
+            let mut empty = absent.clone();
+            *field(&mut empty.context) = Some(String::new());
+            assert_ne!(original, identity(&empty, &bound));
+        }
     }
     fn request(default: Option<TypedValue>, args: ArgumentMap) -> AdmissionRequest<String> {
         AdmissionRequest {
