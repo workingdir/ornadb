@@ -1665,7 +1665,6 @@ fn run_project_stream_invocation(
         color_enabled,
     )
 }
-#[allow(clippy::too_many_lines)]
 fn run_project_invocation_with_arguments(
     endpoint: &Endpoint,
     root_entry: &str,
@@ -1681,19 +1680,7 @@ fn run_project_invocation_with_arguments(
             )
         })?;
     let project = load_project(endpoint)?;
-    let catalogue = std::sync::Arc::new(semantic_catalogue(&project)?);
-    let analysis = orna_semantic::analyze_with_providers(
-        project.modules(),
-        &catalogue,
-        orna_semantic::SystemProviders::Production,
-    );
-    if !analysis.is_ok() {
-        return Err(Diagnostic::target(
-            "E2101",
-            "project semantic analysis failed",
-            "fix the first reported source contract error, then run the project again",
-        ));
-    }
+    let catalogue = admit_project_analysis(&project)?;
     let (identity, initial_digest) = runtime_identity(&repository)?;
     refuse_legacy_bare_module_rows(&repository, identity, initial_digest, &project)?;
     let (request, fingerprint) = DurableTransactionalEvaluator::project_request_identity(
@@ -1761,6 +1748,38 @@ fn run_project_invocation_with_arguments(
                 ),
         )
         .map_err(|error| durable_invocation_failed(&error))?;
+    report_project_outcome(endpoint, root_entry, arguments, color_enabled, outcome)
+}
+
+/// The production catalogue of a project that passes semantic analysis.
+fn admit_project_analysis(
+    project: &orna_project::LoadedProject,
+) -> Result<std::sync::Arc<orna_semantic::Catalogue>, Diagnostic> {
+    let catalogue = std::sync::Arc::new(semantic_catalogue(project)?);
+    let analysis = orna_semantic::analyze_with_providers(
+        project.modules(),
+        &catalogue,
+        orna_semantic::SystemProviders::Production,
+    );
+    if !analysis.is_ok() {
+        return Err(Diagnostic::target(
+            "E2101",
+            "project semantic analysis failed",
+            "fix the first reported source contract error, then run the project again",
+        ));
+    }
+    Ok(catalogue)
+}
+
+/// Routes a stream-root skip to the stream seam and reports the transaction's
+/// outcome.
+fn report_project_outcome(
+    endpoint: &Endpoint,
+    root_entry: &str,
+    arguments: &Environment,
+    color_enabled: bool,
+    outcome: StageOutcome<orna_foundation::Diagnostic>,
+) -> Result<(), Diagnostic> {
     // Project transaction admission does not run stream roots; those route to
     // the explicit finite-list stream seam. The adapter reports that skip as a
     // typed reason, so the routing cannot drift from its text.
@@ -1934,123 +1953,137 @@ fn multi_module_declares_tables(project: &orna_project::LoadedProject) -> bool {
         })
 }
 
-#[allow(clippy::too_many_lines)]
 fn run_pure_invocation(
     endpoint: &Endpoint,
     target: &str,
     color_enabled: bool,
 ) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
+    if run_authority_invocation(endpoint, &project, target, color_enabled)? {
+        return Ok(());
+    }
+    admit_function_only_project(&project)?;
+    run_bounded_invocation(&project, target, color_enabled)
+}
+
+/// Admits and evaluates `target` through the authority route when the only
+/// module is the one `target` names. Returns whether it answered, so every
+/// other project takes the bounded function-only path.
+fn run_authority_invocation(
+    endpoint: &Endpoint,
+    project: &orna_project::LoadedProject,
+    target: &str,
+    color_enabled: bool,
+) -> Result<bool, Diagnostic> {
     // Single-module projects that import pinned standard modules take the
     // authority route only when they need publication metadata. Every other
     // standard-importing project takes the bounded path below, which loads the
     // reachable standard bodies through the verified profile.
     let std_imports = !project.standard_runtime_modules().is_empty();
-    if project.modules().len() == 1 {
-        let identity = &project.identities()[0];
-        let module = &project.modules()[0];
-        let (module_name, function) = target.rsplit_once('.').unwrap_or(("", target));
-        let namespace = if module_name.is_empty() {
-            Vec::new()
-        } else {
-            module_name
-                .split('.')
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        };
-        if identity.namespace() == namespace {
-            let authority = ApplicationAuthority::new(
-                orna_semantic::Catalogue::authoritative_core(),
-                Limits::default(),
+    if project.modules().len() != 1 {
+        return Ok(false);
+    }
+    let identity = &project.identities()[0];
+    let module = &project.modules()[0];
+    let (module_name, function) = target.rsplit_once('.').unwrap_or(("", target));
+    let namespace = if module_name.is_empty() {
+        Vec::new()
+    } else {
+        module_name
+            .split('.')
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    if identity.namespace() != namespace {
+        return Ok(false);
+    }
+    let authority = ApplicationAuthority::new(
+        orna_semantic::Catalogue::authoritative_core(),
+        Limits::default(),
+    )
+    .with_loaded_standard(project)
+    .map_err(|_| {
+        Diagnostic::target(
+            "ORNA-S010-IMPORT",
+            "imported module is unavailable",
+            "use a captured standard dependency or remove the import",
+        )
+    })?;
+    let admission = authority
+        .admit_module(identity.logical_path(), module.source.clone(), function)
+        .map_err(|error| {
+            Diagnostic::target_with_detail(
+                "E2101",
+                "project semantic analysis failed",
+                "fix the first reported source contract error, then run check again",
+                error.to_string(),
             )
-            .with_loaded_standard(&project)
-            .map_err(|_| {
-                Diagnostic::target(
-                    "ORNA-S010-IMPORT",
-                    "imported module is unavailable",
-                    "use a captured standard dependency or remove the import",
+        });
+    let admitted = match admission {
+        Ok(admitted) => Some(admitted),
+        // The bounded path reports the analysis error for std-importing projects.
+        Err(_) if std_imports => None,
+        Err(error) => return Err(error),
+    };
+    let Some(admitted) =
+        admitted.filter(|candidate| !std_imports || candidate.requires_publication_metadata())
+    else {
+        return Ok(false);
+    };
+    if !admitted.table_schemas().is_empty() && admitted.entry_references_tables() {
+        run_committed_table_invocation(
+            endpoint,
+            authority,
+            &admitted,
+            identity.logical_path(),
+            &module.source,
+            sys_host::std_snapshot_pin(project),
+        )?;
+    } else if admitted.requires_publication_metadata() {
+        let (publication_rows, sys_host_context) =
+            runtime_publication_metadata_rows(endpoint, sys_host::std_snapshot_pin(project))?;
+        let authority = authority.with_sys_host_context(sys_host_context);
+        let activation = authority
+            .evaluate_staged_with_publication_rows(&admitted, &Environment::new(), publication_rows)
+            .map_err(|error| {
+                Diagnostic::target_with_detail(
+                    "E2200",
+                    "pure project invocation failed",
+                    "fix the admitted function or retry the invocation",
+                    error.to_string(),
                 )
             })?;
-            let admission = authority
-                .admit_module(identity.logical_path(), module.source.clone(), function)
-                .map_err(|error| {
-                    Diagnostic::target_with_detail(
-                        "E2101",
-                        "project semantic analysis failed",
-                        "fix the first reported source contract error, then run check again",
-                        error.to_string(),
-                    )
-                });
-            let admitted = match admission {
-                Ok(admitted) => Some(admitted),
-                // The bounded path reports the analysis error for std-importing projects.
-                Err(_) if std_imports => None,
-                Err(error) => return Err(error),
-            };
-            if let Some(admitted) = admitted
-                .filter(|candidate| !std_imports || candidate.requires_publication_metadata())
-            {
-                if !admitted.table_schemas().is_empty() && admitted.entry_references_tables() {
-                    run_committed_table_invocation(
-                        endpoint,
-                        authority,
-                        &admitted,
-                        identity.logical_path(),
-                        &module.source,
-                        sys_host::std_snapshot_pin(&project),
-                    )?;
-                    write_success_line("invocation completed", color_enabled)?;
-                    return Ok(());
-                }
-                if admitted.requires_publication_metadata() {
-                    let (publication_rows, sys_host_context) = runtime_publication_metadata_rows(
-                        endpoint,
-                        sys_host::std_snapshot_pin(&project),
-                    )?;
-                    let authority = authority.with_sys_host_context(sys_host_context);
-                    let activation = authority
-                        .evaluate_staged_with_publication_rows(
-                            &admitted,
-                            &Environment::new(),
-                            publication_rows,
-                        )
-                        .map_err(|error| {
-                            Diagnostic::target_with_detail(
-                                "E2200",
-                                "pure project invocation failed",
-                                "fix the admitted function or retry the invocation",
-                                error.to_string(),
-                            )
-                        })?;
-                    if !activation.mutations().is_empty() {
-                        return Err(Diagnostic::unavailable(
-                            "one-shot invocation cannot commit table mutations",
-                            "use a supported table transaction; stream roots require the explicit stream runtime",
-                        ));
-                    }
-                } else {
-                    let std_snapshot = sys_host::std_snapshot_pin(&project);
-                    let authority = match pure_sys_host_context(endpoint, std_snapshot) {
-                        Some(sys_host_context) => authority.with_sys_host_context(sys_host_context),
-                        None => authority,
-                    };
-                    authority
-                        .evaluate(&admitted, &Environment::new())
-                        .map_err(|error| {
-                            Diagnostic::target_with_detail(
-                                "E2200",
-                                "pure project invocation failed",
-                                "fix the admitted function or retry the invocation",
-                                error.to_string(),
-                            )
-                        })?;
-                }
-                write_success_line("invocation completed", color_enabled)?;
-                return Ok(());
-            }
+        if !activation.mutations().is_empty() {
+            return Err(Diagnostic::unavailable(
+                "one-shot invocation cannot commit table mutations",
+                "use a supported table transaction; stream roots require the explicit stream runtime",
+            ));
         }
+    } else {
+        let std_snapshot = sys_host::std_snapshot_pin(project);
+        let authority = match pure_sys_host_context(endpoint, std_snapshot) {
+            Some(sys_host_context) => authority.with_sys_host_context(sys_host_context),
+            None => authority,
+        };
+        authority
+            .evaluate(&admitted, &Environment::new())
+            .map_err(|error| {
+                Diagnostic::target_with_detail(
+                    "E2200",
+                    "pure project invocation failed",
+                    "fix the admitted function or retry the invocation",
+                    error.to_string(),
+                )
+            })?;
     }
-    let catalogue = semantic_catalogue(&project)?;
+    write_success_line("invocation completed", color_enabled)?;
+    Ok(true)
+}
+
+/// Proves the project is function-only and can be read by the bounded
+/// evaluator.
+fn admit_function_only_project(project: &orna_project::LoadedProject) -> Result<(), Diagnostic> {
+    let catalogue = semantic_catalogue(project)?;
     let analysis = orna_semantic::analyze_with_providers(
         project.modules(),
         &catalogue,
@@ -2063,14 +2096,23 @@ fn run_pure_invocation(
             "fix the first reported source contract error, then run check again",
         ));
     }
-    if multi_module_declares_tables(&project) {
+    if multi_module_declares_tables(project) {
         return Err(Diagnostic::target(
             "E2200",
             "table reads in multi-module projects are not supported by one-shot invocation; use the REPL or orna run",
             "one-shot invocation admits table declarations only in single-module projects",
         ));
     }
+    Ok(())
+}
 
+/// Runs `target` through the bounded function-only evaluator, loading the
+/// verified standard profile first when the project pins one.
+fn run_bounded_invocation(
+    project: &orna_project::LoadedProject,
+    target: &str,
+    color_enabled: bool,
+) -> Result<(), Diagnostic> {
     let mut evaluator = BoundedEvaluator::default();
     if let Some(profile) = project.standard_profile() {
         // Admission supplies the runtime-reachable closure (requested roots plus
@@ -2104,7 +2146,7 @@ fn run_pure_invocation(
             }
         }
     }
-    match evaluator.evaluate_project(&pure_execution_project(&project)) {
+    match evaluator.evaluate_project(&pure_execution_project(project)) {
         StageOutcome::Passed => {}
         StageOutcome::Cancelled(diagnostic) => return Err(cancellation_diagnostic(&diagnostic)),
         StageOutcome::Failed(diagnostic) => {
@@ -2630,7 +2672,6 @@ fn committed_rows_at(
     Ok((rows, storage_orders))
 }
 
-#[allow(clippy::too_many_lines)]
 /// One-shot `run` of a single admitted module that declares tables and reads
 /// them. Tables bind to their committed identities at `HEAD`, so reads see the
 /// same committed rows as the REPL. The sys host context and publication
@@ -2645,105 +2686,14 @@ fn run_committed_table_invocation(
     source: &str,
     std_snapshot: StdSnapshotPin,
 ) -> Result<(), Diagnostic> {
-    let path = local_project_path(endpoint)?;
-    let repository = orna_repository::Repository::discover(path).map_err(|_| {
-        Diagnostic::target(
-            "E2200",
-            "committed table identities could not be read",
-            "run the command inside an initialized local Orna repository",
-        )
-    })?;
-    let commit = repository.head().ok().flatten().ok_or_else(|| {
-        Diagnostic::target(
-            "E2200",
-            "table reads need a committed project",
-            "commit the project, then run the command again",
-        )
-    })?;
-    let names = admitted.table_schemas().keys().cloned().collect::<Vec<_>>();
-    let tables = committed_table_identities(&repository, &commit, names)?;
-    let entry = admitted.entry().to_owned();
-    let committed = tables
-        .iter()
-        .map(|table| CommittedTableIdentity::new(table.table(), table.object_id()));
-    let admitted = authority
-        .admit_module_with_committed_table_metadata(logical_path, source, entry, committed)
-        .map_err(|error| {
-            Diagnostic::target_with_detail(
-                "E2101",
-                "project semantic analysis failed",
-                "fix the first reported source contract error, then run check again",
-                error.to_string(),
-            )
-        })?;
+    let repository = discover_committed_repository(endpoint)?;
+    let commit = committed_head(&repository)?;
+    let tables = committed_tables(&repository, &commit, admitted)?;
+    let admitted = admit_committed_metadata(&authority, admitted, logical_path, source, &tables)?;
     let (identity, initial_digest) = runtime_identity(&repository)?;
-    let mode = if admitted.requires_publication_metadata() {
-        RuntimeMode::Embedded
-    } else {
-        RuntimeMode::Run
-    };
-    let authority = authority.with_sys_host_context(sys_host::sys_host_context(
-        repository.worktree(),
-        identity,
-        mode,
-        std_snapshot,
-    ));
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|_| {
-            Diagnostic::target(
-                "E2200",
-                "committed table rows could not be read",
-                "retry the invocation after checking local runtime state",
-            )
-        })?;
-    let state = runtime
-        .block_on(RuntimeState::open(&repository, identity, initial_digest))
-        .map_err(|_| {
-            Diagnostic::target(
-                "E2200",
-                "committed table rows could not be read",
-                "retry the invocation after checking local runtime state",
-            )
-        })?;
-    let table_names = admitted
-        .table_schemas()
-        .keys()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
-    let candidates = legacy_bare_module_candidates(&repository, Some(&commit), &table_names)
-        .map_err(|_| {
-            Diagnostic::target(
-                "E2200",
-                "committed table rows could not be read",
-                "retry the invocation after checking local runtime state",
-            )
-        })?;
-    if let Some(table) = legacy_bare_module_table(&state, &runtime, &candidates).map_err(|_| {
-        Diagnostic::target(
-            "E2200",
-            "committed table rows could not be read",
-            "retry the invocation after checking local runtime state",
-        )
-    })? {
-        return Err(legacy_module_table_diagnostic(&table));
-    }
-    let publication_rows = if admitted.requires_publication_metadata() {
-        Some(
-            runtime
-                .block_on(state.publication_metadata_rows())
-                .map_err(|_| {
-                    Diagnostic::target(
-                        "E2200",
-                        "local runtime publication metadata could not be read",
-                        "retry the invocation after checking local runtime state",
-                    )
-                })?,
-        )
-    } else {
-        None
-    };
+    let authority = invocation_host(authority, &repository, identity, &admitted, std_snapshot);
+    let (runtime, state, publication_rows) =
+        open_committed_runtime(&repository, identity, initial_digest, &admitted, &commit)?;
     let committed =
         committed_invocation_rows(&repository, &commit, &runtime, &state, &admitted, &tables)?;
     let (_snapshot, activation) = evaluate_over_committed_tables(
@@ -2762,6 +2712,147 @@ fn run_committed_table_invocation(
         ));
     }
     Ok(())
+}
+
+/// The repository a committed-table invocation reads.
+fn discover_committed_repository(
+    endpoint: &Endpoint,
+) -> Result<orna_repository::Repository, Diagnostic> {
+    orna_repository::Repository::discover(local_project_path(endpoint)?).map_err(|_| {
+        Diagnostic::target(
+            "E2200",
+            "committed table identities could not be read",
+            "run the command inside an initialized local Orna repository",
+        )
+    })
+}
+
+/// The commit whose table identities bind the invocation.
+fn committed_head(
+    repository: &orna_repository::Repository,
+) -> Result<orna_repository::GitCommitRef, Diagnostic> {
+    repository.head().ok().flatten().ok_or_else(|| {
+        Diagnostic::target(
+            "E2200",
+            "table reads need a committed project",
+            "commit the project, then run the command again",
+        )
+    })
+}
+
+/// The committed identities of the admitted tables.
+fn committed_tables(
+    repository: &orna_repository::Repository,
+    commit: &orna_repository::GitCommitRef,
+    admitted: &AdmittedApplication,
+) -> Result<Vec<RuntimeTableIdentity>, Diagnostic> {
+    let names = admitted.table_schemas().keys().cloned().collect::<Vec<_>>();
+    committed_table_identities(repository, commit, names)
+}
+
+/// Re-admits the module with the committed table metadata its reads bind.
+fn admit_committed_metadata(
+    authority: &ApplicationAuthority,
+    admitted: &AdmittedApplication,
+    logical_path: &str,
+    source: &str,
+    tables: &[RuntimeTableIdentity],
+) -> Result<AdmittedApplication, Diagnostic> {
+    let entry = admitted.entry().to_owned();
+    let committed = tables
+        .iter()
+        .map(|table| CommittedTableIdentity::new(table.table(), table.object_id()));
+    authority
+        .admit_module_with_committed_table_metadata(logical_path, source, entry, committed)
+        .map_err(|error| {
+            Diagnostic::target_with_detail(
+                "E2101",
+                "project semantic analysis failed",
+                "fix the first reported source contract error, then run check again",
+                error.to_string(),
+            )
+        })
+}
+
+/// The authority with the host context a committed-table read runs under.
+fn invocation_host(
+    authority: ApplicationAuthority,
+    repository: &orna_repository::Repository,
+    identity: RuntimeIdentity,
+    admitted: &AdmittedApplication,
+    std_snapshot: StdSnapshotPin,
+) -> ApplicationAuthority {
+    let mode = if admitted.requires_publication_metadata() {
+        RuntimeMode::Embedded
+    } else {
+        RuntimeMode::Run
+    };
+    authority.with_sys_host_context(sys_host::sys_host_context(
+        repository.worktree(),
+        identity,
+        mode,
+        std_snapshot,
+    ))
+}
+
+/// The runtime and state a committed-table read needs, with the publication
+/// metadata rows it must see before any row is read.
+fn open_committed_runtime(
+    repository: &orna_repository::Repository,
+    identity: RuntimeIdentity,
+    initial_digest: [u8; 32],
+    admitted: &AdmittedApplication,
+    commit: &orna_repository::GitCommitRef,
+) -> Result<
+    (
+        tokio::runtime::Runtime,
+        RuntimeState,
+        Option<RuntimePublicationMetadataRows>,
+    ),
+    Diagnostic,
+> {
+    let unavailable = || {
+        Diagnostic::target(
+            "E2200",
+            "committed table rows could not be read",
+            "retry the invocation after checking local runtime state",
+        )
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| unavailable())?;
+    let state = runtime
+        .block_on(RuntimeState::open(repository, identity, initial_digest))
+        .map_err(|_| unavailable())?;
+    let table_names = admitted
+        .table_schemas()
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let candidates = legacy_bare_module_candidates(repository, Some(commit), &table_names)
+        .map_err(|_| unavailable())?;
+    if let Some(table) =
+        legacy_bare_module_table(&state, &runtime, &candidates).map_err(|_| unavailable())?
+    {
+        return Err(legacy_module_table_diagnostic(&table));
+    }
+    let publication_rows = if admitted.requires_publication_metadata() {
+        Some(
+            runtime
+                .block_on(state.publication_metadata_rows())
+                .map_err(|_| {
+                    Diagnostic::target(
+                        "E2200",
+                        "local runtime publication metadata could not be read",
+                        "retry the invocation after checking local runtime state",
+                    )
+                })?,
+        )
+    } else {
+        None
+    };
+    Ok((runtime, state, publication_rows))
 }
 
 fn repl_transactions(
@@ -4114,7 +4205,6 @@ fn run_fetch(
     Ok(())
 }
 
-#[allow(clippy::too_many_lines)]
 /// Publishes the checked-out branch together with the continuity refs an
 /// ordinary push synchronizes (`ORNA-GIT-008`).
 ///
