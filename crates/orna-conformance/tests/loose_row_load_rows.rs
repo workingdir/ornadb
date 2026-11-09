@@ -1,8 +1,8 @@
 use std::{fs, process::Command};
 
+use orna_check::{Catalogue, RowUnitInput, admit_row_unit, analyze_with_catalogue};
 use orna_project::ProjectLoader;
 use orna_repository::Repository;
-use orna_semantic::{Catalogue, RowUnitInput, admit_row_unit, analyze_with_catalogue};
 use tempfile::TempDir;
 
 fn repository(files: &[(&str, &str)]) -> (TempDir, Repository) {

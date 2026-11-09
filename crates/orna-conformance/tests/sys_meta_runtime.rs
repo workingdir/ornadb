@@ -1,5 +1,5 @@
+use orna_check::{Catalogue, ModuleInput, analyze_with_catalogue};
 use orna_security::{SecretMetadata, SecretRef};
-use orna_semantic::{Catalogue, ModuleInput, analyze_with_catalogue};
 use orna_sys::{
     SystemEffect, TypeId, TypedValue, ValueMetadataFacts, ValueMetadataResolver,
     system_function_descriptor, system_secret_projection, system_value_metadata,

@@ -5,7 +5,7 @@
 //! encoding of their fields: the evaluator (REPL and source writes), whose
 //! optional absence is a bare `null` and whose records are field-name maps,
 //! and source row documents lowered without a schema by
-//! `orna_semantic::lower_row_unit`, which spell an enum value as its
+//! `orna_check::lower_row_unit`, which spell an enum value as its
 //! variant name and a stored reference as the target key. The descriptor
 //! carries every field's type node, so it directs the lowering:
 //!
@@ -736,7 +736,7 @@ fn canonical_record_fields(stored: Vec<Raw>) -> Result<Vec<Raw>, Failure> {
 mod tests {
     use super::*;
     use crate::{ObjectIdentityManifest, ObjectKind};
-    use orna_semantic::ModuleInput;
+    use orna_check::ModuleInput;
     use orna_value::Value;
 
     const DATABASE: [u8; 16] = [0x0d; 16];
@@ -750,7 +750,7 @@ mod tests {
     impl Table {
         fn new(source: &str, table: &str) -> Self {
             let modules = [ModuleInput::new("main.orna", source)];
-            let analysis = orna_semantic::analyze(&modules);
+            let analysis = orna_check::analyze(&modules);
             assert!(analysis.is_ok(), "{:?}", analysis.diagnostics);
             let identities = ObjectIdentityManifest::reconcile(&modules, None).unwrap();
             let artifact = identities

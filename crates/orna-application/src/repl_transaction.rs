@@ -1,11 +1,11 @@
 use super::*;
+use orna_check::Type;
 use orna_project::{
     CommittedTable, ProjectLoader, StoredSchema, admit_format3_row, blob_placeholder,
     evaluator_rows, has_text_primary_key, holds_blob, restore_stored_blobs,
     runtime_key_from_evaluator,
 };
 use orna_repository::{OrpBlobBinding, Repository, RepositoryFormatContext};
-use orna_semantic::Type;
 use orna_syntax::Expr;
 
 /// Borrowed repository and runtime authority for one trusted local REPL input.
@@ -271,7 +271,7 @@ fn lower_evaluator_row(
 /// activation left at its key, or else its committed row.
 fn normalize_repl_mutations(
     scope: &ReplTransactionScope<'_>,
-    tables: &BTreeMap<String, orna_semantic::TableSchema>,
+    tables: &BTreeMap<String, orna_check::TableSchema>,
     table_ids: &BTreeMap<String, TableObjectId>,
     committed: &BTreeMap<String, CommittedTable>,
     activation: StagedActivation,
@@ -388,7 +388,7 @@ fn normalize_repl_mutations(
 /// row read: the committed storage orders come from the caller's single read.
 fn committed_table_rows(
     scope: &ReplTransactionScope<'_>,
-    tables: &BTreeMap<String, orna_semantic::TableSchema>,
+    tables: &BTreeMap<String, orna_check::TableSchema>,
 ) -> Result<(RuntimeTableRows, BTreeMap<String, CommittedTable>), ApplicationError> {
     let mut rows = BTreeMap::new();
     let mut committed = BTreeMap::new();

@@ -1,8 +1,8 @@
+use orna_check::{Catalogue, StandardDependencyProfile};
 use orna_evaluator::{
     Limits, SysHostBindingRegistry, reference_standard_profile, reference_standard_sources,
 };
 use orna_project_repl::AdmittedReplSession;
-use orna_semantic::{Catalogue, StandardDependencyProfile};
 use orna_syntax::{Declaration, Pattern, TypeExpr, parse_module};
 use orna_sys::{
     ClockProvider, EnvironmentProvider, ProcessProvider, system_host_binding_modules_json,

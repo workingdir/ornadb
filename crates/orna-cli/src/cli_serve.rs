@@ -577,7 +577,7 @@ pub(super) fn run(endpoint: &Endpoint, port: u16, allow_push: bool) -> Result<()
 struct ServedClone {
     root: PathBuf,
     identity: RuntimeIdentity,
-    catalogue: orna_semantic::Catalogue,
+    catalogue: orna_check::Catalogue,
     project: Option<orna_project::LoadedProject>,
     /// The admitted `serve` entry, or `None` when the project declares none.
     app: Option<cli_serve_app::ServingEntry>,
@@ -607,7 +607,7 @@ fn open_served_clone(endpoint: &Endpoint) -> Result<ServedClone, Diagnostic> {
     // run only after an explicit query or live Eval request reaches a route.
     let (project, catalogue, app) = match admit_serving_entry(endpoint) {
         Some(serving) => (Some(serving.project), serving.catalogue, serving.entry),
-        None => (None, orna_semantic::Catalogue::default(), None),
+        None => (None, orna_check::Catalogue::default(), None),
     };
     let (identity, initial_digest) = runtime_identity(&repository)?;
     // The served runtime uses this process's owner. A later process takes the
@@ -729,7 +729,7 @@ fn ensure_unambiguous_live_table_names(
 /// cannot represent a catalogue or entry without its project.
 struct AdmittedServing {
     project: orna_project::LoadedProject,
-    catalogue: orna_semantic::Catalogue,
+    catalogue: orna_check::Catalogue,
     /// The admitted serving entry, absent when the project has none.
     entry: Option<cli_serve_app::ServingEntry>,
 }

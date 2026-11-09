@@ -1,6 +1,6 @@
 //! Focused negative evidence for protocol-member and overlap diagnostics.
 
-use orna_semantic::{Catalogue, ModuleInput, analyze_with_catalogue};
+use orna_check::{Catalogue, ModuleInput, analyze_with_catalogue};
 
 const GENERIC_FAILURES: &str = include_str!("fixtures/traceability-generic-failures.orna");
 

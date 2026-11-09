@@ -3,10 +3,10 @@ use orna_application::{
     ApplicationAuthority, ApplicationEffectFuture, ApplicationEffectRequest, ApplicationError,
     AsyncApplicationEffectDispatcher,
 };
+use orna_check::Catalogue;
 use orna_evaluator::{Environment, Limits};
 use orna_repository::Repository;
 use orna_runtime::{RuntimeActivationContext, RuntimeIdentity, RuntimeState};
-use orna_semantic::Catalogue;
 use orna_value::{CanonicalValue, OvbRaw};
 use std::{
     fs,

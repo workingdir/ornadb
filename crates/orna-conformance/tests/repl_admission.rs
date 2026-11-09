@@ -29,7 +29,7 @@ fn runtime_failure_does_not_publish_a_semantic_binding() {
     let parsed = orna_syntax::parse_repl(pending);
     assert!(parsed.is_ok());
     assert!(
-        orna_semantic::ReplContext::empty()
+        orna_check::ReplContext::empty()
             .stage(&parsed.value)
             .is_ok()
     );
@@ -129,7 +129,7 @@ fn known_effect_is_rejected_by_preview_before_execution() {
     session.submit(source(EFFECT, 0)).unwrap();
     let effect_source = source(EFFECT, 1);
     let parsed = orna_syntax::parse_repl(effect_source);
-    let admission = orna_semantic::ReplContext::empty()
+    let admission = orna_check::ReplContext::empty()
         .stage(&parsed.value)
         .unwrap();
     assert!(!admission.effects.effects.is_empty());

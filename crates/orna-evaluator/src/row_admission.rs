@@ -6,7 +6,7 @@
 
 use crate::{Limits, evaluate_parsed};
 use num_bigint::BigInt;
-use orna_semantic::{Analysis, Namespace, TableAdmission, TableSchema, Type};
+use orna_check::{Analysis, Namespace, TableAdmission, TableSchema, Type};
 use orna_syntax::{Expr, parse_row};
 use orna_value::{Diagnostic, DiagnosticSeverity, SafeText, Value};
 use orna_value::{Raw, path_decode_key_components};

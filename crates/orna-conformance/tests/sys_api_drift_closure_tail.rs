@@ -1,4 +1,4 @@
-use orna_semantic::{ModuleInput, analyze};
+use orna_check::{ModuleInput, analyze};
 use serde_json::Value;
 
 const FROZEN_SYS_API: &str = include_str!("fixtures/reference/api/sys.json");

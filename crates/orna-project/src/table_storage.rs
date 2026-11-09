@@ -18,9 +18,9 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use num_bigint::BigInt;
+use orna_check::{ModuleHeader, SymbolKind, TableSchema, Type};
 use orna_repository::{GitCommitRef, KeyRange, PrivateCommit, Repository, RepositoryFormatContext};
 use orna_runtime::TableObjectId;
-use orna_semantic::{ModuleHeader, SymbolKind, TableSchema, Type};
 use orna_value::{
     BlobMetadata, ContextValue, ROV3_BLOB_TAG, Raw, Value, ValueFormat,
     decode_canonical_storage_value, encode_canonical_storage_value,

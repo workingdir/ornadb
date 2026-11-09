@@ -1,6 +1,6 @@
 //! Closed signature language for the intrinsic catalogue.
 //!
-//! `orna-intrinsics` must not depend on `orna-semantic`, where the checker's
+//! `orna-intrinsics` must not depend on `orna-check`, where the checker's
 //! `Type` lives, so this module defines the smallest closed type language the
 //! catalogue needs. The semantic checker maps every `SigType` to its own `Type`
 //! with a total function.

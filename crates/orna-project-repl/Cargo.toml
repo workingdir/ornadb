@@ -14,7 +14,7 @@ system-host-bindings = ["orna-evaluator/system-host-bindings"]
 orna-evaluator = { path = "../orna-evaluator" }
 orna-project = { path = "../orna-project" }
 orna-repository = { path = "../orna-repository" }
-orna-semantic = { path = "../orna-semantic" }
+orna-check = { path = "../orna-check" }
 orna-syntax = { path = "../orna-syntax" }
 orna-value = { path = "../orna-value" }
 sha2 = "0.10.9"

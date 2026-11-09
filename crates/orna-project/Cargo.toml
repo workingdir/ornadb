@@ -9,7 +9,7 @@ description = "Bounded Git-worktree source loader for Orna 1.0 projects"
 [dependencies]
 orna-base = { path = "../orna-base" }
 orna-repository = { path = "../orna-repository" }
-orna-semantic = { path = "../orna-semantic" }
+orna-check = { path = "../orna-check" }
 orna-syntax = { path = "../orna-syntax" }
 orna-value = { path = "../orna-value" }
 num-bigint = "0.4.6"

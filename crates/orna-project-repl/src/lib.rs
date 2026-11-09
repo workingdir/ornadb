@@ -9,12 +9,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use orna_project::{AttachedDatabaseSession, LoadedProject};
-use orna_semantic::StandardDependencyProfile;
-use orna_semantic::{
+use orna_check::StandardDependencyProfile;
+use orna_check::{
     Analysis, Catalogue, DIAG_AMBIGUOUS, EffectSummary, ModuleInput, ReplAdmission, ReplContext,
     SymbolKind, SystemProviders, Type, analyze_with_providers, unresolved_member, unresolved_name,
 };
+use orna_project::{AttachedDatabaseSession, LoadedProject};
 use orna_syntax::{
     Declaration, ImportSegment, ReplInput, SyntaxDiagnostic, TokenKind, TypeMember,
     TypeRepresentation, UseTail, Visibility, lex, parse_module, parse_repl,
@@ -1232,10 +1232,10 @@ fn locate_identifier(source: &str, name: &str, qualified: bool) -> Option<std::o
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orna_check::StandardDependencyProfile;
     use orna_evaluator::parse_admitted_repl;
     use orna_project::{AttachedDatabaseSession, PinnedDatabase, ProjectLoader};
     use orna_repository::Repository;
-    use orna_semantic::StandardDependencyProfile;
     use orna_value::{Raw, Value};
     use std::{fs, process::Command};
     use tempfile::TempDir;
@@ -1433,7 +1433,7 @@ mod tests {
             staged
                 .effects()
                 .effects
-                .contains(&orna_semantic::EffectKind::Network)
+                .contains(&orna_check::EffectKind::Network)
         );
         assert!(staged.effects().may_fail);
 

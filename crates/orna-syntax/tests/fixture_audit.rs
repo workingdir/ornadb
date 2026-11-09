@@ -467,7 +467,8 @@ fn split_compile_time_path_fragments_are_rejected() {
 #[test]
 #[should_panic(expected = "test fixtures must live in their consuming crate")]
 fn cross_crate_fixture_includes_are_rejected() {
-    let source_text = r#"include_str!("../../orna-semantic/tests/fixtures/traceability-money-exact-decimal.orna")"#;
+    let source_text =
+        r#"include_str!("../../orna-check/tests/fixtures/traceability-money-exact-decimal.orna")"#;
     let source = scan_rust_source(source_text);
     let root = workspace_root();
     let source_path = root.join("crates/orna-syntax/tests/synthetic.rs");

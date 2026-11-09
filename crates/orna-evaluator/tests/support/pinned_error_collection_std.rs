@@ -1,6 +1,6 @@
+use orna_check::{Catalogue, StandardDependencyProfile};
 use orna_evaluator::Limits;
 use orna_project_repl::AdmittedReplSession;
-use orna_semantic::{Catalogue, StandardDependencyProfile};
 
 pub fn captured_profile() -> (StandardDependencyProfile, Vec<(String, String)>) {
     let sources = sources();

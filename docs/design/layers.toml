@@ -74,7 +74,7 @@ name = "orna-sys-macros"
 layer = 3
 
 [[crate]]
-name = "orna-semantic"
+name = "orna-check"
 layer = 4
 
 [[crate]]
@@ -171,7 +171,7 @@ role = "archive"
 # labels them. `--mode=report` prints these with their V number.
 [[known]]
 id = "V1"
-key = "layer:orna-semantic->orna-sys"
+key = "layer:orna-check->orna-sys"
 reason = "layer 4 -> 6: the only upward production edge; the catalogue moves to orna-sys-id at layer 3 (stage 06)"
 
 [[known]]
