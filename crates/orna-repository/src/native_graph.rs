@@ -2093,7 +2093,7 @@ impl NativeGraphContext {
                 .checked_add(entry.span_length)
                 .ok_or(GraphError::InvalidByteIndex)?;
             if height == 0 {
-                if entry.span_length > crate::blob_store::GEAR_MAXIMUM as u64 {
+                if !crate::blob_store::span_fits_chunk(entry.span_length) {
                     return Err(GraphError::InvalidByteIndex);
                 }
                 let chunk = self.read_git_object(
@@ -2103,9 +2103,11 @@ impl NativeGraphContext {
                     scope,
                     objects,
                 )?;
-                if chunk.len() as u64 != entry.span_length
-                    || entry.chunk_sha256 != Some(crate::blob_store::digest_bytes(&chunk).sha256())
-                {
+                if !crate::blob_store::chunk_matches_span(
+                    entry.span_length,
+                    entry.chunk_sha256,
+                    &chunk,
+                ) {
                     return Err(GraphError::ChunkDigestMismatch);
                 }
                 scope.charge_structured_metadata_read(chunk.len() as u64)?;
@@ -3592,7 +3594,7 @@ impl NativeGraphContext {
                 continue;
             }
             if height == 0 {
-                if entry.span_length > crate::blob_store::GEAR_MAXIMUM as u64
+                if !crate::blob_store::span_fits_chunk(entry.span_length)
                     || (child_end != blob_length
                         && entry.span_length < crate::blob_store::GEAR_MINIMUM as u64)
                 {
@@ -3606,9 +3608,11 @@ impl NativeGraphContext {
                     scope,
                     objects,
                 )?;
-                if chunk.len() as u64 != entry.span_length
-                    || entry.chunk_sha256 != Some(crate::blob_store::digest_bytes(&chunk).sha256())
-                {
+                if !crate::blob_store::chunk_matches_span(
+                    entry.span_length,
+                    entry.chunk_sha256,
+                    &chunk,
+                ) {
                     return Err(GraphError::ChunkDigestMismatch);
                 }
                 let from = usize::try_from(overlap_start - child_start)
@@ -3718,7 +3722,7 @@ impl NativeGraphContext {
                 .checked_add(entry.span_length)
                 .ok_or(GraphError::InvalidByteIndex)?;
             if height == 0 {
-                if entry.span_length > crate::blob_store::GEAR_MAXIMUM as u64 {
+                if !crate::blob_store::span_fits_chunk(entry.span_length) {
                     return Err(GraphError::InvalidByteIndex);
                 }
                 let reservation = scope.reserve_payload(entry.span_length)?;
@@ -3729,9 +3733,11 @@ impl NativeGraphContext {
                     scope,
                     objects,
                 )?;
-                if chunk.len() as u64 != entry.span_length
-                    || entry.chunk_sha256 != Some(crate::blob_store::digest_bytes(&chunk).sha256())
-                {
+                if !crate::blob_store::chunk_matches_span(
+                    entry.span_length,
+                    entry.chunk_sha256,
+                    &chunk,
+                ) {
                     return Err(GraphError::ChunkDigestMismatch);
                 }
                 chunk_boundaries.push_chunk(&chunk)?;
@@ -6893,7 +6899,7 @@ impl PinnedNativeGraphReader {
         let mut total = 0u64;
         for entry in entries {
             if height == 0 {
-                if entry.span_length > crate::blob_store::GEAR_MAXIMUM as u64 {
+                if !crate::blob_store::span_fits_chunk(entry.span_length) {
                     return Err(GraphError::InvalidByteIndex);
                 }
                 let chunk = self.read_object(
@@ -6901,10 +6907,11 @@ impl PinnedNativeGraphReader {
                     &entry.target,
                     crate::blob_store::GEAR_MAXIMUM as u64,
                 )?;
-                let chunk_digest: [u8; 32] = Sha256::digest(&chunk).into();
-                if chunk.len() as u64 != entry.span_length
-                    || entry.chunk_sha256 != Some(chunk_digest)
-                {
+                if !crate::blob_store::chunk_matches_span(
+                    entry.span_length,
+                    entry.chunk_sha256,
+                    &chunk,
+                ) {
                     return Err(GraphError::ChunkDigestMismatch);
                 }
                 hasher.update(&chunk);

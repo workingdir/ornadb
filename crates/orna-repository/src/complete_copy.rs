@@ -1738,7 +1738,7 @@ impl ByteIndexWalk<'_> {
         chunk_sha256: Option<[u8; 32]>,
         parent: &str,
     ) -> Result<(), CompleteCopyError> {
-        if span_length > crate::blob_store::GEAR_MAXIMUM as u64 {
+        if !crate::blob_store::span_fits_chunk(span_length) {
             return Err(self.mismatch(parent));
         }
         let limit = usize::try_from(span_length).map_err(|_| self.mismatch(parent))?;
@@ -1746,8 +1746,7 @@ impl ByteIndexWalk<'_> {
             .reader
             .read_blob(oid, limit)
             .map_err(|error| read_error(error, self.mismatch(parent)))?;
-        let digest = crate::blob_store::digest_bytes(&chunk).sha256();
-        if chunk.len() as u64 != span_length || chunk_sha256 != Some(digest) {
+        if !crate::blob_store::chunk_matches_span(span_length, chunk_sha256, &chunk) {
             return Err(self.mismatch(parent));
         }
         Sha2Digest::update(&mut self.hasher, &chunk);
