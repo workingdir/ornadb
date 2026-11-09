@@ -290,6 +290,9 @@ enum Node {
 
 type PresentProperties = Vec<(Node, Node)>;
 
+/// Unmistakable replacement for any value the wire may not disclose.
+const REDACTED_MARKER: &str = "<redacted>";
+
 impl Envelope {
     pub fn encode(&self, limits: Limits) -> Result<Vec<u8>> {
         limits.validate()?;
@@ -513,7 +516,7 @@ impl Message {
             } => vec![
                 (0, uint(*revision)),
                 (1, present.0.0.clone()),
-                (2, snapshot_node(snapshot)?),
+                (2, snapshot_node(snapshot)),
             ],
             Self::Delta {
                 base_revision,
@@ -524,7 +527,7 @@ impl Message {
                 (0, uint(*base_revision)),
                 (1, uint(*new_revision)),
                 (2, patches.0.0.clone()),
-                (3, snapshot_node(snapshot)?),
+                (3, snapshot_node(snapshot)),
             ],
             Self::Result {
                 status,
@@ -573,7 +576,7 @@ impl Message {
             if fields.iter().any(|(known, _)| known == key) {
                 return Err(Error::InvalidMessage);
             }
-            fields.push((*key, present_value_node(&to_ovb(&value.0)?)?));
+            fields.push((*key, present_value_node(&to_ovb(&value.0))?));
         }
         Ok(Node::Map(
             fields
@@ -699,7 +702,7 @@ impl Message {
                     return Err(Error::UnknownMandatoryExtension);
                 }
                 let safe = canonical_value(value)?;
-                extensions.insert(number, ValueNode(from_ovb(safe.raw())?));
+                extensions.insert(number, ValueNode(from_ovb(safe.raw())));
             }
         }
         message.validate_envelope(request, watch)?;
@@ -713,10 +716,7 @@ impl DatabaseContext {
             (uint(0), uuid_node(self.database)),
             (
                 uint(1),
-                match self.snapshot.as_ref() {
-                    Some(snapshot) => snapshot_node(snapshot).unwrap_or(Node::Null),
-                    None => Node::Null,
-                },
+                self.snapshot.as_ref().map_or(Node::Null, snapshot_node),
             ),
         ])
     }
@@ -999,9 +999,8 @@ impl PatchList {
         // before retaining the tree because Delta serialization reuses it.
         // A PresentNode used as a patch payload is the typed delta boundary,
         // so preserve that wrapper while redacting its untyped property data.
-        let node = from_ovb(&to_ovb(node)?)?;
-        validate_patches(&node)?;
-        let node = sanitize_patch_list(&node)?;
+        validate_patches(node)?;
+        let node = sanitize_patch_list(node)?;
         validate_patches(&node)?;
         Ok(Self(ValueNode(node)))
     }
@@ -1032,7 +1031,7 @@ fn sanitize_patch_list(node: &Node) -> Result<Node> {
                     if matches!(opcode, 0 | 2) && index == 2 {
                         sanitize_patch_payload(field)
                     } else {
-                        present_value_node(&to_ovb(field)?)
+                        present_value_node(&to_ovb(field))
                     }
                 })
                 .collect::<Result<Vec<_>>>()?;
@@ -1046,7 +1045,7 @@ fn sanitize_patch_payload(node: &Node) -> Result<Node> {
     if matches!(node, Node::Tag(60012, _)) {
         redact_present_values(node)
     } else {
-        present_value_node(&to_ovb(node)?)
+        present_value_node(&to_ovb(node))
     }
 }
 
@@ -1444,20 +1443,21 @@ fn matches_selector(node: &Node, selector: &PatchPathComponent) -> Result<bool> 
 }
 impl Diagnostic {
     fn decode(node: &Node) -> Result<Self> {
-        validate_diagnostic(node)?;
         let bytes = encode_node(node)?;
+        let diagnostic =
+            orna_foundation::Diagnostic::decode_ovb(&bytes).map_err(|_| Error::InvalidValue)?;
         // Only the fixed, payload-free read-only diagnostic is safe to disclose.
         // The wire redacted bit is never sufficient authority; all other
         // diagnostics are redacted fail-closed at this boundary.
         if Self::is_safe_read_only_diagnostic(node) {
             return Ok(Self(ValueNode(node.clone())));
         }
-        let diagnostic = orna_foundation::Diagnostic::decode_ovb(&bytes)
-            .map_err(|_| Error::InvalidValue)?
-            .redacted();
-        let safe_bytes = diagnostic.encode_ovb().map_err(|_| Error::InvalidValue)?;
+        let safe_bytes = diagnostic
+            .redacted()
+            .encode_ovb()
+            .map_err(|_| Error::InvalidValue)?;
         let safe = CanonicalValue::decode(&safe_bytes).map_err(|_| Error::InvalidValue)?;
-        Ok(Self(ValueNode(from_ovb(safe.raw())?)))
+        Ok(Self(ValueNode(from_ovb(safe.raw()))))
     }
 
     fn is_safe_read_only_diagnostic(node: &Node) -> bool {
@@ -1640,12 +1640,6 @@ fn validate_path(node: &Node) -> Result<()> {
     }
     Ok(())
 }
-fn validate_diagnostic(node: &Node) -> Result<()> {
-    let bytes = encode_node(node)?;
-    orna_foundation::Diagnostic::decode_ovb(&bytes)
-        .map(|_| ())
-        .map_err(|_| Error::InvalidValue)
-}
 
 fn canonical_value(node: &Node) -> Result<CanonicalValue> {
     if contains_profile_tag(node) {
@@ -1654,7 +1648,7 @@ fn canonical_value(node: &Node) -> Result<CanonicalValue> {
     if contains_protected_value(node) {
         return Err(Error::InvalidValue);
     }
-    let value = CanonicalValue::new(to_ovb(node)?).map_err(|_| Error::InvalidValue)?;
+    let value = CanonicalValue::new(to_ovb(node)).map_err(|_| Error::InvalidValue)?;
     value.redacted_for_trace().map_err(|_| Error::InvalidValue)
 }
 
@@ -1694,11 +1688,11 @@ fn redacted_value_node(node: &Node) -> Result<Node> {
     // Result bodies are typed envelopes. Preserve Diagnostic/Present wrappers
     // until their owning decoders apply field-aware redaction, while still
     // scrubbing generic Error values at this trace boundary.
-    let value = CanonicalValue::new(to_ovb(node)?).map_err(|_| Error::InvalidValue)?;
+    let value = CanonicalValue::new(to_ovb(node)).map_err(|_| Error::InvalidValue)?;
     let value = value
         .redacted_error_values_for_trace()
         .map_err(|_| Error::InvalidValue)?;
-    from_ovb(value.raw())
+    Ok(from_ovb(value.raw()))
 }
 fn nullable_value(node: &Node) -> Result<Option<CanonicalValue>> {
     if matches!(node, Node::Null) {
@@ -1707,22 +1701,18 @@ fn nullable_value(node: &Node) -> Result<Option<CanonicalValue>> {
         canonical_value(node).map(Some)
     }
 }
-fn to_ovb(node: &Node) -> Result<OvbRaw> {
-    Ok(match node {
+fn to_ovb(node: &Node) -> OvbRaw {
+    match node {
         Node::Null => OvbRaw::Null,
         Node::Bool(v) => OvbRaw::Bool(*v),
         Node::Int(v) => OvbRaw::Int(v.clone()),
         Node::Float(v) => OvbRaw::Float(*v),
         Node::Bytes(v) => OvbRaw::Bytes(v.clone()),
         Node::Text(v) => OvbRaw::Text(v.clone()),
-        Node::Array(v) => OvbRaw::Array(v.iter().map(to_ovb).collect::<Result<_>>()?),
-        Node::Map(v) => OvbRaw::Map(
-            v.iter()
-                .map(|(k, v)| Ok((to_ovb(k)?, to_ovb(v)?)))
-                .collect::<Result<_>>()?,
-        ),
-        Node::Tag(tag, value) => OvbRaw::Tag(*tag, Box::new(to_ovb(value)?)),
-    })
+        Node::Array(v) => OvbRaw::Array(v.iter().map(to_ovb).collect()),
+        Node::Map(v) => OvbRaw::Map(v.iter().map(|(k, v)| (to_ovb(k), to_ovb(v))).collect()),
+        Node::Tag(tag, value) => OvbRaw::Tag(*tag, Box::new(to_ovb(value))),
+    }
 }
 fn present_value_node(value: &OvbRaw) -> Result<Node> {
     match value {
@@ -1730,16 +1720,16 @@ fn present_value_node(value: &OvbRaw) -> Result<Node> {
             // The generic fallback has no type witness or per-field disclosure
             // proof. ORNA-SYS-100 and ORNA-SECRET-002 require an unmistakable
             // marker, so discard the complete protected wrapper payload.
-            Ok(Node::Text("<redacted>".into()))
+            Ok(Node::Text(REDACTED_MARKER.into()))
         }
         OvbRaw::Tag(60016, _) => {
             let value = CanonicalValue::new(value.clone()).map_err(|_| Error::InvalidValue)?;
-            from_ovb(
+            Ok(from_ovb(
                 value
                     .redacted_for_trace()
                     .map_err(|_| Error::InvalidValue)?
                     .raw(),
-            )
+            ))
         }
         OvbRaw::Array(values) => Ok(Node::Array(
             values
@@ -1748,62 +1738,60 @@ fn present_value_node(value: &OvbRaw) -> Result<Node> {
                 .collect::<Result<Vec<_>>>()?,
         )),
         OvbRaw::Map(original_entries) => {
-            let mut entries = original_entries
+            let entries = original_entries
                 .iter()
                 .map(|(key, value)| Ok((present_value_node(key)?, present_value_node(value)?)))
                 .collect::<Result<Vec<_>>>()?;
-            let mut changed_key = false;
-            for ((key, _), (safe_key, _)) in original_entries.iter().zip(&entries) {
-                if to_ovb(safe_key)? != key.clone() {
-                    changed_key = true;
-                    break;
-                }
-            }
-            if changed_key {
+            let key_changed = original_entries
+                .iter()
+                .zip(&entries)
+                .any(|((key, _), (safe_key, _))| to_ovb(safe_key) != *key);
+            if key_changed {
                 // Redacting keys can merge distinct entries. Fail closed for
                 // the whole map rather than emit an ambiguous trace value.
-                return Ok(Node::Text("<redacted>".into()));
+                return Ok(Node::Text(REDACTED_MARKER.into()));
             }
-            entries.sort_by(|(left, _), (right, _)| {
-                encode_node(left)
-                    .expect("validated presentation keys remain encodable")
-                    .cmp(&encode_node(right).expect("validated presentation keys remain encodable"))
-            });
-            Ok(Node::Map(entries))
+            let mut keyed = entries
+                .into_iter()
+                .map(|(key, value)| Ok((encode_node(&key)?, key, value)))
+                .collect::<Result<Vec<_>>>()?;
+            keyed.sort_by(|left, right| left.0.cmp(&right.0));
+            Ok(Node::Map(
+                keyed
+                    .into_iter()
+                    .map(|(_, key, value)| (key, value))
+                    .collect(),
+            ))
         }
         OvbRaw::Tag(tag, value) => Ok(Node::Tag(*tag, Box::new(present_value_node(value)?))),
-        value => from_ovb(value),
+        value => Ok(from_ovb(value)),
     }
 }
 fn value_node(value: &CanonicalValue) -> Result<Node> {
     // Protocol serialization is an unprivileged trace boundary; preserve the
     // portable local Error for recovery, but never send its caller text or
     // details across the wire without a disclosure classifier.
-    let node = from_ovb(value.raw())?;
+    let node = from_ovb(value.raw());
     if contains_protected_value(&node) {
         return Err(Error::InvalidValue);
     }
     let safe = value
         .redacted_for_trace()
         .map_err(|_| Error::InvalidValue)?;
-    from_ovb(safe.raw())
+    Ok(from_ovb(safe.raw()))
 }
-fn from_ovb(value: &OvbRaw) -> Result<Node> {
-    Ok(match value {
+fn from_ovb(value: &OvbRaw) -> Node {
+    match value {
         OvbRaw::Null => Node::Null,
         OvbRaw::Bool(v) => Node::Bool(*v),
         OvbRaw::Int(v) => Node::Int(v.clone()),
         OvbRaw::Float(v) => Node::Float(*v),
         OvbRaw::Bytes(v) => Node::Bytes(v.clone()),
         OvbRaw::Text(v) => Node::Text(v.clone()),
-        OvbRaw::Array(v) => Node::Array(v.iter().map(from_ovb).collect::<Result<_>>()?),
-        OvbRaw::Map(v) => Node::Map(
-            v.iter()
-                .map(|(k, v)| Ok((from_ovb(k)?, from_ovb(v)?)))
-                .collect::<Result<_>>()?,
-        ),
-        OvbRaw::Tag(tag, value) => Node::Tag(*tag, Box::new(from_ovb(value)?)),
-    })
+        OvbRaw::Array(v) => Node::Array(v.iter().map(from_ovb).collect()),
+        OvbRaw::Map(v) => Node::Map(v.iter().map(|(k, v)| (from_ovb(k), from_ovb(v))).collect()),
+        OvbRaw::Tag(tag, value) => Node::Tag(*tag, Box::new(from_ovb(value))),
+    }
 }
 
 fn redact_present_values(node: &Node) -> Result<Node> {
@@ -1821,10 +1809,10 @@ fn redact_present_values(node: &Node) -> Result<Node> {
             [kind, table, key] if u64_value(kind).ok() == Some(1) => Node::Array(vec![
                 kind.clone(),
                 table.clone(),
-                present_value_node(&to_ovb(key)?)?,
+                present_value_node(&to_ovb(key))?,
             ]),
             [kind, key] if u64_value(kind).ok() == Some(3) => {
-                Node::Array(vec![kind.clone(), present_value_node(&to_ovb(key)?)?])
+                Node::Array(vec![kind.clone(), present_value_node(&to_ovb(key))?])
             }
             _ => fields[1].clone(),
         }
@@ -1834,7 +1822,7 @@ fn redact_present_values(node: &Node) -> Result<Node> {
     let properties = map(&fields[2]).ok_or(Error::InvalidValue)?;
     let properties = properties
         .iter()
-        .map(|(key, value)| Ok((key.clone(), present_value_node(&to_ovb(value)?)?)))
+        .map(|(key, value)| Ok((key.clone(), present_value_node(&to_ovb(value))?)))
         .collect::<Result<Vec<_>>>()?;
     let children = array(&fields[3]).ok_or(Error::InvalidValue)?;
     let children = children
@@ -1853,7 +1841,7 @@ fn redact_present_values(node: &Node) -> Result<Node> {
     ))
 }
 fn snapshot(node: &Node) -> Result<CanonicalSnapshot> {
-    CanonicalSnapshot::decode(&to_ovb(node)?).map_err(|_| Error::InvalidValue)
+    CanonicalSnapshot::decode(&to_ovb(node)).map_err(|_| Error::InvalidValue)
 }
 fn nullable_snapshot(node: &Node) -> Result<Option<CanonicalSnapshot>> {
     if matches!(node, Node::Null) {
@@ -1862,7 +1850,7 @@ fn nullable_snapshot(node: &Node) -> Result<Option<CanonicalSnapshot>> {
         snapshot(node).map(Some)
     }
 }
-fn snapshot_node(snapshot: &CanonicalSnapshot) -> Result<Node> {
+fn snapshot_node(snapshot: &CanonicalSnapshot) -> Node {
     from_ovb(&snapshot.raw())
 }
 fn nullable_diagnostic(node: &Node) -> Result<Option<Diagnostic>> {
@@ -3076,7 +3064,7 @@ mod tests {
                         )],
                     ),
                 ),
-                (uint(2), snapshot_node(&snapshot()).unwrap()),
+                (uint(2), snapshot_node(&snapshot())),
             ]),
         );
 
@@ -3371,7 +3359,7 @@ mod tests {
     #[test]
     fn diagnostics_validate_each_span_shape_and_value() {
         let valid_span = Node::Array(vec![
-            snapshot_node(&snapshot()).unwrap(),
+            snapshot_node(&snapshot()),
             Node::Text("src/main.orna".into()),
             uint(1),
             uint(3),
@@ -3392,19 +3380,19 @@ mod tests {
                 uint(3),
             ]),
             Node::Array(vec![
-                snapshot_node(&snapshot()).unwrap(),
+                snapshot_node(&snapshot()),
                 Node::Text("../main.orna".into()),
                 uint(1),
                 uint(3),
             ]),
             Node::Array(vec![
-                snapshot_node(&snapshot()).unwrap(),
+                snapshot_node(&snapshot()),
                 Node::Text("src/main.orna".into()),
                 Node::Int((-1).into()),
                 uint(3),
             ]),
             Node::Array(vec![
-                snapshot_node(&snapshot()).unwrap(),
+                snapshot_node(&snapshot()),
                 Node::Text("src/main.orna".into()),
                 uint(4),
                 uint(3),
@@ -3421,7 +3409,7 @@ mod tests {
     #[test]
     fn diagnostics_reject_a_redacted_span_without_a_redaction_claim() {
         let span = Node::Array(vec![
-            snapshot_node(&snapshot()).unwrap(),
+            snapshot_node(&snapshot()),
             Node::Text("<redacted>".into()),
             uint(1),
             uint(3),
@@ -3457,7 +3445,7 @@ mod tests {
             Node::Map(vec![
                 (uint(0), uint(0)),
                 (uint(1), root),
-                (uint(2), snapshot_node(&snapshot()).unwrap()),
+                (uint(2), snapshot_node(&snapshot())),
             ]),
         );
         assert_eq!(
@@ -3501,7 +3489,7 @@ mod tests {
             Node::Map(vec![
                 (uint(0), uint(0)),
                 (uint(1), valid),
-                (uint(2), snapshot_node(&snapshot()).unwrap()),
+                (uint(2), snapshot_node(&snapshot())),
             ]),
         );
         let single = [
@@ -3562,7 +3550,7 @@ mod tests {
                 Node::Map(vec![
                     (uint(0), uint(0)),
                     (uint(1), present),
-                    (uint(2), snapshot_node(&snapshot()).unwrap()),
+                    (uint(2), snapshot_node(&snapshot())),
                 ]),
             );
             assert_eq!(
@@ -3736,7 +3724,7 @@ mod tests {
                         error_node(fixture, true),
                     ])]),
                 ),
-                (uint(3), snapshot_node(&snapshot()).unwrap()),
+                (uint(3), snapshot_node(&snapshot())),
             ]),
         );
         let patch = Envelope::decode(&patch_incoming, Limits::default()).unwrap();
@@ -3768,7 +3756,7 @@ mod tests {
         let decoded_status = Envelope::decode(&status_wire, Limits::default()).unwrap();
         assert!(!format!("{decoded_status:?}").contains(fixture));
 
-        let value = CanonicalValue::new(to_ovb(&error_node(fixture, true)).unwrap()).unwrap();
+        let value = CanonicalValue::new(to_ovb(&error_node(fixture, true))).unwrap();
         let present = PresentNode::new(
             PresentKind::Name("failure".into()),
             None,
