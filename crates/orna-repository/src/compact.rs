@@ -25,7 +25,8 @@ use uuid::{Uuid, Version};
 
 #[cfg(any(test, feature = "legacy-fixture-writer"))]
 use crate::PublicationJournalEntry;
-use crate::hex::hex_encode;
+use crate::hex::{hex_decode, hex_encode, is_hex};
+use crate::wire::big::{put_string, put_u32, put_u64, take_fixed, take_string, take_u32, take_u64};
 use crate::{
     GitCommitRef, IndexGeneration, ManagedFileChange, ManagedPath, PrivateCommit,
     PublicationJournal, Repository, RepositoryError,
@@ -498,7 +499,7 @@ impl CompactManifestEntry {
     ) -> Result<Self, RepositoryError> {
         segment.validate_unallocated()?;
         verify_physical_segment(table, segment, &segment.bytes)?;
-        if generation == 0 || git_object_id.is_empty() || !git_object_id.bytes().all(is_hex) {
+        if generation == 0 || !is_hex(&git_object_id) {
             return Err(RepositoryError::InvalidCompactManifest);
         }
         let compressed_bytes = u64::try_from(segment.bytes.len())
@@ -536,7 +537,7 @@ impl CompactManifestEntry {
             || canonical_key_order(&self.min_key, &self.max_key)? == Ordering::Greater
             || self.row_count == 0
             || self.compressed_bytes == 0
-            || !self.git_object_id.bytes().all(is_hex)
+            || !is_hex(&self.git_object_id)
             || object_id_length.is_some_and(|length| self.git_object_id.len() != length)
             || self.relative_path != compact_segment_path(table, self.segment_id)?
             || self
@@ -2263,8 +2264,8 @@ impl CompactManifest {
         &self.entries
     }
 
-    pub fn manifest_path(&self) -> ManagedPath {
-        managed_child(&compact_root(self.table), "manifest.orna").expect("constant safe path")
+    pub fn manifest_path(&self) -> Result<ManagedPath, RepositoryError> {
+        compact_manifest_path(self.table)
     }
 
     /// Validates manifest bookkeeping. Segment schema IDs identify the
@@ -2324,7 +2325,10 @@ impl CompactManifest {
             .into_iter()
             .map(|shard| ManagedFileChange::new(shard.file, Some(shard.bytes)))
             .collect::<Vec<_>>();
-        files.push(ManagedFileChange::new(self.manifest_path(), Some(manifest)));
+        files.push(ManagedFileChange::new(
+            self.manifest_path()?,
+            Some(manifest),
+        ));
         Ok(files)
     }
 
@@ -2336,10 +2340,11 @@ impl CompactManifest {
         runtime_intent_id: [u8; 16],
         cleanup_watermark: [u8; 32],
     ) -> Result<CompactManifestWitness, RepositoryError> {
+        let manifest_path = self.manifest_path()?;
         let manifest = self
             .canonical_files()?
             .into_iter()
-            .find(|change| change.path() == &self.manifest_path())
+            .find(|change| change.path() == &manifest_path)
             .and_then(|change| change.bytes().map(ToOwned::to_owned))
             .ok_or(RepositoryError::InvalidCompactManifest)?;
         Ok(CompactManifestWitness {
@@ -2347,7 +2352,7 @@ impl CompactManifest {
             selected_ref,
             runtime_intent_id,
             cleanup_watermark,
-            manifest_path: self.manifest_path(),
+            manifest_path,
             base_sha256,
             manifest_sha256: Sha256::digest(manifest).into(),
             generation: self
@@ -2436,7 +2441,7 @@ impl CompactManifestWitness {
             || self.cleanup_watermark == [0; 32]
             || !is_selected_ref(&self.selected_ref)
             || self.entries.is_empty()
-            || self.manifest_path != managed_child(&compact_root(self.table), "manifest.orna")?
+            || self.manifest_path != compact_manifest_path(self.table)?
         {
             return Err(RepositoryError::InvalidPublicationJournal);
         }
@@ -2446,8 +2451,8 @@ impl CompactManifestWitness {
                 || !entry
                     .path
                     .as_path()
-                    .starts_with(compact_data_root(self.table).as_path())
-                || !entry.object_id.bytes().all(is_hex)
+                    .starts_with(compact_data_root(self.table)?.as_path())
+                || !is_hex(&entry.object_id)
                 || object_id_length.is_some_and(|length| entry.object_id.len() != length)
             {
                 return Err(RepositoryError::InvalidPublicationJournal);
@@ -3199,7 +3204,7 @@ impl Repository {
         commit: &GitCommitRef,
         table: Uuid,
     ) -> Result<Option<CompactManifest>, RepositoryError> {
-        let manifest_path = managed_child(&compact_root(table), "manifest.orna")?;
+        let manifest_path = compact_manifest_path(table)?;
         let Some(bytes) = self.committed_file_bytes(commit, &manifest_path)? else {
             return Ok(None);
         };
@@ -3265,7 +3270,7 @@ impl Repository {
         ) {
             return Ok(crate::GitDeclaredObjectSetState::Incomplete);
         }
-        let manifest_path = managed_child(&compact_root(table), "manifest.orna")?;
+        let manifest_path = compact_manifest_path(table)?;
         let Some(bytes) = self.observed_committed_file_bytes(commit, &manifest_path)? else {
             return Ok(crate::GitDeclaredObjectSetState::Incomplete);
         };
@@ -3585,7 +3590,7 @@ impl Repository {
             return Err(RepositoryError::InvalidCompactManifest);
         }
 
-        let manifest_path = managed_child(&compact_root(table), "manifest.orna")?;
+        let manifest_path = compact_manifest_path(table)?;
         let manifest_bytes = self
             .observed_committed_file_bytes(commit, &manifest_path)?
             .ok_or(RepositoryError::InvalidCompactManifest)?;
@@ -3692,7 +3697,7 @@ impl Repository {
         self.verify_manifest_at_commit(expected_head, &base)?;
         let object_id_length = self.native_object_id_length()?;
         let generation = base.next_generation;
-        let root = compact_data_root(base.table);
+        let root = compact_data_root(base.table)?;
         let mut paths = BTreeSet::new();
         let mut additions = Vec::with_capacity(segments.len());
         for segment in segments {
@@ -3852,7 +3857,7 @@ impl Repository {
     ) -> Result<(), RepositoryError> {
         let expected = manifest.canonical_files()?;
         if manifest.entries.is_empty() {
-            match self.committed_file_bytes(commit, &manifest.manifest_path())? {
+            match self.committed_file_bytes(commit, &manifest.manifest_path()?)? {
                 Some(actual) if expected[0].bytes() == Some(actual.as_slice()) => {}
                 Some(_) => return Err(RepositoryError::InvalidCompactManifest),
                 None => return Ok(()),
@@ -3882,7 +3887,7 @@ impl Repository {
         commit: &GitCommitRef,
         manifest: &CompactManifest,
     ) -> Result<[u8; 32], RepositoryError> {
-        match self.committed_file_bytes(commit, &manifest.manifest_path())? {
+        match self.committed_file_bytes(commit, &manifest.manifest_path()?)? {
             Some(bytes) => Ok(Sha256::digest(bytes).into()),
             None if manifest.entries.is_empty() => Ok([0; 32]),
             None => Err(RepositoryError::InvalidCompactManifest),
@@ -3899,7 +3904,7 @@ impl Repository {
         self.verify_compact_journal(candidate, witness)
             .map_err(|_| RepositoryError::InvalidCompactManifest)?;
         let actual = self
-            .candidate_file_bytes(candidate, &manifest.manifest_path())?
+            .candidate_file_bytes(candidate, &manifest.manifest_path()?)?
             .ok_or(RepositoryError::InvalidCompactManifest)?;
         let parsed = self.read_compact_manifest_from_candidate(candidate, &actual)?;
         if parsed != *manifest {
@@ -4001,7 +4006,7 @@ fn verify_canonical_manifest_files(
     shard_bytes_by_path: &[(ManagedPath, Vec<u8>)],
 ) -> Result<(), RepositoryError> {
     for expected in manifest.canonical_files()? {
-        let actual = if expected.path() == &manifest.manifest_path() {
+        let actual = if expected.path() == &manifest.manifest_path()? {
             manifest_bytes
         } else {
             shard_bytes_by_path
@@ -4044,7 +4049,7 @@ fn parse_tree_entry(
     if kind != b"blob"
         || fields.next().is_some()
         || object.len() != object_id_length
-        || !object.bytes().all(is_hex)
+        || !is_hex(&object)
     {
         return Err(RepositoryError::GitOperationFailed);
     }
@@ -4055,12 +4060,16 @@ fn is_regular_git_file_mode(mode: &str) -> bool {
     matches!(mode, "100644" | "100755")
 }
 
-fn compact_root(table: Uuid) -> ManagedPath {
-    ManagedPath::new(format!(".orna/storage/{table}")).expect("UUID produces safe managed path")
+fn compact_root(table: Uuid) -> Result<ManagedPath, RepositoryError> {
+    ManagedPath::new(format!(".orna/storage/{table}"))
 }
 
-fn compact_data_root(table: Uuid) -> ManagedPath {
-    managed_child(&compact_root(table), "data").expect("constant safe path")
+fn compact_manifest_path(table: Uuid) -> Result<ManagedPath, RepositoryError> {
+    managed_child(&compact_root(table)?, "manifest.orna")
+}
+
+fn compact_data_root(table: Uuid) -> Result<ManagedPath, RepositoryError> {
+    managed_child(&compact_root(table)?, "data")
 }
 
 fn compact_segment_path(table: Uuid, segment_id: Uuid) -> Result<ManagedPath, RepositoryError> {
@@ -4069,13 +4078,13 @@ fn compact_segment_path(table: Uuid, segment_id: Uuid) -> Result<ManagedPath, Re
         .get(..2)
         .ok_or(RepositoryError::InvalidCompactManifest)?;
     managed_child(
-        &compact_data_root(table),
+        &compact_data_root(table)?,
         &format!("{prefix}/{segment}.parquet"),
     )
 }
 
 fn shard_path(table: Uuid, number: u64) -> Result<ManagedPath, RepositoryError> {
-    managed_child(&compact_root(table), &format!("shards/{number:08}.orna"))
+    managed_child(&compact_root(table)?, &format!("shards/{number:08}.orna"))
 }
 
 fn managed_child(root: &ManagedPath, child: &str) -> Result<ManagedPath, RepositoryError> {
@@ -4107,7 +4116,7 @@ fn canonical_manifest(
         if index != 0 {
             output.push_str(", ");
         }
-        let root = compact_root(manifest.table);
+        let root = compact_root(manifest.table)?;
         let relative = shard
             .file
             .as_path()
@@ -4222,7 +4231,7 @@ fn parse_manifest_header(bytes: &[u8]) -> Result<ParsedManifestHeader, Repositor
         let file = shard_path(table, number)?;
         let expected_relative = file
             .as_path()
-            .strip_prefix(compact_root(table).as_path())
+            .strip_prefix(compact_root(table)?.as_path())
             .map_err(|_| RepositoryError::InvalidCompactManifest)?;
         if string_field(&shard, "file")?
             != expected_relative
@@ -4451,29 +4460,11 @@ fn list_field<'a>(
 }
 
 fn decode_hex(value: &str) -> Result<Vec<u8>, RepositoryError> {
-    if !value.len().is_multiple_of(2) || !value.bytes().all(is_hex) {
-        return Err(RepositoryError::InvalidCompactManifest);
-    }
-    let (pairs, []) = value.as_bytes().as_chunks::<2>() else {
-        return Err(RepositoryError::InvalidCompactManifest);
-    };
-    pairs
-        .iter()
-        .map(|pair| {
-            let high = (pair[0] as char)
-                .to_digit(16)
-                .ok_or(RepositoryError::InvalidCompactManifest)?;
-            let low = (pair[1] as char)
-                .to_digit(16)
-                .ok_or(RepositoryError::InvalidCompactManifest)?;
-            u8::try_from((high << 4) | low).map_err(|_| RepositoryError::InvalidCompactManifest)
-        })
-        .collect()
+    hex_decode(value).ok_or(RepositoryError::InvalidCompactManifest)
 }
 
 fn parse_hex_32(value: &str) -> Result<[u8; 32], RepositoryError> {
-    let bytes = decode_hex(value)?;
-    bytes
+    decode_hex(value)?
         .try_into()
         .map_err(|_| RepositoryError::InvalidCompactManifest)
 }
@@ -4482,9 +4473,6 @@ fn decode_base64(value: &str) -> Result<Vec<u8>, RepositoryError> {
     orna_value::base64_decode(value).map_err(|_| RepositoryError::InvalidCompactManifest)
 }
 
-fn is_hex(byte: u8) -> bool {
-    byte.is_ascii_hexdigit()
-}
 fn is_safe_atom(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b':' | b'+')
 }
@@ -4496,53 +4484,6 @@ fn is_selected_ref(value: &str) -> bool {
         && !value.contains("//")
         && !value.contains("..")
         && value.bytes().all(|byte| is_safe_atom(byte) || byte == b'/')
-}
-
-fn put_u32(bytes: &mut Vec<u8>, value: usize) -> Result<(), RepositoryError> {
-    let value = u32::try_from(value).map_err(|_| RepositoryError::InvalidPublicationJournal)?;
-    bytes.extend_from_slice(&value.to_be_bytes());
-    Ok(())
-}
-fn put_u64(bytes: &mut Vec<u8>, value: u64) {
-    bytes.extend_from_slice(&value.to_be_bytes());
-}
-fn put_string(bytes: &mut Vec<u8>, value: &str) -> Result<(), RepositoryError> {
-    put_u32(bytes, value.len())?;
-    bytes.extend_from_slice(value.as_bytes());
-    Ok(())
-}
-fn take_u32(bytes: &[u8], cursor: &mut usize) -> Result<u32, RepositoryError> {
-    Ok(u32::from_be_bytes(take_fixed::<4>(bytes, cursor)?))
-}
-fn take_u64(bytes: &[u8], cursor: &mut usize) -> Result<u64, RepositoryError> {
-    Ok(u64::from_be_bytes(take_fixed::<8>(bytes, cursor)?))
-}
-fn take_string(bytes: &[u8], cursor: &mut usize) -> Result<String, RepositoryError> {
-    let length = usize::try_from(take_u32(bytes, cursor)?)
-        .map_err(|_| RepositoryError::InvalidPublicationJournal)?;
-    let end = cursor
-        .checked_add(length)
-        .ok_or(RepositoryError::InvalidPublicationJournal)?;
-    let value = bytes
-        .get(*cursor..end)
-        .ok_or(RepositoryError::InvalidPublicationJournal)?;
-    *cursor = end;
-    String::from_utf8(value.to_vec()).map_err(|_| RepositoryError::InvalidPublicationJournal)
-}
-fn take_fixed<const N: usize>(
-    bytes: &[u8],
-    cursor: &mut usize,
-) -> Result<[u8; N], RepositoryError> {
-    let end = cursor
-        .checked_add(N)
-        .ok_or(RepositoryError::InvalidPublicationJournal)?;
-    let value = bytes
-        .get(*cursor..end)
-        .ok_or(RepositoryError::InvalidPublicationJournal)?;
-    *cursor = end;
-    value
-        .try_into()
-        .map_err(|_| RepositoryError::InvalidPublicationJournal)
 }
 
 impl fmt::Display for CompactSegmentRole {
@@ -4581,6 +4522,25 @@ mod tests {
     };
     use std::{fs, path::Path, process::Command, sync::Arc};
     use tempfile::TempDir;
+
+    /// The manifest writer spells every digest and key with [`hex_encode`],
+    /// so the reader accepts only that lowercase spelling. A manifest that
+    /// relied on uppercase digits has no second accepted form.
+    #[test]
+    fn manifest_hex_fields_require_the_canonical_lowercase_spelling() {
+        let table = Uuid::from_u128(1);
+        let schema = "ab".repeat(32);
+        let record = |schema: &str| {
+            format!(
+                "{{profile: \"{COMPACT_PROFILE}\", table: \"{table}\", schema: \"{schema}\", next_generation: 1, shards: []}}\n"
+            )
+        };
+        assert!(parse_manifest_header(record(&schema).as_bytes()).is_ok());
+        assert!(matches!(
+            parse_manifest_header(record(&schema.to_uppercase()).as_bytes()),
+            Err(RepositoryError::InvalidCompactManifest)
+        ));
+    }
 
     const BOOL_TABLE: Uuid = Uuid::from_u128(2);
     const BOOL_FIELD: Uuid = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0001);
@@ -5559,7 +5519,7 @@ mod tests {
         let table = Uuid::from_bytes([0x11; 16]);
         let segment_id = Uuid::from_bytes([0, 0, 0, 0, 0, 0, 0x70, 0, 0x80, 0, 0, 0, 0, 0, 0, 1]);
         let shard_path = shard_path(table, 0).unwrap();
-        let manifest_path = managed_child(&compact_root(table), "manifest.orna").unwrap();
+        let manifest_path = compact_manifest_path(table).unwrap();
         let mut entry = CompactManifestEntry {
             segment_id,
             role: CompactSegmentRole::Data,
@@ -6265,12 +6225,12 @@ mod tests {
             selected_ref: "refs/heads/x".into(),
             runtime_intent_id: [1; 16],
             cleanup_watermark: [2; 32],
-            manifest_path: managed_child(&compact_root(table), "manifest.orna").unwrap(),
+            manifest_path: compact_manifest_path(table).unwrap(),
             base_sha256: [4; 32],
             manifest_sha256: [5; 32],
             generation: 1,
             entries: vec![CompactManifestObject {
-                path: managed_child(&compact_data_root(table), "a.orna").unwrap(),
+                path: managed_child(&compact_data_root(table).unwrap(), "a.orna").unwrap(),
                 object_id: "a".repeat(40),
                 sha256: [3; 32],
             }],

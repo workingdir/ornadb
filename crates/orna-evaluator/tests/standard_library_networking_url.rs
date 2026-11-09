@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 
 use orna_evaluator::{
-    AdmittedReplSession, Environment, Functions, Limits, PureFunction,
-    evaluate_expression_with_functions,
+    Environment, Functions, Limits, PureFunction, evaluate_expression_with_functions,
 };
 use orna_foundation::CanonicalValue;
+use orna_project_repl::AdmittedReplSession;
 use orna_value::Raw;
 
 fn bool_value(value: bool) -> CanonicalValue {

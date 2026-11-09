@@ -1,0 +1,25 @@
+[package]
+name = "orna-project-repl"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.95"
+license.workspace = true
+description = "Typed, project-pinned admission for the bounded Orna 1.0 REPL"
+
+[features]
+default = ["system-host-bindings"]
+system-host-bindings = ["orna-evaluator/system-host-bindings"]
+
+[dependencies]
+orna-evaluator = { path = "../orna-evaluator" }
+orna-foundation = { path = "../orna-foundation" }
+orna-project = { path = "../orna-project" }
+orna-repository = { path = "../orna-repository" }
+orna-semantic = { path = "../orna-semantic" }
+orna-syntax = { path = "../orna-syntax" }
+orna-value = { path = "../orna-value" }
+sha2 = "0.10.9"
+
+[dev-dependencies]
+orna-evaluator = { path = "../orna-evaluator", features = ["cancellation-test-hooks"] }
+tempfile = "3.23.0"

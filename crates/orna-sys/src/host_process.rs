@@ -238,17 +238,12 @@ impl ProcessProvider {
         };
         let status = loop {
             if abort.load(Ordering::Acquire) {
-                kill_process_tree(&mut child);
-                let _ = child.wait();
-                join_reader(stdout_thread);
-                join_reader(stderr_thread);
-                if let Some(writer) = input_thread {
-                    let _ = writer.join();
-                }
-                let capture = capture
+                reap(&mut child, [stdout_thread, stderr_thread], input_thread);
+                let exceeded = capture
                     .lock()
-                    .expect("process capture mutex is not poisoned");
-                return Err(if capture.output_limit_exceeded {
+                    .map_err(|_| ProcessProviderError::Unavailable)?
+                    .output_limit_exceeded;
+                return Err(if exceeded {
                     ProcessProviderError::OutputLimit
                 } else {
                     ProcessProviderError::Unavailable
@@ -257,13 +252,7 @@ impl ProcessProvider {
             let status = match child.try_wait() {
                 Ok(status) => status,
                 Err(_) => {
-                    kill_process_tree(&mut child);
-                    let _ = child.wait();
-                    join_reader(stdout_thread);
-                    join_reader(stderr_thread);
-                    if let Some(writer) = input_thread {
-                        let _ = writer.join();
-                    }
+                    reap(&mut child, [stdout_thread, stderr_thread], input_thread);
                     return Err(ProcessProviderError::Unavailable);
                 }
             };
@@ -271,13 +260,7 @@ impl ProcessProvider {
                 break status;
             }
             if Instant::now() >= deadline {
-                kill_process_tree(&mut child);
-                let _ = child.wait();
-                join_reader(stdout_thread);
-                join_reader(stderr_thread);
-                if let Some(writer) = input_thread {
-                    let _ = writer.join();
-                }
+                reap(&mut child, [stdout_thread, stderr_thread], input_thread);
                 return Err(ProcessProviderError::TimedOut);
             }
             thread::sleep(Duration::from_millis(2));
@@ -296,7 +279,7 @@ impl ProcessProvider {
         }
         let mut capture = capture
             .lock()
-            .expect("process capture mutex is not poisoned");
+            .map_err(|_| ProcessProviderError::Unavailable)?;
         if capture.output_limit_exceeded {
             return Err(ProcessProviderError::OutputLimit);
         }
@@ -333,9 +316,12 @@ fn capture_pipe<R: Read + Send + 'static>(
             match reader.read(&mut buffer) {
                 Ok(0) => return,
                 Ok(count) => {
-                    let mut capture = capture
-                        .lock()
-                        .expect("process capture mutex is not poisoned");
+                    // A poisoned capture means the sibling reader panicked; the
+                    // run cannot produce trustworthy output, so abort it.
+                    let Ok(mut capture) = capture.lock() else {
+                        abort.store(true, Ordering::Release);
+                        return;
+                    };
                     let remaining = maximum_output_bytes.saturating_sub(capture.total);
                     let accepted = count.min(remaining);
                     let bytes = &buffer[..accepted];
@@ -352,10 +338,9 @@ fn capture_pipe<R: Read + Send + 'static>(
                     }
                 }
                 Err(_) => {
-                    capture
-                        .lock()
-                        .expect("process capture mutex is not poisoned")
-                        .read_failed = true;
+                    if let Ok(mut capture) = capture.lock() {
+                        capture.read_failed = true;
+                    }
                     abort.store(true, Ordering::Release);
                     return;
                 }
@@ -366,6 +351,24 @@ fn capture_pipe<R: Read + Send + 'static>(
 
 fn join_reader(reader: thread::JoinHandle<()>) {
     let _ = reader.join();
+}
+
+/// Ends an aborted run: kills the child's process group, reaps the leader and
+/// joins every helper thread, so nothing outlives the failed call. The run is
+/// already failing, so a wait or join error has nothing left to report.
+fn reap(
+    child: &mut Child,
+    readers: [thread::JoinHandle<()>; 2],
+    writer: Option<thread::JoinHandle<Result<(), ()>>>,
+) {
+    kill_process_tree(child);
+    let _ = child.wait();
+    for reader in readers {
+        join_reader(reader);
+    }
+    if let Some(writer) = writer {
+        let _ = writer.join();
+    }
 }
 
 /// Kills the child's whole process group on Linux. The child leads its own

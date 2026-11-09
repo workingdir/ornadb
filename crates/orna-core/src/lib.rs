@@ -3,6 +3,7 @@
 //! The public text form of each identifier is opaque and type-tagged. The
 //! random 128-bit representation is an implementation detail, not a UUID API.
 
+mod byte_reader;
 pub mod canonical_hash;
 pub mod catalogue;
 pub mod catalogue_diff;
@@ -11,6 +12,7 @@ pub mod inspect_carrier;
 pub mod inspect_lifecycle;
 pub mod invocation;
 pub mod invocation_binding;
+mod orv;
 pub mod physical;
 pub mod presenter;
 pub mod revision;

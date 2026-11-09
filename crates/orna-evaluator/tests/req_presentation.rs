@@ -1,5 +1,6 @@
-use orna_evaluator::{AdmittedReplSession, Limits};
+use orna_evaluator::Limits;
 use orna_foundation::CanonicalValue;
+use orna_project_repl::AdmittedReplSession;
 use orna_value::Raw;
 
 fn session() -> AdmittedReplSession {

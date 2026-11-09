@@ -96,7 +96,7 @@ async fn historical_reads_are_pinned_to_checkpoint_generations_and_cover_deletes
         .select_historical_snapshot(1)
         .await
         .expect("select first checkpoint generation");
-    let generation_one_descriptor = generation_one.capture().snapshot().clone();
+    let generation_one_descriptor = generation_one.capture().snapshot();
     commit(
         &state,
         writer,
@@ -426,7 +426,7 @@ async fn as_of_pins_stay_exact_across_generation_encoding_boundaries() {
         .select_historical_snapshot(0)
         .await
         .expect("select initial generation");
-    let initial_descriptor = initial.capture().snapshot().clone();
+    let initial_descriptor = initial.capture().snapshot();
     let encoded_initial_descriptor = initial_descriptor
         .encode()
         .expect("encode exact generation-zero descriptor");
@@ -640,7 +640,7 @@ async fn retained_pins_cross_generation_encoding_boundaries() {
                 .select_historical_snapshot(generation)
                 .await
                 .expect("select retained generation around integer boundary");
-            let descriptor = selected.capture().snapshot().clone();
+            let descriptor = selected.capture().snapshot();
             let encoded = descriptor.encode().expect("encode retained boundary pin");
             let decoded = Snapshot::decode_bytes(&encoded).expect("decode retained boundary pin");
             assert_eq!(decoded, descriptor);
@@ -809,7 +809,7 @@ async fn stable_prefix_neighbor_survives_extension_pin_tails() {
                 .select_historical_snapshot(generation)
                 .await
                 .expect("select adjacent prefix boundary pin");
-            let descriptor = selected.capture().snapshot().clone();
+            let descriptor = selected.capture().snapshot();
             let encoded = descriptor.encode().expect("encode prefix boundary pin");
             let decoded = Snapshot::decode_bytes(&encoded).expect("decode prefix boundary pin");
             assert_eq!(decoded, descriptor);
@@ -1100,28 +1100,28 @@ async fn case_closure_matrix_preserves_each_transition_pin() {
     );
 
     let pins = vec![
-        (1_u64, both.capture().snapshot().clone(), both_rows.clone()),
-        (2, tail_only.capture().snapshot().clone(), tail_only_rows),
-        (3, restored.capture().snapshot().clone(), both_rows),
+        (1_u64, both.capture().snapshot(), both_rows.clone()),
+        (2, tail_only.capture().snapshot(), tail_only_rows),
+        (3, restored.capture().snapshot(), both_rows),
         (
             4,
-            prefix_only.capture().snapshot().clone(),
+            prefix_only.capture().snapshot(),
             prefix_only_rows,
         ),
-        (5, empty.capture().snapshot().clone(), Vec::new()),
+        (5, empty.capture().snapshot(), Vec::new()),
         (
             6,
-            reopened_tail_only.capture().snapshot().clone(),
+            reopened_tail_only.capture().snapshot(),
             reopened_tail_rows.clone(),
         ),
         (
             7,
-            reopened_both.capture().snapshot().clone(),
+            reopened_both.capture().snapshot(),
             reopened_both_rows,
         ),
         (
             8,
-            reopened_tail_after_closure.capture().snapshot().clone(),
+            reopened_tail_after_closure.capture().snapshot(),
             reopened_tail_rows,
         ),
     ];
@@ -8568,7 +8568,7 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
                 .select_historical_snapshot(generation)
                 .await
                 .expect("select prefix restoration boundary pin");
-            let descriptor = selected.capture().snapshot().clone();
+            let descriptor = selected.capture().snapshot();
             let encoded = descriptor.encode().expect("encode prefix restoration pin");
             let decoded = Snapshot::decode_bytes(&encoded).expect("decode prefix restoration pin");
             assert_eq!(decoded, descriptor);

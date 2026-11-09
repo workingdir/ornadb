@@ -1,6 +1,7 @@
 use unicode_ident::{is_xid_continue, is_xid_start};
 use unicode_normalization::UnicodeNormalization;
 
+use crate::budget::NestingBudget;
 use crate::parser::SourceSpan;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -194,8 +195,7 @@ pub(crate) fn lex_recovering(source: &str) -> (Vec<Token>, Vec<LexError>) {
         at: 0,
         tokens: Vec::new(),
         errors: Vec::new(),
-        string_depth: 0,
-        string_limit_reported: false,
+        string_nesting: NestingBudget::new(MAX_STRING_NESTING),
     };
     l.run();
     l.tokens.push(Token {
@@ -214,8 +214,7 @@ struct Lexer<'a> {
     at: usize,
     tokens: Vec<Token>,
     errors: Vec<LexError>,
-    string_depth: usize,
-    string_limit_reported: bool,
+    string_nesting: NestingBudget,
 }
 impl<'a> Lexer<'a> {
     fn run(&mut self) {
@@ -447,22 +446,20 @@ impl<'a> Lexer<'a> {
         self.push(kind, start)
     }
     fn string(&mut self, start: usize) {
-        if self.string_depth == MAX_STRING_NESTING {
-            if !self.string_limit_reported {
+        if !self.string_nesting.enter() {
+            if self.string_nesting.first_overflow() {
                 self.error(
                     "ORNA-LEX-013",
                     "maximum string interpolation nesting exceeded",
                     start,
                     start + 1,
                 );
-                self.string_limit_reported = true;
             }
             self.skip_limited_string();
             return;
         }
-        self.string_depth += 1;
         self.string_inner(start);
-        self.string_depth -= 1;
+        self.string_nesting.leave();
     }
     fn string_inner(&mut self, start: usize) {
         self.bump();

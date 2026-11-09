@@ -66,10 +66,11 @@ struct Splice {
 
 impl Splice {
     /// Drops the unchanged entries at either end, keeping at least one
-    /// replaced entry so the splice still has a position. `None` when nothing
-    /// changed.
+    /// replaced entry so the splice still has a position. An empty splice
+    /// `replaced` means the run covered the root leaf, which has no parent
+    /// entry; that run always changed the map. `None` when nothing changed.
     fn trimmed(mut self) -> Option<Self> {
-        if self.replaced == self.emitted {
+        if !self.replaced.is_empty() && self.replaced == self.emitted {
             return None;
         }
         while self.replaced.len() > 1
@@ -138,15 +139,25 @@ impl Cursor {
     }
 
     /// The entry naming this node in a parent, as the parent recorded it.
-    fn entry(&self) -> Result<OrderedBranchEntry, GraphError> {
+    ///
+    /// An empty leaf is legal only as the whole map's root (store-format-3
+    /// §2): it covers no range, so no parent entry can name it, and the root
+    /// itself has no parent. Returning `None` there keeps that absence
+    /// explicit instead of inventing an empty key and a zero count.
+    fn entry(&self) -> Result<Option<OrderedBranchEntry>, GraphError> {
         let (inclusive_max_key, row_count) = match &self.data {
-            NodeData::OrderedLeaf { entries, .. } => (
-                entries
-                    .last()
-                    .map(|entry| entry.key.clone())
-                    .unwrap_or_default(),
-                entries.len() as u64,
-            ),
+            NodeData::OrderedLeaf { entries, .. } => {
+                let Some(last) = entries.last() else {
+                    return if self.path.is_empty() {
+                        Ok(None)
+                    } else {
+                        // A branch entry must name a non-empty range, so an
+                        // empty leaf below the root is a malformed graph.
+                        Err(GraphError::InvalidCount(0))
+                    };
+                };
+                (last.key.clone(), entries.len() as u64)
+            }
             NodeData::OrderedBranch { entries, .. } => (
                 entries
                     .last()
@@ -161,11 +172,11 @@ impl Cursor {
                 });
             }
         };
-        Ok(OrderedBranchEntry {
+        Ok(Some(OrderedBranchEntry {
             inclusive_max_key,
             child: self.oid.clone(),
             row_count,
-        })
+        }))
     }
 }
 
@@ -510,7 +521,9 @@ impl<R: FnMut(&NativeOid) -> Result<NodeData, GraphError>> OldMap<'_, R> {
             let mut replaced = Vec::new();
             let mut old_pages = Vec::new();
             loop {
-                replaced.push(cursor.entry()?);
+                if let Some(entry) = cursor.entry()? {
+                    replaced.push(entry);
+                }
                 let entries = cursor.leaf_entries()?.to_vec();
                 old_pages.push(cursor.data.clone());
                 for entry in entries {
@@ -637,7 +650,9 @@ impl<R: FnMut(&NativeOid) -> Result<NodeData, GraphError>> OldMap<'_, R> {
             // passed; its run may continue into the next node.
             let mut applying: Option<(Splice, usize)> = None;
             loop {
-                replaced.push(cursor.entry()?);
+                if let Some(entry) = cursor.entry()? {
+                    replaced.push(entry);
+                }
                 let entries = cursor.branch_entries()?.to_vec();
                 old_pages.push(cursor.data.clone());
                 for entry in entries {
@@ -842,10 +857,14 @@ pub(crate) fn maintain_ordered_map(
         splices = old.rewrite_branches(height, splices, &mut writer)?;
     }
     // The root is the only node at its height, so the last level is one
-    // splice that replaces it.
+    // splice that replaces it. A root leaf contributes no parent entry, so
+    // its splice has an empty `replaced` list.
     let level = match splices.as_slice() {
         [] => return Ok(unchanged(writer.reused)),
-        [splice] if splice.replaced.len() == 1 && splice.replaced[0].child == root => {
+        [splice]
+            if splice.replaced.is_empty()
+                || (splice.replaced.len() == 1 && splice.replaced[0].child == root) =>
+        {
             splice.emitted.clone()
         }
         _ => return Err(GraphError::ContextMismatch),
@@ -1138,5 +1157,35 @@ mod tests {
         expected_rows.insert(12_345, value(24, 1));
         let mut expected_store = Store::default();
         assert_eq!(maintained.root, build(&mut expected_store, &expected_rows));
+    }
+
+    /// store-format-3 §2 allows an empty leaf only as the whole map's root.
+    /// It covers no key range, so it has no entry in a parent; a parent that
+    /// claimed one would be naming a range that does not exist. The root's
+    /// own emptiness is reported as `None`, not as an empty key.
+    #[test]
+    fn only_the_root_leaf_has_no_parent_entry() {
+        let oid = NativeOid::new(GitHashAlgorithm::Sha1, [0_u8; 20]).expect("oid");
+        let data = NodeData::OrderedLeaf {
+            domain: vec![0xa1, 0x00],
+            entries: Vec::new(),
+        };
+        let root = Cursor {
+            path: Vec::new(),
+            oid: oid.clone(),
+            data: data.clone(),
+        };
+        assert_eq!(root.entry().expect("root leaf"), None);
+        let child = Cursor {
+            path: vec![Step {
+                height: 1,
+                entries: Vec::new(),
+                index: 0,
+                lower: None,
+            }],
+            oid,
+            data,
+        };
+        assert!(matches!(child.entry(), Err(GraphError::InvalidCount(0))));
     }
 }

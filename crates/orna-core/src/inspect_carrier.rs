@@ -5,19 +5,20 @@
 
 use std::{collections::HashSet, error::Error, fmt};
 
-use crate::{CatalogueRevisionId, InspectEpochId, InvocationId, SourceRevisionId, TypeId};
+use crate::{
+    CatalogueRevisionId, InspectEpochId, InvocationId, SourceRevisionId, TypeId,
+    byte_reader::{Reader, TruncatedError},
+    orv::{
+        ORV_HEADER_BYTES, ORV_MAX_PAYLOAD_BYTES, ORV_MAX_VALUE_DEPTH,
+        ORV_RECORD_FIELD_HEADER_BYTES, ORV5_MARKER,
+    },
+};
 
 pub const INSPECT_CARRIER_MAGIC: &[u8; 15] = b"ORNA-INSPECT/1 ";
 pub const INSPECT_CARRIER_VERSION: u16 = 1;
 pub const MAX_INSPECT_CARRIER_ROWS: usize = 65_536;
 pub const MAX_INSPECT_CARRIER_ROW_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_INSPECT_CARRIER_BYTES: usize = 16 * 1024 * 1024;
-
-const ORV5_MARKER: &[u8; 4] = b"ORV5";
-const ORV5_HEADER_BYTES: usize = 25;
-const ORV5_PAYLOAD_LIMIT: usize = 16 * 1024 * 1024;
-const RECORD_FIELD_HEADER_BYTES: usize = 20;
-const MAX_CONSTRUCTED_DEPTH: usize = 32;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum InspectProjection {
@@ -396,7 +397,7 @@ impl InspectCarrierEnvelope {
                 maximum: MAX_INSPECT_CARRIER_BYTES,
             });
         }
-        let mut reader = Reader { bytes, position: 0 };
+        let mut reader = Reader::<InspectCarrierError>::new(bytes);
         if reader.take(INSPECT_CARRIER_MAGIC.len())? != INSPECT_CARRIER_MAGIC {
             return Err(InspectCarrierError::InvalidMagic);
         }
@@ -506,7 +507,7 @@ fn be_u32_at(bytes: &[u8], offset: usize) -> Option<u32> {
 }
 
 fn validate_orv5_value(bytes: &[u8], depth: usize) -> Result<(), InspectRowError> {
-    if bytes.len() < ORV5_HEADER_BYTES {
+    if bytes.len() < ORV_HEADER_BYTES {
         return Err(InspectRowError::TruncatedHeader {
             actual: bytes.len(),
         });
@@ -523,20 +524,20 @@ fn validate_orv5_value(bytes: &[u8], depth: usize) -> Result<(), InspectRowError
     let declared = be_u32_at(bytes, 21).ok_or(InspectRowError::TruncatedHeader {
         actual: bytes.len(),
     })? as usize;
-    if declared > ORV5_PAYLOAD_LIMIT {
+    if declared > ORV_MAX_PAYLOAD_BYTES {
         return Err(InspectRowError::PayloadTooLarge {
             actual: declared,
-            maximum: ORV5_PAYLOAD_LIMIT,
+            maximum: ORV_MAX_PAYLOAD_BYTES,
         });
     }
-    let actual = bytes.len() - ORV5_HEADER_BYTES;
+    let actual = bytes.len() - ORV_HEADER_BYTES;
     if actual < declared {
         return Err(InspectRowError::TruncatedPayload { declared, actual });
     }
     if actual > declared {
         return Err(InspectRowError::TrailingBytes { declared, actual });
     }
-    let payload = &bytes[ORV5_HEADER_BYTES..];
+    let payload = &bytes[ORV_HEADER_BYTES..];
     match tag {
         0x00 | 0x01 | 0x09 => require_empty(tag, payload),
         0x02 => {
@@ -551,7 +552,7 @@ fn validate_orv5_value(bytes: &[u8], depth: usize) -> Result<(), InspectRowError
         0x06..=0x07 | 0x0a | 0x0c => Ok(()),
         0x08 => require_fixed(tag, payload, 16),
         0x0b => {
-            if depth >= MAX_CONSTRUCTED_DEPTH {
+            if depth >= ORV_MAX_VALUE_DEPTH {
                 return Err(InspectRowError::ConstructedDepthExceeded);
             }
             validate_record_payload(payload, depth)
@@ -593,7 +594,7 @@ fn validate_record_payload(payload: &[u8], depth: usize) -> Result<(), InspectRo
     let mut field_identities = HashSet::new();
     let mut previous_field_identity: Option<&[u8]> = None;
     for _ in 0..count {
-        if payload.len().saturating_sub(cursor) < RECORD_FIELD_HEADER_BYTES {
+        if payload.len().saturating_sub(cursor) < ORV_RECORD_FIELD_HEADER_BYTES {
             return Err(InspectRowError::TruncatedRecord {
                 actual: payload.len().saturating_sub(cursor),
             });
@@ -605,7 +606,7 @@ fn validate_record_payload(payload: &[u8], depth: usize) -> Result<(), InspectRo
         })? as usize;
         cursor += 4;
         let remaining = payload.len().saturating_sub(cursor);
-        if length < ORV5_HEADER_BYTES || length > remaining {
+        if length < ORV_HEADER_BYTES || length > remaining {
             return Err(InspectRowError::InvalidNestedLength {
                 declared: length,
                 actual: remaining,
@@ -651,7 +652,7 @@ fn validate_constructed_payload(
     if type_id.to_bytes() != [0; 16] {
         return Err(InspectRowError::ConstructedTypeIdentityNotZero);
     }
-    if depth >= MAX_CONSTRUCTED_DEPTH {
+    if depth >= ORV_MAX_VALUE_DEPTH {
         return Err(InspectRowError::ConstructedDepthExceeded);
     }
     if payload.len() < 2 {
@@ -683,7 +684,7 @@ fn parse_descriptor(
     cursor: &mut usize,
     depth: usize,
 ) -> Result<Descriptor, InspectRowError> {
-    if depth > MAX_CONSTRUCTED_DEPTH {
+    if depth > ORV_MAX_VALUE_DEPTH {
         return Err(InspectRowError::ConstructedDepthExceeded);
     }
     let tag = *bytes
@@ -727,7 +728,7 @@ fn validate_constructor_content(
     content: &[u8],
     depth: usize,
 ) -> Result<(), InspectRowError> {
-    if depth > MAX_CONSTRUCTED_DEPTH {
+    if depth > ORV_MAX_VALUE_DEPTH {
         return Err(InspectRowError::ConstructedDepthExceeded);
     }
     match descriptor {
@@ -794,7 +795,7 @@ fn validate_child_at(
         be_u32_at(content, cursor).ok_or(InspectRowError::TruncatedConstructedContent)? as usize;
     let value_start = cursor + 4;
     let remaining = content.len().saturating_sub(value_start);
-    if length < ORV5_HEADER_BYTES || length > remaining {
+    if length < ORV_HEADER_BYTES || length > remaining {
         return Err(InspectRowError::InvalidNestedLength {
             declared: length,
             actual: remaining,
@@ -804,40 +805,9 @@ fn validate_child_at(
     Ok(value_start + length)
 }
 
-struct Reader<'a> {
-    bytes: &'a [u8],
-    position: usize,
-}
-
-impl<'a> Reader<'a> {
-    fn take(&mut self, length: usize) -> Result<&'a [u8], InspectCarrierError> {
-        let end = self
-            .position
-            .checked_add(length)
-            .ok_or(InspectCarrierError::Truncated)?;
-        let value = self
-            .bytes
-            .get(self.position..end)
-            .ok_or(InspectCarrierError::Truncated)?;
-        self.position = end;
-        Ok(value)
-    }
-    fn array<const N: usize>(&mut self) -> Result<[u8; N], InspectCarrierError> {
-        self.take(N)?
-            .try_into()
-            .map_err(|_| InspectCarrierError::Truncated)
-    }
-    fn u8(&mut self) -> Result<u8, InspectCarrierError> {
-        Ok(u8::from_be_bytes(self.array()?))
-    }
-    fn u16(&mut self) -> Result<u16, InspectCarrierError> {
-        Ok(u16::from_be_bytes(self.array()?))
-    }
-    fn u32(&mut self) -> Result<u32, InspectCarrierError> {
-        Ok(u32::from_be_bytes(self.array()?))
-    }
-    fn remaining(&self) -> usize {
-        self.bytes.len() - self.position
+impl TruncatedError for InspectCarrierError {
+    fn truncated() -> Self {
+        Self::Truncated
     }
 }
 
@@ -997,7 +967,7 @@ mod tests {
     }
 
     fn row(tag: u8, type_id: [u8; 16], payload: &[u8]) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(ORV5_HEADER_BYTES + payload.len());
+        let mut bytes = Vec::with_capacity(ORV_HEADER_BYTES + payload.len());
         bytes.extend_from_slice(ORV5_MARKER);
         bytes.push(tag);
         bytes.extend_from_slice(&type_id);
@@ -1036,11 +1006,11 @@ mod tests {
     #[test]
     fn constructed_descriptor_depth_matches_orv5_boundary() {
         assert_eq!(
-            validate_orv5_row_frame(&option_descriptor_row(MAX_CONSTRUCTED_DEPTH)),
+            validate_orv5_row_frame(&option_descriptor_row(ORV_MAX_VALUE_DEPTH)),
             Ok(())
         );
         assert_eq!(
-            validate_orv5_row_frame(&option_descriptor_row(MAX_CONSTRUCTED_DEPTH + 1)),
+            validate_orv5_row_frame(&option_descriptor_row(ORV_MAX_VALUE_DEPTH + 1)),
             Err(InspectRowError::ConstructedDepthExceeded)
         );
     }
@@ -1231,7 +1201,7 @@ mod tests {
         .encode()
         .expect("valid record carrier encodes");
         let second_identity =
-            70 + 4 + ORV5_HEADER_BYTES + 4 + RECORD_FIELD_HEADER_BYTES + integer_row(1).len();
+            70 + 4 + ORV_HEADER_BYTES + 4 + ORV_RECORD_FIELD_HEADER_BYTES + integer_row(1).len();
 
         let mut duplicate_wire = valid.clone();
         duplicate_wire[second_identity..second_identity + 16].copy_from_slice(&[1; 16]);

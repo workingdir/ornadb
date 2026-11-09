@@ -8,7 +8,7 @@ import unittest
 
 from scripts.check_standard_library_pin import (
     PinError,
-    check_const_pairing,
+    check_mirror_derivation,
     check_mirror_bytes,
     check_reachable_from_main,
     gitlink_commit,
@@ -44,68 +44,45 @@ def commit_file(repo: Path, relative: str, content: str, message: str) -> str:
     return git(repo, "rev-parse", "HEAD")
 
 
+MIRROR = """
+macro_rules! reference_standard_modules {
+    ($($name:ident = $path:literal $(+ $addendum:literal)?;)+) => {
+        const SOURCES: [(&str, &str); 2] = [
+            $(($name, concat!(include_str!(concat!("../../../stdlib/", $path))))),+
+        ];
+    };
+}
+
+reference_standard_modules! {
+    REFERENCE_STANDARD_MATH_PATH_V1 = "std/math.orna";
+    REFERENCE_STANDARD_ENCODING_BASE64_PATH_V1 = "std/encoding/base64.orna" + "extra.orna";
+}
+"""
+
+
 class MirrorParsingTests(unittest.TestCase):
     def test_extracts_stdlib_relative_paths_in_source_order(self) -> None:
-        text = (
-            'const A: &str = include_str!("../../../stdlib/std/math.orna");\n'
-            '    include_str!(\n        "../../../stdlib/std/encoding/base64.orna"\n    );\n'
-            'const B: &str = include_str!("../fixtures/other.orna");\n'
-        )
-
-        self.assertEqual(mirrored_paths(text), ["math.orna", "encoding/base64.orna"])
+        self.assertEqual(mirrored_paths(MIRROR), ["math.orna", "encoding/base64.orna"])
 
     def test_rejects_a_source_mirrored_twice(self) -> None:
-        text = (
-            'include_str!("../../../stdlib/std/math.orna");\n'
-            'include_str!("../../../stdlib/std/math.orna");\n'
-        )
+        text = MIRROR + '    REFERENCE_STANDARD_MATH_AGAIN_PATH_V1 = "std/math.orna";\n'
 
         with self.assertRaisesRegex(PinError, "twice: math.orna"):
             mirrored_paths(text)
 
 
-PAIRED_MIRROR = """
-pub const REFERENCE_STANDARD_MATH_PATH_V1: &str = "std/math.orna";
-const REFERENCE_STANDARD_MATH_SOURCE_V1: &str = include_str!("../../../stdlib/std/math.orna");
-pub const REFERENCE_STANDARD_ENCODING_BASE64_PATH_V1: &str = "std/encoding/base64.orna";
-const REFERENCE_STANDARD_ENCODING_BASE64_SOURCE_V1: &str =
-    include_str!("../../../stdlib/std/encoding/base64.orna");
-fn reference_standard_sources_v1() -> [(String, String); 2] {
-    [
-        (
-            REFERENCE_STANDARD_MATH_PATH_V1.into(),
-            REFERENCE_STANDARD_MATH_SOURCE_V1.into(),
-        ),
-        (
-            REFERENCE_STANDARD_ENCODING_BASE64_PATH_V1.into(),
-            REFERENCE_STANDARD_ENCODING_BASE64_SOURCE_V1.into(),
-        ),
-    ]
-}
-"""
+class MirrorDerivationTests(unittest.TestCase):
+    def test_accepts_a_table_that_embeds_each_row_by_its_path_literal(self) -> None:
+        check_mirror_derivation(MIRROR)
 
+    def test_rejects_a_mirror_without_rows(self) -> None:
+        with self.assertRaisesRegex(PinError, "declares no standard modules"):
+            check_mirror_derivation("macro_rules! reference_standard_modules {}")
 
-class ConstPairingTests(unittest.TestCase):
-    def test_accepts_matching_path_and_source_consts(self) -> None:
-        check_const_pairing(PAIRED_MIRROR)
-
-    def test_rejects_a_path_const_that_names_another_module(self) -> None:
-        text = PAIRED_MIRROR.replace('"std/math.orna"', '"std/bits.orna"')
-        with self.assertRaisesRegex(PinError, "MATH_PATH_V1 is 'std/bits.orna'"):
-            check_const_pairing(text)
-
-    def test_rejects_a_source_const_without_a_path_const(self) -> None:
-        text = PAIRED_MIRROR.replace("pub const REFERENCE_STANDARD_MATH_PATH_V1", "const UNUSED_PATH")
-        with self.assertRaisesRegex(PinError, "MATH_SOURCE_V1 has no path const"):
-            check_const_pairing(text)
-
-    def test_rejects_a_swapped_array_pair(self) -> None:
-        text = PAIRED_MIRROR.replace(
-            "REFERENCE_STANDARD_MATH_SOURCE_V1.into()",
-            "REFERENCE_STANDARD_ENCODING_BASE64_SOURCE_V1.into()",
-        )
-        with self.assertRaisesRegex(PinError, "array pairs MATH_PATH_V1 with ENCODING_BASE64_SOURCE_V1"):
-            check_const_pairing(text)
+    def test_rejects_a_macro_that_stops_deriving_the_include_from_the_row(self) -> None:
+        text = MIRROR.replace('include_str!(concat!("../../../stdlib/", $path))', 'include_str!("../../../stdlib/std/math.orna")')
+        with self.assertRaisesRegex(PinError, "no longer embeds each module"):
+            check_mirror_derivation(text)
 
 
 class GitlinkTests(unittest.TestCase):
