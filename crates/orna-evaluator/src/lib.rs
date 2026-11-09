@@ -7776,26 +7776,10 @@ impl Context<'_, '_> {
                 ordered.push(Value::String("UTC".into()));
             }
             if statistics_operation {
-                let Some(Value::Relation(plan)) = ordered.first() else {
-                    return Err(error("ORNA-EVAL-TYPE"));
-                };
-                let rows = self.collect_relation_values(plan, depth + 1)?;
-                ordered[0] = Value::list(rows);
-                if id == orna_intrinsics::IntrinsicId::StatsHistogram && ordered.len() == 2 {
-                    ordered.push(Value::Bool(false));
-                }
-                return self.stats(name, ordered);
+                return self.relation_statistics_call(name, id, ordered, depth);
             }
             if name == "union" {
-                let mut union_operands = ordered.into_iter();
-                let (Some(left), Some(right)) = (union_operands.next(), union_operands.next())
-                else {
-                    return Err(error("ORNA-EVAL-ARGUMENT"));
-                };
-                let (Value::Relation(left), Value::Relation(right)) = (left, right) else {
-                    return Err(error("ORNA-EVAL-TYPE"));
-                };
-                return Ok(Value::Relation(RelationPlan::union(left, right)));
+                return Self::relation_union_call(ordered);
             }
             if matches!(
                 name,
@@ -7812,89 +7796,134 @@ impl Context<'_, '_> {
                 return self.collection_relation_operation(name, ordered, depth);
             }
             if name == "filter" {
-                let mut filter_arguments = ordered.into_iter();
-                let Some(Value::Relation(plan)) = filter_arguments.next() else {
+                return Self::relation_filter_call(ordered);
+            }
+            self.relation_terminal_or_stage_call(name, ordered, depth)
+        })())
+    }
+
+    /// Statistics functions materialize the relation into one list before the
+    /// existing list statistics entry point runs.
+    fn relation_statistics_call(
+        &mut self,
+        name: &str,
+        id: orna_intrinsics::IntrinsicId,
+        mut ordered: Vec<Value>,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        let Some(Value::Relation(plan)) = ordered.first() else {
+            return Err(error("ORNA-EVAL-TYPE"));
+        };
+        let rows = self.collect_relation_values(plan, depth + 1)?;
+        ordered[0] = Value::list(rows);
+        if id == orna_intrinsics::IntrinsicId::StatsHistogram && ordered.len() == 2 {
+            ordered.push(Value::Bool(false));
+        }
+        self.stats(name, ordered)
+    }
+
+    /// Union keeps both plans so the result composes lazily.
+    fn relation_union_call(ordered: Vec<Value>) -> Result<Value, EvaluationError> {
+        let mut union_operands = ordered.into_iter();
+        let (Some(left), Some(right)) = (union_operands.next(), union_operands.next()) else {
+            return Err(error("ORNA-EVAL-ARGUMENT"));
+        };
+        let (Value::Relation(left), Value::Relation(right)) = (left, right) else {
+            return Err(error("ORNA-EVAL-TYPE"));
+        };
+        Ok(Value::Relation(RelationPlan::union(left, right)))
+    }
+
+    /// Filter compilation extends the owned plan directly. A chain of filters
+    /// over a nested union storm should copy the tree only when the cascade is
+    /// split between union children, not once for every stage added to it.
+    fn relation_filter_call(ordered: Vec<Value>) -> Result<Value, EvaluationError> {
+        let mut filter_arguments = ordered.into_iter();
+        let Some(Value::Relation(plan)) = filter_arguments.next() else {
+            return Err(error("ORNA-EVAL-TYPE"));
+        };
+        let Some(predicate) = filter_arguments.next() else {
+            return Err(error("ORNA-EVAL-ARGUMENT"));
+        };
+        Ok(Value::Relation(
+            plan.with_stage(RelationStage::Filter(vec![predicate])),
+        ))
+    }
+
+    /// Observes a terminal or appends one composition stage to the plan.
+    fn relation_terminal_or_stage_call(
+        &mut self,
+        name: &str,
+        ordered: Vec<Value>,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        let Value::Relation(mut plan) = ordered[0].clone() else {
+            return Err(error("ORNA-EVAL-TYPE"));
+        };
+
+        if let Some(terminal) = RelationTerminal::from_name(name) {
+            // Keep adjacent filters compiled as one cascade until terminal
+            // demand begins, then push the batch once.
+            let plan = plan.flush_filter_cascade();
+            return self.observe_relation(&plan, terminal, &ordered[1..], depth);
+        }
+
+        match name {
+            // The reference specifies relation composition and order but
+            // no separate projection grammar. `project` is the named
+            // result-shaping spelling of the same lazy one-to-one map.
+            "map" | "project" => {
+                plan = plan.with_stage(RelationStage::Map(ordered[1].clone()));
+                Ok(Value::Relation(plan))
+            }
+            "flat_map" => {
+                plan = plan.with_stage(RelationStage::FlatMap(ordered[1].clone()));
+                Ok(Value::Relation(plan))
+            }
+            "sort_by" => {
+                plan = plan.with_stage(RelationStage::SortBy(ordered[1].clone()));
+                Ok(Value::Relation(plan))
+            }
+            "bucket_by" => {
+                let spec = bucket_by_spec(&ordered[1], ordered.get(2))?;
+                plan = plan.with_stage(RelationStage::BucketBy(spec));
+                Ok(Value::Relation(plan))
+            }
+            "window" => {
+                let size = relation_window_argument(&ordered[1])?;
+                let step = ordered.get(2).map_or(Ok(1), relation_window_argument)?;
+                plan = plan.with_stage(RelationStage::Window(size, step));
+                Ok(Value::Relation(plan))
+            }
+            "distinct" => {
+                plan = plan.with_stage(RelationStage::Distinct);
+                Ok(Value::Relation(plan))
+            }
+            "unique" => {
+                plan = plan.with_stage(RelationStage::Distinct);
+                Ok(Value::Relation(plan))
+            }
+            "pairs" => {
+                plan = plan.with_stage(RelationStage::Pairs);
+                Ok(Value::Relation(plan))
+            }
+            "take" | "drop" => {
+                let Value::Int(count) = &ordered[1] else {
                     return Err(error("ORNA-EVAL-TYPE"));
                 };
-                let Some(predicate) = filter_arguments.next() else {
-                    return Err(error("ORNA-EVAL-ARGUMENT"));
-                };
-                // Filter compilation extends the owned plan directly. A
-                // chain of filters over a nested union storm should copy the
-                // tree only when the cascade is split between union children,
-                // not once for every stage added to that tree.
-                return Ok(Value::Relation(
-                    plan.with_stage(RelationStage::Filter(vec![predicate])),
-                ));
+                if count.sign() == num_bigint::Sign::Minus {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+                let count = count.to_usize().ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+                plan = plan.with_stage(if name == "take" {
+                    RelationStage::Take(count)
+                } else {
+                    RelationStage::Drop(count)
+                });
+                Ok(Value::Relation(plan))
             }
-            let Value::Relation(mut plan) = ordered[0].clone() else {
-                return Err(error("ORNA-EVAL-TYPE"));
-            };
-
-            if let Some(terminal) = RelationTerminal::from_name(name) {
-                // Keep adjacent filters compiled as one cascade until terminal
-                // demand begins, then push the batch once.
-                let plan = plan.flush_filter_cascade();
-                return self.observe_relation(&plan, terminal, &ordered[1..], depth);
-            }
-
-            match name {
-                // The reference specifies relation composition and order but
-                // no separate projection grammar. `project` is the named
-                // result-shaping spelling of the same lazy one-to-one map.
-                "map" | "project" => {
-                    plan = plan.with_stage(RelationStage::Map(ordered[1].clone()));
-                    Ok(Value::Relation(plan))
-                }
-                "flat_map" => {
-                    plan = plan.with_stage(RelationStage::FlatMap(ordered[1].clone()));
-                    Ok(Value::Relation(plan))
-                }
-                "sort_by" => {
-                    plan = plan.with_stage(RelationStage::SortBy(ordered[1].clone()));
-                    Ok(Value::Relation(plan))
-                }
-                "bucket_by" => {
-                    let spec = bucket_by_spec(&ordered[1], ordered.get(2))?;
-                    plan = plan.with_stage(RelationStage::BucketBy(spec));
-                    Ok(Value::Relation(plan))
-                }
-                "window" => {
-                    let size = relation_window_argument(&ordered[1])?;
-                    let step = ordered.get(2).map_or(Ok(1), relation_window_argument)?;
-                    plan = plan.with_stage(RelationStage::Window(size, step));
-                    Ok(Value::Relation(plan))
-                }
-                "distinct" => {
-                    plan = plan.with_stage(RelationStage::Distinct);
-                    Ok(Value::Relation(plan))
-                }
-                "unique" => {
-                    plan = plan.with_stage(RelationStage::Distinct);
-                    Ok(Value::Relation(plan))
-                }
-                "pairs" => {
-                    plan = plan.with_stage(RelationStage::Pairs);
-                    Ok(Value::Relation(plan))
-                }
-                "take" | "drop" => {
-                    let Value::Int(count) = &ordered[1] else {
-                        return Err(error("ORNA-EVAL-TYPE"));
-                    };
-                    if count.sign() == num_bigint::Sign::Minus {
-                        return Err(error("ORNA-EVAL-VALUE"));
-                    }
-                    let count = count.to_usize().ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
-                    plan = plan.with_stage(if name == "take" {
-                        RelationStage::Take(count)
-                    } else {
-                        RelationStage::Drop(count)
-                    });
-                    Ok(Value::Relation(plan))
-                }
-                _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
-            }
-        })())
+            _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
+        }
     }
 
     fn collection_relation_operation(
