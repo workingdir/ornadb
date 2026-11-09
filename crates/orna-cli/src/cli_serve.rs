@@ -605,7 +605,10 @@ fn open_served_clone(endpoint: &Endpoint) -> Result<ServedClone, Diagnostic> {
     // Project loading parses the reachable source modules only. In
     // particular, serving a clone never invokes its root `main()`; functions
     // run only after an explicit query or live Eval request reaches a route.
-    let (project, catalogue, app) = admit_serving_entry(endpoint);
+    let (project, catalogue, app) = match admit_serving_entry(endpoint) {
+        Some(serving) => (Some(serving.project), serving.catalogue, serving.entry),
+        None => (None, orna_semantic::Catalogue::default(), None),
+    };
     let (identity, initial_digest) = runtime_identity(&repository)?;
     // The served runtime uses this process's owner. A later process takes the
     // lease over with a bumped epoch once it holds the runtime owner lock, so a
@@ -721,35 +724,43 @@ fn ensure_unambiguous_live_table_names(
     Ok(())
 }
 
+/// The serving state admitted before the listener binds. `None` from
+/// [`admit_serving_entry`] means no project could be admitted; this type
+/// cannot represent a catalogue or entry without its project.
+struct AdmittedServing {
+    project: orna_project::LoadedProject,
+    catalogue: orna_semantic::Catalogue,
+    /// The admitted serving entry, absent when the project has none.
+    entry: Option<cli_serve_app::ServingEntry>,
+}
+
 /// Loads and admits the serving entry. A broken `main.orna` is reported on
 /// stderr and leaves the Git transport serving (ORNA-SERVE-007, ORNA-APP-020):
 /// the project and entry are then absent and the catalogue is empty.
-fn admit_serving_entry(
-    endpoint: &Endpoint,
-) -> (
-    Option<orna_project::LoadedProject>,
-    orna_semantic::Catalogue,
-    Option<cli_serve_app::ServingEntry>,
-) {
+fn admit_serving_entry(endpoint: &Endpoint) -> Option<AdmittedServing> {
     let project = match load_project(endpoint) {
         Ok(project) => project,
         Err(diagnostic) => {
             report_serving_diagnostic(&diagnostic);
-            return (None, orna_semantic::Catalogue::default(), None);
+            return None;
         }
     };
     let catalogue = match semantic_catalogue(&project) {
         Ok(catalogue) => catalogue,
         Err(diagnostic) => {
             report_serving_diagnostic(&diagnostic);
-            return (None, orna_semantic::Catalogue::default(), None);
+            return None;
         }
     };
     let root = match local_project_path(endpoint) {
         Ok(root) => root,
         Err(diagnostic) => {
             report_serving_diagnostic(&diagnostic);
-            return (Some(project), catalogue, None);
+            return Some(AdmittedServing {
+                project,
+                catalogue,
+                entry: None,
+            });
         }
     };
     match cli_serve_app::ServeApp::admit(root, &project, &catalogue) {
@@ -761,11 +772,19 @@ fn admit_serving_entry(
             let entry = app.map(|app| {
                 cli_serve_app::ServingEntry::new(app, cli_serve_app::console_session(&project))
             });
-            (Some(project), catalogue, entry)
+            Some(AdmittedServing {
+                project,
+                catalogue,
+                entry,
+            })
         }
         Err(diagnostic) => {
             report_serving_diagnostic(&diagnostic);
-            (Some(project), catalogue, None)
+            Some(AdmittedServing {
+                project,
+                catalogue,
+                entry: None,
+            })
         }
     }
 }

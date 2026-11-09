@@ -154,6 +154,19 @@ impl<D> StageOutcome<D> {
             Self::Skipped { .. } => EvidenceStatus::Skipped,
         }
     }
+
+    /// Whether this stage was skipped because project transaction admission
+    /// does not run stream roots, which the explicit finite-list stream seam
+    /// serves instead. Callers route on this predicate instead of copying the
+    /// reason text, so the routing cannot drift from the adapter.
+    #[must_use]
+    pub fn is_stream_root_admission_skip(&self) -> bool {
+        matches!(
+            self,
+            Self::Skipped { reason }
+                if reason == crate::semantic_adapter::PROJECT_STREAM_ROOT_ADMISSION_REASON
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
