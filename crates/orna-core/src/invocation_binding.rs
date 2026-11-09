@@ -311,19 +311,17 @@ pub fn convert_cli_string(
             .parse::<i64>()
             .map(RuntimeValue::BigInt)
             .map_err(|_| InvocationConversionError::InvalidInteger),
-        ResolvedType::Scalar(StandardScalar::Float) => input
-            .parse::<f64>()
-            .map_err(|_| InvocationConversionError::InvalidFloat)
-            .and_then(|value| {
-                // CLI text arguments accept finite numeric spellings only;
-                // RuntimeFloat itself retains the full IEEE-754 value domain.
-                if !value.is_finite() {
-                    return Err(InvocationConversionError::InvalidFloat);
-                }
-                RuntimeFloat::new(value)
-                    .map(RuntimeValue::Float)
-                    .map_err(|_| InvocationConversionError::InvalidFloat)
-            }),
+        ResolvedType::Scalar(StandardScalar::Float) => {
+            let value = input
+                .parse::<f64>()
+                .map_err(|_| InvocationConversionError::InvalidFloat)?;
+            // CLI text arguments accept finite numeric spellings only;
+            // RuntimeFloat itself retains the full IEEE-754 value domain.
+            if !value.is_finite() {
+                return Err(InvocationConversionError::InvalidFloat);
+            }
+            Ok(RuntimeValue::Float(RuntimeFloat::new(value)))
+        }
         ResolvedType::Scalar(StandardScalar::Boolean) => match input {
             "true" => Ok(RuntimeValue::Boolean(true)),
             "false" => Ok(RuntimeValue::Boolean(false)),
@@ -482,7 +480,7 @@ mod tests {
     }
 
     fn float(value: f64) -> RuntimeValue {
-        RuntimeValue::Float(RuntimeFloat::new(value).unwrap())
+        RuntimeValue::Float(RuntimeFloat::new(value))
     }
 
     #[test]

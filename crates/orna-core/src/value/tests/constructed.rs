@@ -343,7 +343,7 @@ fn runtime_type_preserves_every_flat_runtime_variant() {
             ResolvedType::scalar(StandardScalar::BigInt),
         ),
         (
-            RuntimeValue::Float(RuntimeFloat::new(9.5).unwrap()),
+            RuntimeValue::Float(RuntimeFloat::new(9.5)),
             ResolvedType::scalar(StandardScalar::Float),
         ),
         (
@@ -1962,13 +1962,11 @@ fn named_float_map_keys_fail_at_descriptor_preflight_for_all_attempted_values() 
     let active = active_map_revision();
     let float_descriptor = TypeDescriptor::named(MAP_FLOAT);
     let attempted_keys = [
-        RuntimeValue::Float(RuntimeFloat::new(1.5).unwrap()),
-        RuntimeValue::Float(RuntimeFloat::new(-0.0).unwrap()),
-        // Deliberately bypass the finite-only constructor: descriptor preflight
-        // must reject the named Float key before inspecting this attempted key.
-        // SAFETY: the source and destination types are both 64-bit and bit
-        // patterns are preserved for every f64, including NaN.
-        RuntimeValue::Float(unsafe { std::mem::transmute::<f64, RuntimeFloat>(f64::NAN) }),
+        RuntimeValue::Float(RuntimeFloat::new(1.5)),
+        RuntimeValue::Float(RuntimeFloat::new(-0.0)),
+        // A non-finite FLOAT is a valid value: descriptor preflight must reject
+        // the named Float key before inspecting any attempted key.
+        RuntimeValue::Float(RuntimeFloat::new(f64::NAN)),
     ];
 
     for attempted_key in attempted_keys {
@@ -2002,7 +2000,7 @@ fn float_map_values_remain_accepted_under_an_integer_key_descriptor() {
         descriptor,
         vec![(
             RuntimeValue::Integer(7),
-            RuntimeValue::Float(RuntimeFloat::new(3.5).unwrap()),
+            RuntimeValue::Float(RuntimeFloat::new(3.5)),
         )],
     )
     .unwrap();
@@ -2016,7 +2014,7 @@ fn float_map_values_remain_accepted_under_an_integer_key_descriptor() {
         entries,
         &[(
             RuntimeValue::Integer(7),
-            RuntimeValue::Float(RuntimeFloat::new(3.5).unwrap()),
+            RuntimeValue::Float(RuntimeFloat::new(3.5)),
         )]
     );
 }
@@ -3030,7 +3028,7 @@ fn admitted_leaf_values_construct_in_option_list_and_map() {
         (TypeDescriptor::named(MAP_BIGINT), RuntimeValue::BigInt(2)),
         (
             TypeDescriptor::named(MAP_FLOAT),
-            RuntimeValue::Float(RuntimeFloat::new(3.5).unwrap()),
+            RuntimeValue::Float(RuntimeFloat::new(3.5)),
         ),
         (
             TypeDescriptor::named(MAP_TEXT),
