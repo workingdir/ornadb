@@ -1086,6 +1086,47 @@ fn stream_administration_outcome(
     }
 }
 
+/// The closed set of administrative stream effects that can reach the busy
+/// receipt path.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AdminStreamFunction {
+    /// `sys.admin.pause_stream`.
+    PauseStream,
+    /// `sys.admin.pause_stream_with_reason` (engine vocabulary).
+    PauseStreamWithReason,
+    /// `sys.admin.resume_stream`.
+    ResumeStream,
+}
+
+impl AdminStreamFunction {
+    /// The exact durable receipt name.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::PauseStream => "sys.admin.pause_stream",
+            Self::PauseStreamWithReason => "sys.admin.pause_stream_with_reason",
+            Self::ResumeStream => "sys.admin.resume_stream",
+        }
+    }
+
+    /// Whether this effect requires a reason argument.
+    #[must_use]
+    pub const fn requires_reason(self) -> bool {
+        matches!(self, Self::PauseStreamWithReason)
+    }
+
+    /// The exact inverse of [`Self::name`], at the caller/durable boundary.
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "sys.admin.pause_stream" => Some(Self::PauseStream),
+            "sys.admin.pause_stream_with_reason" => Some(Self::PauseStreamWithReason),
+            "sys.admin.resume_stream" => Some(Self::ResumeStream),
+            _ => None,
+        }
+    }
+}
+
 impl RuntimeState {
     /// Applies a writer-fenced durable pause transition for one resolved
     /// stream. A caller that needs the public administration result must wait
@@ -1358,21 +1399,20 @@ impl RuntimeState {
     pub async fn reject_admin_stream_effect_as_busy(
         &self,
         lease: WriterLease,
-        function: &'static str,
+        function: AdminStreamFunction,
         reference: Value,
         reason: Option<String>,
         invocation_id: [u8; 16],
     ) -> Result<(), RuntimeError> {
-        if !matches!(
-            (function, reason.is_some()),
-            ("sys.admin.pause_stream", false)
-                | ("sys.admin.pause_stream_with_reason", true)
-                | ("sys.admin.resume_stream", false)
-        ) {
+        if function.requires_reason() != reason.is_some() {
             return Err(RuntimeError::RecoveryInvalid);
         }
-        let descriptor =
-            admin_reference_descriptor(invocation_id, function, &reference, reason.as_deref());
+        let descriptor = admin_reference_descriptor(
+            invocation_id,
+            function.name(),
+            &reference,
+            reason.as_deref(),
+        );
         match self
             .record_failed_admin_descriptor(&descriptor, lease, None, &RuntimeError::AdminBusy)
             .await

@@ -20,6 +20,7 @@ use orna_runtime::{
     RuntimeError, RuntimeIdentity, RuntimeState, StreamAdministrationOutcome, TableMutation,
     run_table_activation,
 };
+use orna_sys::SysFailureCode;
 use tempfile::{Builder, TempDir};
 
 fn repository() -> (TempDir, Repository) {
@@ -210,7 +211,7 @@ async fn activation_callback_pause_is_busy_and_does_not_mutate_runtime() {
     ));
     assert_eq!(
         RuntimeError::AdminBusy.public_code(),
-        Some("sys.admin.busy")
+        Some(SysFailureCode::AdminBusy)
     );
     assert_eq!(
         state

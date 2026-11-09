@@ -189,7 +189,7 @@ pub struct InvocationObservation {
     pub ended_ms: Option<i64>,
     pub observed_ms: i64,
     pub status: InvocationObservationStatus,
-    pub failure_code: Option<String>,
+    pub failure_code: Option<orna_sys::SysFailureCode>,
     pub idempotency_key_hash: Option<[u8; 32]>,
     pub live: bool,
 }
@@ -591,7 +591,7 @@ impl RuntimeState {
                    AND status IN (?7, ?8)",
                 params![
                     status.code(),
-                    failure_code,
+                    failure_code.map(orna_sys::SysFailureCode::as_str),
                     ended_ms,
                     id.to_vec(),
                     writer.owner_id.to_vec(),
@@ -690,12 +690,13 @@ impl RuntimeState {
             let updated = tx
                 .execute(
                     "UPDATE sys_invocation_observation
-                     SET status = ?1, failure_code = 'sys.invoke.orphaned',
-                         ended_ms = ?2, observed_ms = ?2
-                     WHERE invocation_id = ?3 AND status IN (?4, ?5)
-                       AND (owner_id <> ?6 OR owner_epoch <> ?7)",
+                     SET status = ?1, failure_code = ?2,
+                         ended_ms = ?3, observed_ms = ?3
+                     WHERE invocation_id = ?4 AND status IN (?5, ?6)
+                       AND (owner_id <> ?7 OR owner_epoch <> ?8)",
                     params![
                         InvocationObservationStatus::Orphaned.code(),
+                        orna_sys::SysFailureCode::InvokeOrphaned.as_str(),
                         ended_ms,
                         id.to_vec(),
                         InvocationObservationStatus::Queued.code(),
@@ -951,39 +952,32 @@ fn bind_invocation_arguments(
 
 fn completion_fields(
     completion: InvocationCompletion,
-) -> Result<(InvocationObservationStatus, Option<String>), RuntimeError> {
-    let result = match completion {
-        InvocationCompletion::Succeeded => (InvocationObservationStatus::Succeeded, None),
-        InvocationCompletion::Failed { diagnostic_code } => {
-            validate_diagnostic_code(&diagnostic_code)?;
-            (InvocationObservationStatus::Failed, Some(diagnostic_code))
-        }
-        InvocationCompletion::Cancelled { diagnostic_code } => {
-            if let Some(code) = &diagnostic_code {
-                validate_diagnostic_code(code)?;
-            }
-            (InvocationObservationStatus::Cancelled, diagnostic_code)
-        }
-        InvocationCompletion::Orphaned { diagnostic_code } => {
-            if let Some(code) = &diagnostic_code {
-                validate_diagnostic_code(code)?;
-            }
-            (InvocationObservationStatus::Orphaned, diagnostic_code)
-        }
+) -> Result<
+    (
+        InvocationObservationStatus,
+        Option<orna_sys::SysFailureCode>,
+    ),
+    RuntimeError,
+> {
+    let parse = |code: Option<String>| {
+        code.map(|code| orna_sys::SysFailureCode::parse(&code).ok_or(RuntimeError::InvalidIdentity))
+            .transpose()
     };
-    Ok(result)
-}
-
-fn validate_diagnostic_code(value: &str) -> Result<(), RuntimeError> {
-    if value.is_empty()
-        || value.len() > 256
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-    {
-        return Err(RuntimeError::InvalidIdentity);
-    }
-    Ok(())
+    Ok(match completion {
+        InvocationCompletion::Succeeded => (InvocationObservationStatus::Succeeded, None),
+        InvocationCompletion::Failed { diagnostic_code } => (
+            InvocationObservationStatus::Failed,
+            parse(Some(diagnostic_code))?,
+        ),
+        InvocationCompletion::Cancelled { diagnostic_code } => (
+            InvocationObservationStatus::Cancelled,
+            parse(diagnostic_code)?,
+        ),
+        InvocationCompletion::Orphaned { diagnostic_code } => (
+            InvocationObservationStatus::Orphaned,
+            parse(diagnostic_code)?,
+        ),
+    })
 }
 
 async fn validate_launch_owner(
@@ -1140,6 +1134,9 @@ async fn load_invocation_observation(
             .map_err(|_| RuntimeError::RecoveryInvalid)?,
     )?;
     let failure_code: Option<String> = row.get(16).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    let failure_code = failure_code
+        .map(|code| orna_sys::SysFailureCode::parse(&code).ok_or(RuntimeError::RecoveryInvalid))
+        .transpose()?;
     let idempotency_key_hash: Option<Vec<u8>> =
         row.get(17).map_err(|_| RuntimeError::RecoveryInvalid)?;
     let idempotency_key_hash = idempotency_key_hash.map(fixed::<32>).transpose()?;
@@ -1159,9 +1156,6 @@ async fn load_invocation_observation(
         }
     {
         return Err(RuntimeError::RecoveryInvalid);
-    }
-    if let Some(code) = &failure_code {
-        validate_diagnostic_code(code)?;
     }
     let mut current_writer_rows = connection
         .query(

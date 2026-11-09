@@ -19,6 +19,7 @@ use orna_stream::{
     AsyncCheckpointBackend, CheckpointPrecondition, CommitIntent, CommitResult, DeliveryIdentity,
     DiagnosticClass, DiagnosticCode, LeasePurpose, Position, SafeDiagnostic, StreamFailurePayload,
 };
+use orna_sys::SysFailureCode;
 use tempfile::{Builder, TempDir};
 
 #[derive(Clone)]
@@ -142,7 +143,7 @@ async fn unsupported_target_and_key_format_mismatch_fail_before_mutation() {
         .unwrap_err();
     assert_eq!(
         rejected.public_code(),
-        Some("sys.checkpoint.not_replayable")
+        Some(SysFailureCode::CheckpointNotReplayable)
     );
     assert_eq!(state.stream_checkpoint(&key).await.unwrap(), before);
     assert!(
@@ -179,7 +180,7 @@ async fn unsupported_target_and_key_format_mismatch_fail_before_mutation() {
         .unwrap_err();
     assert_eq!(
         rejected.public_code(),
-        Some("sys.checkpoint.not_replayable")
+        Some(SysFailureCode::CheckpointNotReplayable)
     );
     assert_eq!(mismatch_provider.validations.load(Ordering::Relaxed), 0);
     assert_eq!(state.stream_checkpoint(&key).await.unwrap(), before);
@@ -216,7 +217,7 @@ async fn provider_key_format_mismatch_with_live_owner_is_rejected_before_mutatio
 
     assert_eq!(
         rejected.public_code(),
-        Some("sys.checkpoint.not_replayable")
+        Some(SysFailureCode::CheckpointNotReplayable)
     );
     assert_eq!(provider.validations.load(Ordering::Relaxed), 0);
     assert_eq!(state.stream_checkpoint(&key).await.unwrap(), before);
@@ -340,7 +341,10 @@ async fn stale_version_and_position_map_to_conflict_without_mutation() {
         .await
         .unwrap_err();
     assert_eq!(stale_version, RuntimeError::StreamCheckpointStale);
-    assert_eq!(stale_version.public_code(), Some("sys.checkpoint.conflict"));
+    assert_eq!(
+        stale_version.public_code(),
+        Some(SysFailureCode::CheckpointConflict)
+    );
 
     let stale_position = state
         .reset_checkpoint_with_provider(
@@ -360,7 +364,7 @@ async fn stale_version_and_position_map_to_conflict_without_mutation() {
         .unwrap_err();
     assert_eq!(
         stale_position.public_code(),
-        Some("sys.checkpoint.conflict")
+        Some(SysFailureCode::CheckpointConflict)
     );
     assert_eq!(state.stream_checkpoint(&key).await.unwrap(), before);
     assert_eq!(state.checkpoint_reset_audits(&key).await.unwrap().len(), 1);
