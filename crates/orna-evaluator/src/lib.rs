@@ -7269,7 +7269,7 @@ impl Context<'_, '_> {
                 pipeline: false,
             },
         ];
-        let values = Self::order_arguments(&params, &[], arguments, values, 0, false)?;
+        let values = Self::order_arguments(&params, &[], arguments, values, 0, false, None)?;
         match values.as_slice() {
             [
                 Value::Decimal(divisor),
@@ -7357,6 +7357,7 @@ impl Context<'_, '_> {
                 values,
                 implicit,
                 true,
+                Some(id),
             )?;
             if id == orna_intrinsics::IntrinsicId::CollectionBucketBy && ordered.len() == 2 {
                 ordered.push(Value::String("UTC".into()));
@@ -9629,6 +9630,7 @@ impl Context<'_, '_> {
             values,
             implicit,
             false,
+            Some(id),
         )?;
         let mut values = values;
         if id == orna_intrinsics::IntrinsicId::CollectionBucketBy && values.len() == 2 {
@@ -9797,6 +9799,7 @@ impl Context<'_, '_> {
         values: Vec<Value>,
         implicit: usize,
         relation: bool,
+        id: Option<orna_intrinsics::IntrinsicId>,
     ) -> Result<Vec<Value>, EvaluationError> {
         let unsupported = || {
             error(if relation {
@@ -9817,6 +9820,15 @@ impl Context<'_, '_> {
         if arguments.iter().all(|argument| argument.name.is_none()) {
             return Ok(values);
         }
+        let relation_first_is_rows = relation
+            && id.is_some_and(|id| {
+                matches!(
+                    id,
+                    orna_intrinsics::IntrinsicId::CollectionWindow
+                        | orna_intrinsics::IntrinsicId::CollectionUnique
+                        | orna_intrinsics::IntrinsicId::CollectionPairs
+                )
+            });
         let mut ordered: Vec<Option<Value>> = vec![None; params.len()];
         let mut positional = 0;
         let mut named_started = false;
@@ -9829,15 +9841,23 @@ impl Context<'_, '_> {
                 named_started = true;
                 params
                     .iter()
-                    .position(|param| param.name == name)
+                    .enumerate()
+                    .position(|(index, param)| {
+                        // Relation stages keep the pre-S2 `rows` spelling for
+                        // these three operations, whose catalogue parameter is
+                        // named `values`; nothing else renames a parameter.
+                        let expected = if index == 0 && relation_first_is_rows {
+                            "rows"
+                        } else {
+                            param.name
+                        };
+                        expected == name
+                    })
                     .or_else(|| match name {
                         "values"
                             if !relation
                                 && params.first().is_some_and(|param| param.name == "rows") =>
                         {
-                            Some(0)
-                        }
-                        "rows" if params.first().is_some_and(|param| param.name == "values") => {
                             Some(0)
                         }
                         "min" if params.get(1).is_some_and(|param| param.name == "lower") => {
