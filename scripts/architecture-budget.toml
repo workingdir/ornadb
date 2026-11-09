@@ -499,12 +499,9 @@ name = "orna-syntax"
 [crate.functions]
 "src/parser.rs::annotate_expr" = 143
 "src/parser.rs::annotate_item" = 154
-"src/parser.rs::parse_block_inner" = 202
 "src/parser.rs::parse_control_expression_inner" = 131
-"src/parser.rs::parse_pattern_inner" = 191
 "src/parser.rs::parse_type_expr_inner" = 177
 "src/parser.rs::pratt_from" = 214
-"src/parser.rs::prefix" = 192
 "src/parser.rs::validate_token_grammar" = 129
 
 [[crate]]

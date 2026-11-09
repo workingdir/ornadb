@@ -527,32 +527,7 @@ pub fn walk_expr<V: Visit + ?Sized>(visitor: &mut V, expression: &Expr) {
                 visitor.visit_expr(upper);
             }
         }
-        Expr::Call {
-            callee,
-            arguments,
-            span,
-        } => {
-            visitor.visit_span(span);
-            visitor.visit_expr(callee);
-            for argument in arguments {
-                visitor.visit_argument(argument);
-            }
-        }
-        Expr::GenericCall {
-            callee,
-            type_arguments,
-            arguments,
-            span,
-        } => {
-            visitor.visit_span(span);
-            visitor.visit_expr(callee);
-            for ty in type_arguments {
-                visitor.visit_type(ty);
-            }
-            for argument in arguments {
-                visitor.visit_argument(argument);
-            }
-        }
+        Expr::Call { .. } | Expr::GenericCall { .. } => walk_call(visitor, expression),
         Expr::Index { base, index, span } => {
             visitor.visit_span(span);
             visitor.visit_expr(base);
@@ -576,21 +551,7 @@ pub fn walk_expr<V: Visit + ?Sized>(visitor: &mut V, expression: &Expr) {
                 visitor.visit_expr(element);
             }
         }
-        Expr::Record { fields, span } => {
-            visitor.visit_span(span);
-            for field in fields {
-                visitor.visit_record_field(field);
-            }
-        }
-        Expr::Nominal { path, fields, span } => {
-            visitor.visit_span(span);
-            for segment in path {
-                visitor.visit_name_segment(segment);
-            }
-            for field in fields {
-                visitor.visit_record_field(field);
-            }
-        }
+        Expr::Record { .. } | Expr::Nominal { .. } => walk_record(visitor, expression),
         Expr::Lambda {
             parameters,
             body,
@@ -615,31 +576,85 @@ pub fn walk_expr<V: Visit + ?Sized>(visitor: &mut V, expression: &Expr) {
                 visitor.visit_expr(tail);
             }
         }
-        Expr::Control {
-            kind,
-            binding,
-            condition,
-            body,
-            arms,
-            alternate,
+        Expr::Control { .. } => walk_control(visitor, expression),
+    }
+}
+
+/// Visits a call expression: the callee, its type arguments and its argument
+/// values. Called only for `Expr::Call` and `Expr::GenericCall`.
+fn walk_call<V: Visit + ?Sized>(visitor: &mut V, expression: &Expr) {
+    let (callee, type_arguments, arguments, span) = match expression {
+        Expr::Call {
+            callee,
+            arguments,
             span,
-            ..
-        } => {
-            visitor.visit_span(span);
-            if let Some(binding) = binding {
-                visitor.visit_control_binding(binding);
-            }
-            if let Some(condition) = condition {
-                visitor.visit_expr(condition);
-            }
-            if let Some(body) = body {
-                visitor.visit_expr(body);
-            }
-            visitor.visit_control_arms(*kind, arms);
-            if let Some(alternate) = alternate {
-                visitor.visit_expr(alternate);
-            }
+        } => (callee, &[][..], arguments, span),
+        Expr::GenericCall {
+            callee,
+            type_arguments,
+            arguments,
+            span,
+        } => (callee, &type_arguments[..], arguments, span),
+        _ => unreachable!("walk_call is only called for call expressions"),
+    };
+    visitor.visit_span(span);
+    visitor.visit_expr(callee);
+    for ty in type_arguments {
+        visitor.visit_type(ty);
+    }
+    for argument in arguments {
+        visitor.visit_argument(argument);
+    }
+}
+
+/// Visits a record literal or nominal constructor. Called only for
+/// `Expr::Record` and `Expr::Nominal`.
+fn walk_record<V: Visit + ?Sized>(visitor: &mut V, expression: &Expr) {
+    let (path, fields, span) = match expression {
+        Expr::Record { fields, span } => (None, fields, span),
+        Expr::Nominal { path, fields, span } => (Some(path.as_slice()), fields, span),
+        _ => unreachable!("walk_record is only called for record expressions"),
+    };
+    visitor.visit_span(span);
+    if let Some(path) = path {
+        for segment in path {
+            visitor.visit_name_segment(segment);
         }
+    }
+    for field in fields {
+        visitor.visit_record_field(field);
+    }
+}
+
+/// Visits a control expression: binding, condition, body, arms and alternate.
+/// Called only for `Expr::Control`.
+fn walk_control<V: Visit + ?Sized>(visitor: &mut V, expression: &Expr) {
+    let Expr::Control {
+        kind,
+        binding,
+        condition,
+        body,
+        arms,
+        alternate,
+        span,
+        ..
+    } = expression
+    else {
+        unreachable!("walk_control is only called for control expressions");
+    };
+    visitor.visit_span(span);
+    if let Some(binding) = binding {
+        visitor.visit_control_binding(binding);
+    }
+    if let Some(condition) = condition {
+        visitor.visit_expr(condition);
+    }
+    if let Some(body) = body {
+        visitor.visit_expr(body);
+    }
+    visitor.visit_control_arms(*kind, arms);
+    if let Some(alternate) = alternate {
+        visitor.visit_expr(alternate);
     }
 }
 
