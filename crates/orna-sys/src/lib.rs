@@ -8,11 +8,12 @@
 //! supervisor below only provides a bounded execution and await seam for
 //! admitted work.
 
-pub use orna_sys_id::SysFunction;
+pub use orna_sys_id::{HostOperation, HostProvider, SysFunction};
 pub use orna_sys_model::abi_version::AbiVersion;
-pub use orna_sys_model::host_registry_model::{
-    HostBindingDeclaration, HostOperationDescriptor, HostProviderRole, SystemHostOperationRegistry,
-};
+pub use orna_sys_model::host_registry_model::{HostBindingDeclaration, HostProviderRole};
+
+mod host_registry_model;
+pub use host_registry_model::{HostOperationDescriptor, SystemHostOperationRegistry};
 
 mod introspection;
 pub use introspection::{

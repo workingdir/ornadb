@@ -7,13 +7,15 @@ use std::{
 use quote::ToTokens;
 use serde::Serialize;
 use serde_json::{Value, json};
-use syn::visit::Visit;
+use syn::{Expr, Lit, Meta, Token, punctuated::Punctuated, visit::Visit};
 
 use orna_sys_model::{
     abi_version::AbiVersion,
     host_registry_model::{HostOperationDescriptor, HostProviderRole, SystemHostOperationRegistry},
     signature::{matching_delimiter, split_top_level},
 };
+
+include!(concat!(env!("OUT_DIR"), "/sys_host_vocabulary.rs"));
 
 #[derive(Default)]
 struct Collector {
@@ -538,6 +540,259 @@ fn valid_provider_role_annotation_id(value: &str) -> bool {
     valid_qualified_id(role) && minor.parse::<u16>().is_ok() && major.parse::<u16>().is_ok()
 }
 
+fn variant_ident(expr: &Expr, owner: &str) -> Result<String, String> {
+    let Expr::Path(path) = expr else {
+        return Err(format!("{owner} value must be a `{owner}::Variant` path"));
+    };
+    if path.qself.is_some() || path.path.segments.len() != 2 {
+        return Err(format!("{owner} value must be a `{owner}::Variant` path"));
+    }
+    let namespace = path.path.segments[0].ident.to_string();
+    let effects_alias = owner == "SysEffectKind" && namespace == "SysEffect";
+    if namespace != owner && !effects_alias {
+        return Err(format!("{owner} value must be a `{owner}::Variant` path"));
+    }
+    Ok(path.path.segments[1].ident.to_string())
+}
+
+fn variant_list(expr: &Expr, owner: &str) -> Result<Vec<String>, String> {
+    let Expr::Array(array) = expr else {
+        return Err(format!("{owner} list must be a `[...]` array"));
+    };
+    array
+        .elems
+        .iter()
+        .map(|element| variant_ident(element, owner))
+        .collect()
+}
+
+fn string_value(expr: &Expr, key: &str) -> Result<String, String> {
+    match expr {
+        Expr::Lit(literal) => match &literal.lit {
+            Lit::Str(text) => Ok(text.value()),
+            _ => Err(format!("host operation `{key}` must be a string literal")),
+        },
+        _ => Err(format!("host operation `{key}` must be a string literal")),
+    }
+}
+
+fn sys_function_label(variant: &str) -> Option<&'static str> {
+    SYS_FUNCTION_VARIANTS
+        .iter()
+        .find(|(name, _)| *name == variant)
+        .map(|(_, label)| *label)
+}
+
+fn failure_code_text(variant: &str) -> Option<&'static str> {
+    SYS_FAILURE_CODE_VARIANTS
+        .iter()
+        .find(|(name, _)| *name == variant)
+        .map(|(_, code)| *code)
+}
+
+fn host_operation_entry(variant: &str) -> Option<(&'static str, &'static str, &'static str)> {
+    HOST_OPERATION_VARIANTS
+        .iter()
+        .find(|(name, ..)| *name == variant)
+        .map(|(_, label, role, provider)| (*label, *role, *provider))
+}
+
+fn host_provider_name(variant: &str) -> Option<&'static str> {
+    HOST_PROVIDER_VARIANTS
+        .iter()
+        .find(|(name, _)| *name == variant)
+        .map(|(_, provider)| *provider)
+}
+
+fn effect_name(variant: &str) -> Option<&'static str> {
+    match variant {
+        "Read" => Some("read"),
+        "Invoke" => Some("invoke"),
+        "Admin" => Some("admin"),
+        _ => None,
+    }
+}
+
+/// Extracts the `# Preconditions` paragraphs of one host method's doc comment.
+///
+/// Each blank-line-separated paragraph is one precondition, matching the
+/// generated registry's prose entries byte for byte.
+fn doc_preconditions(attributes: &[syn::Attribute]) -> Result<Vec<String>, String> {
+    let mut lines = Vec::new();
+    for attribute in attributes {
+        if attribute.path().is_ident("sys_host_operation") {
+            break;
+        }
+        if !attribute.path().is_ident("doc") {
+            continue;
+        }
+        let Meta::NameValue(value) = &attribute.meta else {
+            continue;
+        };
+        let Expr::Lit(literal) = &value.value else {
+            return Err("host operation doc comments must be string literals".to_owned());
+        };
+        let Lit::Str(text) = &literal.lit else {
+            return Err("host operation doc comments must be string literals".to_owned());
+        };
+        lines.push(text.value());
+    }
+    let mut found = false;
+    let mut paragraphs = Vec::new();
+    let mut current = Vec::new();
+    let joined = lines.join("\n");
+    for line in joined.lines() {
+        let line = line.trim();
+        if !found {
+            if line == "# Preconditions" {
+                found = true;
+            }
+            continue;
+        }
+        if line.starts_with('#') {
+            break;
+        }
+        if line.is_empty() {
+            if !current.is_empty() {
+                paragraphs.push(current.join(" "));
+                current.clear();
+            }
+        } else {
+            current.push(line);
+        }
+    }
+    if !current.is_empty() {
+        paragraphs.push(current.join(" "));
+    }
+    if !found {
+        return Err("host operation doc comment must declare `# Preconditions`".to_owned());
+    }
+    if paragraphs.is_empty() {
+        return Err("host operation `# Preconditions` section is empty".to_owned());
+    }
+    Ok(paragraphs)
+}
+
+/// Converts one typed `#[sys_host_operation]` attribute into the canonical
+/// metadata object the registry projection serializes.
+fn typed_attribute_metadata(
+    attribute: &syn::Attribute,
+    method: &syn::ImplItemFn,
+) -> Result<Value, String> {
+    let metas = attribute
+        .parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
+        .map_err(|error| error.to_string())?;
+    let mut function = None;
+    let mut operation = None;
+    let mut effects = None;
+    let mut failures = None;
+    let mut role = None;
+    let mut provider = None;
+    let mut signature = None;
+    let mut implementation = None;
+    for meta in metas {
+        let Meta::NameValue(named) = meta else {
+            return Err("host operation metadata must use `key = value` entries".to_owned());
+        };
+        let key = named
+            .path
+            .get_ident()
+            .ok_or_else(|| "host operation metadata key must be an identifier".to_owned())?
+            .to_string();
+        match key.as_str() {
+            "function" => function = Some(variant_ident(&named.value, "SysFunction")?),
+            "operation" => operation = Some(variant_ident(&named.value, "HostOperation")?),
+            "effects" => effects = Some(variant_list(&named.value, "SysEffectKind")?),
+            "failures" => failures = Some(variant_list(&named.value, "SysFailureCode")?),
+            "role" => role = Some(string_value(&named.value, "role")?),
+            "provider" => provider = Some(variant_ident(&named.value, "HostProvider")?),
+            "signature" => signature = Some(string_value(&named.value, "signature")?),
+            "implementation" => {
+                implementation = Some(string_value(&named.value, "implementation")?)
+            }
+            other => {
+                return Err(format!("unknown host operation metadata key `{other}`"));
+            }
+        }
+    }
+    let operation = operation.ok_or_else(|| {
+        "host operation metadata must declare `operation = HostOperation::X`".to_owned()
+    })?;
+    let (name, expected_role, expected_provider) = host_operation_entry(&operation)
+        .ok_or_else(|| format!("unknown HostOperation variant `{operation}`"))?;
+    if let Some(function) = &function {
+        let label = sys_function_label(function)
+            .ok_or_else(|| format!("unknown SysFunction variant `{function}`"))?;
+        if label != name {
+            return Err(format!(
+                "SysFunction `{function}` labels `{label}`, not host operation `{name}`"
+            ));
+        }
+    }
+    let role = role.ok_or_else(|| "host operation metadata is missing `role`".to_owned())?;
+    if role != expected_role {
+        return Err(format!(
+            "host operation `{name}` role must be `{expected_role}`"
+        ));
+    }
+    let provider =
+        provider.ok_or_else(|| "host operation metadata is missing `provider`".to_owned())?;
+    let provider_name = host_provider_name(&provider)
+        .ok_or_else(|| format!("unknown HostProvider variant `{provider}`"))?;
+    if provider_name != expected_provider {
+        return Err(format!(
+            "host operation `{name}` provider must be `{expected_provider}`"
+        ));
+    }
+    let signature =
+        signature.ok_or_else(|| "host operation metadata is missing `signature`".to_owned())?;
+    let implementation = implementation
+        .ok_or_else(|| "host operation metadata is missing `implementation`".to_owned())?;
+    let effects =
+        effects.ok_or_else(|| "host operation metadata is missing `effects`".to_owned())?;
+    if effects.is_empty() {
+        return Err("host operation effects must be a non-empty known effect list".to_owned());
+    }
+    let effects = effects
+        .iter()
+        .map(|variant| {
+            effect_name(variant).ok_or_else(|| format!("unknown SysEffectKind variant `{variant}`"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let failures = failures
+        .ok_or_else(|| "host operation metadata is missing `failures`".to_owned())?
+        .iter()
+        .map(|variant| {
+            failure_code_text(variant)
+                .ok_or_else(|| format!("unknown SysFailureCode variant `{variant}`"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let (_, version) = role
+        .rsplit_once('@')
+        .ok_or_else(|| "host role requires an explicit @major.minor version".to_owned())?;
+    let (major, minor) = version
+        .split_once('.')
+        .ok_or_else(|| "host role version must be major.minor".to_owned())?;
+    let major: u64 = major
+        .parse()
+        .map_err(|_| "host role version requires numeric major and minor".to_owned())?;
+    let minor: u64 = minor
+        .parse()
+        .map_err(|_| "host role version requires numeric major and minor".to_owned())?;
+    let preconditions = doc_preconditions(&method.attrs)?;
+    Ok(json!({
+        "name": name,
+        "version": {"major": major, "minor": minor},
+        "signature": signature,
+        "effects": effects,
+        "preconditions": preconditions,
+        "failures": failures,
+        "role": role,
+        "provider": provider_name,
+        "implementation": implementation,
+    }))
+}
+
 impl<'ast> Visit<'ast> for Collector {
     fn visit_impl_item_fn(&mut self, method: &'ast syn::ImplItemFn) {
         for attribute in method
@@ -545,34 +800,27 @@ impl<'ast> Visit<'ast> for Collector {
             .iter()
             .filter(|attribute| attribute.path().is_ident("sys_host_operation"))
         {
-            let parsed = attribute.parse_args::<syn::LitStr>();
-            let result = parsed
-                .map_err(|error| error.to_string())
-                .and_then(|literal| {
-                    let mut metadata: Value = serde_json::from_str(&literal.value())
-                        .map_err(|error| format!("invalid host-operation JSON: {error}"))?;
-                    validate_operation(&metadata, &method.sig)?;
-                    // The registry describes the portable operation, not the
-                    // Rust implementation shape. A host method may take one
-                    // request struct where the portable signature has several
-                    // parameters, so the declared signature owns the names.
-                    metadata["parameters"] = Value::Array(
-                        signature_parameter_names(
-                            metadata["signature"]
-                                .as_str()
-                                .expect("validated host signature"),
-                        )?
-                        .into_iter()
-                        .map(Value::String)
-                        .collect(),
-                    );
-                    let operation: HostOperationDescriptor = serde_json::from_value(metadata)
-                        .map_err(|error| {
-                            format!("invalid typed host-operation metadata: {error}")
-                        })?;
-                    let name = operation.name.clone();
-                    Ok((name, operation))
-                });
+            let result = typed_attribute_metadata(attribute, method).and_then(|mut metadata| {
+                validate_operation(&metadata, &method.sig)?;
+                // The registry describes the portable operation, not the
+                // Rust implementation shape. A host method may take one
+                // request struct where the portable signature has several
+                // parameters, so the declared signature owns the names.
+                metadata["parameters"] = Value::Array(
+                    signature_parameter_names(
+                        metadata["signature"]
+                            .as_str()
+                            .expect("validated host signature"),
+                    )?
+                    .into_iter()
+                    .map(Value::String)
+                    .collect(),
+                );
+                let operation: HostOperationDescriptor = serde_json::from_value(metadata)
+                    .map_err(|error| format!("invalid typed host-operation metadata: {error}"))?;
+                let name = operation.name.clone();
+                Ok((name, operation))
+            });
             match result {
                 Ok((name, metadata)) => {
                     if self.operations.insert(name.clone(), metadata).is_some() {
@@ -958,4 +1206,58 @@ fn validate_native_method_signature(
 
 fn compact_tokens<T: ToTokens + ?Sized>(value: &T) -> String {
     value.to_token_stream().to_string().replace(' ', "")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn typed_declaration_rejects_an_unknown_sys_function_variant() {
+        let attribute: syn::Attribute = syn::parse_quote!(#[sys_host_operation(
+            function = SysFunction::NotAVariant,
+            operation = HostOperation::StdIoFsReadText,
+            effects = [SysEffectKind::Read],
+            failures = [SysFailureCode::ObjectNotFound],
+            role = "host.std.io.fs.read@1.0",
+            provider = HostProvider::Filesystem,
+            signature = "fn std.io.fs.read_text(root: Str, path: Str): Str",
+            implementation = "read_text"
+        )]);
+        let method: syn::ImplItemFn = syn::parse_quote! {
+            fn read_text(&self, root: &str, path: &str) -> Result<String, FilesystemProviderError> {
+                todo!()
+            }
+        };
+        let error = typed_attribute_metadata(&attribute, &method).unwrap_err();
+        assert!(
+            error.contains("unknown SysFunction variant"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn typed_declaration_rejects_a_foreign_host_operation_role() {
+        let attribute: syn::Attribute = syn::parse_quote!(#[sys_host_operation(
+            operation = HostOperation::StdIoFsReadText,
+            effects = [SysEffectKind::Read],
+            failures = [SysFailureCode::ObjectNotFound],
+            role = "host.std.io.fs.write@1.0",
+            provider = HostProvider::Filesystem,
+            signature = "fn std.io.fs.read_text(root: Str, path: Str): Str",
+            implementation = "read_text"
+        )]);
+        let method: syn::ImplItemFn = syn::parse_quote! {
+            /// Read text.
+            ///
+            /// # Preconditions
+            ///
+            /// root is held for the provider lifetime
+            fn read_text(&self, root: &str, path: &str) -> Result<String, FilesystemProviderError> {
+                todo!()
+            }
+        };
+        let error = typed_attribute_metadata(&attribute, &method).unwrap_err();
+        assert!(error.contains("role must be"), "unexpected error: {error}");
+    }
 }

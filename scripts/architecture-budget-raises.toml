@@ -601,3 +601,15 @@ new_limit = 132
 reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
 bead = "ornadb-rkn8m"
 
+
+[[raise]]
+path = "crates/orna-sys/src/host_filesystem.rs"
+new_limit = 2600
+reason = "stage S2 replaces the embedded JSON payloads with typed declaration attributes and # Preconditions doc prose; the facts are unchanged"
+bead = "ornadb-ouxeq.3"
+
+[[raise]]
+path = "crates/orna-sys-codegen/src/build_host.rs"
+new_limit = 1350
+reason = "stage S2 adds the typed declaration parser, doc-comment precondition extraction and generated-vocabulary resolution"
+bead = "ornadb-ouxeq.3"

@@ -243,7 +243,7 @@ fn portable_failure_codes_are_the_catalogue_set_in_order() {
         assert_eq!(code.origin(), orna_sys_id::Origin::Engine);
         assert!(!expected.contains(&code.as_str()));
     }
-    assert_eq!(engine_codes.len(), 34);
+    assert_eq!(engine_codes.len(), orna_sys_id::ENGINE_FAILURE_CODE_COUNT);
 }
 
 #[test]
@@ -478,6 +478,35 @@ fn engine_inventory_matches_the_generated_tables() {
         assert!(names.insert(name));
         assert!(orna_sys_id::ENGINE_TEST_FIXTURE_NAMES.contains(&name));
     }
+    let host_operations = array(&engine, "host_operations");
+    assert_eq!(host_operations.len(), orna_sys_id::HOST_OPERATION_COUNT);
+    assert_eq!(
+        orna_sys_id::HostOperation::ALL.len(),
+        orna_sys_id::HOST_OPERATION_COUNT
+    );
+    for (index, entry) in host_operations.iter().enumerate() {
+        let name = entry["name"].as_str().unwrap();
+        let operation = orna_sys_id::HostOperation::ALL[index];
+        assert_eq!(operation.label(), name);
+        assert_eq!(
+            orna_sys_id::HostOperation::from_label(name),
+            Some(operation)
+        );
+        assert_eq!(operation.origin(), orna_sys_id::Origin::Engine);
+        assert_eq!(
+            orna_sys_id::HostProvider::parse(entry["provider"].as_str().unwrap()),
+            Some(operation.provider())
+        );
+        assert_eq!(operation.role(), entry["role"].as_str().unwrap());
+    }
+    assert_eq!(
+        array(&engine, "host_providers").len(),
+        orna_sys_id::HOST_PROVIDER_COUNT
+    );
+    assert_eq!(
+        orna_sys_id::HostProvider::ALL.len(),
+        orna_sys_id::HOST_PROVIDER_COUNT
+    );
     assert_eq!(names.len(), orna_sys_id::ENGINE_NAME_COUNT);
     for family in ["inspect", "security", "state"] {
         let prefix = format!("sys.{family}.");

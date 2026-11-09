@@ -18,9 +18,9 @@ pub const ENGINE_SEALED_FUNCTION_COUNT: usize = 27;
 pub const ENGINE_ONLY_FUNCTION_COUNT: usize = 2;
 pub const ENGINE_ONLY_TYPE_COUNT: usize = 4;
 pub const ENGINE_RETIRED_FUNCTION_COUNT: usize = 2;
-pub const ENGINE_FAILURE_CODE_COUNT: usize = 34;
+pub const ENGINE_FAILURE_CODE_COUNT: usize = 61;
 pub const ENGINE_TEST_FIXTURE_NAME_COUNT: usize = 19;
-pub const ENGINE_NAME_COUNT: usize = 88;
+pub const ENGINE_NAME_COUNT: usize = 115;
 
 /// One catalogued callable's metadata, byte-for-byte from the catalogue.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

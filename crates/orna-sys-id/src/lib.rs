@@ -19,6 +19,7 @@
 pub mod descriptor;
 pub mod error_code;
 pub mod function;
+pub mod host_operation;
 pub mod relation;
 pub mod removed;
 pub mod versioned;
@@ -36,6 +37,10 @@ pub use descriptor::{
 };
 pub use error_code::{PORTABLE_FAILURE_CODE_COUNT, SYS_FAILURE_CODE_COUNT, SysFailureCode};
 pub use function::{AmbiguousPath, SYS_FUNCTION_COUNT, SysFunction};
+pub use host_operation::{
+    HOST_OPERATION_COUNT, HOST_OPERATION_DESCRIPTORS, HOST_PROVIDER_COUNT, HostOperation,
+    HostOperationDescriptor, HostProvider, host_operation_descriptor,
+};
 pub use relation::{
     SYS_ENUM_COUNT, SYS_ENUM_VALUE_COUNT, SYS_FIELD_COUNT, SYS_GROUPED_HANDLE_COUNT,
     SYS_RELATION_COUNT, SYS_SINGLETON_COUNT, SYS_TYPE_COUNT, SysEnum, SysEnumValue, SysField,
@@ -120,6 +125,33 @@ impl SysEffect {
             "admin" => Some(SysEffect::Admin),
             _ => None,
         }
+    }
+
+    /// The Rust variant identifier, for typed declarations.
+    #[must_use]
+    pub const fn variant_name(self) -> &'static str {
+        match self {
+            SysEffect::Read => "Read",
+            SysEffect::Invoke => "Invoke",
+            SysEffect::Admin => "Admin",
+        }
+    }
+
+    /// Resolves a variant identifier used by a typed declaration.
+    #[must_use]
+    pub fn from_variant_name(name: &str) -> Option<Self> {
+        match name {
+            "Read" => Some(SysEffect::Read),
+            "Invoke" => Some(SysEffect::Invoke),
+            "Admin" => Some(SysEffect::Admin),
+            _ => None,
+        }
+    }
+}
+
+impl PartialEq<&str> for SysEffect {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
     }
 }
 

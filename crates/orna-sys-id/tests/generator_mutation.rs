@@ -49,7 +49,7 @@ fn the_unmutated_catalogues_generate() {
     assert!(generated.relations.contains("\"sys.Database\""));
     assert!(generated.removed.contains("SysRemovedName"));
     assert!(generated.tables.contains("SYS_FUNCTION_DESCRIPTORS"));
-    assert_eq!(generated.files().len(), 5);
+    assert_eq!(generated.files().len(), 6);
 }
 
 #[test]

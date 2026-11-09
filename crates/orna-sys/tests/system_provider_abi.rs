@@ -1395,7 +1395,7 @@ fn every_dispatch_operation_declares_its_portable_failure_vocabulary() {
             .unwrap_or_else(|| panic!("host operation `{}` has no portable contract", host.name));
         for code in &host.failures {
             assert!(
-                contract.declares_failure(&FailureCode::new(code).unwrap()),
+                contract.declares_failure(&FailureCode::new(code.as_str()).unwrap()),
                 "host operation `{}` declares `{code}` outside its portable contract",
                 host.name
             );
