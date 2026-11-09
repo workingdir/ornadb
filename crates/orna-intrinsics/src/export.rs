@@ -105,7 +105,14 @@ fn render_signature(out: &mut String, signature: &Signature) {
     }
     out.push_str("],\n        \"result\": ");
     let _ = write!(out, "\"{}\"", escape(&signature.result.render()));
-    out.push_str("\n      }");
+    out.push_str(",\n        \"arities\": [");
+    for (index, arity) in signature.arities.iter().enumerate() {
+        if index != 0 {
+            out.push_str(", ");
+        }
+        let _ = write!(out, "{arity}");
+    }
+    out.push_str("]\n      }");
 }
 
 fn render_param(out: &mut String, param: &Param) {

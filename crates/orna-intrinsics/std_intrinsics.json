@@ -1,6 +1,6 @@
 {
   "schema": "orna.std_intrinsics.v1",
-  "source_digest": "30b2a2b1ad6f14c7",
+  "source_digest": "8516713d90d64008",
   "intrinsics": [
     {
       "id": "CoreSome",
@@ -11,7 +11,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "value", "type": "Param(0)", "has_default": false, "pipeline": false }],
-        "result": "Param(0)?"
+        "result": "Param(0)?",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -28,7 +29,8 @@
       "signature": {
         "type_params": [],
         "params": [],
-        "result": "Instant"
+        "result": "Instant",
+        "arities": []
       },
       "effect": "Clock",
       "dispatch": { "kind": "Native" },
@@ -45,7 +47,8 @@
       "signature": {
         "type_params": [],
         "params": [],
-        "result": "Uuid"
+        "result": "Uuid",
+        "arities": []
       },
       "effect": "Entropy",
       "dispatch": { "kind": "Native" },
@@ -62,7 +65,8 @@
       "signature": {
         "type_params": [],
         "params": [{ "name": "code", "type": "Str", "has_default": false, "pipeline": false }, { "name": "message", "type": "Str", "has_default": false, "pipeline": false }],
-        "result": "Error"
+        "result": "Error",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -79,7 +83,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "error", "type": "Error", "has_default": false, "pipeline": false }],
-        "result": "Param(0)"
+        "result": "Param(0)",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -96,7 +101,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "predicate", "type": "fn(Param(0)): Bool", "has_default": false, "pipeline": false }],
-        "result": "[Param(0)]"
+        "result": "[Param(0)]",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -113,7 +119,8 @@
       "signature": {
         "type_params": ["T", "U"],
         "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "transform", "type": "fn(Param(0)): Param(1)", "has_default": false, "pipeline": false }],
-        "result": "[Param(1)]"
+        "result": "[Param(1)]",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -130,7 +137,8 @@
       "signature": {
         "type_params": ["T", "U"],
         "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "transform", "type": "fn(Param(0)): [Param(1)]", "has_default": false, "pipeline": false }],
-        "result": "[Param(1)]"
+        "result": "[Param(1)]",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -147,7 +155,8 @@
       "signature": {
         "type_params": ["T", "K"],
         "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "key", "type": "fn(Param(0)): Param(1)", "has_default": false, "pipeline": false }],
-        "result": "[Param(0)]"
+        "result": "[Param(0)]",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -164,7 +173,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "count", "type": "Int", "has_default": false, "pipeline": false }],
-        "result": "[Param(0)]"
+        "result": "[Param(0)]",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -181,7 +191,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "count", "type": "Int", "has_default": false, "pipeline": false }],
-        "result": "[Param(0)]"
+        "result": "[Param(0)]",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -198,7 +209,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }],
-        "result": "[Param(0)]"
+        "result": "[Param(0)]",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -215,7 +227,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "left", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "right", "type": "[Param(0)]", "has_default": false, "pipeline": false }],
-        "result": "[Param(0)]"
+        "result": "[Param(0)]",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -232,7 +245,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }],
-        "result": "Int"
+        "result": "Int",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -249,7 +263,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }],
-        "result": "Param(0)?"
+        "result": "Param(0)?",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -266,7 +281,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }],
-        "result": "Param(0)?"
+        "result": "Param(0)?",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -283,7 +299,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "predicate", "type": "fn(Param(0)): Bool", "has_default": true, "pipeline": false }],
-        "result": "Param(0)"
+        "result": "Param(0)",
+        "arities": [1, 2]
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -300,7 +317,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }],
-        "result": "Param(0)"
+        "result": "Param(0)",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -317,7 +335,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }],
-        "result": "Param(0)?"
+        "result": "Param(0)?",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -334,7 +353,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }],
-        "result": "Param(0)?"
+        "result": "Param(0)?",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -351,7 +371,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "predicate", "type": "fn(Param(0)): Bool", "has_default": false, "pipeline": false }],
-        "result": "Bool"
+        "result": "Bool",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -368,7 +389,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "predicate", "type": "fn(Param(0)): Bool", "has_default": false, "pipeline": false }],
-        "result": "Bool"
+        "result": "Bool",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -385,7 +407,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "values", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "size", "type": "Int", "has_default": false, "pipeline": false }],
-        "result": "[[Param(0)]]"
+        "result": "[[Param(0)]]",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -402,7 +425,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "values", "type": "[[Param(0)]]", "has_default": false, "pipeline": true }],
-        "result": "[Param(0)]"
+        "result": "[Param(0)]",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -419,7 +443,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "values", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "predicate", "type": "fn(Param(0)): Bool", "has_default": false, "pipeline": false }],
-        "result": "([Param(0)], [Param(0)])"
+        "result": "([Param(0)], [Param(0)])",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -436,7 +461,8 @@
       "signature": {
         "type_params": ["T", "U"],
         "params": [{ "name": "left", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "right", "type": "[Param(1)]", "has_default": false, "pipeline": false }],
-        "result": "[(Param(0), Param(1))]"
+        "result": "[(Param(0), Param(1))]",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -453,7 +479,8 @@
       "signature": {
         "type_params": ["T", "U"],
         "params": [{ "name": "left", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "right", "type": "[Param(1)]", "has_default": false, "pipeline": false }],
-        "result": "[(Param(0), Param(1))]"
+        "result": "[(Param(0), Param(1))]",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -470,7 +497,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "values", "type": "[Param(0)]", "has_default": false, "pipeline": true }],
-        "result": "[Param(0)]"
+        "result": "[Param(0)]",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -487,7 +515,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "values", "type": "[Param(0)]", "has_default": false, "pipeline": true }],
-        "result": "[(Param(0), Param(0))]"
+        "result": "[(Param(0), Param(0))]",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -504,7 +533,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "values", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "size", "type": "Int", "has_default": false, "pipeline": false }, { "name": "step", "type": "Int", "has_default": true, "pipeline": false }],
-        "result": "[[Param(0)]]"
+        "result": "[[Param(0)]]",
+        "arities": [2, 3]
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -521,7 +551,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "values", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "predicate", "type": "fn(Param(0)): Bool", "has_default": false, "pipeline": false }],
-        "result": "[[Param(0)]]"
+        "result": "[[Param(0)]]",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -538,7 +569,8 @@
       "signature": {
         "type_params": ["T", "K"],
         "params": [{ "name": "values", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "key", "type": "fn(Param(0)): Param(1)", "has_default": false, "pipeline": false }],
-        "result": "[(Param(0), Int)]"
+        "result": "[(Param(0), Int)]",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -555,7 +587,8 @@
       "signature": {
         "type_params": ["T", "K"],
         "params": [{ "name": "values", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "key", "type": "fn(Param(0)): Param(1)", "has_default": false, "pipeline": false }],
-        "result": "[(Param(1), [Param(0)])]"
+        "result": "[(Param(1), [Param(0)])]",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -571,8 +604,9 @@
       "leaf": "__bucket_by",
       "signature": {
         "type_params": ["T", "P"],
-        "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "period", "type": "Param(1)", "has_default": false, "pipeline": false }, { "name": "zone", "type": "Str", "has_default": false, "pipeline": false }],
-        "result": "[[Param(0)]]"
+        "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "period", "type": "Param(1)", "has_default": false, "pipeline": false }, { "name": "zone", "type": "Str", "has_default": true, "pipeline": false }],
+        "result": "[[Param(0)]]",
+        "arities": []
       },
       "effect": "PinnedData",
       "dispatch": { "kind": "Native" },
@@ -589,7 +623,8 @@
       "signature": {
         "type_params": ["T", "Time", "Key"],
         "params": [{ "name": "left", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "right", "type": "[Param(0)]", "has_default": false, "pipeline": false }, { "name": "time", "type": "fn(Param(0)): Param(1)", "has_default": false, "pipeline": false }, { "name": "by", "type": "fn(Param(0)): Param(2)", "has_default": false, "pipeline": false }],
-        "result": "[(Param(0), Param(0)?)]"
+        "result": "[(Param(0), Param(0)?)]",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -606,7 +641,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "anchor", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "recursive_term", "type": "fn(Param(0)): [Param(0)]", "has_default": false, "pipeline": false }],
-        "result": "[Param(0)]"
+        "result": "[Param(0)]",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -623,7 +659,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "points", "type": "[(Instant, Param(0))]", "has_default": false, "pipeline": false }],
-        "result": "Bool"
+        "result": "Bool",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -640,7 +677,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "points", "type": "[(Instant, Param(0))]", "has_default": false, "pipeline": true }, { "name": "size", "type": "Int", "has_default": false, "pipeline": false }, { "name": "step", "type": "Int", "has_default": true, "pipeline": false }],
-        "result": "[Param(0)?]"
+        "result": "[Param(0)?]",
+        "arities": [2, 3]
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -657,7 +695,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "points", "type": "[(Instant, Param(0))]", "has_default": false, "pipeline": true }, { "name": "size", "type": "Int", "has_default": false, "pipeline": false }, { "name": "step", "type": "Int", "has_default": true, "pipeline": false }],
-        "result": "[(Param(0)?, Param(0)?)]"
+        "result": "[(Param(0)?, Param(0)?)]",
+        "arities": [2, 3]
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -674,7 +713,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "points", "type": "[(Instant, Param(0))]", "has_default": false, "pipeline": true }, { "name": "size", "type": "Int", "has_default": false, "pipeline": false }, { "name": "step", "type": "Int", "has_default": true, "pipeline": false }],
-        "result": "[[(Instant, Param(0))]]"
+        "result": "[[(Instant, Param(0))]]",
+        "arities": [2, 3]
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -691,7 +731,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "points", "type": "[(Instant, Param(0))]", "has_default": false, "pipeline": true }, { "name": "size", "type": "Int", "has_default": false, "pipeline": false }, { "name": "step", "type": "Int", "has_default": true, "pipeline": false }],
-        "result": "[Param(0)?]"
+        "result": "[Param(0)?]",
+        "arities": [2, 3]
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -708,7 +749,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "values", "type": "[Param(0)]", "has_default": false, "pipeline": false }],
-        "result": "Int"
+        "result": "Int",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -725,7 +767,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "left", "type": "[Param(0)]", "has_default": false, "pipeline": false }, { "name": "right", "type": "[Param(0)]", "has_default": false, "pipeline": false }],
-        "result": "[Param(0)]"
+        "result": "[Param(0)]",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -742,7 +785,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "values", "type": "[Param(0)]", "has_default": false, "pipeline": false }],
-        "result": "Param(0)"
+        "result": "Param(0)",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -759,7 +803,8 @@
       "signature": {
         "type_params": ["T", "K"],
         "params": [{ "name": "values", "type": "[Param(0)]", "has_default": false, "pipeline": false }, { "name": "key", "type": "fn(Param(0)): Param(1)", "has_default": false, "pipeline": false }],
-        "result": "[Param(0)]"
+        "result": "[Param(0)]",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -776,7 +821,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "values", "type": "[Param(0)]", "has_default": false, "pipeline": false }],
-        "result": "Param(0)?"
+        "result": "Param(0)?",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -793,7 +839,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "values", "type": "[Param(0)]", "has_default": false, "pipeline": false }],
-        "result": "Param(0)?"
+        "result": "Param(0)?",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -810,7 +857,8 @@
       "signature": {
         "type_params": [],
         "params": [{ "name": "value", "type": "Int", "has_default": false, "pipeline": true }],
-        "result": "Int"
+        "result": "Int",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "SourceOnly" },
@@ -827,7 +875,8 @@
       "signature": {
         "type_params": [],
         "params": [{ "name": "value", "type": "Int", "has_default": false, "pipeline": true }],
-        "result": "Int"
+        "result": "Int",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "SourceOnly" },
@@ -844,7 +893,8 @@
       "signature": {
         "type_params": [],
         "params": [{ "name": "value", "type": "Int", "has_default": false, "pipeline": true }],
-        "result": "Bool"
+        "result": "Bool",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "SourceOnly" },
@@ -861,7 +911,8 @@
       "signature": {
         "type_params": [],
         "params": [{ "name": "left", "type": "Int", "has_default": false, "pipeline": true }, { "name": "right", "type": "Int", "has_default": false, "pipeline": false }],
-        "result": "Int"
+        "result": "Int",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "SourceOnly" },
@@ -878,7 +929,8 @@
       "signature": {
         "type_params": [],
         "params": [{ "name": "left", "type": "Int", "has_default": false, "pipeline": true }, { "name": "right", "type": "Int", "has_default": false, "pipeline": false }],
-        "result": "Int"
+        "result": "Int",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "SourceOnly" },
@@ -895,7 +947,8 @@
       "signature": {
         "type_params": [],
         "params": [{ "name": "value", "type": "Int", "has_default": false, "pipeline": true }, { "name": "lower", "type": "Int", "has_default": false, "pipeline": false }, { "name": "upper", "type": "Int", "has_default": false, "pipeline": false }],
-        "result": "Int"
+        "result": "Int",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "SourceOnly" },
@@ -912,7 +965,8 @@
       "signature": {
         "type_params": [],
         "params": [{ "name": "value", "type": "Str", "has_default": false, "pipeline": true }],
-        "result": "Str"
+        "result": "Str",
+        "arities": []
       },
       "effect": "PinnedData",
       "dispatch": { "kind": "Native" },
@@ -929,7 +983,8 @@
       "signature": {
         "type_params": [],
         "params": [{ "name": "value", "type": "Str", "has_default": false, "pipeline": true }, { "name": "separator", "type": "Str", "has_default": false, "pipeline": false }],
-        "result": "[Str]"
+        "result": "[Str]",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -946,7 +1001,8 @@
       "signature": {
         "type_params": [],
         "params": [{ "name": "values", "type": "[Str]", "has_default": false, "pipeline": true }, { "name": "separator", "type": "Str", "has_default": false, "pipeline": false }],
-        "result": "Str"
+        "result": "Str",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -963,7 +1019,8 @@
       "signature": {
         "type_params": [],
         "params": [{ "name": "value", "type": "Str", "has_default": false, "pipeline": true }, { "name": "prefix", "type": "Str", "has_default": false, "pipeline": false }],
-        "result": "Bool"
+        "result": "Bool",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -980,7 +1037,8 @@
       "signature": {
         "type_params": [],
         "params": [{ "name": "value", "type": "Str", "has_default": false, "pipeline": true }, { "name": "suffix", "type": "Str", "has_default": false, "pipeline": false }],
-        "result": "Bool"
+        "result": "Bool",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -997,7 +1055,8 @@
       "signature": {
         "type_params": [],
         "params": [{ "name": "value", "type": "Str", "has_default": false, "pipeline": true }, { "name": "needle", "type": "Str", "has_default": false, "pipeline": false }],
-        "result": "Bool"
+        "result": "Bool",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -1014,7 +1073,8 @@
       "signature": {
         "type_params": [],
         "params": [{ "name": "value", "type": "Str", "has_default": false, "pipeline": true }, { "name": "from", "type": "Str", "has_default": false, "pipeline": false }, { "name": "to", "type": "Str", "has_default": false, "pipeline": false }],
-        "result": "Str"
+        "result": "Str",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -1031,7 +1091,8 @@
       "signature": {
         "type_params": [],
         "params": [{ "name": "value", "type": "Str", "has_default": false, "pipeline": true }, { "name": "form", "type": "Str", "has_default": false, "pipeline": false }],
-        "result": "Str"
+        "result": "Str",
+        "arities": []
       },
       "effect": "PinnedData",
       "dispatch": { "kind": "Native" },
@@ -1048,7 +1109,8 @@
       "signature": {
         "type_params": [],
         "params": [{ "name": "value", "type": "Str", "has_default": false, "pipeline": true }],
-        "result": "Str"
+        "result": "Str",
+        "arities": []
       },
       "effect": "PinnedData",
       "dispatch": { "kind": "Native" },
@@ -1065,7 +1127,8 @@
       "signature": {
         "type_params": [],
         "params": [{ "name": "value", "type": "Str", "has_default": false, "pipeline": true }],
-        "result": "Str"
+        "result": "Str",
+        "arities": []
       },
       "effect": "PinnedData",
       "dispatch": { "kind": "Native" },
@@ -1082,7 +1145,8 @@
       "signature": {
         "type_params": [],
         "params": [{ "name": "left", "type": "Int", "has_default": false, "pipeline": true }, { "name": "right", "type": "Int", "has_default": false, "pipeline": false }],
-        "result": "Int"
+        "result": "Int",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -1099,7 +1163,8 @@
       "signature": {
         "type_params": [],
         "params": [{ "name": "left", "type": "Int", "has_default": false, "pipeline": true }, { "name": "right", "type": "Int", "has_default": false, "pipeline": false }],
-        "result": "Int"
+        "result": "Int",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -1116,7 +1181,8 @@
       "signature": {
         "type_params": [],
         "params": [{ "name": "left", "type": "Int", "has_default": false, "pipeline": true }, { "name": "right", "type": "Int", "has_default": false, "pipeline": false }],
-        "result": "Int"
+        "result": "Int",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -1133,7 +1199,8 @@
       "signature": {
         "type_params": [],
         "params": [{ "name": "value", "type": "Int", "has_default": false, "pipeline": true }],
-        "result": "Int"
+        "result": "Int",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -1150,7 +1217,8 @@
       "signature": {
         "type_params": [],
         "params": [{ "name": "value", "type": "Int", "has_default": false, "pipeline": true }, { "name": "count", "type": "Int", "has_default": false, "pipeline": false }],
-        "result": "Int"
+        "result": "Int",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -1167,7 +1235,8 @@
       "signature": {
         "type_params": [],
         "params": [{ "name": "value", "type": "Int", "has_default": false, "pipeline": true }, { "name": "count", "type": "Int", "has_default": false, "pipeline": false }],
-        "result": "Int"
+        "result": "Int",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -1184,7 +1253,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "values", "type": "[Param(0)]", "has_default": false, "pipeline": false }, { "name": "source_identity", "type": "Str", "has_default": false, "pipeline": false }],
-        "result": "Stream<Param(0)>"
+        "result": "Stream<Param(0)>",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -1201,7 +1271,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "source", "type": "Str", "has_default": false, "pipeline": false }, { "name": "identity", "type": "Str", "has_default": false, "pipeline": false }],
-        "result": "Stream<Param(0)>"
+        "result": "Stream<Param(0)>",
+        "arities": []
       },
       "effect": "Stream",
       "dispatch": { "kind": "Native" },
@@ -1218,7 +1289,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "stream", "type": "Stream<Param(0)>", "has_default": false, "pipeline": true }, { "name": "action", "type": "fn(Param(0)): Unit", "has_default": false, "pipeline": false }],
-        "result": "Unit"
+        "result": "Unit",
+        "arities": []
       },
       "effect": "Stream",
       "dispatch": { "kind": "Native" },
@@ -1235,7 +1307,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "stream", "type": "Stream<Param(0)>", "has_default": false, "pipeline": true }, { "name": "size", "type": "Int", "has_default": false, "pipeline": false }],
-        "result": "Stream<[Param(0)]>"
+        "result": "Stream<[Param(0)]>",
+        "arities": []
       },
       "effect": "Stream",
       "dispatch": { "kind": "Native" },
@@ -1252,7 +1325,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "stream", "type": "Stream<Param(0)>", "has_default": false, "pipeline": true }, { "name": "capacity", "type": "Int", "has_default": false, "pipeline": false }],
-        "result": "Stream<Param(0)>"
+        "result": "Stream<Param(0)>",
+        "arities": []
       },
       "effect": "Stream",
       "dispatch": { "kind": "Native" },
@@ -1269,7 +1343,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "streams", "type": "[Stream<Param(0)>]", "has_default": false, "pipeline": false }],
-        "result": "Stream<Param(0)>"
+        "result": "Stream<Param(0)>",
+        "arities": []
       },
       "effect": "Stream",
       "dispatch": { "kind": "Native" },
@@ -1286,7 +1361,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "stream", "type": "Stream<Param(0)>", "has_default": false, "pipeline": true }, { "name": "duration", "type": "Duration", "has_default": false, "pipeline": false }, { "name": "drop_policy", "type": "Str", "has_default": false, "pipeline": false }],
-        "result": "Stream<Param(0)>"
+        "result": "Stream<Param(0)>",
+        "arities": []
       },
       "effect": "Host",
       "dispatch": { "kind": "Native" },
@@ -1303,7 +1379,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "stream", "type": "Stream<Param(0)>", "has_default": false, "pipeline": true }, { "name": "duration", "type": "Duration", "has_default": false, "pipeline": false }, { "name": "delivery_policy", "type": "Str", "has_default": false, "pipeline": false }],
-        "result": "Stream<Param(0)>"
+        "result": "Stream<Param(0)>",
+        "arities": []
       },
       "effect": "Host",
       "dispatch": { "kind": "Native" },
@@ -1320,7 +1397,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "stream", "type": "Stream<Param(0)>", "has_default": false, "pipeline": true }, { "name": "policy", "type": "{ max_attempts: Int, initial_delay: Duration, max_delay: Duration }", "has_default": false, "pipeline": false }],
-        "result": "Stream<Param(0)>"
+        "result": "Stream<Param(0)>",
+        "arities": []
       },
       "effect": "Stream",
       "dispatch": { "kind": "Native" },
@@ -1337,7 +1415,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "stream", "type": "Stream<Param(0)>", "has_default": false, "pipeline": true }, { "name": "handler", "type": "fn(Error): Param(0)", "has_default": false, "pipeline": false }],
-        "result": "Stream<Param(0)>"
+        "result": "Stream<Param(0)>",
+        "arities": []
       },
       "effect": "Stream",
       "dispatch": { "kind": "Native" },
@@ -1354,7 +1433,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "callbacks", "type": "[fn(): Param(0)]", "has_default": false, "pipeline": false }],
-        "result": "[Param(0)]"
+        "result": "[Param(0)]",
+        "arities": []
       },
       "effect": "Host",
       "dispatch": { "kind": "Native" },
@@ -1371,7 +1451,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "callbacks", "type": "[fn(): Param(0)]", "has_default": false, "pipeline": false }],
-        "result": "Param(0)"
+        "result": "Param(0)",
+        "arities": []
       },
       "effect": "Host",
       "dispatch": { "kind": "Native" },
@@ -1388,7 +1469,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "callback", "type": "fn(): Param(0)", "has_default": false, "pipeline": false }, { "name": "duration", "type": "Duration", "has_default": false, "pipeline": false }],
-        "result": "Param(0)"
+        "result": "Param(0)",
+        "arities": []
       },
       "effect": "Host",
       "dispatch": { "kind": "Native" },
@@ -1405,7 +1487,8 @@
       "signature": {
         "type_params": ["P", "A"],
         "params": [{ "name": "kind", "type": "Str", "has_default": false, "pipeline": false }, { "name": "properties", "type": "Param(0)", "has_default": false, "pipeline": false }, { "name": "children", "type": "[Ui]", "has_default": false, "pipeline": false }, { "name": "actions", "type": "[(Str, Param(1))]", "has_default": false, "pipeline": false }, { "name": "property_types", "type": "[(Str, Str)]", "has_default": false, "pipeline": false }],
-        "result": "Ui"
+        "result": "Ui",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -1422,7 +1505,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "scale", "type": "Int?", "has_default": true, "pipeline": false }, { "name": "rounding", "type": "Str?", "has_default": true, "pipeline": false }],
-        "result": "Param(0)?"
+        "result": "Param(0)?",
+        "arities": [1, 3]
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -1439,7 +1523,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "scale", "type": "Int?", "has_default": true, "pipeline": false }, { "name": "rounding", "type": "Str?", "has_default": true, "pipeline": false }],
-        "result": "Param(0)?"
+        "result": "Param(0)?",
+        "arities": [1, 3]
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -1456,7 +1541,8 @@
       "signature": {
         "type_params": ["T", "P"],
         "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "p", "type": "Param(1)", "has_default": false, "pipeline": false }, { "name": "interpolation", "type": "Str", "has_default": false, "pipeline": false }, { "name": "scale", "type": "Int?", "has_default": true, "pipeline": false }, { "name": "rounding", "type": "Str?", "has_default": true, "pipeline": false }],
-        "result": "Param(0)?"
+        "result": "Param(0)?",
+        "arities": [3, 5]
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -1473,7 +1559,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }],
-        "result": "Param(0)"
+        "result": "Param(0)",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -1490,7 +1577,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }],
-        "result": "Param(0)?"
+        "result": "Param(0)?",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -1507,7 +1595,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }],
-        "result": "Param(0)?"
+        "result": "Param(0)?",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -1524,7 +1613,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }],
-        "result": "Param(0)?"
+        "result": "Param(0)?",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -1541,7 +1631,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }],
-        "result": "[Param(0)]"
+        "result": "[Param(0)]",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -1558,7 +1649,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "scale", "type": "Int?", "has_default": true, "pipeline": false }, { "name": "rounding", "type": "Str?", "has_default": true, "pipeline": false }],
-        "result": "Param(0)?"
+        "result": "Param(0)?",
+        "arities": [1, 3]
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -1575,7 +1667,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "scale", "type": "Int?", "has_default": true, "pipeline": false }, { "name": "rounding", "type": "Str?", "has_default": true, "pipeline": false }],
-        "result": "Param(0)?"
+        "result": "Param(0)?",
+        "arities": [1, 3]
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -1592,7 +1685,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "rows", "type": "[Param(0)]", "has_default": false, "pipeline": true }, { "name": "bins", "type": "[(Param(0), Param(0))]", "has_default": false, "pipeline": false }, { "name": "include_final_upper", "type": "Bool", "has_default": true, "pipeline": false }],
-        "result": "[Int]"
+        "result": "[Int]",
+        "arities": [2, 3]
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -1609,7 +1703,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "points", "type": "[(Instant, Param(0))]", "has_default": false, "pipeline": true }],
-        "result": "Param(0)?"
+        "result": "Param(0)?",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -1626,7 +1721,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "points", "type": "[(Instant, Param(0))]", "has_default": false, "pipeline": true }],
-        "result": "[(Instant, Param(0))]"
+        "result": "[(Instant, Param(0))]",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -1643,7 +1739,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "points", "type": "[(Instant, Param(0))]", "has_default": false, "pipeline": true }],
-        "result": "Param(0)?"
+        "result": "Param(0)?",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -1660,7 +1757,8 @@
       "signature": {
         "type_params": [],
         "params": [{ "name": "instant", "type": "Instant", "has_default": false, "pipeline": true }, { "name": "zone", "type": "Str", "has_default": false, "pipeline": false }],
-        "result": "Int"
+        "result": "Int",
+        "arities": []
       },
       "effect": "PinnedData",
       "dispatch": { "kind": "Native" },
@@ -1677,7 +1775,8 @@
       "signature": {
         "type_params": [],
         "params": [{ "name": "local", "type": "Str", "has_default": false, "pipeline": true }, { "name": "zone", "type": "Str", "has_default": false, "pipeline": false }, { "name": "ambiguous", "type": "Str", "has_default": false, "pipeline": false }, { "name": "gap", "type": "Str?", "has_default": true, "pipeline": false }],
-        "result": "Instant"
+        "result": "Instant",
+        "arities": [3, 4]
       },
       "effect": "PinnedData",
       "dispatch": { "kind": "Native" },
@@ -1694,7 +1793,8 @@
       "signature": {
         "type_params": [],
         "params": [{ "name": "duration", "type": "Duration", "has_default": false, "pipeline": true }, { "name": "context", "type": "{ locale: Str, time_zone: Str }", "has_default": true, "pipeline": false }],
-        "result": "Str"
+        "result": "Str",
+        "arities": [1, 2]
       },
       "effect": "PinnedData",
       "dispatch": { "kind": "Native" },
@@ -1711,7 +1811,8 @@
       "signature": {
         "type_params": [],
         "params": [{ "name": "duration", "type": "Duration", "has_default": false, "pipeline": true }, { "name": "context", "type": "{ locale: Str, time_zone: Str }", "has_default": true, "pipeline": false }],
-        "result": "Str"
+        "result": "Str",
+        "arities": [1, 2]
       },
       "effect": "PinnedData",
       "dispatch": { "kind": "Native" },
@@ -1728,7 +1829,8 @@
       "signature": {
         "type_params": [],
         "params": [{ "name": "duration", "type": "Duration", "has_default": false, "pipeline": true }, { "name": "context", "type": "{ locale: Str, time_zone: Str }", "has_default": true, "pipeline": false }],
-        "result": "Str"
+        "result": "Str",
+        "arities": [1, 2]
       },
       "effect": "PinnedData",
       "dispatch": { "kind": "Native" },
@@ -1745,7 +1847,8 @@
       "signature": {
         "type_params": [],
         "params": [{ "name": "duration", "type": "Duration", "has_default": false, "pipeline": true }, { "name": "context", "type": "{ locale: Str, time_zone: Str }", "has_default": true, "pipeline": false }],
-        "result": "Str"
+        "result": "Str",
+        "arities": [1, 2]
       },
       "effect": "PinnedData",
       "dispatch": { "kind": "Native" },
@@ -1762,7 +1865,8 @@
       "signature": {
         "type_params": [],
         "params": [{ "name": "input", "type": "Blob", "has_default": false, "pipeline": true }],
-        "result": "Digest"
+        "result": "Digest",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -1779,7 +1883,8 @@
       "signature": {
         "type_params": [],
         "params": [{ "name": "input", "type": "Str", "has_default": false, "pipeline": true }],
-        "result": "Digest"
+        "result": "Digest",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -1796,7 +1901,8 @@
       "signature": {
         "type_params": [],
         "params": [{ "name": "domain", "type": "Str", "has_default": false, "pipeline": true }, { "name": "payload", "type": "Blob", "has_default": false, "pipeline": false }],
-        "result": "Digest"
+        "result": "Digest",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -1813,7 +1919,8 @@
       "signature": {
         "type_params": [],
         "params": [{ "name": "digest", "type": "Digest", "has_default": false, "pipeline": true }],
-        "result": "Str"
+        "result": "Str",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -1830,7 +1937,8 @@
       "signature": {
         "type_params": [],
         "params": [{ "name": "value", "type": "Str", "has_default": false, "pipeline": true }],
-        "result": "Digest?"
+        "result": "Digest?",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -1847,7 +1955,8 @@
       "signature": {
         "type_params": [],
         "params": [{ "name": "count", "type": "Int", "has_default": false, "pipeline": true }],
-        "result": "Blob"
+        "result": "Blob",
+        "arities": []
       },
       "effect": "Entropy",
       "dispatch": { "kind": "Native" },
@@ -1864,7 +1973,8 @@
       "signature": {
         "type_params": [],
         "params": [{ "name": "lower_inclusive", "type": "Int", "has_default": false, "pipeline": true }, { "name": "upper_exclusive", "type": "Int", "has_default": false, "pipeline": false }],
-        "result": "Int"
+        "result": "Int",
+        "arities": []
       },
       "effect": "Entropy",
       "dispatch": { "kind": "Native" },
@@ -1881,7 +1991,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "values", "type": "[Param(0)]", "has_default": false, "pipeline": true }],
-        "result": "Param(0)?"
+        "result": "Param(0)?",
+        "arities": []
       },
       "effect": "Entropy",
       "dispatch": { "kind": "Native" },
@@ -1898,7 +2009,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "values", "type": "[Param(0)]", "has_default": false, "pipeline": true }],
-        "result": "[Param(0)]"
+        "result": "[Param(0)]",
+        "arities": []
       },
       "effect": "Entropy",
       "dispatch": { "kind": "Native" },
@@ -1915,7 +2027,8 @@
       "signature": {
         "type_params": [],
         "params": [{ "name": "input", "type": "Blob", "has_default": false, "pipeline": true }],
-        "result": "Str"
+        "result": "Str",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -1932,7 +2045,8 @@
       "signature": {
         "type_params": [],
         "params": [{ "name": "input", "type": "Str", "has_default": false, "pipeline": true }],
-        "result": "Blob"
+        "result": "Blob",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -1949,7 +2063,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "value", "type": "Param(0)", "has_default": false, "pipeline": true }],
-        "result": "Str"
+        "result": "Str",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -1966,7 +2081,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "input", "type": "Str", "has_default": false, "pipeline": true }],
-        "result": "Param(0)"
+        "result": "Param(0)",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -1983,7 +2099,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "input", "type": "Str", "has_default": false, "pipeline": true }, { "name": "ignore_unknown_fields", "type": "Bool", "has_default": true, "pipeline": false }],
-        "result": "Param(0)"
+        "result": "Param(0)",
+        "arities": [1, 2]
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -2000,7 +2117,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "value", "type": "Param(0)", "has_default": false, "pipeline": true }],
-        "result": "Str"
+        "result": "Str",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -2017,7 +2135,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "input", "type": "Str", "has_default": false, "pipeline": true }],
-        "result": "Param(0)"
+        "result": "Param(0)",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -2034,7 +2153,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "value", "type": "Param(0)", "has_default": false, "pipeline": true }],
-        "result": "Blob"
+        "result": "Blob",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -2051,7 +2171,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "input", "type": "Blob", "has_default": false, "pipeline": true }],
-        "result": "Param(0)"
+        "result": "Param(0)",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -2068,7 +2189,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "amount", "type": "Param(0)", "has_default": false, "pipeline": true }, { "name": "minor_digits", "type": "Int", "has_default": false, "pipeline": false }, { "name": "rounding", "type": "Str", "has_default": false, "pipeline": false }],
-        "result": "Param(0)"
+        "result": "Param(0)",
+        "arities": []
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -2085,7 +2207,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "amount", "type": "Param(0)", "has_default": false, "pipeline": true }, { "name": "weights", "type": "[Int]", "has_default": false, "pipeline": false }, { "name": "minor_digits", "type": "Int", "has_default": false, "pipeline": false }, { "name": "rounding", "type": "Str?", "has_default": true, "pipeline": false }],
-        "result": "[Param(0)]"
+        "result": "[Param(0)]",
+        "arities": [3, 4]
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
@@ -2102,7 +2225,8 @@
       "signature": {
         "type_params": ["T"],
         "params": [{ "name": "amount", "type": "Param(0)", "has_default": false, "pipeline": true }, { "name": "currency_code", "type": "Str", "has_default": false, "pipeline": false }, { "name": "minor_digits", "type": "Int", "has_default": false, "pipeline": false }, { "name": "rounding", "type": "Str", "has_default": false, "pipeline": false }, { "name": "locale", "type": "Str", "has_default": false, "pipeline": false }],
-        "result": "Str"
+        "result": "Str",
+        "arities": []
       },
       "effect": "PinnedData",
       "dispatch": { "kind": "Native" },

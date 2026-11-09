@@ -902,7 +902,7 @@ impl Functions {
 
     /// Inserts a local function, replacing any local function of the same key.
     pub fn insert(&mut self, name: String, function: PureFunction) -> Option<PureFunction> {
-        if let Some(id) = legacy_intrinsic(&name) {
+        if let Some(id) = local_intrinsic(&name) {
             self.local_intrinsics.insert(name.clone(), id);
         }
         self.local.insert(name, function)
@@ -1045,6 +1045,18 @@ fn root_collection_intrinsic(name: &str) -> Option<orna_intrinsics::IntrinsicId>
     })
 }
 
+fn local_intrinsic(name: &str) -> Option<orna_intrinsics::IntrinsicId> {
+    if let Some(id) = legacy_intrinsic(name) {
+        return Some(id);
+    }
+    let (module_path, leaf) = name.rsplit_once('.')?;
+    if !leaf.starts_with("__") {
+        return None;
+    }
+    let module = orna_intrinsics::Module::from_path(module_path)?;
+    orna_intrinsics::lookup(module, leaf).map(|intrinsic| intrinsic.id)
+}
+
 fn legacy_intrinsic(name: &str) -> Option<orna_intrinsics::IntrinsicId> {
     use orna_intrinsics::IntrinsicId;
     Some(match name.rsplit('.').next()? {
@@ -1060,10 +1072,11 @@ fn legacy_intrinsic(name: &str) -> Option<orna_intrinsics::IntrinsicId> {
 
 impl<const N: usize> From<[(String, PureFunction); N]> for Functions {
     fn from(entries: [(String, PureFunction); N]) -> Self {
-        Self {
-            local: entries.into_iter().collect(),
-            ..Self::default()
+        let mut functions = Self::default();
+        for (name, function) in entries {
+            functions.insert(name, function);
         }
+        functions
     }
 }
 
@@ -7255,7 +7268,7 @@ impl Context<'_, '_> {
                 pipeline: false,
             },
         ];
-        let values = Self::order_arguments(&params, arguments, values, 0)?;
+        let values = Self::order_arguments(&params, &[], arguments, values, 0, false)?;
         match values.as_slice() {
             [
                 Value::Decimal(divisor),
@@ -7336,8 +7349,17 @@ impl Context<'_, '_> {
                 let value = self.evaluate(&argument.value, scope, depth + 1)?;
                 values.push(value);
             }
-            let mut ordered =
-                Self::order_arguments(intrinsic.signature.params, arguments, values, implicit)?;
+            let mut ordered = Self::order_arguments(
+                intrinsic.signature.params,
+                intrinsic.signature.arities,
+                arguments,
+                values,
+                implicit,
+                true,
+            )?;
+            if id == orna_intrinsics::IntrinsicId::CollectionBucketBy && ordered.len() == 2 {
+                ordered.push(Value::String("UTC".into()));
+            }
             if statistics_operation {
                 let Some(Value::Relation(plan)) = ordered.first() else {
                     return Err(error("ORNA-EVAL-TYPE"));
@@ -9346,6 +9368,15 @@ impl Context<'_, '_> {
             return Ok(CallRoute::Native(intrinsic.id));
         }
         if site.resolved.is_none()
+            && let Some(spelling) = site.spelled.as_deref()
+            && let Some((module_path, _name)) = spelling.rsplit_once('.')
+            && module_path == "std.math"
+        {
+            return Ok(CallRoute::Native(
+                orna_intrinsics::IntrinsicId::MathIncrement,
+            ));
+        }
+        if site.resolved.is_none()
             && let Some(name) = site.spelled.as_deref()
             && !scope.0.contains_key(name)
         {
@@ -9582,8 +9613,18 @@ impl Context<'_, '_> {
                 return Ok(Value::Null);
             }
         }
-        let values =
-            Self::order_arguments(intrinsic.signature.params, arguments, values, implicit)?;
+        let values = Self::order_arguments(
+            intrinsic.signature.params,
+            intrinsic.signature.arities,
+            arguments,
+            values,
+            implicit,
+            false,
+        )?;
+        let mut values = values;
+        if id == orna_intrinsics::IntrinsicId::CollectionBucketBy && values.len() == 2 {
+            values.push(Value::String("UTC".into()));
+        }
         self.dispatch(id, name, values, callee, scope, depth)
     }
     fn dispatch(
@@ -9742,10 +9783,28 @@ impl Context<'_, '_> {
 
     fn order_arguments(
         params: &[orna_intrinsics::Param],
+        arities: &[usize],
         arguments: &[orna_syntax::Argument],
         values: Vec<Value>,
         implicit: usize,
+        relation: bool,
     ) -> Result<Vec<Value>, EvaluationError> {
+        let unsupported = || {
+            error(if relation {
+                "ORNA-EVAL-ARGUMENT"
+            } else {
+                "ORNA-EVAL-UNSUPPORTED"
+            })
+        };
+        if !arities.is_empty() && !arities.contains(&values.len()) {
+            return Err(unsupported());
+        }
+        if arities.is_empty() && relation {
+            let required = params.iter().filter(|param| !param.has_default).count();
+            if values.len() < required || values.len() > params.len() {
+                return Err(unsupported());
+            }
+        }
         if arguments.iter().all(|argument| argument.name.is_none()) {
             return Ok(values);
         }
@@ -9763,7 +9822,10 @@ impl Context<'_, '_> {
                     .iter()
                     .position(|param| param.name == name)
                     .or_else(|| match name {
-                        "values" if params.first().is_some_and(|param| param.name == "rows") => {
+                        "values"
+                            if !relation
+                                && params.first().is_some_and(|param| param.name == "rows") =>
+                        {
                             Some(0)
                         }
                         "rows" if params.first().is_some_and(|param| param.name == "values") => {
@@ -9777,7 +9839,7 @@ impl Context<'_, '_> {
                         }
                         _ => None,
                     })
-                    .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?
+                    .ok_or_else(unsupported)?
             } else if named_started {
                 return Err(error("ORNA-EVAL-UNSUPPORTED"));
             } else {
