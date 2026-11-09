@@ -212,6 +212,23 @@ pub fn digest_bytes(bytes: &[u8]) -> ContentIdentity {
     digest.finish()
 }
 
+/// Whether one leaf span of a byte index fits a single GEAR chunk. A recorded
+/// span above the maximum cannot name a chunk the blob store ever produced.
+pub(crate) fn span_fits_chunk(span_length: u64) -> bool {
+    span_length <= GEAR_MAXIMUM as u64
+}
+
+/// Whether `chunk` is the content a byte-index leaf records: exactly its span
+/// length, hashed to its recorded digest. A leaf that records no digest never
+/// matches, because every content chunk carries one.
+pub(crate) fn chunk_matches_span(
+    span_length: u64,
+    chunk_sha256: Option<[u8; 32]>,
+    chunk: &[u8],
+) -> bool {
+    chunk.len() as u64 == span_length && chunk_sha256 == Some(digest_bytes(chunk).sha256())
+}
+
 fn chunk_span(bytes: &[u8], start: usize, end: usize) -> Result<ChunkSpan, BlobStoreError> {
     let length = end
         .checked_sub(start)

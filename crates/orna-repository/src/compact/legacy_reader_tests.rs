@@ -37,24 +37,13 @@ use super::legacy_fixture_writer::with_page_checksums;
 use super::{CompactCommittedRow, resolve_legacy_authoritative_rows};
 use crate::hex::hex_encode;
 use crate::{
-    CompactManifest, CompactPublicationPlan, CompactSegment, CompactSegmentRole, GitCommitRef,
-    GitDeclaredObjectSetState, GitObjectKind, GitObjectState, IndexGeneration, ManagedFileChange,
-    ManagedPath, Repository, RepositoryError, RuntimeGeneration, WorktreeState, test_support,
+    CompactManifest, CompactPublicationPlan, CompactPublicationRequest, CompactSegment,
+    CompactSegmentRecord, CompactSegmentRole, GitCommitRef, GitDeclaredObjectSetState,
+    GitObjectKind, GitObjectState, IndexGeneration, ManagedFileChange, ManagedPath, Repository,
+    RepositoryError, RuntimeGeneration, WorktreeState, test_support,
 };
 
-fn git(directory: &Path, arguments: &[&str]) -> String {
-    let output = Command::new("git")
-        .current_dir(directory)
-        .args(arguments)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "git {arguments:?}: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).unwrap().trim().to_owned()
-}
+use crate::test_support::git;
 
 fn repository() -> TempDir {
     let temp = TempDir::new().unwrap();
@@ -152,20 +141,20 @@ fn compact_segment_with_manifest_columns(
         .unwrap()
         .encode()
         .unwrap();
-    CompactSegment::new(
+    CompactSegment::new(CompactSegmentRecord {
         segment_id,
-        CompactSegmentRole::Data,
-        compact_schema_fingerprint(table),
-        "test-encoder-v1",
-        path,
+        role: CompactSegmentRole::Data,
+        schema: compact_schema_fingerprint(table),
+        encoder_version: "test-encoder-v1".to_owned(),
+        relative_path: path,
         bytes,
-        key.clone(),
-        key,
-        1,
+        min_key: key.clone(),
+        max_key: key,
+        row_count: 1,
         columns,
-        true,
-        false,
-    )
+        row_group_index: true,
+        bloom: false,
+    })
     .unwrap()
 }
 
@@ -251,20 +240,20 @@ fn date_segment(table: Uuid, ordinal: u64, days: &[i32]) -> CompactSegment {
         .unwrap()
         .encode()
         .unwrap();
-    CompactSegment::new(
+    CompactSegment::new(CompactSegmentRecord {
         segment_id,
-        CompactSegmentRole::Data,
-        date_schema_fingerprint(table),
-        "test-encoder-v1",
-        path,
+        role: CompactSegmentRole::Data,
+        schema: date_schema_fingerprint(table),
+        encoder_version: "test-encoder-v1".to_owned(),
+        relative_path: path,
         bytes,
-        bound.clone(),
-        bound,
-        u64::try_from(days.len()).unwrap(),
+        min_key: bound.clone(),
+        max_key: bound,
+        row_count: u64::try_from(days.len()).unwrap(),
         columns,
-        true,
-        false,
-    )
+        row_group_index: true,
+        bloom: false,
+    })
     .unwrap()
 }
 
@@ -667,56 +656,73 @@ fn compact_segment_for_schema(
         .unwrap()
         .encode()
         .unwrap();
-    CompactSegment::new(
+    CompactSegment::new(CompactSegmentRecord {
         segment_id,
         role,
-        schema_fingerprint(schema),
-        "test-encoder-v1",
-        path,
-        compact_primitive_parquet(table, schema, physical_field, type_name, &columns),
-        key.clone(),
-        key,
-        1,
+        schema: schema_fingerprint(schema),
+        encoder_version: "test-encoder-v1".to_owned(),
+        relative_path: path,
+        bytes: compact_primitive_parquet(table, schema, physical_field, type_name, &columns),
+        min_key: key.clone(),
+        max_key: key,
+        row_count: 1,
         columns,
-        true,
-        false,
-    )
+        row_group_index: true,
+        bloom: false,
+    })
     .unwrap()
 }
 
-#[allow(clippy::too_many_arguments)]
-fn compact_ovb_segment_for_schema(
+/// One OVB compact-segment fixture: the table and ordinal it is filed under,
+/// its role, the schema and physical field saying how its rows are encoded,
+/// the column mapping bytes, and the encoded values with their key bounds and
+/// logical annotation.
+struct OvBSegmentFixture<'a> {
     table: Uuid,
     ordinal: u64,
     role: CompactSegmentRole,
-    schema: &SchemaDescriptor,
+    schema: &'a SchemaDescriptor,
     physical_field: Uuid,
     columns: Vec<u8>,
-    values: &[Vec<u8>],
+    values: &'a [Vec<u8>],
     min_key: Vec<u8>,
     max_key: Vec<u8>,
-    annotation: Option<&str>,
-) -> CompactSegment {
+    annotation: Option<&'a str>,
+}
+
+fn compact_ovb_segment_for_schema(fixture: OvBSegmentFixture<'_>) -> CompactSegment {
+    let OvBSegmentFixture {
+        table,
+        ordinal,
+        role,
+        schema,
+        physical_field,
+        columns,
+        values,
+        min_key,
+        max_key,
+        annotation,
+    } = fixture;
     let segment_id = Uuid::from_u64_pair(0x018f_0000_0000_7000, ordinal | 0x8000_0000_0000_0000);
     let path = ManagedPath::new(format!(
         ".orna/storage/{table}/data/{}/{segment_id}.parquet",
         &segment_id.to_string()[..2]
     ))
     .unwrap();
-    CompactSegment::new(
+    CompactSegment::new(CompactSegmentRecord {
         segment_id,
         role,
-        schema_fingerprint(schema),
-        "test-encoder-v1",
-        path,
-        compact_ovb_parquet(table, schema, physical_field, &columns, values, annotation),
+        schema: schema_fingerprint(schema),
+        encoder_version: "test-encoder-v1".to_owned(),
+        relative_path: path,
+        bytes: compact_ovb_parquet(table, schema, physical_field, &columns, values, annotation),
         min_key,
         max_key,
-        u64::try_from(values.len()).unwrap(),
+        row_count: u64::try_from(values.len()).unwrap(),
         columns,
-        true,
-        false,
-    )
+        row_group_index: true,
+        bloom: false,
+    })
     .unwrap()
 }
 
@@ -808,19 +814,33 @@ fn compact_columns_for_leaves(leaves: &[(Uuid, &str, &str)]) -> Vec<u8> {
     .unwrap()
 }
 
-/// Writes an `Int` key column and an unannotated `BYTE_ARRAY` `Blob` column as
-/// one compact segment file (1.0.0 `23-storage.md:184`).
-#[allow(clippy::too_many_arguments)]
-fn compact_key_blob_parquet(
+/// One key/blob Parquet fixture: the table and schema the row is encoded
+/// under, its key and blob columns, the column mapping bytes, the values those
+/// columns hold, and the blob column's logical annotation.
+struct KeyBlobFixture<'a> {
     table: Uuid,
-    schema: &SchemaDescriptor,
+    schema: &'a SchemaDescriptor,
     key_field: Uuid,
     blob_field: Uuid,
-    columns: &[u8],
-    keys: &[i64],
-    blobs: &[&[u8]],
-    blob_annotation: &str,
-) -> Vec<u8> {
+    columns: &'a [u8],
+    keys: &'a [i64],
+    blobs: &'a [&'a [u8]],
+    blob_annotation: &'a str,
+}
+
+/// Writes an `Int` key column and an unannotated `BYTE_ARRAY` `Blob` column as
+/// one compact segment file (1.0.0 `23-storage.md:184`).
+fn compact_key_blob_parquet(fixture: KeyBlobFixture<'_>) -> Vec<u8> {
+    let KeyBlobFixture {
+        table,
+        schema,
+        key_field,
+        blob_field,
+        columns,
+        keys,
+        blobs,
+        blob_annotation,
+    } = fixture;
     assert_eq!(keys.len(), blobs.len());
     let key_path = format!("f_{}", key_field.simple());
     let blob_path = format!("f_{}", blob_field.simple());
@@ -900,47 +920,46 @@ fn compact_key_blob_parquet(
     with_page_checksums(bytes)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn compact_key_blob_segment(
-    table: Uuid,
-    ordinal: u64,
-    schema: &SchemaDescriptor,
-    key_field: Uuid,
-    blob_field: Uuid,
-    columns: Vec<u8>,
-    keys: &[i64],
-    blobs: &[&[u8]],
-    blob_annotation: &str,
-) -> CompactSegment {
+fn compact_key_blob_segment(fixture: KeyBlobFixture<'_>, ordinal: u64) -> CompactSegment {
+    let KeyBlobFixture {
+        table,
+        schema,
+        key_field,
+        blob_field,
+        columns,
+        keys,
+        blobs,
+        blob_annotation,
+    } = fixture;
     let segment_id = Uuid::from_u64_pair(0x018f_0000_0000_7000, ordinal | 0x8000_0000_0000_0000);
     let path = ManagedPath::new(format!(
         ".orna/storage/{table}/data/{}/{segment_id}.parquet",
         &segment_id.to_string()[..2]
     ))
     .unwrap();
-    CompactSegment::new(
+    CompactSegment::new(CompactSegmentRecord {
         segment_id,
-        CompactSegmentRole::Data,
-        schema_fingerprint(schema),
-        "test-encoder-v1",
-        path,
-        compact_key_blob_parquet(
+        role: CompactSegmentRole::Data,
+        schema: schema_fingerprint(schema),
+        encoder_version: "test-encoder-v1".to_owned(),
+        relative_path: path,
+        bytes: compact_key_blob_parquet(KeyBlobFixture {
             table,
             schema,
             key_field,
             blob_field,
-            &columns,
+            columns,
             keys,
             blobs,
             blob_annotation,
-        ),
-        encoded_int(u64::try_from(*keys.iter().min().unwrap()).unwrap()),
-        encoded_int(u64::try_from(*keys.iter().max().unwrap()).unwrap()),
-        u64::try_from(keys.len()).unwrap(),
-        columns,
-        true,
-        false,
-    )
+        }),
+        min_key: encoded_int(u64::try_from(*keys.iter().min().unwrap()).unwrap()),
+        max_key: encoded_int(u64::try_from(*keys.iter().max().unwrap()).unwrap()),
+        row_count: u64::try_from(keys.len()).unwrap(),
+        columns: columns.to_vec(),
+        row_group_index: true,
+        bloom: false,
+    })
     .unwrap()
 }
 
@@ -957,15 +976,15 @@ fn compact_plan(
         .unwrap()
         .unwrap_or_else(|| CompactManifest::empty(table, compact_schema_fingerprint(table)));
     repository
-        .prepare_compact_publication(
-            &head,
-            repository.index_generation().unwrap(),
+        .prepare_compact_publication(CompactPublicationRequest {
+            expected_head: &head,
+            expected_index: repository.index_generation().unwrap(),
             base,
-            intent,
-            [intent[0]; 32],
+            runtime_intent_id: intent,
+            cleanup_watermark: [intent[0]; 32],
             segments,
-            "orna: publish compact runtime data",
-        )
+            message: "orna: publish compact runtime data",
+        })
         .unwrap()
 }
 
@@ -1747,15 +1766,15 @@ fn compact_publication_accepts_a_valid_date_parquet_fixture() {
     let segment = date_segment(table, 1, &days);
     let head = repo.head().unwrap().unwrap();
     let plan = repo
-        .prepare_compact_publication(
-            &head,
-            repo.index_generation().unwrap(),
-            CompactManifest::empty(table, schema_digest),
-            [68; 16],
-            [69; 32],
-            &[segment],
-            "test: publish date compact segment",
-        )
+        .prepare_compact_publication(CompactPublicationRequest {
+            expected_head: &head,
+            expected_index: repo.index_generation().unwrap(),
+            base: CompactManifest::empty(table, schema_digest),
+            runtime_intent_id: [68; 16],
+            cleanup_watermark: [69; 32],
+            segments: &[segment],
+            message: "test: publish date compact segment",
+        })
         .unwrap();
     let manifest = repo
         .read_compact_manifest(plan.candidate_commit(), table)
@@ -2225,15 +2244,15 @@ fn compact_publication_rejects_schema_identity_and_type_substitution() {
             columns,
         );
         assert!(matches!(
-            repo.prepare_compact_publication(
-                &head,
-                repo.index_generation().unwrap(),
-                CompactManifest::empty(table, schema_fingerprint(&schema)),
-                [ordinal as u8; 16],
-                [ordinal as u8; 32],
-                &[segment],
-                "reject compact schema substitution",
-            ),
+            repo.prepare_compact_publication(CompactPublicationRequest {
+                expected_head: &head,
+                expected_index: repo.index_generation().unwrap(),
+                base: CompactManifest::empty(table, schema_fingerprint(&schema)),
+                runtime_intent_id: [ordinal as u8; 16],
+                cleanup_watermark: [ordinal as u8; 32],
+                segments: &[segment],
+                message: "reject compact schema substitution",
+            }),
             Err(RepositoryError::InvalidCompactManifest)
         ));
     }
@@ -2254,28 +2273,28 @@ fn compact_publication_accepts_immutable_ovb_int_and_bool_key_fallbacks() {
     .unwrap()
     .encode()
     .unwrap();
-    let int_segment = compact_ovb_segment_for_schema(
-        int_table,
-        741,
-        CompactSegmentRole::Data,
-        &int_schema,
-        int_field,
-        compact_columns_for_mapping(int_field, "Int", "ovb"),
-        std::slice::from_ref(&int_value),
-        int_value.clone(),
-        int_value.clone(),
-        None,
-    );
+    let int_segment = compact_ovb_segment_for_schema(OvBSegmentFixture {
+        table: int_table,
+        ordinal: 741,
+        role: CompactSegmentRole::Data,
+        schema: &int_schema,
+        physical_field: int_field,
+        columns: compact_columns_for_mapping(int_field, "Int", "ovb"),
+        values: std::slice::from_ref(&int_value),
+        min_key: int_value.clone(),
+        max_key: int_value.clone(),
+        annotation: None,
+    });
     assert!(
-        repo.prepare_compact_publication(
-            &head,
-            repo.index_generation().unwrap(),
-            CompactManifest::empty(int_table, schema_fingerprint(&int_schema)),
-            [74; 16],
-            [74; 32],
-            &[int_segment],
-            "accept immutable ovb int fallback",
-        )
+        repo.prepare_compact_publication(CompactPublicationRequest {
+            expected_head: &head,
+            expected_index: repo.index_generation().unwrap(),
+            base: CompactManifest::empty(int_table, schema_fingerprint(&int_schema)),
+            runtime_intent_id: [74; 16],
+            cleanup_watermark: [74; 32],
+            segments: &[int_segment],
+            message: "accept immutable ovb int fallback",
+        })
         .is_ok()
     );
 
@@ -2292,28 +2311,28 @@ fn compact_publication_accepts_immutable_ovb_int_and_bool_key_fallbacks() {
             .encode()
             .unwrap(),
     ];
-    let bool_segment = compact_ovb_segment_for_schema(
-        bool_table,
-        742,
-        CompactSegmentRole::Data,
-        &bool_schema,
-        bool_field,
-        compact_columns_for_mapping(bool_field, "Bool", "ovb"),
-        &bool_values,
-        bool_values[0].clone(),
-        bool_values[1].clone(),
-        None,
-    );
+    let bool_segment = compact_ovb_segment_for_schema(OvBSegmentFixture {
+        table: bool_table,
+        ordinal: 742,
+        role: CompactSegmentRole::Data,
+        schema: &bool_schema,
+        physical_field: bool_field,
+        columns: compact_columns_for_mapping(bool_field, "Bool", "ovb"),
+        values: &bool_values,
+        min_key: bool_values[0].clone(),
+        max_key: bool_values[1].clone(),
+        annotation: None,
+    });
     assert!(
-        repo.prepare_compact_publication(
-            &head,
-            repo.index_generation().unwrap(),
-            CompactManifest::empty(bool_table, schema_fingerprint(&bool_schema)),
-            [75; 16],
-            [75; 32],
-            &[bool_segment],
-            "accept immutable ovb bool fallback",
-        )
+        repo.prepare_compact_publication(CompactPublicationRequest {
+            expected_head: &head,
+            expected_index: repo.index_generation().unwrap(),
+            base: CompactManifest::empty(bool_table, schema_fingerprint(&bool_schema)),
+            runtime_intent_id: [75; 16],
+            cleanup_watermark: [75; 32],
+            segments: &[bool_segment],
+            message: "accept immutable ovb bool fallback",
+        })
         .is_ok()
     );
 }
@@ -2361,28 +2380,28 @@ fn compact_publication_rejects_immutable_ovb_fallback_mismatches() {
         ),
     ];
     for (ordinal, value, columns, annotation) in cases {
-        let segment = compact_ovb_segment_for_schema(
+        let segment = compact_ovb_segment_for_schema(OvBSegmentFixture {
             table,
             ordinal,
-            CompactSegmentRole::Data,
-            &schema,
-            field,
+            role: CompactSegmentRole::Data,
+            schema: &schema,
+            physical_field: field,
             columns,
-            std::slice::from_ref(&value),
-            canonical_int.clone(),
-            canonical_int.clone(),
+            values: std::slice::from_ref(&value),
+            min_key: canonical_int.clone(),
+            max_key: canonical_int.clone(),
             annotation,
-        );
+        });
         assert!(matches!(
-            repo.prepare_compact_publication(
-                &head,
-                repo.index_generation().unwrap(),
-                CompactManifest::empty(table, schema_fingerprint(&schema)),
-                [ordinal as u8; 16],
-                [ordinal as u8; 32],
-                &[segment],
-                "reject immutable ovb fallback mismatch",
-            ),
+            repo.prepare_compact_publication(CompactPublicationRequest {
+                expected_head: &head,
+                expected_index: repo.index_generation().unwrap(),
+                base: CompactManifest::empty(table, schema_fingerprint(&schema)),
+                runtime_intent_id: [ordinal as u8; 16],
+                cleanup_watermark: [ordinal as u8; 32],
+                segments: &[segment],
+                message: "reject immutable ovb fallback mismatch",
+            }),
             Err(RepositoryError::InvalidCompactManifest)
         ));
     }
@@ -2408,15 +2427,15 @@ fn compact_publication_rejects_a_schema_owned_by_another_table() {
     let head = repo.head().unwrap().unwrap();
 
     assert!(matches!(
-        repo.prepare_compact_publication(
-            &head,
-            repo.index_generation().unwrap(),
-            CompactManifest::empty(table, schema_fingerprint(&schema)),
-            [70; 16],
-            [70; 32],
-            &[segment],
-            "reject compact foreign-table schema",
-        ),
+        repo.prepare_compact_publication(CompactPublicationRequest {
+            expected_head: &head,
+            expected_index: repo.index_generation().unwrap(),
+            base: CompactManifest::empty(table, schema_fingerprint(&schema)),
+            runtime_intent_id: [70; 16],
+            cleanup_watermark: [70; 32],
+            segments: &[segment],
+            message: "reject compact foreign-table schema",
+        }),
         Err(RepositoryError::InvalidCompactManifest)
     ));
 }
@@ -2479,15 +2498,15 @@ fn compact_publication_requires_complete_unique_known_stored_mappings() {
             columns,
         );
         assert!(matches!(
-            repo.prepare_compact_publication(
-                &head,
-                repo.index_generation().unwrap(),
-                CompactManifest::empty(table, schema_fingerprint(&schema)),
-                [ordinal as u8; 16],
-                [ordinal as u8; 32],
-                &[segment],
-                "reject incomplete compact descriptor",
-            ),
+            repo.prepare_compact_publication(CompactPublicationRequest {
+                expected_head: &head,
+                expected_index: repo.index_generation().unwrap(),
+                base: CompactManifest::empty(table, schema_fingerprint(&schema)),
+                runtime_intent_id: [ordinal as u8; 16],
+                cleanup_watermark: [ordinal as u8; 32],
+                segments: &[segment],
+                message: "reject incomplete compact descriptor",
+            }),
             Err(RepositoryError::InvalidCompactManifest)
         ));
     }
@@ -2513,15 +2532,15 @@ fn compact_publication_excludes_computed_fields_and_deletion_non_keys() {
         compact_columns_for_mapping(key, "Int", "int64"),
     );
     assert!(
-        repo.prepare_compact_publication(
-            &head,
-            repo.index_generation().unwrap(),
-            CompactManifest::empty(table, schema_fingerprint(&computed_schema)),
-            [72; 16],
-            [72; 32],
-            &[accepted],
-            "accept compact computed omission",
-        )
+        repo.prepare_compact_publication(CompactPublicationRequest {
+            expected_head: &head,
+            expected_index: repo.index_generation().unwrap(),
+            base: CompactManifest::empty(table, schema_fingerprint(&computed_schema)),
+            runtime_intent_id: [72; 16],
+            cleanup_watermark: [72; 32],
+            segments: &[accepted],
+            message: "accept compact computed omission",
+        })
         .is_ok()
     );
 
@@ -2538,15 +2557,15 @@ fn compact_publication_excludes_computed_fields_and_deletion_non_keys() {
         compact_columns_for_mapping(stored, "Int", "int64"),
     );
     assert!(matches!(
-        repo.prepare_compact_publication(
-            &head,
-            repo.index_generation().unwrap(),
-            CompactManifest::empty(table, schema_fingerprint(&deletion_schema)),
-            [73; 16],
-            [73; 32],
-            &[deletion],
-            "reject compact deletion stored field",
-        ),
+        repo.prepare_compact_publication(CompactPublicationRequest {
+            expected_head: &head,
+            expected_index: repo.index_generation().unwrap(),
+            base: CompactManifest::empty(table, schema_fingerprint(&deletion_schema)),
+            runtime_intent_id: [73; 16],
+            cleanup_watermark: [73; 32],
+            segments: &[deletion],
+            message: "reject compact deletion stored field",
+        }),
         Err(RepositoryError::InvalidCompactManifest)
     ));
 }
@@ -2565,15 +2584,15 @@ fn compact_publication_rejects_a_descriptor_that_does_not_match_parquet_leaves()
     );
 
     assert!(matches!(
-        repo.prepare_compact_publication(
-            &head,
-            repo.index_generation().unwrap(),
-            CompactManifest::empty(table, compact_schema_fingerprint(table)),
-            [39; 16],
-            [39; 32],
-            &[segment],
-            "orna: publish compact runtime data",
-        ),
+        repo.prepare_compact_publication(CompactPublicationRequest {
+            expected_head: &head,
+            expected_index: repo.index_generation().unwrap(),
+            base: CompactManifest::empty(table, compact_schema_fingerprint(table)),
+            runtime_intent_id: [39; 16],
+            cleanup_watermark: [39; 32],
+            segments: &[segment],
+            message: "orna: publish compact runtime data",
+        }),
         Err(RepositoryError::InvalidCompactManifest)
     ));
     assert_eq!(repo.head().unwrap(), Some(head));
@@ -2956,55 +2975,55 @@ fn legacy_authoritative_read_resolves_key_only_generations_and_deletions_without
     let key = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0802);
     let schema = compact_schema_with_roles(table, &[(key, "key", 0)]);
     let head = repo.head().unwrap().unwrap();
-    let data = compact_ovb_segment_for_schema(
+    let data = compact_ovb_segment_for_schema(OvBSegmentFixture {
         table,
-        801,
-        CompactSegmentRole::Data,
-        &schema,
-        key,
-        compact_columns_for_mapping(key, "Int", "ovb"),
-        &[encoded_int(1), encoded_int(2), encoded_int(3)],
-        encoded_int(1),
-        encoded_int(3),
-        None,
-    );
+        ordinal: 801,
+        role: CompactSegmentRole::Data,
+        schema: &schema,
+        physical_field: key,
+        columns: compact_columns_for_mapping(key, "Int", "ovb"),
+        values: &[encoded_int(1), encoded_int(2), encoded_int(3)],
+        min_key: encoded_int(1),
+        max_key: encoded_int(3),
+        annotation: None,
+    });
     let first = repo
-        .prepare_compact_publication(
-            &head,
-            repo.index_generation().unwrap(),
-            CompactManifest::empty(table, schema_fingerprint(&schema)),
-            [80; 16],
-            [80; 32],
-            &[data],
-            "publish legacy key-only generation one",
-        )
+        .prepare_compact_publication(CompactPublicationRequest {
+            expected_head: &head,
+            expected_index: repo.index_generation().unwrap(),
+            base: CompactManifest::empty(table, schema_fingerprint(&schema)),
+            runtime_intent_id: [80; 16],
+            cleanup_watermark: [80; 32],
+            segments: &[data],
+            message: "publish legacy key-only generation one",
+        })
         .unwrap();
     adopt_compact_fixture(&repo, &first);
 
     let head = repo.head().unwrap().unwrap();
     let base = repo.read_compact_manifest(&head, table).unwrap().unwrap();
-    let deletion = compact_ovb_segment_for_schema(
+    let deletion = compact_ovb_segment_for_schema(OvBSegmentFixture {
         table,
-        802,
-        CompactSegmentRole::Deletion,
-        &schema,
-        key,
-        compact_columns_for_mapping(key, "Int", "ovb"),
-        &[encoded_int(2)],
-        encoded_int(2),
-        encoded_int(2),
-        None,
-    );
+        ordinal: 802,
+        role: CompactSegmentRole::Deletion,
+        schema: &schema,
+        physical_field: key,
+        columns: compact_columns_for_mapping(key, "Int", "ovb"),
+        values: &[encoded_int(2)],
+        min_key: encoded_int(2),
+        max_key: encoded_int(2),
+        annotation: None,
+    });
     let second = repo
-        .prepare_compact_publication(
-            &head,
-            repo.index_generation().unwrap(),
+        .prepare_compact_publication(CompactPublicationRequest {
+            expected_head: &head,
+            expected_index: repo.index_generation().unwrap(),
             base,
-            [81; 16],
-            [81; 32],
-            &[deletion],
-            "publish legacy key-only deletion",
-        )
+            runtime_intent_id: [81; 16],
+            cleanup_watermark: [81; 32],
+            segments: &[deletion],
+            message: "publish legacy key-only deletion",
+        })
         .unwrap();
     adopt_compact_fixture(&repo, &second);
 
@@ -3044,27 +3063,29 @@ fn legacy_authoritative_read_decodes_unannotated_blob_column_bytes() {
     // drops empty values fails instead of passing on a benign fixture.
     let payloads: [&[u8]; 2] = [&[0x00, 0xff, 0x80, b'o', b'r', b'n', b'a'], &[]];
     let body = compact_key_blob_segment(
-        table,
+        KeyBlobFixture {
+            table,
+            schema: &schema,
+            key_field: key,
+            blob_field: blob,
+            columns: &columns,
+            keys: &[1, 2],
+            blobs: &payloads,
+            blob_annotation: "",
+        },
         901,
-        &schema,
-        key,
-        blob,
-        columns,
-        &[1, 2],
-        &payloads,
-        "",
     );
     let head = repo.head().unwrap().unwrap();
     let plan = repo
-        .prepare_compact_publication(
-            &head,
-            repo.index_generation().unwrap(),
-            CompactManifest::empty(table, schema_fingerprint(&schema)),
-            [90; 16],
-            [90; 32],
-            &[body],
-            "publish legacy blob generation one",
-        )
+        .prepare_compact_publication(CompactPublicationRequest {
+            expected_head: &head,
+            expected_index: repo.index_generation().unwrap(),
+            base: CompactManifest::empty(table, schema_fingerprint(&schema)),
+            runtime_intent_id: [90; 16],
+            cleanup_watermark: [90; 32],
+            segments: &[body],
+            message: "publish legacy blob generation one",
+        })
         .unwrap();
     adopt_compact_fixture(&repo, &plan);
 
@@ -3137,28 +3158,30 @@ fn compact_publication_refuses_an_annotated_blob_leaf() {
     let columns = compact_columns_for_leaves(&[(key, "Int", "int64"), (blob, "Blob", "blob")]);
     let payloads: [&[u8]; 1] = [b"annotated"];
     let body = compact_key_blob_segment(
-        table,
+        KeyBlobFixture {
+            table,
+            schema: &schema,
+            key_field: key,
+            blob_field: blob,
+            columns: &columns,
+            keys: &[1],
+            blobs: &payloads,
+            blob_annotation: " (STRING)",
+        },
         1001,
-        &schema,
-        key,
-        blob,
-        columns,
-        &[1],
-        &payloads,
-        " (STRING)",
     );
     let head = repo.head().unwrap().unwrap();
     let before = git_state(&repo, root.path());
     assert!(matches!(
-        repo.prepare_compact_publication(
-            &head,
-            repo.index_generation().unwrap(),
-            CompactManifest::empty(table, schema_fingerprint(&schema)),
-            [100; 16],
-            [100; 32],
-            &[body],
-            "publish annotated legacy blob generation one",
-        ),
+        repo.prepare_compact_publication(CompactPublicationRequest {
+            expected_head: &head,
+            expected_index: repo.index_generation().unwrap(),
+            base: CompactManifest::empty(table, schema_fingerprint(&schema)),
+            runtime_intent_id: [100; 16],
+            cleanup_watermark: [100; 32],
+            segments: &[body],
+            message: "publish annotated legacy blob generation one",
+        }),
         Err(RepositoryError::InvalidCompactManifest)
     ));
     assert_eq!(git_state(&repo, root.path()), before);

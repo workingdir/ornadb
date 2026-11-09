@@ -27,34 +27,7 @@ const FETCH_CHILD_OTHER: &str = "ORNA_FETCH_ROUTING_OTHER";
 const CLONE_CHILD_REMOTE: &str = "ORNA_CLONE_ROUTING_REMOTE";
 const CLONE_CHILD_DESTINATION: &str = "ORNA_CLONE_ROUTING_DESTINATION";
 
-fn git(directory: &Path, arguments: &[&str]) -> String {
-    let output = Command::new("git")
-        .current_dir(directory)
-        .args(arguments)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "git {arguments:?}: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).unwrap().trim().to_owned()
-}
-
-fn git_no_lazy(directory: &Path, arguments: &[&str]) -> String {
-    let output = Command::new("git")
-        .current_dir(directory)
-        .env("GIT_NO_LAZY_FETCH", "1")
-        .args(arguments)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "git {arguments:?}: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).unwrap()
-}
+use test_support::{git, git_no_lazy};
 
 fn promised_inventory(directory: &Path) -> Vec<String> {
     let mut inventory = git_no_lazy(
