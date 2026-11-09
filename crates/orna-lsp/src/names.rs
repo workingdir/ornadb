@@ -1185,12 +1185,12 @@ impl Walker<'_> {
                     let element = condition.as_deref().map_or(Hint::Unknown, |iterable| {
                         Hint::Element(Box::new(self.hint(iterable)))
                     });
-                    let pattern_span = pattern_span(pattern);
+                    let pattern_span = pattern.span();
                     self.bind_pattern(
                         pattern,
                         &body.span(),
                         pattern_span.end,
-                        &pattern_span,
+                        pattern_span,
                         LocalBindingKind::Pattern,
                         &element,
                     );
@@ -1199,7 +1199,7 @@ impl Walker<'_> {
                     self.expr(body);
                 }
                 for arm in control_arms(*kind, arms) {
-                    let visible_after = pattern_span(&arm.pattern).end;
+                    let visible_after = arm.pattern.span().end;
                     self.bind_pattern(
                         &arm.pattern,
                         &arm.span,
@@ -1509,17 +1509,5 @@ pub(crate) fn token_key(token: &Token) -> Key {
     match &token.kind {
         TokenKind::Identifier { normalized } => normalized.clone(),
         _ => token.text.clone(),
-    }
-}
-
-fn pattern_span(pattern: &Pattern) -> SyntaxSpan {
-    match pattern {
-        Pattern::Name(_, span) | Pattern::Wildcard(span) | Pattern::Literal { span, .. } => {
-            span.clone()
-        }
-        Pattern::Tuple { span, .. }
-        | Pattern::List { span, .. }
-        | Pattern::Record { span, .. }
-        | Pattern::Constructor { span, .. } => span.clone(),
     }
 }

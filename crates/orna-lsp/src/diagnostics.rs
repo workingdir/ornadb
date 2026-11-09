@@ -7,6 +7,7 @@
 //! only the newest editor state.
 
 use std::collections::{BTreeMap, HashMap};
+use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -174,13 +175,30 @@ impl Drop for DiagnosticsWorker {
 type Published = HashMap<Uri, (Vec<Diagnostic>, Option<PathBuf>)>;
 
 fn run(receiver: &Receiver<Job>, publisher: &Publisher) {
+    run_with(receiver, publisher, reports_for);
+}
+
+/// The worker loop, with the check passed in so a test can make it panic.
+fn run_with(
+    receiver: &Receiver<Job>,
+    publisher: &Publisher,
+    check: impl Fn(&Job, &Published) -> Vec<Report>,
+) {
     let mut published = Published::new();
     while let Ok(mut job) = receiver.recv() {
         while let Ok(newer) = receiver.try_recv() {
             job.triggers.extend(newer.triggers);
             job.snapshot = newer.snapshot;
         }
-        for report in reports_for(&job, &published) {
+        // A check that panics must not end the loop: the thread would stop
+        // publishing diagnostics for every document until the editor is
+        // restarted. The job is dropped (the panic hook has already reported
+        // it) and the next edit schedules a fresh check. The check only reads
+        // the job and the published map, so nothing is left half-updated.
+        let Ok(reports) = panic::catch_unwind(AssertUnwindSafe(|| check(&job, &published))) else {
+            continue;
+        };
+        for report in reports {
             publisher.publish(&report);
             if report.diagnostics.is_empty() && report.version.is_none() {
                 published.remove(&report.uri);
@@ -247,5 +265,53 @@ fn cleared(uri: &Uri, root: Option<PathBuf>) -> Report {
         version: None,
         diagnostics: Vec::new(),
         root,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use super::*;
+    use crate::sync::lock;
+
+    const TIMEOUT: Duration = Duration::from_secs(30);
+
+    fn job() -> Job {
+        Job {
+            snapshot: Arc::new(Vec::new()),
+            triggers: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_check_that_panics_does_not_end_diagnostics() {
+        let uri: Uri = "file:///workspace/a.orna".parse().unwrap();
+        let (jobs, receiver) = mpsc::channel();
+        let (checked_sender, checked) = mpsc::channel();
+        let published = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&published);
+        let publisher = Publisher::new(move |message| lock(&sink).push(message));
+        let calls = AtomicUsize::new(0);
+        let worker = thread::spawn(move || {
+            run_with(&receiver, &publisher, |_, _| {
+                let call = calls.fetch_add(1, Ordering::SeqCst);
+                checked_sender.send(()).unwrap();
+                assert_ne!(call, 0, "check bug");
+                vec![cleared(&uri, None)]
+            });
+        });
+        jobs.send(job()).unwrap();
+        checked.recv_timeout(TIMEOUT).expect("the first check ran");
+        // The first check panicked; a later job is still checked.
+        jobs.send(job()).unwrap();
+        checked
+            .recv_timeout(TIMEOUT)
+            .expect("the worker outlived the panic");
+        drop(jobs);
+        worker.join().unwrap();
+        assert_eq!(lock(&published).len(), 1, "only the second check published");
     }
 }

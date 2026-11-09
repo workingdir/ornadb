@@ -176,15 +176,24 @@ struct Imports {
     globs: Vec<Vec<Key>>,
 }
 
+/// How the modules of a workspace see each other.
+#[derive(Clone)]
+enum Scope {
+    /// Detached documents share one scope instead of importing each other.
+    Detached,
+    /// Modules see each other through `use` imports, as in `orna check`.
+    Project {
+        /// Why some project modules are missing, when loading failed.
+        incomplete: Option<String>,
+    },
+}
+
 /// The modules one request can see.
 pub(crate) struct Workspace {
     pub modules: Vec<Module>,
     /// The standard library these modules see, as `orna check` sees it.
     pub standard: Arc<StandardLibrary>,
-    /// Detached documents share one scope instead of importing each other.
-    shared_scope: bool,
-    /// Why some project modules are missing, when loading failed.
-    pub incomplete: Option<String>,
+    scope: Scope,
     imports: Vec<Imports>,
     /// Top-level declarations of each module by key.
     top_level: Vec<HashMap<Key, Vec<usize>>>,
@@ -212,7 +221,7 @@ impl Workspace {
         standard: Arc<StandardLibrary>,
         incomplete: Option<String>,
     ) -> Self {
-        Self::build(modules, standard, false, incomplete)
+        Self::build(modules, standard, Scope::Project { incomplete })
     }
 
     /// Documents outside a project, sharing one scope and the reference
@@ -226,21 +235,16 @@ impl Workspace {
                 logical_path: None,
             })
             .collect();
-        Self::build(modules, StandardLibrary::reference(), true, None)
+        Self::build(modules, StandardLibrary::reference(), Scope::Detached)
     }
 
-    fn build(
-        modules: Vec<Module>,
-        standard: Arc<StandardLibrary>,
-        shared_scope: bool,
-        incomplete: Option<String>,
-    ) -> Self {
+    fn build(modules: Vec<Module>, standard: Arc<StandardLibrary>, scope: Scope) -> Self {
         let mut imports = Vec::with_capacity(modules.len());
         let mut top_level = Vec::with_capacity(modules.len());
         let mut members = Vec::with_capacity(modules.len());
         let mut by_namespace = HashMap::new();
         for (index, module) in modules.iter().enumerate() {
-            if !shared_scope {
+            if matches!(scope, Scope::Project { .. }) {
                 by_namespace
                     .entry(module.namespace.clone())
                     .or_insert(index);
@@ -266,8 +270,7 @@ impl Workspace {
         Self {
             modules,
             standard,
-            shared_scope,
-            incomplete,
+            scope,
             imports,
             top_level,
             members,
@@ -299,12 +302,20 @@ impl Workspace {
                 logical_path: module.logical_path.clone(),
             })
             .collect();
-        Self::build(
-            modules,
-            Arc::clone(&self.standard),
-            self.shared_scope,
-            self.incomplete.clone(),
-        )
+        Self::build(modules, Arc::clone(&self.standard), self.scope.clone())
+    }
+
+    /// Whether the modules are documents outside a project, sharing one scope.
+    pub(crate) fn is_detached(&self) -> bool {
+        matches!(self.scope, Scope::Detached)
+    }
+
+    /// Why some project modules are missing, when loading the project failed.
+    pub(crate) fn incomplete(&self) -> Option<&str> {
+        match &self.scope {
+            Scope::Project { incomplete } => incomplete.as_deref(),
+            Scope::Detached => None,
+        }
     }
 
     /// `file:line:column` of `byte` in `module`, for messages.
@@ -326,7 +337,7 @@ impl Workspace {
     /// it imports by name or glob.
     pub(crate) fn completion_symbols(&self, module: usize) -> Vec<&EditorSymbol> {
         let mut symbols = self.modules[module].file.symbols.iter().collect::<Vec<_>>();
-        if self.shared_scope {
+        if self.is_detached() {
             for (index, other) in self.modules.iter().enumerate() {
                 if index != module {
                     symbols.extend(other.file.symbols.iter());
@@ -488,7 +499,7 @@ impl Workspace {
 
     /// A bare name in `module`.
     fn lookup(&self, module: usize, key: &str) -> Resolved {
-        if self.shared_scope {
+        if self.is_detached() {
             // Same-name declarations of one module are one overload group,
             // resolved to its first declaration as in a project; only the
             // same name declared by two modules is ambiguous.

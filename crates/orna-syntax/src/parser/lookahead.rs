@@ -12,7 +12,6 @@ const NO_POSITION: usize = usize::MAX;
 /// depth (`<` = +1, `>` = -1). The first position where a scan from `s` stops
 /// is a next-index query on those sums, so both answers are precomputed in
 /// linear time and the parser reads them in constant time.
-#[derive(Clone)]
 pub(in crate::parser) struct TokenLookahead {
     /// `terminated_initializers[s]` is the result of the terminator scan that
     /// starts at token `s`.
