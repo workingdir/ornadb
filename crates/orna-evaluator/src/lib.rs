@@ -11308,183 +11308,12 @@ impl Context<'_, '_> {
                 Ok(Value::Unit)
             }
             ("batch", [Value::Stream { .. }, Value::Int(size)]) => {
-                if let Value::Stream {
-                    source_label,
-                    source_digest,
-                    provider: Some(provider),
-                    ..
-                } = &values[0]
-                {
-                    let size = self.positive_collection_size(size)?;
-                    self.items(size)?;
-                    if provider.batch_size.is_some() {
-                        return Err(error("ORNA-EVAL-VALUE"));
-                    }
-                    let mut provider = provider.clone();
-                    provider.batch_size = Some(size);
-                    return self.provider_stream_value(
-                        source_label.clone(),
-                        *source_digest,
-                        provider,
-                    );
-                }
-                let (items, source_label) = self.checked_stream_values(&values[0])?;
-                let size = self.positive_collection_size(size)?;
-                let mut batches = Vec::new();
-                for batch in items.chunks(size) {
-                    self.step()?;
-                    batches.push(Value::list(batch.to_vec()));
-                    self.items(batches.len())?;
-                }
-                self.finite_stream(format!("{source_label}|batch:{size}"), batches)
+                self.stream_batch(&values[0], size)
             }
             ("buffer", [Value::Stream { .. }, Value::Int(capacity)]) => {
-                if let Value::Stream {
-                    source_label,
-                    source_digest,
-                    provider: Some(provider),
-                    ..
-                } = &values[0]
-                {
-                    let capacity = self.positive_collection_size(capacity)?;
-                    self.items(capacity)?;
-                    let mut provider = provider.clone();
-                    provider.buffer_capacity = capacity;
-                    return self.provider_stream_value(
-                        source_label.clone(),
-                        *source_digest,
-                        provider,
-                    );
-                }
-                let (items, source_label) = self.checked_stream_values(&values[0])?;
-                self.positive_collection_size(capacity)?;
-                // The immutable finite source is consumed under backpressure;
-                // a bounded queue changes scheduling, never item order/content.
-                self.finite_stream(format!("{source_label}|buffer"), items)
+                self.stream_buffer(&values[0], capacity)
             }
-            ("merge", [Value::List(streams)]) => {
-                if streams.iter().any(|stream| {
-                    matches!(
-                        stream,
-                        Value::Stream {
-                            provider: Some(_),
-                            ..
-                        }
-                    )
-                }) {
-                    self.items(streams.len())?;
-                    if streams.is_empty() {
-                        return self.provider_stream_value(
-                            "merge:empty".to_owned(),
-                            [0; 32],
-                            ProviderStream {
-                                sources: Vec::new(),
-                                buffer_capacity: 1,
-                                batch_size: None,
-                                throttle_nanoseconds: None,
-                                debounce_nanoseconds: None,
-                                retry: None,
-                                recover: None,
-                            },
-                        );
-                    }
-                    let mut sources = Vec::new();
-                    let mut capacity = usize::MAX;
-                    let mut merge_identity = Sha256::new();
-                    merge_identity.update(b"orna.provider-merge.v1\0");
-                    for stream in streams {
-                        let Value::Stream {
-                            provider: Some(provider),
-                            source_digest,
-                            ..
-                        } = stream
-                        else {
-                            return Err(error("ORNA-EVAL-TYPE"));
-                        };
-                        if provider.batch_size.is_some()
-                            || provider.throttle_nanoseconds.is_some()
-                            || provider.debounce_nanoseconds.is_some()
-                            || provider.retry.is_some()
-                            || provider.recover.is_some()
-                        {
-                            return Err(error("ORNA-EVAL-VALUE"));
-                        }
-                        capacity = capacity.min(provider.buffer_capacity);
-                        for source in &provider.sources {
-                            self.step()?;
-                            merge_identity.update((source.source.len() as u64).to_be_bytes());
-                            merge_identity.update(source.source.as_bytes());
-                            merge_identity.update(source.identity);
-                            sources.push(source.clone());
-                        }
-                        merge_identity.update(source_digest);
-                    }
-                    let identity: [u8; 32] = merge_identity.finalize().into();
-                    let label = format!(
-                        "merge:{}",
-                        identity
-                            .iter()
-                            .map(|byte| format!("{byte:02x}"))
-                            .collect::<String>()
-                    );
-                    return self.provider_stream_value(
-                        label,
-                        identity,
-                        ProviderStream {
-                            sources,
-                            buffer_capacity: capacity,
-                            batch_size: None,
-                            throttle_nanoseconds: None,
-                            debounce_nanoseconds: None,
-                            retry: None,
-                            recover: None,
-                        },
-                    );
-                }
-                let mut sources = Vec::with_capacity(streams.len());
-                for stream in streams {
-                    let (items, source_label) = self.checked_stream_values(stream)?;
-                    sources.push((source_label, items));
-                }
-                let total = sources.iter().try_fold(0usize, |total, (_, items)| {
-                    total
-                        .checked_add(items.len())
-                        .ok_or_else(|| error("ORNA-EVAL-LIMIT"))
-                })?;
-                self.items(total)?;
-                let mut merged = Vec::with_capacity(total);
-                // The reference leaves cross-source arrival to a live
-                // scheduler. These finite materialized sources have no event
-                // timestamps, so this evaluator uses a repeatable round-robin
-                // admission schedule while preserving every source's order.
-                for position in 0..sources
-                    .iter()
-                    .map(|(_, items)| items.len())
-                    .max()
-                    .unwrap_or(0)
-                {
-                    for (_, items) in &sources {
-                        if let Some(value) = items.get(position) {
-                            self.step()?;
-                            merged.push(value.clone());
-                        }
-                    }
-                }
-                let mut merge_identity = Sha256::new();
-                merge_identity.update(b"orna.merge.v1\0");
-                merge_identity.update((sources.len() as u64).to_be_bytes());
-                for (source_label, items) in &sources {
-                    merge_identity.update((source_label.len() as u64).to_be_bytes());
-                    merge_identity.update(source_label.as_bytes());
-                    merge_identity.update(self.list_stream_digest(source_label, items)?);
-                }
-                let source_identity = merge_identity
-                    .finalize()
-                    .iter()
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect::<String>();
-                self.finite_stream(format!("merge:{source_identity}"), merged)
-            }
+            ("merge", [Value::List(streams)]) => self.stream_merge(streams),
             (
                 "throttle",
                 [
@@ -11495,42 +11324,7 @@ impl Context<'_, '_> {
                     },
                     Value::String(policy),
                 ],
-            ) => {
-                if elapsed_total_nanoseconds(seconds, *nanosecond) <= BigInt::from(0u8) {
-                    return Err(error("ORNA-EVAL-VALUE"));
-                }
-                if policy != "drop" {
-                    return Err(error("ORNA-EVAL-VALUE"));
-                }
-                if let Value::Stream {
-                    source_label,
-                    source_digest,
-                    provider: Some(provider),
-                    ..
-                } = &values[0]
-                {
-                    if provider.throttle_nanoseconds.is_some()
-                        || provider.debounce_nanoseconds.is_some()
-                    {
-                        return Err(error("ORNA-EVAL-VALUE"));
-                    }
-                    let mut provider = provider.clone();
-                    provider.throttle_nanoseconds =
-                        Some(elapsed_total_nanoseconds(seconds, *nanosecond));
-                    return self.provider_stream_value(
-                        source_label.clone(),
-                        *source_digest,
-                        provider,
-                    );
-                }
-                // The reference requires elapsed intervals but gives this
-                // finite source no timestamp provider. Treat the materialized
-                // list as one observation instant; explicit `drop` keeps its
-                // first item and drops later same-instant values.
-                let (items, source_label) = self.checked_stream_values(&values[0])?;
-                let output = items.first().cloned().into_iter().collect();
-                self.finite_stream(format!("{source_label}|throttle:drop"), output)
-            }
+            ) => self.stream_throttle(&values[0], seconds, *nanosecond, policy),
             (
                 "debounce",
                 [
@@ -11541,155 +11335,12 @@ impl Context<'_, '_> {
                     },
                     Value::String(policy),
                 ],
-            ) => {
-                if elapsed_total_nanoseconds(seconds, *nanosecond) <= BigInt::from(0u8) {
-                    return Err(error("ORNA-EVAL-VALUE"));
-                }
-                if policy != "latest" {
-                    return Err(error("ORNA-EVAL-VALUE"));
-                }
-                if let Value::Stream {
-                    source_label,
-                    source_digest,
-                    provider: Some(provider),
-                    ..
-                } = &values[0]
-                {
-                    if provider.debounce_nanoseconds.is_some()
-                        || provider.throttle_nanoseconds.is_some()
-                    {
-                        return Err(error("ORNA-EVAL-VALUE"));
-                    }
-                    let mut provider = provider.clone();
-                    provider.debounce_nanoseconds =
-                        Some(elapsed_total_nanoseconds(seconds, *nanosecond));
-                    return self.provider_stream_value(
-                        source_label.clone(),
-                        *source_digest,
-                        provider,
-                    );
-                }
-                // The reference requires elapsed quiet intervals but gives
-                // this finite source no timestamp provider. Treat its items as
-                // one synchronous burst and apply explicit `latest` delivery.
-                let (items, source_label) = self.checked_stream_values(&values[0])?;
-                let output = items.last().cloned().into_iter().collect();
-                self.finite_stream(format!("{source_label}|debounce:latest"), output)
-            }
+            ) => self.stream_debounce(&values[0], seconds, *nanosecond, policy),
             ("retry", [Value::Stream { .. }, Value::Record(policy)]) => {
-                if let Value::Stream {
-                    source_label,
-                    source_digest,
-                    provider: Some(provider),
-                    ..
-                } = &values[0]
-                {
-                    let Some(Value::Int(max_attempts)) = policy.get("max_attempts") else {
-                        return Err(error("ORNA-EVAL-TYPE"));
-                    };
-                    let Some(Value::Duration {
-                        seconds: initial_seconds,
-                        nanosecond: initial_nanos,
-                    }) = policy.get("initial_delay")
-                    else {
-                        return Err(error("ORNA-EVAL-TYPE"));
-                    };
-                    let Some(Value::Duration {
-                        seconds: maximum_seconds,
-                        nanosecond: maximum_nanos,
-                    }) = policy.get("max_delay")
-                    else {
-                        return Err(error("ORNA-EVAL-TYPE"));
-                    };
-                    let initial_delay_nanoseconds =
-                        elapsed_total_nanoseconds(initial_seconds, *initial_nanos);
-                    let max_delay_nanoseconds =
-                        elapsed_total_nanoseconds(maximum_seconds, *maximum_nanos);
-                    let max_attempts = max_attempts
-                        .to_usize()
-                        .filter(|attempts| {
-                            *attempts > 0 && *attempts <= self.limits.max_collection_items
-                        })
-                        .ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
-                    if initial_delay_nanoseconds < BigInt::from(0u8)
-                        || max_delay_nanoseconds < initial_delay_nanoseconds
-                        || provider.retry.is_some()
-                    {
-                        return Err(error("ORNA-EVAL-VALUE"));
-                    }
-                    let mut provider = provider.clone();
-                    // `max_attempts` counts the first delivery attempt as
-                    // well as retries; the initial delay applies before the
-                    // first redelivery, then doubles up to `max_delay`.
-                    provider.retry = Some(ProviderRetryPolicy {
-                        max_attempts,
-                        initial_delay_nanoseconds,
-                        max_delay_nanoseconds,
-                    });
-                    return self.provider_stream_value(
-                        source_label.clone(),
-                        *source_digest,
-                        provider,
-                    );
-                }
-                let (items, source_label) = self.checked_stream_values(&values[0])?;
-                let Some(Value::Int(max_attempts)) = policy.get("max_attempts") else {
-                    return Err(error("ORNA-EVAL-TYPE"));
-                };
-                let Some(Value::Duration {
-                    seconds: initial_seconds,
-                    nanosecond: initial_nanos,
-                }) = policy.get("initial_delay")
-                else {
-                    return Err(error("ORNA-EVAL-TYPE"));
-                };
-                let Some(Value::Duration {
-                    seconds: maximum_seconds,
-                    nanosecond: maximum_nanos,
-                }) = policy.get("max_delay")
-                else {
-                    return Err(error("ORNA-EVAL-TYPE"));
-                };
-                if !max_attempts.is_positive()
-                    || elapsed_total_nanoseconds(initial_seconds, *initial_nanos)
-                        < BigInt::from(0u8)
-                    || elapsed_total_nanoseconds(maximum_seconds, *maximum_nanos)
-                        < elapsed_total_nanoseconds(initial_seconds, *initial_nanos)
-                {
-                    return Err(error("ORNA-EVAL-VALUE"));
-                }
-                // ListStreamSource is replayable and cannot produce a blocked
-                // provider delivery. A valid retry policy preserves it exactly.
-                self.finite_stream(format!("{source_label}|retry"), items)
+                self.stream_retry(&values[0], policy)
             }
             ("recover", [Value::Stream { .. }, handler]) => {
-                if let Value::Stream {
-                    source_label,
-                    source_digest,
-                    provider: Some(provider),
-                    ..
-                } = &values[0]
-                {
-                    if !matches!(handler, Value::Function { .. } | Value::Closure(_))
-                        || provider.recover.is_some()
-                    {
-                        return Err(error("ORNA-EVAL-TYPE"));
-                    }
-                    let mut provider = provider.clone();
-                    provider.recover = Some(Box::new(handler.clone()));
-                    return self.provider_stream_value(
-                        source_label.clone(),
-                        *source_digest,
-                        provider,
-                    );
-                }
-                let (items, source_label) = self.checked_stream_values(&values[0])?;
-                if !matches!(handler, Value::Function { .. } | Value::Closure(_)) {
-                    return Err(error("ORNA-EVAL-TYPE"));
-                }
-                // The finite list source cannot fail decoding or polling, so
-                // recovery has no failure to replace and retains every item.
-                self.finite_stream(format!("{source_label}|recover"), items)
+                self.stream_recover(&values[0], handler)
             }
             ("from_provider", [_, _])
             | ("from_list", [_, _])
@@ -11704,6 +11355,376 @@ impl Context<'_, '_> {
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
     }
+    /// Merges streams into one replayable source. Provider-backed streams
+    /// combine their sources under one identity; finite streams are admitted
+    /// round-robin so every source keeps its own order.
+    fn stream_merge(&mut self, streams: &List) -> Result<Value, EvaluationError> {
+        if streams.iter().any(|stream| {
+            matches!(
+                stream,
+                Value::Stream {
+                    provider: Some(_),
+                    ..
+                }
+            )
+        }) {
+            self.items(streams.len())?;
+            if streams.is_empty() {
+                return self.provider_stream_value(
+                    "merge:empty".to_owned(),
+                    [0; 32],
+                    ProviderStream {
+                        sources: Vec::new(),
+                        buffer_capacity: 1,
+                        batch_size: None,
+                        throttle_nanoseconds: None,
+                        debounce_nanoseconds: None,
+                        retry: None,
+                        recover: None,
+                    },
+                );
+            }
+            let mut sources = Vec::new();
+            let mut capacity = usize::MAX;
+            let mut merge_identity = Sha256::new();
+            merge_identity.update(b"orna.provider-merge.v1\0");
+            for stream in streams {
+                let Value::Stream {
+                    provider: Some(provider),
+                    source_digest,
+                    ..
+                } = stream
+                else {
+                    return Err(error("ORNA-EVAL-TYPE"));
+                };
+                if provider.batch_size.is_some()
+                    || provider.throttle_nanoseconds.is_some()
+                    || provider.debounce_nanoseconds.is_some()
+                    || provider.retry.is_some()
+                    || provider.recover.is_some()
+                {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+                capacity = capacity.min(provider.buffer_capacity);
+                for source in &provider.sources {
+                    self.step()?;
+                    merge_identity.update((source.source.len() as u64).to_be_bytes());
+                    merge_identity.update(source.source.as_bytes());
+                    merge_identity.update(source.identity);
+                    sources.push(source.clone());
+                }
+                merge_identity.update(source_digest);
+            }
+            let identity: [u8; 32] = merge_identity.finalize().into();
+            let label = format!(
+                "merge:{}",
+                identity
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            );
+            return self.provider_stream_value(
+                label,
+                identity,
+                ProviderStream {
+                    sources,
+                    buffer_capacity: capacity,
+                    batch_size: None,
+                    throttle_nanoseconds: None,
+                    debounce_nanoseconds: None,
+                    retry: None,
+                    recover: None,
+                },
+            );
+        }
+        self.merge_finite_streams(streams)
+    }
+
+    fn stream_batch(&mut self, stream: &Value, size: &BigInt) -> Result<Value, EvaluationError> {
+        if let Value::Stream {
+            source_label,
+            source_digest,
+            provider: Some(provider),
+            ..
+        } = stream
+        {
+            let size = self.positive_collection_size(size)?;
+            self.items(size)?;
+            if provider.batch_size.is_some() {
+                return Err(error("ORNA-EVAL-VALUE"));
+            }
+            let mut provider = provider.clone();
+            provider.batch_size = Some(size);
+            return self.provider_stream_value(source_label.clone(), *source_digest, provider);
+        }
+        let (items, source_label) = self.checked_stream_values(stream)?;
+        let size = self.positive_collection_size(size)?;
+        let mut batches = Vec::new();
+        for batch in items.chunks(size) {
+            self.step()?;
+            batches.push(Value::list(batch.to_vec()));
+            self.items(batches.len())?;
+        }
+        self.finite_stream(format!("{source_label}|batch:{size}"), batches)
+    }
+
+    fn stream_buffer(
+        &mut self,
+        stream: &Value,
+        capacity: &BigInt,
+    ) -> Result<Value, EvaluationError> {
+        if let Value::Stream {
+            source_label,
+            source_digest,
+            provider: Some(provider),
+            ..
+        } = stream
+        {
+            let capacity = self.positive_collection_size(capacity)?;
+            self.items(capacity)?;
+            let mut provider = provider.clone();
+            provider.buffer_capacity = capacity;
+            return self.provider_stream_value(source_label.clone(), *source_digest, provider);
+        }
+        let (items, source_label) = self.checked_stream_values(stream)?;
+        self.positive_collection_size(capacity)?;
+        // The immutable finite source is consumed under backpressure;
+        // a bounded queue changes scheduling, never item order/content.
+        self.finite_stream(format!("{source_label}|buffer"), items)
+    }
+
+    /// Admits finite streams round-robin so every source keeps its own order,
+    /// then folds the merged identity from the source labels and digests.
+    fn merge_finite_streams(&mut self, streams: &List) -> Result<Value, EvaluationError> {
+        let mut sources = Vec::with_capacity(streams.len());
+        for stream in streams {
+            let (items, source_label) = self.checked_stream_values(stream)?;
+            sources.push((source_label, items));
+        }
+        let total = sources.iter().try_fold(0usize, |total, (_, items)| {
+            total
+                .checked_add(items.len())
+                .ok_or_else(|| error("ORNA-EVAL-LIMIT"))
+        })?;
+        self.items(total)?;
+        let mut merged = Vec::with_capacity(total);
+        // The reference leaves cross-source arrival to a live
+        // scheduler. These finite materialized sources have no event
+        // timestamps, so this evaluator uses a repeatable round-robin
+        // admission schedule while preserving every source's order.
+        for position in 0..sources
+            .iter()
+            .map(|(_, items)| items.len())
+            .max()
+            .unwrap_or(0)
+        {
+            for (_, items) in &sources {
+                if let Some(value) = items.get(position) {
+                    self.step()?;
+                    merged.push(value.clone());
+                }
+            }
+        }
+        let mut merge_identity = Sha256::new();
+        merge_identity.update(b"orna.merge.v1\0");
+        merge_identity.update((sources.len() as u64).to_be_bytes());
+        for (source_label, items) in &sources {
+            merge_identity.update((source_label.len() as u64).to_be_bytes());
+            merge_identity.update(source_label.as_bytes());
+            merge_identity.update(self.list_stream_digest(source_label, items)?);
+        }
+        let source_identity = merge_identity
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        self.finite_stream(format!("merge:{source_identity}"), merged)
+    }
+
+    fn stream_throttle(
+        &mut self,
+        stream: &Value,
+        seconds: &BigInt,
+        nanosecond: u32,
+        policy: &str,
+    ) -> Result<Value, EvaluationError> {
+        if elapsed_total_nanoseconds(seconds, nanosecond) <= BigInt::from(0u8) {
+            return Err(error("ORNA-EVAL-VALUE"));
+        }
+        if policy != "drop" {
+            return Err(error("ORNA-EVAL-VALUE"));
+        }
+        if let Value::Stream {
+            source_label,
+            source_digest,
+            provider: Some(provider),
+            ..
+        } = stream
+        {
+            if provider.throttle_nanoseconds.is_some() || provider.debounce_nanoseconds.is_some() {
+                return Err(error("ORNA-EVAL-VALUE"));
+            }
+            let mut provider = provider.clone();
+            provider.throttle_nanoseconds = Some(elapsed_total_nanoseconds(seconds, nanosecond));
+            return self.provider_stream_value(source_label.clone(), *source_digest, provider);
+        }
+        // The reference requires elapsed intervals but gives this
+        // finite source no timestamp provider. Treat the materialized
+        // list as one observation instant; explicit `drop` keeps its
+        // first item and drops later same-instant values.
+        let (items, source_label) = self.checked_stream_values(stream)?;
+        let output = items.first().cloned().into_iter().collect();
+        self.finite_stream(format!("{source_label}|throttle:drop"), output)
+    }
+
+    fn stream_debounce(
+        &mut self,
+        stream: &Value,
+        seconds: &BigInt,
+        nanosecond: u32,
+        policy: &str,
+    ) -> Result<Value, EvaluationError> {
+        if elapsed_total_nanoseconds(seconds, nanosecond) <= BigInt::from(0u8) {
+            return Err(error("ORNA-EVAL-VALUE"));
+        }
+        if policy != "latest" {
+            return Err(error("ORNA-EVAL-VALUE"));
+        }
+        if let Value::Stream {
+            source_label,
+            source_digest,
+            provider: Some(provider),
+            ..
+        } = stream
+        {
+            if provider.debounce_nanoseconds.is_some() || provider.throttle_nanoseconds.is_some() {
+                return Err(error("ORNA-EVAL-VALUE"));
+            }
+            let mut provider = provider.clone();
+            provider.debounce_nanoseconds = Some(elapsed_total_nanoseconds(seconds, nanosecond));
+            return self.provider_stream_value(source_label.clone(), *source_digest, provider);
+        }
+        // The reference requires elapsed quiet intervals but gives
+        // this finite source no timestamp provider. Treat its items as
+        // one synchronous burst and apply explicit `latest` delivery.
+        let (items, source_label) = self.checked_stream_values(stream)?;
+        let output = items.last().cloned().into_iter().collect();
+        self.finite_stream(format!("{source_label}|debounce:latest"), output)
+    }
+
+    fn stream_retry(
+        &mut self,
+        stream: &Value,
+        policy: &BTreeMap<String, Value>,
+    ) -> Result<Value, EvaluationError> {
+        if let Value::Stream {
+            source_label,
+            source_digest,
+            provider: Some(provider),
+            ..
+        } = stream
+        {
+            let Some(Value::Int(max_attempts)) = policy.get("max_attempts") else {
+                return Err(error("ORNA-EVAL-TYPE"));
+            };
+            let Some(Value::Duration {
+                seconds: initial_seconds,
+                nanosecond: initial_nanos,
+            }) = policy.get("initial_delay")
+            else {
+                return Err(error("ORNA-EVAL-TYPE"));
+            };
+            let Some(Value::Duration {
+                seconds: maximum_seconds,
+                nanosecond: maximum_nanos,
+            }) = policy.get("max_delay")
+            else {
+                return Err(error("ORNA-EVAL-TYPE"));
+            };
+            let initial_delay_nanoseconds =
+                elapsed_total_nanoseconds(initial_seconds, *initial_nanos);
+            let max_delay_nanoseconds = elapsed_total_nanoseconds(maximum_seconds, *maximum_nanos);
+            let max_attempts = max_attempts
+                .to_usize()
+                .filter(|attempts| *attempts > 0 && *attempts <= self.limits.max_collection_items)
+                .ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+            if initial_delay_nanoseconds < BigInt::from(0u8)
+                || max_delay_nanoseconds < initial_delay_nanoseconds
+                || provider.retry.is_some()
+            {
+                return Err(error("ORNA-EVAL-VALUE"));
+            }
+            let mut provider = provider.clone();
+            // `max_attempts` counts the first delivery attempt as
+            // well as retries; the initial delay applies before the
+            // first redelivery, then doubles up to `max_delay`.
+            provider.retry = Some(ProviderRetryPolicy {
+                max_attempts,
+                initial_delay_nanoseconds,
+                max_delay_nanoseconds,
+            });
+            return self.provider_stream_value(source_label.clone(), *source_digest, provider);
+        }
+        let (items, source_label) = self.checked_stream_values(stream)?;
+        let Some(Value::Int(max_attempts)) = policy.get("max_attempts") else {
+            return Err(error("ORNA-EVAL-TYPE"));
+        };
+        let Some(Value::Duration {
+            seconds: initial_seconds,
+            nanosecond: initial_nanos,
+        }) = policy.get("initial_delay")
+        else {
+            return Err(error("ORNA-EVAL-TYPE"));
+        };
+        let Some(Value::Duration {
+            seconds: maximum_seconds,
+            nanosecond: maximum_nanos,
+        }) = policy.get("max_delay")
+        else {
+            return Err(error("ORNA-EVAL-TYPE"));
+        };
+        if !max_attempts.is_positive()
+            || elapsed_total_nanoseconds(initial_seconds, *initial_nanos) < BigInt::from(0u8)
+            || elapsed_total_nanoseconds(maximum_seconds, *maximum_nanos)
+                < elapsed_total_nanoseconds(initial_seconds, *initial_nanos)
+        {
+            return Err(error("ORNA-EVAL-VALUE"));
+        }
+        // ListStreamSource is replayable and cannot produce a blocked
+        // provider delivery. A valid retry policy preserves it exactly.
+        self.finite_stream(format!("{source_label}|retry"), items)
+    }
+
+    fn stream_recover(
+        &mut self,
+        stream: &Value,
+        handler: &Value,
+    ) -> Result<Value, EvaluationError> {
+        if let Value::Stream {
+            source_label,
+            source_digest,
+            provider: Some(provider),
+            ..
+        } = stream
+        {
+            if !matches!(handler, Value::Function { .. } | Value::Closure(_))
+                || provider.recover.is_some()
+            {
+                return Err(error("ORNA-EVAL-TYPE"));
+            }
+            let mut provider = provider.clone();
+            provider.recover = Some(Box::new(handler.clone()));
+            return self.provider_stream_value(source_label.clone(), *source_digest, provider);
+        }
+        let (items, source_label) = self.checked_stream_values(stream)?;
+        if !matches!(handler, Value::Function { .. } | Value::Closure(_)) {
+            return Err(error("ORNA-EVAL-TYPE"));
+        }
+        // The finite list source cannot fail decoding or polling, so
+        // recovery has no failure to replace and retains every item.
+        self.finite_stream(format!("{source_label}|recover"), items)
+    }
+
     fn concurrent(&mut self, name: &str, values: Vec<Value>) -> Result<Value, EvaluationError> {
         match (name, values.as_slice()) {
             ("parallel", [Value::List(callbacks)]) => {
