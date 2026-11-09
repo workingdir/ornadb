@@ -1035,6 +1035,37 @@ fn descriptor_field_id(
     profile: &CompactOvbProfile,
     expected_fields: &BTreeMap<[u8; 16], (&OvbRaw, u8)>,
 ) -> Result<([u8; 16], Option<KeyColumnKind>), CompactParquetError> {
+    let (id, parts) = descriptor_parts(descriptor, column)?;
+    let Some((expected_type, _role)) = expected_fields.get(&id) else {
+        return Err(CompactParquetError::UnsupportedKeyMapping);
+    };
+    if parts.logical_type != *expected_type {
+        return Err(CompactParquetError::UnsupportedKeyMapping);
+    }
+    let kind = if profile.key_field_ids().any(|key| key == id) {
+        key_column_kind(&parts, column)?
+    } else {
+        stored_column_kind(&parts, column)?
+    };
+    Ok((id, Some(kind)))
+}
+
+/// The descriptor parts the kind validators read once the descriptor's field
+/// identity and projected column name are known to be its own.
+struct ColumnDescriptorParts<'a> {
+    logical_type: &'a OvbRaw,
+    physical: &'a OvbRaw,
+    parameters: &'a OvbRaw,
+}
+
+/// Admits the descriptor as exactly one field of this schema and returns the
+/// field id plus the parts that classify its physical mapping. A descriptor
+/// whose field path or projected name is not the column it sits beside would
+/// let one column's annotation authorise another column's bytes.
+fn descriptor_parts<'a>(
+    descriptor: &'a OvbRaw,
+    column: &parquet::schema::types::ColumnDescriptor,
+) -> Result<([u8; 16], ColumnDescriptorParts<'a>), CompactParquetError> {
     let OvbRaw::Array(fields) = descriptor else {
         return Err(CompactParquetError::InvalidMetadata);
     };
@@ -1057,293 +1088,255 @@ fn descriptor_field_id(
     let OvbRaw::Array(path) = &fields[1] else {
         return Err(CompactParquetError::InvalidMetadata);
     };
+    let projected = format!("f_{}", Uuid::from_bytes(id).simple());
     if path.len() != 1
-        || !matches!(&path[0], OvbRaw::Text(value) if value == &format!("f_{}", Uuid::from_bytes(id).simple()))
+        || !matches!(&path[0], OvbRaw::Text(value) if value == &projected)
         || column.path().parts().len() != 1
-        || column.path().parts()[0] != format!("f_{}", Uuid::from_bytes(id).simple())
+        || column.path().parts()[0] != projected
     {
         return Err(CompactParquetError::InvalidMetadata);
     }
-    let Some((expected_type, _role)) = expected_fields.get(&id) else {
-        return Err(CompactParquetError::UnsupportedKeyMapping);
+    Ok((
+        id,
+        ColumnDescriptorParts {
+            logical_type: &fields[2],
+            physical: &fields[3],
+            parameters: &fields[4],
+        },
+    ))
+}
+
+/// The declared `(logical type, physical annotation)` pair. Every supported
+/// mapping is exactly one such pair, so the validators match on the pair
+/// instead of restating the five-part comparison once per kind.
+fn declared_type<'a>(parts: &ColumnDescriptorParts<'a>) -> Option<(&'a str, &'a str)> {
+    let OvbRaw::Array(logical_type) = parts.logical_type else {
+        return None;
     };
-    if &fields[2] != *expected_type {
-        return Err(CompactParquetError::UnsupportedKeyMapping);
+    let [version, OvbRaw::Text(name)] = logical_type.as_slice() else {
+        return None;
+    };
+    if *version != OvbRaw::Int(0.into()) {
+        return None;
     }
-    let kind = if profile.key_field_ids().any(|key| key == id) {
-        let OvbRaw::Array(logical_type) = &fields[2] else {
-            return Err(CompactParquetError::UnsupportedKeyMapping);
-        };
-        let kind = if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Decimal".to_owned())]
-            && matches!(&fields[3], OvbRaw::Text(value) if value == "decimal")
-        {
-            let (precision, scale, storage_width) = decimal_parameters(&fields[4])?;
-            let expected_width = decimal_storage_width(precision)
-                .ok_or(CompactParquetError::UnsupportedKeyMapping)?;
-            let decimal_annotation = matches!(
-                column.logical_type_ref(),
-                Some(LogicalType::Decimal(decimal))
-                    if decimal.precision == i32::from(precision)
-                        && decimal.scale == i32::from(scale)
-            );
-            let physical_ok = match precision {
-                1..=9 => column.physical_type() == Type::INT32 && storage_width == 4,
-                10..=18 => column.physical_type() == Type::INT64 && storage_width == 8,
-                19..=38 => {
-                    column.physical_type() == Type::FIXED_LEN_BYTE_ARRAY
-                        && column.type_length() == i32::from(storage_width)
-                }
-                _ => false,
-            };
-            if !decimal_annotation
-                || !physical_ok
-                || storage_width != expected_width
-                || column.converted_type() != ConvertedType::DECIMAL
-            {
-                return Err(CompactParquetError::UnsupportedKeyMapping);
-            }
-            KeyColumnKind::Decimal {
-                precision,
-                scale,
-                storage_width,
-            }
-        } else if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Decimal".to_owned())]
-            && matches!(&fields[3], OvbRaw::Text(value) if value == "ovb")
-            && matches!(&fields[4], OvbRaw::Array(parameters) if parameters == &[OvbRaw::Int(1.into())])
-            && column.physical_type() == Type::BYTE_ARRAY
-            && column.logical_type_ref().is_none()
-            && column.converted_type() == ConvertedType::NONE
-        {
-            KeyColumnKind::OvbDecimal
-        } else if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Int".to_owned())]
-            && matches!(&fields[3], OvbRaw::Text(value) if value == "int64")
-            && column.physical_type() == Type::INT64
-        {
-            KeyColumnKind::Int
-        } else if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Instant".to_owned())]
-            && matches!(&fields[3], OvbRaw::Text(value) if value == "instant_ns")
-            && column.physical_type() == Type::INT64
-            && matches!(
-                column.logical_type_ref(),
-                Some(LogicalType::Timestamp(timestamp))
-                    if timestamp.is_adjusted_to_u_t_c && timestamp.unit == TimeUnit::NANOS
-            )
-        {
-            KeyColumnKind::Instant
-        } else if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Uuid".to_owned())]
-            && matches!(&fields[3], OvbRaw::Text(value) if value == "uuid")
-            && column.physical_type() == Type::FIXED_LEN_BYTE_ARRAY
-            && column.type_length() == 16
-            && column.logical_type_ref() == Some(&parquet::basic::LogicalType::Uuid)
-        {
-            KeyColumnKind::Uuid
-        } else if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Int".to_owned())]
-            && matches!(&fields[3], OvbRaw::Text(value) if value == "ovb")
-            && column.physical_type() == Type::BYTE_ARRAY
-        {
-            KeyColumnKind::OvbInt
-        } else if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Bool".to_owned())]
-            && matches!(&fields[3], OvbRaw::Text(value) if value == "bool")
-            && column.physical_type() == Type::BOOLEAN
-        {
-            KeyColumnKind::Bool
-        } else if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Bool".to_owned())]
-            && matches!(&fields[3], OvbRaw::Text(value) if value == "ovb")
-            && column.physical_type() == Type::BYTE_ARRAY
-        {
-            KeyColumnKind::OvbBool
-        } else if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Str".to_owned())]
-            && matches!(&fields[3], OvbRaw::Text(value) if value == "utf8")
-            && column.physical_type() == Type::BYTE_ARRAY
-            && column.logical_type_ref() == Some(&parquet::basic::LogicalType::String)
-        {
-            KeyColumnKind::Str
-        } else if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Date".to_owned())]
-            && matches!(&fields[3], OvbRaw::Text(value) if value == "date")
-            && column.physical_type() == Type::INT32
-            && column.logical_type_ref() == Some(&parquet::basic::LogicalType::Date)
-        {
-            KeyColumnKind::Date
-        } else if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Str".to_owned())]
-            && matches!(&fields[3], OvbRaw::Text(value) if value == "ovb")
-            && matches!(&fields[4], OvbRaw::Array(parameters) if parameters == &[OvbRaw::Int(1.into())])
-            && column.physical_type() == Type::BYTE_ARRAY
-            && column.logical_type_ref().is_none()
-            && column.converted_type() == ConvertedType::NONE
-        {
-            KeyColumnKind::OvbStr
-        } else if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Uuid".to_owned())]
-            && matches!(&fields[3], OvbRaw::Text(value) if value == "ovb")
-            && matches!(&fields[4], OvbRaw::Array(parameters) if parameters == &[OvbRaw::Int(1.into())])
-            && column.physical_type() == Type::BYTE_ARRAY
-            && column.logical_type_ref().is_none()
-            && column.converted_type() == ConvertedType::NONE
-        {
-            KeyColumnKind::OvbUuid
-        } else if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Date".to_owned())]
-            && matches!(&fields[3], OvbRaw::Text(value) if value == "ovb")
-            && matches!(&fields[4], OvbRaw::Array(parameters) if parameters == &[OvbRaw::Int(1.into())])
-            && column.physical_type() == Type::BYTE_ARRAY
-            && column.logical_type_ref().is_none()
-            && column.converted_type() == ConvertedType::NONE
-        {
-            KeyColumnKind::OvbDate
-        } else if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Instant".to_owned())]
-            && matches!(&fields[3], OvbRaw::Text(value) if value == "ovb")
-            && matches!(&fields[4], OvbRaw::Array(parameters) if parameters == &[OvbRaw::Int(1.into())])
-            && column.physical_type() == Type::BYTE_ARRAY
-            && column.logical_type_ref().is_none()
-            && column.converted_type() == ConvertedType::NONE
-        {
-            KeyColumnKind::OvbInstant
-        } else {
-            return Err(CompactParquetError::UnsupportedKeyMapping);
-        };
-        let valid_parameters = match kind {
-            KeyColumnKind::OvbInt
+    let OvbRaw::Text(physical) = parts.physical else {
+        return None;
+    };
+    Some((name.as_str(), physical.as_str()))
+}
+
+/// The `ovb` physical fallback: one complete canonical OVB-1 value per
+/// BYTE_ARRAY cell, with no Parquet annotation that could contradict it.
+fn ovb_fallback_mapping(column: &parquet::schema::types::ColumnDescriptor) -> bool {
+    column.physical_type() == Type::BYTE_ARRAY
+        && column.logical_type_ref().is_none()
+        && column.converted_type() == ConvertedType::NONE
+}
+
+fn is_ovb_parameters(parameters: &OvbRaw) -> bool {
+    matches!(parameters, OvbRaw::Array(parameters) if parameters == &[OvbRaw::Int(1.into())])
+}
+
+fn has_empty_parameters(parameters: &OvbRaw) -> bool {
+    matches!(parameters, OvbRaw::Array(parameters) if parameters.is_empty())
+}
+
+const fn is_ovb_kind(kind: KeyColumnKind) -> bool {
+    matches!(
+        kind,
+        KeyColumnKind::OvbInt
             | KeyColumnKind::OvbBool
             | KeyColumnKind::OvbDecimal
             | KeyColumnKind::OvbStr
             | KeyColumnKind::OvbUuid
             | KeyColumnKind::OvbDate
-            | KeyColumnKind::OvbInstant => {
-                matches!(&fields[4], OvbRaw::Array(parameters) if parameters == &[OvbRaw::Int(1.into())])
-            }
-            KeyColumnKind::Decimal { .. } => true,
-            KeyColumnKind::Uuid => valid_uuid_parameters(&fields[4]),
-            _ => matches!(&fields[4], OvbRaw::Array(parameters) if parameters.is_empty()),
-        };
-        if !valid_parameters
-            || (!(kind == KeyColumnKind::Str
-                || kind == KeyColumnKind::Date
-                || kind == KeyColumnKind::Uuid
-                || kind == KeyColumnKind::Instant
-                || matches!(kind, KeyColumnKind::Decimal { .. }))
-                && column.logical_type_ref().is_some())
-            || (matches!(
-                kind,
-                KeyColumnKind::OvbInt
-                    | KeyColumnKind::OvbBool
-                    | KeyColumnKind::OvbDecimal
-                    | KeyColumnKind::OvbStr
-                    | KeyColumnKind::OvbUuid
-                    | KeyColumnKind::OvbDate
-                    | KeyColumnKind::OvbInstant
-            ) && column.converted_type() != ConvertedType::NONE)
-            || (kind == KeyColumnKind::Uuid && column.converted_type() != ConvertedType::NONE)
-            || (matches!(
-                kind,
-                KeyColumnKind::OvbInt
-                    | KeyColumnKind::OvbBool
-                    | KeyColumnKind::OvbDecimal
-                    | KeyColumnKind::OvbStr
-                    | KeyColumnKind::OvbUuid
-                    | KeyColumnKind::OvbDate
-                    | KeyColumnKind::OvbInstant
-            ) && column.max_def_level() != 0)
-            || (matches!(kind, KeyColumnKind::Decimal { .. }) && column.max_def_level() != 0)
-            || column.max_rep_level() != 0
+            | KeyColumnKind::OvbInstant
+    )
+}
+
+/// Classifies a primary-key column. A key is compared as its decoded value, so
+/// a mapping that admits two physical spellings of one logical key (or a
+/// nullable key cell) would make the index order ambiguous.
+fn key_column_kind(
+    parts: &ColumnDescriptorParts<'_>,
+    column: &parquet::schema::types::ColumnDescriptor,
+) -> Result<KeyColumnKind, CompactParquetError> {
+    let Some((name, physical)) = declared_type(parts) else {
+        return Err(CompactParquetError::UnsupportedKeyMapping);
+    };
+    let kind = match (name, physical) {
+        ("Decimal", "decimal") => decimal_key_kind(parts, column)?,
+        ("Decimal", "ovb") if ovb_fallback_mapping(column) => KeyColumnKind::OvbDecimal,
+        ("Int", "int64") if column.physical_type() == Type::INT64 => KeyColumnKind::Int,
+        ("Instant", "instant_ns")
+            if column.physical_type() == Type::INT64
+                && matches!(
+                    column.logical_type_ref(),
+                    Some(LogicalType::Timestamp(timestamp))
+                        if timestamp.is_adjusted_to_u_t_c && timestamp.unit == TimeUnit::NANOS
+                ) =>
         {
-            return Err(CompactParquetError::UnsupportedKeyMapping);
+            KeyColumnKind::Instant
         }
-        Some(kind)
-    } else {
-        let OvbRaw::Array(logical_type) = &fields[2] else {
-            return Err(CompactParquetError::UnsupportedKeyMapping);
-        };
-        let kind = if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Int".to_owned())]
-            && matches!(&fields[3], OvbRaw::Text(value) if value == "int64")
-            && column.physical_type() == Type::INT64
+        ("Uuid", "uuid")
+            if column.physical_type() == Type::FIXED_LEN_BYTE_ARRAY
+                && column.type_length() == 16
+                && column.logical_type_ref() == Some(&parquet::basic::LogicalType::Uuid) =>
         {
-            KeyColumnKind::Int
-        } else if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Float".to_owned())]
-            && matches!(&fields[3], OvbRaw::Text(value) if value == "float64")
-            && matches!(&fields[4], OvbRaw::Array(parameters) if parameters.is_empty())
-            && column.physical_type() == Type::DOUBLE
-            && column.logical_type_ref().is_none()
-            && column.converted_type() == ConvertedType::NONE
+            KeyColumnKind::Uuid
+        }
+        ("Int", "ovb") if ovb_fallback_mapping(column) => KeyColumnKind::OvbInt,
+        ("Bool", "bool") if column.physical_type() == Type::BOOLEAN => KeyColumnKind::Bool,
+        ("Bool", "ovb") if ovb_fallback_mapping(column) => KeyColumnKind::OvbBool,
+        ("Str", "utf8")
+            if column.physical_type() == Type::BYTE_ARRAY
+                && column.logical_type_ref() == Some(&parquet::basic::LogicalType::String) =>
+        {
+            KeyColumnKind::Str
+        }
+        ("Date", "date")
+            if column.physical_type() == Type::INT32
+                && column.logical_type_ref() == Some(&parquet::basic::LogicalType::Date) =>
+        {
+            KeyColumnKind::Date
+        }
+        ("Str", "ovb") if ovb_fallback_mapping(column) => KeyColumnKind::OvbStr,
+        ("Uuid", "ovb") if ovb_fallback_mapping(column) => KeyColumnKind::OvbUuid,
+        ("Date", "ovb") if ovb_fallback_mapping(column) => KeyColumnKind::OvbDate,
+        ("Instant", "ovb") if ovb_fallback_mapping(column) => KeyColumnKind::OvbInstant,
+        _ => return Err(CompactParquetError::UnsupportedKeyMapping),
+    };
+    validate_key_column(kind, parts, column)?;
+    Ok(kind)
+}
+
+/// Reads one Decimal key column's declared parameters and admits only the
+/// width the precision requires, so the stored unscaled integer cannot be
+/// wider than the descriptor claims.
+fn decimal_key_kind(
+    parts: &ColumnDescriptorParts<'_>,
+    column: &parquet::schema::types::ColumnDescriptor,
+) -> Result<KeyColumnKind, CompactParquetError> {
+    let (precision, scale, storage_width) = decimal_parameters(parts.parameters)?;
+    let expected_width =
+        decimal_storage_width(precision).ok_or(CompactParquetError::UnsupportedKeyMapping)?;
+    let decimal_annotation = matches!(
+        column.logical_type_ref(),
+        Some(LogicalType::Decimal(decimal))
+            if decimal.precision == i32::from(precision)
+                && decimal.scale == i32::from(scale)
+    );
+    let physical_ok = match precision {
+        1..=9 => column.physical_type() == Type::INT32 && storage_width == 4,
+        10..=18 => column.physical_type() == Type::INT64 && storage_width == 8,
+        19..=38 => {
+            column.physical_type() == Type::FIXED_LEN_BYTE_ARRAY
+                && column.type_length() == i32::from(storage_width)
+        }
+        _ => false,
+    };
+    if !decimal_annotation
+        || !physical_ok
+        || storage_width != expected_width
+        || column.converted_type() != ConvertedType::DECIMAL
+    {
+        return Err(CompactParquetError::UnsupportedKeyMapping);
+    }
+    Ok(KeyColumnKind::Decimal {
+        precision,
+        scale,
+        storage_width,
+    })
+}
+
+/// The checks every key column owes once its kind is known: the exact
+/// parameters array, no annotation the reader would otherwise trust, and
+/// neither a repeated nor an optional column.
+fn validate_key_column(
+    kind: KeyColumnKind,
+    parts: &ColumnDescriptorParts<'_>,
+    column: &parquet::schema::types::ColumnDescriptor,
+) -> Result<(), CompactParquetError> {
+    let ovb = is_ovb_kind(kind);
+    let valid_parameters = if matches!(kind, KeyColumnKind::Decimal { .. }) {
+        true
+    } else if kind == KeyColumnKind::Uuid {
+        valid_uuid_parameters(parts.parameters)
+    } else if ovb {
+        is_ovb_parameters(parts.parameters)
+    } else {
+        has_empty_parameters(parts.parameters)
+    };
+    let annotated = matches!(
+        kind,
+        KeyColumnKind::Str
+            | KeyColumnKind::Date
+            | KeyColumnKind::Uuid
+            | KeyColumnKind::Instant
+            | KeyColumnKind::Decimal { .. }
+    );
+    if !valid_parameters
+        || (!annotated && column.logical_type_ref().is_some())
+        || (ovb && column.converted_type() != ConvertedType::NONE)
+        || (kind == KeyColumnKind::Uuid && column.converted_type() != ConvertedType::NONE)
+        || (ovb && column.max_def_level() != 0)
+        || (matches!(kind, KeyColumnKind::Decimal { .. }) && column.max_def_level() != 0)
+        || column.max_rep_level() != 0
+    {
+        return Err(CompactParquetError::UnsupportedKeyMapping);
+    }
+    Ok(())
+}
+
+/// Classifies a stored (non-key) column. Unlike a key it may be optional, but
+/// its declared mapping must still be the one the reader decodes; DOUBLE in
+/// particular is only ever read through a declared Float field, never inferred
+/// from the values.
+fn stored_column_kind(
+    parts: &ColumnDescriptorParts<'_>,
+    column: &parquet::schema::types::ColumnDescriptor,
+) -> Result<KeyColumnKind, CompactParquetError> {
+    let kind = match declared_type(parts) {
+        Some(("Int", "int64")) if column.physical_type() == Type::INT64 => KeyColumnKind::Int,
+        Some(("Float", "float64"))
+            if has_empty_parameters(parts.parameters)
+                && column.physical_type() == Type::DOUBLE
+                && column.logical_type_ref().is_none()
+                && column.converted_type() == ConvertedType::NONE =>
         {
             // Float is not a legal primary-key type, but it is a standard
             // physical mapping for stored columns. Retain its descriptor
             // identity so DOUBLE is never inferred from a sample value.
             KeyColumnKind::Float
-        } else if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Bool".to_owned())]
-            && matches!(&fields[3], OvbRaw::Text(value) if value == "bool")
-            && column.physical_type() == Type::BOOLEAN
-        {
-            KeyColumnKind::Bool
-        } else if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Str".to_owned())]
-            && matches!(&fields[3], OvbRaw::Text(value) if value == "utf8")
-            && column.physical_type() == Type::BYTE_ARRAY
-            && column.logical_type_ref() == Some(&parquet::basic::LogicalType::String)
+        }
+        Some(("Bool", "bool")) if column.physical_type() == Type::BOOLEAN => KeyColumnKind::Bool,
+        Some(("Str", "utf8"))
+            if column.physical_type() == Type::BYTE_ARRAY
+                && column.logical_type_ref() == Some(&parquet::basic::LogicalType::String) =>
         {
             KeyColumnKind::Str
-        } else if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Date".to_owned())]
-            && matches!(&fields[3], OvbRaw::Text(value) if value == "date")
-            && column.physical_type() == Type::INT32
-            && column.logical_type_ref() == Some(&parquet::basic::LogicalType::Date)
+        }
+        Some(("Date", "date"))
+            if column.physical_type() == Type::INT32
+                && column.logical_type_ref() == Some(&parquet::basic::LogicalType::Date) =>
         {
             KeyColumnKind::Date
-        } else if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Str".to_owned())]
-            && matches!(&fields[3], OvbRaw::Text(value) if value == "ovb")
-            && column.physical_type() == Type::BYTE_ARRAY
-            && column.logical_type_ref().is_none()
-            && column.converted_type() == ConvertedType::NONE
-        {
-            KeyColumnKind::OvbStr
-        } else if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Uuid".to_owned())]
-            && matches!(&fields[3], OvbRaw::Text(value) if value == "ovb")
-            && column.physical_type() == Type::BYTE_ARRAY
-            && column.logical_type_ref().is_none()
-            && column.converted_type() == ConvertedType::NONE
-        {
-            KeyColumnKind::OvbUuid
-        } else if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Date".to_owned())]
-            && matches!(&fields[3], OvbRaw::Text(value) if value == "ovb")
-            && column.physical_type() == Type::BYTE_ARRAY
-            && column.logical_type_ref().is_none()
-            && column.converted_type() == ConvertedType::NONE
-        {
-            KeyColumnKind::OvbDate
-        } else if logical_type == &[OvbRaw::Int(0.into()), OvbRaw::Text("Instant".to_owned())]
-            && matches!(&fields[3], OvbRaw::Text(value) if value == "ovb")
-            && column.physical_type() == Type::BYTE_ARRAY
-            && column.logical_type_ref().is_none()
-            && column.converted_type() == ConvertedType::NONE
-        {
-            KeyColumnKind::OvbInstant
-        } else {
-            return Err(CompactParquetError::UnsupportedKeyMapping);
-        };
-        let valid_parameters = match kind {
-            KeyColumnKind::OvbInt
-            | KeyColumnKind::OvbBool
-            | KeyColumnKind::OvbDecimal
-            | KeyColumnKind::OvbStr
-            | KeyColumnKind::OvbUuid
-            | KeyColumnKind::OvbDate
-            | KeyColumnKind::OvbInstant => {
-                matches!(&fields[4], OvbRaw::Array(parameters) if parameters == &[OvbRaw::Int(1.into())])
-            }
-            _ => matches!(&fields[4], OvbRaw::Array(parameters) if parameters.is_empty()),
-        };
-        if !valid_parameters
-            || (matches!(
-                kind,
-                KeyColumnKind::OvbInt
-                    | KeyColumnKind::OvbBool
-                    | KeyColumnKind::OvbDecimal
-                    | KeyColumnKind::OvbStr
-                    | KeyColumnKind::OvbUuid
-                    | KeyColumnKind::OvbDate
-                    | KeyColumnKind::OvbInstant
-            ) && column.logical_type_ref().is_some())
-        {
-            return Err(CompactParquetError::UnsupportedKeyMapping);
         }
-        Some(kind)
+        Some(("Str", "ovb")) if ovb_fallback_mapping(column) => KeyColumnKind::OvbStr,
+        Some(("Uuid", "ovb")) if ovb_fallback_mapping(column) => KeyColumnKind::OvbUuid,
+        Some(("Date", "ovb")) if ovb_fallback_mapping(column) => KeyColumnKind::OvbDate,
+        Some(("Instant", "ovb")) if ovb_fallback_mapping(column) => KeyColumnKind::OvbInstant,
+        _ => return Err(CompactParquetError::UnsupportedKeyMapping),
     };
-    Ok((id, kind))
+    let valid_parameters = if is_ovb_kind(kind) {
+        is_ovb_parameters(parts.parameters)
+    } else {
+        has_empty_parameters(parts.parameters)
+    };
+    if !valid_parameters || (is_ovb_kind(kind) && column.logical_type_ref().is_some()) {
+        return Err(CompactParquetError::UnsupportedKeyMapping);
+    }
+    Ok(kind)
 }
 
 fn required_physical_fields(
@@ -1497,48 +1490,43 @@ fn profile_key_kinds(
         })
         .collect()
 }
-fn read_uuid_column(
-    row_group: &dyn parquet::file::reader::RowGroupReader,
-    index: usize,
+/// Reads every cell of one required compact column and rejects a column that is
+/// repeated, short, or carries a null. `read_batch` owns the physical reader
+/// type; the level and count rules are the same for every key kind.
+fn collect_required_cells<T>(
+    descriptor: &parquet::schema::types::ColumnDescriptor,
     expected_rows: usize,
-) -> Result<Vec<OvbRaw>, CompactParquetError> {
-    let reader = row_group
-        .get_column_reader(index)
-        .map_err(|_| CompactParquetError::InvalidParquet)?;
-    let ColumnReader::FixedLenByteArrayColumnReader(mut reader) = reader else {
-        return Err(CompactParquetError::UnsupportedKeyMapping);
-    };
-    let descriptor = row_group.metadata().schema_descr().column(index);
-    if descriptor.type_length() != 16 || descriptor.max_rep_level() != 0 {
+    mut read_batch: impl FnMut(
+        usize,
+        Option<&mut Vec<i16>>,
+        &mut Vec<T>,
+    ) -> Result<(usize, usize, usize), CompactParquetError>,
+) -> Result<Vec<T>, CompactParquetError> {
+    if descriptor.max_rep_level() != 0 {
         return Err(CompactParquetError::UnsupportedKeyMapping);
     }
     let mut values = Vec::with_capacity(expected_rows);
     let mut definition_levels = Vec::new();
     let mut records = 0usize;
-    loop {
-        let remaining = expected_rows.saturating_sub(records);
-        if remaining == 0 {
-            break;
-        }
+    while records < expected_rows {
+        let remaining = expected_rows - records;
         let definition_levels_ref =
             (descriptor.max_def_level() != 0).then_some(&mut definition_levels);
-        let (read_records, values_read, levels_read) = reader
-            .read_records(remaining, definition_levels_ref, None, &mut values)
-            .map_err(|_| CompactParquetError::InvalidParquet)?;
+        let (read_records, values_read, levels_read) =
+            read_batch(remaining, definition_levels_ref, &mut values)?;
         if read_records == 0 {
             break;
         }
-        if levels_read != read_records {
+        if levels_read != read_records || values_read != read_records {
             return Err(CompactParquetError::NullKey);
         }
+        // Definition levels accumulate across batches; every one of them must be
+        // the column's maximum, so no key cell is absent.
         if descriptor.max_def_level() != 0
             && definition_levels
                 .iter()
                 .any(|level| *level != descriptor.max_def_level())
         {
-            return Err(CompactParquetError::NullKey);
-        }
-        if values_read != read_records {
             return Err(CompactParquetError::NullKey);
         }
         records = records
@@ -1551,16 +1539,38 @@ fn read_uuid_column(
             observed: records as u64,
         });
     }
-    values
-        .into_iter()
-        .map(|value| {
-            let bytes = value.as_bytes();
-            if bytes.len() != 16 {
-                return Err(CompactParquetError::InvalidMetadata);
-            }
-            Ok(OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(bytes.to_vec()))))
-        })
-        .collect()
+    Ok(values)
+}
+
+fn read_uuid_column(
+    row_group: &dyn parquet::file::reader::RowGroupReader,
+    index: usize,
+    expected_rows: usize,
+) -> Result<Vec<OvbRaw>, CompactParquetError> {
+    let reader = row_group
+        .get_column_reader(index)
+        .map_err(|_| CompactParquetError::InvalidParquet)?;
+    let ColumnReader::FixedLenByteArrayColumnReader(mut reader) = reader else {
+        return Err(CompactParquetError::UnsupportedKeyMapping);
+    };
+    let descriptor = row_group.metadata().schema_descr().column(index);
+    if descriptor.type_length() != 16 {
+        return Err(CompactParquetError::UnsupportedKeyMapping);
+    }
+    collect_required_cells(&descriptor, expected_rows, |remaining, levels, values| {
+        reader
+            .read_records(remaining, levels, None, values)
+            .map_err(|_| CompactParquetError::InvalidParquet)
+    })?
+    .into_iter()
+    .map(|value| {
+        let bytes = value.as_bytes();
+        if bytes.len() != 16 {
+            return Err(CompactParquetError::InvalidMetadata);
+        }
+        Ok(OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(bytes.to_vec()))))
+    })
+    .collect()
 }
 
 fn read_int64_column(
@@ -1575,37 +1585,73 @@ fn read_int64_column(
         return Err(CompactParquetError::UnsupportedKeyMapping);
     };
     let descriptor = row_group.metadata().schema_descr().column(index);
+    collect_required_cells(&descriptor, expected_rows, |remaining, levels, values| {
+        reader
+            .read_records(remaining, levels, None, values)
+            .map_err(|_| CompactParquetError::InvalidParquet)
+    })
+}
+
+/// Reads every cell of one optional compact stored column, keeping absent cells
+/// as `None`. `decode` owns the canonical encoding of one present cell, and
+/// `read_batch` the physical reader type.
+fn collect_nullable_cells<T, U>(
+    descriptor: &parquet::schema::types::ColumnDescriptor,
+    expected_rows: usize,
+    mut decode: impl FnMut(&T) -> Result<U, CompactParquetError>,
+    mut read_batch: impl FnMut(
+        usize,
+        Option<&mut Vec<i16>>,
+        &mut Vec<T>,
+    ) -> Result<(usize, usize, usize), CompactParquetError>,
+) -> Result<Vec<Option<U>>, CompactParquetError> {
     if descriptor.max_rep_level() != 0 {
         return Err(CompactParquetError::UnsupportedKeyMapping);
     }
+    let max_def_level = descriptor.max_def_level();
     let mut values = Vec::with_capacity(expected_rows);
-    let mut definition_levels = Vec::new();
     let mut records = 0usize;
-    loop {
-        let remaining = expected_rows.saturating_sub(records);
-        if remaining == 0 {
-            break;
+    while records < expected_rows {
+        let remaining = expected_rows - records;
+        let mut definition_levels = Vec::new();
+        let mut physical_values = Vec::new();
+        let definitions = (max_def_level != 0).then_some(&mut definition_levels);
+        let (read_records, values_read, levels_read) =
+            read_batch(remaining, definitions, &mut physical_values)?;
+        if read_records == 0 || levels_read != read_records {
+            return Err(CompactParquetError::RowCountMismatch {
+                expected: expected_rows as u64,
+                observed: records as u64,
+            });
         }
-        let definition_levels_ref =
-            (descriptor.max_def_level() != 0).then_some(&mut definition_levels);
-        let (read_records, values_read, levels_read) = reader
-            .read_records(remaining, definition_levels_ref, None, &mut values)
-            .map_err(|_| CompactParquetError::InvalidParquet)?;
-        if read_records == 0 {
-            break;
-        }
-        if levels_read != read_records {
-            return Err(CompactParquetError::NullKey);
-        }
-        if descriptor.max_def_level() != 0
-            && definition_levels
-                .iter()
-                .any(|level| *level != descriptor.max_def_level())
-        {
-            return Err(CompactParquetError::NullKey);
-        }
-        if values_read != read_records {
-            return Err(CompactParquetError::NullKey);
+        if max_def_level == 0 {
+            if values_read != read_records {
+                return Err(CompactParquetError::InvalidParquet);
+            }
+            for value in &physical_values {
+                values.push(Some(decode(value)?));
+            }
+        } else {
+            if definition_levels.len() != read_records || values_read > read_records {
+                return Err(CompactParquetError::InvalidParquet);
+            }
+            let mut value_index = 0;
+            for level in definition_levels {
+                if level == max_def_level {
+                    let value = physical_values
+                        .get(value_index)
+                        .ok_or(CompactParquetError::InvalidParquet)?;
+                    value_index += 1;
+                    values.push(Some(decode(value)?));
+                } else if level == 0 {
+                    values.push(None);
+                } else {
+                    return Err(CompactParquetError::InvalidParquet);
+                }
+            }
+            if value_index != values_read {
+                return Err(CompactParquetError::InvalidParquet);
+            }
         }
         records = records
             .checked_add(read_records)
@@ -1632,74 +1678,20 @@ fn read_float_column(
         return Err(CompactParquetError::UnsupportedKeyMapping);
     };
     let descriptor = row_group.metadata().schema_descr().column(index);
-    if descriptor.max_rep_level() != 0 {
-        return Err(CompactParquetError::UnsupportedKeyMapping);
-    }
-    let max_def_level = descriptor.max_def_level();
-    let mut values = Vec::with_capacity(expected_rows);
-    let mut records = 0usize;
-    while records < expected_rows {
-        let remaining = expected_rows - records;
-        let mut definition_levels = Vec::new();
-        let mut physical_values = Vec::new();
-        let definitions = (max_def_level != 0).then_some(&mut definition_levels);
-        let (read_records, values_read, levels_read) = reader
-            .read_records(remaining, definitions, None, &mut physical_values)
-            .map_err(|_| CompactParquetError::InvalidParquet)?;
-        if read_records == 0 || levels_read != read_records {
-            return Err(CompactParquetError::RowCountMismatch {
-                expected: expected_rows as u64,
-                observed: records as u64,
-            });
-        }
-        if max_def_level == 0 {
-            if values_read != read_records {
-                return Err(CompactParquetError::InvalidParquet);
-            }
-            for value in physical_values {
-                values.push(Some(
-                    CanonicalValue::float_bits(value.to_bits())
-                        .encode()
-                        .map_err(|_| CompactParquetError::InvalidMetadata)?,
-                ));
-            }
-        } else {
-            if definition_levels.len() != read_records || values_read > read_records {
-                return Err(CompactParquetError::InvalidParquet);
-            }
-            let mut value_index = 0;
-            for level in definition_levels {
-                if level == max_def_level {
-                    let value = physical_values
-                        .get(value_index)
-                        .ok_or(CompactParquetError::InvalidParquet)?;
-                    value_index += 1;
-                    values.push(Some(
-                        CanonicalValue::float_bits(value.to_bits())
-                            .encode()
-                            .map_err(|_| CompactParquetError::InvalidMetadata)?,
-                    ));
-                } else if level == 0 {
-                    values.push(None);
-                } else {
-                    return Err(CompactParquetError::InvalidParquet);
-                }
-            }
-            if value_index != values_read {
-                return Err(CompactParquetError::InvalidParquet);
-            }
-        }
-        records = records
-            .checked_add(read_records)
-            .ok_or(CompactParquetError::InvalidParquet)?;
-    }
-    if records != expected_rows || values.len() != expected_rows {
-        return Err(CompactParquetError::RowCountMismatch {
-            expected: expected_rows as u64,
-            observed: records as u64,
-        });
-    }
-    Ok(values)
+    collect_nullable_cells(
+        &descriptor,
+        expected_rows,
+        |value: &f64| {
+            CanonicalValue::float_bits(value.to_bits())
+                .encode()
+                .map_err(|_| CompactParquetError::InvalidMetadata)
+        },
+        |remaining, definitions, values| {
+            reader
+                .read_records(remaining, definitions, None, values)
+                .map_err(|_| CompactParquetError::InvalidParquet)
+        },
+    )
 }
 
 fn read_int32_column(
@@ -1714,43 +1706,11 @@ fn read_int32_column(
         return Err(CompactParquetError::UnsupportedKeyMapping);
     };
     let descriptor = row_group.metadata().schema_descr().column(index);
-    if descriptor.max_rep_level() != 0 {
-        return Err(CompactParquetError::UnsupportedKeyMapping);
-    }
-    let mut values = Vec::with_capacity(expected_rows);
-    let mut definition_levels = Vec::new();
-    let mut records = 0usize;
-    while records < expected_rows {
-        let remaining = expected_rows - records;
-        let definition_levels_ref =
-            (descriptor.max_def_level() != 0).then_some(&mut definition_levels);
-        let (read_records, values_read, levels_read) = reader
-            .read_records(remaining, definition_levels_ref, None, &mut values)
-            .map_err(|_| CompactParquetError::InvalidParquet)?;
-        if read_records == 0 {
-            break;
-        }
-        if levels_read != read_records || values_read != read_records {
-            return Err(CompactParquetError::NullKey);
-        }
-        if descriptor.max_def_level() != 0
-            && definition_levels
-                .iter()
-                .any(|level| *level != descriptor.max_def_level())
-        {
-            return Err(CompactParquetError::NullKey);
-        }
-        records = records
-            .checked_add(read_records)
-            .ok_or(CompactParquetError::InvalidParquet)?;
-    }
-    if records != expected_rows || values.len() != expected_rows {
-        return Err(CompactParquetError::RowCountMismatch {
-            expected: expected_rows as u64,
-            observed: records as u64,
-        });
-    }
-    Ok(values)
+    collect_required_cells(&descriptor, expected_rows, |remaining, levels, values| {
+        reader
+            .read_records(remaining, levels, None, values)
+            .map_err(|_| CompactParquetError::InvalidParquet)
+    })
 }
 
 /// Reads the immutable profile's descriptor-gated scalar `ovb` fallback.
@@ -1834,48 +1794,14 @@ fn read_decimal_column(
                 return Err(CompactParquetError::UnsupportedKeyMapping);
             };
             let descriptor = row_group.metadata().schema_descr().column(index);
-            if descriptor.max_rep_level() != 0 {
-                return Err(CompactParquetError::UnsupportedKeyMapping);
-            }
-            let mut values = Vec::with_capacity(expected_rows);
-            let mut definition_levels = Vec::new();
-            let mut records = 0usize;
-            while records < expected_rows {
-                let remaining = expected_rows - records;
-                let definition_levels_ref =
-                    (descriptor.max_def_level() != 0).then_some(&mut definition_levels);
-                let (read_records, values_read, levels_read) = reader
-                    .read_records(remaining, definition_levels_ref, None, &mut values)
-                    .map_err(|_| CompactParquetError::InvalidParquet)?;
-                if read_records == 0 {
-                    break;
-                }
-                if levels_read != read_records || values_read != read_records {
-                    return Err(CompactParquetError::NullKey);
-                }
-                if descriptor.max_def_level() != 0
-                    && definition_levels
-                        .iter()
-                        .any(|level| *level != descriptor.max_def_level())
-                {
-                    return Err(CompactParquetError::NullKey);
-                }
-                records = records
-                    .checked_add(read_records)
-                    .ok_or(CompactParquetError::InvalidParquet)?;
-            }
-            if records != expected_rows || values.len() != expected_rows {
-                return Err(CompactParquetError::RowCountMismatch {
-                    expected: expected_rows as u64,
-                    observed: records as u64,
-                });
-            }
-            values
-                .into_iter()
-                .map(|value| {
-                    decimal_value(fixed_decimal_value(value.as_bytes())?, precision, scale)
-                })
-                .collect()
+            collect_required_cells(&descriptor, expected_rows, |remaining, levels, values| {
+                reader
+                    .read_records(remaining, levels, None, values)
+                    .map_err(|_| CompactParquetError::InvalidParquet)
+            })?
+            .into_iter()
+            .map(|value| decimal_value(fixed_decimal_value(value.as_bytes())?, precision, scale))
+            .collect()
         }
         _ => Err(CompactParquetError::UnsupportedKeyMapping),
     }
@@ -1894,59 +1820,21 @@ fn read_ovb_column(
         return Err(CompactParquetError::UnsupportedKeyMapping);
     };
     let descriptor = row_group.metadata().schema_descr().column(index);
-    if descriptor.max_rep_level() != 0 {
-        return Err(CompactParquetError::UnsupportedKeyMapping);
-    }
-    let mut values = Vec::with_capacity(expected_rows);
-    let mut definition_levels = Vec::new();
-    let mut records = 0usize;
-    loop {
-        let remaining = expected_rows.saturating_sub(records);
-        if remaining == 0 {
-            break;
+    collect_required_cells(&descriptor, expected_rows, |remaining, levels, values| {
+        reader
+            .read_records(remaining, levels, None, values)
+            .map_err(|_| CompactParquetError::InvalidParquet)
+    })?
+    .into_iter()
+    .map(|value| {
+        let value = CanonicalValue::decode(value.data())
+            .map_err(|_| CompactParquetError::InvalidMetadata)?;
+        if !valid_ovb_fallback(value.raw(), expected_kind) {
+            return Err(CompactParquetError::UnsupportedKeyMapping);
         }
-        let definition_levels_ref =
-            (descriptor.max_def_level() != 0).then_some(&mut definition_levels);
-        let (read_records, values_read, levels_read) = reader
-            .read_records(remaining, definition_levels_ref, None, &mut values)
-            .map_err(|_| CompactParquetError::InvalidParquet)?;
-        if read_records == 0 {
-            break;
-        }
-        if levels_read != read_records {
-            return Err(CompactParquetError::NullKey);
-        }
-        if descriptor.max_def_level() != 0
-            && definition_levels
-                .iter()
-                .any(|level| *level != descriptor.max_def_level())
-        {
-            return Err(CompactParquetError::NullKey);
-        }
-        if values_read != read_records {
-            return Err(CompactParquetError::NullKey);
-        }
-        records = records
-            .checked_add(read_records)
-            .ok_or(CompactParquetError::InvalidParquet)?;
-    }
-    if records != expected_rows || values.len() != expected_rows {
-        return Err(CompactParquetError::RowCountMismatch {
-            expected: expected_rows as u64,
-            observed: records as u64,
-        });
-    }
-    values
-        .into_iter()
-        .map(|value| {
-            let value = CanonicalValue::decode(value.data())
-                .map_err(|_| CompactParquetError::InvalidMetadata)?;
-            if !valid_ovb_fallback(value.raw(), expected_kind) {
-                return Err(CompactParquetError::UnsupportedKeyMapping);
-            }
-            Ok(value.raw().clone())
-        })
-        .collect()
+        Ok(value.raw().clone())
+    })
+    .collect()
 }
 fn valid_ovb_fallback(value: &OvbRaw, expected_kind: KeyColumnKind) -> bool {
     match (expected_kind, value) {
@@ -2057,50 +1945,11 @@ fn read_bool_column(
         return Err(CompactParquetError::UnsupportedKeyMapping);
     };
     let descriptor = row_group.metadata().schema_descr().column(index);
-
-    if descriptor.max_rep_level() != 0 {
-        return Err(CompactParquetError::UnsupportedKeyMapping);
-    }
-    let mut values = Vec::with_capacity(expected_rows);
-    let mut definition_levels = Vec::new();
-    let mut records = 0usize;
-    loop {
-        let remaining = expected_rows.saturating_sub(records);
-        if remaining == 0 {
-            break;
-        }
-        let definition_levels_ref =
-            (descriptor.max_def_level() != 0).then_some(&mut definition_levels);
-        let (read_records, values_read, levels_read) = reader
-            .read_records(remaining, definition_levels_ref, None, &mut values)
-            .map_err(|_| CompactParquetError::InvalidParquet)?;
-        if read_records == 0 {
-            break;
-        }
-        if levels_read != read_records {
-            return Err(CompactParquetError::NullKey);
-        }
-        if descriptor.max_def_level() != 0
-            && definition_levels
-                .iter()
-                .any(|level| *level != descriptor.max_def_level())
-        {
-            return Err(CompactParquetError::NullKey);
-        }
-        if values_read != read_records {
-            return Err(CompactParquetError::NullKey);
-        }
-        records = records
-            .checked_add(read_records)
-            .ok_or(CompactParquetError::InvalidParquet)?;
-    }
-    if records != expected_rows || values.len() != expected_rows {
-        return Err(CompactParquetError::RowCountMismatch {
-            expected: expected_rows as u64,
-            observed: records as u64,
-        });
-    }
-    Ok(values)
+    collect_required_cells(&descriptor, expected_rows, |remaining, levels, values| {
+        reader
+            .read_records(remaining, levels, None, values)
+            .map_err(|_| CompactParquetError::InvalidParquet)
+    })
 }
 
 fn read_str_column(
@@ -2115,54 +1964,16 @@ fn read_str_column(
         return Err(CompactParquetError::UnsupportedKeyMapping);
     };
     let descriptor = row_group.metadata().schema_descr().column(index);
-    if descriptor.max_rep_level() != 0 {
-        return Err(CompactParquetError::UnsupportedKeyMapping);
-    }
-    let mut values = Vec::with_capacity(expected_rows);
-    let mut definition_levels = Vec::new();
-    let mut records = 0usize;
-    loop {
-        let remaining = expected_rows.saturating_sub(records);
-        if remaining == 0 {
-            break;
-        }
-        let definition_levels_ref =
-            (descriptor.max_def_level() != 0).then_some(&mut definition_levels);
-        let (read_records, values_read, levels_read) = reader
-            .read_records(remaining, definition_levels_ref, None, &mut values)
-            .map_err(|_| CompactParquetError::InvalidParquet)?;
-        if read_records == 0 {
-            break;
-        }
-        if levels_read != read_records {
-            return Err(CompactParquetError::NullKey);
-        }
-        if descriptor.max_def_level() != 0
-            && definition_levels
-                .iter()
-                .any(|level| *level != descriptor.max_def_level())
-        {
-            return Err(CompactParquetError::NullKey);
-        }
-        if values_read != read_records {
-            return Err(CompactParquetError::NullKey);
-        }
-        records = records
-            .checked_add(read_records)
-            .ok_or(CompactParquetError::InvalidParquet)?;
-    }
-    if records != expected_rows || values.len() != expected_rows {
-        return Err(CompactParquetError::RowCountMismatch {
-            expected: expected_rows as u64,
-            observed: records as u64,
-        });
-    }
-    values
-        .into_iter()
-        .map(|value| {
-            String::from_utf8(value.data().to_vec()).map_err(|_| CompactParquetError::InvalidUtf8)
-        })
-        .collect()
+    collect_required_cells(&descriptor, expected_rows, |remaining, levels, values| {
+        reader
+            .read_records(remaining, levels, None, values)
+            .map_err(|_| CompactParquetError::InvalidParquet)
+    })?
+    .into_iter()
+    .map(|value| {
+        String::from_utf8(value.data().to_vec()).map_err(|_| CompactParquetError::InvalidUtf8)
+    })
+    .collect()
 }
 
 fn hex_digest(bytes: [u8; 32]) -> String {
