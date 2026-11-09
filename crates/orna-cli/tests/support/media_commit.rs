@@ -99,7 +99,7 @@ pub async fn commit_capture_for_table(
         bindings,
         expression,
         key,
-        ordinal,
+        FixtureIdentity::byte(ordinal),
         insert_only,
         relation_id,
         table_name,
@@ -130,13 +130,62 @@ pub async fn commit_capture_pending(
         bindings,
         expression,
         key,
-        ordinal,
+        FixtureIdentity::byte(ordinal),
         insert_only,
         relation_id,
         "media",
         false,
     )
     .await;
+}
+
+/// The identities one fixture request uses. The byte-ordinal and wide-ordinal
+/// helpers differ only in this scheme; their request lifecycle is shared.
+struct FixtureIdentity {
+    session: [u8; 16],
+    request: [u8; 16],
+    fingerprint: [u8; 32],
+    table_row: [u8; 16],
+    next_digest: [u8; 32],
+    terminal: Vec<u8>,
+    /// Ordinal the publication of a byte-ordinal capture reports.
+    publish_ordinal: u8,
+}
+
+impl FixtureIdentity {
+    /// Identities for the original byte-ordinal helpers. Ordinals below 256
+    /// keep every identity their callers were written against.
+    fn byte(ordinal: u8) -> Self {
+        Self {
+            session: [ordinal; 16],
+            request: [ordinal + 1; 16],
+            fingerprint: [ordinal + 2; 32],
+            table_row: [ordinal + 3; 16],
+            next_digest: [ordinal + 4; 32],
+            terminal: vec![ordinal + 5],
+            publish_ordinal: ordinal + 0x10,
+        }
+    }
+
+    /// Identities for a fixture ordinal wider than a byte, used by the scale
+    /// probe (bead ornadb-w3f9). Each family gets its own leading byte and the
+    /// ordinal occupies the next two, so identities stay unique below 65536.
+    fn wide(ordinal: u16) -> Self {
+        Self {
+            session: wide_identity(ordinal, 0xa0),
+            request: wide_identity(ordinal, 0xa1),
+            fingerprint: wide_digest(ordinal, 0xa2),
+            table_row: wide_identity(ordinal, 0xa3),
+            next_digest: wide_digest(ordinal, 0xa4),
+            terminal: vec![low_ordinal_byte(ordinal)],
+            // Wide captures publish the whole frozen range in one publication.
+            publish_ordinal: 0,
+        }
+    }
+}
+
+fn low_ordinal_byte(ordinal: u16) -> u8 {
+    u8::try_from(ordinal & 0x00ff).expect("low byte of a 16-bit ordinal")
 }
 
 /// One capture request: the repository, the runtime state and the rows it writes.
@@ -148,25 +197,24 @@ async fn commit_capture_inner(
     bindings: &mut SysHostBindingRegistry,
     expression: &str,
     key: &str,
-    ordinal: u8,
+    identity: FixtureIdentity,
     insert_only: bool,
     relation_id: [u8; 16],
     table_name: &str,
     publish: bool,
 ) {
     let request_identity = RequestIdentity {
-        session_id: [ordinal; 16],
-        request_id: [ordinal + 1; 16],
+        session_id: identity.session,
+        request_id: identity.request,
     };
-    let fingerprint = [ordinal + 2; 32];
     let (_, admission) = state
-        .reserve_request_with_admission(request_identity, fingerprint)
+        .reserve_request_with_admission(request_identity, identity.fingerprint)
         .await
         .unwrap();
     state
         .start_request_with_owner_and_admission(
             request_identity,
-            fingerprint,
+            identity.fingerprint,
             writer,
             admission.expect("new request returns its admission capability"),
         )
@@ -182,7 +230,7 @@ async fn commit_capture_inner(
     )
     .unwrap();
     let binding = bindings.accept_captured_blob_for_row(&value).unwrap();
-    let (id, key_bytes, row) = ([ordinal + 3; 16], key.as_bytes().to_vec(), Vec::new());
+    let (id, key_bytes, row) = (identity.table_row, key.as_bytes().to_vec(), Vec::new());
     let mutation = if insert_only {
         TableMutation::insert(id, table_name, key_bytes, row)
     } else {
@@ -196,11 +244,11 @@ async fn commit_capture_inner(
         .commit_table_request_activation(
             writer,
             request_identity,
-            fingerprint,
+            identity.fingerprint,
             &context,
             &[mutation],
-            [ordinal + 4; 32],
-            TerminalOutcome::new(vec![ordinal + 5]).unwrap(),
+            identity.next_digest,
+            TerminalOutcome::new(identity.terminal).unwrap(),
             &NoFault,
             orna_evaluator::EffectGate::admit_unbound_for_test(),
         )
@@ -208,7 +256,7 @@ async fn commit_capture_inner(
         .unwrap();
     assert_eq!(committed.request.state, RequestState::Completed);
     if publish {
-        crate::format3::publish_media_row(repository, state, key, ordinal + 0x10).await;
+        crate::format3::publish_media_row(repository, state, key, identity.publish_ordinal).await;
     }
 }
 /// Identity for a fixture ordinal wider than a byte, used by the scale probe
@@ -218,7 +266,7 @@ async fn commit_capture_inner(
 /// untouched.
 fn wide_identity(ordinal: u16, family: u8) -> [u8; 16] {
     let mut id = [family; 16];
-    id[1] = u8::try_from(ordinal & 0x00ff).expect("low byte of a 16-bit ordinal");
+    id[1] = low_ordinal_byte(ordinal);
     id[2] = u8::try_from(ordinal >> 8).expect("high byte of a 16-bit ordinal");
     id
 }
@@ -226,7 +274,7 @@ fn wide_identity(ordinal: u16, family: u8) -> [u8; 16] {
 /// Digest-shaped identity for a wide ordinal, same scheme as `wide_identity`.
 fn wide_digest(ordinal: u16, family: u8) -> [u8; 32] {
     let mut digest = [family; 32];
-    digest[1] = u8::try_from(ordinal & 0x00ff).expect("low byte of a 16-bit ordinal");
+    digest[1] = low_ordinal_byte(ordinal);
     digest[2] = u8::try_from(ordinal >> 8).expect("high byte of a 16-bit ordinal");
     digest
 }
@@ -246,66 +294,20 @@ pub async fn commit_capture_pending_wide(
     insert_only: bool,
     relation_id: [u8; 16],
 ) {
-    let request_identity = RequestIdentity {
-        session_id: wide_identity(ordinal, 0xa0),
-        request_id: wide_identity(ordinal, 0xa1),
-    };
-    let fingerprint = wide_digest(ordinal, 0xa2);
-    let (_, admission) = state
-        .reserve_request_with_admission(request_identity, fingerprint)
-        .await
-        .unwrap();
-    state
-        .start_request_with_owner_and_admission(
-            request_identity,
-            fingerprint,
-            writer,
-            admission.expect("new request returns its admission capability"),
-        )
-        .await
-        .unwrap();
-    let context = state.begin_activation().await.unwrap();
-    let value = evaluate_expression_ovb2_with_effects(
-        expression,
-        &BTreeMap::default(),
-        Limits::default(),
+    commit_capture_inner(
+        repository,
+        state,
+        writer,
         bindings,
+        expression,
+        key,
+        FixtureIdentity::wide(ordinal),
+        insert_only,
+        relation_id,
+        "media",
+        false,
     )
-    .unwrap();
-    let binding = bindings.accept_captured_blob_for_row(&value).unwrap();
-    let (id, key_bytes, row) = (
-        wide_identity(ordinal, 0xa3),
-        key.as_bytes().to_vec(),
-        Vec::new(),
-    );
-    let mutation = if insert_only {
-        TableMutation::insert(id, "media", key_bytes, row)
-    } else {
-        TableMutation::new(id, "media", key_bytes, Some(row))
-    }
-    .unwrap()
-    .with_table_object_id(TableObjectId::new(relation_id))
-    .with_orp_blob_binding(binding)
-    .unwrap();
-    let committed = state
-        .commit_table_request_activation(
-            writer,
-            request_identity,
-            fingerprint,
-            &context,
-            &[mutation],
-            wide_digest(ordinal, 0xa4),
-            TerminalOutcome::new(vec![
-                u8::try_from(ordinal & 0x00ff).expect("low byte of a 16-bit ordinal"),
-            ])
-            .unwrap(),
-            &NoFault,
-            orna_evaluator::EffectGate::admit_unbound_for_test(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(committed.request.state, RequestState::Completed);
-    let _ = repository;
+    .await;
 }
 
 /// Source row id for a fixture ordinal. Ordinals below 256 keep the encoding

@@ -35,7 +35,7 @@ function_lines = 120
 [[crate]]
 name = "orna-application"
 [crate.files]
-"src/lib.rs" = 14911
+"src/lib.rs" = 14830
 "src/migration_rows.rs" = 1733
 "src/repl_transaction.rs" = 1231
 [crate.functions]
@@ -60,50 +60,16 @@ name = "orna-application"
 [[crate]]
 name = "orna-cli"
 [crate.files]
-"src/cli_dispatch.rs" = 2093
 "src/cli_history.rs" = 1571
 "src/cli_mount.rs" = 2251
 "src/cli_query.rs" = 1252
-"src/cli_serve.rs" = 4802
+"src/cli_serve.rs" = 2354
 "src/cli_serve_app.rs" = 1270
-"src/fuse_mount.rs" = 12008
-"src/main.rs" = 5962
+"src/main.rs" = 4359
 "src/repl.rs" = 1674
 [crate.functions]
-"src/cli_commit.rs::run" = 127
-"src/cli_commit.rs::stage_store" = 121
-"src/cli_dispatch.rs::declaration_name_span" = 125
-"src/cli_dispatch.rs::prepare_migration_copy" = 171
-"src/cli_dispatch.rs::run_mv" = 199
-"src/cli_dispatch.rs::run_store_mv" = 154
-"src/cli_history.rs::parse_options" = 132
-"src/cli_query.rs::parse_options" = 173
-"src/cli_query.rs::run" = 296
-"src/cli_query.rs::run_legacy" = 124
-"src/cli_serve.rs::smart_http_clones_and_pushes_the_selected_clones_head" = 143
 "src/cli_serve_app.rs::stage_at_head" = 128
-"src/fuse_mount.rs::candidate" = 230
-"src/fuse_mount.rs::commit_blob_candidate" = 169
-"src/fuse_mount.rs::create" = 139
-"src/fuse_mount.rs::from_snapshot" = 173
-"src/fuse_mount.rs::mount_blob_window_reads_charge_only_intersecting_chunks" = 135
-"src/fuse_mount.rs::open#4" = 346
-"src/fuse_mount.rs::prepare_edit" = 172
-"src/fuse_mount.rs::project_row_files" = 294
-"src/fuse_mount.rs::read" = 162
-"src/fuse_mount.rs::rename" = 340
-"src/fuse_mount.rs::retain" = 124
-"src/fuse_mount.rs::retain_all_drafts" = 281
-"src/fuse_mount.rs::setattr" = 135
-"src/fuse_mount.rs::unresolved_drafts_of" = 131
-"src/fuse_mount.rs::workspace_readdir_uses_lazy_indexed_pages" = 128
-"src/main.rs::parsing_is_bounded_and_diagnostic_is_stable" = 165
-"src/main.rs::repl_snapshot_loader_keeps_a_selected_ref_stable_after_it_moves" = 175
-"src/main.rs::run_committed_table_invocation" = 126
-"src/main.rs::run_project_invocation_with_arguments" = 128
-"src/main.rs::run_pure_invocation" = 203
-"src/main.rs::run_push" = 126
-"src/main.rs::run_repl_input" = 395
+"src/main.rs::run_repl_input" = 264
 
 [[crate]]
 name = "orna-conformance"
@@ -316,15 +282,15 @@ name = "orna-repository"
 [crate.files]
 "src/compact.rs" = 6282
 "src/compact/legacy_reader_tests.rs" = 3185
-"src/complete_copy.rs" = 2945
+"src/complete_copy.rs" = 2934
 "src/format_context.rs" = 6287
 "src/lib.rs" = 15926
-"src/migration_copy.rs" = 3042
-"src/native_graph.rs" = 15685
-"src/object_reader.rs" = 1503
+"src/migration_copy.rs" = 3025
+"src/native_graph.rs" = 14142
+"src/object_reader.rs" = 1496
 "src/relation_admission.rs" = 4743
 "src/row_store.rs" = 1786
-"src/transport.rs" = 2542
+"src/transport.rs" = 2510
 [crate.functions]
 "src/compact.rs::compact_schema_history_projects_by_field_id_and_frozen_fallback" = 131
 "src/compact.rs::decode_compact_segment_projection" = 127
@@ -336,7 +302,6 @@ name = "orna-repository"
 "src/compact/legacy_reader_tests.rs::filtered_compact_clone" = 153
 "src/complete_copy.rs::decode" = 153
 "src/complete_copy.rs::export_complete_copy_of" = 131
-"src/format2_ogb.rs::verify_node" = 123
 "src/format_context.rs::admitted_fields_decode_inline_and_overflow_from_bound_manifest_without_media_reads" = 220
 "src/format_context.rs::captured_ogb2_protected_pin_is_admitted_through_committed_orp_row" = 125
 "src/format_context.rs::checkout_of_a_prior_commit_reads_its_rows_and_annotated_blob" = 125
@@ -354,9 +319,7 @@ name = "orna-repository"
 "src/lib.rs::recover_publication" = 173
 "src/migration_copy.rs::prepare_format3_migration_in" = 150
 "src/migration_copy.rs::recover_prepared_copy" = 168
-"src/native_graph.rs::collect_ordered_range_with" = 140
 "src/native_graph.rs::encode_canonical" = 159
-"src/native_graph.rs::find_ordered_entry_with" = 122
 "src/native_graph.rs::maintain_row_index_keeps_one_at_a_time_outcomes" = 155
 "src/native_graph.rs::maintain_row_map" = 136
 "src/native_graph.rs::one_native_store_root_publishes_row_changes_for_multiple_relations" = 163
@@ -384,7 +347,7 @@ name = "orna-runtime"
 "src/stream_run.rs" = 1499
 "src/stream_store.rs" = 1230
 "src/table_store.rs" = 1735
-"src/vfs.rs" = 6811
+"src/vfs.rs" = 4871
 [crate.functions]
 "src/catalogue.rs::activation_commits_catalogue_identity_with_table_state_or_rolls_back_both" = 141
 "src/catalogue.rs::admit_catalogue_batch_tx" = 123
