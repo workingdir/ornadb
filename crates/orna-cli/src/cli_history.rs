@@ -1503,6 +1503,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn quiet_is_a_bare_flag_and_defaults_off() {
         let plain = words(&["0102", "song"]);
         assert!(!parse_options(&plain).unwrap().quiet);
@@ -1510,6 +1511,7 @@ mod tests {
         assert!(parse_options(&flagged).unwrap().quiet);
     }
 
+    #[test]
     fn count_is_a_bare_flag_and_defaults_off() {
         let plain = words(&["0102", "song"]);
         assert!(!parse_options(&plain).unwrap().count);
