@@ -989,6 +989,63 @@ fn session_from_another_snapshot_is_revalidated_before_authorisation() {
 }
 
 #[test]
+fn session_with_active_roles_is_revalidated_against_the_deciding_snapshot() {
+    let first = SecuritySnapshot::new(
+        REVISION,
+        vec![FUNCTION],
+        vec![
+            active(ROLE, PrincipalKind::Role),
+            active(USER, PrincipalKind::User),
+        ],
+        vec![RoleMembership::new(ROLE, USER)],
+        vec![ExecuteGrant::new(ROLE, FUNCTION)],
+    )
+    .expect("first snapshot should validate");
+    let session = first
+        .bind_authenticated_session(USER, vec![ROLE])
+        .expect("the role is reachable in the first snapshot");
+    let target = InvocationTarget::new(FUNCTION, REVISION);
+    assert!(matches!(
+        first.authorise_execute(&session, target),
+        ExecuteDecision::Allowed(_)
+    ));
+
+    // The membership that reached the selected role was revoked.
+    let unreachable = SecuritySnapshot::new(
+        REVISION,
+        vec![FUNCTION],
+        vec![
+            active(ROLE, PrincipalKind::Role),
+            active(USER, PrincipalKind::User),
+        ],
+        vec![],
+        vec![ExecuteGrant::new(ROLE, FUNCTION)],
+    )
+    .expect("a snapshot without the membership should validate");
+    assert_eq!(
+        unreachable.authorise_execute(&session, target),
+        ExecuteDecision::Denied(ExecuteDenial::InvalidSession)
+    );
+
+    // The selected role was disabled.
+    let disabled_role = SecuritySnapshot::new(
+        REVISION,
+        vec![FUNCTION],
+        vec![
+            Principal::new(ROLE, PrincipalKind::Role, PrincipalStatus::Disabled),
+            active(USER, PrincipalKind::User),
+        ],
+        vec![RoleMembership::new(ROLE, USER)],
+        vec![ExecuteGrant::new(ROLE, FUNCTION)],
+    )
+    .expect("a disabled role remains durable state");
+    assert_eq!(
+        disabled_role.authorise_execute(&session, target),
+        ExecuteDecision::Denied(ExecuteDenial::InvalidSession)
+    );
+}
+
+#[test]
 fn snapshot_exposes_canonical_persistence_records() {
     let snapshot = SecuritySnapshot::new(
         REVISION,

@@ -2212,7 +2212,25 @@ impl SecuritySnapshot {
         mut active_roles: Vec<PrincipalId>,
     ) -> Result<AuthenticatedSession, SessionBindingError> {
         active_roles.sort_unstable();
-        if active_roles.windows(2).any(|roles| roles[0] == roles[1]) {
+        self.check_session(principal, &active_roles)?;
+        Ok(AuthenticatedSession {
+            principal,
+            active_roles,
+            binding: AuthenticatedSessionBinding::new(),
+        })
+    }
+
+    /// Checks that `principal` may hold a session with `sorted_active_roles`
+    /// (canonical order) in this snapshot, without minting a session binding.
+    fn check_session(
+        &self,
+        principal: PrincipalId,
+        sorted_active_roles: &[PrincipalId],
+    ) -> Result<(), SessionBindingError> {
+        if sorted_active_roles
+            .windows(2)
+            .any(|roles| roles[0] == roles[1])
+        {
             return Err(SessionBindingError::DuplicateActiveRole);
         }
 
@@ -2226,8 +2244,11 @@ impl SecuritySnapshot {
         if session_principal.kind == PrincipalKind::Role {
             return Err(SessionBindingError::RoleCannotAuthenticate);
         }
+        if sorted_active_roles.is_empty() {
+            return Ok(());
+        }
         let reachable_roles = self.reachable_roles(principal);
-        for active_role in &active_roles {
+        for active_role in sorted_active_roles {
             let role = self
                 .principals
                 .get(active_role)
@@ -2242,12 +2263,7 @@ impl SecuritySnapshot {
                 return Err(SessionBindingError::UnreachableActiveRole);
             }
         }
-
-        Ok(AuthenticatedSession {
-            principal,
-            active_roles,
-            binding: AuthenticatedSessionBinding::new(),
-        })
+        Ok(())
     }
 
     fn reachable_roles(&self, principal: PrincipalId) -> HashSet<PrincipalId> {
@@ -2408,7 +2424,9 @@ impl SecuritySnapshot {
         session: &AuthenticatedSession,
         target: InvocationTarget,
     ) -> Result<(), ExecuteDenial> {
-        self.bind_authenticated_session(session.principal, session.active_roles.clone())
+        // A session binds only in canonical role order, so the retained roles
+        // can be re-checked in place against this snapshot.
+        self.check_session(session.principal, &session.active_roles)
             .map_err(|_| ExecuteDenial::InvalidSession)?;
         if target.revision != self.revision {
             return Err(ExecuteDenial::RevisionMismatch);
