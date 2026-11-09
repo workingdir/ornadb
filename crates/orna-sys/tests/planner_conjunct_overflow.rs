@@ -1,7 +1,7 @@
 use orna_sys::{
-    ExplainError, ExpressionRef, MAX_PLAN_NODES, ObjectRef, PlanDetail, PlanNodeKind,
-    QueryPlanDescription, QuerySourceStatistics, SnapshotRef, explain_query,
-    explain_query_with_limit_chain,
+    ExplainError, ExplainInputs, ExpressionRef, MAX_PLAN_NODES, ObjectRef, PlanDetail,
+    PlanNodeKind, QueryPlanDescription, QuerySourceStatistics, SnapshotRef, explain_query,
+    explain_query_with,
 };
 
 const CONJUNCT_FIXTURE: &str = include_str!("fixtures/planner_conjunct_overflow.orna");
@@ -32,7 +32,7 @@ fn explain_conjunct_limit_chain(
     first_limit: Option<u64>,
     following_limits: &[u64],
 ) -> Result<orna_sys::ExplainedPlan, orna_sys::ExplainError> {
-    explain_query_with_limit_chain(
+    explain_query_with(
         &QueryPlanDescription {
             snapshot: SnapshotRef::descriptive("snapshot:conjunct-limit-chain"),
             source: ObjectRef::descriptive("table:PlannerConjunctOverflow"),
@@ -50,7 +50,10 @@ fn explain_conjunct_limit_chain(
             mutations: Vec::new(),
             materialize_into: None,
         },
-        following_limits,
+        ExplainInputs {
+            additional_limits: following_limits,
+            ..ExplainInputs::default()
+        },
     )
 }
 

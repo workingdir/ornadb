@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 
 use orna_sys::{
-    ExpressionRef, ObjectRef, PlanDetail, PlanNode, PlanNodeKind, QueryJoinDescription,
-    QueryJoinPairIdentityDescription, QueryPlanDescription, QuerySourceStatistics, SnapshotRef,
-    explain_query_with_join_pair_identities,
+    ExplainInputs, ExpressionRef, ObjectRef, PlanDetail, PlanNode, PlanNodeKind,
+    QueryJoinDescription, QueryJoinPairIdentityDescription, QueryPlanDescription,
+    QuerySourceStatistics, SnapshotRef, explain_query_with,
 };
 
 const FIXTURE: &str = include_str!("fixtures/planner_join_anchor_fold_identity_s670k.orna");
@@ -78,8 +78,14 @@ fn pairs(anchor: &str, order: [&str; 4]) -> Vec<QueryJoinPairIdentityDescription
 }
 
 fn plan(anchor: &str, order: [&str; 4]) -> orna_sys::ExplainedPlan {
-    explain_query_with_join_pair_identities(&query(anchor, order), &pairs(anchor, order))
-        .expect("exact logical pairs remain resolved through sparse cost planning")
+    explain_query_with(
+        &query(anchor, order),
+        ExplainInputs {
+            join_pair_identities: &pairs(anchor, order),
+            ..ExplainInputs::default()
+        },
+    )
+    .expect("exact logical pairs remain resolved through sparse cost planning")
 }
 
 fn text<'a>(node: &'a PlanNode, key: &str) -> &'a str {

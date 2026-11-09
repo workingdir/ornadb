@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 
 use orna_sys::{
-    ObjectRef, PlanDetail, PlanNode, PlanNodeKind, QueryJoinDescription,
+    ExplainInputs, ObjectRef, PlanDetail, PlanNode, PlanNodeKind, QueryJoinDescription,
     QueryPartialIndexDescription, QueryPlanDescription, QuerySourceStatistics, SnapshotRef,
-    explain_query_with_partial_indexes,
+    explain_query_with,
 };
 
 const PARTIAL_INDEX_FIXTURE: &str =
@@ -155,7 +155,7 @@ fn partial_index_identity_follows_sparse_predicate_cascade_after_reordering() {
     assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
     assert_eq!(parsed.value.items.len(), 2);
 
-    let explained = explain_query_with_partial_indexes(
+    let explained = explain_query_with(
         &query(vec![
             join(
                 "table:Expensive",
@@ -172,21 +172,24 @@ fn partial_index_identity_follows_sparse_predicate_cascade_after_reordering() {
                 Some("expr:medium-live"),
             ),
         ]),
-        &[
-            index("table:Medium", "index:medium-live", "expr:medium-live"),
-            index("table:Small", "index:small-live-z", "expr:small-live"),
-            index(
-                "table:Unrelated",
-                "index:decoy-small-live",
-                "expr:small-live",
-            ),
-            index(
-                "table:Expensive",
-                "index:wrong-predicate",
-                "expr:small-live",
-            ),
-            index("table:Small", "index:small-live-a", "expr:small-live"),
-        ],
+        ExplainInputs {
+            partial_indexes: &[
+                index("table:Medium", "index:medium-live", "expr:medium-live"),
+                index("table:Small", "index:small-live-z", "expr:small-live"),
+                index(
+                    "table:Unrelated",
+                    "index:decoy-small-live",
+                    "expr:small-live",
+                ),
+                index(
+                    "table:Expensive",
+                    "index:wrong-predicate",
+                    "expr:small-live",
+                ),
+                index("table:Small", "index:small-live-a", "expr:small-live"),
+            ],
+            ..ExplainInputs::default()
+        },
     )
     .expect("partial index candidates produce an explain plan");
 
