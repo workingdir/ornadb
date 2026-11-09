@@ -77,7 +77,7 @@ surface.
 
 ### Identities and catalogue closure
 
-`SecuritySnapshot::new_with_function_targets_local_peer_credentials_and_privilege_grants`
+`SecuritySnapshot::from_definitions`
 rejects duplicate or zero identities and validates the complete catalogue
 snapshot before it can authorise anything. Principal status is checked at
 session binding and role selection. A `ROLE` cannot authenticate as the session

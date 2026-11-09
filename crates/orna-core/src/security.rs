@@ -1952,12 +1952,34 @@ fn role_graph_has_cycle(
         .any(|role| visit(role, memberships, &mut visiting, &mut visited))
 }
 
+/// The complete set of definitions validated into one [`SecuritySnapshot`].
+///
+/// A category left out of the literal is empty. The application-only
+/// convenience [`SecuritySnapshot::new`] builds the common case; every other
+/// caller names only the categories it actually supplies.
+#[derive(Clone, Debug, Default)]
+pub struct SecurityDefinitions {
+    /// The closed two-class known function union.
+    pub function_targets: Vec<SecurityFunctionTarget>,
+    /// The principals that may act in this snapshot.
+    pub principals: Vec<Principal>,
+    /// Direct role memberships.
+    pub memberships: Vec<RoleMembership>,
+    /// Execute grants from a principal to a known function.
+    pub execute_grants: Vec<ExecuteGrant>,
+    /// Protected local peer credentials.
+    pub local_peer_credentials: Vec<LocalPeerCredential>,
+    /// Privilege-class grants.
+    pub privilege_grants: Vec<PrivilegeGrant>,
+}
+
 impl SecuritySnapshot {
     /// Creates a security snapshot from an application-only function set.
     ///
     /// Every listed function is an `Application` target. Use
-    /// [`Self::new_with_function_targets`] when the exact verified standard
-    /// snapshot pinned by the revision contributes functions to the union.
+    /// [`Self::from_definitions`] when the exact verified standard snapshot
+    /// pinned by the revision contributes functions to the union, or when the
+    /// snapshot carries local peer credentials or privilege grants.
     pub fn new(
         revision: RevisionPair,
         functions: Vec<FunctionId>,
@@ -1965,87 +1987,23 @@ impl SecuritySnapshot {
         memberships: Vec<RoleMembership>,
         grants: Vec<ExecuteGrant>,
     ) -> Result<Self, SecuritySnapshotError> {
-        Self::new_with_local_peer_credentials(
+        Self::from_definitions(
             revision,
-            functions,
-            principals,
-            memberships,
-            grants,
-            vec![],
+            SecurityDefinitions {
+                function_targets: functions
+                    .into_iter()
+                    .map(SecurityFunctionTarget::application)
+                    .collect(),
+                principals,
+                memberships,
+                execute_grants: grants,
+                ..SecurityDefinitions::default()
+            },
         )
     }
 
-    /// Creates a security snapshot with protected local peer credentials.
-    ///
-    /// Every listed function is an `Application` target. Use
-    /// [`Self::new_with_function_targets_and_local_peer_credentials`] when the
-    /// exact verified standard snapshot contributes functions to the union.
-    pub fn new_with_local_peer_credentials(
-        revision: RevisionPair,
-        functions: Vec<FunctionId>,
-        principals: Vec<Principal>,
-        memberships: Vec<RoleMembership>,
-        grants: Vec<ExecuteGrant>,
-        local_peer_credentials: Vec<LocalPeerCredential>,
-    ) -> Result<Self, SecuritySnapshotError> {
-        Self::new_with_function_targets_and_local_peer_credentials(
-            revision,
-            functions
-                .into_iter()
-                .map(SecurityFunctionTarget::application)
-                .collect(),
-            principals,
-            memberships,
-            grants,
-            local_peer_credentials,
-        )
-    }
-
-    /// Creates a security snapshot from the closed two-class target union.
-    pub fn new_with_function_targets(
-        revision: RevisionPair,
-        functions: Vec<SecurityFunctionTarget>,
-        principals: Vec<Principal>,
-        memberships: Vec<RoleMembership>,
-        grants: Vec<ExecuteGrant>,
-    ) -> Result<Self, SecuritySnapshotError> {
-        Self::new_with_function_targets_and_local_peer_credentials(
-            revision,
-            functions,
-            principals,
-            memberships,
-            grants,
-            vec![],
-        )
-    }
-
-    /// Creates a two-class security snapshot with protected local peer credentials.
-    ///
-    /// The function set is the canonical, identity-ordered union of the pinned
-    /// application catalogue and the exact verified standard snapshot. A
-    /// function identity repeated across the two classes, or twice in either
-    /// class, is a duplicate and fails construction closed.
-    pub fn new_with_function_targets_and_local_peer_credentials(
-        revision: RevisionPair,
-        functions: Vec<SecurityFunctionTarget>,
-        principals: Vec<Principal>,
-        memberships: Vec<RoleMembership>,
-        grants: Vec<ExecuteGrant>,
-        local_peer_credentials: Vec<LocalPeerCredential>,
-    ) -> Result<Self, SecuritySnapshotError> {
-        Self::new_with_function_targets_local_peer_credentials_and_privilege_grants(
-            revision,
-            functions,
-            principals,
-            memberships,
-            grants,
-            local_peer_credentials,
-            vec![],
-        )
-    }
-
-    /// Creates a two-class security snapshot with protected local peer
-    /// credentials and privilege-class grants.
+    /// Validates and creates a security snapshot from every definition
+    /// category.
     ///
     /// The function set is the canonical, identity-ordered union of the
     /// pinned application catalogue and the exact verified standard
@@ -2055,15 +2013,18 @@ impl SecuritySnapshot {
     /// in the snapshot; a grant object is not required to be a member of
     /// the known function union because privilege grants may name sealed
     /// system functions.
-    pub fn new_with_function_targets_local_peer_credentials_and_privilege_grants(
+    pub fn from_definitions(
         revision: RevisionPair,
-        functions: Vec<SecurityFunctionTarget>,
-        principals: Vec<Principal>,
-        memberships: Vec<RoleMembership>,
-        grants: Vec<ExecuteGrant>,
-        local_peer_credentials: Vec<LocalPeerCredential>,
-        privilege_grants: Vec<PrivilegeGrant>,
+        definitions: SecurityDefinitions,
     ) -> Result<Self, SecuritySnapshotError> {
+        let SecurityDefinitions {
+            function_targets: functions,
+            principals,
+            memberships,
+            execute_grants: grants,
+            local_peer_credentials,
+            privilege_grants,
+        } = definitions;
         let mut known_functions = BTreeMap::new();
         for function in functions {
             if known_functions
