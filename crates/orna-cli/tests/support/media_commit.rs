@@ -24,7 +24,6 @@ use orna_runtime::{
     TableObjectId, TerminalOutcome, WriterLease,
     vfs::{VfsDurableSave, VfsSaveAdmission, VfsSaveCandidate, VfsTableRowReplacement},
 };
-use orna_storage::LoosePath;
 use orna_value::Format3Context;
 
 /// The production table schema identity (ORNA-VFS-019), shared with the mount.
@@ -385,7 +384,6 @@ pub async fn commit_source_captures_for_table(
     assert_eq!(schema.declaration_name(), table_name);
     assert_eq!(schema.table_object_id(), TableObjectId::new(relation_id));
     let mut mutations = Vec::with_capacity(captures.len());
-    let mut paths_by_key = std::collections::BTreeMap::new();
     let mut retained_sources = Vec::with_capacity(captures.len());
     for capture in captures {
         // Admission decodes each logical path component with the VFS-1 key
@@ -464,14 +462,6 @@ pub async fn commit_source_captures_for_table(
                 .expect("retain the admitted Blob pin on the mutation");
         }
         assert!(mutation.value().is_some_and(|value| !value.is_empty()));
-        // Storage names a loose row by its canonical key text (key-path-v1), so
-        // a special-character key keeps its own decoding. A key the storage
-        // codec cannot represent (over its component limit) keeps the projected
-        // alias name; that name is not decodable by storage (see the PR body).
-        let loose_path = LoosePath::for_key(table_name, &[capture.key.to_owned()])
-            .or_else(|_| LoosePath::for_key(table_name, std::slice::from_ref(&encoded_key)))
-            .expect("the committed source row has a managed path");
-        paths_by_key.insert(mutation.key().to_vec(), loose_path);
         retained_sources.push(source_bindings);
         mutations.push(mutation);
     }
@@ -513,13 +503,7 @@ pub async fn commit_source_captures_for_table(
         .await
         .unwrap();
     assert_eq!(committed.request.state, RequestState::Completed);
-    crate::format3::publish_source_rows(
-        repository,
-        state,
-        &paths_by_key,
-        [ordinal.wrapping_add(6); 16],
-    )
-    .await;
+    crate::format3::publish_source_rows(repository, state, [ordinal.wrapping_add(6); 16]).await;
     drop(retained_sources);
 }
 

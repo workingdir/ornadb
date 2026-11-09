@@ -768,14 +768,6 @@ async fn durable_source_publication_onto_a_legacy_snapshot_is_refused_without_wr
                 &state,
                 [65; 16],
                 &checkpoint,
-                |mutation| {
-                    let key = mutation
-                        .key()
-                        .iter()
-                        .map(|byte| format!("{byte:02x}"))
-                        .collect::<String>();
-                    LoosePath::for_key(mutation.table(), &[key])
-                },
                 "orna: publish durable source",
             )
             .await,
