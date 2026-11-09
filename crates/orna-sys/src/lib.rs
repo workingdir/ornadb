@@ -13,7 +13,7 @@ use std::{
     fmt,
     marker::PhantomData,
     sync::{
-        Arc, Condvar, Mutex,
+        Arc, Condvar, Mutex, MutexGuard,
         atomic::{AtomicBool, Ordering},
     },
     thread::{self, ThreadId},
@@ -1615,44 +1615,55 @@ struct SynchronousExecutionState {
     pending: usize,
 }
 
+/// Whether a newly spawned worker may enter user code. It starts `Closed` and
+/// is decided exactly once.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum GateState {
+    #[default]
+    Closed,
+    Open,
+    Aborted,
+}
+
 /// Prevents a newly spawned worker from entering user code until the caller
 /// has finished publishing its join handle. This keeps the lifecycle fence
 /// out of the callback's reentrant call graph without creating an untracked
 /// execution window.
 #[derive(Debug, Default)]
 struct WorkerStartGate {
-    open: Mutex<Option<bool>>,
+    state: Mutex<GateState>,
     changed: Condvar,
 }
 
 impl WorkerStartGate {
+    /// Blocks until the gate is decided; true when the worker may run.
     fn wait(&self) -> bool {
-        let Ok(mut open) = self.open.lock() else {
+        let Ok(mut state) = self.state.lock() else {
             return false;
         };
-        while open.is_none() {
-            let Ok(next) = self.changed.wait(open) else {
+        while *state == GateState::Closed {
+            let Ok(next) = self.changed.wait(state) else {
                 return false;
             };
-            open = next;
+            state = next;
         }
-        *open == Some(true)
+        *state == GateState::Open
     }
 
     fn release(&self) {
-        if let Ok(mut open) = self.open.lock()
-            && open.is_none()
-        {
-            *open = Some(true);
-            self.changed.notify_all();
-        }
+        self.decide(GateState::Open);
     }
 
     fn abort(&self) {
-        if let Ok(mut open) = self.open.lock()
-            && open.is_none()
+        self.decide(GateState::Aborted);
+    }
+
+    /// Settles a still-closed gate; a decided gate never changes.
+    fn decide(&self, decision: GateState) {
+        if let Ok(mut state) = self.state.lock()
+            && *state == GateState::Closed
         {
-            *open = Some(false);
+            *state = decision;
             self.changed.notify_all();
         }
     }
@@ -1961,7 +1972,7 @@ impl RuntimeSupervisor {
     pub fn start<T, E>(
         &self,
         request: AdmissionRequest<T>,
-        mut executor: E,
+        executor: E,
     ) -> Result<InvocationHandle<T>, AdmissionError>
     where
         E: InvocationExecutor + Send + 'static,
@@ -1977,7 +1988,7 @@ impl RuntimeSupervisor {
         if request.mode != InvocationMode::Start {
             return Err(AdmissionError::StartMode);
         }
-        let (handle, boundary) = {
+        let (handle, new_work) = {
             let mut runtime = self
                 .runtime
                 .lock()
@@ -1987,132 +1998,118 @@ impl RuntimeSupervisor {
                     let worker_handle = runtime
                         .handle::<()>(handle.invocation.id(), handle.result_type.id().clone());
                     let cancellation = runtime.cancellation_token(&worker_handle)?;
-                    (handle, Some((boundary, worker_handle, cancellation)))
+                    (
+                        handle,
+                        Some(NewWork {
+                            boundary,
+                            handle: worker_handle,
+                            cancellation,
+                        }),
+                    )
                 }
                 Admission::Active { handle } | Admission::Terminal { handle, .. } => (handle, None),
             }
         };
-
-        if let Some((boundary, worker_handle, cancellation)) = boundary {
-            let runtime = Arc::clone(&self.runtime);
-            let synchronous = Arc::clone(&self.synchronous);
-            let reservation = match synchronous.reserve() {
-                Ok(reservation) => reservation,
-                Err(_) => {
-                    synchronous.state.clear_poison();
-                    let mut runtime = self
-                        .runtime
-                        .lock()
-                        .map_err(|_| AdmissionError::RuntimeUnavailable)?;
-                    runtime.classify_terminal(&worker_handle, TerminalClass::Orphaned)?;
-                    return Ok(handle);
-                }
-            };
-            let worker_handle_for_worker = worker_handle.clone();
-            let start_gate = Arc::new(WorkerStartGate::default());
-            #[cfg(test)]
-            let hold_worker_start = self.test_hold_worker_start.load(Ordering::Acquire);
-            #[cfg(test)]
-            if hold_worker_start {
-                *self.test_worker_gate.lock().unwrap() = Some(Arc::clone(&start_gate));
-            }
-            let start_gate_for_worker = Arc::clone(&start_gate);
-            let worker = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                thread::spawn(move || {
-                    if !start_gate_for_worker.wait() {
-                        return;
-                    }
-                    let execution = match reservation.begin() {
-                        Ok(execution) => execution,
-                        Err(_) => {
-                            if let Ok(mut runtime) = runtime.lock() {
-                                let _ = runtime.classify_terminal(
-                                    &worker_handle_for_worker,
-                                    TerminalClass::Orphaned,
-                                );
-                            }
-                            return;
-                        }
-                    };
-                    // Cancellation while queued fences callback entry. Once
-                    // running is published, cooperative executors observe
-                    // later cancellation through the shared token.
-                    let cancelled_before_running = {
-                        let Ok(mut runtime) = runtime.lock() else {
-                            drop(execution);
-                            return;
-                        };
-                        if cancellation.is_cancelled() {
-                            true
-                        } else {
-                            let _ = runtime.mark_running(&worker_handle_for_worker);
-                            false
-                        }
-                    };
-                    if cancelled_before_running {
-                        if let Ok(mut runtime) = runtime.lock() {
-                            let _ = runtime.retain_terminal(
-                                &worker_handle_for_worker,
-                                InvocationResult::Cancelled(None),
-                            );
-                        }
-                        drop(execution);
-                        return;
-                    }
-                    let result = execute_guarded(&mut executor, &boundary, &cancellation);
-                    let Ok(mut runtime) = runtime.lock() else {
-                        return;
-                    };
-                    if runtime
-                        .retain_terminal(&worker_handle_for_worker, result)
-                        .is_err()
-                    {
-                        let _ = runtime
-                            .classify_terminal(&worker_handle_for_worker, TerminalClass::Orphaned);
-                    }
-                    drop(execution);
-                })
-            })) {
-                Ok(worker) => worker,
-                Err(_) => {
-                    let mut runtime = self
-                        .runtime
-                        .lock()
-                        .map_err(|_| AdmissionError::RuntimeUnavailable)?;
-                    runtime.classify_terminal(&worker_handle, TerminalClass::Orphaned)?;
-                    return Ok(handle);
-                }
-            };
-            let workers = self
-                .workers
-                .lock()
-                .map_err(|_| AdmissionError::RuntimeUnavailable);
-            match workers {
-                Ok(mut workers) => {
-                    workers.insert(handle.invocation.id().clone(), worker);
-                    drop(workers);
-                    drop(lifecycle);
-                    #[cfg(test)]
-                    if !hold_worker_start {
-                        start_gate.release();
-                    }
-                    #[cfg(not(test))]
-                    start_gate.release();
-                }
-                Err(error) => {
-                    self.workers.clear_poison();
-                    drop(lifecycle);
-                    start_gate.abort();
-                    let _ = worker.join();
-                    self.runtime
-                        .lock()
-                        .map_err(|_| AdmissionError::RuntimeUnavailable)?
-                        .classify_terminal(&worker_handle, TerminalClass::Orphaned)?;
-                    return Err(error);
-                }
-            }
+        if let Some(work) = new_work {
+            self.spawn_worker(work, executor, lifecycle)?;
         }
         Ok(handle)
+    }
+
+    /// Starts the one worker for a newly admitted invocation and publishes its
+    /// join handle before releasing the lifecycle fence, so a concurrent
+    /// restart can never miss it. Every failure to launch leaves the
+    /// invocation orphaned rather than queued forever.
+    fn spawn_worker<E>(
+        &self,
+        work: NewWork,
+        executor: E,
+        lifecycle: MutexGuard<'_, LifecycleState>,
+    ) -> Result<(), AdmissionError>
+    where
+        E: InvocationExecutor + Send + 'static,
+    {
+        let NewWork {
+            boundary,
+            handle,
+            cancellation,
+        } = work;
+        let reservation = match self.synchronous.reserve() {
+            Ok(reservation) => reservation,
+            Err(_) => {
+                self.synchronous.state.clear_poison();
+                return self.orphan(&handle);
+            }
+        };
+        let start_gate = Arc::new(WorkerStartGate::default());
+        let hold_start = self.hold_worker_start(&start_gate);
+        let worker = thread::Builder::new().spawn({
+            let runtime = Arc::clone(&self.runtime);
+            let start_gate = Arc::clone(&start_gate);
+            let handle = handle.clone();
+            move || {
+                run_worker(
+                    &runtime,
+                    &start_gate,
+                    reservation,
+                    executor,
+                    &boundary,
+                    &handle,
+                    &cancellation,
+                );
+            }
+        });
+        let Ok(worker) = worker else {
+            return self.orphan(&handle);
+        };
+        let workers = self
+            .workers
+            .lock()
+            .map_err(|_| AdmissionError::RuntimeUnavailable);
+        match workers {
+            Ok(mut workers) => {
+                workers.insert(handle.invocation.id().clone(), worker);
+                drop(workers);
+                drop(lifecycle);
+                if !hold_start {
+                    start_gate.release();
+                }
+                Ok(())
+            }
+            Err(error) => {
+                self.workers.clear_poison();
+                drop(lifecycle);
+                start_gate.abort();
+                // A worker that panicked has nothing left to report; the
+                // invocation is orphaned below either way.
+                let _ = worker.join();
+                self.orphan(&handle)?;
+                Err(error)
+            }
+        }
+    }
+
+    /// Records a launch failure: the admitted invocation will never run.
+    fn orphan(&self, handle: &InvocationHandle<()>) -> Result<(), AdmissionError> {
+        self.runtime
+            .lock()
+            .map_err(|_| AdmissionError::RuntimeUnavailable)?
+            .classify_terminal(handle, TerminalClass::Orphaned)
+    }
+
+    /// Test hook: lets a test keep the next worker parked at its start gate.
+    #[cfg(test)]
+    fn hold_worker_start(&self, gate: &Arc<WorkerStartGate>) -> bool {
+        let hold = self.test_hold_worker_start.load(Ordering::Acquire);
+        if hold {
+            *self.test_worker_gate.lock().unwrap() = Some(Arc::clone(gate));
+        }
+        hold
+    }
+
+    #[cfg(not(test))]
+    fn hold_worker_start(&self, _: &Arc<WorkerStartGate>) -> bool {
+        false
     }
 
     /// Waits for one retained terminal outcome. A timeout is only an
@@ -2422,6 +2419,64 @@ fn malformed_completion_failure() -> RetainedInvocationResult {
         "sys.invoke.malformed_completion",
         "invocation executor returned an invalid terminal completion",
     ))
+}
+
+/// The worker-side pieces of a freshly admitted `Start` invocation.
+struct NewWork {
+    boundary: Box<ExecutionBoundary>,
+    handle: InvocationHandle<()>,
+    cancellation: CancellationToken,
+}
+
+/// The body of one supervised worker thread. Errors from the ledger mean a
+/// restart already orphaned this invocation; there is no caller left to
+/// report them to, so a failed write is dropped on purpose.
+fn run_worker<E: InvocationExecutor>(
+    runtime: &Mutex<Runtime>,
+    start_gate: &WorkerStartGate,
+    reservation: SynchronousReservation,
+    mut executor: E,
+    boundary: &ExecutionBoundary,
+    handle: &InvocationHandle<()>,
+    cancellation: &CancellationToken,
+) {
+    if !start_gate.wait() {
+        return;
+    }
+    let Ok(execution) = reservation.begin() else {
+        if let Ok(mut runtime) = runtime.lock() {
+            let _ = runtime.classify_terminal(handle, TerminalClass::Orphaned);
+        }
+        return;
+    };
+    // Cancellation while queued fences callback entry. Once running is
+    // published, cooperative executors observe later cancellation through the
+    // shared token.
+    let cancelled_before_running = {
+        let Ok(mut runtime) = runtime.lock() else {
+            return;
+        };
+        let cancelled = cancellation.is_cancelled();
+        if !cancelled {
+            let _ = runtime.mark_running(handle);
+        }
+        cancelled
+    };
+    if cancelled_before_running {
+        if let Ok(mut runtime) = runtime.lock() {
+            let _ = runtime.retain_terminal(handle, InvocationResult::Cancelled(None));
+        }
+        return;
+    }
+    let result = execute_guarded(&mut executor, boundary, cancellation);
+    let Ok(mut runtime) = runtime.lock() else {
+        return;
+    };
+    if runtime.retain_terminal(handle, result).is_err() {
+        let _ = runtime.classify_terminal(handle, TerminalClass::Orphaned);
+    }
+    drop(runtime);
+    drop(execution);
 }
 
 /// Runs the executor under the cancellation token. A panicking executor is an
