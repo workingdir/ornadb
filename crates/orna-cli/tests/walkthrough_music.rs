@@ -9,7 +9,7 @@ use orna_application::{ApplicationAuthority, CommittedTableIdentity};
 use orna_evaluator::{
     Environment, Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects,
 };
-use orna_project::{ProjectLoader, admit_source_row};
+use orna_project::{ProjectLoader, SourceRowRequest, admit_source_row};
 use orna_repository::{GitCommitRef, Repository};
 use orna_runtime::{NoFault, RuntimeState, TableObjectId};
 use orna_semantic::Catalogue;
@@ -124,12 +124,14 @@ async fn repl_update() {
     let value_context = format3_context_for_database(&source_commit, *schema.database_id());
     let row = admit_source_row(
         &project,
-        "music/london.orna",
-        r#"{ title: "Old title", artist: "Artist", }"#,
         &schema,
         &value_context,
-        vec![],
-        [0x72; 16],
+        SourceRowRequest::new(
+            "music/london.orna",
+            r#"{ title: "Old title", artist: "Artist", }"#,
+            vec![],
+            [0x72; 16],
+        ),
     )
     .unwrap();
     let (identity, initial_digest) = cli_runtime_identity(&repository);
@@ -334,12 +336,14 @@ async fn music_walkthrough_captures_queries_publishes_and_exports_offline() {
     // The original content-only path admits a typed null cover on its own row.
     let null_cover_row = admit_source_row(
         &project,
-        "music/london.orna",
-        r#"{ title: "Field recording", artist: "Kieran", cover: null, }"#,
         &schema,
         &value_context,
-        vec![("content".to_owned(), audio_binding)],
-        [0x32; 16],
+        SourceRowRequest::new(
+            "music/london.orna",
+            r#"{ title: "Field recording", artist: "Kieran", cover: null, }"#,
+            vec![("content".to_owned(), audio_binding)],
+            [0x32; 16],
+        ),
     )
     .expect("a content-bound Music row admits its explicit null cover");
     assert_eq!(null_cover_row.mutation().key(), b"london");
@@ -356,15 +360,17 @@ async fn music_walkthrough_captures_queries_publishes_and_exports_offline() {
         .unwrap();
     let covered_row = admit_source_row(
         &project,
-        "music/london-cover.orna",
-        r#"{ title: "Live in London", artist: "Kieran", }"#,
         &schema,
         &value_context,
-        vec![
-            ("content".to_owned(), cover_content),
-            ("cover".to_owned(), cover),
-        ],
-        [0x31; 16],
+        SourceRowRequest::new(
+            "music/london-cover.orna",
+            r#"{ title: "Live in London", artist: "Kieran", }"#,
+            vec![
+                ("content".to_owned(), cover_content),
+                ("cover".to_owned(), cover),
+            ],
+            [0x31; 16],
+        ),
     )
     .expect("the Music row admits content and cover in their named Blob fields");
     assert_eq!(covered_row.mutation().key(), b"london-cover");
