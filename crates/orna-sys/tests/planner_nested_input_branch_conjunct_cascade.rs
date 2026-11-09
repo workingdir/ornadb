@@ -1,7 +1,6 @@
 use orna_sys::{
-    ExplainError, ExpressionRef, ObjectRef, PlanDetail, PlanNodeKind, QueryPlanDescription,
-    QuerySourceStatistics, SnapshotRef,
-    explain_query_with_input_limit_conjunct_disjunct_limit_conjunct_chain,
+    ExplainError, ExplainInputs, ExpressionRef, ObjectRef, PlanDetail, PlanNodeKind,
+    QueryPlanDescription, QuerySourceStatistics, SnapshotRef, explain_query_with,
 };
 
 const FIXTURE: &str = include_str!("fixtures/planner_nested_input_branch_conjunct_cascade.orna");
@@ -15,7 +14,7 @@ fn explain_nested_input_branch_conjunct_cascade(
     conjunct_count: u64,
     additional_limits: &[u64],
 ) -> Result<orna_sys::ExplainedPlan, ExplainError> {
-    explain_query_with_input_limit_conjunct_disjunct_limit_conjunct_chain(
+    explain_query_with(
         &QueryPlanDescription {
             snapshot: SnapshotRef::descriptive("snapshot:nested-input-branch-conjunct-cascade"),
             source: ObjectRef::descriptive("table:PlannerNestedInputBranchConjunctCascade"),
@@ -33,13 +32,16 @@ fn explain_nested_input_branch_conjunct_cascade(
             mutations: Vec::new(),
             materialize_into: None,
         },
-        disjunct_count,
-        conjunct_count_per_disjunct,
-        nested_input_limits,
-        nested_disjunct_limits,
-        ExpressionRef::descriptive("expr:fifth-and-sixth"),
-        conjunct_count,
-        additional_limits,
+        ExplainInputs {
+            disjunct_count,
+            conjunct_count: Some(conjunct_count),
+            conjunct_count_per_disjunct: Some(conjunct_count_per_disjunct),
+            nested_input_limits: Some(nested_input_limits),
+            limits_between_disjunct_and_conjunct: Some(nested_disjunct_limits),
+            post_expansion_conjunct: Some(&ExpressionRef::descriptive("expr:fifth-and-sixth")),
+            additional_limits,
+            ..ExplainInputs::default()
+        },
     )
 }
 

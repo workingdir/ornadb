@@ -1,10 +1,10 @@
 use orna_sys::{
-    ExpressionRef, MutableBranchSnapshot, ObjectRef, PlanDetail, PlanNode, PlanNodeKind,
-    PlanWindowFrameBound, QueryJoinDescription, QueryJoinPairIdentityDescription,
+    ExplainInputs, ExpressionRef, MutableBranchSnapshot, ObjectRef, PlanDetail, PlanNode,
+    PlanNodeKind, PlanWindowFrameBound, QueryJoinDescription, QueryJoinPairIdentityDescription,
     QueryPairedCheckpointSegmentCompactionChainDescription,
     QueryPairedCheckpointSegmentCompactionStepDescription, QueryPlanDescription,
     QuerySourceStatistics, QueryWindowAggregatePushdownDescription, QueryWindowSpillDescription,
-    SnapshotRef, explain_query_with_paired_cost_restoration_and_window_spill_pushdowns,
+    SnapshotRef, explain_query_with,
 };
 
 const FIXTURE: &str = include_str!("fixtures/planner_bounded_spill_window_restore_axcfm.orna");
@@ -204,17 +204,20 @@ fn plan(
         spills.reverse();
         checkpoint_chains.reverse();
     }
-    explain_query_with_paired_cost_restoration_and_window_spill_pushdowns(
+    explain_query_with(
         &query,
-        &pairs,
-        &aggregates,
-        &spills,
-        &checkpoint_chains,
-        &[],
-        &[],
-        &[],
-        &[],
-        &[],
+        ExplainInputs {
+            window_aggregates: &aggregates,
+            join_pair_identities: &pairs,
+            window_spills: &spills,
+            checkpoint_compaction_chains: &checkpoint_chains,
+            segment_rotation_chains: &[],
+            stream_compaction_chains: &[],
+            spill_restore_chains: &[],
+            stream_rotation_chains: &[],
+            wal_rotation_chains: &[],
+            ..ExplainInputs::default()
+        },
     )
     .expect("exact bounded window spills and restore chains explain together")
 }
