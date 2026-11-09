@@ -6511,10 +6511,7 @@ fn infer_from_nominal_target(
             DIAG_TYPE,
             "From implementation result must construct its nominal target",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects: inferred.effects,
-        };
+        return Inferred::error_with(inferred.effects);
     }
     Inferred {
         ty: target.clone(),
@@ -8186,10 +8183,7 @@ fn infer_return_statement(
             infer_contextual(value, expected, scope, local, diagnostics)
         }
         (Some(value), None) => infer(value, scope, local, diagnostics),
-        (None, _) => Inferred {
-            ty: Type::Unit,
-            effects: EffectSummary::default(),
-        },
+        (None, _) => Inferred::pure(Type::Unit),
     };
     if let Some(index) = owner {
         if let Some(expected) = &expected {
@@ -9005,10 +8999,7 @@ fn infer_codec_decode_call(
             DIAG_TYPE,
             "codec decode requires an explicit `as: T` type witness",
         ));
-        return Some(Inferred {
-            ty: Type::Error,
-            effects,
-        });
+        return Some(Inferred::error_with(effects));
     };
     if input.is_none() {
         diagnostics.push(diag(DIAG_TYPE, "codec decode requires an input value"));
@@ -9524,6 +9515,30 @@ struct Inferred {
     effects: EffectSummary,
 }
 
+impl Inferred {
+    /// A result that performs no host effect and cannot fail.
+    fn pure(ty: Type) -> Self {
+        Self {
+            ty,
+            effects: EffectSummary::default(),
+        }
+    }
+
+    /// An expression that already produced a diagnostic and has no effects.
+    fn error() -> Self {
+        Self::pure(Type::Error)
+    }
+
+    /// An expression that already produced a diagnostic but whose operands
+    /// still carry `effects`.
+    fn error_with(effects: EffectSummary) -> Self {
+        Self {
+            ty: Type::Error,
+            effects,
+        }
+    }
+}
+
 /// Applies the sole contextual numeric conversion admitted by the language:
 /// an exact fractional literal may be checked directly as `Float`. All other
 /// expressions remain inferred through the ordinary closed-world path.
@@ -9557,10 +9572,7 @@ fn infer_contextual(
                 DIAG_TYPE,
                 "an untyped range needs at least one endpoint or a range context",
             ));
-            return Inferred {
-                ty: expected.clone(),
-                effects: EffectSummary::default(),
-            };
+            return Inferred::pure(expected.clone());
         }
         let mut effects = EffectSummary::default();
         for endpoint in [lower.as_deref(), upper.as_deref()].into_iter().flatten() {
@@ -9603,10 +9615,7 @@ fn infer_contextual(
             }
         )
     {
-        return Inferred {
-            ty: Type::Float,
-            effects: EffectSummary::default(),
-        };
+        return Inferred::pure(Type::Float);
     }
     if let Expr::Control {
         kind: ControlKind::If,
@@ -9805,19 +9814,16 @@ fn infer_node(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Inferred {
     match expr {
-        Expr::Literal { kind, .. } => Inferred {
-            ty: match kind {
-                LiteralKind::Integer => Type::Int,
-                LiteralKind::Decimal => Type::Decimal,
-                LiteralKind::Float => Type::Float,
-                LiteralKind::Date => Type::Date,
-                LiteralKind::Instant => Type::Instant,
-                LiteralKind::String => Type::Text,
-                LiteralKind::Boolean => Type::Bool,
-                LiteralKind::Null => Type::Null,
-            },
-            effects: EffectSummary::default(),
-        },
+        Expr::Literal { kind, .. } => Inferred::pure(match kind {
+            LiteralKind::Integer => Type::Int,
+            LiteralKind::Decimal => Type::Decimal,
+            LiteralKind::Float => Type::Float,
+            LiteralKind::Date => Type::Date,
+            LiteralKind::Instant => Type::Instant,
+            LiteralKind::String => Type::Text,
+            LiteralKind::Boolean => Type::Bool,
+            LiteralKind::Null => Type::Null,
+        }),
         Expr::InterpolatedString { segments, .. } => {
             let mut effects = EffectSummary::default();
             for segment in segments {
@@ -9838,10 +9844,7 @@ fn infer_node(
                     DIAG_AMBIGUOUS,
                     "name has multiple wildcard-import candidates",
                 ));
-                return Inferred {
-                    ty: Type::Error,
-                    effects: EffectSummary::default(),
-                };
+                return Inferred::error();
             }
             let symbol = local.get(text).or_else(|| scope.names.get(text));
             match symbol {
@@ -9858,10 +9861,7 @@ fn infer_node(
                     effects: s.effects.clone(),
                 },
                 None => match intrinsic_value_type(text) {
-                    Some(ty) => Inferred {
-                        ty,
-                        effects: EffectSummary::default(),
-                    },
+                    Some(ty) => Inferred::pure(ty),
                     None => {
                         let mut diagnostic = diag(
                             if matches!(text.as_str(), "Ok" | "Err") {
@@ -9882,10 +9882,7 @@ fn infer_node(
                             );
                         }
                         diagnostics.push(diagnostic);
-                        Inferred {
-                            ty: Type::Error,
-                            effects: EffectSummary::default(),
-                        }
+                        Inferred::error()
                     }
                 },
             }
@@ -10157,18 +10154,12 @@ fn infer_node(
                     DIAG_LEGACY_SYS_RUNTIME,
                     "`sys.runtime` was renamed to `sys.rt`",
                 ));
-                return Inferred {
-                    ty: Type::Error,
-                    effects: EffectSummary::default(),
-                };
+                return Inferred::error();
             }
             let diagnostics_before_base = diagnostics.len();
             let base = infer(base, scope, local, diagnostics);
             if base.ty == Type::Error && diagnostics.len() == diagnostics_before_base {
-                return Inferred {
-                    ty: Type::Error,
-                    effects: base.effects,
-                };
+                return Inferred::error_with(base.effects);
             }
             if let Some(inferred) = infer_historical_member(&base.ty, name, scope, diagnostics) {
                 return Inferred {
@@ -10188,10 +10179,7 @@ fn infer_node(
             }
             if let Some(message) = legacy_sys_admin_message(&base.ty, name) {
                 diagnostics.push(diag(DIAG_SYS_ADMIN_METHOD, message));
-                return Inferred {
-                    ty: Type::Error,
-                    effects: base.effects,
-                };
+                return Inferred::error_with(base.effects);
             }
             if let Type::Named(system_type) = &base.ty
                 && system_api::embedded_system_api().describes_type(system_type)
@@ -10200,10 +10188,7 @@ fn infer_node(
                     DIAG_UNSUPPORTED,
                     "portable system member is described but not implemented by this semantic slice",
                 ));
-                return Inferred {
-                    ty: Type::Error,
-                    effects: base.effects,
-                };
+                return Inferred::error_with(base.effects);
             }
             if let Some(ty) = infer_text_member(&base.ty, name) {
                 return Inferred {
@@ -10216,10 +10201,7 @@ fn infer_node(
                     DIAG_SECRET_DISPLAY,
                     "secret values cannot be displayed",
                 ));
-                return Inferred {
-                    ty: Type::Error,
-                    effects: base.effects,
-                };
+                return Inferred::error_with(base.effects);
             }
             if let Some(ty) = infer_numeric_member(&base.ty, name) {
                 return Inferred {
@@ -10350,10 +10332,7 @@ fn infer_node(
                     ..
                 } if statements.is_empty()
             ) {
-                Inferred {
-                    ty: Type::Record(BTreeMap::new()),
-                    effects: EffectSummary::default(),
-                }
+                Inferred::pure(Type::Record(BTreeMap::new()))
             } else {
                 infer_function_body(body, None, scope, &locals, diagnostics)
             };
@@ -10412,10 +10391,7 @@ fn infer_node(
                     DIAG_TYPE,
                     "Some requires exactly one positional value",
                 ));
-                return Inferred {
-                    ty: Type::Error,
-                    effects,
-                };
+                return Inferred::error_with(effects);
             }
             if qualified_path(callee)
                 .as_deref()
@@ -10425,10 +10401,7 @@ fn infer_node(
                     DIAG_CROSS_DATABASE_WRITE,
                     "cross-database writes are not atomic/supported",
                 ));
-                return Inferred {
-                    ty: Type::Error,
-                    effects: EffectSummary::default(),
-                };
+                return Inferred::error();
             }
             if matches!(callee.as_ref(), Expr::Name { text, .. } if text == "parallel")
                 && let [argument] = arguments.as_slice()
@@ -10467,27 +10440,18 @@ fn infer_node(
                     DIAG_LEGACY_RESULT,
                     "Result/Ok/Err control plumbing was removed; return the success type directly",
                 ));
-                return Inferred {
-                    ty: Type::Error,
-                    effects: EffectSummary::default(),
-                };
+                return Inferred::error();
             }
             if qualified_path(callee).as_deref() == Some(["sys", "storage"].as_slice()) {
                 diagnostics.push(diag(
                     DIAG_SYS_STORAGE_CALL,
                     "`sys.storage` is a grouping namespace; use `sys.Storage` or `sys.admin` storage functions",
                 ));
-                return Inferred {
-                    ty: Type::Error,
-                    effects: EffectSummary::default(),
-                };
+                return Inferred::error();
             }
             if qualified_path(callee).as_deref() == Some(["sys", "Commit", "insert"].as_slice()) {
                 diagnostics.push(diag(DIAG_SYS_COMMIT_READ_ONLY, "sys.Commit is read-only"));
-                return Inferred {
-                    ty: Type::Error,
-                    effects: EffectSummary::default(),
-                };
+                return Inferred::error();
             }
             if let Some(path) = qualified_path(callee)
                 && let Some(inferred) =
@@ -10611,10 +10575,7 @@ fn infer_node(
                 .collect::<Vec<_>>();
             if presentation_boundary && values.iter().any(contains_secret_value_type) {
                 diagnostics.push(diag(DIAG_TYPE, "secret values cannot be presented"));
-                return Inferred {
-                    ty: Type::Error,
-                    effects,
-                };
+                return Inferred::error_with(effects);
             }
             let historical_context = historical_callable_context(&callee.ty).cloned();
             match callable_function_type(&callee.ty).cloned() {
@@ -10656,16 +10617,10 @@ fn infer_node(
                         effects,
                     }
                 }
-                _ if callee.ty == Type::Error => Inferred {
-                    ty: Type::Error,
-                    effects,
-                },
+                _ if callee.ty == Type::Error => Inferred::error_with(effects),
                 _ => {
                     diagnostics.push(diag(DIAG_TYPE, "call requires a statically known function"));
-                    Inferred {
-                        ty: Type::Error,
-                        effects,
-                    }
+                    Inferred::error_with(effects)
                 }
             }
         }
@@ -10715,10 +10670,7 @@ fn infer_node(
                 DIAG_UNSUPPORTED,
                 "generic calls are outside this semantic slice",
             ));
-            Inferred {
-                ty: Type::Error,
-                effects,
-            }
+            Inferred::error_with(effects)
         }
         Expr::Unary { op, rhs, .. } => {
             let inferred = infer(rhs, scope, local, diagnostics);
@@ -10813,10 +10765,7 @@ fn infer_node(
                     DIAG_RELATION_EQUALITY_AMBIGUOUS,
                     "relation equality is ambiguous; choose sequence or row-set comparison explicitly",
                 ));
-                return Inferred {
-                    ty: Type::Error,
-                    effects,
-                };
+                return Inferred::error_with(effects);
             }
             if matches!(op.as_str(), ".." | "..=") {
                 let ty = if left.ty == right.ty && is_ordered_range_bound(&left.ty) {
@@ -10937,10 +10886,7 @@ fn infer_node(
                         // parameter identity for later rebinding and capture.
                         let ty = specialize_snapshot_ref_parameter(value, &x.ty, &locals);
                         if ty == Type::Bottom {
-                            final_control = Some(Inferred {
-                                ty,
-                                effects: EffectSummary::default(),
-                            });
+                            final_control = Some(Inferred::pure(ty));
                             break;
                         }
                         bind_pattern(pattern, ty, scope, &mut locals, diagnostics);
@@ -11010,10 +10956,7 @@ fn infer_node(
             // (ORNA-CFLOW-001); `Null` is reserved for the `null` literal.
             let tail = final_control
                 .or_else(|| tail.as_ref().map(|x| infer(x, scope, &locals, diagnostics)))
-                .unwrap_or(Inferred {
-                    ty: Type::Unit,
-                    effects: EffectSummary::default(),
-                });
+                .unwrap_or(Inferred::pure(Type::Unit));
             effects.join(&tail.effects);
             Inferred {
                 ty: tail.ty,
@@ -11098,10 +11041,7 @@ fn infer_node(
                 DIAG_UNSUPPORTED,
                 "expression form is outside this semantic slice",
             ));
-            Inferred {
-                ty: Type::Error,
-                effects: EffectSummary::default(),
-            }
+            Inferred::error()
         }
     }
 }
@@ -12144,20 +12084,14 @@ fn infer_while(
     }
     let Some(condition) = condition else {
         diagnostics.push(diag(DIAG_UNSUPPORTED, "while control requires a condition"));
-        return Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        };
+        return Inferred::error();
     };
     let condition = infer(condition, scope, local, diagnostics);
     require_same(&Type::Bool, &condition.ty, diagnostics);
 
     let Some(body) = body else {
         diagnostics.push(diag(DIAG_UNSUPPORTED, "while control requires a body"));
-        return Inferred {
-            ty: Type::Error,
-            effects: condition.effects,
-        };
+        return Inferred::error_with(condition.effects);
     };
     let body = infer(body, scope, local, diagnostics);
     let mut effects = condition.effects;
@@ -12280,24 +12214,15 @@ fn infer_for(
 ) -> Inferred {
     let Some(binding) = binding else {
         diagnostics.push(diag(DIAG_UNSUPPORTED, "for control requires a binding"));
-        return Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        };
+        return Inferred::error();
     };
     let Some(iterable) = iterable else {
         diagnostics.push(diag(DIAG_UNSUPPORTED, "for control requires an iterable"));
-        return Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        };
+        return Inferred::error();
     };
     let Some(body) = body else {
         diagnostics.push(diag(DIAG_UNSUPPORTED, "for control requires a body"));
-        return Inferred {
-            ty: Type::Error,
-            effects: infer(iterable, scope, local, diagnostics).effects,
-        };
+        return Inferred::error_with(infer(iterable, scope, local, diagnostics).effects);
     };
     if alternate.is_some()
         || arms.len() != 1
@@ -12309,10 +12234,7 @@ fn infer_for(
             DIAG_UNSUPPORTED,
             "malformed for control shape is outside this semantic slice",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects: infer(iterable, scope, local, diagnostics).effects,
-        };
+        return Inferred::error_with(infer(iterable, scope, local, diagnostics).effects);
     }
 
     let iterable_expression = iterable;
@@ -12324,10 +12246,7 @@ fn infer_for(
                 "for control supports only finite lists and integer ranges in this semantic slice",
             ));
         }
-        return Inferred {
-            ty: Type::Error,
-            effects: iterable.effects,
-        };
+        return Inferred::error_with(iterable.effects);
     };
     let mut body_locals = local.clone();
     bind_pattern(binding, element, scope, &mut body_locals, diagnostics);
@@ -12375,20 +12294,14 @@ fn infer_if(
     }
     let Some(condition) = condition else {
         diagnostics.push(diag(DIAG_UNSUPPORTED, "if expression requires a condition"));
-        return Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        };
+        return Inferred::error();
     };
     let condition = infer(condition, scope, local, diagnostics);
     require_same(&Type::Bool, &condition.ty, diagnostics);
 
     let Some(body) = body else {
         diagnostics.push(diag(DIAG_UNSUPPORTED, "if expression requires a body"));
-        return Inferred {
-            ty: Type::Error,
-            effects: condition.effects,
-        };
+        return Inferred::error_with(condition.effects);
     };
     // A declared or contextual type is the conditional's own unification
     // target (ORNA-CFLOW-003), so each value-producing branch is checked
@@ -12414,10 +12327,7 @@ fn infer_if(
             DIAG_UNSUPPORTED,
             "if expression requires an else branch in this semantic slice",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     };
     let alternate = match contextual {
         Some(expected) => infer_contextual(alternate, expected, scope, local, diagnostics),
@@ -12596,10 +12506,7 @@ fn infer_case(
                 &mut discarded_result,
             );
         }
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     };
     let scrutinee = infer(condition, scope, local, diagnostics);
     effects.join(&scrutinee.effects);
@@ -12608,10 +12515,7 @@ fn infer_case(
             DIAG_UNSUPPORTED,
             "case expression requires at least one arm",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     }
 
     let mut result = None;
@@ -13428,10 +13332,7 @@ fn infer_nominal(
             DIAG_UNRESOLVED,
             "nominal record type cannot be resolved",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     };
     let schema = symbol.table_schema.as_ref();
     let admission = schema.and_then(|schema| schema.admission.as_ref());
@@ -13579,10 +13480,7 @@ fn infer_enum_variant_reference(
             Type::Error
         }
     };
-    Some(Inferred {
-        ty,
-        effects: EffectSummary::default(),
-    })
+    Some(Inferred::pure(ty))
 }
 
 /// ORNA-ENUM-003 and ORNA-SYNTAX-001: `Enum.variant { field: value }` checks
@@ -13712,10 +13610,7 @@ fn infer_stream_from_list(
             DIAG_TYPE,
             "Stream.from_list requires values and source_identity",
         ));
-        return Some(Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        });
+        return Some(Inferred::error());
     };
     let values = infer(values, scope, local, diagnostics);
     let valid_identity = source_identity.is_some_and(|argument| {
@@ -13733,10 +13628,7 @@ fn infer_stream_from_list(
     }
     let Type::List(element) = values.ty else {
         diagnostics.push(diag(DIAG_TYPE, "Stream.from_list values must be a list"));
-        return Some(Inferred {
-            ty: Type::Error,
-            effects: values.effects,
-        });
+        return Some(Inferred::error_with(values.effects));
     };
     Some(Inferred {
         ty: Type::Stream(element),
@@ -14305,16 +14197,10 @@ fn infer_finite_list_collection(
             DIAG_TYPE,
             format!("std.collection {operation} requires a finite list"),
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     }
     let Some(callback) = callback else {
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     };
     let ty = match operation {
         "filter" => {
@@ -14397,10 +14283,7 @@ fn infer_finite_list_helper_collection(
             )
         }) && matches!(&argument.value, Expr::Lambda { .. });
         let inferred = if contextual_callback {
-            Inferred {
-                ty: Type::Error,
-                effects: EffectSummary::default(),
-            }
+            Inferred::error()
         } else {
             infer(&argument.value, scope, local, diagnostics)
         };
@@ -14711,10 +14594,7 @@ fn infer_finite_list_simple_collection(
             DIAG_TYPE,
             format!("finite-list {operation} requires a finite list"),
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     };
     let result = match operation {
         "count" => Type::Int,
@@ -14864,16 +14744,10 @@ fn infer_finite_list_sort_by(
             DIAG_TYPE,
             "finite-list sort_by requires a finite list",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     };
     let Some(index) = slots[1] else {
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     };
     let callback = infer_finite_list_sort_key(
         &arguments[index].value,
@@ -15192,16 +15066,10 @@ fn infer_finite_list_first(
     }
     let Type::List(element) = rows else {
         diagnostics.push(diag(DIAG_TYPE, "finite-list first requires a finite list"));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     };
     if malformed {
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     }
     Inferred {
         ty: Type::Optional(element),
@@ -15291,10 +15159,7 @@ fn infer_finite_list_one(
     }
     let Type::List(element) = rows else {
         diagnostics.push(diag(DIAG_TYPE, "finite-list one requires a finite list"));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     };
 
     if let Some(index) = slots[1] {
@@ -15332,10 +15197,7 @@ fn infer_finite_list_predicate(
                 DIAG_TYPE,
                 format!("finite-list {operation} predicate must take one parameter"),
             ));
-            return Inferred {
-                ty: Type::Error,
-                effects: EffectSummary::default(),
-            };
+            return Inferred::error();
         };
         if let Some(annotation) = &lambda_parameter.annotation {
             require_same(
@@ -15349,10 +15211,7 @@ fn infer_finite_list_predicate(
                 DIAG_UNSUPPORTED,
                 format!("finite-list {operation} predicate pattern is outside this semantic slice"),
             ));
-            return Inferred {
-                ty: Type::Error,
-                effects: EffectSummary::default(),
-            };
+            return Inferred::error();
         };
         let mut callback_locals = local.clone();
         insert_local_binding(name, parameter, &mut callback_locals, diagnostics);
@@ -15373,10 +15232,7 @@ fn infer_finite_list_predicate(
             DIAG_TYPE,
             format!("finite-list {operation} predicate must be a one-parameter function"),
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects: callback.effects,
-        };
+        return Inferred::error_with(callback.effects);
     };
     if parameters.len() != 1 {
         diagnostics.push(diag(
@@ -15483,17 +15339,11 @@ fn infer_finite_list_every_exists(
             DIAG_TYPE,
             format!("finite-list {operation} requires a finite list"),
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     };
 
     let Some(index) = slots[1] else {
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     };
     let callback = infer_finite_list_predicate(
         operation,
@@ -15536,10 +15386,7 @@ fn infer_relation_call(
     }
     if name == "window" && arguments.is_empty() {
         diagnostics.push(diag(DIAG_TYPE, "window requires a relation and a size"));
-        return Some(Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        });
+        return Some(Inferred::error());
     }
     let relation = infer(&arguments[0].value, scope, local, diagnostics);
     let Type::Relation(element) = relation.ty else {
@@ -15547,10 +15394,7 @@ fn infer_relation_call(
             DIAG_TYPE,
             format!("{name} requires a relation as its first argument"),
         ));
-        return Some(Inferred {
-            ty: Type::Error,
-            effects: relation.effects,
-        });
+        return Some(Inferred::error_with(relation.effects));
     };
     if name == "window" {
         let window = infer_relation_window(&arguments[1..], *element, scope, local, diagnostics);
@@ -16083,10 +15927,7 @@ fn infer_relation_collection_call(
         .enumerate()
         .map(|(index, argument)| {
             if Some(index) == callback_index {
-                Inferred {
-                    ty: Type::Error,
-                    effects: EffectSummary::default(),
-                }
+                Inferred::error()
             } else {
                 infer(&argument.value, scope, local, diagnostics)
             }
@@ -16104,10 +15945,7 @@ fn infer_relation_collection_call(
             DIAG_TYPE,
             format!("relation {operation} requires rows and {callback_name}"),
         ));
-        return Some(Inferred {
-            ty: Type::Error,
-            effects,
-        });
+        return Some(Inferred::error_with(effects));
     };
     let callback = infer_relation_callback(
         &arguments[callback_index].value,
@@ -16211,10 +16049,7 @@ fn infer_relation_collection_pipeline(
                 DIAG_TYPE,
                 format!("relation {operation} requires a {parameter} callback"),
             ));
-            return Inferred {
-                ty: Type::Error,
-                effects,
-            };
+            return Inferred::error_with(effects);
         };
         let callback = infer_relation_callback(
             &argument.value,
@@ -16432,10 +16267,7 @@ fn infer_relation_union_call(
             DIAG_TYPE,
             "relation union arguments do not match its static signature",
         ));
-        return Some(Inferred {
-            ty: Type::Error,
-            effects,
-        });
+        return Some(Inferred::error_with(effects));
     }
     let left = &values[slots[0].expect("validated relation union left slot")];
     let right = &values[slots[1].expect("validated relation union right slot")];
@@ -16448,10 +16280,7 @@ fn infer_relation_union_call(
             DIAG_TYPE,
             "relation union requires relations with compatible element types",
         ));
-        return Some(Inferred {
-            ty: Type::Error,
-            effects,
-        });
+        return Some(Inferred::error_with(effects));
     }
     Some(Inferred {
         ty: Type::Relation(left_element.clone()),
@@ -16590,10 +16419,7 @@ fn infer_relation_terminal_call(
         ));
     }
     let Type::Relation(element) = values[row_index].ty.clone() else {
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     };
     let mut valid = !malformed;
     if matches!(operation, "one" | "every" | "exists")
@@ -16900,10 +16726,7 @@ fn infer_success_pipeline(
             .message()
             .starts_with("a durable consumer function may own only one checkpointed source root")
     }) {
-        return Inferred {
-            ty: Type::Error,
-            effects: input.effects,
-        };
+        return Inferred::error_with(input.effects);
     }
     if matches!(&input.ty, Type::Relation(_))
         && let Expr::Call {
@@ -17044,20 +16867,14 @@ fn infer_success_pipeline(
                 DIAG_TYPE,
                 "relation union requires a relation with a compatible element type",
             ));
-            return Inferred {
-                ty: Type::Error,
-                effects,
-            };
+            return Inferred::error_with(effects);
         };
         if !types_match(element, &right_element) {
             diagnostics.push(diag(
                 DIAG_TYPE,
                 "relation union requires relations with compatible element types",
             ));
-            return Inferred {
-                ty: Type::Error,
-                effects,
-            };
+            return Inferred::error_with(effects);
         }
         return Inferred {
             ty: Type::Relation(element.clone()),
@@ -17115,10 +16932,7 @@ fn infer_success_pipeline(
                         DIAG_TYPE,
                         "distinct requires a lawful equality key; default Float equality is unavailable",
                     ));
-                    return Inferred {
-                        ty: Type::Error,
-                        effects: input.effects,
-                    };
+                    return Inferred::error_with(input.effects);
                 }
                 return Inferred {
                     ty: input.ty,
@@ -17136,20 +16950,14 @@ fn infer_success_pipeline(
                         DIAG_TYPE,
                         "union requires a list with a compatible element type",
                     ));
-                    return Inferred {
-                        ty: Type::Error,
-                        effects,
-                    };
+                    return Inferred::error_with(effects);
                 };
                 if !types_match(element, &right_element) {
                     diagnostics.push(diag(
                         DIAG_TYPE,
                         "union requires lists with compatible element types",
                     ));
-                    return Inferred {
-                        ty: Type::Error,
-                        effects,
-                    };
+                    return Inferred::error_with(effects);
                 }
                 return Inferred {
                     ty: input.ty,
@@ -17190,10 +16998,7 @@ fn infer_success_pipeline(
                 DIAG_TYPE,
                 "distinct requires a lawful equality key; default Float equality is unavailable",
             ));
-            return Inferred {
-                ty: Type::Error,
-                effects: input.effects,
-            };
+            return Inferred::error_with(input.effects);
         }
         return Inferred {
             ty: input.ty,
@@ -17343,10 +17148,7 @@ fn infer_success_pipeline(
                     DIAG_UNSUPPORTED,
                     "pipeline stage is outside this semantic slice",
                 ));
-                Inferred {
-                    ty: Type::Error,
-                    effects: input.effects,
-                }
+                Inferred::error_with(input.effects)
             }
         };
     }
@@ -17374,10 +17176,7 @@ fn infer_success_pipeline(
                 DIAG_TYPE,
                 "pipeline input is not a supported relation or stream",
             ));
-            return Inferred {
-                ty: Type::Error,
-                effects: input.effects,
-            };
+            return Inferred::error_with(input.effects);
         }
     };
     if !is_stream
@@ -17443,10 +17242,7 @@ fn infer_success_pipeline(
                 DIAG_UNSUPPORTED,
                 format!("relation {text} count is outside the supported bounded form"),
             ));
-            return Inferred {
-                ty: Type::Error,
-                effects,
-            };
+            return Inferred::error_with(effects);
         }
         return Inferred {
             ty: Type::Relation(Box::new(element)),
@@ -17462,10 +17258,7 @@ fn infer_success_pipeline(
                 DIAG_TYPE,
                 "relation flat_map requires one transform callback",
             ));
-            return Inferred {
-                ty: Type::Error,
-                effects: input.effects,
-            };
+            return Inferred::error_with(input.effects);
         };
         let malformed = argument.name.is_some() && argument.name.as_deref() != Some("transform");
         if malformed {
@@ -17492,10 +17285,7 @@ fn infer_success_pipeline(
                     DIAG_TYPE,
                     "relation flat_map transform must return a finite collection",
                 ));
-                return Inferred {
-                    ty: Type::Error,
-                    effects,
-                };
+                return Inferred::error_with(effects);
             }
         };
         return Inferred {
@@ -17557,14 +17347,11 @@ fn infer_success_pipeline(
                 DIAG_UNSUPPORTED,
                 "pipeline operation is outside this semantic slice",
             ));
-            return Inferred {
-                ty: Type::Error,
-                effects: {
-                    let mut effects = input.effects;
-                    effects.join(&ignored.effects);
-                    effects
-                },
-            };
+            return Inferred::error_with({
+                let mut effects = input.effects;
+                effects.join(&ignored.effects);
+                effects
+            });
         }
     };
     let mut effects = input.effects;
@@ -17613,10 +17400,7 @@ fn infer_success_pipeline(
         };
         if let Some((code, message)) = message {
             diagnostics.push(diag(code, message));
-            return Inferred {
-                ty: Type::Error,
-                effects,
-            };
+            return Inferred::error_with(effects);
         }
         return Inferred { ty, effects };
     }
@@ -17691,10 +17475,7 @@ fn infer_recovery_pipeline(
             DIAG_UNSUPPORTED,
             "recovery pipeline requires a one-parameter lambda",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects: input.effects,
-        };
+        return Inferred::error_with(input.effects);
     };
     let Expr::Lambda {
         parameters, body, ..
@@ -17707,20 +17488,14 @@ fn infer_recovery_pipeline(
             DIAG_TYPE,
             "recovery pipeline callback must take one parameter",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects: input.effects,
-        };
+        return Inferred::error_with(input.effects);
     };
     let Pattern::Name(name, _) = &parameter.pattern else {
         diagnostics.push(diag(
             DIAG_UNSUPPORTED,
             "recovery pipeline callback pattern is outside this semantic slice",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects: input.effects,
-        };
+        return Inferred::error_with(input.effects);
     };
     let mut callback_locals = local.clone();
     insert_local_binding(name, error_value_type(), &mut callback_locals, diagnostics);
@@ -17805,10 +17580,7 @@ fn infer_error_call(
             DIAG_TYPE,
             "error requires named code, message, and optional cause arguments",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     }
 
     let before = diagnostics.len();
@@ -17876,20 +17648,14 @@ fn infer_lambda_pipeline_stage(
             DIAG_UNSUPPORTED,
             "pipeline lambda must take exactly one parameter",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects: input.effects,
-        };
+        return Inferred::error_with(input.effects);
     };
     let Pattern::Name(name, _) = &parameter.pattern else {
         diagnostics.push(diag(
             DIAG_UNSUPPORTED,
             "pipeline lambda parameter pattern is outside this semantic slice",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects: input.effects,
-        };
+        return Inferred::error_with(input.effects);
     };
     let parameter_type = parameter
         .annotation
@@ -17949,20 +17715,14 @@ fn infer_named_pipeline_stage(
                 format!("pipeline stage {text} requires a collection input"),
             ));
         }
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     }
     if qualified_path(callee).is_none() {
         diagnostics.push(diag(
             DIAG_UNSUPPORTED,
             "pipeline stage must be a named callable",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects: input.effects,
-        };
+        return Inferred::error_with(input.effects);
     }
     let callee = infer(callee, scope, local, diagnostics);
     let mut effects = input.effects;
@@ -17977,10 +17737,7 @@ fn infer_named_pipeline_stage(
     else {
         for argument in arguments {
             let value = if matches!(argument.value, Expr::Lambda { .. }) {
-                Inferred {
-                    ty: Type::Error,
-                    effects: EffectSummary::default(),
-                }
+                Inferred::error()
             } else {
                 infer(&argument.value, scope, local, diagnostics)
             };
@@ -17992,10 +17749,7 @@ fn infer_named_pipeline_stage(
                 "pipeline stage is not a supported named callable",
             ));
         }
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     };
     let mut values = Vec::with_capacity(arguments.len() + 1);
     values.push(input.ty);
@@ -18010,17 +17764,11 @@ fn infer_named_pipeline_stage(
             Some(expected @ Type::Function { .. }) => {
                 infer_contextual(&argument.value, expected, scope, local, diagnostics)
             }
-            Some(_) if matches!(argument.value, Expr::Lambda { .. }) => Inferred {
-                ty: Type::Error,
-                effects: EffectSummary::default(),
-            },
+            Some(_) if matches!(argument.value, Expr::Lambda { .. }) => Inferred::error(),
             Some(expected) => {
                 infer_contextual(&argument.value, expected, scope, local, diagnostics)
             }
-            None if matches!(argument.value, Expr::Lambda { .. }) => Inferred {
-                ty: Type::Error,
-                effects: EffectSummary::default(),
-            },
+            None if matches!(argument.value, Expr::Lambda { .. }) => Inferred::error(),
             None => infer(&argument.value, scope, local, diagnostics),
         };
         effects.join(&value.effects);
@@ -18076,10 +17824,7 @@ fn infer_generic_pipeline_stage(
             DIAG_UNSUPPORTED,
             "generic pipeline stage must be a supported named callable",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     };
     if path == ["sys", "explain"]
         || path == ["sys", "meta"]
@@ -18120,10 +17865,7 @@ fn infer_generic_pipeline_stage(
             DIAG_TYPE,
             "Money constructor pipeline stage requires the piped value as its only argument",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     }
     effects.join(&infer(callee, scope, local, diagnostics).effects);
     for argument in arguments {
@@ -18133,10 +17875,7 @@ fn infer_generic_pipeline_stage(
         DIAG_UNSUPPORTED,
         "generic pipeline stage is outside this semantic slice",
     ));
-    Inferred {
-        ty: Type::Error,
-        effects,
-    }
+    Inferred::error_with(effects)
 }
 
 fn is_ordered_range_bound(ty: &Type) -> bool {
@@ -18250,30 +17989,21 @@ fn infer_callback(
             DIAG_TYPE,
             "core operation callback must be a one-parameter lambda",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        };
+        return Inferred::error();
     };
     let [lambda_parameter] = parameters.as_slice() else {
         diagnostics.push(diag(
             DIAG_TYPE,
             "core operation callback must take one parameter",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        };
+        return Inferred::error();
     };
     let Pattern::Name(name, _) = &lambda_parameter.pattern else {
         diagnostics.push(diag(
             DIAG_UNSUPPORTED,
             "core operation callback pattern is outside this semantic slice",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        };
+        return Inferred::error();
     };
     let mut callback_locals = local.clone();
     insert_local_binding(name, parameter, &mut callback_locals, diagnostics);
@@ -18324,10 +18054,7 @@ fn infer_relation_callback(
             DIAG_TYPE,
             "relation callback must be a one-parameter function",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects: callback.effects,
-        };
+        return Inferred::error_with(callback.effects);
     };
     if parameters.len() != 1 {
         diagnostics.push(diag(DIAG_TYPE, "relation callback must take one parameter"));
@@ -18365,10 +18092,7 @@ fn infer_finite_list_callback(
             DIAG_TYPE,
             "finite-list collection callback must be a one-parameter function",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects: callback.effects,
-        };
+        return Inferred::error_with(callback.effects);
     };
     if parameters.len() != 1 {
         diagnostics.push(diag(
@@ -18673,10 +18397,7 @@ fn infer_table_row_input(
                 if source_blob_values_are_external
                     && matches!(expected, Type::Named(name) if matches!(name.as_str(), "Blob" | "std.BINARY_LARGE_OBJECT"))
                 {
-                    Inferred {
-                        ty: expected.clone(),
-                        effects: EffectSummary::default(),
-                    }
+                    Inferred::pure(expected.clone())
                 } else {
                     infer_contextual(&field.value, expected, scope, local, diagnostics)
                 }
@@ -18858,10 +18579,7 @@ fn infer_table_projection(
         _ => None,
     })?;
     let field = fields.get(name)?.clone();
-    Some(Inferred {
-        ty: function(vec![table.ty.clone()], field),
-        effects: EffectSummary::default(),
-    })
+    Some(Inferred::pure(function(vec![table.ty.clone()], field)))
 }
 
 /// Resolves a member through an explicitly imported module root or a
@@ -18895,10 +18613,7 @@ fn resolve_qualified_module_member(
                     .expect("identifier text is safe"),
                 ),
             );
-            Inferred {
-                ty: Type::Error,
-                effects: EffectSummary::default(),
-            }
+            Inferred::error()
         }
     }
 }
@@ -19369,10 +19084,7 @@ fn infer_timeout_call(
             Some("duration") if duration.is_none() => duration = Some(&argument.value),
             Some(_) => {
                 diagnostics.push(diag(DIAG_TYPE, "timeout expects a callback and a duration"));
-                return Some(Inferred {
-                    ty: Type::Error,
-                    effects: EffectSummary::default(),
-                });
+                return Some(Inferred::error());
             }
             None => {
                 let slot = match positional {
@@ -19381,18 +19093,12 @@ fn infer_timeout_call(
                     _ => {
                         diagnostics
                             .push(diag(DIAG_TYPE, "timeout expects a callback and a duration"));
-                        return Some(Inferred {
-                            ty: Type::Error,
-                            effects: EffectSummary::default(),
-                        });
+                        return Some(Inferred::error());
                     }
                 };
                 if slot.is_some() {
                     diagnostics.push(diag(DIAG_TYPE, "timeout expects a callback and a duration"));
-                    return Some(Inferred {
-                        ty: Type::Error,
-                        effects: EffectSummary::default(),
-                    });
+                    return Some(Inferred::error());
                 }
                 *slot = Some(&argument.value);
                 positional += 1;
@@ -19401,10 +19107,7 @@ fn infer_timeout_call(
     }
     let (Some(callback), Some(duration)) = (callback, duration) else {
         diagnostics.push(diag(DIAG_TYPE, "timeout expects a callback and a duration"));
-        return Some(Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        });
+        return Some(Inferred::error());
     };
 
     let callback = infer(callback, scope, local, diagnostics);
@@ -19416,10 +19119,7 @@ fn infer_timeout_call(
     } = callback.ty
     else {
         diagnostics.push(diag(DIAG_TYPE, "timeout callback must be a function"));
-        return Some(Inferred {
-            ty: Type::Error,
-            effects,
-        });
+        return Some(Inferred::error_with(effects));
     };
     if !parameters.is_empty() {
         diagnostics.push(diag(DIAG_TYPE, "timeout callback must not take parameters"));
@@ -19504,20 +19204,14 @@ fn infer_descriptor_system_path(
         });
     }
     if let Some(enum_name) = api.enum_value(path) {
-        return DescriptorPathInference::Resolved(Inferred {
-            ty: Type::Named(enum_name),
-            effects: EffectSummary::default(),
-        });
+        return DescriptorPathInference::Resolved(Inferred::pure(Type::Named(enum_name)));
     }
     match api.resolve(path) {
         PathResolution::ReadOnly(ty) => {
             if let Some(singleton) = api.singleton_view(path) {
                 require_linked_system_member(SystemMember::Singleton(singleton), scope);
             }
-            DescriptorPathInference::Resolved(Inferred {
-                ty: descriptor_type(ty),
-                effects: EffectSummary::default(),
-            })
+            DescriptorPathInference::Resolved(Inferred::pure(descriptor_type(ty)))
         }
         PathResolution::Removed(removed) => {
             diagnostics.push(diag(
@@ -19719,10 +19413,7 @@ fn infer_descriptor_system_call(
             DIAG_UNSUPPORTED,
             "portable system function is described but not implemented by this semantic slice",
         ));
-        return Some(Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        });
+        return Some(Inferred::error());
     }
     let mut effects = EffectSummary::default();
     let values = arguments
@@ -19756,10 +19447,7 @@ fn infer_descriptor_system_call(
                 "arguments do not match a portable system function overload"
             },
         ));
-        return Some(Inferred {
-            ty: Type::Error,
-            effects,
-        });
+        return Some(Inferred::error_with(effects));
     };
     require_linked_system_member(system_api::SystemMember::Callable(&function.label), scope);
     effects.join(&descriptor_effects(function.effect));
@@ -19826,10 +19514,7 @@ fn infer_invoke_system_call(
             DIAG_UNSUPPORTED,
             "portable generic system function is described but not implemented by this semantic slice",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     };
     require_linked_system_member(system_api::SystemMember::Callable(&function.label), scope);
     let parameter = invoke_typed_descriptor(function)
@@ -19840,16 +19525,10 @@ fn infer_invoke_system_call(
             DIAG_TYPE,
             "typed sys.invoke requires an explicit as: T witness",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     };
     if values.iter().any(|value| matches!(value, Type::Error)) {
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     }
     let witness = values[witness_index].clone();
 
@@ -19859,30 +19538,21 @@ fn infer_invoke_system_call(
                 DIAG_TYPE,
                 "sys.invoke requires exactly one explicit type argument when generic arguments are supplied",
             ));
-            return Inferred {
-                ty: Type::Error,
-                effects,
-            };
+            return Inferred::error_with(effects);
         }
         let Some(type_argument) = valid_static_type(&type_arguments[0], scope) else {
             diagnostics.push(diag(
                 DIAG_TYPE,
                 "sys.invoke explicit type argument must name a known static type",
             ));
-            return Inferred {
-                ty: Type::Error,
-                effects,
-            };
+            return Inferred::error_with(effects);
         };
         if type_argument != witness {
             diagnostics.push(diag(
                 DIAG_TYPE,
                 "sys.invoke explicit type argument must match the as: witness",
             ));
-            return Inferred {
-                ty: Type::Error,
-                effects,
-            };
+            return Inferred::error_with(effects);
         }
     }
 
@@ -19896,10 +19566,7 @@ fn infer_invoke_system_call(
             DIAG_UNSUPPORTED,
             "portable generic system function has an unsupported type shape",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     };
     let names = function
         .parameters
@@ -19926,10 +19593,7 @@ fn infer_invoke_system_call(
             DIAG_TYPE,
             "arguments do not match the portable sys.invoke<T> signature",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     }
 
     effects.join(&descriptor_effects(function.effect));
@@ -20033,10 +19697,7 @@ fn infer_start_system_call(
             DIAG_UNSUPPORTED,
             "portable generic system function is described but not implemented by this semantic slice",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     };
     require_linked_system_member(system_api::SystemMember::Callable(&function.label), scope);
     let parameter = start_typed_descriptor(function)
@@ -20047,16 +19708,10 @@ fn infer_start_system_call(
             DIAG_TYPE,
             "typed sys.start requires an explicit as: T witness",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     };
     if values.iter().any(|value| matches!(value, Type::Error)) {
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     }
     let witness = values[witness_index].clone();
 
@@ -20066,30 +19721,21 @@ fn infer_start_system_call(
                 DIAG_TYPE,
                 "sys.start requires exactly one explicit type argument when generic arguments are supplied",
             ));
-            return Inferred {
-                ty: Type::Error,
-                effects,
-            };
+            return Inferred::error_with(effects);
         }
         let Some(type_argument) = valid_static_type(&type_arguments[0], scope) else {
             diagnostics.push(diag(
                 DIAG_TYPE,
                 "sys.start explicit type argument must name a known static type",
             ));
-            return Inferred {
-                ty: Type::Error,
-                effects,
-            };
+            return Inferred::error_with(effects);
         };
         if type_argument != witness {
             diagnostics.push(diag(
                 DIAG_TYPE,
                 "sys.start explicit type argument must match the as: witness",
             ));
-            return Inferred {
-                ty: Type::Error,
-                effects,
-            };
+            return Inferred::error_with(effects);
         }
     }
 
@@ -20103,10 +19749,7 @@ fn infer_start_system_call(
             DIAG_UNSUPPORTED,
             "portable generic system function has an unsupported type shape",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     };
     let names = function
         .parameters
@@ -20133,10 +19776,7 @@ fn infer_start_system_call(
             DIAG_TYPE,
             "arguments do not match the portable sys.start<T> signature",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     }
 
     effects.join(&descriptor_effects(function.effect));
@@ -20331,10 +19971,7 @@ fn infer_unsupported_generic_system_call(
         DIAG_UNSUPPORTED,
         "explicit generic arguments are not implemented for this portable system function",
     ));
-    Inferred {
-        ty: Type::Error,
-        effects,
-    }
+    Inferred::error_with(effects)
 }
 
 fn substitute_generic_descriptor_type(
@@ -20449,10 +20086,7 @@ fn infer_query_explain_system_call(
         );
         effects.join(&descriptor_effects(query_descriptor.effect));
         if query_value.is_some_and(|ty| matches!(ty, Type::Error)) {
-            return Some(Inferred {
-                ty: Type::Error,
-                effects,
-            });
+            return Some(Inferred::error_with(effects));
         }
         let query_element = match query_value.expect("query shape contains a value") {
             Type::Relation(element) => element.as_ref(),
@@ -20462,10 +20096,7 @@ fn infer_query_explain_system_call(
                         DIAG_TYPE,
                         "sys.explain(Query) requires a typed query value",
                     ));
-                    return Some(Inferred {
-                        ty: Type::Error,
-                        effects,
-                    });
+                    return Some(Inferred::error_with(effects));
                 };
                 element
             }
@@ -20474,10 +20105,7 @@ fn infer_query_explain_system_call(
                     DIAG_TYPE,
                     "sys.explain(Query) requires a typed query value",
                 ));
-                return Some(Inferred {
-                    ty: Type::Error,
-                    effects,
-                });
+                return Some(Inferred::error_with(effects));
             }
         };
 
@@ -20491,20 +20119,14 @@ fn infer_query_explain_system_call(
                     DIAG_TYPE,
                     "sys.explain requires exactly one valid explicit query element type",
                 ));
-                return Some(Inferred {
-                    ty: Type::Error,
-                    effects,
-                });
+                return Some(Inferred::error_with(effects));
             };
             if !types_match(explicit, query_element) {
                 diagnostics.push(diag(
                     DIAG_TYPE,
                     "sys.explain explicit query element type must match the query value",
                 ));
-                return Some(Inferred {
-                    ty: Type::Error,
-                    effects,
-                });
+                return Some(Inferred::error_with(effects));
             }
         }
 
@@ -20522,10 +20144,7 @@ fn infer_query_explain_system_call(
     }
 
     if values.iter().any(|ty| matches!(ty, Type::Error)) {
-        return Some(Inferred {
-            ty: Type::Error,
-            effects,
-        });
+        return Some(Inferred::error_with(effects));
     }
 
     if has_input {
@@ -20569,10 +20188,7 @@ fn infer_query_explain_system_call(
         DIAG_TYPE,
         "arguments do not match a portable sys.explain overload",
     ));
-    Some(Inferred {
-        ty: Type::Error,
-        effects,
-    })
+    Some(Inferred::error_with(effects))
 }
 
 /// `sys.meta<T>` is the one generic system operation whose type parameter is
@@ -20618,10 +20234,7 @@ fn infer_meta_system_call(
             DIAG_UNSUPPORTED,
             "portable generic system function is described but not implemented by this semantic slice",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     };
     require_linked_system_member(system_api::SystemMember::Callable(&function.label), scope);
     if !valid_shape {
@@ -20629,16 +20242,10 @@ fn infer_meta_system_call(
             DIAG_TYPE,
             "arguments do not match a portable system function overload",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     }
     if values.iter().any(|value| matches!(value, Type::Error)) {
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     }
     effects.join(&descriptor_effects(function.effect));
     let parameter = function.type_parameters.iter().next().unwrap();
@@ -20654,20 +20261,14 @@ fn infer_meta_system_call(
                 DIAG_TYPE,
                 "sys.meta requires exactly one explicit type argument when generic arguments are supplied",
             ));
-            return Inferred {
-                ty: Type::Error,
-                effects,
-            };
+            return Inferred::error_with(effects);
         };
         if type_argument != *value_type {
             diagnostics.push(diag(
                 DIAG_TYPE,
                 "sys.meta explicit type argument must match the value type",
             ));
-            return Inferred {
-                ty: Type::Error,
-                effects,
-            };
+            return Inferred::error_with(effects);
         }
     }
     let result = substitute_descriptor_type(&function.result, parameter, value_type);
@@ -20796,17 +20397,11 @@ fn infer_cancel_system_call(
             DIAG_UNSUPPORTED,
             "portable generic system function is described but not implemented by this semantic slice",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     };
     require_linked_system_member(system_api::SystemMember::Callable(&function.label), scope);
     if values.iter().any(|value| matches!(value, Type::Error)) {
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     }
 
     let mut used = vec![false; function.parameters.len()];
@@ -20871,10 +20466,7 @@ fn infer_cancel_system_call(
             DIAG_TYPE,
             "arguments do not match a portable system function overload",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     }
     let result_type = invocation_type.expect("valid invocation handle supplies its type");
     if let Some(type_arguments) = type_arguments {
@@ -20888,20 +20480,14 @@ fn infer_cancel_system_call(
                 DIAG_TYPE,
                 "sys.cancel requires exactly one explicit type argument when generic arguments are supplied",
             ));
-            return Inferred {
-                ty: Type::Error,
-                effects,
-            };
+            return Inferred::error_with(effects);
         };
         if type_argument != result_type {
             diagnostics.push(diag(
                 DIAG_TYPE,
                 "sys.cancel explicit type argument must match the invocation handle result type",
             ));
-            return Inferred {
-                ty: Type::Error,
-                effects,
-            };
+            return Inferred::error_with(effects);
         }
     }
     effects.join(&descriptor_effects(function.effect));
@@ -20956,17 +20542,11 @@ fn infer_await_system_call(
             DIAG_UNSUPPORTED,
             "portable generic system function is described but not implemented by this semantic slice",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     };
     require_linked_system_member(system_api::SystemMember::Callable(&function.label), scope);
     if values.iter().any(|value| matches!(value, Type::Error)) {
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     }
 
     let mut used = vec![false; function.parameters.len()];
@@ -21030,10 +20610,7 @@ fn infer_await_system_call(
             DIAG_TYPE,
             "arguments do not match a portable system function overload",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     }
     let result_type = invocation_type.expect("valid invocation handle supplies its type");
     if let Some(type_arguments) = type_arguments {
@@ -21047,20 +20624,14 @@ fn infer_await_system_call(
                 DIAG_TYPE,
                 "sys.await requires exactly one explicit type argument when generic arguments are supplied",
             ));
-            return Inferred {
-                ty: Type::Error,
-                effects,
-            };
+            return Inferred::error_with(effects);
         };
         if type_argument != result_type {
             diagnostics.push(diag(
                 DIAG_TYPE,
                 "sys.await explicit type argument must match the invocation handle result type",
             ));
-            return Inferred {
-                ty: Type::Error,
-                effects,
-            };
+            return Inferred::error_with(effects);
         }
     }
     effects.join(&descriptor_effects(function.effect));
@@ -21254,10 +20825,7 @@ fn infer_system_path(
     }
     match infer_descriptor_system_path(path, scope, diagnostics) {
         DescriptorPathInference::Resolved(inferred) => Some(inferred),
-        DescriptorPathInference::Rejected => Some(Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        }),
+        DescriptorPathInference::Rejected => Some(Inferred::error()),
     }
 }
 fn infer_nominal_conversion_call(
@@ -21303,10 +20871,7 @@ fn infer_nominal_conversion_call(
             DIAG_TYPE,
             "nominal conversion requires exactly one source value",
         ));
-        return Some(Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        });
+        return Some(Inferred::error());
     }
     let argument = infer(&arguments[0].value, scope, local, diagnostics);
     if sources.iter().any(|source| source == &argument.ty) {
@@ -21340,10 +20905,7 @@ fn infer_nominal_conversion_call(
         DIAG_TYPE,
         "no matching From implementation for the source type",
     ));
-    Some(Inferred {
-        ty: Type::Error,
-        effects: argument.effects,
-    })
+    Some(Inferred::error_with(argument.effects))
 }
 
 fn is_snapshot_selector_context(selector: &str) -> bool {
@@ -25924,19 +25486,15 @@ fn infer_historical_member(
     {
         let namespace = name.to_owned();
         if historical_root_available(&scope.historical_modules, &namespace) || name == "sys" {
-            return Some(Inferred {
-                ty: historical_namespace_type(snapshot, &namespace),
-                effects: EffectSummary::default(),
-            });
+            return Some(Inferred::pure(historical_namespace_type(
+                snapshot, &namespace,
+            )));
         }
         diagnostics.push(diag(
             DIAG_UNRESOLVED,
             "historical database member cannot be resolved",
         ));
-        return Some(Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        });
+        return Some(Inferred::error());
     }
     let (snapshot, namespace) = historical_namespace_parts(base)?;
     let module_namespace = Namespace(
@@ -25947,10 +25505,10 @@ fn infer_historical_member(
             .collect(),
     );
     if scope.historical_modules.contains_key(&module_namespace) {
-        return Some(Inferred {
-            ty: historical_namespace_type(snapshot, &module_namespace.display()),
-            effects: EffectSummary::default(),
-        });
+        return Some(Inferred::pure(historical_namespace_type(
+            snapshot,
+            &module_namespace.display(),
+        )));
     }
 
     // The portable system surface is descriptor-backed rather than a source
@@ -26010,10 +25568,7 @@ fn infer_historical_member(
                 DIAG_UNSUPPORTED,
                 "historical callable permits only database-read effects",
             ));
-            return Some(Inferred {
-                ty: Type::Error,
-                effects: EffectSummary::default(),
-            });
+            return Some(Inferred::error());
         }
         return Some(Inferred {
             ty: if symbol.kind == SymbolKind::Function {
@@ -26033,10 +25588,7 @@ fn infer_historical_member(
         DIAG_UNRESOLVED,
         "historical database member cannot be resolved",
     ));
-    Some(Inferred {
-        ty: Type::Error,
-        effects: EffectSummary::default(),
-    })
+    Some(Inferred::error())
 }
 
 fn infer_system_member(base: &Type, name: &str) -> Option<Type> {
@@ -26449,18 +26001,12 @@ fn infer_money_constructor_type(
         ));
     }
     if !currency_is_valid || value_is_float {
-        return Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        };
+        return Inferred::error();
     }
-    Inferred {
-        ty: Type::Applied {
-            base: "Money".into(),
-            arguments: vec![currency],
-        },
-        effects: EffectSummary::default(),
-    }
+    Inferred::pure(Type::Applied {
+        base: "Money".into(),
+        arguments: vec![currency],
+    })
 }
 
 fn is_money_rate(ty: &Type) -> bool {
@@ -26615,10 +26161,7 @@ fn infer_ui_action_call(
             DIAG_TYPE,
             "std.ui.action requires explicit action_id provenance and input type",
         ));
-        return Some(Inferred {
-            ty: Type::Error,
-            effects,
-        });
+        return Some(Inferred::error_with(effects));
     }
 
     Some(Inferred {
@@ -26651,10 +26194,7 @@ fn qualified_path(expr: &Expr) -> Option<Vec<&str>> {
 
 fn infer_type_argument(expression: &Expr) -> Option<Inferred> {
     let path = qualified_path(expression)?;
-    Some(Inferred {
-        ty: Type::Named(path.join(".")),
-        effects: EffectSummary::default(),
-    })
+    Some(Inferred::pure(Type::Named(path.join("."))))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -26768,10 +26308,7 @@ fn infer_table_assertion(
         };
         if let Some(message) = message {
             diagnostics.push(diag(DIAG_ASSERTION_OWNER_PIPE, message));
-            return Inferred {
-                ty: Type::Bool,
-                effects: EffectSummary::default(),
-            };
+            return Inferred::pure(Type::Bool);
         }
     }
     let Expr::Call {
@@ -26790,22 +26327,13 @@ fn infer_table_assertion(
         parameters, body, ..
     } = &arguments[0].value
     else {
-        return Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        };
+        return Inferred::error();
     };
     let [parameter] = parameters.as_slice() else {
-        return Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        };
+        return Inferred::error();
     };
     let Pattern::Name(name, _) = &parameter.pattern else {
-        return Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        };
+        return Inferred::error();
     };
     let mut local = BTreeMap::new();
     insert_local_binding(name, row.clone(), &mut local, diagnostics);
@@ -27056,10 +26584,7 @@ fn infer_module_relation(
                 }
             }
             let mut inferred = tail.as_ref().map_or_else(
-                || Inferred {
-                    ty: Type::Tuple(Vec::new()),
-                    effects: EffectSummary::default(),
-                },
+                || Inferred::pure(Type::Tuple(Vec::new())),
                 |tail| infer_module_relation(tail, table_rows, scope, &locals, diagnostics),
             );
             effects.join(&inferred.effects);
@@ -27138,26 +26663,17 @@ fn infer_module_relation(
     let Some(row) = table_identity(&arguments[0].value, scope, local)
         .and_then(|identity| table_rows.get(&identity))
     else {
-        return Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        };
+        return Inferred::error();
     };
     let inferred = match &arguments[1].value {
         Expr::Lambda {
             parameters, body, ..
         } => {
             let [parameter] = parameters.as_slice() else {
-                return Inferred {
-                    ty: Type::Error,
-                    effects: EffectSummary::default(),
-                };
+                return Inferred::error();
             };
             let Pattern::Name(name, _) = &parameter.pattern else {
-                return Inferred {
-                    ty: Type::Error,
-                    effects: EffectSummary::default(),
-                };
+                return Inferred::error();
             };
             let mut locals = local.clone();
             insert_local_binding(name, row.clone(), &mut locals, diagnostics);
@@ -27165,19 +26681,13 @@ fn infer_module_relation(
         }
         Expr::Name { text, .. } => {
             let Some(symbol) = local.get(text) else {
-                return Inferred {
-                    ty: Type::Error,
-                    effects: EffectSummary::default(),
-                };
+                return Inferred::error();
             };
             let Type::Function {
                 parameters, result, ..
             } = &symbol.ty
             else {
-                return Inferred {
-                    ty: Type::Error,
-                    effects: EffectSummary::default(),
-                };
+                return Inferred::error();
             };
             if parameters.len() != 1 {
                 diagnostics.push(diag(
@@ -27194,10 +26704,7 @@ fn infer_module_relation(
             }
         }
         _ => {
-            return Inferred {
-                ty: Type::Error,
-                effects: EffectSummary::default(),
-            };
+            return Inferred::error();
         }
     };
     Inferred {
