@@ -1,0 +1,68 @@
+# Reviewed size exceptions for the OrnaDB workspace.
+#
+# `python3 scripts/check_architecture.py --mode=budget` fails on a file or
+# function that is over its hard cap with no recorded entry and no reviewed
+# raise, and on a recorded entry that grows by more than max(5%, 25 lines).
+# This file is the only way to permit a deliberate raise; the recorded budget in
+# scripts/architecture-budget.toml only ever moves down.
+#
+# Every entry needs:
+#   path       crates/<crate>/<relative file>::<function> for a function,
+#              crates/<crate>/<relative file> for a file
+#   new_limit  the reviewed size the path may reach (the same max(5%, 25 lines)
+#              tolerance applies above it)
+#   reason     why the size is accepted
+#   bead       the bead that owns the follow-up work
+#
+# A raise whose path is not present in the workspace is reserved for an
+# in-flight PR and is reported as a note; remove it once the PR lands or the
+# code shrinks below the hard cap. A raise that is no longer needed is also a
+# note, never a failure.
+
+[[raise]]
+path = "crates/orna-lsp/src/server.rs"
+new_limit = 2728
+reason = "PR #9783 replaces ten positional arguments with SymbolHeader and folds the position/document requests into one locate_request/workspace_request path"
+bead = "ornadb-qvsyc"
+
+[[raise]]
+path = "crates/orna-syntax/src/parser.rs"
+new_limit = 5784
+reason = "PR #9783 splits Parser::item per declaration kind and adds the located-span accessors; the remaining long parser functions are on the bead"
+bead = "ornadb-18ky0"
+
+[[raise]]
+path = "crates/orna-syntax/src/parser.rs::parse_block_inner"
+new_limit = 205
+reason = "PR #9783's located-span accessors touch parse_block_inner; splitting it is the remaining ornadb-18ky0 work"
+bead = "ornadb-18ky0"
+
+[[raise]]
+path = "crates/orna-syntax/src/visit.rs::walk_expr"
+new_limit = 146
+reason = "PR #9783 adds the exhaustive orna_syntax::visit traversal; walk_expr is the one arm over the 120-line cap"
+bead = "ornadb-41661"
+
+[[raise]]
+path = "crates/orna-evaluator/src/sys_bindings.rs"
+new_limit = 2556
+reason = "PR #9764 classifies filesystem and process dispatch once instead of an implicit god function; the split is the remaining ornadb-aok6t work"
+bead = "ornadb-aok6t"
+
+[[raise]]
+path = "crates/orna-cli/src/repl.rs"
+new_limit = 1882
+reason = "PR #9770 adds the REPL request typestate and the production :watch host"
+bead = "ornadb-32tpo"
+
+[[raise]]
+path = "crates/orna-repository/src/native_graph/ordered.rs::collect_ordered_range_with"
+new_limit = 145
+reason = "PR #9768 shares byte-index chunk verification across the native graph splits"
+bead = "ornadb-l0ouj"
+
+[[raise]]
+path = "crates/orna-repository/src/native_graph/ordered.rs::find_ordered_entry_with"
+new_limit = 122
+reason = "PR #9768 shares byte-index chunk verification across the native graph splits"
+bead = "ornadb-l0ouj"
