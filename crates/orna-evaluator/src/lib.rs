@@ -1080,6 +1080,9 @@ fn module_intrinsic(name: &str) -> Option<orna_intrinsics::IntrinsicId> {
     let (module_path, leaf) = name.rsplit_once('.')?;
     let module = orna_intrinsics::Module::from_path(module_path)?;
     let intrinsic = orna_intrinsics::lookup(module, leaf)?;
+    if intrinsic.module != module {
+        return None;
+    }
     if intrinsic.dispatch == orna_intrinsics::Dispatch::SourceOnly
         || !intrinsic.pins.contains(orna_intrinsics::CURRENT_STD_PIN)
     {
@@ -1088,19 +1091,41 @@ fn module_intrinsic(name: &str) -> Option<orna_intrinsics::IntrinsicId> {
     // Modules whose table binds only the private leaf keep their public source
     // wrapper; binding the public name would skip its validation and hand the
     // handler a spelling it does not match.
-    let bind_public = !matches!(
-        module,
+    let bind_public = match module {
+        // The collection table binds the core operators by public name and the
+        // helper wrappers by their private leaf; the other helper publics are
+        // ordinary source that call those leaves.
+        orna_intrinsics::Module::Collection => {
+            intrinsic.leaf.is_none() && intrinsic.id.name().starts_with("Core")
+        }
+        orna_intrinsics::Module::Query => false,
         orna_intrinsics::Module::Stats
-            | orna_intrinsics::Module::Ui
-            | orna_intrinsics::Module::Json
-            | orna_intrinsics::Module::OrnaCodec
-            | orna_intrinsics::Module::OvbCodec
-            | orna_intrinsics::Module::Money
-    ) && !(module == orna_intrinsics::Module::Query && intrinsic.leaf.is_some());
+        | orna_intrinsics::Module::Ui
+        | orna_intrinsics::Module::Json
+        | orna_intrinsics::Module::OrnaCodec
+        | orna_intrinsics::Module::OvbCodec
+        | orna_intrinsics::Module::Money => false,
+        _ => true,
+    };
     if !bind_public && !leaf.starts_with("__") {
         return None;
     }
     Some(intrinsic.id)
+}
+
+fn qualified_intrinsic(spelling: &str) -> Option<orna_intrinsics::IntrinsicId> {
+    let (module_path, name) = spelling.rsplit_once('.')?;
+    if module_path == "std.math" {
+        return Some(orna_intrinsics::IntrinsicId::MathIncrement);
+    }
+    let module = orna_intrinsics::Module::from_path(module_path)?;
+    let intrinsic = orna_intrinsics::lookup(module, name)?;
+    if intrinsic.module != module {
+        return None;
+    }
+    (intrinsic.dispatch != orna_intrinsics::Dispatch::SourceOnly
+        && intrinsic.pins.contains(orna_intrinsics::CURRENT_STD_PIN))
+    .then_some(intrinsic.id)
 }
 
 fn legacy_intrinsic(name: &str) -> Option<orna_intrinsics::IntrinsicId> {
@@ -7373,6 +7398,7 @@ impl Context<'_, '_> {
                     .then(|| {
                         orna_intrinsics::root_intrinsic(&name)
                             .or_else(|| root_collection_intrinsic(&name))
+                            .or_else(|| qualified_intrinsic(&name))
                     })
                     .flatten()
             })?;
@@ -7414,6 +7440,9 @@ impl Context<'_, '_> {
                 };
                 let rows = self.collect_relation_values(plan, depth + 1)?;
                 ordered[0] = Value::list(rows);
+                if id == orna_intrinsics::IntrinsicId::StatsHistogram && ordered.len() == 2 {
+                    ordered.push(Value::Bool(false));
+                }
                 return self.stats(name, ordered);
             }
             if name == "union" {
@@ -9409,6 +9438,7 @@ impl Context<'_, '_> {
             && let Some(module) = orna_intrinsics::Module::from_path(module_path)
             && module != orna_intrinsics::Module::Time
             && let Some(intrinsic) = orna_intrinsics::lookup(module, name)
+            && intrinsic.module == module
             && (intrinsic.dispatch != orna_intrinsics::Dispatch::SourceOnly
                 || module == orna_intrinsics::Module::Math)
             && intrinsic.pins.contains(orna_intrinsics::CURRENT_STD_PIN)
@@ -11990,7 +12020,7 @@ impl Context<'_, '_> {
             ("__asof_join", [Value::List(left), Value::List(right), time, by]) => {
                 self.asof_join(left, right, time, by, depth)
             }
-            ("__bucket_by", [Value::List(rows), period, zone]) => {
+            ("bucket_by" | "__bucket_by", [Value::List(rows), period, zone]) => {
                 let spec = bucket_by_spec(period, Some(zone))?;
                 let mut state = RelationBucketState::try_new(spec).map_err(bucket_error)?;
                 self.items(rows.len())?;
