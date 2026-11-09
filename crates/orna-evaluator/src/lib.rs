@@ -6840,9 +6840,100 @@ impl Context<'_, '_> {
         if matches!((&left, &right), (Value::Range { .. }, Value::Range { .. })) {
             return compare(op, compare_values(&left, &right)?);
         }
+        // Dispatch by operand kind; each family owns the operator rules for its
+        // types, and the terminal arm keeps unsupported pairs a type error.
         match (left, right) {
             (Value::Int(a), Value::Int(b)) => self.int_binary(op, a, b),
             (Value::Decimal(a), Value::Decimal(b)) => self.decimal_binary(op, a, b),
+            (Value::Float(a), Value::Float(b)) => self.float_binary(op, a, b),
+            (Value::String(a), Value::String(b)) => compare(op, a.cmp(&b)),
+            (Value::Date(a), Value::Date(b)) => compare(op, a.cmp(&b)),
+            (Value::Bool(a), Value::Bool(b)) => compare(op, a.cmp(&b)),
+            (
+                left @ (Value::Money { .. } | Value::Decimal(_)),
+                right @ (Value::Money { .. } | Value::Decimal(_)),
+            ) => self.money_pair_binary(op, left, right),
+            (
+                left @ (Value::Instant { .. }
+                | Value::Duration { .. }
+                | Value::Int(_)
+                | Value::Decimal(_)),
+                right @ (Value::Instant { .. }
+                | Value::Duration { .. }
+                | Value::Int(_)
+                | Value::Decimal(_)),
+            ) => self.temporal_binary(op, left, right),
+            _ => Err(error("ORNA-EVAL-TYPE")),
+        }
+    }
+
+    /// Money pairs and money/decimal scaling. Decimal pairs and other mixed
+    /// pairs never reach here, so the fallback is a type error.
+    fn money_pair_binary(
+        &self,
+        op: &str,
+        left: Value,
+        right: Value,
+    ) -> Result<Value, EvaluationError> {
+        match (left, right) {
+            (
+                Value::Money {
+                    amount: a,
+                    currency: ac,
+                },
+                Value::Money {
+                    amount: b,
+                    currency: bc,
+                },
+            ) => self.money_binary(op, a, ac, b, bc),
+            (Value::Money { amount, currency }, Value::Decimal(scalar)) => {
+                self.money_scalar_binary(op, amount, currency, scalar, false)
+            }
+            (Value::Decimal(scalar), Value::Money { amount, currency }) => {
+                self.money_scalar_binary(op, amount, currency, scalar, true)
+            }
+            _ => Err(error("ORNA-EVAL-TYPE")),
+        }
+    }
+
+    /// Instant and Duration arithmetic and ordering, dispatched by left kind.
+    /// A pair that no family covers is a type error, matching the terminal arm
+    /// of the operand-kind dispatch.
+    fn temporal_binary(
+        &self,
+        op: &str,
+        left: Value,
+        right: Value,
+    ) -> Result<Value, EvaluationError> {
+        match (left, right) {
+            (
+                left @ Value::Instant { .. },
+                right @ (Value::Instant { .. } | Value::Duration { .. }),
+            ) => self.instant_binary(op, left, right),
+            (
+                left @ Value::Duration { .. },
+                right @ (Value::Instant { .. }
+                | Value::Duration { .. }
+                | Value::Int(_)
+                | Value::Decimal(_)),
+            ) => self.duration_binary(op, left, right),
+            (left @ Value::Int(_), right @ Value::Duration { .. })
+            | (left @ Value::Decimal(_), right @ Value::Duration { .. }) => {
+                self.duration_binary(op, left, right)
+            }
+            _ => Err(error("ORNA-EVAL-TYPE")),
+        }
+    }
+
+    /// An instant on the left: offset by a duration, the difference between two
+    /// instants, or instant ordering.
+    fn instant_binary(
+        &self,
+        op: &str,
+        left: Value,
+        right: Value,
+    ) -> Result<Value, EvaluationError> {
+        match (left, right) {
             (
                 Value::Instant {
                     unix_seconds,
@@ -6860,6 +6951,44 @@ impl Context<'_, '_> {
                 op == "-",
             ),
             (
+                Value::Instant {
+                    unix_seconds: left_seconds,
+                    nanosecond: left_nanosecond,
+                },
+                Value::Instant {
+                    unix_seconds: right_seconds,
+                    nanosecond: right_nanosecond,
+                },
+            ) if op == "-" => self.instant_difference(
+                left_seconds,
+                left_nanosecond,
+                right_seconds,
+                right_nanosecond,
+            ),
+            (
+                Value::Instant {
+                    unix_seconds: a_seconds,
+                    nanosecond: a_nanosecond,
+                },
+                Value::Instant {
+                    unix_seconds: b_seconds,
+                    nanosecond: b_nanosecond,
+                },
+            ) => self.instant_compare(op, a_seconds, a_nanosecond, b_seconds, b_nanosecond),
+            _ => Err(error("ORNA-EVAL-TYPE")),
+        }
+    }
+
+    /// A duration on either side: shifting an instant, duration arithmetic and
+    /// scaling, or duration ordering.
+    fn duration_binary(
+        &self,
+        op: &str,
+        left: Value,
+        right: Value,
+    ) -> Result<Value, EvaluationError> {
+        match (left, right) {
+            (
                 Value::Duration {
                     seconds,
                     nanosecond: duration_nanosecond,
@@ -6876,19 +7005,6 @@ impl Context<'_, '_> {
                 false,
             ),
             (
-                Value::Instant {
-                    unix_seconds: left_seconds,
-                    nanosecond: left_nanosecond,
-                },
-                Value::Instant {
-                    unix_seconds: right_seconds,
-                    nanosecond: right_nanosecond,
-                },
-            ) if op == "-" => self.duration_from_total_nanoseconds(
-                elapsed_total_nanoseconds(&BigInt::from(left_seconds), left_nanosecond)
-                    - elapsed_total_nanoseconds(&BigInt::from(right_seconds), right_nanosecond),
-            ),
-            (
                 Value::Duration {
                     seconds: left_seconds,
                     nanosecond: left_nanosecond,
@@ -6897,15 +7013,13 @@ impl Context<'_, '_> {
                     seconds: right_seconds,
                     nanosecond: right_nanosecond,
                 },
-            ) if matches!(op, "+" | "-") => {
-                let left = elapsed_total_nanoseconds(&left_seconds, left_nanosecond);
-                let right = elapsed_total_nanoseconds(&right_seconds, right_nanosecond);
-                self.duration_from_total_nanoseconds(if op == "+" {
-                    left + right
-                } else {
-                    left - right
-                })
-            }
+            ) if matches!(op, "+" | "-") => self.duration_pair_binary(
+                op,
+                left_seconds,
+                left_nanosecond,
+                right_seconds,
+                right_nanosecond,
+            ),
             (
                 Value::Duration {
                     seconds,
@@ -6930,19 +7044,7 @@ impl Context<'_, '_> {
                     nanosecond,
                 },
                 Value::Int(divisor),
-            ) if op == "/" => {
-                if divisor.is_zero() {
-                    return Err(error("ORNA-EVAL-DIVIDE-BY-ZERO"));
-                }
-                let total = elapsed_total_nanoseconds(&seconds, nanosecond);
-                let (quotient, remainder) = total.div_rem(&divisor);
-                // Orna does not prescribe Duration scaling. Keep it exact on
-                // the stored nanosecond grid instead of silently rounding.
-                if !remainder.is_zero() {
-                    return Err(error("ORNA-EVAL-VALUE"));
-                }
-                self.duration_from_total_nanoseconds(quotient)
-            }
+            ) if op == "/" => self.duration_int_divide(seconds, nanosecond, divisor),
             (
                 Value::Duration {
                     seconds,
@@ -6977,40 +7079,6 @@ impl Context<'_, '_> {
                 true,
             ),
             (
-                Value::Money {
-                    amount: a,
-                    currency: ac,
-                },
-                Value::Money {
-                    amount: b,
-                    currency: bc,
-                },
-            ) => self.money_binary(op, a, ac, b, bc),
-            (Value::Money { amount, currency }, Value::Decimal(scalar)) => {
-                self.money_scalar_binary(op, amount, currency, scalar, false)
-            }
-            (Value::Decimal(scalar), Value::Money { amount, currency }) => {
-                self.money_scalar_binary(op, amount, currency, scalar, true)
-            }
-            (Value::Float(a), Value::Float(b)) => self.float_binary(op, a, b),
-            (Value::String(a), Value::String(b)) => compare(op, a.cmp(&b)),
-            (Value::Date(a), Value::Date(b)) => compare(op, a.cmp(&b)),
-            (
-                Value::Instant {
-                    unix_seconds: a_seconds,
-                    nanosecond: a_nanosecond,
-                },
-                Value::Instant {
-                    unix_seconds: b_seconds,
-                    nanosecond: b_nanosecond,
-                },
-            ) => compare(
-                op,
-                a_seconds
-                    .cmp(&b_seconds)
-                    .then(a_nanosecond.cmp(&b_nanosecond)),
-            ),
-            (
                 Value::Duration {
                     seconds: a_seconds,
                     nanosecond: a_nanosecond,
@@ -7019,15 +7087,92 @@ impl Context<'_, '_> {
                     seconds: b_seconds,
                     nanosecond: b_nanosecond,
                 },
-            ) => compare(
-                op,
-                a_seconds
-                    .cmp(&b_seconds)
-                    .then(a_nanosecond.cmp(&b_nanosecond)),
-            ),
-            (Value::Bool(a), Value::Bool(b)) => compare(op, a.cmp(&b)),
+            ) => self.duration_compare(op, a_seconds, a_nanosecond, b_seconds, b_nanosecond),
             _ => Err(error("ORNA-EVAL-TYPE")),
         }
+    }
+
+    /// Elapsed time between two instants, as a Duration on the nanosecond grid.
+    fn instant_difference(
+        &self,
+        left_seconds: i64,
+        left_nanosecond: u32,
+        right_seconds: i64,
+        right_nanosecond: u32,
+    ) -> Result<Value, EvaluationError> {
+        self.duration_from_total_nanoseconds(
+            elapsed_total_nanoseconds(&BigInt::from(left_seconds), left_nanosecond)
+                - elapsed_total_nanoseconds(&BigInt::from(right_seconds), right_nanosecond),
+        )
+    }
+
+    /// Adds or subtracts two durations on the nanosecond grid.
+    fn duration_pair_binary(
+        &self,
+        op: &str,
+        left_seconds: BigInt,
+        left_nanosecond: u32,
+        right_seconds: BigInt,
+        right_nanosecond: u32,
+    ) -> Result<Value, EvaluationError> {
+        let left = elapsed_total_nanoseconds(&left_seconds, left_nanosecond);
+        let right = elapsed_total_nanoseconds(&right_seconds, right_nanosecond);
+        self.duration_from_total_nanoseconds(if op == "+" {
+            left + right
+        } else {
+            left - right
+        })
+    }
+
+    /// Orna does not prescribe Duration scaling. Keep it exact on the stored
+    /// nanosecond grid instead of silently rounding.
+    fn duration_int_divide(
+        &self,
+        seconds: BigInt,
+        nanosecond: u32,
+        divisor: BigInt,
+    ) -> Result<Value, EvaluationError> {
+        if divisor.is_zero() {
+            return Err(error("ORNA-EVAL-DIVIDE-BY-ZERO"));
+        }
+        let total = elapsed_total_nanoseconds(&seconds, nanosecond);
+        let (quotient, remainder) = total.div_rem(&divisor);
+        if !remainder.is_zero() {
+            return Err(error("ORNA-EVAL-VALUE"));
+        }
+        self.duration_from_total_nanoseconds(quotient)
+    }
+
+    fn instant_compare(
+        &self,
+        op: &str,
+        a_seconds: i64,
+        a_nanosecond: u32,
+        b_seconds: i64,
+        b_nanosecond: u32,
+    ) -> Result<Value, EvaluationError> {
+        compare(
+            op,
+            a_seconds
+                .cmp(&b_seconds)
+                .then(a_nanosecond.cmp(&b_nanosecond)),
+        )
+    }
+
+    fn duration_compare(
+        &self,
+        op: &str,
+        a_seconds: BigInt,
+        a_nanosecond: u32,
+        b_seconds: BigInt,
+        b_nanosecond: u32,
+    ) -> Result<Value, EvaluationError> {
+        compare(
+            op,
+            a_seconds
+                .cmp(&b_seconds)
+                .then(a_nanosecond.cmp(&b_nanosecond)),
+        )
     }
     fn duration_from_total_nanoseconds(
         &self,
