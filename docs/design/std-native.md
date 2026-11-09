@@ -335,6 +335,30 @@ invocation cost (the real hot loop for `map`/`filter` over many rows,
 `standard_snapshot_replay.rs` (61 tests) and 251 tests in `evaluator.rs`. That
 suite is the byte-identical acceptance net for every stage below.
 
+### 1.10 How much of std is already Orna
+
+The pinned snapshot declares 809 functions: 610 public and 199 private. Only 72
+distinct private leaf names begin with `__`, and the native table names 57 of
+them. The leaf accounting is exactly the mess section 1.3 describes:
+
+* 7 registry-named leaves have no declaration anywhere: `__list_length`,
+  `__list_concat`, `__numeric_sum`, `__stable_sort`, `__minimum`, `__maximum`
+  and `__recursive_cte` (which exists only in the Rust addendum of section 1.7).
+* 22 declared leaves are named by no std registry entry: the 15 `std.io`
+  host-effect leaves (`stdlib/std/io/fs.orna:9-64`, `io/environment.orna:8-11`,
+  `io/process.orna:19`), `std.time.__offset_at` and `std.time.__resolve_local`
+  (`stdlib/std/time.orna:54,67`), and the five `stdlib/std/hash.orna:13-34`
+  leaves. In each case the registry names the *public* symbol instead, so the
+  declared pair is unreachable.
+
+Meanwhile 54 module files declare functions and contain no leaf at all -
+`stdlib/std/iterator.orna` alone has 35 declarations, alongside `map.orna` (18),
+`set.orna` (10), `numeric.orna` (38), `lazy.orna` (8), `iteration.orna` (11),
+`collection/adapters.orna` (9) and `collection/advanced.orna` (15). The
+precedent for pure-Orna implementations is therefore already the norm in this
+repository; the reform finishes that direction for the 15 `SRC` rows of section
+3.9 rather than introducing it.
+
 --------------------------------------------------------------------------
 
 ## 2. Prior art
