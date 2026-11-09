@@ -688,15 +688,6 @@ impl SystemApi {
         orna_sys::system_dispatch_table().operation(name)
     }
 
-    /// The portable failure-code vocabulary declared by `api/sys.json`.
-    ///
-    /// Retaining this descriptor metadata permits later diagnostic validation;
-    /// it does not make any failure operationally implemented.
-    #[allow(dead_code)]
-    pub(crate) fn failure_codes(&self) -> &BTreeSet<String> {
-        &self.failure_codes
-    }
-
     pub(crate) fn relation(&self, path: &str) -> Option<&RelationDescriptor> {
         self.relations.get(path).or_else(|| {
             self.grouped_relations
@@ -2322,11 +2313,11 @@ mod tests {
         );
         assert_eq!(api.inventory.failure_codes, raw.failure_codes.len());
         assert_eq!(
-            api.failure_codes(),
-            &raw.failure_codes.iter().cloned().collect::<BTreeSet<_>>(),
+            api.failure_codes,
+            raw.failure_codes.iter().cloned().collect::<BTreeSet<_>>(),
         );
-        assert!(api.failure_codes().contains("sys.admin.assertion_failed"));
-        assert!(!api.failure_codes().contains("sys.failure.not_declared"));
+        assert!(api.failure_codes.contains("sys.admin.assertion_failed"));
+        assert!(!api.failure_codes.contains("sys.failure.not_declared"));
         assert_eq!(
             api.singletons.keys().cloned().collect::<BTreeSet<_>>(),
             raw.singletons

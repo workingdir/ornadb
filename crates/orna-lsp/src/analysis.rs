@@ -1,5 +1,4 @@
 //! Editor analysis built exclusively on the frozen Orna 1.0 syntax tree.
-#![allow(deprecated)] // lsp-types 0.97 still requires DocumentSymbol::deprecated.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -122,7 +121,7 @@ pub(crate) fn document_links(workspace: &Workspace, module: usize) -> Vec<Docume
     if !file.parse.diagnostics.is_empty() {
         return Vec::new();
     }
-    let in_project = workspace.modules[module].logical_path.is_some();
+    let in_project = !workspace.is_detached();
     let mapper = PositionMapper::new(file.text());
     file.parse
         .value
@@ -702,7 +701,7 @@ pub(crate) fn hover(workspace: &Workspace, module: usize, byte: usize) -> Option
                 Some(ty) => format!(
                     "{}: {}",
                     declared.name,
-                    source_slice(file.text(), type_span(ty))
+                    source_slice(file.text(), ty.span())
                 ),
                 None => source_slice(file.text(), &declared.full).trim().to_owned(),
             };
@@ -758,18 +757,6 @@ fn declared_noun(kind: DeclaredKind) -> &'static str {
         DeclaredKind::PayloadField => "field",
         DeclaredKind::Method => "method",
         DeclaredKind::Static => "constant",
-    }
-}
-
-fn type_span(ty: &TypeExpr) -> &SourceSpan {
-    match ty {
-        TypeExpr::Name { span, .. }
-        | TypeExpr::Optional { span, .. }
-        | TypeExpr::Product { span, .. }
-        | TypeExpr::List { span, .. }
-        | TypeExpr::Record { span, .. }
-        | TypeExpr::Tuple { span, .. }
-        | TypeExpr::Function { span, .. } => span,
     }
 }
 
@@ -1258,6 +1245,8 @@ pub fn document_symbols(
         .collect()
 }
 
+// lsp-types 0.97 still requires `DocumentSymbol::deprecated`.
+#[allow(deprecated)]
 fn document_symbol(symbol: EditorSymbol, mapper: &PositionMapper<'_>) -> DocumentSymbol {
     DocumentSymbol {
         name: symbol.name,

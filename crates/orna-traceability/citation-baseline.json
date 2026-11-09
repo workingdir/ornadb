@@ -10,6 +10,7 @@
     "orna-live",
     "orna-lsp",
     "orna-project",
+    "orna-project-repl",
     "orna-protocol",
     "orna-repository",
     "orna-runtime",

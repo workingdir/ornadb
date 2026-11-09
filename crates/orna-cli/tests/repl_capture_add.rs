@@ -3,7 +3,8 @@ use std::{
     process::{Child, ChildStdout, Command, Output, Stdio},
 };
 
-use orna_evaluator::{AdmittedReplSession, Limits};
+use orna_evaluator::Limits;
+use orna_project_repl::AdmittedReplSession;
 use orna_runtime::RuntimeState;
 use orna_semantic::{Catalogue, ModuleInput};
 use orna_value::{Blob, ContextValue, Raw, ValueFormat};
