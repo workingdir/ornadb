@@ -550,8 +550,7 @@ pub async fn import_stream_carry(
     let transaction = state
         .connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     for row in &carry.checkpoints {
         transaction
             .execute(
@@ -572,8 +571,7 @@ pub async fn import_stream_carry(
                     row.next_fence
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
     }
     for row in &carry.bridges {
         transaction
@@ -587,14 +585,12 @@ pub async fn import_stream_carry(
                     row.source_generation_digest.as_slice()
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
     }
     for row in &carry.controls {
         transaction
             .execute(INSERT_CONTROL, params![row.key_id.as_str(), row.status])
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
     }
     for row in &carry.pause_reasons {
         transaction
@@ -602,8 +598,7 @@ pub async fn import_stream_carry(
                 INSERT_PAUSE_REASON,
                 params![row.key_id.as_str(), row.reason.as_str()],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
     }
     for row in &carry.bootstraps {
         transaction
@@ -611,8 +606,7 @@ pub async fn import_stream_carry(
                 INSERT_BOOTSTRAP,
                 params![row.key_id.as_str(), row.selected_commit.as_str()],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
     }
     insert_failure_carry(&transaction, &carry.failures).await?;
     insert_receipt_carry(&transaction, &carry.receipts).await?;
@@ -629,8 +623,7 @@ pub async fn import_stream_carry(
                     row.transition
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
     }
     for row in &carry.reset_audits {
         transaction
@@ -648,8 +641,7 @@ pub async fn import_stream_carry(
                     row.redacted
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
     }
     for row in &carry.runs {
         transaction
@@ -676,8 +668,7 @@ pub async fn import_stream_carry(
                     row.diagnostic_class
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
     }
     for row in &carry.streams {
         transaction
@@ -704,13 +695,9 @@ pub async fn import_stream_carry(
                     row.observed_ms
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
     }
-    transaction
-        .commit()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    transaction.commit().await?;
     Ok(())
 }
 
@@ -720,13 +707,8 @@ async fn read_source_generation(connection: &Connection) -> Result<(i64, Vec<u8>
             "SELECT generation, generation_digest FROM runtime_meta WHERE singleton = 1",
             (),
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    let row = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-        .ok_or(RuntimeError::RecoveryInvalid)?;
+        .await?;
+    let row = rows.next().await?.ok_or(RuntimeError::RecoveryInvalid)?;
     let generation: i64 = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
     let digest: Vec<u8> = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
     if generation < 0 || digest.len() != 32 {
@@ -738,14 +720,9 @@ async fn read_source_generation(connection: &Connection) -> Result<(i64, Vec<u8>
 async fn table_names(connection: &Connection) -> Result<HashSet<String>, RuntimeError> {
     let mut rows = connection
         .query("SELECT name FROM sqlite_master WHERE type = 'table'", ())
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     let mut names = HashSet::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    {
+    while let Some(row) = rows.next().await? {
         let name: String = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
         names.insert(name);
     }
@@ -755,13 +732,8 @@ async fn table_names(connection: &Connection) -> Result<HashSet<String>, Runtime
 async fn count_rows(connection: &Connection, table: &str) -> Result<i64, RuntimeError> {
     let mut rows = connection
         .query(&format!("SELECT COUNT(*) FROM {table}"), ())
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    let row = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-        .ok_or(RuntimeError::RecoveryInvalid)?;
+        .await?;
+    let row = rows.next().await?.ok_or(RuntimeError::RecoveryInvalid)?;
     let count: i64 = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
     Ok(count)
 }
@@ -773,13 +745,9 @@ async fn read_checkpoints(connection: &Connection) -> Result<Vec<CheckpointRow>,
             (),
         )
         .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        ?;
     let mut checkpoints = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    {
+    while let Some(row) = rows.next().await? {
         checkpoints.push(CheckpointRow {
             key_id: row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
             principal: row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
@@ -809,13 +777,9 @@ async fn read_history(
             (),
         )
         .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        ?;
     let mut history = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    {
+    while let Some(row) = rows.next().await? {
         history.push(HistoryRow {
             key_id: row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
             version: row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
@@ -852,13 +816,9 @@ async fn read_bridges(connection: &Connection) -> Result<Vec<BridgeRow>, Runtime
             (),
         )
         .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        ?;
     let mut bridges = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    {
+    while let Some(row) = rows.next().await? {
         bridges.push(BridgeRow {
             key_id: row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
             origin_version: row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
@@ -876,14 +836,9 @@ async fn read_controls(connection: &Connection) -> Result<Vec<ControlRow>, Runti
             "SELECT key_id, status FROM stream_control ORDER BY key_id",
             (),
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     let mut controls = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    {
+    while let Some(row) = rows.next().await? {
         controls.push(ControlRow {
             key_id: row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
             status: row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
@@ -898,14 +853,9 @@ async fn read_pause_reasons(connection: &Connection) -> Result<Vec<PauseReasonRo
             "SELECT key_id, reason FROM stream_pause_reason ORDER BY key_id",
             (),
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     let mut reasons = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    {
+    while let Some(row) = rows.next().await? {
         reasons.push(PauseReasonRow {
             key_id: row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
             reason: row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
@@ -920,14 +870,9 @@ async fn read_bootstraps(connection: &Connection) -> Result<Vec<BootstrapRow>, R
             "SELECT key_id, selected_commit FROM stream_checkpoint_bootstrap ORDER BY key_id",
             (),
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     let mut bootstraps = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    {
+    while let Some(row) = rows.next().await? {
         bootstraps.push(BootstrapRow {
             key_id: row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
             selected_commit: row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
@@ -952,13 +897,9 @@ async fn read_receipt_carry(connection: &Connection) -> Result<Vec<ReceiptRow>, 
             (),
         )
         .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        ?;
     let mut receipts = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    {
+    while let Some(row) = rows.next().await? {
         receipts.push(ReceiptRow {
             effect_identity: row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
             request_digest: row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
@@ -981,13 +922,8 @@ async fn in_flight_receipt_count(connection: &Connection) -> Result<i64, Runtime
             "SELECT COUNT(*) FROM stream_provider_effect_receipt WHERE status = 1",
             (),
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    let row = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-        .ok_or(RuntimeError::RecoveryInvalid)?;
+        .await?;
+    let row = rows.next().await?.ok_or(RuntimeError::RecoveryInvalid)?;
     row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)
 }
 
@@ -1032,13 +968,8 @@ async fn in_flight_failure_count(connection: &Connection) -> Result<i64, Runtime
             "SELECT COUNT(*) FROM stream_failure WHERE status IN (2, 5)",
             (),
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    let row = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-        .ok_or(RuntimeError::RecoveryInvalid)?;
+        .await?;
+    let row = rows.next().await?.ok_or(RuntimeError::RecoveryInvalid)?;
     row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)
 }
 
@@ -1049,13 +980,9 @@ async fn read_failures(connection: &Connection) -> Result<Vec<FailureRow>, Runti
             (),
         )
         .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        ?;
     let mut failures = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    {
+    while let Some(row) = rows.next().await? {
         failures.push(FailureRow {
             identity_id: row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
             key_id: row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
@@ -1089,13 +1016,9 @@ async fn read_failure_payloads(
             (),
         )
         .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        ?;
     let mut payloads = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    {
+    while let Some(row) = rows.next().await? {
         payloads.push(FailurePayloadRow {
             identity_id: row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
             payload: row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
@@ -1115,14 +1038,9 @@ async fn read_failure_legacy(
             "SELECT identity_id FROM stream_failure_payload_legacy ORDER BY identity_id",
             (),
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     let mut legacy = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    {
+    while let Some(row) = rows.next().await? {
         legacy.push(FailureLegacyRow {
             identity_id: row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
         });
@@ -1139,13 +1057,9 @@ async fn read_assertion_details(
             (),
         )
         .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        ?;
     let mut details = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    {
+    while let Some(row) = rows.next().await? {
         details.push(AssertionDetailRow {
             identity_id: row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
             code: row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
@@ -1175,13 +1089,9 @@ async fn read_provider_failures(
             (),
         )
         .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        ?;
     let mut failures = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    {
+    while let Some(row) = rows.next().await? {
         failures.push(ProviderFailureRow {
             key_id: row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
             checkpoint_version: row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
@@ -1215,8 +1125,7 @@ async fn insert_receipt_carry(
                     row.receipt.as_deref()
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
     }
     Ok(())
 }
@@ -1251,8 +1160,7 @@ async fn insert_failure_carry(
                     row.diagnostic_class
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
     }
     for row in &carry.payloads {
         connection
@@ -1266,14 +1174,12 @@ async fn insert_failure_carry(
                     row.retention
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
     }
     for row in &carry.legacy {
         connection
             .execute(INSERT_FAILURE_LEGACY, params![row.identity_id.as_str()])
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
     }
     for row in &carry.assertion_details {
         connection
@@ -1296,8 +1202,7 @@ async fn insert_failure_carry(
                     row.safe_witness.as_deref()
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
     }
     for row in &carry.provider_failures {
         connection
@@ -1312,8 +1217,7 @@ async fn insert_failure_carry(
                     row.diagnostic_class
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
     }
     Ok(())
 }
@@ -1325,13 +1229,9 @@ async fn read_reset_audits(connection: &Connection) -> Result<Vec<ResetAuditRow>
             (),
         )
         .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        ?;
     let mut audits = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    {
+    while let Some(row) = rows.next().await? {
         audits.push(ResetAuditRow {
             sequence: row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
             key_id: row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
@@ -1356,13 +1256,9 @@ async fn read_run_rows(connection: &Connection) -> Result<Vec<RunRow>, RuntimeEr
             (),
         )
         .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        ?;
     let mut runs = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    {
+    while let Some(row) = rows.next().await? {
         runs.push(RunRow {
             run_id: row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
             session_id: row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
@@ -1396,13 +1292,9 @@ async fn read_stream_rows(connection: &Connection) -> Result<Vec<StreamRow>, Run
             (),
         )
         .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        ?;
     let mut streams = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    {
+    while let Some(row) = rows.next().await? {
         streams.push(StreamRow {
             stream_id: row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
             run_id: row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,

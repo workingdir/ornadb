@@ -1159,6 +1159,16 @@ impl std::fmt::Display for CatalogueError {
 }
 impl std::error::Error for CatalogueError {}
 
+impl From<libsql::Error> for CatalogueError {
+    /// Catalogue reads share the runtime's redacted embedded connection, and
+    /// `CatalogueError` cannot carry the native cause for the same reason
+    /// `RuntimeError` cannot. One conversion keeps that lossy mapping here
+    /// instead of at each storage call site.
+    fn from(_: libsql::Error) -> Self {
+        Self::StorageUnavailable
+    }
+}
+
 // Keep the implementation's compact error spelling local to this module;
 // shared runtime consumers continue to see the unchanged RuntimeError enum.
 use self::CatalogueError as RuntimeError;
@@ -1572,8 +1582,7 @@ async fn admit_catalogue_batch_tx(
             "INSERT INTO runtime_catalogue_admission (snapshot) VALUES (?1)",
             params![capture_bytes(capture)?],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     if inserted != 1 {
         return Err(RuntimeError::CatalogueCorrupt);
     }
@@ -1628,8 +1637,7 @@ impl RuntimeState {
         let transaction = self
             .connection
             .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| crate::RuntimeError::StorageUnavailable)?;
+            .await?;
         let current = capture_tx(&transaction).await?;
         if &current != context.capture() {
             return Err(crate::RuntimeError::StaleCapture {
@@ -1683,10 +1691,7 @@ impl RuntimeState {
         if committed_capture != next_capture {
             return Err(crate::RuntimeError::RecoveryInvalid);
         }
-        transaction
-            .commit()
-            .await
-            .map_err(|_| crate::RuntimeError::StorageUnavailable)?;
+        transaction.commit().await?;
         Ok(committed_capture)
     }
 
@@ -1724,10 +1729,7 @@ impl RuntimeState {
             });
         }
         let result = admit_catalogue_batch_tx(&transaction, &capture, &admission).await?;
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction.commit().await?;
         Ok(result)
     }
 
@@ -1767,10 +1769,7 @@ impl RuntimeState {
             admit_module_object_tx(&transaction, &capture, predecessor, &declaration).await?;
         mark_module_admission_tx(&transaction, &capture, object_id).await?;
         let module = load_module_tx(&transaction, &capture, object_id).await?;
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction.commit().await?;
         Ok(module)
     }
 
@@ -1793,10 +1792,7 @@ impl RuntimeState {
         )
         .await?;
         let Some(id) = id else {
-            transaction
-                .commit()
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            transaction.commit().await?;
             return Ok(None);
         };
         let stored = load_type_form_tx(&transaction, &capture, id).await?;
@@ -1804,10 +1800,7 @@ impl RuntimeState {
             return Err(RuntimeError::CatalogueTypeMismatch);
         }
         let handle = load_type_handle_tx(&transaction, &capture, id).await?;
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction.commit().await?;
         Ok(Some(handle))
     }
 
@@ -1827,10 +1820,7 @@ impl RuntimeState {
         )
         .await?
         else {
-            transaction
-                .commit()
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            transaction.commit().await?;
             return Ok(None);
         };
         let object = load_object_tx(&transaction, &capture, id).await?;
@@ -1839,10 +1829,7 @@ impl RuntimeState {
         let result_id = load_result_type_id_tx(&transaction, &capture, id).await?;
         let result_type = load_type_handle_tx(&transaction, &capture, result_id).await?;
         let parameters = load_parameters_tx(&transaction, &capture, id).await?;
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction.commit().await?;
         Ok(Some(CatalogueFunction {
             object: CatalogueObject {
                 function_reference: Some(function_ref),
@@ -1869,17 +1856,11 @@ impl RuntimeState {
         )
         .await?
         else {
-            transaction
-                .commit()
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            transaction.commit().await?;
             return Ok(None);
         };
         let module = load_module_tx(&transaction, &capture, id).await?;
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction.commit().await?;
         Ok(Some(module))
     }
 
@@ -1901,17 +1882,11 @@ impl RuntimeState {
         let stored = retained_capture_row_tx(&transaction, capture).await?;
         let Some(id) = lookup_snapshot_object_id(&transaction, &stored, qualified_name).await?
         else {
-            transaction
-                .commit()
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            transaction.commit().await?;
             return Ok(None);
         };
         let function = load_function_tx(&transaction, capture, id).await?;
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction.commit().await?;
         Ok(Some(function))
     }
 
@@ -1931,10 +1906,7 @@ impl RuntimeState {
         let stored = retained_capture_row_tx(&transaction, capture).await?;
         let Some(id) = lookup_snapshot_object_id(&transaction, &stored, qualified_name).await?
         else {
-            transaction
-                .commit()
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            transaction.commit().await?;
             return Ok(None);
         };
         let stored_form = load_type_form_tx(&transaction, capture, id).await?;
@@ -1942,10 +1914,7 @@ impl RuntimeState {
             return Err(RuntimeError::CatalogueTypeMismatch);
         }
         let handle = load_type_handle_tx(&transaction, capture, id).await?;
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction.commit().await?;
         Ok(Some(handle))
     }
 
@@ -1963,31 +1932,25 @@ impl RuntimeState {
         let stored = retained_capture_row_tx(&transaction, capture).await?;
         let Some(id) = lookup_snapshot_object_id(&transaction, &stored, qualified_name).await?
         else {
-            transaction
-                .commit()
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            transaction.commit().await?;
             return Ok(None);
         };
         let module = load_module_tx(&transaction, capture, id).await?;
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction.commit().await?;
         Ok(Some(module))
     }
     async fn catalogue_transaction(&self) -> Result<Transaction, RuntimeError> {
         self.connection
             .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
             .await
-            .map_err(|_| RuntimeError::StorageUnavailable)
+            .map_err(RuntimeError::from)
     }
 
     async fn catalogue_transaction_read(&self) -> Result<Transaction, RuntimeError> {
         self.connection
             .transaction_with_behavior(libsql::TransactionBehavior::Deferred)
             .await
-            .map_err(|_| RuntimeError::StorageUnavailable)
+            .map_err(RuntimeError::from)
     }
 }
 
@@ -2280,13 +2243,8 @@ async fn validate_revision_identity_tx(
              FROM runtime_catalogue_revision WHERE revision_id = ?1",
             params![declaration.revision_id.to_vec()],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    {
+        .await?;
+    while let Some(row) = rows.next().await? {
         let existing_object_id = fixed(row.get(0).map_err(|_| RuntimeError::CatalogueCorrupt)?)?;
         let existing_kind = CatalogueObjectKind::from_code(
             row.get(1).map_err(|_| RuntimeError::CatalogueCorrupt)?,
@@ -2321,21 +2279,15 @@ pub(crate) async fn persist_capture_tx(
                 capture.generation_digest().to_vec()
             ],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     let mut rows = transaction
         .query(
             "SELECT database_id, runtime_id, generation, generation_digest
              FROM runtime_catalogue_capture WHERE snapshot = ?1",
             params![snapshot],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    let row = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-        .ok_or(RuntimeError::CatalogueCorrupt)?;
+        .await?;
+    let row = rows.next().await?.ok_or(RuntimeError::CatalogueCorrupt)?;
     if fixed(row.get(0).map_err(|_| RuntimeError::CatalogueCorrupt)?)? != capture.database_id()
         || fixed(row.get(1).map_err(|_| RuntimeError::CatalogueCorrupt)?)? != capture.runtime_id()
         || row
@@ -2405,13 +2357,8 @@ async fn carry_forward_catalogue_tx(
             "SELECT 1 FROM runtime_catalogue_admission WHERE snapshot = ?1",
             params![predecessor_snapshot.clone()],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    let predecessor_was_admitted = admissions
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-        .is_some();
+        .await?;
+    let predecessor_was_admitted = admissions.next().await?.is_some();
     let mut mismatches = connection
         .query(
             "SELECT 1
@@ -2423,14 +2370,8 @@ async fn carry_forward_catalogue_tx(
              LIMIT 1",
             params![predecessor_snapshot.clone()],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    if mismatches
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-        .is_some()
-    {
+        .await?;
+    if mismatches.next().await?.is_some() {
         return Err(RuntimeError::CatalogueKindMismatch);
     }
     copy_catalogue_relation_tx(
@@ -2467,8 +2408,7 @@ async fn carry_forward_catalogue_tx(
                 "INSERT INTO runtime_catalogue_admission (snapshot) VALUES (?1)",
                 params![snapshot.clone()],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         if inserted != 1 {
             return Err(RuntimeError::CatalogueCorrupt);
         }
@@ -2480,8 +2420,7 @@ async fn carry_forward_catalogue_tx(
                  FROM runtime_catalogue_revision_binding WHERE snapshot = ?1",
                 params![predecessor_snapshot, snapshot],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         if copied > 1 {
             return Err(RuntimeError::CatalogueCorrupt);
         }
@@ -2528,12 +2467,10 @@ async fn copy_catalogue_relation_tx(
     };
     let mut rows = connection
         .query(count_sql, params![predecessor_snapshot.to_vec()])
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     let source_count: i64 = rows
         .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
+        .await?
         .ok_or(RuntimeError::CatalogueCorrupt)?
         .get(0)
         .map_err(|_| RuntimeError::CatalogueCorrupt)?;
@@ -2542,8 +2479,7 @@ async fn copy_catalogue_relation_tx(
             insert_sql,
             params![predecessor_snapshot.to_vec(), snapshot.to_vec()],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     if copied != u64::try_from(source_count).map_err(|_| RuntimeError::CatalogueCorrupt)? {
         return Err(RuntimeError::CatalogueCorrupt);
     }
@@ -2559,13 +2495,8 @@ async fn catalogue_admission_exists_tx(
             "SELECT 1 FROM runtime_catalogue_admission WHERE snapshot = ?1",
             params![capture_bytes(capture)?],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    Ok(rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-        .is_some())
+        .await?;
+    Ok(rows.next().await?.is_some())
 }
 
 async fn clear_catalogue_snapshot_tx(
@@ -2584,8 +2515,7 @@ async fn clear_catalogue_snapshot_tx(
                 &format!("DELETE FROM {table} WHERE snapshot = ?1"),
                 params![snapshot.clone()],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
     }
     Ok(())
 }
@@ -2601,14 +2531,9 @@ async fn validate_complete_batch_tx(
              WHERE snapshot = ?1",
             params![capture_bytes(capture)?],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     let mut actual = std::collections::BTreeMap::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    {
+    while let Some(row) = rows.next().await? {
         let name: String = row.get(0).map_err(|_| RuntimeError::CatalogueCorrupt)?;
         let kind = CatalogueObjectKind::from_code(
             row.get(1).map_err(|_| RuntimeError::CatalogueCorrupt)?,
@@ -2636,12 +2561,10 @@ async fn validate_predecessor_capture_tx(
              FROM runtime_catalogue_capture WHERE snapshot = ?1",
             params![snapshot],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     let row = rows
         .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
+        .await?
         .ok_or(RuntimeError::CataloguePredecessorInvalid)?;
     if fixed(row.get(0).map_err(|_| RuntimeError::CatalogueCorrupt)?)? != predecessor.database_id()
         || fixed(row.get(1).map_err(|_| RuntimeError::CatalogueCorrupt)?)?
@@ -2676,13 +2599,8 @@ async fn retained_capture_row_tx(
              FROM runtime_catalogue_capture WHERE snapshot = ?1",
             params![snapshot.clone()],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    else {
+        .await?;
+    let Some(row) = rows.next().await? else {
         return Err(RuntimeError::CatalogueCaptureInvalid);
     };
     if fixed(row.get(0).map_err(|_| RuntimeError::CatalogueCorrupt)?)? != capture.database_id()
@@ -2712,13 +2630,8 @@ async fn ensure_revision_row_tx(
              WHERE object_id = ?1 AND snapshot = ?2",
             params![object_id.to_vec(), snapshot],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    else {
+        .await?;
+    let Some(row) = rows.next().await? else {
         return Err(RuntimeError::CatalogueCorrupt);
     };
     let kind =
@@ -2780,8 +2693,7 @@ async fn insert_type_tx(
                 target
             ],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     if load_type_form_tx(transaction, capture, object_id).await? != form {
         return Err(RuntimeError::CatalogueTypeMismatch);
     }
@@ -2798,13 +2710,8 @@ async fn validate_type_references_tx(
              WHERE snapshot = ?1 AND form = 'reference'",
             params![capture_bytes(capture)?],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    {
+        .await?;
+    while let Some(row) = rows.next().await? {
         let target = fixed(row.get(0).map_err(|_| RuntimeError::CatalogueCorrupt)?)?;
         let object = load_object_tx(transaction, capture, target).await?;
         if object.kind != CatalogueObjectKind::Type {
@@ -2834,8 +2741,7 @@ async fn insert_function_tx(
                 result_type.to_vec()
             ],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     let stored_result = load_result_type_id_tx(transaction, capture, object_id).await?;
     if stored_result != result_type {
         return Err(RuntimeError::CatalogueRevisionConflict);
@@ -2856,8 +2762,7 @@ async fn insert_function_tx(
                     type_id.to_vec()
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
     }
     let actual = load_parameters_tx(transaction, capture, object_id).await?;
     if actual.len() != parameters.len() {
@@ -2998,13 +2903,8 @@ async fn module_admission_exists_tx(
              WHERE object_id = ?1 AND snapshot = ?2",
             params![object_id.to_vec(), capture_bytes(capture)?],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    Ok(rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-        .is_some())
+        .await?;
+    Ok(rows.next().await?.is_some())
 }
 
 async fn mark_module_admission_tx(
@@ -3018,8 +2918,7 @@ async fn mark_module_admission_tx(
              (object_id, snapshot) VALUES (?1, ?2)",
             params![object_id.to_vec(), capture_bytes(capture)?],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     Ok(())
 }
 
@@ -3060,13 +2959,8 @@ async fn module_revision_facts_tx(
                 CatalogueObjectKind::Module.code()
             ],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    else {
+        .await?;
+    let Some(row) = rows.next().await? else {
         return Ok(None);
     };
     Ok(Some((
@@ -3085,14 +2979,8 @@ async fn reject_separate_module_rows_tx(
              WHERE snapshot = ?1 AND kind = ?2 LIMIT 1",
             params![capture_bytes(capture)?, CatalogueObjectKind::Module.code()],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    if rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-        .is_some()
-    {
+        .await?;
+    if rows.next().await?.is_some() {
         return Err(RuntimeError::CatalogueKindMismatch);
     }
     Ok(())
@@ -3113,8 +3001,7 @@ async fn clear_module_revision_tx(
                 CatalogueObjectKind::Module.code()
             ],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     Ok(())
 }
 
@@ -3130,8 +3017,7 @@ async fn allocate_object_id_tx(
                  VALUES (?1, ?2, ?3)",
                 params![id.to_vec(), kind.code(), now_ms()?],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         if inserted == 1 {
             return Ok(id);
         }
@@ -3148,12 +3034,10 @@ async fn object_kind_tx(
             "SELECT kind FROM runtime_catalogue_identity WHERE object_id = ?1",
             params![id.to_vec()],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     let row = rows
         .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
+        .await?
         .ok_or(RuntimeError::CatalogueIdentityMissing)?;
     CatalogueObjectKind::from_code(row.get(0).map_err(|_| RuntimeError::CatalogueCorrupt)?)
 }
@@ -3194,13 +3078,8 @@ async fn lookup_snapshot_object_id(
              WHERE snapshot = ?1 AND qualified_name = ?2",
             params![snapshot.to_vec(), name],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    else {
+        .await?;
+    let Some(row) = rows.next().await? else {
         return Ok(None);
     };
     Ok(Some(fixed(
@@ -3219,13 +3098,8 @@ async fn current_object_revision_exists(
              WHERE object_id = ?1 AND snapshot = ?2 LIMIT 1",
             params![id.to_vec(), capture_bytes(capture)?],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    Ok(rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-        .is_some())
+        .await?;
+    Ok(rows.next().await?.is_some())
 }
 
 fn validate_predecessor_snapshot(
@@ -3267,11 +3141,10 @@ async fn load_object_tx(
             params![id.to_vec(), capture_bytes(capture)?],
         )
         .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        ?;
     let row = rows
         .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
+        .await?
         .ok_or(RuntimeError::CatalogueIdentityMissing)?;
     let kind =
         CatalogueObjectKind::from_code(row.get(0).map_err(|_| RuntimeError::CatalogueCorrupt)?)?;
@@ -3302,11 +3175,10 @@ async fn load_type_form_tx(
     let mut rows = transaction
         .query("SELECT form, target_object_id FROM runtime_catalogue_type WHERE object_id = ?1 AND snapshot = ?2", params![id.to_vec(), capture_bytes(capture)?])
         .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        ?;
     let row = rows
         .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
+        .await?
         .ok_or(RuntimeError::CatalogueTypeMissing)?;
     CatalogueTypeForm::decode(
         row.get(0).map_err(|_| RuntimeError::CatalogueCorrupt)?,
@@ -3344,11 +3216,10 @@ async fn load_result_type_id_tx(
     let mut rows = transaction
         .query("SELECT result_type_object_id FROM runtime_catalogue_function WHERE object_id = ?1 AND snapshot = ?2", params![id.to_vec(), capture_bytes(capture)?])
         .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        ?;
     let row = rows
         .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
+        .await?
         .ok_or(RuntimeError::CatalogueFunctionMissing)?;
     Ok(fixed(
         row.get(0).map_err(|_| RuntimeError::CatalogueCorrupt)?,
@@ -3363,13 +3234,9 @@ async fn load_parameters_tx(
     let mut rows = transaction
         .query("SELECT position, name, type_object_id FROM runtime_catalogue_parameter WHERE object_id = ?1 AND snapshot = ?2 ORDER BY position", params![id.to_vec(), capture_bytes(capture)?])
         .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        ?;
     let mut parameters = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    {
+    while let Some(row) = rows.next().await? {
         let position = u64::try_from(
             row.get::<i64>(0)
                 .map_err(|_| RuntimeError::CatalogueCorrupt)?,
