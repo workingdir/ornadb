@@ -498,33 +498,137 @@ impl FunctionDefinition {
     }
 }
 
+/// Name and identity lookups over one category of definitions, as positions in
+/// the snapshot-ordered `Vec` that owns them.
+#[derive(Clone, Debug)]
+struct DefinitionIndex<Id> {
+    by_name: HashMap<QualifiedSemanticName, usize>,
+    by_id: HashMap<Id, usize>,
+}
+
+impl<Id: Copy + Eq + Hash> DefinitionIndex<Id> {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            by_name: HashMap::with_capacity(capacity),
+            by_id: HashMap::with_capacity(capacity),
+        }
+    }
+
+    /// Records the definition at `position`. A repeated name is rejected before
+    /// a repeated identity, with the category's own error.
+    fn insert(
+        &mut self,
+        position: usize,
+        name: &QualifiedSemanticName,
+        id: Id,
+        duplicate_name: impl FnOnce(QualifiedSemanticName) -> CatalogueSnapshotError,
+        duplicate_id: impl FnOnce(Id) -> CatalogueSnapshotError,
+    ) -> Result<(), CatalogueSnapshotError> {
+        if self.by_name.insert(name.clone(), position).is_some() {
+            return Err(duplicate_name(name.clone()));
+        }
+        if self.by_id.insert(id, position).is_some() {
+            return Err(duplicate_id(id));
+        }
+        Ok(())
+    }
+
+    fn find_by_name<'a, T>(
+        &self,
+        definitions: &'a [T],
+        name: &QualifiedSemanticName,
+    ) -> Option<&'a T> {
+        self.by_name
+            .get(name)
+            .map(|&position| &definitions[position])
+    }
+
+    fn find_by_id<'a, T>(&self, definitions: &'a [T], id: Id) -> Option<&'a T> {
+        self.by_id.get(&id).map(|&position| &definitions[position])
+    }
+}
+
+/// The direct type bindings of one snapshot, found by closed lookup name or by
+/// derived identity, with the targets of the prelude-scoped names.
+#[derive(Clone, Debug)]
+struct TypeBindingIndex {
+    by_name: HashMap<TypeLookupName, usize>,
+    by_id: HashMap<TypeBindingId, usize>,
+    prelude_type_ids: HashMap<PreludeTypeName, TypeId>,
+}
+
+/// The primary type names and identities registered so far, shared by every
+/// primary type category so a repeat across categories is detected.
+struct PrimaryTypes {
+    ids_by_qualified_name: HashMap<QualifiedSemanticName, TypeId>,
+    ids: HashSet<TypeId>,
+}
+
+impl PrimaryTypes {
+    fn with_capacity(primary: usize, bindings: usize) -> Self {
+        Self {
+            ids_by_qualified_name: HashMap::with_capacity(primary + bindings),
+            ids: HashSet::with_capacity(primary),
+        }
+    }
+
+    /// Registers one primary type, rejecting a name or identity already taken
+    /// by another primary type.
+    fn register(
+        &mut self,
+        id: TypeId,
+        name: &QualifiedSemanticName,
+    ) -> Result<(), CatalogueSnapshotError> {
+        if self
+            .ids_by_qualified_name
+            .insert(name.clone(), id)
+            .is_some()
+        {
+            return Err(CatalogueSnapshotError::DuplicateTypeName {
+                name: TypeLookupName::qualified(name.clone()),
+            });
+        }
+        if !self.ids.insert(id) {
+            return Err(CatalogueSnapshotError::DuplicateTypeId { id });
+        }
+        Ok(())
+    }
+}
+
+/// Requires that the namespace of `name` is a declared schema.
+fn require_declared_schema(
+    schemas: &DefinitionIndex<SchemaId>,
+    name: &QualifiedSemanticName,
+    has_no_schema: impl FnOnce() -> CatalogueSnapshotError,
+    not_declared: impl FnOnce(QualifiedSemanticName) -> CatalogueSnapshotError,
+) -> Result<(), CatalogueSnapshotError> {
+    let namespace = namespace_of(name).ok_or_else(has_no_schema)?;
+    if schemas.by_name.contains_key(&namespace) {
+        Ok(())
+    } else {
+        Err(not_declared(namespace))
+    }
+}
+
 /// An immutable set of resolved definitions for one catalogue revision.
 #[derive(Clone, Debug)]
 pub struct CatalogueSnapshot {
     revision: CatalogueRevisionId,
     schemas: Vec<SchemaDefinition>,
-    schema_indices_by_name: HashMap<QualifiedSemanticName, usize>,
-    schema_indices_by_id: HashMap<SchemaId, usize>,
+    schema_index: DefinitionIndex<SchemaId>,
     object_types: Vec<ObjectTypeDefinition>,
-    object_type_indices_by_name: HashMap<QualifiedSemanticName, usize>,
-    object_type_indices_by_id: HashMap<TypeId, usize>,
+    object_type_index: DefinitionIndex<TypeId>,
     value_types: Vec<ValueTypeDefinition>,
-    value_type_indices_by_name: HashMap<QualifiedSemanticName, usize>,
-    value_type_indices_by_id: HashMap<TypeId, usize>,
+    value_type_index: DefinitionIndex<TypeId>,
     enum_types: Vec<EnumTypeDefinition>,
-    enum_type_indices_by_name: HashMap<QualifiedSemanticName, usize>,
-    enum_type_indices_by_id: HashMap<TypeId, usize>,
+    enum_type_index: DefinitionIndex<TypeId>,
     record_value_types: Vec<RecordValueTypeDefinition>,
-    record_value_type_indices_by_name: HashMap<QualifiedSemanticName, usize>,
-    record_value_type_indices_by_id: HashMap<TypeId, usize>,
+    record_value_type_index: DefinitionIndex<TypeId>,
     type_bindings: Vec<TypeBinding>,
-    type_binding_indices_by_name: HashMap<TypeLookupName, usize>,
-    type_binding_indices_by_id: HashMap<TypeBindingId, usize>,
+    type_binding_index: TypeBindingIndex,
     type_ids_by_qualified_name: HashMap<QualifiedSemanticName, TypeId>,
-    type_ids_by_prelude_name: HashMap<PreludeTypeName, TypeId>,
     functions: Vec<FunctionDefinition>,
-    function_indices_by_name: HashMap<QualifiedSemanticName, usize>,
-    function_indices_by_id: HashMap<FunctionId, usize>,
+    function_index: DefinitionIndex<FunctionId>,
 }
 
 impl CatalogueSnapshot {
@@ -675,87 +779,106 @@ impl CatalogueSnapshot {
         type_bindings: Vec<TypeBinding>,
         functions: Vec<FunctionDefinition>,
     ) -> Result<Self, CatalogueSnapshotError> {
-        let mut schema_indices_by_name = HashMap::with_capacity(schemas.len());
-        let mut schema_indices_by_id = HashMap::with_capacity(schemas.len());
-        let mut object_type_indices_by_name = HashMap::with_capacity(object_types.len());
-        let mut object_type_indices_by_id = HashMap::with_capacity(object_types.len());
-        let mut value_type_indices_by_name = HashMap::with_capacity(value_types.len());
-        let mut value_type_indices_by_id = HashMap::with_capacity(value_types.len());
-        let mut enum_type_indices_by_name = HashMap::with_capacity(enum_types.len());
-        let mut enum_type_indices_by_id = HashMap::with_capacity(enum_types.len());
-        let mut record_value_type_indices_by_name =
-            HashMap::with_capacity(record_value_types.len());
-        let mut record_value_type_indices_by_id = HashMap::with_capacity(record_value_types.len());
-        let mut type_binding_indices_by_name = HashMap::with_capacity(type_bindings.len());
-        let mut type_binding_indices_by_id = HashMap::with_capacity(type_bindings.len());
-        let mut type_ids_by_qualified_name = HashMap::with_capacity(
-            object_types.len()
-                + value_types.len()
-                + enum_types.len()
-                + record_value_types.len()
-                + type_bindings.len(),
-        );
-        let mut type_ids_by_prelude_name = HashMap::with_capacity(type_bindings.len());
-        let mut primary_type_ids = HashMap::with_capacity(
+        // The categories are validated in a fixed order and each stops at its
+        // first error, so the error reported for an input with several faults
+        // does not depend on how the checks are organised.
+        let schema_index = Self::index_schemas(&schemas)?;
+        let mut primary_types = PrimaryTypes::with_capacity(
             object_types.len() + value_types.len() + enum_types.len() + record_value_types.len(),
+            type_bindings.len(),
         );
-        let mut function_indices_by_name = HashMap::with_capacity(functions.len());
-        let mut function_indices_by_id = HashMap::with_capacity(functions.len());
+        let object_type_index =
+            Self::index_object_types(&object_types, &schema_index, &mut primary_types)?;
+        let value_type_index =
+            Self::index_value_types(&value_types, &schema_index, &mut primary_types)?;
+        let enum_type_index =
+            Self::index_enum_types(&enum_types, &schema_index, &mut primary_types)?;
+        let record_value_type_index =
+            Self::index_record_value_types(&record_value_types, &schema_index, &mut primary_types)?;
+        Self::validate_record_value_field_types(
+            &record_value_types,
+            &enum_type_index,
+            &record_value_type_index,
+            &primary_types,
+        )?;
+        let type_binding_index =
+            Self::index_type_bindings(&type_bindings, &schema_index, &mut primary_types)?;
+        let function_index = Self::index_functions(&functions, &schema_index)?;
 
-        for (schema_index, schema) in schemas.iter().enumerate() {
-            if schema_indices_by_name
-                .insert(schema.name.clone(), schema_index)
-                .is_some()
-            {
-                return Err(CatalogueSnapshotError::DuplicateSchemaName {
-                    name: schema.name.clone(),
-                });
-            }
+        Ok(Self {
+            revision,
+            schemas,
+            schema_index,
+            object_types,
+            object_type_index,
+            value_types,
+            value_type_index,
+            enum_types,
+            enum_type_index,
+            record_value_types,
+            record_value_type_index,
+            type_bindings,
+            type_binding_index,
+            type_ids_by_qualified_name: primary_types.ids_by_qualified_name,
+            functions,
+            function_index,
+        })
+    }
 
-            if schema_indices_by_id
-                .insert(schema.id, schema_index)
-                .is_some()
-            {
-                return Err(CatalogueSnapshotError::DuplicateSchemaId { id: schema.id });
-            }
+    fn index_schemas(
+        schemas: &[SchemaDefinition],
+    ) -> Result<DefinitionIndex<SchemaId>, CatalogueSnapshotError> {
+        let mut index = DefinitionIndex::with_capacity(schemas.len());
+        for (position, schema) in schemas.iter().enumerate() {
+            index.insert(
+                position,
+                &schema.name,
+                schema.id,
+                |name| CatalogueSnapshotError::DuplicateSchemaName { name },
+                |id| CatalogueSnapshotError::DuplicateSchemaId { id },
+            )?;
         }
+        Ok(index)
+    }
 
-        for (type_index, object_type) in object_types.iter().enumerate() {
-            if object_type_indices_by_name
-                .insert(object_type.name.clone(), type_index)
-                .is_some()
-            {
-                return Err(CatalogueSnapshotError::DuplicateObjectTypeName {
-                    name: object_type.name.clone(),
-                });
-            }
-
-            if object_type_indices_by_id
-                .insert(object_type.id, type_index)
-                .is_some()
-            {
-                return Err(CatalogueSnapshotError::DuplicateObjectTypeId { id: object_type.id });
-            }
-
-            type_ids_by_qualified_name.insert(object_type.name.clone(), object_type.id);
-            primary_type_ids.insert(object_type.id, object_type.name.clone());
-
-            let namespace = namespace_of(&object_type.name).ok_or(
-                CatalogueSnapshotError::ObjectTypeHasNoSchema {
+    fn index_object_types(
+        object_types: &[ObjectTypeDefinition],
+        schemas: &DefinitionIndex<SchemaId>,
+        primary_types: &mut PrimaryTypes,
+    ) -> Result<DefinitionIndex<TypeId>, CatalogueSnapshotError> {
+        let mut index = DefinitionIndex::with_capacity(object_types.len());
+        for (position, object_type) in object_types.iter().enumerate() {
+            index.insert(
+                position,
+                &object_type.name,
+                object_type.id,
+                |name| CatalogueSnapshotError::DuplicateObjectTypeName { name },
+                |id| CatalogueSnapshotError::DuplicateObjectTypeId { id },
+            )?;
+            primary_types.register(object_type.id, &object_type.name)?;
+            require_declared_schema(
+                schemas,
+                &object_type.name,
+                || CatalogueSnapshotError::ObjectTypeHasNoSchema {
                     object_type: object_type.id,
                 },
-            )?;
-            if !schema_indices_by_name.contains_key(&namespace) {
-                return Err(CatalogueSnapshotError::ObjectTypeSchemaNotDeclared {
+                |schema| CatalogueSnapshotError::ObjectTypeSchemaNotDeclared {
                     object_type: object_type.id,
-                    schema: namespace,
-                });
-            }
-
+                    schema,
+                },
+            )?;
             Self::validate_fields(object_type)?;
         }
+        Ok(index)
+    }
 
-        for (type_index, value_type) in value_types.iter().enumerate() {
+    fn index_value_types(
+        value_types: &[ValueTypeDefinition],
+        schemas: &DefinitionIndex<SchemaId>,
+        primary_types: &mut PrimaryTypes,
+    ) -> Result<DefinitionIndex<TypeId>, CatalogueSnapshotError> {
+        let mut index = DefinitionIndex::with_capacity(value_types.len());
+        for (position, value_type) in value_types.iter().enumerate() {
             if value_type.representation_contract().is_empty() {
                 return Err(
                     CatalogueSnapshotError::EmptyValueTypeRepresentationContract {
@@ -763,57 +886,36 @@ impl CatalogueSnapshot {
                     },
                 );
             }
-
-            if value_type_indices_by_name
-                .insert(value_type.name().clone(), type_index)
-                .is_some()
-            {
-                return Err(CatalogueSnapshotError::DuplicateValueTypeName {
-                    name: value_type.name().clone(),
-                });
-            }
-
-            if value_type_indices_by_id
-                .insert(value_type.id(), type_index)
-                .is_some()
-            {
-                return Err(CatalogueSnapshotError::DuplicateValueTypeId {
-                    id: value_type.id(),
-                });
-            }
-
-            if type_ids_by_qualified_name
-                .insert(value_type.name().clone(), value_type.id())
-                .is_some()
-            {
-                return Err(CatalogueSnapshotError::DuplicateTypeName {
-                    name: TypeLookupName::qualified(value_type.name().clone()),
-                });
-            }
-
-            if primary_type_ids
-                .insert(value_type.id(), value_type.name().clone())
-                .is_some()
-            {
-                return Err(CatalogueSnapshotError::DuplicateTypeId {
-                    id: value_type.id(),
-                });
-            }
-
-            let namespace = namespace_of(value_type.name()).ok_or(
-                CatalogueSnapshotError::ValueTypeHasNoSchema {
+            index.insert(
+                position,
+                value_type.name(),
+                value_type.id(),
+                |name| CatalogueSnapshotError::DuplicateValueTypeName { name },
+                |id| CatalogueSnapshotError::DuplicateValueTypeId { id },
+            )?;
+            primary_types.register(value_type.id(), value_type.name())?;
+            require_declared_schema(
+                schemas,
+                value_type.name(),
+                || CatalogueSnapshotError::ValueTypeHasNoSchema {
                     value_type: value_type.id(),
                 },
-            )?;
-            if !schema_indices_by_name.contains_key(&namespace) {
-                return Err(CatalogueSnapshotError::ValueTypeSchemaNotDeclared {
+                |schema| CatalogueSnapshotError::ValueTypeSchemaNotDeclared {
                     value_type: value_type.id(),
-                    schema: namespace,
-                });
-            }
+                    schema,
+                },
+            )?;
         }
+        Ok(index)
+    }
 
-        for (type_index, enum_type) in enum_types.iter().enumerate() {
+    fn index_enum_types(
+        enum_types: &[EnumTypeDefinition],
+        schemas: &DefinitionIndex<SchemaId>,
+        primary_types: &mut PrimaryTypes,
+    ) -> Result<DefinitionIndex<TypeId>, CatalogueSnapshotError> {
+        let mut index = DefinitionIndex::with_capacity(enum_types.len());
+        for (position, enum_type) in enum_types.iter().enumerate() {
             if enum_type.labels().is_empty() {
                 return Err(CatalogueSnapshotError::EmptyEnumTypeLabels {
                     enum_type: enum_type.id(),
@@ -828,109 +930,81 @@ impl CatalogueSnapshot {
                     });
                 }
             }
-
-            if enum_type_indices_by_name
-                .insert(enum_type.name().clone(), type_index)
-                .is_some()
-            {
-                return Err(CatalogueSnapshotError::DuplicateEnumTypeName {
-                    name: enum_type.name().clone(),
-                });
-            }
-            if enum_type_indices_by_id
-                .insert(enum_type.id(), type_index)
-                .is_some()
-            {
-                return Err(CatalogueSnapshotError::DuplicateEnumTypeId { id: enum_type.id() });
-            }
-            if type_ids_by_qualified_name
-                .insert(enum_type.name().clone(), enum_type.id())
-                .is_some()
-            {
-                return Err(CatalogueSnapshotError::DuplicateTypeName {
-                    name: TypeLookupName::qualified(enum_type.name().clone()),
-                });
-            }
-            if primary_type_ids
-                .insert(enum_type.id(), enum_type.name().clone())
-                .is_some()
-            {
-                return Err(CatalogueSnapshotError::DuplicateTypeId { id: enum_type.id() });
-            }
-
-            let namespace = namespace_of(enum_type.name()).ok_or(
-                CatalogueSnapshotError::EnumTypeHasNoSchema {
+            index.insert(
+                position,
+                enum_type.name(),
+                enum_type.id(),
+                |name| CatalogueSnapshotError::DuplicateEnumTypeName { name },
+                |id| CatalogueSnapshotError::DuplicateEnumTypeId { id },
+            )?;
+            primary_types.register(enum_type.id(), enum_type.name())?;
+            require_declared_schema(
+                schemas,
+                enum_type.name(),
+                || CatalogueSnapshotError::EnumTypeHasNoSchema {
                     enum_type: enum_type.id(),
                 },
-            )?;
-            if !schema_indices_by_name.contains_key(&namespace) {
-                return Err(CatalogueSnapshotError::EnumTypeSchemaNotDeclared {
+                |schema| CatalogueSnapshotError::EnumTypeSchemaNotDeclared {
                     enum_type: enum_type.id(),
-                    schema: namespace,
-                });
-            }
+                    schema,
+                },
+            )?;
         }
+        Ok(index)
+    }
 
-        for (type_index, record_value_type) in record_value_types.iter().enumerate() {
+    fn index_record_value_types(
+        record_value_types: &[RecordValueTypeDefinition],
+        schemas: &DefinitionIndex<SchemaId>,
+        primary_types: &mut PrimaryTypes,
+    ) -> Result<DefinitionIndex<TypeId>, CatalogueSnapshotError> {
+        let mut index = DefinitionIndex::with_capacity(record_value_types.len());
+        for (position, record_value_type) in record_value_types.iter().enumerate() {
             if record_value_type.fields().is_empty() {
                 return Err(CatalogueSnapshotError::EmptyRecordValueTypeFields {
                     record_value_type: record_value_type.id(),
                 });
             }
-            if record_value_type_indices_by_name
-                .insert(record_value_type.name().clone(), type_index)
-                .is_some()
-            {
-                return Err(CatalogueSnapshotError::DuplicateRecordValueTypeName {
-                    name: record_value_type.name().clone(),
-                });
-            }
-            if record_value_type_indices_by_id
-                .insert(record_value_type.id(), type_index)
-                .is_some()
-            {
-                return Err(CatalogueSnapshotError::DuplicateRecordValueTypeId {
-                    id: record_value_type.id(),
-                });
-            }
-            if type_ids_by_qualified_name
-                .insert(record_value_type.name().clone(), record_value_type.id())
-                .is_some()
-            {
-                return Err(CatalogueSnapshotError::DuplicateTypeName {
-                    name: TypeLookupName::qualified(record_value_type.name().clone()),
-                });
-            }
-            if primary_type_ids
-                .insert(record_value_type.id(), record_value_type.name().clone())
-                .is_some()
-            {
-                return Err(CatalogueSnapshotError::DuplicateTypeId {
-                    id: record_value_type.id(),
-                });
-            }
-
-            let namespace = namespace_of(record_value_type.name()).ok_or(
-                CatalogueSnapshotError::RecordValueTypeHasNoSchema {
+            index.insert(
+                position,
+                record_value_type.name(),
+                record_value_type.id(),
+                |name| CatalogueSnapshotError::DuplicateRecordValueTypeName { name },
+                |id| CatalogueSnapshotError::DuplicateRecordValueTypeId { id },
+            )?;
+            primary_types.register(record_value_type.id(), record_value_type.name())?;
+            require_declared_schema(
+                schemas,
+                record_value_type.name(),
+                || CatalogueSnapshotError::RecordValueTypeHasNoSchema {
                     record_value_type: record_value_type.id(),
                 },
-            )?;
-            if !schema_indices_by_name.contains_key(&namespace) {
-                return Err(CatalogueSnapshotError::RecordValueTypeSchemaNotDeclared {
+                |schema| CatalogueSnapshotError::RecordValueTypeSchemaNotDeclared {
                     record_value_type: record_value_type.id(),
-                    schema: namespace,
-                });
-            }
+                    schema,
+                },
+            )?;
         }
+        Ok(index)
+    }
 
-        for record_value_type in &record_value_types {
+    /// Checks the fields of every record value type once all primary types are
+    /// registered: a named field type must be an enum or record value type of
+    /// this snapshot, or a name that is not a primary type of this snapshot.
+    fn validate_record_value_field_types(
+        record_value_types: &[RecordValueTypeDefinition],
+        enum_types: &DefinitionIndex<TypeId>,
+        record_value_types_index: &DefinitionIndex<TypeId>,
+        primary_types: &PrimaryTypes,
+    ) -> Result<(), CatalogueSnapshotError> {
+        for record_value_type in record_value_types {
             Self::validate_record_value_fields(record_value_type)?;
             for field in record_value_type.fields() {
                 let accepted = match field.descriptor().kind() {
                     crate::types::TypeDescriptorKind::Named(target) => {
-                        enum_type_indices_by_id.contains_key(&target)
-                            || record_value_type_indices_by_id.contains_key(&target)
-                            || !primary_type_ids.contains_key(&target)
+                        enum_types.by_id.contains_key(&target)
+                            || record_value_types_index.by_id.contains_key(&target)
+                            || !primary_types.ids.contains(&target)
                     }
                     crate::types::TypeDescriptorKind::Reference(_)
                     | crate::types::TypeDescriptorKind::List(_)
@@ -948,25 +1022,33 @@ impl CatalogueSnapshot {
                 }
             }
         }
+        Ok(())
+    }
 
-        for (binding_index, binding) in type_bindings.iter().enumerate() {
-            if type_binding_indices_by_name
-                .insert(binding.name().clone(), binding_index)
+    fn index_type_bindings(
+        type_bindings: &[TypeBinding],
+        schemas: &DefinitionIndex<SchemaId>,
+        primary_types: &mut PrimaryTypes,
+    ) -> Result<TypeBindingIndex, CatalogueSnapshotError> {
+        let mut index = TypeBindingIndex {
+            by_name: HashMap::with_capacity(type_bindings.len()),
+            by_id: HashMap::with_capacity(type_bindings.len()),
+            prelude_type_ids: HashMap::with_capacity(type_bindings.len()),
+        };
+        for (position, binding) in type_bindings.iter().enumerate() {
+            if index
+                .by_name
+                .insert(binding.name().clone(), position)
                 .is_some()
             {
                 return Err(CatalogueSnapshotError::DuplicateTypeName {
                     name: binding.name().clone(),
                 });
             }
-
-            if type_binding_indices_by_id
-                .insert(binding.id(), binding_index)
-                .is_some()
-            {
+            if index.by_id.insert(binding.id(), position).is_some() {
                 return Err(CatalogueSnapshotError::DuplicateTypeBindingId { id: binding.id() });
             }
-
-            if !primary_type_ids.contains_key(&binding.target()) {
+            if !primary_types.ids.contains(&binding.target()) {
                 return Err(CatalogueSnapshotError::TypeBindingTargetNotFound {
                     binding: binding.id(),
                     target: binding.target(),
@@ -975,7 +1057,8 @@ impl CatalogueSnapshot {
 
             match binding.name() {
                 TypeLookupName::Qualified(name) => {
-                    if type_ids_by_qualified_name
+                    if primary_types
+                        .ids_by_qualified_name
                         .insert(name.clone(), binding.target())
                         .is_some()
                     {
@@ -983,23 +1066,21 @@ impl CatalogueSnapshot {
                             name: binding.name().clone(),
                         });
                     }
-
-                    let namespace = namespace_of(name).ok_or(
-                        CatalogueSnapshotError::QualifiedTypeBindingHasNoSchema {
+                    require_declared_schema(
+                        schemas,
+                        name,
+                        || CatalogueSnapshotError::QualifiedTypeBindingHasNoSchema {
                             binding: binding.id(),
                         },
+                        |schema| CatalogueSnapshotError::QualifiedTypeBindingSchemaNotDeclared {
+                            binding: binding.id(),
+                            schema,
+                        },
                     )?;
-                    if !schema_indices_by_name.contains_key(&namespace) {
-                        return Err(
-                            CatalogueSnapshotError::QualifiedTypeBindingSchemaNotDeclared {
-                                binding: binding.id(),
-                                schema: namespace,
-                            },
-                        );
-                    }
                 }
                 TypeLookupName::Prelude(name) => {
-                    if type_ids_by_prelude_name
+                    if index
+                        .prelude_type_ids
                         .insert(name.clone(), binding.target())
                         .is_some()
                     {
@@ -1010,65 +1091,36 @@ impl CatalogueSnapshot {
                 }
             }
         }
+        Ok(index)
+    }
 
-        for (function_index, function) in functions.iter().enumerate() {
-            if function_indices_by_name
-                .insert(function.name.clone(), function_index)
-                .is_some()
-            {
-                return Err(CatalogueSnapshotError::DuplicateFunctionName {
-                    name: function.name.clone(),
-                });
-            }
-
-            if function_indices_by_id
-                .insert(function.id, function_index)
-                .is_some()
-            {
-                return Err(CatalogueSnapshotError::DuplicateFunctionId { id: function.id });
-            }
-
-            let namespace = namespace_of(&function.name).ok_or(
-                CatalogueSnapshotError::FunctionHasNoSchema {
+    fn index_functions(
+        functions: &[FunctionDefinition],
+        schemas: &DefinitionIndex<SchemaId>,
+    ) -> Result<DefinitionIndex<FunctionId>, CatalogueSnapshotError> {
+        let mut index = DefinitionIndex::with_capacity(functions.len());
+        for (position, function) in functions.iter().enumerate() {
+            index.insert(
+                position,
+                &function.name,
+                function.id,
+                |name| CatalogueSnapshotError::DuplicateFunctionName { name },
+                |id| CatalogueSnapshotError::DuplicateFunctionId { id },
+            )?;
+            require_declared_schema(
+                schemas,
+                &function.name,
+                || CatalogueSnapshotError::FunctionHasNoSchema {
                     function: function.id,
                 },
-            )?;
-            if !schema_indices_by_name.contains_key(&namespace) {
-                return Err(CatalogueSnapshotError::FunctionSchemaNotDeclared {
+                |schema| CatalogueSnapshotError::FunctionSchemaNotDeclared {
                     function: function.id,
-                    schema: namespace,
-                });
-            }
-
+                    schema,
+                },
+            )?;
             Self::validate_function(function)?;
         }
-
-        Ok(Self {
-            revision,
-            schemas,
-            schema_indices_by_name,
-            schema_indices_by_id,
-            object_types,
-            object_type_indices_by_name,
-            object_type_indices_by_id,
-            value_types,
-            value_type_indices_by_name,
-            value_type_indices_by_id,
-            enum_types,
-            enum_type_indices_by_name,
-            enum_type_indices_by_id,
-            record_value_types,
-            record_value_type_indices_by_name,
-            record_value_type_indices_by_id,
-            type_bindings,
-            type_binding_indices_by_name,
-            type_binding_indices_by_id,
-            type_ids_by_qualified_name,
-            type_ids_by_prelude_name,
-            functions,
-            function_indices_by_name,
-            function_indices_by_id,
-        })
+        Ok(index)
     }
 
     /// Returns the stable identity of this catalogue revision.
@@ -1083,16 +1135,12 @@ impl CatalogueSnapshot {
 
     /// Finds a schema by its exact resolved qualified name.
     pub fn schema_by_name(&self, name: &QualifiedSemanticName) -> Option<&SchemaDefinition> {
-        self.schema_indices_by_name
-            .get(name)
-            .map(|index| &self.schemas[*index])
+        self.schema_index.find_by_name(&self.schemas, name)
     }
 
     /// Finds a schema by its stable identity.
     pub fn schema_by_id(&self, id: SchemaId) -> Option<&SchemaDefinition> {
-        self.schema_indices_by_id
-            .get(&id)
-            .map(|index| &self.schemas[*index])
+        self.schema_index.find_by_id(&self.schemas, id)
     }
 
     /// Returns the object type definitions in their snapshot order.
@@ -1105,16 +1153,13 @@ impl CatalogueSnapshot {
         &self,
         name: &QualifiedSemanticName,
     ) -> Option<&ObjectTypeDefinition> {
-        self.object_type_indices_by_name
-            .get(name)
-            .map(|index| &self.object_types[*index])
+        self.object_type_index
+            .find_by_name(&self.object_types, name)
     }
 
     /// Finds an object type by its stable identity.
     pub fn object_type_by_id(&self, id: TypeId) -> Option<&ObjectTypeDefinition> {
-        self.object_type_indices_by_id
-            .get(&id)
-            .map(|index| &self.object_types[*index])
+        self.object_type_index.find_by_id(&self.object_types, id)
     }
 
     /// Returns the value type definitions in their snapshot order.
@@ -1124,16 +1169,12 @@ impl CatalogueSnapshot {
 
     /// Finds a value type by its exact canonical qualified name.
     pub fn value_type_by_name(&self, name: &QualifiedSemanticName) -> Option<&ValueTypeDefinition> {
-        self.value_type_indices_by_name
-            .get(name)
-            .map(|index| &self.value_types[*index])
+        self.value_type_index.find_by_name(&self.value_types, name)
     }
 
     /// Finds a value type by its stable identity.
     pub fn value_type_by_id(&self, id: TypeId) -> Option<&ValueTypeDefinition> {
-        self.value_type_indices_by_id
-            .get(&id)
-            .map(|index| &self.value_types[*index])
+        self.value_type_index.find_by_id(&self.value_types, id)
     }
 
     /// Returns enum type definitions in their snapshot order.
@@ -1143,16 +1184,12 @@ impl CatalogueSnapshot {
 
     /// Finds an enum type by its exact canonical qualified name.
     pub fn enum_type_by_name(&self, name: &QualifiedSemanticName) -> Option<&EnumTypeDefinition> {
-        self.enum_type_indices_by_name
-            .get(name)
-            .map(|index| &self.enum_types[*index])
+        self.enum_type_index.find_by_name(&self.enum_types, name)
     }
 
     /// Finds an enum type by its stable identity.
     pub fn enum_type_by_id(&self, id: TypeId) -> Option<&EnumTypeDefinition> {
-        self.enum_type_indices_by_id
-            .get(&id)
-            .map(|index| &self.enum_types[*index])
+        self.enum_type_index.find_by_id(&self.enum_types, id)
     }
 
     /// Returns record value type definitions in their snapshot order.
@@ -1165,16 +1202,14 @@ impl CatalogueSnapshot {
         &self,
         name: &QualifiedSemanticName,
     ) -> Option<&RecordValueTypeDefinition> {
-        self.record_value_type_indices_by_name
-            .get(name)
-            .map(|index| &self.record_value_types[*index])
+        self.record_value_type_index
+            .find_by_name(&self.record_value_types, name)
     }
 
     /// Finds a record value type by its stable identity.
     pub fn record_value_type_by_id(&self, id: TypeId) -> Option<&RecordValueTypeDefinition> {
-        self.record_value_type_indices_by_id
-            .get(&id)
-            .map(|index| &self.record_value_types[*index])
+        self.record_value_type_index
+            .find_by_id(&self.record_value_types, id)
     }
 
     /// Returns direct type bindings in their snapshot order.
@@ -1184,23 +1219,27 @@ impl CatalogueSnapshot {
 
     /// Finds a direct type binding by its closed lookup name.
     pub fn type_binding_by_name(&self, name: &TypeLookupName) -> Option<&TypeBinding> {
-        self.type_binding_indices_by_name
+        self.type_binding_index
+            .by_name
             .get(name)
-            .map(|index| &self.type_bindings[*index])
+            .map(|&position| &self.type_bindings[position])
     }
 
     /// Finds a direct type binding by its stable derived identity.
     pub fn type_binding_by_id(&self, id: TypeBindingId) -> Option<&TypeBinding> {
-        self.type_binding_indices_by_id
+        self.type_binding_index
+            .by_id
             .get(&id)
-            .map(|index| &self.type_bindings[*index])
+            .map(|&position| &self.type_bindings[position])
     }
 
     /// Resolves one qualified primary name or direct binding to its stable type identity.
     pub fn type_id_by_name(&self, name: &TypeLookupName) -> Option<TypeId> {
         match name {
             TypeLookupName::Qualified(name) => self.type_ids_by_qualified_name.get(name).copied(),
-            TypeLookupName::Prelude(name) => self.type_ids_by_prelude_name.get(name).copied(),
+            TypeLookupName::Prelude(name) => {
+                self.type_binding_index.prelude_type_ids.get(name).copied()
+            }
         }
     }
 
@@ -1229,16 +1268,12 @@ impl CatalogueSnapshot {
 
     /// Finds a function by its exact resolved qualified name.
     pub fn function_by_name(&self, name: &QualifiedSemanticName) -> Option<&FunctionDefinition> {
-        self.function_indices_by_name
-            .get(name)
-            .map(|index| &self.functions[*index])
+        self.function_index.find_by_name(&self.functions, name)
     }
 
     /// Finds a function by its stable identity.
     pub fn function_by_id(&self, id: FunctionId) -> Option<&FunctionDefinition> {
-        self.function_indices_by_id
-            .get(&id)
-            .map(|index| &self.functions[*index])
+        self.function_index.find_by_id(&self.functions, id)
     }
 
     fn validate_fields(object_type: &ObjectTypeDefinition) -> Result<(), CatalogueSnapshotError> {
