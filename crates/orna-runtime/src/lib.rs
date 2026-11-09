@@ -6049,40 +6049,13 @@ impl RuntimeState {
         lease: WriterLease,
         key: CheckpointKey,
     ) -> Result<StreamAdministrationOutcome, RuntimeError> {
-        self.pause_stream_at_capture(lease, key, None).await
-    }
-
-    /// Applies a pause only if the writer-fenced transaction still observes
-    /// the supplied CWD capture.
-    pub async fn pause_stream_at_capture(
-        &self,
-        lease: WriterLease,
-        key: CheckpointKey,
-        expected_capture: Option<&CwdCapture>,
-    ) -> Result<StreamAdministrationOutcome, RuntimeError> {
         self.apply_admin_invocation(
             lease,
-            expected_capture,
+            None,
             AdminInvocationOperation::Pause { key, reason: None },
         )
         .await
         .and_then(admin_stream_result)
-    }
-
-    /// Applies a pause with a caller-stable invocation identity. A repeated
-    /// identity with the same operation returns its retained outcome without
-    /// reapplying the transition; reusing it for different arguments fails.
-    pub async fn pause_stream_with_invocation_id(
-        &self,
-        lease: WriterLease,
-        key: CheckpointKey,
-        invocation_id: [u8; 16],
-    ) -> Result<StreamAdministrationOutcome, RuntimeError> {
-        let operation = AdminInvocationOperation::Pause { key, reason: None };
-        let descriptor = admin_invocation_descriptor_with_id(&operation, invocation_id);
-        self.apply_admin_invocation_with_descriptor(lease, None, operation, descriptor)
-            .await
-            .and_then(admin_stream_result)
     }
 
     /// Reason-bearing stable-receipt form of a stream pause.
@@ -6174,22 +6147,9 @@ impl RuntimeState {
         key: CheckpointKey,
         reason: String,
     ) -> Result<StreamAdministrationOutcome, RuntimeError> {
-        self.pause_stream_with_reason_at_capture(lease, key, reason, None)
-            .await
-    }
-
-    /// Equivalent to [`Self::pause_stream_with_reason`], additionally
-    /// requiring the CWD capture observed while resolving the stream.
-    pub async fn pause_stream_with_reason_at_capture(
-        &self,
-        lease: WriterLease,
-        key: CheckpointKey,
-        reason: String,
-        expected_capture: Option<&CwdCapture>,
-    ) -> Result<StreamAdministrationOutcome, RuntimeError> {
         self.apply_admin_invocation(
             lease,
-            expected_capture,
+            None,
             AdminInvocationOperation::Pause {
                 key,
                 reason: Some(reason),
@@ -6249,24 +6209,6 @@ impl RuntimeState {
             lease,
             request,
             None,
-            provider,
-            Uuid::new_v4().into_bytes(),
-        )
-        .await
-    }
-
-    /// Capture-fenced provider-gated form of the checkpoint reset boundary.
-    pub async fn reset_checkpoint_at_capture_with_provider<P: CheckpointResetProvider>(
-        &self,
-        lease: WriterLease,
-        request: CheckpointResetRequest,
-        expected_capture: Option<&CwdCapture>,
-        provider: &P,
-    ) -> Result<StreamCheckpoint, RuntimeError> {
-        self.reset_checkpoint_at_capture_with_provider_and_invocation_id(
-            lease,
-            request,
-            expected_capture,
             provider,
             Uuid::new_v4().into_bytes(),
         )
@@ -6411,37 +6353,7 @@ impl RuntimeState {
         lease: WriterLease,
         key: CheckpointKey,
     ) -> Result<StreamAdministrationOutcome, RuntimeError> {
-        self.resume_stream_at_capture(lease, key, None).await
-    }
-
-    /// Applies a resume only if the writer-fenced transaction still observes
-    /// the supplied CWD capture.
-    pub async fn resume_stream_at_capture(
-        &self,
-        lease: WriterLease,
-        key: CheckpointKey,
-        expected_capture: Option<&CwdCapture>,
-    ) -> Result<StreamAdministrationOutcome, RuntimeError> {
-        self.apply_admin_invocation(
-            lease,
-            expected_capture,
-            AdminInvocationOperation::Resume { key },
-        )
-        .await
-        .and_then(admin_stream_result)
-    }
-
-    /// Applies a resume with a caller-stable invocation identity, replaying
-    /// the durable outcome when the same request is submitted again.
-    pub async fn resume_stream_with_invocation_id(
-        &self,
-        lease: WriterLease,
-        key: CheckpointKey,
-        invocation_id: [u8; 16],
-    ) -> Result<StreamAdministrationOutcome, RuntimeError> {
-        let operation = AdminInvocationOperation::Resume { key };
-        let descriptor = admin_invocation_descriptor_with_id(&operation, invocation_id);
-        self.apply_admin_invocation_with_descriptor(lease, None, operation, descriptor)
+        self.apply_admin_invocation(lease, None, AdminInvocationOperation::Resume { key })
             .await
             .and_then(admin_stream_result)
     }
@@ -6787,37 +6699,6 @@ impl RuntimeState {
     /// Returns this runtime's single repository-scoped VFS cache owner.
     pub fn vfs_repository_cache(&self) -> &vfs::VfsRepositoryCache {
         &self.vfs_repository_cache
-    }
-
-    /// Registers an immutable repository projection in this runtime's VFS
-    /// cache scope. All files for this runtime should be admitted here.
-    pub async fn manage_vfs_file<S>(
-        &self,
-        image: Arc<vfs::VfsFileSnapshot<S>>,
-    ) -> Result<Arc<vfs::ManagedFile<S>>, vfs::VfsRepositoryCacheError>
-    where
-        S: std::any::Any + Send + Sync + 'static,
-    {
-        self.vfs_repository_cache.managed_file(image).await
-    }
-
-    /// Routes an EDIT-1 temporary-file rename through this runtime's VFS
-    /// scope. The adapter must complete the validated durable table activation
-    /// before it returns `ActivationDecision::Accepted`.
-    pub async fn rename_vfs_temporary_over<S, F, Fut, E>(
-        &self,
-        destination: &Arc<vfs::ManagedFile<S>>,
-        scratch: &vfs::TemporarySave<S>,
-        activate: F,
-    ) -> Result<vfs::TemporaryRenameOutcome<S>, vfs::TemporaryRenameError<E>>
-    where
-        S: Send + Sync + 'static,
-        F: FnOnce(vfs::ActivationCandidate<S>) -> Fut,
-        Fut: Future<Output = Result<vfs::ActivationDecision<S>, E>>,
-    {
-        self.vfs_repository_cache
-            .rename_over(destination, scratch, activate)
-            .await
     }
 
     /// Returns a checked continuation for an already-admitted Running table
@@ -14110,106 +13991,6 @@ impl RuntimeState {
         key.verify(&payload, &Signature::from_bytes(receipt.signature()))
             .map_err(|_| RuntimeError::InvalidCompactReceipt)
     }
-    /// Reads and verifies a compact receipt already persisted for this exact
-    /// repository recovery request. The original freeze is loaded from durable
-    /// runtime state; this lookup never reconstructs or consumes its prefix.
-    pub async fn persisted_compact_publication_receipt(
-        &self,
-        pending: &CompactPublicationPending,
-    ) -> Result<Option<CompactRuntimeReceipt>, RuntimeError> {
-        validate_id(pending.runtime_intent_id())?;
-        validate_digest(pending.cleanup_watermark())?;
-        let mut rows = self
-            .connection
-            .query(
-                "SELECT freeze.checkpoint_generation, freeze.checkpoint_mutation_sequence,
-                        freeze.checkpoint_digest, freeze.compact_watermark,
-                        freeze.compact_commit_id, freeze.compact_journal_verifier,
-                        publication_commit.intent_id, publication_commit.commit_id,
-                        publication_commit.compact_receipt
-                 FROM publication_freeze AS freeze
-                 LEFT JOIN publication_commit
-                   ON publication_commit.intent_id = freeze.intent_id
-                 WHERE freeze.intent_id = ?1",
-                params![pending.runtime_intent_id().to_vec()],
-            )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let Some(row) = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        else {
-            return Err(RuntimeError::RecoveryInvalid);
-        };
-        let stored_checkpoint = Checkpoint {
-            generation: u64::try_from(
-                row.get::<i64>(0)
-                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
-            )
-            .map_err(|_| RuntimeError::RecoveryInvalid)?,
-            mutation_sequence: u64::try_from(
-                row.get::<i64>(1)
-                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
-            )
-            .map_err(|_| RuntimeError::RecoveryInvalid)?,
-            digest: fixed(row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
-        };
-        if stored_checkpoint.digest != pending.cleanup_watermark() {
-            return Err(RuntimeError::ConflictingPublicationIntent);
-        }
-        let watermark: Option<Vec<u8>> = row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?;
-        let bound_commit: Option<Vec<u8>> =
-            row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?;
-        let verifier: Option<Vec<u8>> = row.get(5).map_err(|_| RuntimeError::RecoveryInvalid)?;
-        let compact_binding_matches = match (watermark, bound_commit, verifier) {
-            (None, None, None) => false,
-            (Some(watermark), Some(commit), Some(verifier)) => {
-                if fixed::<32>(watermark)? != pending.cleanup_watermark()
-                    || commit != pending.commit().as_str().as_bytes()
-                    || fixed::<32>(verifier)? != pending.journal_verifier()
-                {
-                    return Err(RuntimeError::ConflictingPublicationIntent);
-                }
-                true
-            }
-            _ => return Err(RuntimeError::RecoveryInvalid),
-        };
-        let committed_intent: Option<Vec<u8>> =
-            row.get(6).map_err(|_| RuntimeError::RecoveryInvalid)?;
-        let Some(committed_intent) = committed_intent else {
-            return Ok(None);
-        };
-        if fixed::<16>(committed_intent)? != pending.runtime_intent_id() {
-            return Err(RuntimeError::RecoveryInvalid);
-        }
-        if !compact_binding_matches {
-            return Err(RuntimeError::RecoveryInvalid);
-        }
-        let committed_id: Vec<u8> = row.get(7).map_err(|_| RuntimeError::RecoveryInvalid)?;
-        PublicationCommitId::new(committed_id.clone())
-            .map_err(|_| RuntimeError::RecoveryInvalid)?;
-        if committed_id != pending.commit().as_str().as_bytes() {
-            return Err(RuntimeError::ConflictingPublicationCommit);
-        }
-        let encoded: Option<Vec<u8>> = row.get(8).map_err(|_| RuntimeError::RecoveryInvalid)?;
-        let receipt = CompactRuntimeReceipt::decode(
-            encoded
-                .as_deref()
-                .ok_or(RuntimeError::InvalidCompactReceipt)?,
-        )
-        .map_err(|_| RuntimeError::InvalidCompactReceipt)?;
-        self.verify_compact_receipt(&receipt)?;
-        if receipt.runtime_intent_id() != pending.runtime_intent_id()
-            || receipt.cleanup_watermark() != pending.cleanup_watermark()
-            || receipt.commit() != pending.commit()
-            || receipt.journal_verifier() != pending.journal_verifier()
-        {
-            return Err(RuntimeError::ConflictingPublicationCommit);
-        }
-        Ok(Some(receipt))
-    }
-
     pub async fn validate_recovery(&self) -> Result<(), RuntimeError> {
         self.validate_recovery_with_pin_manifest().await.map(|_| ())
     }

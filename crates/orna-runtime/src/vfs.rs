@@ -506,10 +506,6 @@ impl<S, C> SnapshotReaddirCursor<S, C> {
         &self.continuation
     }
 
-    pub fn continuation_mut(&mut self) -> &mut C {
-        &mut self.continuation
-    }
-
     pub fn projection(&self) -> Option<&CacheProjection> {
         self.pin.projection()
     }
@@ -2483,23 +2479,6 @@ pub fn field_name_digest(field: &str) -> [u8; 32] {
     str_component_digest(field)
 }
 
-/// Resolves one `~field-` alias digest against a retained candidate field
-/// name. The full name is re-derived and verified rather than trusted, so a
-/// colliding digest is detected instead of merged (VFS-016).
-pub fn resolve_field_alias(digest: &[u8; 32], candidates: &[&str]) -> Result<String, VfsPathError> {
-    let mut resolved: Option<&str> = None;
-    for candidate in candidates {
-        if &field_name_digest(candidate) != digest {
-            continue;
-        }
-        if resolved.is_some_and(|found| found != *candidate) {
-            return Err(VfsPathError::NameCollision);
-        }
-        resolved = Some(candidate);
-    }
-    resolved.map(str::to_owned).ok_or(VfsPathError::UnknownRow)
-}
-
 /// Projects one stored Blob field name to its sibling content-file name:
 /// escaped field name plus the MIME-1 selected suffix. A field that would spell
 /// the reserved row document keeps its own distinct name (VFS-016).
@@ -2587,25 +2566,6 @@ pub fn classify_content_suffix(
         .canonical_annotation(media_type, Some(selected))
         .map(|annotation| annotation.suffix().map(str::to_owned))
         .map_err(|_| VfsPathError::InvalidDocument)
-}
-
-/// Splits one mount-relative path and refuses absolute paths, empty
-/// components, and traversal spellings before any name is resolved (VFS-004).
-pub fn split_vfs_relative(path: &str) -> Result<Vec<&str>, VfsPathError> {
-    if path.is_empty() || path.starts_with('/') || path.len() > VFS_MAX_PATH_BYTES {
-        return Err(VfsPathError::OutsideProjection);
-    }
-    let mut components = Vec::new();
-    for component in path.split('/') {
-        if component.is_empty() || component == "." || component == ".." {
-            return Err(VfsPathError::OutsideProjection);
-        }
-        if component.contains('\\') {
-            return Err(VfsPathError::OutsideProjection);
-        }
-        components.push(component);
-    }
-    Ok(components)
 }
 
 /// Decodes one projected component back to its canonical text, refusing any
@@ -3061,17 +3021,6 @@ impl<S> VfsRowProjection<S> {
     /// `data.orna`.
     pub fn document_text(&self) -> &str {
         &self.document
-    }
-
-    /// Binds the served document bytes to the snapshot that produced them, so
-    /// a read handle observes exactly the admitted row.
-    pub fn document_snapshot(&self) -> VfsFileSnapshot<S> {
-        VfsFileSnapshot::new(self.pin.clone_pin(), self.document.as_bytes())
-    }
-
-    /// Directory entries of this row, document first, then content files.
-    pub fn entry_names(&self) -> impl Iterator<Item = &str> {
-        std::iter::once(VFS_ROW_DOCUMENT).chain(self.files.iter().map(VfsProjectedFile::name))
     }
 
     pub fn files(&self) -> &[VfsProjectedFile] {
