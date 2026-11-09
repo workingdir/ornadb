@@ -8,14 +8,14 @@ use orna_foundation::{
 };
 use orna_live::{
     ActionAuthority, ActionAuthorityRegistry, ActionBinding, ActionFuture, ActionHandler,
-    CreateRequest, DeleteRequest, Error, Frame, FrameOutcome, HttpBody, HttpConnection,
-    HttpConnectionError, HttpEncodeError, HttpIoError, HttpParseError, Limits, ListenerBindError,
-    ListenerExposure, LiveApplication, LiveApplicationWorkLease, LiveApplicationWorkSupervisor,
-    LiveCredentialIssuer, LiveEvalResponse, LiveEvalTransaction, LiveHost, LiveListenerAcceptor,
-    LiveSessionAuthority, LiveSessionChildren, LiveTransport, ResumeRequest, SUBPROTOCOL,
-    SessionCredential, SessionMetadata, TransportLimits, WebSocketApplicationPreparation,
-    WebSocketOutput, WebSocketState, WebSocketUpgrade, WireRequest, WireResponse,
-    encode_websocket_output, parse_http_request,
+    CreateRequest, DeleteRequest, Error, FirstPartyEffectTrust, Frame, FrameOutcome, HttpBody,
+    HttpConnection, HttpConnectionError, HttpEncodeError, HttpIoError, HttpParseError, Limits,
+    ListenerBindError, ListenerExposure, LiveApplication, LiveApplicationWorkLease,
+    LiveApplicationWorkSupervisor, LiveCredentialIssuer, LiveEvalResponse, LiveEvalTransaction,
+    LiveHost, LiveListenerAcceptor, LiveSessionAuthority, LiveSessionChildren, LiveTransport,
+    ResumeRequest, SUBPROTOCOL, SessionCredential, SessionMetadata, TransportLimits,
+    WebSocketApplicationPreparation, WebSocketOutput, WebSocketState, WebSocketUpgrade,
+    WireRequest, WireResponse, encode_websocket_output, parse_http_request,
 };
 use orna_protocol::{
     DatabaseContext, Envelope, Message, PresentIdentity, PresentKind, PresentNode,
@@ -24,9 +24,9 @@ use orna_protocol::{
 };
 use orna_repository::Repository;
 use orna_runtime::{
-    ActivationEffectReport, EffectGate, FaultInjector, FaultPoint, RequestIdentity, RequestOwner,
-    RequestState, RunObservationStatus, RuntimeActivationContext, RuntimeError, RuntimeIdentity,
-    RuntimeState, TableMutation, TerminalOutcome,
+    FaultInjector, FaultPoint, RequestIdentity, RequestOwner, RequestState, RunObservationStatus,
+    RuntimeActivationContext, RuntimeError, RuntimeIdentity, RuntimeState, TableMutation,
+    TerminalOutcome,
 };
 use orna_security::{
     AttachmentId, BoundaryError, CredentialIssuer, Origin, OriginPolicy, SessionBoundary,
@@ -575,7 +575,7 @@ impl LiveApplication for CompetingTerminalApplication {
         let transaction = LiveEvalTransaction::new(
             vec![TableMutation::new([8; 16], "books", vec![8], Some(vec![9])).unwrap()],
             [4; 32],
-            EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
+            orna_evaluator::EffectGate::admit_unbound_for_test(),
             Arc::new(NoFault),
         )
         .for_request(RequestIdentity {
@@ -630,8 +630,8 @@ impl LiveApplication for TransactionalApplication {
 
     // The transactions below declare a controlled effect report this fake is
     // trusted to make, so their observed rollbacks recover as RollbackProven.
-    fn trusts_controlled_effect_reports(&self) -> bool {
-        true
+    fn first_party_effect_trust(&self) -> Option<FirstPartyEffectTrust> {
+        Some(FirstPartyEffectTrust::mint())
     }
 
     fn eval_with_transaction<'a>(
@@ -650,7 +650,7 @@ impl LiveApplication for TransactionalApplication {
         let transaction = LiveEvalTransaction::new(
             self.mutations.clone(),
             [3; 32],
-            EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
+            orna_evaluator::EffectGate::admit_unbound_for_test(),
             Arc::clone(&self.faults),
         )
         .for_request(RequestIdentity {
@@ -696,7 +696,7 @@ impl LiveApplication for TransactionalApplication {
         let transaction = LiveEvalTransaction::new(
             self.mutations.clone(),
             [3; 32],
-            EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
+            orna_evaluator::EffectGate::admit_unbound_for_test(),
             Arc::clone(&self.faults),
         )
         .for_request(RequestIdentity {
@@ -798,10 +798,6 @@ impl LiveApplication for UntrustedTransactionalApplication {
     ) -> Result<Envelope, Error> {
         self.0.watch(session, request, message)
     }
-
-    fn trusts_controlled_effect_reports(&self) -> bool {
-        false
-    }
 }
 
 /// A third-party application that declares its own `ExternalPossible` effect
@@ -835,7 +831,7 @@ impl LiveApplication for ThirdPartyHostEffectApplication {
         let transaction = LiveEvalTransaction::new(
             self.mutations.clone(),
             [3; 32],
-            ActivationEffectReport::ExternalPossible,
+            orna_evaluator::ActivationEffectReport::ExternalPossible,
             Arc::clone(&self.faults),
         )
         .for_request(RequestIdentity {
@@ -867,14 +863,10 @@ impl LiveApplication for ThirdPartyHostEffectApplication {
     fn watch(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope, Error> {
         Err(Error::UnsupportedOperation)
     }
-
-    fn trusts_controlled_effect_reports(&self) -> bool {
-        false
-    }
 }
 
 /// A third-party application that overrides nothing about trust. Its
-/// `trusts_controlled_effect_reports` must be the trait default, `false`, so
+/// `first_party_effect_trust` must be the trait default, `None`, so
 /// any controlled report it declares is downgraded (REQUEST-1 step 5).
 struct DefaultTrustApplication;
 
@@ -890,7 +882,7 @@ impl LiveApplication for DefaultTrustApplication {
 
 #[test]
 fn third_party_trust_defaults_to_untrusted() {
-    assert!(!DefaultTrustApplication.trusts_controlled_effect_reports());
+    assert!(DefaultTrustApplication.first_party_effect_trust().is_none());
 }
 
 /// Applies its effects inside a plain Eval and answers with a response that
@@ -1058,8 +1050,8 @@ impl LiveApplication for WatchEventApplication {
 
     // Watch-event rollbacks keep their RollbackProven expectations because the
     // fake declares a controlled effect report it is trusted to make.
-    fn trusts_controlled_effect_reports(&self) -> bool {
-        true
+    fn first_party_effect_trust(&self) -> Option<FirstPartyEffectTrust> {
+        Some(FirstPartyEffectTrust::mint())
     }
 
     fn watch(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope, Error> {
@@ -1127,7 +1119,7 @@ impl LiveApplication for WatchEventApplication {
                                 .unwrap(),
                         ],
                         [201; 32],
-                        EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
+                        orna_evaluator::EffectGate::admit_unbound_for_test(),
                         Arc::new(FailAt(FaultPoint::AfterTableWrite)),
                     )
                     .for_request(RequestIdentity {
@@ -1143,7 +1135,7 @@ impl LiveApplication for WatchEventApplication {
                                 .unwrap(),
                         ],
                         [202; 32],
-                        EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
+                        orna_evaluator::EffectGate::admit_unbound_for_test(),
                         Arc::new(NoFault),
                     )
                     .for_request(RequestIdentity {
@@ -11597,7 +11589,7 @@ fn durable_live_host_replays_proven_rollback_without_reexecution() {
             [3; 32],
             TerminalOutcome::new(vec![4]).unwrap(),
             &FailAt(FaultPoint::AfterTerminalClaim),
-            EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
+            orna_evaluator::EffectGate::admit_unbound_for_test(),
         )),
         Err(RuntimeError::FaultInjected(FaultPoint::AfterTerminalClaim))
     );
@@ -11686,7 +11678,7 @@ fn durable_replay_rejects_an_uncertain_payload_for_a_proven_rollback() {
             [3; 32],
             TerminalOutcome::new(vec![4]).unwrap(),
             &FailAt(FaultPoint::AfterTerminalClaim),
-            EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
+            orna_evaluator::EffectGate::admit_unbound_for_test(),
         )),
         Err(RuntimeError::FaultInjected(FaultPoint::AfterTerminalClaim))
     );
@@ -11844,7 +11836,7 @@ fn durable_runtime_replays_proven_rollback_as_redacted_orphaned_failure() {
             [3; 32],
             TerminalOutcome::new(vec![4]).unwrap(),
             &FailAt(FaultPoint::AfterTerminalClaim),
-            EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
+            orna_evaluator::EffectGate::admit_unbound_for_test(),
         )),
         Err(RuntimeError::FaultInjected(FaultPoint::AfterTerminalClaim))
     );

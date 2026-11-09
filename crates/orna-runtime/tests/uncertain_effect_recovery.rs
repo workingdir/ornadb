@@ -18,11 +18,11 @@ use std::{
     process::{Command, ExitStatus},
 };
 
+use orna_evaluator::ActivationEffectReport;
 use orna_repository::Repository;
 use orna_runtime::{
-    ActivationEffectReport, EffectGate, FaultInjector, FaultPoint, RecoveryDisposition,
-    RequestIdentity, RequestOwner, RequestState, RuntimeError, RuntimeIdentity, RuntimeState,
-    TableMutation, TerminalOutcome,
+    FaultInjector, FaultPoint, RecoveryDisposition, RequestIdentity, RequestOwner, RequestState,
+    RuntimeError, RuntimeIdentity, RuntimeState, TableMutation, TerminalOutcome,
 };
 use tempfile::{Builder, TempDir};
 
@@ -214,7 +214,7 @@ fn external_effect_child(repository_path: &Path) {
                 [8; 32],
                 outcome(EFFECTS_UNCERTAIN),
                 &AbortAt(FaultPoint::AfterTableWrite),
-                EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
+                orna_evaluator::EffectGate::admit_unbound_for_test(),
             )
             .await;
         unreachable!("the table-write seam must abort the child process");
@@ -245,7 +245,7 @@ fn controlled_rollback_child(repository_path: &Path) {
                 request(),
                 FINGERPRINT,
                 owner,
-                &match EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()) {
+                &match orna_evaluator::EffectGate::admit_unbound_for_test() {
                     ActivationEffectReport::ControlledOnly(token) => token,
                     ActivationEffectReport::ExternalPossible => {
                         unreachable!("an unbound evaluation is admitted as controlled")
@@ -267,7 +267,7 @@ fn controlled_rollback_child(repository_path: &Path) {
                 [8; 32],
                 outcome(ROLLBACK_PROVEN),
                 &RefuseAt(FaultPoint::AfterTableWrite),
-                EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
+                orna_evaluator::EffectGate::admit_unbound_for_test(),
             )
             .await;
         assert!(

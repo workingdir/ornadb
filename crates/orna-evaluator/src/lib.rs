@@ -58,7 +58,9 @@ mod unicode_16_case_properties;
 pub use browser_profile::{BrowserProfileError, execute_browser_profile};
 pub use cancellation::CancellationToken;
 #[cfg(feature = "system-host-bindings")]
-pub use effect_evidence::SysHostEffectEvidence;
+pub use effect_evidence::{
+    ActivationEffectReport, ControlledEffectToken, EffectGate, ExternalStateEvidence,
+};
 #[cfg(feature = "system-host-bindings")]
 pub use explain_bindings::{ActivationExplainCatalogue, ExplainCatalogue};
 use list::List;

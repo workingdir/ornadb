@@ -174,16 +174,14 @@ fn verify_root<S: OgbObjects>(
 
     let mut hasher = Sha256::new();
     let mut streamed = 0u64;
-    verify_node(
+    NodeVerifier {
         store,
-        &data_oid,
         width,
-        Some(total),
-        None,
-        &mut hasher,
-        &mut streamed,
-        payload.as_mut().map(|(buffer, _)| &mut **buffer),
-    )?;
+        hasher: &mut hasher,
+        streamed: &mut streamed,
+        payload: payload.as_mut().map(|(buffer, _)| &mut **buffer),
+    }
+    .verify(&data_oid, Some(total), None)?;
     let actual: [u8; 32] = hasher.finalize().into();
     if streamed != total {
         return Err(OgbError::Integrity("total length"));
@@ -197,132 +195,130 @@ fn verify_root<S: OgbObjects>(
     })
 }
 
-/// The parameters describe one record; each caller passes them straight through.
-#[allow(clippy::too_many_arguments)]
-/// Recursively verifies one data node. Chunk bytes are fed to `hasher` in order,
-/// and appended to `payload` when the caller asked for the content.
-fn verify_node<S: OgbObjects>(
-    store: &S,
-    oid: &[u8],
+/// The objects and streaming state of one whole-content verification: the tree
+/// and blob reader, the OID width of the algorithm in use, the running digest,
+/// the bytes fed so far, and the buffer the content is kept in when asked for.
+struct NodeVerifier<'a, S: OgbObjects> {
+    store: &'a S,
     width: usize,
-    expected_len: Option<u64>,
-    expected_height: Option<u64>,
-    hasher: &mut Sha256,
-    streamed: &mut u64,
-    mut payload: Option<&mut Vec<u8>>,
-) -> Result<(), OgbError> {
-    let entries = tree(store, oid)?;
-    let index_entry = find(&entries, "index")?;
-    if index_entry.mode != MODE_BLOB {
-        return Err(OgbError::Malformed("index mode"));
-    }
-    let index_bytes = blob(store, &index_entry.oid)?;
-    let Item::Array(index) = decode_exact(&index_bytes)? else {
-        return Err(OgbError::Malformed("node shape"));
-    };
-    let [version, height, total, children] =
-        <[Item; 4]>::try_from(index).map_err(|_| OgbError::Malformed("node arity"))?;
-    if version != Item::Uint(1) {
-        return Err(OgbError::Malformed("node version"));
-    }
-    let Item::Uint(height) = height else {
-        return Err(OgbError::Malformed("node height"));
-    };
-    if height > OGB_MAX_HEIGHT {
-        return Err(OgbError::Malformed("node height range"));
-    }
-    let Item::Uint(total) = total else {
-        return Err(OgbError::Malformed("node total"));
-    };
-    if total > OGB_MAX_LENGTH {
-        return Err(OgbError::Malformed("node total range"));
-    }
-    if expected_len.is_some_and(|len| len != total) {
-        return Err(OgbError::Malformed("child length"));
-    }
-    if expected_height.is_some_and(|h| h != height) {
-        return Err(OgbError::Malformed("child height"));
-    }
-    let Item::Array(children) = children else {
-        return Err(OgbError::Malformed("node entries"));
-    };
-    if children.len() > OGB_FANOUT || (children.is_empty() && (height != 0 || total != 0)) {
-        return Err(OgbError::Malformed("node fanout"));
-    }
+    hasher: &'a mut Sha256,
+    streamed: &'a mut u64,
+    payload: Option<&'a mut Vec<u8>>,
+}
 
-    let child_names: Vec<String> = (0..children.len()).map(|i| format!("{i:03x}")).collect();
-    let mut expected_names: Vec<&str> = vec!["index"];
-    expected_names.extend(child_names.iter().map(String::as_str));
-    exact_names(&entries, &expected_names)?;
+impl<S: OgbObjects> NodeVerifier<'_, S> {
+    /// Recursively verifies one data node. Chunk bytes are fed to the hasher in
+    /// order, and appended to the payload when the caller asked for the content.
+    fn verify(
+        &mut self,
+        oid: &[u8],
+        expected_len: Option<u64>,
+        expected_height: Option<u64>,
+    ) -> Result<(), OgbError> {
+        let entries = tree(self.store, oid)?;
+        let index_entry = find(&entries, "index")?;
+        if index_entry.mode != MODE_BLOB {
+            return Err(OgbError::Malformed("index mode"));
+        }
+        let index_bytes = blob(self.store, &index_entry.oid)?;
+        let Item::Array(index) = decode_exact(&index_bytes)? else {
+            return Err(OgbError::Malformed("node shape"));
+        };
+        let [version, height, total, children] =
+            <[Item; 4]>::try_from(index).map_err(|_| OgbError::Malformed("node arity"))?;
+        if version != Item::Uint(1) {
+            return Err(OgbError::Malformed("node version"));
+        }
+        let Item::Uint(height) = height else {
+            return Err(OgbError::Malformed("node height"));
+        };
+        if height > OGB_MAX_HEIGHT {
+            return Err(OgbError::Malformed("node height range"));
+        }
+        let Item::Uint(total) = total else {
+            return Err(OgbError::Malformed("node total"));
+        };
+        if total > OGB_MAX_LENGTH {
+            return Err(OgbError::Malformed("node total range"));
+        }
+        if expected_len.is_some_and(|len| len != total) {
+            return Err(OgbError::Malformed("child length"));
+        }
+        if expected_height.is_some_and(|h| h != height) {
+            return Err(OgbError::Malformed("child height"));
+        }
+        let Item::Array(children) = children else {
+            return Err(OgbError::Malformed("node entries"));
+        };
+        if children.len() > OGB_FANOUT || (children.is_empty() && (height != 0 || total != 0)) {
+            return Err(OgbError::Malformed("node fanout"));
+        }
 
-    let mut end = 0u64;
-    for (i, child) in children.into_iter().enumerate() {
-        let Item::Array(fields) = child else {
-            return Err(OgbError::Malformed("entry shape"));
-        };
-        let [stop, target, digest] =
-            <[Item; 3]>::try_from(fields).map_err(|_| OgbError::Malformed("entry arity"))?;
-        let Item::Uint(stop) = stop else {
-            return Err(OgbError::Malformed("entry interval"));
-        };
-        if !(end < stop && stop <= OGB_MAX_LENGTH) {
-            return Err(OgbError::Malformed("entry interval range"));
-        }
-        let Item::Bytes(target) = target else {
-            return Err(OgbError::Malformed("entry target"));
-        };
-        if target.len() != width {
-            return Err(OgbError::Malformed("entry oid width"));
-        }
-        let child_entry = find(&entries, &child_names[i])?;
-        let want_mode = if height == 0 { MODE_BLOB } else { MODE_TREE };
-        if child_entry.mode != want_mode || child_entry.oid != target {
-            return Err(OgbError::Malformed("entry target"));
-        }
-        let length = stop - end;
-        if height == 0 {
-            let Item::Bytes(chunk_digest) = digest else {
-                return Err(OgbError::Malformed("chunk digest"));
+        let child_names: Vec<String> = (0..children.len()).map(|i| format!("{i:03x}")).collect();
+        let mut expected_names: Vec<&str> = vec!["index"];
+        expected_names.extend(child_names.iter().map(String::as_str));
+        exact_names(&entries, &expected_names)?;
+
+        let mut end = 0u64;
+        for (i, child) in children.into_iter().enumerate() {
+            let Item::Array(fields) = child else {
+                return Err(OgbError::Malformed("entry shape"));
             };
-            let chunk_digest = <[u8; 32]>::try_from(chunk_digest.as_slice())
-                .map_err(|_| OgbError::Malformed("chunk digest width"))?;
-            if length > OGB_MAX_CHUNK {
-                return Err(OgbError::Malformed("chunk size"));
+            let [stop, target, digest] =
+                <[Item; 3]>::try_from(fields).map_err(|_| OgbError::Malformed("entry arity"))?;
+            let Item::Uint(stop) = stop else {
+                return Err(OgbError::Malformed("entry interval"));
+            };
+            if !(end < stop && stop <= OGB_MAX_LENGTH) {
+                return Err(OgbError::Malformed("entry interval range"));
             }
-            let data = blob(store, &target)?;
-            if data.len() as u64 != length {
-                return Err(OgbError::Integrity("chunk length"));
+            let Item::Bytes(target) = target else {
+                return Err(OgbError::Malformed("entry target"));
+            };
+            if target.len() != self.width {
+                return Err(OgbError::Malformed("entry oid width"));
             }
-            let got: [u8; 32] = Sha256::digest(&data).into();
-            if got != chunk_digest {
-                return Err(OgbError::Integrity("chunk digest"));
+            let child_entry = find(&entries, &child_names[i])?;
+            let want_mode = if height == 0 { MODE_BLOB } else { MODE_TREE };
+            if child_entry.mode != want_mode || child_entry.oid != target {
+                return Err(OgbError::Malformed("entry target"));
             }
-            hasher.update(&data);
-            if let Some(buffer) = payload.as_mut() {
-                buffer.extend_from_slice(&data);
+            let length = stop - end;
+            if height == 0 {
+                let Item::Bytes(chunk_digest) = digest else {
+                    return Err(OgbError::Malformed("chunk digest"));
+                };
+                let chunk_digest = <[u8; 32]>::try_from(chunk_digest.as_slice())
+                    .map_err(|_| OgbError::Malformed("chunk digest width"))?;
+                if length > OGB_MAX_CHUNK {
+                    return Err(OgbError::Malformed("chunk size"));
+                }
+                let data = blob(self.store, &target)?;
+                if data.len() as u64 != length {
+                    return Err(OgbError::Integrity("chunk length"));
+                }
+                let got: [u8; 32] = Sha256::digest(&data).into();
+                if got != chunk_digest {
+                    return Err(OgbError::Integrity("chunk digest"));
+                }
+                self.hasher.update(&data);
+                if let Some(buffer) = self.payload.as_deref_mut() {
+                    buffer.extend_from_slice(&data);
+                }
+                *self.streamed += length;
+            } else {
+                if digest != Item::Null {
+                    return Err(OgbError::Malformed("internal digest"));
+                }
+                self.verify(&target, Some(length), Some(height - 1))?;
             }
-            *streamed += length;
-        } else {
-            if digest != Item::Null {
-                return Err(OgbError::Malformed("internal digest"));
-            }
-            verify_node(
-                store,
-                &target,
-                width,
-                Some(length),
-                Some(height - 1),
-                hasher,
-                streamed,
-                payload.as_deref_mut(),
-            )?;
+            end = stop;
         }
-        end = stop;
+        if end != total {
+            return Err(OgbError::Malformed("node total"));
+        }
+        Ok(())
     }
-    if end != total {
-        return Err(OgbError::Malformed("node total"));
-    }
-    Ok(())
 }
 
 fn oid_width(oid: &[u8]) -> Result<usize, OgbError> {

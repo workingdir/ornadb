@@ -26,8 +26,8 @@ use crate::cli_row_key::render_key;
 use crate::encoding::hex;
 
 use orna_repository::{
-    AdmittedRow, FormatContextError, GitCommitRef, KeyRange, Repository, RepositoryFormatContext,
-    TypedKey,
+    AdmittedRow, FormatContextError, GitCommitRef, KeyRange, NativeGraphContext, Repository,
+    RepositoryFormatContext, RepositoryReadScope, TypedKey,
 };
 use orna_runtime::TableObjectId;
 use orna_value::{BlobMetadata, ROV3_BLOB_TAG, Raw, decode_canonical_storage_value};
@@ -43,6 +43,9 @@ const MAX_HISTORY_LIMIT: usize = 4096;
 /// (`MAX_ROW_RANGE_LIMIT`). A relation larger than one page is walked page by
 /// page so the comparison never materialises an unbounded range.
 const MAX_DIFF_PAGE: usize = 256;
+
+/// How a legacy `history` invocation names the table of a loose row.
+const LEGACY_HELP: &str = "name the table of a legacy loose row by its key-path directory, such as `contacts/Contact`, with `--at` naming the format-1/2 snapshot";
 
 /// Output shape for the revision listing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -69,7 +72,118 @@ struct HistoryOptions<'a> {
     diff: Option<(&'a str, &'a str)>,
 }
 
-#[allow(clippy::too_many_lines)]
+use crate::cli_options::Words;
+
+/// The value one option consumes, or the option's own usage diagnostic.
+fn option_value<'a>(
+    words: &mut Words<'a>,
+    message: &'static str,
+    usage: &'static str,
+) -> Result<&'a str, Diagnostic> {
+    crate::cli_options::value(words, history_error, message, usage)
+}
+
+/// `--limit <1..=4096>`.
+fn limit_option(words: &mut Words<'_>) -> Result<usize, Diagnostic> {
+    let value = option_value(words, "--limit needs a value", "usage: --limit <1..=4096>")?;
+    value
+        .parse::<usize>()
+        .ok()
+        .filter(|limit| (1..=MAX_HISTORY_LIMIT).contains(limit))
+        .ok_or_else(|| history_error("--limit is not in 1..=4096", format!("got {value:?}")))
+}
+
+/// `--since <commit-hex>`.
+fn since_option<'a>(words: &mut Words<'a>) -> Result<&'a str, Diagnostic> {
+    option_value(
+        words,
+        "--since needs a commit id",
+        "usage: --since <commit-hex>",
+    )
+}
+
+/// `--at <selector>`: a listing names one snapshot.
+fn at_option<'a>(words: &mut Words<'a>, current: Option<&'a str>) -> Result<&'a str, Diagnostic> {
+    let value = option_value(words, "--at needs a value", "usage: --at <selector>")?;
+    if current.is_some() {
+        return Err(history_error(
+            "History names one snapshot",
+            "usage: --at <selector>",
+        ));
+    }
+    Ok(value)
+}
+
+/// `--diff <from-selector> <to-selector>`: a comparison names one pair.
+fn diff_option<'a>(
+    words: &mut Words<'a>,
+    current: Option<(&'a str, &'a str)>,
+) -> Result<(&'a str, &'a str), Diagnostic> {
+    let from = option_value(
+        words,
+        "--diff needs two snapshots",
+        "usage: --diff <from-selector> <to-selector>",
+    )?;
+    let to = option_value(
+        words,
+        "--diff needs two snapshots",
+        "usage: --diff <from-selector> <to-selector>",
+    )?;
+    if current.is_some() {
+        return Err(history_error(
+            "History compares one pair of snapshots",
+            "usage: --diff <from-selector> <to-selector>",
+        ));
+    }
+    Ok((from, to))
+}
+
+/// `--author <substring>`.
+fn author_option<'a>(words: &mut Words<'a>) -> Result<&'a str, Diagnostic> {
+    option_value(
+        words,
+        "--author needs a value",
+        "usage: --author <substring>",
+    )
+}
+
+/// `--format <human|json>`.
+fn format_option(words: &mut Words<'_>) -> Result<HistoryFormat, Diagnostic> {
+    let value = option_value(
+        words,
+        "--format needs a value",
+        "usage: --format <human|json>",
+    )?;
+    match value {
+        "human" => Ok(HistoryFormat::Human),
+        "json" => Ok(HistoryFormat::Json),
+        _ => Err(history_error(
+            "--format is not human or json",
+            format!("got {value:?}"),
+        )),
+    }
+}
+
+/// The relation and optional row key; `--diff` names the relation and both
+/// snapshots, so no row key is read and the comparison covers every row.
+fn relation_and_key<'a>(
+    diff: Option<(&'a str, &'a str)>,
+    positional: &[&'a str],
+) -> Result<(&'a str, Option<&'a str>), Diagnostic> {
+    match (diff, positional.split_first()) {
+        (Some(_), Some((relation, []))) => Ok((*relation, None)),
+        (Some((_, _)), _) => Err(history_error(
+            "History expects a relation for --diff",
+            "usage: orna history <relation-hex> --diff <from-selector> <to-selector>",
+        )),
+        (None, Some((relation, [key]))) => Ok((*relation, Some(*key))),
+        (None, _) => Err(history_error(
+            "History expects a relation and a row key",
+            "usage: orna history <relation-hex> <key> [--at SELECTOR] [--limit N] [--since <commit-hex>]",
+        )),
+    }
+}
+
 fn parse_options(arguments: &[String]) -> Result<HistoryOptions<'_>, Diagnostic> {
     let mut positional = Vec::new();
     let mut at = None;
@@ -81,84 +195,18 @@ fn parse_options(arguments: &[String]) -> Result<HistoryOptions<'_>, Diagnostic>
     let mut count = false;
     let mut author = None;
     let mut diff = None;
-    let mut words = arguments.iter().map(String::as_str);
+    let mut words = crate::cli_options::words(arguments);
     while let Some(word) = words.next() {
         match word {
-            "--limit" => {
-                let value = words.next().ok_or_else(|| {
-                    history_error("--limit needs a value", "usage: --limit <1..=4096>")
-                })?;
-                limit = value
-                    .parse::<usize>()
-                    .ok()
-                    .filter(|limit| (1..=MAX_HISTORY_LIMIT).contains(limit))
-                    .ok_or_else(|| {
-                        history_error("--limit is not in 1..=4096", format!("got {value:?}"))
-                    })?;
-            }
-            "--since" => {
-                let value = words.next().ok_or_else(|| {
-                    history_error("--since needs a commit id", "usage: --since <commit-hex>")
-                })?;
-                since = Some(value);
-            }
-            "--at" => {
-                let value = words
-                    .next()
-                    .ok_or_else(|| history_error("--at needs a value", "usage: --at <selector>"))?;
-                if at.is_some() {
-                    return Err(history_error(
-                        "History names one snapshot",
-                        "usage: --at <selector>",
-                    ));
-                }
-                at = Some(value);
-            }
+            "--limit" => limit = limit_option(&mut words)?,
+            "--since" => since = Some(since_option(&mut words)?),
+            "--at" => at = Some(at_option(&mut words, at)?),
             "--reverse" => reverse = true,
             "--quiet" => quiet = true,
             "--count" => count = true,
-            "--diff" => {
-                let from = words.next().ok_or_else(|| {
-                    history_error(
-                        "--diff needs two snapshots",
-                        "usage: --diff <from-selector> <to-selector>",
-                    )
-                })?;
-                let to = words.next().ok_or_else(|| {
-                    history_error(
-                        "--diff needs two snapshots",
-                        "usage: --diff <from-selector> <to-selector>",
-                    )
-                })?;
-                if diff.is_some() {
-                    return Err(history_error(
-                        "History compares one pair of snapshots",
-                        "usage: --diff <from-selector> <to-selector>",
-                    ));
-                }
-                diff = Some((from, to));
-            }
-            "--author" => {
-                let value = words.next().ok_or_else(|| {
-                    history_error("--author needs a value", "usage: --author <substring>")
-                })?;
-                author = Some(value);
-            }
-            "--format" => {
-                let value = words.next().ok_or_else(|| {
-                    history_error("--format needs a value", "usage: --format <human|json>")
-                })?;
-                format = match value {
-                    "human" => HistoryFormat::Human,
-                    "json" => HistoryFormat::Json,
-                    _ => {
-                        return Err(history_error(
-                            "--format is not human or json",
-                            format!("got {value:?}"),
-                        ));
-                    }
-                };
-            }
+            "--diff" => diff = Some(diff_option(&mut words, diff)?),
+            "--author" => author = Some(author_option(&mut words)?),
+            "--format" => format = format_option(&mut words)?,
             flag if flag.starts_with("--") => {
                 return Err(history_error(
                     "Unknown history flag",
@@ -170,24 +218,7 @@ fn parse_options(arguments: &[String]) -> Result<HistoryOptions<'_>, Diagnostic>
             _ => positional.push(word),
         }
     }
-    let (relation, key) = match (diff, positional[..].split_first()) {
-        // `--diff` names the relation and both snapshots, so no row key is
-        // read: the comparison is over every row of the relation.
-        (Some(_), Some((relation, []))) => (*relation, None),
-        (Some((_, _)), _) => {
-            return Err(history_error(
-                "History expects a relation for --diff",
-                "usage: orna history <relation-hex> --diff <from-selector> <to-selector>",
-            ));
-        }
-        (None, Some((relation, [key]))) => (*relation, Some(*key)),
-        (None, _) => {
-            return Err(history_error(
-                "History expects a relation and a row key",
-                "usage: orna history <relation-hex> <key> [--at SELECTOR] [--limit N] [--since <commit-hex>]",
-            ));
-        }
-    };
+    let (relation, key) = relation_and_key(diff, &positional)?;
     Ok(HistoryOptions {
         relation,
         key,
@@ -203,7 +234,6 @@ fn parse_options(arguments: &[String]) -> Result<HistoryOptions<'_>, Diagnostic>
     })
 }
 
-#[allow(clippy::too_many_lines)]
 pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnostic> {
     let options = parse_options(arguments)?;
     let path = local_project_path(endpoint)?;
@@ -221,21 +251,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     // here; the row map, the read and the revision walk all come from the
     // commit it named, so a branch that advances during the read never changes
     // the answer. Without `--at` the walk starts at the current HEAD.
-    let (format, start, commit) = if let Some(selector) = options.at {
-        // One guard, one resolution: `pin_snapshot` refuses an ambiguous
-        // name before it resolves, so `--at` and `--diff` cannot disagree.
-        let (commit, format) = pin_snapshot(&repository, path, selector)?;
-        let start = commit.as_str().to_owned();
-        (format, start, Some(commit))
-    } else {
-        let commit = repository.head().map_err(|error| {
-            history_error("Snapshot could not be resolved", format!("{error:?}"))
-        })?;
-        let format = repository.open_format_context().map_err(|error| {
-            history_error("Format context could not be opened", format!("{error:?}"))
-        })?;
-        (format, "HEAD".to_owned(), commit)
-    };
+    let (format, start, commit) = resolve_walk(&repository, path, options.at)?;
     // The snapshot is admitted before any revision is listed: a format-3
     // snapshot that tracks a loose row file is the mixed layout project
     // admission refuses (ORNA-META-001, ORNA-META-002), and a history answered
@@ -271,26 +287,74 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     // given, while a row written by hand may be keyed by canonical text. Both
     // are bounded point reads of the committed row map, so the row that answers
     // is a real committed row rather than a reinterpretation of the argument.
+    let row = committed_row(&graph, &scope, key)?;
+    let walk = walk_bound(&options);
+    let mut revisions = native_revisions(&graph, &scope, &row, &start, walk)?;
+    finish(&options, &mut revisions, walk)
+}
+
+/// The format context, walk start and pinned commit a listing reads.
+///
+/// One guard, one resolution: `pin_snapshot` refuses an ambiguous `--at` name
+/// before it resolves, so `--at` and `--diff` cannot disagree.
+fn resolve_walk<'a>(
+    repository: &Repository,
+    path: &'a str,
+    at: Option<&'a str>,
+) -> Result<(RepositoryFormatContext, String, Option<GitCommitRef>), Diagnostic> {
+    let Some(selector) = at else {
+        let commit = repository.head().map_err(|error| {
+            history_error("Snapshot could not be resolved", format!("{error:?}"))
+        })?;
+        let format = repository.open_format_context().map_err(|error| {
+            history_error("Format context could not be opened", format!("{error:?}"))
+        })?;
+        return Ok((format, "HEAD".to_owned(), commit));
+    };
+    let (commit, format) = pin_snapshot(repository, path, selector)?;
+    let start = commit.as_str().to_owned();
+    Ok((format, start, Some(commit)))
+}
+
+/// The one committed row `key` names, trying the text spelling and then the
+/// bytes that spell it.
+fn committed_row(
+    graph: &NativeGraphContext,
+    scope: &RepositoryReadScope,
+    key: &str,
+) -> Result<AdmittedRow, Diagnostic> {
     let mut row = None;
     for candidate in cli_row_key::key_candidates(key, None)? {
         row = graph
-            .lookup_row(&candidate, &scope)
+            .lookup_row(&candidate, scope)
             .map_err(|error| history_error("Row lookup failed", format!("{error:?}")))?;
         if row.is_some() {
             break;
         }
     }
-    let row = row
-        .ok_or_else(|| history_error("Row is not committed", format!("no row with key {key:?}")))?;
-    // `--since` needs the walk far enough to reach its commit, so walk the
-    // full bound and cut afterwards; otherwise walk only what is printed.
-    let walk = if options.since.is_some() || options.author.is_some() {
+    row.ok_or_else(|| history_error("Row is not committed", format!("no row with key {key:?}")))
+}
+
+/// How far the walk reads: `--since` and `--author` need the whole bound so
+/// their commit and author can be reached, otherwise only what is printed.
+fn walk_bound(options: &HistoryOptions<'_>) -> usize {
+    if options.since.is_some() || options.author.is_some() {
         MAX_HISTORY_LIMIT
     } else {
         options.limit
-    };
-    let mut revisions = graph
-        .list_row_revisions(&row, &start, walk, &scope)
+    }
+}
+
+/// One row's revisions through the committed row map walk.
+fn native_revisions(
+    graph: &NativeGraphContext,
+    scope: &RepositoryReadScope,
+    row: &AdmittedRow,
+    start: &str,
+    walk: usize,
+) -> Result<Vec<HistoryRevision>, Diagnostic> {
+    Ok(graph
+        .list_row_revisions(row, start, walk, scope)
         .map_err(|error| {
             history_error("Revision history could not be listed", format!("{error:?}"))
         })?
@@ -303,8 +367,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
             committed_at: revision.committed_at(),
             migration: revision.migration().map(str::to_owned),
         })
-        .collect::<Vec<_>>();
-    finish(&options, &mut revisions, walk)
+        .collect())
 }
 
 /// One revision as either row walk reports it.
@@ -406,7 +469,6 @@ fn run_legacy(
     start: &str,
     key: &str,
 ) -> Result<(), Diagnostic> {
-    const LEGACY_HELP: &str = "name the table of a legacy loose row by its key-path directory, such as `contacts/Contact`, with `--at` naming the format-1/2 snapshot";
     let table_path = match cli_legacy::legacy_address(options.relation, LEGACY_HELP)? {
         orna_application::LegacyTableAddress::TablePath(path) => path,
         orna_application::LegacyTableAddress::Relation(relation) => {
@@ -434,28 +496,10 @@ fn run_legacy(
             ));
         }
     };
-    let mut row_path = None;
-    for candidate in cli_row_key::key_candidates(key, None)? {
-        row_path =
-            orna_application::legacy_loose_row_path(repository, commit, &table_path, &candidate)
-                .map_err(|error| cli_legacy::legacy_read_error(&error, LEGACY_HELP))?;
-        if row_path.is_some() {
-            break;
-        }
-    }
-    let Some(row_path) = row_path else {
-        return Err(history_error(
-            "Row is not committed",
-            format!("no row with key {key:?}"),
-        ));
-    };
+    let row_path = legacy_row_path(repository, commit, &table_path, key)?;
     // `--since` needs the walk far enough to reach its commit, so walk the
     // full bound and cut afterwards; otherwise walk only what is printed.
-    let walk = if options.since.is_some() || options.author.is_some() {
-        MAX_HISTORY_LIMIT
-    } else {
-        options.limit
-    };
+    let walk = walk_bound(options);
     let mut revisions =
         orna_application::read_legacy_row_revisions(repository, start, &row_path, walk)
             .map_err(|error| cli_legacy::legacy_read_error(&error, LEGACY_HELP))?
@@ -472,7 +516,28 @@ fn run_legacy(
     finish(options, &mut revisions, walk)
 }
 
-#[allow(clippy::too_many_lines)]
+/// The loose row unit `key` names under `table_path`. The key is tried as text
+/// and then as the bytes that spell it, the same two spellings the native point
+/// read uses.
+fn legacy_row_path(
+    repository: &Repository,
+    commit: &GitCommitRef,
+    table_path: &str,
+    key: &str,
+) -> Result<String, Diagnostic> {
+    let mut row_path = None;
+    for candidate in cli_row_key::key_candidates(key, None)? {
+        row_path =
+            orna_application::legacy_loose_row_path(repository, commit, table_path, &candidate)
+                .map_err(|error| cli_legacy::legacy_read_error(&error, LEGACY_HELP))?;
+        if row_path.is_some() {
+            break;
+        }
+    }
+    row_path
+        .ok_or_else(|| history_error("Row is not committed", format!("no row with key {key:?}")))
+}
+
 /// One revision as a JSON object: commit, root tree, presence, author and the
 /// commit time in seconds since the Unix epoch, plus the migration coordinate
 /// when the commit is the journalled migration commit.
@@ -824,7 +889,19 @@ fn row_changed(before: &HistoryRow, after: &HistoryRow) -> bool {
     content_changed(before, after) || annotations_changed(before, after)
 }
 
-#[allow(clippy::too_many_lines)]
+/// Both endpoints of one `--diff`: each pinned once, with the table schema of
+/// its own snapshot and the labels the report prints.
+struct DiffEndpoints {
+    before_format: RepositoryFormatContext,
+    after_format: RepositoryFormatContext,
+    before_schema: orna_project::ResolvedTableSchema,
+    after_schema: orna_project::ResolvedTableSchema,
+    from_commit: GitCommitRef,
+    to_commit: GitCommitRef,
+    from_label: String,
+    to_label: String,
+}
+
 /// Reports what changed in one relation between two named snapshots.
 ///
 /// Both endpoints are pinned through the same repository-owned historical
@@ -842,6 +919,54 @@ fn run_diff(
     to: &str,
     format: HistoryFormat,
 ) -> Result<(), Diagnostic> {
+    let endpoints = diff_endpoints(repository, directory, relation, from, to)?;
+    let (before, before_read) = read_relation_rows(
+        &endpoints.before_format,
+        relation,
+        endpoints.before_schema.binding(),
+    )?;
+    let (after, after_read) = read_relation_rows(
+        &endpoints.after_format,
+        relation,
+        endpoints.after_schema.binding(),
+    )?;
+    let cost = ReadCost {
+        payload_bytes_read: before_read.payload_bytes_read + after_read.payload_bytes_read,
+        objects_read: before_read.objects_read + after_read.objects_read,
+    };
+    let window = rekey_window(
+        repository,
+        &endpoints.from_commit,
+        &endpoints.to_commit,
+        relation,
+    )?;
+    let (before, after, paired) = pair_rekeys(before, after, &window);
+    let mut changes = compare_rows(before, after);
+    changes.extend(
+        paired
+            .into_iter()
+            .map(|(before, after)| RowChange::Rekeyed { before, after }),
+    );
+    report_diff(
+        format,
+        &endpoints.from_label,
+        &endpoints.to_label,
+        &changes,
+        cost,
+    );
+    Ok(())
+}
+
+/// Pins both `--diff` endpoints and refuses a pair this comparison cannot join:
+/// a legacy input, two databases, or a schema that is not from the exact
+/// endpoint.
+fn diff_endpoints(
+    repository: &Repository,
+    directory: &str,
+    relation: [u8; 16],
+    from: &str,
+    to: &str,
+) -> Result<DiffEndpoints, Diagnostic> {
     // Each endpoint is pinned once, through the same ambiguity guard `--at`
     // uses, so an identical-prefix name is refused rather than resolved to
     // whichever ref `git for-each-ref` lists first.
@@ -878,8 +1003,6 @@ fn run_diff(
             ),
         ));
     }
-    let from_label = format!("{from:?} ({})", from_commit.as_str());
-    let to_label = format!("{to:?} ({})", to_commit.as_str());
     let loader = orna_project::ProjectLoader::default();
     let before_schema = loader
         .resolve_committed_source_table_schema(
@@ -919,23 +1042,34 @@ fn run_diff(
             "source table identity and schema must come from the exact history endpoint",
         ));
     }
-    let (before, before_read) =
-        read_relation_rows(&before_format, relation, before_schema.binding())?;
-    let (after, after_read) = read_relation_rows(&after_format, relation, after_schema.binding())?;
-    let payload_bytes_read = before_read.payload_bytes_read + after_read.payload_bytes_read;
-    let native_objects_read = before_read.objects_read + after_read.objects_read;
-    let window = rekey_window(repository, &from_commit, &to_commit, relation)?;
-    let (before, after, paired) = pair_rekeys(before, after, &window);
-    let mut changes = compare_rows(before, after);
-    changes.extend(
-        paired
-            .into_iter()
-            .map(|(before, after)| RowChange::Rekeyed { before, after }),
-    );
-    let (added, updated, removed, rekeyed) = counts(&changes);
+    let from_label = format!("{from:?} ({})", from_commit.as_str());
+    let to_label = format!("{to:?} ({})", to_commit.as_str());
+    Ok(DiffEndpoints {
+        before_format,
+        after_format,
+        before_schema,
+        after_schema,
+        from_commit,
+        to_commit,
+        from_label,
+        to_label,
+    })
+}
+
+/// Prints one comparison in the requested shape with its measured read cost.
+fn report_diff(
+    format: HistoryFormat,
+    from_label: &str,
+    to_label: &str,
+    changes: &[RowChange],
+    cost: ReadCost,
+) {
+    let (added, updated, removed, rekeyed) = counts(changes);
+    let payload_bytes_read = cost.payload_bytes_read;
+    let native_objects_read = cost.objects_read;
     match format {
         HistoryFormat::Human => {
-            for change in &changes {
+            for change in changes {
                 println!("{}", human_change(change));
             }
             println!(
@@ -967,11 +1101,11 @@ fn run_diff(
             );
         }
     }
-    Ok(())
 }
 
 /// The measured cost of one pinned relation read: the media payload bytes and
 /// native objects the read touched.
+#[derive(Clone, Copy)]
 struct ReadCost {
     payload_bytes_read: u64,
     objects_read: u64,

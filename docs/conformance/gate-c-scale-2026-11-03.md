@@ -157,3 +157,54 @@ Record and selector wiring: `#9517` (`d85f4d112`) and `#9518` (`16bf94193`). The
 gate-c-million-rows: passed; 1 passed, 0 failed; 1,045.61 s
 C1: tests {"passed": 1}, executed_by [{"record": "gate-c-million-rows", ...}]
 ```
+
+## Production-written graph at one million rows (2026-11-09)
+
+C3's remaining limitation was a production-written graph at one million rows. The ten-row
+production-writer probe could not be raised: it admits every row as a separate runtime request
+through the media-capture fixture. That path costs about 70 ms per row and the cost is flat in
+table size, so a million rows is about 19 hours; it also derives request and row identities
+from a u16 ordinal, so it cannot name more than 65,536 rows. Stage attribution at 100 rows
+(debug, 16-core workstation) puts the product half at about 7 ms per row:
+
+| Stage per row | ms |
+|---|---|
+| reserve request | 0.8 |
+| start request | 0.9 |
+| begin activation | 0.15 |
+| evaluate the capture expression | 47 |
+| accept the captured Blob | 23 |
+| commit the request | 5 |
+
+The 70 ms is test-side expression evaluation and Blob capture, not row admission; the three
+durable runtime steps are flat (72, 74 and 67 ms per row end to end at 10, 100 and 1,000 rows).
+
+`orp1_row_store_one_million_rows_production_written` admits all rows in one runtime request,
+the batch shape a bulk import uses, derives mutation ids from a u64 index, and publishes
+through `RuntimePublicationCoordinator`. Measured locally (debug build, the same binary as
+gate C):
+
+| Rows | Admission | Publication | Read + node decode | Leaves | Branches | Peak RSS |
+|---|---|---|---|---|---|---|
+| 1,000 | 0.61 s | 0.70 s | 0.06 s | 7 | 1 | - |
+| 10,000 | 4.69 s | 3.78 s | 0.06 s | 121 | 6 | - |
+| 50,000 | 21.3 s | 17.3 s | - | 644 | 12 | - |
+| 200,000 | 90.4 s | 67.9 s | 0.47 s | 2,568 | 29 | 238 MB |
+| 1,000,000 | 564.8 s | 343.1 s | 2.09 s | 12,958 | 163 | 816 MB |
+
+The one-million-row case takes 911.9 s (15.2 minutes) end to end and its index shape matches
+the test-side fixture (12,958 leaves, 163 branches). Admission and publication exponents from
+10,000 to 200,000 rows are 0.99 and 0.97; publication from 200,000 to one million is 1.01, and
+admission is 1.14 (SQLite writes three rows per mutation, so the constant rises slightly).
+
+The nightly `gate-c-million` record runs both ignored cases in one cargo invocation with one
+test thread. On a hosted runner the test-side case used 112 minutes, 6.7 times this
+workstation; even that factor on the new case (102 minutes) leaves both cases at 214 minutes
+inside the 330-minute recorder and the 350-minute job cap.
+
+Index counts are decoded from the committed node data blobs (`[1, kind, ...]` through one
+`git cat-file --batch` session) because `NativeGraphContext::object_stats` bounds its walk at
+`MAX_RANGE_GRAPH_OBJECTS` (2,048) and a one-million-row store has about 13,130 nodes. That
+bound is why the probe decodes the committed nodes itself rather than calling the product
+walk. Payload traffic on a production-written graph at one million rows is still unmeasured:
+those rows carry no Blob.

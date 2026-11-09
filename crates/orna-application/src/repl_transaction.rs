@@ -1211,12 +1211,9 @@ fn restore_contextual_blob_values(
 /// (environment reads are always external), so this always yields `ExternalPossible`.
 /// The declaration is truthful, but the REPL commit path does not yet persist it to
 /// the request ledger (tracked by ornadb-rg5g); this helper only admits the
-/// evaluation through [`EffectGate::admit`] under that registry.
+/// evaluation through [`EffectGate::admit_sys_host`] under that registry.
 pub(crate) fn repl_declared_effects(bindings: &SysHostBindingRegistry) -> ActivationEffectReport {
-    EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::bound(
-        None,
-        Some(bindings),
-    ))
+    EffectGate::admit_sys_host(None, Some(bindings))
 }
 
 #[cfg(test)]

@@ -1242,13 +1242,15 @@ impl Repository {
             .transpose()?;
         let admitted = admit_relations(
             &mut writer,
-            base,
-            &committed,
-            evolution_source.as_ref(),
-            relations,
-            identities,
-            &watermarks,
-            changes,
+            StagedRelationContent {
+                base,
+                committed: &committed,
+                evolution_source: evolution_source.as_ref(),
+                relations,
+                identities,
+                watermarks: &watermarks,
+                changes,
+            },
         )?;
         let store_root = write_store_root(&mut writer, database_id, &admitted.entries)?;
         self.install_staged_store_root(&writer, staged, store_root, admitted, &[])
@@ -1693,10 +1695,9 @@ impl Repository {
         ]);
         let listed = self.run(command)?.stdout;
         Ok(listed.split(|byte| *byte == 0).any(|entry| {
-            entry
-                .rsplit(|byte| *byte == b'\t')
-                .next()
-                .is_some_and(|path| path == LEGACY_OBJECT_IDENTITY_SIDECAR_PATH.as_bytes())
+            crate::GitListRecord::parse(entry).is_some_and(|record| {
+                record.name() == LEGACY_OBJECT_IDENTITY_SIDECAR_PATH.as_bytes()
+            })
         }))
     }
 
@@ -1856,13 +1857,15 @@ impl Repository {
         let mut writer = NodeWriter::new(self)?;
         let admitted = admit_relations(
             &mut writer,
-            Vec::new(),
-            &BTreeMap::new(),
-            None,
-            relations,
-            identities,
-            watermarks,
-            CommittedRelationChanges::Allowed,
+            StagedRelationContent {
+                base: Vec::new(),
+                committed: &BTreeMap::new(),
+                evolution_source: None,
+                relations,
+                identities,
+                watermarks,
+                changes: CommittedRelationChanges::Allowed,
+            },
         )?;
         let store_root = write_store_root(&mut writer, *database_id.as_bytes(), &admitted.entries)?;
         writer.sync()?;
@@ -2178,29 +2181,46 @@ struct AdmittedRelations {
     removed: Vec<RemovedRelation>,
 }
 
-/// The parameters describe one record; each caller passes them straight through.
-#[allow(clippy::too_many_arguments)]
-/// Merges `relations` into the validated `base` relation entries of the
-/// staged store. `committed` maps each relation `HEAD` commits to its schema
-/// node. A committed relation keeps its rows and evolves when its descriptor
-/// changes (ORNA-EVOL-002), reading them from `evolution_source`; it cannot
-/// be unstaged. Any other relation is admitted by this commit: a new one, or
-/// one only an earlier staging created, gets its schema node and its staged
-/// rows (none unless the table declares rows), and an uncommitted relation
-/// the staged source no longer declares is dropped; either is refused when
-/// the relation holds rows. Staged rows are validated before anything is
-/// written, so a refused row leaves the store unchanged. When a committed
-/// relation's table retires it leaves the store with its rows (ORNA-OBJECT-004).
+/// The relation content one staging pass admits: the validated `base` entries
+/// the store already binds, the `committed` schema nodes they resolve to, the
+/// pinned `evolution_source` an evolved relation reads its committed rows
+/// from, and the staged relations, identity inventory and allocator
+/// watermarks the commit supplies.
+struct StagedRelationContent<'a> {
+    base: Vec<StoreRelationEntry>,
+    committed: &'a BTreeMap<[u8; 16], NativeOid>,
+    evolution_source: Option<&'a RepositoryFormatContext>,
+    relations: &'a [StagedRelation],
+    identities: &'a [StoredObjectIdentity],
+    watermarks: &'a AllocatorWatermarks,
+    changes: CommittedRelationChanges,
+}
+
+/// Merges the staged `relations` into the validated base relation entries of
+/// the staged store. `committed` maps each relation `HEAD` commits to its
+/// schema node. A committed relation keeps its rows and evolves when its
+/// descriptor changes (ORNA-EVOL-002), reading them from `evolution_source`;
+/// it cannot be unstaged. Any other relation is admitted by this commit: a
+/// new one, or one only an earlier staging created, gets its schema node and
+/// its staged rows (none unless the table declares rows), and an uncommitted
+/// relation the staged source no longer declares is dropped; either is
+/// refused when the relation holds rows. Staged rows are validated before
+/// anything is written, so a refused row leaves the store unchanged. When a
+/// committed relation's table retires it leaves the store with its rows
+/// (ORNA-OBJECT-004).
 fn admit_relations(
     writer: &mut NodeWriter<'_>,
-    base: Vec<StoreRelationEntry>,
-    committed: &BTreeMap<[u8; 16], NativeOid>,
-    evolution_source: Option<&RepositoryFormatContext>,
-    relations: &[StagedRelation],
-    identities: &[StoredObjectIdentity],
-    watermarks: &AllocatorWatermarks,
-    changes: CommittedRelationChanges,
+    content: StagedRelationContent<'_>,
 ) -> Result<AdmittedRelations, RelationAdmissionError> {
+    let StagedRelationContent {
+        base,
+        committed,
+        evolution_source,
+        relations,
+        identities,
+        watermarks,
+        changes,
+    } = content;
     let mut entries = base
         .into_iter()
         .map(|entry| (entry.relation_id, entry))
@@ -3675,13 +3695,15 @@ mod tests {
             .collect::<Vec<_>>();
         let entries = admit_relations(
             &mut writer,
-            Vec::new(),
-            &BTreeMap::new(),
-            None,
-            &tables,
-            &identities_for(&all),
-            &AllocatorWatermarks::new(),
-            CommittedRelationChanges::Allowed,
+            StagedRelationContent {
+                base: Vec::new(),
+                committed: &BTreeMap::new(),
+                evolution_source: None,
+                relations: &tables,
+                identities: &identities_for(&all),
+                watermarks: &AllocatorWatermarks::new(),
+                changes: CommittedRelationChanges::Allowed,
+            },
         )
         .unwrap()
         .entries;

@@ -78,8 +78,7 @@ assert every(row => row.title != \"\");\n}\n";
         )
         .expect("the REPL write is admitted");
         let state = transactions_ref
-            .state
-            .as_ref()
+            .writer_state()
             .expect("the write opens the runtime state");
         transactions_ref
             .runtime

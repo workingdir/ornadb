@@ -11,7 +11,6 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
-    process::Command,
     str::FromStr,
 };
 
@@ -19,9 +18,7 @@ use fs2::FileExt;
 use tempfile::TempDir;
 use uuid::{Uuid, Version};
 
-use crate::{
-    Repository, RepositoryError, format_context, scrub_git_routing_environment, valid_branch_name,
-};
+use crate::{Repository, RepositoryError, format_context, valid_branch_name};
 
 const FORMAT_DIRECTORY: &str = ".orna";
 const FORMAT_FILE: &str = "format.orna";
@@ -270,14 +267,13 @@ pub fn inspect_legacy_source_metadata(
 }
 
 fn initialize_git(target: &Path) -> Result<(), RepositoryInitError> {
-    let mut command = Command::new("git");
+    let mut command = crate::git_command();
     if let Some(initial_branch) = configured_initial_branch() {
         command
             .arg("-c")
             .arg(format!("init.defaultBranch={initial_branch}"));
     }
     command.arg("init").arg("--").arg(target);
-    scrub_git_routing_environment(&mut command);
     command.env("GIT_CONFIG_NOSYSTEM", "1").env(
         "GIT_CONFIG_GLOBAL",
         if cfg!(windows) { "NUL" } else { "/dev/null" },
@@ -662,31 +658,14 @@ impl FromStr for DatabaseId {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        ffi::OsString,
-        fs,
-        path::{Path, PathBuf},
-        process::Command,
-    };
+    use std::{ffi::OsString, fs, path::PathBuf, process::Command};
 
     use super::{
         DATABASE_FILE, FORMAT_DIRECTORY, FORMAT_FILE, Repository, RepositoryInitError,
         initialize_repository, inspect_metadata,
     };
 
-    fn git(directory: &Path, arguments: &[&str]) -> String {
-        let output = Command::new("git")
-            .current_dir(directory)
-            .args(arguments)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "git {arguments:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8(output.stdout).unwrap().trim().to_owned()
-    }
+    use crate::test_support::git;
 
     #[test]
     fn initializes_canonical_records_and_reuses_the_database_identity() {
