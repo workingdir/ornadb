@@ -552,7 +552,7 @@ There is also no publication policy: only 6 of 26 crates set `publish = false`
 | Go | `internal` package rule: a package under `.../internal/...` is importable only from the subtree above it, enforced by the toolchain (Go 1.4 release notes, "Internal packages") | https://go.dev/doc/go1.4 | **Partly.** Rust has no equivalent; the closest cheap analogue is a crate *naming* rule plus the allowlist script (`orna-*-internal` crates may only be depended on by their owner). Does not apply as language machinery. |
 | cargo-deny | `[bans]` denies crates globally; `[[bans.deny]]` with `wrappers` restricts a ban to everything except named direct dependents; `multiple-versions`, `wildcards`, `[[bans.features]]` | https://embarkstudios.github.io/cargo-deny/checks/bans/cfg.html and https://embarkstudios.github.io/cargo-deny/checks/bans/index.html | **Partly.** Excellent for external crates (`hex` banned outside the one crate that owns hex, two base64 libraries forbidden, `libsql` only below the state layer). Insufficient for internal layer rules: bans are global except for the `wrappers` exception list, so expressing "layer 6 must not depend on layer 8" needs the allowlist script. Both are proposed; cargo-deny owns external deps, the script owns internal edges. |
 | cargo-modules | `cargo modules structure`, `dependencies --acyclic` (fails on a module cycle), `orphans --deny` (fails on a source file no `mod` item links) | https://github.com/regexident/cargo-modules | **Yes, for the other half of the problem.** It analyses a crate's *internal* module graph and cannot express a crate-to-crate layer rule, so it is not a substitute for the metadata script. It is exactly the right tool for two failure modes this plan creates: a module cycle introduced by a split, and a file left unlinked by a `git mv`. Proposed as a per-crate gate in the split stages and nightly, not in the fast `arch` job, because it needs a build. |
-| Roslyn / Go compiler layering | layer docs with an enforcing test | Roslyn's `docs/wiki/Layers.md` is no longer at that path (HTTP 404 on 2026-11-09), so no claim is made about its contents | Not cited as precedent for a mechanism. The mechanism adopted here is rustc's tidy allowlist, which was verified. |
+| Roslyn / Go compiler layering | layer docs with an enforcing test | Roslyn's Layers wiki page is no longer at that path (HTTP 404 on 2026-11-09), so no claim is made about its contents | Not cited as precedent for a mechanism. The mechanism adopted here is rustc's tidy allowlist, which was verified. |
 
 What does **not** transfer:
 
@@ -1636,7 +1636,7 @@ before the crate list.
 OrnaDB is a layered Rust workspace: a language front end, a pure evaluator, a `sys`
 host boundary, a durable local state layer, a Git repository layer, and edges
 (CLI, LSP) that wire them. The full architecture, with measured evidence and the
-migration plan, is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+migration plan, is in docs/ARCHITECTURE.md (added by stage 01).
 
 ## The three rules
 
