@@ -103,6 +103,32 @@ impl Module {
             Module::Money => "std.money",
         }
     }
+
+    /// Resolves a pinned module path back to its catalogue module.
+    pub fn from_path(path: &str) -> Option<Module> {
+        [
+            Module::Core,
+            Module::Collection,
+            Module::Query,
+            Module::Math,
+            Module::Text,
+            Module::Bits,
+            Module::Stream,
+            Module::Concurrent,
+            Module::Ui,
+            Module::Stats,
+            Module::Time,
+            Module::Hash,
+            Module::Random,
+            Module::Base64,
+            Module::Json,
+            Module::OrnaCodec,
+            Module::OvbCodec,
+            Module::Money,
+        ]
+        .into_iter()
+        .find(|module| module.path() == path)
+    }
 }
 
 /// One native operation's complete descriptor.

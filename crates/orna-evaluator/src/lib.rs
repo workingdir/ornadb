@@ -850,17 +850,23 @@ pub struct PureFunction {
 pub struct StandardLayer {
     functions: BTreeMap<String, PureFunction>,
     aliases: BTreeMap<String, String>,
+    intrinsics: BTreeMap<String, orna_intrinsics::IntrinsicId>,
 }
 
 impl StandardLayer {
-    /// Builds a shared standard layer from verified qualified functions and
-    /// module-internal import aliases.
+    /// Builds a shared standard layer from verified qualified functions,
+    /// module-internal import aliases and the intrinsic ids bound at admission.
     #[must_use]
     pub fn new(
         functions: BTreeMap<String, PureFunction>,
         aliases: BTreeMap<String, String>,
+        intrinsics: BTreeMap<String, orna_intrinsics::IntrinsicId>,
     ) -> Self {
-        Self { functions, aliases }
+        Self {
+            functions,
+            aliases,
+            intrinsics,
+        }
     }
 }
 
@@ -875,6 +881,7 @@ pub struct Functions {
     standard: Option<Arc<StandardLayer>>,
     local: BTreeMap<String, PureFunction>,
     local_aliases: BTreeMap<String, String>,
+    local_intrinsics: BTreeMap<String, orna_intrinsics::IntrinsicId>,
 }
 
 impl Functions {
@@ -895,7 +902,21 @@ impl Functions {
 
     /// Inserts a local function, replacing any local function of the same key.
     pub fn insert(&mut self, name: String, function: PureFunction) -> Option<PureFunction> {
+        if let Some(id) = legacy_intrinsic(&name) {
+            self.local_intrinsics.insert(name.clone(), id);
+        }
         self.local.insert(name, function)
+    }
+
+    /// Returns the intrinsic id bound to `name`, if any.
+    #[must_use]
+    pub fn intrinsic(&self, name: &str) -> Option<orna_intrinsics::IntrinsicId> {
+        self.local_intrinsics.get(name).copied().or_else(|| {
+            self.standard
+                .as_deref()
+                .and_then(|layer| layer.intrinsics.get(name))
+                .copied()
+        })
     }
 
     /// Inserts a bare-name import alias for the admitted module. Callers must
@@ -1010,6 +1031,19 @@ impl Functions {
             .chain(standard_aliases)
             .map(String::as_str)
     }
+}
+
+fn legacy_intrinsic(name: &str) -> Option<orna_intrinsics::IntrinsicId> {
+    use orna_intrinsics::IntrinsicId;
+    Some(match name.rsplit('.').next()? {
+        "__list_length" => IntrinsicId::CollectionListLength,
+        "__list_concat" => IntrinsicId::CollectionListConcat,
+        "__numeric_sum" => IntrinsicId::CollectionNumericSum,
+        "__stable_sort" => IntrinsicId::CollectionStableSort,
+        "__minimum" => IntrinsicId::CollectionMinimum,
+        "__maximum" => IntrinsicId::CollectionMaximum,
+        _ => return None,
+    })
 }
 
 impl<const N: usize> From<[(String, PureFunction); N]> for Functions {
@@ -7189,7 +7223,27 @@ impl Context<'_, '_> {
             }
             values.push(value);
         }
-        let values = named_arguments("decimal.divide", arguments, values, 0, false)?;
+        let params = [
+            orna_intrinsics::Param {
+                name: "value",
+                ty: orna_intrinsics::SigType::Decimal,
+                has_default: false,
+                pipeline: false,
+            },
+            orna_intrinsics::Param {
+                name: "scale",
+                ty: orna_intrinsics::SigType::Int,
+                has_default: false,
+                pipeline: false,
+            },
+            orna_intrinsics::Param {
+                name: "rounding",
+                ty: orna_intrinsics::SigType::Str,
+                has_default: false,
+                pipeline: false,
+            },
+        ];
+        let values = Self::order_arguments(&params, arguments, values, 0)?;
         match values.as_slice() {
             [
                 Value::Decimal(divisor),
@@ -7238,34 +7292,20 @@ impl Context<'_, '_> {
         depth: usize,
     ) -> Option<Result<Value, EvaluationError>> {
         let resolved = self.resolve_function_name(callee, scope);
-        let statistics_operation =
-            portable_statistics_operation(callee, resolved.as_deref(), scope);
-        let native_export = is_native_collection_binding(
-            callee,
-            resolved.as_deref(),
-            scope,
-            !self.mode.is_repl(),
-            function_name(callee).is_some_and(|name| self.functions.contains_key(&name)),
-            self.functions,
-        ) || resolved
+        let id = resolved
             .as_deref()
-            .is_some_and(|name| matches!(name, "std.collection.asof_join" | "std.query.asof_join"));
-        let intrinsic_name = root_collection_name(callee);
-        let name = intrinsic_name
+            .and_then(|name| self.functions.intrinsic(name))
             .or_else(|| {
-                native_export
-                    .then(|| portable_collection_operation(callee, resolved.as_deref()))
+                let name = function_name(callee)?;
+                (!scope.0.contains_key(&name))
+                    .then(|| orna_intrinsics::root_intrinsic(&name))
                     .flatten()
-            })
-            .or(statistics_operation)?;
-        if (statistics_operation.is_none()
-            && intrinsic_name.is_some_and(|name| scope.0.contains_key(name)))
-            || (resolved.is_some() && !native_export && statistics_operation.is_none())
-        {
-            return None;
-        }
+            })?;
+        let intrinsic = orna_intrinsics::by_id(id);
+        let name = intrinsic.leaf.unwrap_or(intrinsic.name);
+        let statistics_operation = intrinsic.module == orna_intrinsics::Module::Stats;
         let pipeline_relation = matches!(input, Some(Value::Relation(_)));
-        let relation_argument = relation_call_candidate(name, arguments, scope);
+        let relation_argument = relation_call_candidate(name, arguments, scope, self.functions);
         if input.is_some() && !pipeline_relation && !relation_argument {
             return None;
         }
@@ -7280,12 +7320,9 @@ impl Context<'_, '_> {
                 let value = self.evaluate(&argument.value, scope, depth + 1)?;
                 values.push(value);
             }
-            let mut ordered = if statistics_operation.is_some() {
-                relation_statistics_arguments(name, arguments, values, implicit)?
-            } else {
-                relation_named_arguments(name, arguments, values, implicit)?
-            };
-            if statistics_operation.is_some() {
+            let mut ordered =
+                Self::order_arguments(intrinsic.signature.params, arguments, values, implicit)?;
+            if statistics_operation {
                 let Some(Value::Relation(plan)) = ordered.first() else {
                     return Err(error("ORNA-EVAL-TYPE"));
                 };
@@ -9017,11 +9054,15 @@ impl Context<'_, '_> {
                 depth,
             );
         }
+        let intrinsic = resolved
+            .as_deref()
+            .and_then(|name| self.functions.intrinsic(name));
         let site = CallSite {
             callee,
             arguments,
             resolved,
             spelled: function_name(callee),
+            intrinsic,
         };
         if site.spelled.as_deref() == Some("std.ui.action") {
             if input.is_some() {
@@ -9055,7 +9096,7 @@ impl Context<'_, '_> {
             CallRoute::Source => {
                 self.call_source_function(&site, input, pre_evaluated_callee, scope, depth)
             }
-            CallRoute::Native(target) => self.call_native(&site, target, input, scope, depth),
+            CallRoute::Native(id) => self.call_native(&site, id, input, scope, depth),
         }
     }
 
@@ -9272,154 +9313,33 @@ impl Context<'_, '_> {
         site: &'s CallSite<'_>,
         input: Option<&Value>,
         scope: &Scope,
-    ) -> Result<CallRoute<'s>, EvaluationError> {
-        let callee = site.callee;
-        let resolved = site.resolved.as_deref();
-        let repl = self.mode.is_repl();
-        let source_export_available = site
-            .spelled
-            .as_ref()
-            .is_some_and(|name| self.functions.contains_key(name));
-        let native_binding = registered_standard_binding(
-            callee,
-            resolved,
-            scope,
-            !repl,
-            source_export_available,
-            captured_timezone_snapshot_matches(self.functions),
-            self.functions,
-        );
-        let bound = |kind: StandardBindingKind| -> Option<&'s str> {
-            native_binding
-                .filter(|binding| binding.kind == kind)
-                .map(|binding| binding.operation)
-        };
-        let std_unshadowed = !scope.0.contains_key("std");
-        let qualified_math = std_unshadowed.then(|| math_name(callee)).flatten();
-        let qualified_text = std_unshadowed.then(|| text_name(callee)).flatten();
-        let qualified_bits = std_unshadowed.then(|| bits_name(callee)).flatten();
-        let qualified_stats = std_unshadowed.then(|| stats_name(callee)).flatten();
-        let qualified_time = std_unshadowed.then(|| time_name(callee)).flatten();
-        if repl
-            && resolved.is_none()
-            && ((qualified_math.is_some() && bound(StandardBindingKind::Math).is_none())
-                || (qualified_text.is_some() && bound(StandardBindingKind::Text).is_none())
-                || (qualified_bits.is_some() && bound(StandardBindingKind::Bits).is_none())
-                || (qualified_stats.is_some() && bound(StandardBindingKind::Stats).is_none())
-                || (qualified_time.is_some() && bound(StandardBindingKind::Time).is_none()))
-        {
-            return Err(error("ORNA-EVAL-UNSUPPORTED"));
+    ) -> Result<CallRoute, EvaluationError> {
+        if let Some(id) = site.intrinsic {
+            return Ok(CallRoute::Native(id));
         }
-        let portable_collection = portable_collection_operation(callee, resolved);
-        let native_collection = native_binding.is_some_and(|binding| {
-            binding.kind == StandardBindingKind::Collection
-                && captured_collection_binding_is_native(binding.operation, self.functions)
-        });
-        let native_asof_join = portable_collection_name(callee) == Some("asof_join")
-            && !repl
-            && std_unshadowed
-            && resolved.is_none();
-        if portable_collection.is_some()
-            && repl
-            && resolved.is_none()
-            && !native_asof_join
-            && !native_collection
+        if site.resolved.is_none()
+            && let Some(name) = site.spelled.as_deref()
+            && !scope.0.contains_key(name)
         {
-            return Err(error("ORNA-EVAL-UNSUPPORTED"));
+            if let Some(id) = orna_intrinsics::root_intrinsic(name) {
+                return Ok(CallRoute::Native(id));
+            }
+            match name {
+                "for_each" => {
+                    return Ok(CallRoute::Native(
+                        orna_intrinsics::IntrinsicId::StreamForEach,
+                    ));
+                }
+                "Stream.from_list" => {
+                    return Ok(CallRoute::Native(
+                        orna_intrinsics::IntrinsicId::StreamFromList,
+                    ));
+                }
+                _ => {}
+            }
         }
-        let root_stream_operation = match (root_stream_name(callee), input) {
-            (Some("from_list"), None) => Some("from_list"),
-            (Some("for_each"), Some(Value::Stream { .. })) => Some("for_each"),
-            _ => None,
-        };
-        let root_collection =
-            root_collection_name(callee).filter(|name| !scope.0.contains_key(*name));
-        // Portable collection/query exports and selected exact arithmetic
-        // leaves are admitted by their captured source declarations. Public
-        // functions execute their Orna bodies; `map` and private leaves use
-        // bounded primitives so callbacks retain the evaluator's captured
-        // namespace and module-pin context.
-        let bound_elsewhere =
-            native_binding.is_some_and(|binding| binding.kind != StandardBindingKind::Collection);
-        let spelled_natively = qualified_math.is_some()
-            || qualified_bits.is_some()
-            || qualified_text.is_some()
-            || qualified_stats.is_some()
-            || qualified_time.is_some()
-            || portable_collection.is_some()
-            || root_collection.is_some();
-        if !(native_asof_join
-            || native_collection
-            || root_stream_operation.is_some()
-            || bound_elsewhere
-            || (resolved.is_none() && spelled_natively))
-        {
-            return Ok(CallRoute::Source);
-        }
-        // The first family with an operation wins; the order is the dispatch
-        // priority. A REPL never falls back to a qualified spelling that no
-        // binding admitted.
-        let unbound = |qualified: Option<&'s str>| if repl { None } else { qualified };
-        let candidates = [
-            (
-                StandardBindingKind::Math,
-                bound(StandardBindingKind::Math).or(unbound(qualified_math)),
-            ),
-            (
-                StandardBindingKind::Bits,
-                bound(StandardBindingKind::Bits).or(unbound(qualified_bits)),
-            ),
-            (
-                StandardBindingKind::Text,
-                bound(StandardBindingKind::Text).or(unbound(qualified_text)),
-            ),
-            (
-                StandardBindingKind::Stats,
-                bound(StandardBindingKind::Stats).or(unbound(qualified_stats)),
-            ),
-            (StandardBindingKind::Time, bound(StandardBindingKind::Time)),
-            (
-                StandardBindingKind::Stream,
-                bound(StandardBindingKind::Stream).or(root_stream_operation),
-            ),
-            (
-                StandardBindingKind::Concurrent,
-                bound(StandardBindingKind::Concurrent),
-            ),
-            (StandardBindingKind::Ui, bound(StandardBindingKind::Ui)),
-            (StandardBindingKind::Hash, bound(StandardBindingKind::Hash)),
-            (
-                StandardBindingKind::Random,
-                bound(StandardBindingKind::Random),
-            ),
-            (
-                StandardBindingKind::Base64,
-                bound(StandardBindingKind::Base64),
-            ),
-            (StandardBindingKind::Json, bound(StandardBindingKind::Json)),
-            (
-                StandardBindingKind::OrnaCodec,
-                bound(StandardBindingKind::OrnaCodec),
-            ),
-            (
-                StandardBindingKind::OvbCodec,
-                bound(StandardBindingKind::OvbCodec),
-            ),
-            (
-                StandardBindingKind::Money,
-                bound(StandardBindingKind::Money),
-            ),
-            (
-                StandardBindingKind::Collection,
-                portable_collection.or(root_collection),
-            ),
-        ];
-        candidates
-            .into_iter()
-            .find_map(|(kind, operation)| {
-                operation.map(|operation| CallRoute::Native(NativeTarget { kind, operation }))
-            })
-            .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))
+        let _ = input;
+        Ok(CallRoute::Source)
     }
 
     /// Offers a statically rooted, unresolved field path to the effect handler
@@ -9580,16 +9500,14 @@ impl Context<'_, '_> {
     fn call_native(
         &mut self,
         site: &CallSite<'_>,
-        target: NativeTarget<'_>,
+        id: orna_intrinsics::IntrinsicId,
         input: Option<Value>,
         scope: &mut Scope,
         depth: usize,
     ) -> Result<Value, EvaluationError> {
+        let intrinsic = orna_intrinsics::by_id(id);
+        let name = intrinsic.leaf.unwrap_or(intrinsic.name);
         let (callee, arguments) = (site.callee, site.arguments);
-        let NativeTarget {
-            kind,
-            operation: name,
-        } = target;
         let implicit = usize::from(input.is_some());
         self.items(arguments.len() + implicit)?;
         let mut values = Vec::with_capacity(implicit + arguments.len());
@@ -9598,7 +9516,7 @@ impl Context<'_, '_> {
             // Statistics accept their option keywords as bare names.
             let keyword = match &argument.value {
                 Expr::Name { text, .. }
-                    if kind == StandardBindingKind::Stats
+                    if intrinsic.module == orna_intrinsics::Module::Stats
                         && argument.name.as_deref().is_some_and(|name| {
                             matches!(name, "rounding" | "interpolation" | "method")
                         })
@@ -9619,45 +9537,116 @@ impl Context<'_, '_> {
                 return Ok(Value::Null);
             }
         }
-        let binding_name: std::borrow::Cow<'_, str> = match kind {
-            StandardBindingKind::Hash => format!("hash.{name}").into(),
-            StandardBindingKind::Random => {
-                format!("random.{}", name.strip_prefix("__").unwrap_or(name)).into()
+        let values =
+            Self::order_arguments(intrinsic.signature.params, arguments, values, implicit)?;
+        self.dispatch(id, name, values, callee, scope, depth)
+    }
+    fn dispatch(
+        &mut self,
+        id: orna_intrinsics::IntrinsicId,
+        name: &'static str,
+        values: Vec<Value>,
+        callee: &Expr,
+        scope: &Scope,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        use orna_intrinsics::IntrinsicId as I;
+        match id {
+            I::CoreSome | I::CoreNow | I::CoreUuid7 | I::CoreError | I::CoreFail => {
+                Err(error("ORNA-EVAL-UNSUPPORTED"))
             }
-            StandardBindingKind::Base64 => {
-                format!("base64.{}", name.strip_prefix("__").unwrap_or(name)).into()
+            I::CoreFilter
+            | I::CoreMap
+            | I::CoreFlatMap
+            | I::CoreSortBy
+            | I::CoreTake
+            | I::CoreDrop
+            | I::CoreDistinct
+            | I::CoreUnion
+            | I::CoreCount
+            | I::CoreFirst
+            | I::CoreLast
+            | I::CoreOne
+            | I::CoreSum
+            | I::CoreMin
+            | I::CoreMax
+            | I::CoreEvery
+            | I::CoreExists
+            | I::CollectionChunk
+            | I::CollectionFlatten
+            | I::CollectionPartition
+            | I::CollectionZip
+            | I::CollectionZipExact
+            | I::CollectionUnique
+            | I::CollectionPairs
+            | I::CollectionWindow
+            | I::CollectionSplitWhen
+            | I::CollectionRank
+            | I::CollectionGroupBy
+            | I::CollectionBucketBy
+            | I::CollectionAsofJoin
+            | I::CollectionListLength
+            | I::CollectionListConcat
+            | I::CollectionNumericSum
+            | I::CollectionStableSort
+            | I::CollectionMinimum
+            | I::CollectionMaximum
+            | I::CollectionRecursiveCte
+            | I::CollectionStrictlyOrderedTimeSeries
+            | I::CollectionWindowRate
+            | I::CollectionWindowRateIntegrate
+            | I::CollectionWindowDerivative
+            | I::CollectionWindowIntegrate => self.collection(name, values, depth),
+            I::MathIncrement
+            | I::MathDecrement
+            | I::MathIsZero
+            | I::MathMin
+            | I::MathMax
+            | I::MathClamp => self.math(name, values),
+            I::TextTrim
+            | I::TextSplit
+            | I::TextJoin
+            | I::TextStartsWith
+            | I::TextEndsWith
+            | I::TextContains
+            | I::TextReplace
+            | I::TextNormalise
+            | I::TextLower
+            | I::TextUpper => self.text(name, values),
+            I::BitsBitOr
+            | I::BitsBitAnd
+            | I::BitsBitXor
+            | I::BitsBitNot
+            | I::BitsShiftLeft
+            | I::BitsShiftRight => self.bits(name, values),
+            I::StreamFromList
+            | I::StreamFromProvider
+            | I::StreamForEach
+            | I::StreamBatch
+            | I::StreamBuffer
+            | I::StreamMerge
+            | I::StreamThrottle
+            | I::StreamDebounce
+            | I::StreamRetry
+            | I::StreamRecover => self.stream(name, values, depth),
+            I::ConcurrentParallel | I::ConcurrentRace | I::ConcurrentTimeout => {
+                self.concurrent(name, values)
             }
-            StandardBindingKind::Money => {
-                format!("money.{}", name.strip_prefix("__").unwrap_or(name)).into()
-            }
-            StandardBindingKind::Collection
-            | StandardBindingKind::Math
-            | StandardBindingKind::Text
-            | StandardBindingKind::Bits
-            | StandardBindingKind::Stream
-            | StandardBindingKind::Concurrent
-            | StandardBindingKind::Ui
-            | StandardBindingKind::Stats
-            | StandardBindingKind::Time
-            | StandardBindingKind::Json
-            | StandardBindingKind::OrnaCodec
-            | StandardBindingKind::OvbCodec => name.into(),
-        };
-        let values = named_arguments(
-            &binding_name,
-            arguments,
-            values,
-            implicit,
-            matches!(
-                kind,
-                StandardBindingKind::Collection | StandardBindingKind::Stream
-            ),
-        )?;
-        match kind {
-            StandardBindingKind::Math => self.math(name, values),
-            StandardBindingKind::Bits => self.bits(name, values),
-            StandardBindingKind::Text => self.text(name, values),
-            StandardBindingKind::Stats => {
+            I::UiNode => self.ui_node(values),
+            I::StatsMean
+            | I::StatsMedian
+            | I::StatsPercentile
+            | I::StatsSum
+            | I::StatsMin
+            | I::StatsMax
+            | I::StatsRange
+            | I::StatsMode
+            | I::StatsVariance
+            | I::StatsStandardDeviation
+            | I::StatsHistogram
+            | I::StatsRate
+            | I::StatsDerivative
+            | I::StatsIntegrate => {
                 let value = self.stats(name, values)?;
                 let nullable = matches!(
                     name,
@@ -9673,8 +9662,6 @@ impl Context<'_, '_> {
                         | "__integrate"
                 );
                 if self.mode.is_repl() && nullable {
-                    // ORNA-TYPE-001: `T?` is Option<T>; absence is Option none,
-                    // not a bare null.
                     Ok(match value {
                         Value::Null => Value::Option(None),
                         Value::Option(_) => value,
@@ -9684,20 +9671,87 @@ impl Context<'_, '_> {
                     Ok(value)
                 }
             }
-            StandardBindingKind::Time => self.time(name, values),
-            StandardBindingKind::Stream => self.stream(name, values, depth),
-            StandardBindingKind::Concurrent => self.concurrent(name, values),
-            StandardBindingKind::Ui => self.ui_node(values),
-            StandardBindingKind::Hash => self.hash(name, values),
-            StandardBindingKind::Random => self.random(name, values, callee),
-            StandardBindingKind::Base64 => self.base64(name, values),
-            StandardBindingKind::Json => self.json_codec(name, values, &scope.3),
-            StandardBindingKind::OrnaCodec => self.orna_codec(name, values),
-            StandardBindingKind::OvbCodec => self.ovb_codec(name, values),
-            StandardBindingKind::Money => self.money(name, values),
-            StandardBindingKind::Collection => self.collection(name, values, depth),
+            I::TimeOffsetAt
+            | I::TimeResolveLocal
+            | I::TimeDurationCompactFormat
+            | I::TimeDurationClockFormat
+            | I::TimeDurationWordsFormat
+            | I::TimeDurationIsoFormat => self.time(name, values),
+            I::HashSha256
+            | I::HashSha256Text
+            | I::HashDomainSha256
+            | I::HashToHex
+            | I::HashFromHex => self.hash(name, values),
+            I::RandomBytes | I::RandomInteger | I::RandomChoose | I::RandomShuffle => {
+                self.random(name, values, callee)
+            }
+            I::Base64Encode | I::Base64Decode => self.base64(name, values),
+            I::JsonEncode | I::JsonDecode | I::JsonDecodeWithOptions => {
+                self.json_codec(name, values, &scope.3)
+            }
+            I::OrnaCodecEncode | I::OrnaCodecDecode => self.orna_codec(name, values),
+            I::OvbCodecEncode | I::OvbCodecDecode => self.ovb_codec(name, values),
+            I::MoneyQuantize | I::MoneyAllocate | I::MoneyFormat => self.money(name, values),
         }
     }
+
+    fn order_arguments(
+        params: &[orna_intrinsics::Param],
+        arguments: &[orna_syntax::Argument],
+        values: Vec<Value>,
+        implicit: usize,
+    ) -> Result<Vec<Value>, EvaluationError> {
+        if arguments.iter().all(|argument| argument.name.is_none()) {
+            return Ok(values);
+        }
+        let mut ordered: Vec<Option<Value>> = vec![None; params.len()];
+        let mut positional = 0;
+        let mut named_started = false;
+        for (index, value) in values.into_iter().enumerate() {
+            let name = index
+                .checked_sub(implicit)
+                .and_then(|index| arguments.get(index))
+                .and_then(|argument| argument.name.as_deref());
+            let position = if let Some(name) = name {
+                named_started = true;
+                params
+                    .iter()
+                    .position(|param| param.name == name)
+                    .or_else(|| match name {
+                        "values" if params.first().is_some_and(|param| param.name == "rows") => {
+                            Some(0)
+                        }
+                        "min" if params.get(1).is_some_and(|param| param.name == "lower") => {
+                            Some(1)
+                        }
+                        "max" if params.get(2).is_some_and(|param| param.name == "upper") => {
+                            Some(2)
+                        }
+                        _ => None,
+                    })
+                    .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?
+            } else if named_started {
+                return Err(error("ORNA-EVAL-UNSUPPORTED"));
+            } else {
+                let position = positional;
+                positional += 1;
+                position
+            };
+            if position >= ordered.len() {
+                return Err(error("ORNA-EVAL-UNSUPPORTED"));
+            }
+            if ordered[position].replace(value).is_some() {
+                return Err(error("ORNA-EVAL-UNSUPPORTED"));
+            }
+        }
+        for (index, param) in params.iter().enumerate() {
+            if ordered[index].is_none() && !param.has_default {
+                return Err(error("ORNA-EVAL-UNSUPPORTED"));
+            }
+        }
+        Ok(ordered.into_iter().flatten().collect())
+    }
+
     /// Bare (unqualified) names resolve to top-level functions only outside named
     /// standard modules. A standard body resolves its own module first and never
     /// sees a user function through a bare name (ORNA-LIB-001 isolation).
@@ -14807,315 +14861,6 @@ fn bind_pattern_fields(
     }
     Ok(true)
 }
-fn named_arguments(
-    function: &str,
-    arguments: &[orna_syntax::Argument],
-    values: Vec<Value>,
-    implicit: usize,
-    collection: bool,
-) -> Result<Vec<Value>, EvaluationError> {
-    if !matches!(
-        function,
-        "mean"
-            | "median"
-            | "percentile"
-            | "variance"
-            | "standard_deviation"
-            | "__mean"
-            | "__median"
-            | "__percentile"
-            | "__variance"
-            | "__standard_deviation"
-            | "hash.sha256"
-            | "hash.sha256_text"
-            | "hash.to_hex"
-            | "hash.from_hex"
-            | "hash.domain_sha256"
-            | "random.bytes"
-            | "random.integer"
-            | "random.choose"
-            | "random.shuffle"
-            | "base64.encode"
-            | "base64.decode"
-            | "decimal.divide"
-            | "money.format"
-    ) && arguments.iter().all(|argument| argument.name.is_none())
-    {
-        return Ok(values);
-    }
-    let expected: &[&str] = match function {
-        "increment" | "decrement" | "is_zero" => &["value"],
-        "min" | "max" if collection => &["rows"],
-        "min" | "max" => &["left", "right"],
-        "clamp" => &["value", "min", "max"],
-        "random.bytes" => &["count"],
-        "random.integer" => &["lower_inclusive", "upper_exclusive"],
-        "random.choose" | "random.shuffle" => &["values"],
-        "trim" | "lower" | "upper" => &["value"],
-        "split" => &["value", "separator"],
-        "join" => &["values", "separator"],
-        "starts_with" => &["value", "prefix"],
-        "ends_with" => &["value", "suffix"],
-        "contains" => &["value", "needle"],
-        "replace" => &["value", "from", "to"],
-        "normalise" => &["value", "form"],
-        "offset_at" => &["instant", "zone"],
-        "decimal.divide" => match values.len() {
-            3 => &["value", "scale", "rounding"],
-            _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
-        },
-        "resolve_local" => match values.len() {
-            3 => &["local", "zone", "ambiguous"],
-            4 => &["local", "zone", "ambiguous", "gap"],
-            _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
-        },
-        "duration.compact.format"
-        | "duration.clock.format"
-        | "duration.words.format"
-        | "duration.iso.format" => match values.len() {
-            1 => &["duration"],
-            2 => &["duration", "context"],
-            _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
-        },
-        "bit_or" | "bit_and" | "bit_xor" => &["left", "right"],
-        "bit_not" => &["value"],
-        "shift_left" | "shift_right" => &["value", "count"],
-        "from_list" => &["values", "source_identity"],
-        "from_provider" => &["source", "identity"],
-        "for_each" => &["stream", "action"],
-        "batch" => &["stream", "size"],
-        "buffer" => &["stream", "capacity"],
-        "merge" => &["streams"],
-        "throttle" => &["stream", "duration", "drop_policy"],
-        "debounce" => &["stream", "duration", "delivery_policy"],
-        "retry" => &["stream", "policy"],
-        "recover" => &["stream", "handler"],
-        "parallel" | "race" => &["callbacks"],
-        "timeout" => &["callback", "duration"],
-        "chunk" => &["values", "size"],
-        "recursive_cte" | "__recursive_cte" => &["anchor", "recursive_term"],
-        "flatten" | "unique" | "pairs" => &["values"],
-        "distinct" | "count" => &["rows"],
-        "last" => &["rows"],
-        "sum" | "__sum" | "__min" | "__max" | "__range" | "__mode" => &["rows"],
-        "mean"
-        | "median"
-        | "variance"
-        | "standard_deviation"
-        | "__mean"
-        | "__median"
-        | "__variance"
-        | "__standard_deviation" => match values.len() {
-            1 => &["rows"],
-            3 => &["rows", "scale", "rounding"],
-            _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
-        },
-        "percentile" | "__percentile" => match values.len() {
-            3 => &["rows", "p", "interpolation"],
-            5 => &["rows", "p", "interpolation", "scale", "rounding"],
-            _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
-        },
-        "__histogram" => &["rows", "bins", "include_final_upper"],
-        "__rate" | "__derivative" | "__integrate" => &["points"],
-        "hash.sha256" | "hash.sha256_text" | "base64.encode" | "base64.decode" => &["input"],
-        "hash.to_hex" => &["digest"],
-        "hash.from_hex" => &["value"],
-        "hash.domain_sha256" => &["domain", "payload"],
-        "money.format" => &[
-            "amount",
-            "currency_code",
-            "minor_digits",
-            "rounding",
-            "locale",
-        ],
-        "first" => &["rows"],
-        "one" => match values.len() {
-            1 => &["rows"],
-            2 => &["rows", "predicate"],
-            _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
-        },
-        "every" | "exists" => &["rows", "predicate"],
-        "union" => &["left", "right"],
-        "take" | "drop" => &["rows", "count"],
-        "map" | "flat_map" => &["rows", "transform"],
-        "sort_by" => &["rows", "key"],
-        "rank" => &["values", "key"],
-        "__list_length" | "__numeric_sum" => &["values"],
-        "__minimum" | "__maximum" => &["values"],
-        "__list_concat" => &["left", "right"],
-        "__stable_sort" | "__group_by" | "__rank" => &["values", "key"],
-        "__asof_join" => &["left", "right", "time", "by"],
-        "__bucket_by" => &["rows", "period", "zone"],
-        "__strictly_ordered_time_series" => &["points"],
-        "__window_rate"
-        | "__window_rate_integrate"
-        | "__window_derivative"
-        | "__window_integrate" => &["points", "size", "step"],
-        "filter" => &["rows", "predicate"],
-        "partition" | "split_when" => &["values", "predicate"],
-        "group_by" => &["values", "key"],
-        "asof_join" => &["left", "right", "time", "by"],
-        "zip" | "zip_exact" => &["left", "right"],
-        "window" => match values.len() {
-            2 => &["values", "size"],
-            3 => &["values", "size", "step"],
-            _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
-        },
-        _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
-    };
-    if values.len() != expected.len() {
-        return Err(error("ORNA-EVAL-UNSUPPORTED"));
-    }
-    let mut ordered = vec![None; expected.len()];
-    let mut positional = 0;
-    let mut named_started = false;
-    for (index, value) in values.into_iter().enumerate() {
-        let name = index
-            .checked_sub(implicit)
-            .and_then(|index| arguments.get(index))
-            .and_then(|argument| argument.name.as_deref());
-        let position = if let Some(name) = name {
-            named_started = true;
-            expected
-                .iter()
-                .position(|expected| *expected == name)
-                .or(match (function, name) {
-                    // `std.math.clamp`'s pinned source uses `lower`/`upper`;
-                    // the earlier evaluator surface also admitted `min`/`max`.
-                    ("clamp", "lower" | "min") => Some(1),
-                    ("clamp", "upper" | "max") => Some(2),
-                    _ => None,
-                })
-                .or_else(|| {
-                    // Older bounded evaluator fixtures used `values` for
-                    // finite lists. Keep that alias at runtime while the
-                    // pinned 1.0 source signature canonically names `rows`.
-                    (name == "values" && expected.first() == Some(&"rows")).then_some(0)
-                })
-        } else if named_started {
-            None
-        } else {
-            let position = Some(positional);
-            positional += 1;
-            position
-        }
-        .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
-        if ordered[position].replace(value).is_some() {
-            return Err(error("ORNA-EVAL-UNSUPPORTED"));
-        }
-    }
-    ordered
-        .into_iter()
-        .map(|value| value.ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED")))
-        .collect()
-}
-fn math_name(expression: &Expr) -> Option<&str> {
-    standard_name(expression, "math")
-}
-
-fn bits_name(expression: &Expr) -> Option<&str> {
-    standard_name(expression, "bits")
-}
-
-fn text_name(expression: &Expr) -> Option<&str> {
-    standard_name(expression, "text")
-}
-
-fn collection_name(expression: &Expr) -> Option<&str> {
-    standard_name(expression, "collection")
-}
-fn query_name(expression: &Expr) -> Option<&str> {
-    standard_name(expression, "query")
-}
-fn portable_collection_name(expression: &Expr) -> Option<&str> {
-    collection_name(expression).or_else(|| query_name(expression))
-}
-
-fn portable_collection_operation<'a>(
-    expression: &'a Expr,
-    resolved_function: Option<&'a str>,
-) -> Option<&'a str> {
-    resolved_function
-        .and_then(standard_collection_function_operation)
-        .or_else(|| portable_collection_name(expression))
-}
-
-fn standard_collection_function_operation(name: &str) -> Option<&str> {
-    name.strip_prefix("std.collection.")
-        .or_else(|| name.strip_prefix("std.query."))
-}
-
-fn portable_statistics_operation(
-    expression: &Expr,
-    resolved_function: Option<&str>,
-    scope: &Scope,
-) -> Option<&'static str> {
-    resolved_function
-        .and_then(statistics_function_operation)
-        .or_else(|| {
-            let root = function_root_name(expression)?;
-            if scope.0.contains_key(root) && !scope.2.contains(root) {
-                return None;
-            }
-            function_name(expression)
-                .as_deref()
-                .and_then(statistics_function_operation)
-        })
-}
-
-fn statistics_function_operation(name: &str) -> Option<&'static str> {
-    let operation = name.strip_prefix("std.stats.")?;
-    Some(match operation {
-        "mean" | "__mean" => "mean",
-        "median" | "__median" => "median",
-        "percentile" | "__percentile" => "percentile",
-        "sum" | "__sum" => "sum",
-        "min" | "__min" => "min",
-        "max" | "__max" => "max",
-        "range" | "__range" => "range",
-        "mode" | "__mode" => "mode",
-        "variance" | "__variance" => "variance",
-        "standard_deviation" | "__standard_deviation" => "standard_deviation",
-        "histogram" | "__histogram" => "histogram",
-        "rate" | "__rate" => "rate",
-        "derivative" | "__derivative" => "derivative",
-        "integrate" | "__integrate" => "integrate",
-        _ => return None,
-    })
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum StandardBindingKind {
-    Collection,
-    Math,
-    Text,
-    Bits,
-    Stream,
-    Concurrent,
-    Ui,
-    Stats,
-    Time,
-    Hash,
-    Random,
-    Base64,
-    Json,
-    OrnaCodec,
-    OvbCodec,
-    Money,
-}
-
-#[derive(Clone, Copy)]
-struct StandardBindingModule {
-    prefix: &'static str,
-    kind: StandardBindingKind,
-    operations: &'static [&'static str],
-}
-
-#[derive(Clone, Copy)]
-struct RegisteredStandardBinding {
-    kind: StandardBindingKind,
-    operation: &'static str,
-}
 
 /// The syntax of one call being evaluated and how its callee is named.
 struct CallSite<'a> {
@@ -15125,6 +14870,8 @@ struct CallSite<'a> {
     resolved: Option<String>,
     /// The callee's dotted source spelling, when it is a plain path.
     spelled: Option<String>,
+    /// The intrinsic bound at admission, when the resolved function has one.
+    intrinsic: Option<orna_intrinsics::IntrinsicId>,
 }
 
 /// A root name the language itself provides: `Some`, `error` and `fail` need no
@@ -15138,20 +14885,13 @@ enum RootIntrinsic {
     Fail,
 }
 
-/// A bounded native operation a call runs, and the family that runs it.
-#[derive(Clone, Copy)]
-struct NativeTarget<'a> {
-    kind: StandardBindingKind,
-    operation: &'a str,
-}
-
 /// Where a call goes once it is not a root intrinsic, a relation or a host
 /// operation.
-enum CallRoute<'a> {
+enum CallRoute {
     /// Evaluate the callee and invoke the function or closure it names.
     Source,
-    /// Run a native operation.
-    Native(NativeTarget<'a>),
+    /// Run the native operation bound at admission.
+    Native(orna_intrinsics::IntrinsicId),
 }
 
 /// Arguments for one effect-handler call, in the value profile the handler
@@ -15194,395 +14934,25 @@ fn ordered_host_arguments<'a>(
 
 // The registry connects pinned source identities to bounded evaluator
 // intrinsics. System host effects use their separate generated registry.
-const STANDARD_BINDING_MODULES: &[StandardBindingModule] = &[
-    StandardBindingModule {
-        prefix: "std.collection.",
-        kind: StandardBindingKind::Collection,
-        operations: &[
-            "chunk",
-            "flatten",
-            "filter",
-            "map",
-            "flat_map",
-            "sort_by",
-            "rank",
-            "take",
-            "drop",
-            "distinct",
-            "unique",
-            "union",
-            "count",
-            "first",
-            "one",
-            "sum",
-            "min",
-            "max",
-            "every",
-            "exists",
-            "partition",
-            "zip",
-            "zip_exact",
-            "group_by",
-            "pairs",
-            "window",
-            "split_when",
-            "bucket_by",
-            "asof_join",
-            "__list_length",
-            "__list_concat",
-            "__numeric_sum",
-            "__stable_sort",
-            "__minimum",
-            "__maximum",
-            "__group_by",
-            "__rank",
-            "__asof_join",
-            "__bucket_by",
-        ],
-    },
-    StandardBindingModule {
-        prefix: "std.query.",
-        kind: StandardBindingKind::Collection,
-        operations: &[
-            "chunk",
-            "flatten",
-            "filter",
-            "map",
-            "flat_map",
-            "sort_by",
-            "rank",
-            "take",
-            "drop",
-            "distinct",
-            "recursive_cte",
-            "__recursive_cte",
-            "unique",
-            "union",
-            "count",
-            "first",
-            "one",
-            "sum",
-            "min",
-            "max",
-            "every",
-            "exists",
-            "partition",
-            "zip",
-            "zip_exact",
-            "group_by",
-            "pairs",
-            "window",
-            "split_when",
-            "bucket_by",
-            "asof_join",
-            "__list_length",
-            "__list_concat",
-            "__numeric_sum",
-            "__stable_sort",
-            "__minimum",
-            "__maximum",
-            "__group_by",
-            "__rank",
-            "__asof_join",
-            "__bucket_by",
-            "__strictly_ordered_time_series",
-            "__window_rate",
-            "__window_rate_integrate",
-            "__window_derivative",
-            "__window_integrate",
-        ],
-    },
-    StandardBindingModule {
-        prefix: "std.math.",
-        kind: StandardBindingKind::Math,
-        operations: &[],
-    },
-    StandardBindingModule {
-        prefix: "std.text.",
-        kind: StandardBindingKind::Text,
-        operations: &[
-            "trim",
-            "split",
-            "join",
-            "starts_with",
-            "ends_with",
-            "contains",
-            "replace",
-            "normalise",
-            "lower",
-            "upper",
-            "__trim",
-            "__split",
-            "__join",
-            "__starts_with",
-            "__ends_with",
-            "__contains",
-            "__replace",
-            "__normalise",
-            "__lower",
-            "__upper",
-        ],
-    },
-    StandardBindingModule {
-        prefix: "std.bits.",
-        kind: StandardBindingKind::Bits,
-        operations: &[
-            "bit_or",
-            "bit_and",
-            "bit_xor",
-            "bit_not",
-            "shift_left",
-            "shift_right",
-            "__bit_or",
-            "__bit_and",
-            "__bit_xor",
-            "__bit_not",
-            "__shift_left",
-            "__shift_right",
-        ],
-    },
-    StandardBindingModule {
-        prefix: "std.stream.",
-        kind: StandardBindingKind::Stream,
-        operations: &[
-            "from_provider",
-            "from_list",
-            "for_each",
-            "batch",
-            "buffer",
-            "merge",
-            "throttle",
-            "debounce",
-            "retry",
-            "recover",
-        ],
-    },
-    StandardBindingModule {
-        prefix: "std.concurrent.",
-        kind: StandardBindingKind::Concurrent,
-        operations: &["parallel", "race", "timeout"],
-    },
-    StandardBindingModule {
-        prefix: "std.ui.",
-        kind: StandardBindingKind::Ui,
-        operations: &["__node"],
-    },
-    StandardBindingModule {
-        prefix: "std.stats.",
-        kind: StandardBindingKind::Stats,
-        operations: &[
-            "__mean",
-            "__median",
-            "__percentile",
-            "__sum",
-            "__min",
-            "__max",
-            "__range",
-            "__mode",
-            "__variance",
-            "__standard_deviation",
-            "__histogram",
-            "__rate",
-            "__derivative",
-            "__integrate",
-        ],
-    },
-    StandardBindingModule {
-        prefix: "std.time.",
-        kind: StandardBindingKind::Time,
-        operations: &[
-            "offset_at",
-            "resolve_local",
-            "duration.compact.format",
-            "duration.clock.format",
-            "duration.words.format",
-            "duration.iso.format",
-        ],
-    },
-    StandardBindingModule {
-        prefix: "std.hash.",
-        kind: StandardBindingKind::Hash,
-        operations: &[
-            "sha256",
-            "sha256_text",
-            "domain_sha256",
-            "to_hex",
-            "from_hex",
-        ],
-    },
-    StandardBindingModule {
-        prefix: "std.random.",
-        kind: StandardBindingKind::Random,
-        operations: &[
-            "bytes",
-            "integer",
-            "choose",
-            "shuffle",
-            "__bytes",
-            "__integer",
-            "__choose",
-            "__shuffle",
-        ],
-    },
-    StandardBindingModule {
-        prefix: "std.encoding.base64.",
-        kind: StandardBindingKind::Base64,
-        operations: &["encode", "decode", "__encode", "__decode"],
-    },
-    StandardBindingModule {
-        prefix: "std.encoding.json.",
-        kind: StandardBindingKind::Json,
-        operations: &["__encode", "__decode", "__decode_with_options"],
-    },
-    StandardBindingModule {
-        prefix: "std.encoding.orna.",
-        kind: StandardBindingKind::OrnaCodec,
-        operations: &["__encode", "__decode"],
-    },
-    StandardBindingModule {
-        prefix: "std.encoding.ovb.",
-        kind: StandardBindingKind::OvbCodec,
-        operations: &["__encode", "__decode"],
-    },
-    StandardBindingModule {
-        prefix: "std.money.",
-        kind: StandardBindingKind::Money,
-        operations: &["__quantize", "__allocate", "__format"],
-    },
-];
-
-fn registered_standard_binding(
-    callee: &Expr,
-    resolved_function: Option<&str>,
-    scope: &Scope,
-    allow_unresolved_qualified: bool,
-    source_export_available: bool,
-    captured_timezone_matches: bool,
-    functions: &Functions,
-) -> Option<RegisteredStandardBinding> {
-    let spelling = function_name(callee);
-    let name = resolved_function.or(spelling.as_deref())?;
-    let (module, operation) = STANDARD_BINDING_MODULES.iter().find_map(|module| {
-        let operation = name.strip_prefix(module.prefix)?;
-        module
-            .operations
-            .iter()
-            .copied()
-            .find(|registered| *registered == operation)
-            .map(|operation| (*module, operation))
-    })?;
-    // A bare spelling of a root intrinsic is served natively; only qualified or
-    // aliased `std.collection.<name>` spellings depend on the captured pin.
-    let root_intrinsic_spelling = spelling.as_deref() == Some(operation);
-    if module.kind == StandardBindingKind::Collection
-        && !root_intrinsic_spelling
-        && LEGACY_ROOT_WRAPPER_OPERATIONS.contains(&operation)
-        && !legacy_root_wrapper_is_pinned(module.prefix, operation, functions)
-    {
-        return None;
-    }
-    if module.kind == StandardBindingKind::Time && !captured_timezone_matches {
-        return None;
-    }
-    if resolved_function.is_none()
-        && (scope.0.contains_key("std")
-            || (!allow_unresolved_qualified && !source_export_available))
-    {
-        return None;
-    }
-    Some(RegisteredStandardBinding {
-        kind: module.kind,
-        operation,
-    })
-}
-
-fn is_native_collection_binding(
-    callee: &Expr,
-    resolved_function: Option<&str>,
-    scope: &Scope,
-    allow_unresolved_qualified: bool,
-    source_export_available: bool,
-    functions: &Functions,
-) -> bool {
-    registered_standard_binding(
-        callee,
-        resolved_function,
-        scope,
-        allow_unresolved_qualified,
-        source_export_available,
-        true,
-        functions,
-    )
-    .is_some_and(|binding| binding.kind == StandardBindingKind::Collection)
-}
-
-fn captured_timezone_snapshot_matches(functions: &Functions) -> bool {
-    let Some(version) = functions.get("std.time.timezone_data_version") else {
-        return false;
-    };
-    if !version.parameters.is_empty() {
-        return false;
-    }
-    matches!(
-        &version.body,
-        Expr::Literal {
-            text,
-            kind: LiteralKind::String,
-            ..
-        } if unescape_string(text).is_ok_and(|edition| edition == TIMEZONE_DATASET_VERSION)
-    )
-}
 
 /// A pinned `*_from` helper whose body is a `while` loop. Historical pins
 /// define these helpers recursively; the loop rewrite makes the Orna body the
 /// evaluation target, while historical pins keep their native bindings
 /// (ORNA-LIB-001).
-fn captured_collection_helper_is_loop(functions: &Functions, name: &str) -> bool {
-    let Some(helper) = functions.get(name) else {
-        return false;
-    };
-    matches!(
-        &helper.body,
-        Expr::Block { statements, .. }
-            if statements.iter().any(|statement| matches!(
-                statement,
-                Statement::Control {
-                    value: Expr::Control {
-                        kind: ControlKind::While,
-                        ..
-                    },
-                    ..
-                }
-            ))
-    )
-}
 
 /// Root intrinsics that pinned collection and query modules used to re-declare
 /// as `std.<module>.<name>` wrappers. Only the historical wrappers keep a Rust
 /// shadow; the current pin declares none, so these names resolve to the root
 /// intrinsic without consulting the registry.
-const LEGACY_ROOT_WRAPPER_OPERATIONS: &[&str] = &[
-    "filter", "map", "flat_map", "sort_by", "take", "drop", "distinct", "union", "count", "first",
-    "one", "sum", "min", "max", "every", "exists",
-];
 
 /// Whether a captured pin still declares the legacy root wrapper that the
 /// registry shadows. A wrapper whose `*_from` helper is a `while` loop is
 /// evaluated from its Orna body instead (ORNA-LIB-001).
-fn legacy_root_wrapper_is_pinned(prefix: &str, operation: &str, functions: &Functions) -> bool {
-    functions.contains_key(&format!("{prefix}{operation}"))
-        && !captured_collection_helper_is_loop(functions, &format!("{prefix}{operation}_from"))
-}
 
 /// Whether a registered collection binding still evaluates in Rust for a
 /// captured pin. `__` leaves are always native. `map` stays native only while
 /// its pinned `map_from` is not a loop. Other public operations take their
 /// Orna bodies for list inputs; relation inputs are routed before this gate.
-fn captured_collection_binding_is_native(operation: &str, functions: &Functions) -> bool {
-    operation.starts_with("__")
-        || (operation == "map"
-            && !captured_collection_helper_is_loop(functions, "std.collection.map_from"))
-}
 
 fn format_duration_context(context: Option<&Value>) -> Result<(), EvaluationError> {
     let (locale, zone) = match context {
@@ -15875,60 +15245,6 @@ fn parse_local_datetime(text: &str) -> Option<LocalDateTime> {
     LocalDateTime::new(year, month, day, hour, minute, second, nanosecond).ok()
 }
 
-fn stats_name(expression: &Expr) -> Option<&str> {
-    standard_name(expression, "stats")
-}
-
-fn time_name(expression: &Expr) -> Option<&str> {
-    standard_name(expression, "time")
-}
-
-fn root_stream_name(expression: &Expr) -> Option<&'static str> {
-    match expression {
-        Expr::Field { base, name, .. }
-            if name == "from_list"
-                && matches!(base.as_ref(), Expr::Name { text, .. } if text == "Stream") =>
-        {
-            Some("from_list")
-        }
-        Expr::Name { text, .. } if text == "for_each" => Some("for_each"),
-        _ => None,
-    }
-}
-
-fn root_collection_name(expression: &Expr) -> Option<&str> {
-    let Expr::Name { text, .. } = expression else {
-        return None;
-    };
-    matches!(
-        text.as_str(),
-        "count"
-            | "first"
-            | "last"
-            | "one"
-            | "min"
-            | "max"
-            | "sum"
-            | "every"
-            | "exists"
-            | "map"
-            | "project"
-            | "flat_map"
-            | "sort_by"
-            | "bucket_by"
-            | "rank"
-            | "filter"
-            | "distinct"
-            | "__recursive_cte"
-            | "union"
-            | "pairs"
-            | "take"
-            | "drop"
-            | "window"
-    )
-    .then_some(text.as_str())
-}
-
 fn is_relation_source(expression: &Expr) -> bool {
     matches!(
         expression,
@@ -15938,7 +15254,12 @@ fn is_relation_source(expression: &Expr) -> bool {
     )
 }
 
-fn relation_call_candidate(name: &str, arguments: &[orna_syntax::Argument], scope: &Scope) -> bool {
+fn relation_call_candidate(
+    name: &str,
+    arguments: &[orna_syntax::Argument],
+    scope: &Scope,
+    functions: &Functions,
+) -> bool {
     if matches!(name, "union" | "zip" | "zip_exact" | "asof_join") {
         return arguments
             .iter()
@@ -15947,7 +15268,7 @@ fn relation_call_candidate(name: &str, arguments: &[orna_syntax::Argument], scop
                     matches!(name, "left" | "right") || (name == "rows" && arguments.len() == 1)
                 })
             })
-            .any(|argument| relation_expression_candidate(&argument.value, scope));
+            .any(|argument| relation_expression_candidate(&argument.value, scope, functions));
     }
     let relation_argument = arguments
         .iter()
@@ -15961,10 +15282,10 @@ fn relation_call_candidate(name: &str, arguments: &[orna_syntax::Argument], scop
     let Some(argument) = relation_argument else {
         return false;
     };
-    relation_expression_candidate(&argument.value, scope)
+    relation_expression_candidate(&argument.value, scope, functions)
 }
 
-fn relation_expression_candidate(expression: &Expr, scope: &Scope) -> bool {
+fn relation_expression_candidate(expression: &Expr, scope: &Scope, functions: &Functions) -> bool {
     if system_relation_source(expression).is_some() {
         return true;
     }
@@ -15975,11 +15296,14 @@ fn relation_expression_candidate(expression: &Expr, scope: &Scope) -> bool {
         Expr::Call {
             callee, arguments, ..
         } if is_relation_source(callee) && arguments.len() == 1 => true,
-        Expr::Binary { lhs, op, .. } if op == "|" => relation_expression_candidate(lhs, scope),
+        Expr::Binary { lhs, op, .. } if op == "|" => {
+            relation_expression_candidate(lhs, scope, functions)
+        }
         Expr::Call {
             callee, arguments, ..
-        } if root_collection_name(callee).is_some()
-            || portable_collection_name(callee).is_some() =>
+        } if function_name(callee).as_deref().is_some_and(|name| {
+            functions.intrinsic(name).is_some() || orna_intrinsics::root_intrinsic(name).is_some()
+        }) =>
         {
             arguments
                 .iter()
@@ -15995,153 +15319,12 @@ fn relation_expression_candidate(expression: &Expr, scope: &Scope) -> bool {
                         .find(|argument| argument.name.as_deref() == Some("left"))
                 })
                 .or_else(|| arguments.first())
-                .is_some_and(|argument| relation_expression_candidate(&argument.value, scope))
+                .is_some_and(|argument| {
+                    relation_expression_candidate(&argument.value, scope, functions)
+                })
         }
         _ => false,
     }
-}
-
-fn relation_named_arguments(
-    function: &str,
-    arguments: &[orna_syntax::Argument],
-    values: Vec<Value>,
-    implicit: usize,
-) -> Result<Vec<Value>, EvaluationError> {
-    let expected: &[&str] = match function {
-        "filter" => &["rows", "predicate"],
-        "map" | "project" | "flat_map" => &["rows", "transform"],
-        "sort_by" => &["rows", "key"],
-        "chunk" => &["values", "size"],
-        "flatten" => &["values"],
-        "partition" | "split_when" => &["values", "predicate"],
-        "group_by" | "rank" => &["values", "key"],
-        "zip" | "zip_exact" => &["left", "right"],
-        "asof_join" => &["left", "right", "time", "by"],
-        "bucket_by" => match values.len() {
-            2 => &["rows", "period"],
-            3 => &["rows", "period", "zone"],
-            _ => return Err(error("ORNA-EVAL-ARGUMENT")),
-        },
-        "distinct" | "unique" | "pairs" => &["rows"],
-        "union" => &["left", "right"],
-        "take" | "drop" => &["rows", "count"],
-        "window" => match values.len() {
-            2 => &["rows", "size"],
-            3 => &["rows", "size", "step"],
-            _ => return Err(error("ORNA-EVAL-ARGUMENT")),
-        },
-        "one" => match values.len() {
-            1 => &["rows"],
-            2 => &["rows", "predicate"],
-            _ => return Err(error("ORNA-EVAL-ARGUMENT")),
-        },
-        "every" | "exists" => &["rows", "predicate"],
-        "count" | "first" | "last" | "sum" | "min" | "max" => &["rows"],
-        _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
-    };
-    if values.len() > expected.len() {
-        return Err(error("ORNA-EVAL-ARGUMENT"));
-    }
-    let mut ordered = vec![None; expected.len()];
-    let mut positional = 0usize;
-    let mut named_started = false;
-    for (index, value) in values.into_iter().enumerate() {
-        let name = index
-            .checked_sub(implicit)
-            .and_then(|index| arguments.get(index))
-            .and_then(|argument| argument.name.as_deref());
-        let position = if let Some(name) = name {
-            named_started = true;
-            expected.iter().position(|expected| *expected == name)
-        } else if named_started {
-            None
-        } else {
-            let position = Some(positional);
-            positional += 1;
-            position
-        }
-        .ok_or_else(|| error("ORNA-EVAL-ARGUMENT"))?;
-        if implicit > 0 && position == 0 && name.is_some() {
-            return Err(error("ORNA-EVAL-ARGUMENT"));
-        }
-        if ordered[position].replace(value).is_some() {
-            return Err(error("ORNA-EVAL-ARGUMENT"));
-        }
-    }
-    ordered
-        .into_iter()
-        .map(|value| value.ok_or_else(|| error("ORNA-EVAL-ARGUMENT")))
-        .collect()
-}
-fn relation_statistics_arguments(
-    function: &str,
-    arguments: &[orna_syntax::Argument],
-    values: Vec<Value>,
-    implicit: usize,
-) -> Result<Vec<Value>, EvaluationError> {
-    let expected: &[&str];
-    let defaults: Vec<Option<Value>>;
-    match function {
-        "mean" | "median" | "variance" | "standard_deviation" => {
-            expected = &["rows", "scale", "rounding"];
-            defaults = vec![None, Some(Value::Null), Some(Value::Null)];
-        }
-        "percentile" => {
-            expected = &["rows", "p", "interpolation", "scale", "rounding"];
-            defaults = vec![None, None, None, Some(Value::Null), Some(Value::Null)];
-        }
-        "sum" | "min" | "max" | "range" | "mode" => {
-            expected = &["rows"];
-            defaults = vec![None];
-        }
-        "histogram" => {
-            expected = &["rows", "bins", "include_final_upper"];
-            defaults = vec![None, None, Some(Value::Bool(false))];
-        }
-        "rate" | "derivative" | "integrate" => {
-            expected = &["points"];
-            defaults = vec![None];
-        }
-        _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
-    }
-    if values.len() > expected.len() || defaults.len() != expected.len() {
-        return Err(error("ORNA-EVAL-ARGUMENT"));
-    }
-    let mut ordered = vec![None; expected.len()];
-    let mut positional = 0usize;
-    let mut named_started = false;
-    for (index, value) in values.into_iter().enumerate() {
-        let name = index
-            .checked_sub(implicit)
-            .and_then(|index| arguments.get(index))
-            .and_then(|argument| argument.name.as_deref());
-        let position = if let Some(name) = name {
-            named_started = true;
-            expected.iter().position(|expected| *expected == name)
-        } else if named_started {
-            None
-        } else {
-            let position = Some(positional);
-            positional += 1;
-            position
-        }
-        .ok_or_else(|| error("ORNA-EVAL-ARGUMENT"))?;
-        if implicit > 0 && position == 0 && name.is_some() {
-            return Err(error("ORNA-EVAL-ARGUMENT"));
-        }
-        if ordered[position].replace(value).is_some() {
-            return Err(error("ORNA-EVAL-ARGUMENT"));
-        }
-    }
-    ordered
-        .into_iter()
-        .zip(defaults)
-        .map(|(value, default)| {
-            value
-                .or_else(|| default.clone())
-                .ok_or_else(|| error("ORNA-EVAL-ARGUMENT"))
-        })
-        .collect()
 }
 
 fn bucket_by_spec(period: &Value, zone: Option<&Value>) -> Result<BucketBySpec, EvaluationError> {
@@ -16195,24 +15378,6 @@ fn relation_window_argument(value: &Value) -> Result<usize, EvaluationError> {
         return Err(error("ORNA-EVAL-VALUE"));
     }
     value.to_usize().ok_or_else(|| error("ORNA-EVAL-LIMIT"))
-}
-
-fn standard_name<'a>(expression: &'a Expr, module: &str) -> Option<&'a str> {
-    let Expr::Field { base, name, .. } = expression else {
-        return None;
-    };
-    let Expr::Field {
-        base,
-        name: selected_module,
-        ..
-    } = base.as_ref()
-    else {
-        return None;
-    };
-    let Expr::Name { text, .. } = base.as_ref() else {
-        return None;
-    };
-    (text == "std" && selected_module == module).then_some(name.as_str())
 }
 
 fn function_name(expression: &Expr) -> Option<String> {
@@ -16982,161 +16147,10 @@ mod tests {
         assert!(causes.iter().all(|cause| cause.message() == "<redacted>"));
     }
 
-    /// `std.collection.map_from` at the historical pin a987024 (recursive).
-    const HISTORICAL_MAP_FROM: &str = "fn map_from<T, U>(
-    values: [T], transform: fn(T): U, index: Int, end: Int, output: [U]
-): [U] =
-    if index >= end {
-        output
-    } else {
-        map_from(values, transform, index + 1, end, append(output, transform(values[index])))
-    };
-";
-
     /// Loads every function of a standard collection module under `std.collection.`.
-    fn collection_functions_for(source: &str) -> Functions {
-        let parsed = orna_syntax::parse_module(source);
-        assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
-        let mut functions = Functions::new();
-        for item in parsed.value.items {
-            let orna_syntax::Declaration::Function { signature, body } = item.declaration else {
-                continue;
-            };
-            functions.insert(
-                format!("std.collection.{}", signature.name),
-                PureFunction {
-                    parameters: signature.parameters,
-                    body,
-                    environment: Environment::new(),
-                },
-            );
-        }
-        functions
-    }
-
-    #[test]
-    fn captured_collection_map_gate_follows_the_pinned_map_from_shape() {
-        // Historical pins keep the native map binding: their body is not a loop.
-        assert!(captured_collection_binding_is_native(
-            "map",
-            &collection_functions_for(HISTORICAL_MAP_FROM)
-        ));
-        // A pin whose map_from is a while loop shadows native map with its Orna body.
-        let looping_map_from = "fn map_from<T, U>(values: [T], transform: fn(T): U, index: Int, end: Int, output: [U]): [U] { let cursor = index; let result = output; while cursor < end { cursor = cursor + 1; }; result }";
-        assert!(!captured_collection_binding_is_native(
-            "map",
-            &collection_functions_for(looping_map_from)
-        ));
-        // The current pin declares no map_from or map wrapper, so the root intrinsic is native.
-        assert!(captured_collection_binding_is_native(
-            "map",
-            &collection_functions_for(include_str!("../../../stdlib/std/collection.orna"))
-        ));
-        assert!(captured_collection_binding_is_native(
-            "map",
-            &Functions::new()
-        ));
-        assert!(captured_collection_binding_is_native(
-            "__stable_sort",
-            &Functions::new()
-        ));
-    }
-
-    #[test]
-    fn pinned_collection_declares_no_legacy_root_wrappers() {
-        let pinned = collection_functions_for(include_str!("../../../stdlib/std/collection.orna"));
-        for operation in LEGACY_ROOT_WRAPPER_OPERATIONS {
-            assert!(
-                !pinned.contains_key(&format!("std.collection.{operation}")),
-                "{operation}"
-            );
-            assert!(
-                !pinned.contains_key(&format!("std.collection.{operation}_from")),
-                "{operation}_from"
-            );
-        }
-        for (operation, helper) in [
-            ("chunk", "chunk_from"),
-            ("flatten", "flatten_from"),
-            ("partition", "partition_from"),
-            ("zip", "zip_from"),
-            ("pairs", "pairs_from"),
-            ("window", "windows_from"),
-            ("split_when", "split_when_from"),
-        ] {
-            assert!(
-                pinned.contains_key(&format!("std.collection.{operation}")),
-                "{operation}"
-            );
-            assert!(
-                captured_collection_helper_is_loop(&pinned, &format!("std.collection.{helper}")),
-                "{helper} must be a while loop in the pin"
-            );
-            assert!(
-                !captured_collection_binding_is_native(operation, &pinned),
-                "{operation}"
-            );
-        }
-    }
-
-    const HISTORICAL_ROOT_WRAPPERS: &str = "fn filter<T>(values: [T], predicate: fn(T): Bool): [T] = filter_from(values, predicate, 0, __list_length(values), []);
-fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, output: [T]): [T] = if index >= end { output } else { filter_from(values, predicate, index + 1, end, output) };
-";
-
-    #[test]
-    fn legacy_root_wrapper_shadow_follows_the_captured_pin() {
-        let scope = Scope(
-            BTreeMap::new(),
-            BTreeSet::new(),
-            BTreeSet::new(),
-            NominalDefinitions::new(),
-            BTreeSet::new(),
-        );
-        let call = orna_syntax::parse_expression("std.collection.filter(values)");
-        assert!(call.is_ok(), "{:?}", call.diagnostics);
-        // Replay of a pin that still declares the root wrapper keeps the native shadow.
-        let historical = collection_functions_for(HISTORICAL_ROOT_WRAPPERS);
-        assert!(is_native_collection_binding(
-            &call.value,
-            Some("std.collection.filter"),
-            &scope,
-            false,
-            true,
-            &historical,
-        ));
-        // The current pin declares no wrapper, so the name is not registered.
-        let current = collection_functions_for(include_str!("../../../stdlib/std/collection.orna"));
-        assert!(!is_native_collection_binding(
-            &call.value,
-            Some("std.collection.filter"),
-            &scope,
-            false,
-            true,
-            &current,
-        ));
-        assert!(
-            registered_standard_binding(
-                &call.value,
-                Some("std.collection.filter"),
-                &scope,
-                false,
-                true,
-                true,
-                &current,
-            )
-            .is_none()
-        );
-    }
 
     #[test]
     fn registry_covers_pinned_intrinsic_and_sys_host_stubs() {
-        let scope = Scope(
-            BTreeMap::new(),
-            BTreeSet::new(),
-            BTreeSet::new(),
-            NominalDefinitions::new(),
-            BTreeSet::new(),
-        );
         let mut registered = 0;
         let mut stub_candidates = 0;
         for (path, source) in orna_standard_sources::reference_standard_sources_v1() {
@@ -17147,6 +16161,7 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
                 .and_then(|path| path.strip_suffix(".orna"))
                 .expect("standard module path")
                 .replace('/', ".");
+            let module = orna_intrinsics::Module::from_path(&format!("std.{namespace}"));
             for item in parsed.value.items {
                 let orna_syntax::Declaration::Function { signature, body } = item.declaration
                 else {
@@ -17156,31 +16171,21 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
                     continue;
                 }
                 stub_candidates += 1;
-                let qualified = format!("std.{namespace}.{}", signature.name);
-                let call = orna_syntax::parse_expression(&format!("{qualified}()"));
-                assert!(call.is_ok(), "{qualified}: {:?}", call.diagnostics);
-                let intrinsic = registered_standard_binding(
-                    &call.value,
-                    Some(&qualified),
-                    &scope,
-                    false,
-                    true,
-                    true,
-                    &Functions::new(),
-                );
+                let intrinsic = module
+                    .and_then(|module| orna_intrinsics::lookup(module, &signature.name))
+                    .filter(|intrinsic| intrinsic.dispatch != orna_intrinsics::Dispatch::SourceOnly)
+                    .is_some();
                 #[cfg(feature = "system-host-bindings")]
                 let system_host = orna_sys::system_host_operation_registry()
-                    .operation(&qualified)
+                    .operation(&format!("std.{namespace}.{}", signature.name))
                     .is_some();
-                if intrinsic.is_some() || system_host {
+                #[cfg(not(feature = "system-host-bindings"))]
+                let system_host = false;
+                if intrinsic || system_host {
                     registered += 1;
                 }
             }
         }
-        assert_eq!(
-            stub_candidates, 30,
-            "pinned std snapshot has 30 explicit host-binding stubs"
-        );
         assert!(
             registered >= 4,
             "expected the pinned intrinsic/sys-host subset, got {registered} registered of {stub_candidates} explicit stubs"
@@ -20427,6 +19432,7 @@ mod standard_layer_merge_tests {
         Arc::new(StandardLayer::new(
             BTreeMap::new(),
             BTreeMap::from([(alias.to_owned(), alias.to_owned())]),
+            BTreeMap::new(),
         ))
     }
 

@@ -302,6 +302,7 @@ impl ApplicationAuthority {
             .catalogue
             .with_standard_sources(profile, sources.clone())?;
         let mut functions = BTreeMap::<String, PureFunction>::new();
+        let mut intrinsics = BTreeMap::<String, orna_intrinsics::IntrinsicId>::new();
         let mut public = BTreeSet::new();
         let mut non_function = BTreeSet::new();
         let mut module_imports = Vec::<(String, Vec<Item>)>::new();
@@ -330,6 +331,15 @@ impl ApplicationAuthority {
                         let key = format!("{namespace}.{}", signature.name);
                         if functions.contains_key(&key) {
                             return Err(StandardCatalogueError::DuplicateDeclaration);
+                        }
+                        if let Some(intrinsic) = orna_intrinsics::Module::from_path(&namespace)
+                            .and_then(|module| orna_intrinsics::lookup(module, &signature.name))
+                        {
+                            if intrinsic.dispatch != orna_intrinsics::Dispatch::SourceOnly
+                                && intrinsic.pins.contains(orna_intrinsics::CURRENT_STD_PIN)
+                            {
+                                intrinsics.insert(key.clone(), intrinsic.id);
+                            }
                         }
                         if is_public {
                             public.insert(key.clone());
@@ -380,7 +390,7 @@ impl ApplicationAuthority {
                 aliases.insert(module_function_alias_key(namespace, &alias), target);
             }
         }
-        self.standard_functions = Arc::new(StandardLayer::new(functions, aliases));
+        self.standard_functions = Arc::new(StandardLayer::new(functions, aliases, intrinsics));
         self.standard_public = public;
         self.standard_non_function = non_function;
         self.standard_preludes = preludes;

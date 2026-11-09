@@ -1,6 +1,6 @@
 {
   "schema": "orna.std_intrinsics.v1",
-  "source_digest": "9cddff0953342357",
+  "source_digest": "30b2a2b1ad6f14c7",
   "intrinsics": [
     {
       "id": "CoreSome",
