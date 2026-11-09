@@ -744,353 +744,8 @@ impl Catalogue {
     /// executable standard-library source.
     pub fn authoritative_core() -> Self {
         let mut modules = BTreeMap::new();
-        let primitive_types = [
-            ("BOOLEAN", Type::Bool),
-            ("BOOL", Type::Bool),
-            ("INTEGER", Type::Int),
-            ("INT", Type::Int),
-            ("BIGINT", Type::Int),
-            ("FLOAT", Type::Float),
-            ("DECIMAL", Type::Decimal),
-            ("TEXT", Type::Text),
-            ("DATE", Type::Date),
-            ("TIMESTAMP", Type::Instant),
-            ("VOID", Type::Null),
-        ];
-        let root_types = [
-            ("UUID", Type::Named("std.UUID".into())),
-            ("TIME", Type::Named("std.TIME".into())),
-            ("DURATION", Type::Named("std.DURATION".into())),
-            ("BYTES", Type::Named("std.BINARY_LARGE_OBJECT".into())),
-            ("Action", Type::Named("std.Action".into())),
-            ("Rows", Type::Named("std.Rows".into())),
-            ("JsonValue", Type::Named("std.JsonValue".into())),
-            ("Document", Type::Named("std.Document".into())),
-            ("ByteStream", Type::Named("std.ByteStream".into())),
-            ("UI", Type::Named("std.UI".into())),
-        ];
-        let mut root = Vec::new();
-        root.extend(primitive_types.iter().cloned());
-        root.extend(root_types.iter().cloned());
-        modules.insert(
-            Namespace(vec!["std".into()]),
-            catalogue_module(
-                Namespace(vec!["std".into()]),
-                root,
-                primitive_types
-                    .iter()
-                    .map(|(name, _)| *name)
-                    .chain(root_types.iter().map(|(name, _)| *name)),
-            ),
-        );
-        modules.insert(
-            Namespace(vec!["std".into(), "types".into()]),
-            catalogue_module(
-                Namespace(vec!["std".into(), "types".into()]),
-                primitive_types
-                    .iter()
-                    .map(|(name, ty)| (*name, ty.clone()))
-                    .chain(root_types.iter().map(|(name, ty)| (*name, ty.clone()))),
-                std::iter::empty::<&str>(),
-            ),
-        );
-        modules.insert(
-            Namespace(vec!["std".into(), "math".into()]),
-            catalogue_module(
-                Namespace(vec!["std".into(), "math".into()]),
-                [
-                    ("increment", function(vec![Type::Int], Type::Int)),
-                    ("decrement", function(vec![Type::Int], Type::Int)),
-                    ("is_zero", function(vec![Type::Int], Type::Bool)),
-                    ("min", function(vec![Type::Int, Type::Int], Type::Int)),
-                    ("max", function(vec![Type::Int, Type::Int], Type::Int)),
-                    (
-                        "clamp",
-                        function(vec![Type::Int, Type::Int, Type::Int], Type::Int),
-                    ),
-                ],
-                std::iter::empty::<&str>(),
-            ),
-        );
-        modules.insert(
-            Namespace(vec!["std".into(), "text".into()]),
-            catalogue_module(
-                Namespace(vec!["std".into(), "text".into()]),
-                [
-                    (
-                        "slug",
-                        named_function(vec![("value", Type::Text)], Type::Text),
-                    ),
-                    (
-                        "disambiguate",
-                        named_function(
-                            vec![("value", Type::Text), ("keys", Type::Error)],
-                            Type::Text,
-                        ),
-                    ),
-                ],
-                std::iter::empty::<&str>(),
-            ),
-        );
-        modules.insert(
-            Namespace(vec!["std".into(), "invoke".into()]),
-            catalogue_module(
-                Namespace(vec!["std".into(), "invoke".into()]),
-                [("echo", function(vec![Type::Int], Type::Int))],
-                std::iter::empty::<&str>(),
-            ),
-        );
-        modules.insert(
-            Namespace(vec!["std".into(), "concurrent".into()]),
-            catalogue_module(
-                Namespace(vec!["std".into(), "concurrent".into()]),
-                [
-                    (
-                        "parallel",
-                        function(
-                            vec![Type::List(Box::new(Type::Error))],
-                            Type::List(Box::new(Type::Error)),
-                        ),
-                    ),
-                    (
-                        "race",
-                        function(vec![Type::List(Box::new(Type::Error))], Type::Error),
-                    ),
-                    (
-                        "timeout",
-                        named_function(
-                            vec![
-                                ("callback", function(Vec::new(), Type::Error)),
-                                ("duration", Type::Named("std.DURATION".into())),
-                            ],
-                            Type::Error,
-                        ),
-                    ),
-                    (
-                        "sleep",
-                        named_function(
-                            vec![("duration", Type::Named("std.DURATION".into()))],
-                            Type::Null,
-                        ),
-                    ),
-                ],
-                std::iter::empty::<&str>(),
-            ),
-        );
-        let action = Type::Named("std.Action".into());
-        let rows = Type::Named("std.Rows".into());
-        let json = Type::Named("std.JsonValue".into());
-        let document = Type::Named("std.Document".into());
-        let byte_stream = Type::Named("std.ByteStream".into());
-        modules.insert(
-            Namespace(vec!["std".into(), "action".into()]),
-            catalogue_module(
-                Namespace(vec!["std".into(), "action".into()]),
-                [("Action", action)],
-                std::iter::empty::<&str>(),
-            ),
-        );
-        modules.insert(
-            Namespace(vec!["std".into(), "data".into()]),
-            catalogue_module(
-                Namespace(vec!["std".into(), "data".into()]),
-                [("Rows", rows.clone())],
-                std::iter::empty::<&str>(),
-            ),
-        );
-        modules.insert(
-            Namespace(vec!["std".into(), "json".into()]),
-            catalogue_module(
-                Namespace(vec!["std".into(), "json".into()]),
-                [
-                    ("Value", json.clone()),
-                    ("encode", function(vec![json], byte_stream.clone())),
-                ],
-                std::iter::empty::<&str>(),
-            ),
-        );
-        modules.insert(
-            Namespace(vec!["std".into(), "encoding".into(), "json".into()]),
-            catalogue_module(
-                Namespace(vec!["std".into(), "encoding".into(), "json".into()]),
-                [
-                    (
-                        "encode",
-                        named_function(vec![("value", Type::Error)], byte_stream.clone()),
-                    ),
-                    (
-                        "decode",
-                        named_function(
-                            vec![("value", Type::Error), ("as", Type::Error)],
-                            Type::Error,
-                        ),
-                    ),
-                ],
-                std::iter::empty::<&str>(),
-            ),
-        );
-        modules.insert(
-            Namespace(vec!["std".into(), "encoding".into(), "orna".into()]),
-            catalogue_module(
-                Namespace(vec!["std".into(), "encoding".into(), "orna".into()]),
-                [(
-                    "encode",
-                    named_function(vec![("value", Type::Error)], byte_stream.clone()),
-                )],
-                std::iter::empty::<&str>(),
-            ),
-        );
-        let duration = Type::Named("std.DURATION".into());
-        for segment in ["compact", "clock", "words", "iso"] {
-            let namespace = Namespace(vec![
-                "std".into(),
-                "time".into(),
-                "duration".into(),
-                segment.into(),
-            ]);
-            modules.insert(
-                namespace.clone(),
-                catalogue_module(
-                    namespace,
-                    [(
-                        "format",
-                        named_function(vec![("duration", duration.clone())], Type::Text),
-                    )],
-                    std::iter::empty::<&str>(),
-                ),
-            );
-        }
-        modules.insert(
-            Namespace(vec!["std".into(), "money".into()]),
-            catalogue_module(
-                Namespace(vec!["std".into(), "money".into()]),
-                [(
-                    "format",
-                    named_function(
-                        vec![
-                            (
-                                "value",
-                                Type::Applied {
-                                    base: "Money".into(),
-                                    arguments: vec![Type::Error],
-                                },
-                            ),
-                            ("locale", Type::Named("Locale".into())),
-                        ],
-                        Type::Text,
-                    ),
-                )],
-                std::iter::empty::<&str>(),
-            ),
-        );
-        modules.insert(
-            Namespace(vec!["std".into(), "terminal".into()]),
-            catalogue_module(
-                Namespace(vec!["std".into(), "terminal".into()]),
-                [
-                    ("Document", document.clone()),
-                    ("present_table", function(vec![rows], document)),
-                ],
-                std::iter::empty::<&str>(),
-            ),
-        );
-        modules.insert(
-            Namespace(vec!["std".into(), "io".into()]),
-            catalogue_module(
-                Namespace(vec!["std".into(), "io".into()]),
-                [("ByteStream", byte_stream)],
-                std::iter::empty::<&str>(),
-            ),
-        );
-        modules.insert(
-            Namespace(vec!["std".into(), "net".into(), "http".into()]),
-            catalogue_module(
-                Namespace(vec!["std".into(), "net".into(), "http".into()]),
-                [("get", named_function(vec![("url", Type::Text)], Type::Text))],
-                std::iter::empty::<&str>(),
-            ),
-        );
-        let secret_ref = Type::Named("std.SecretRef".into());
-        modules.insert(
-            Namespace(vec!["std".into(), "secret".into()]),
-            catalogue_module(
-                Namespace(vec!["std".into(), "secret".into()]),
-                [
-                    (
-                        "ref",
-                        named_function(vec![("name", Type::Text)], secret_ref.clone()),
-                    ),
-                    (
-                        "open",
-                        named_function(
-                            vec![("reference", secret_ref), ("as", Type::Error)],
-                            Type::Applied {
-                                base: "Secret".into(),
-                                arguments: vec![Type::Error],
-                            },
-                        ),
-                    ),
-                ],
-                std::iter::empty::<&str>(),
-            ),
-        );
-        let ui = Type::Named("std.UI".into());
-        let page_builder = Type::Function {
-            parameters: vec![Type::Error],
-            parameter_names: None,
-            default_parameters: BTreeSet::new(),
-            result: Box::new(ui.clone()),
-        };
-        modules.insert(
-            Namespace(vec!["std".into(), "ui".into()]),
-            catalogue_module(
-                Namespace(vec!["std".into(), "ui".into()]),
-                [
-                    ("UI", ui.clone()),
-                    ("Action", Type::Named("std.ui.Action".into())),
-                    ("text", function(vec![Type::Text], ui.clone())),
-                    ("button", function(vec![Type::Text, Type::Bool], ui.clone())),
-                    (
-                        "action",
-                        named_function(
-                            vec![
-                                ("action_id", Type::Text),
-                                ("as", Type::Error),
-                                ("debug_kind", Type::Optional(Box::new(Type::Text))),
-                            ],
-                            Type::Named("std.ui.Action".into()),
-                        ),
-                    ),
-                    (
-                        "Page",
-                        named_function(
-                            vec![("path", Type::Text), ("builder", page_builder)],
-                            ui.clone(),
-                        ),
-                    ),
-                    ("List", function(vec![Type::Error], ui.clone())),
-                    ("Table", function(vec![Type::Error], ui.clone())),
-                    ("panel", function(vec![ui.clone()], ui.clone())),
-                    ("row", function(vec![ui.clone()], ui.clone())),
-                    ("column", function(vec![ui.clone()], ui.clone())),
-                    (
-                        "text_input",
-                        function(vec![Type::Text, Type::Text, Type::Bool], ui.clone()),
-                    ),
-                    ("tabs", function(vec![ui.clone()], ui.clone())),
-                    ("window", function(vec![Type::Text, ui.clone()], ui)),
-                ],
-                std::iter::empty::<&str>(),
-            ),
-        );
-        modules.insert(
-            Namespace(vec!["std".into(), "cli".into()]),
-            catalogue_module(
-                Namespace(vec!["std".into(), "cli".into()]),
-                [("repl", function(vec![], Type::Named("std.UI".into())))],
-                std::iter::empty::<&str>(),
-            ),
-        );
+        core_root_modules(&mut modules);
+        core_std_modules(&mut modules);
         Self {
             modules,
             attached_symbols: BTreeMap::new(),
@@ -1108,312 +763,9 @@ impl Catalogue {
     /// discover them from the host.
     pub fn authoritative_fixture() -> Self {
         let mut catalogue = Self::authoritative_core();
-        let contact = Type::Record(BTreeMap::from([
-            ("first".into(), Type::Text),
-            ("emails".into(), Type::List(Box::new(Type::Text))),
-            ("full_name".into(), Type::Text),
-            ("id".into(), Type::Text),
-            ("last".into(), Type::Text),
-            ("name".into(), Type::Text),
-        ]));
-        let reading = Type::Record(BTreeMap::from([
-            ("rpm".into(), Type::Int),
-            (
-                "speed".into(),
-                Type::Applied {
-                    base: "Float".into(),
-                    arguments: vec![Type::Named("mph".into())],
-                },
-            ),
-            ("time".into(), Type::Instant),
-        ]));
-        let message = Type::Record(BTreeMap::from([
-            ("body_html".into(), Type::Text),
-            ("body_text".into(), Type::Text),
-            ("from".into(), Type::Text),
-            ("id".into(), Type::Text),
-            ("received".into(), Type::Instant),
-            ("sent".into(), Type::Instant),
-            ("subject".into(), Type::Text),
-            ("to".into(), Type::Text),
-        ]));
-        // A stored email has provider identity in addition to the connector's
-        // message fields; provider messages do not themselves acquire it.
-        let email = match &message {
-            Type::Record(fields) => {
-                let mut fields = fields.clone();
-                fields.insert("provider".into(), Type::Text);
-                Type::Record(fields)
-            }
-            _ => unreachable!("message catalogue shape is a record"),
-        };
-        let note = Type::Record(BTreeMap::from([
-            ("created".into(), Type::Instant),
-            ("text".into(), Type::Text),
-        ]));
-        let customer = Type::Named("Customer".into());
-        let order = Type::Record(BTreeMap::from([
-            ("created".into(), Type::Instant),
-            ("customer".into(), customer.clone()),
-        ]));
-        let payment = Type::Record(BTreeMap::from([
-            ("amount".into(), Type::Error),
-            ("order".into(), Type::Named("Order".into())),
-        ]));
-        let audit = Type::Record(BTreeMap::from([
-            ("action".into(), Type::Text),
-            ("order".into(), Type::Named("Order".into())),
-        ]));
-
-        let contact_table = fixture_table_with_admission(
-            "Contact",
-            contact.clone(),
-            TableAdmission {
-                required: BTreeSet::from(["name".into()]),
-                private_required: false,
-                computed: BTreeSet::from(["full_name".into()]),
-                keys: vec![("id".into(), Type::Text)],
-                automatic_key: false,
-            },
-        );
-        catalogue.attached_symbols = [
-            fixture_type("Account", Type::Named("Account".into())),
-            fixture_table("Audit", audit),
-            contact_table.clone(),
-            fixture_type("Customer", customer),
-            // The corpus snippets use `GBP` and `EUR` without declaring them;
-            // the manifest's fixture environment supplies that support.
-            fixture_currency("EUR"),
-            fixture_currency("GBP"),
-            fixture_table("Message", Type::Named("Message".into())),
-            fixture_nominal_type(
-                "EmailHeader",
-                Type::Record(BTreeMap::from([("address".into(), Type::Text)])),
-            ),
-            fixture_function(
-                "valid_email",
-                named_function(vec![("value", Type::Text)], Type::Bool),
-            ),
-            fixture_table("Note", note),
-            fixture_table("Order", order),
-            fixture_table("Payment", payment),
-        ]
-        .into_iter()
-        .collect();
-        catalogue.modules.insert(
-            Namespace(vec!["Message".into()]),
-            fixture_module(
-                Namespace(vec!["Message".into()]),
-                [fixture_function(
-                    "default",
-                    function(Vec::new(), Type::Named("Message".into())),
-                )],
-                true,
-            ),
-        );
-        catalogue.modules.insert(
-            Namespace(vec!["contacts".into()]),
-            fixture_module(Namespace(vec!["contacts".into()]), [contact_table], true),
-        );
-        catalogue.modules.insert(
-            Namespace(vec!["energy".into()]),
-            fixture_module(
-                Namespace(vec!["energy".into()]),
-                [
-                    fixture_function("daily", function(vec![Type::Error], Type::Error)),
-                    fixture_table("Reading", reading.clone()),
-                ],
-                true,
-            ),
-        );
-        // The frozen historical-program example is backed by this explicit
-        // retained projection, not by treating every current fixture module as
-        // historical code.  Its `daily` declaration is intentionally the
-        // historical zero-argument signature.
-        let historical_contact = catalogue
-            .modules
-            .get(&Namespace(vec!["contacts".into()]))
-            .and_then(|module| module.exports.get("Contact"))
-            .cloned()
-            .expect("fixture Contact projection");
-        catalogue.historical_modules.insert(
-            Namespace(vec!["directory".into()]),
-            fixture_module(
-                Namespace(vec!["directory".into()]),
-                [("Contact".into(), historical_contact)],
-                true,
-            ),
-        );
-        catalogue.historical_modules.insert(
-            Namespace(vec!["energy".into()]),
-            fixture_module(
-                Namespace(vec!["energy".into()]),
-                [
-                    fixture_function("daily", function(Vec::new(), Type::Error)),
-                    fixture_table("Reading", reading.clone()),
-                ],
-                true,
-            ),
-        );
-        catalogue.modules.insert(
-            Namespace(vec!["mail".into()]),
-            fixture_module(
-                Namespace(vec!["mail".into()]),
-                [fixture_table("Email", email)],
-                true,
-            ),
-        );
-        catalogue.modules.insert(
-            Namespace(vec!["mail".into(), "google".into()]),
-            fixture_module(
-                Namespace(vec!["mail".into(), "google".into()]),
-                [fixture_connector_function("sync", Vec::new(), Type::Null)],
-                true,
-            ),
-        );
-        catalogue.modules.insert(
-            Namespace(vec!["finance".into()]),
-            fixture_module(Namespace(vec!["finance".into()]), [], true),
-        );
-        catalogue.modules.insert(
-            Namespace(vec!["finance".into(), "openbanking".into()]),
-            fixture_module(
-                Namespace(vec!["finance".into(), "openbanking".into()]),
-                [fixture_connector_function(
-                    "sync",
-                    vec![("account", Type::Named("Account".into()))],
-                    Type::Null,
-                )],
-                true,
-            ),
-        );
-        catalogue.modules.insert(
-            Namespace(vec!["openbanking".into()]),
-            fixture_module(
-                Namespace(vec!["openbanking".into()]),
-                [fixture_function(
-                    "transactions",
-                    function(Vec::new(), Type::Stream(Box::new(Type::Error))),
-                )],
-                true,
-            ),
-        );
-        catalogue.modules.insert(
-            Namespace(vec!["google".into()]),
-            fixture_module(
-                Namespace(vec!["google".into()]),
-                [fixture_function(
-                    "mail",
-                    named_function(
-                        vec![("credential", Type::Named("std.SecretRef".into()))],
-                        Type::Stream(Box::new(message.clone())),
-                    ),
-                )],
-                true,
-            ),
-        );
-        catalogue.modules.insert(
-            Namespace(vec!["vehicle".into()]),
-            fixture_module(Namespace(vec!["vehicle".into()]), [], true),
-        );
-        catalogue.modules.insert(
-            Namespace(vec!["vehicle".into(), "corsa".into()]),
-            fixture_module(
-                Namespace(vec!["vehicle".into(), "corsa".into()]),
-                [
-                    fixture_table("Reading", reading),
-                    fixture_value("trips", Type::Named("vehicle.corsa.trips".into())),
-                ],
-                true,
-            ),
-        );
-        catalogue.modules.insert(
-            Namespace(vec!["vehicle".into(), "corsa".into(), "freematics".into()]),
-            fixture_module(
-                Namespace(vec!["vehicle".into(), "corsa".into(), "freematics".into()]),
-                [fixture_connector_function(
-                    "sync",
-                    vec![("source", Type::Text)],
-                    Type::Null,
-                )],
-                true,
-            ),
-        );
-        catalogue.modules.insert(
-            Namespace(vec!["bank".into()]),
-            fixture_module(
-                Namespace(vec!["bank".into()]),
-                [fixture_value("main", Type::Named("Account".into()))],
-                true,
-            ),
-        );
-        catalogue.modules.insert(
-            Namespace(vec!["Europe".into()]),
-            fixture_module(
-                Namespace(vec!["Europe".into()]),
-                [fixture_value("London", Type::Named("std.TimeZone".into()))],
-                true,
-            ),
-        );
-        catalogue.modules.insert(
-            Namespace(vec!["std".into(), "concurrent".into()]),
-            fixture_module(
-                Namespace(vec!["std".into(), "concurrent".into()]),
-                [
-                    fixture_function(
-                        "parallel",
-                        function(
-                            vec![Type::List(Box::new(Type::Error))],
-                            Type::List(Box::new(Type::Error)),
-                        ),
-                    ),
-                    fixture_function(
-                        "timeout",
-                        named_function(
-                            vec![
-                                ("callback", function(Vec::new(), Type::Error)),
-                                ("duration", Type::Named("std.DURATION".into())),
-                            ],
-                            Type::Error,
-                        ),
-                    ),
-                ],
-                false,
-            ),
-        );
-        catalogue.modules.insert(
-            Namespace(vec!["std".into(), "encoding".into(), "csv".into()]),
-            fixture_module(
-                Namespace(vec!["std".into(), "encoding".into(), "csv".into()]),
-                [fixture_function(
-                    "rows",
-                    function(
-                        vec![Type::Named("std.ByteStream".into())],
-                        Type::Stream(Box::new(Type::Record(BTreeMap::new()))),
-                    ),
-                )],
-                false,
-            ),
-        );
-        catalogue.modules.insert(
-            Namespace(vec!["std".into(), "io".into(), "fs".into()]),
-            fixture_module(
-                Namespace(vec!["std".into(), "io".into(), "fs".into()]),
-                [fixture_function(
-                    "read",
-                    function(vec![Type::Text], Type::Named("std.ByteStream".into())),
-                )],
-                false,
-            ),
-        );
-        // The reference fixtures use these units without declaring them; the
-        // conformance manifest requires their semantic support to be supplied
-        // explicitly. `work` is the attached database of
-        // `examples/valid/unit-cross-database.orna`.
-        catalogue.modules.insert(
-            Namespace(vec!["work".into()]),
-            fixture_module(Namespace(vec!["work".into()]), [], true),
-        );
+        let rows = fixture_rows();
+        fixture_attached_symbols(&mut catalogue, &rows);
+        fixture_modules(&mut catalogue, &rows);
         catalogue
             .with_unit_support(&[
                 (
@@ -1437,6 +789,706 @@ impl Catalogue {
             // database (ORNA-ATTACH-002).
             .with_attached_database("work")
     }
+}
+
+/// The primitive, root and operation modules every catalogue exposes.
+fn core_root_modules(modules: &mut BTreeMap<Namespace, ModuleHeader>) {
+    let primitive_types = [
+        ("BOOLEAN", Type::Bool),
+        ("BOOL", Type::Bool),
+        ("INTEGER", Type::Int),
+        ("INT", Type::Int),
+        ("BIGINT", Type::Int),
+        ("FLOAT", Type::Float),
+        ("DECIMAL", Type::Decimal),
+        ("TEXT", Type::Text),
+        ("DATE", Type::Date),
+        ("TIMESTAMP", Type::Instant),
+        ("VOID", Type::Null),
+    ];
+    let root_types = [
+        ("UUID", Type::Named("std.UUID".into())),
+        ("TIME", Type::Named("std.TIME".into())),
+        ("DURATION", Type::Named("std.DURATION".into())),
+        ("BYTES", Type::Named("std.BINARY_LARGE_OBJECT".into())),
+        ("Action", Type::Named("std.Action".into())),
+        ("Rows", Type::Named("std.Rows".into())),
+        ("JsonValue", Type::Named("std.JsonValue".into())),
+        ("Document", Type::Named("std.Document".into())),
+        ("ByteStream", Type::Named("std.ByteStream".into())),
+        ("UI", Type::Named("std.UI".into())),
+    ];
+    let mut root = Vec::new();
+    root.extend(primitive_types.iter().cloned());
+    root.extend(root_types.iter().cloned());
+    modules.insert(
+        Namespace(vec!["std".into()]),
+        catalogue_module(
+            Namespace(vec!["std".into()]),
+            root,
+            primitive_types
+                .iter()
+                .map(|(name, _)| *name)
+                .chain(root_types.iter().map(|(name, _)| *name)),
+        ),
+    );
+    modules.insert(
+        Namespace(vec!["std".into(), "types".into()]),
+        catalogue_module(
+            Namespace(vec!["std".into(), "types".into()]),
+            primitive_types
+                .iter()
+                .map(|(name, ty)| (*name, ty.clone()))
+                .chain(root_types.iter().map(|(name, ty)| (*name, ty.clone()))),
+            std::iter::empty::<&str>(),
+        ),
+    );
+    modules.insert(
+        Namespace(vec!["std".into(), "math".into()]),
+        catalogue_module(
+            Namespace(vec!["std".into(), "math".into()]),
+            [
+                ("increment", function(vec![Type::Int], Type::Int)),
+                ("decrement", function(vec![Type::Int], Type::Int)),
+                ("is_zero", function(vec![Type::Int], Type::Bool)),
+                ("min", function(vec![Type::Int, Type::Int], Type::Int)),
+                ("max", function(vec![Type::Int, Type::Int], Type::Int)),
+                (
+                    "clamp",
+                    function(vec![Type::Int, Type::Int, Type::Int], Type::Int),
+                ),
+            ],
+            std::iter::empty::<&str>(),
+        ),
+    );
+    modules.insert(
+        Namespace(vec!["std".into(), "text".into()]),
+        catalogue_module(
+            Namespace(vec!["std".into(), "text".into()]),
+            [
+                (
+                    "slug",
+                    named_function(vec![("value", Type::Text)], Type::Text),
+                ),
+                (
+                    "disambiguate",
+                    named_function(
+                        vec![("value", Type::Text), ("keys", Type::Error)],
+                        Type::Text,
+                    ),
+                ),
+            ],
+            std::iter::empty::<&str>(),
+        ),
+    );
+    modules.insert(
+        Namespace(vec!["std".into(), "invoke".into()]),
+        catalogue_module(
+            Namespace(vec!["std".into(), "invoke".into()]),
+            [("echo", function(vec![Type::Int], Type::Int))],
+            std::iter::empty::<&str>(),
+        ),
+    );
+    modules.insert(
+        Namespace(vec!["std".into(), "concurrent".into()]),
+        catalogue_module(
+            Namespace(vec!["std".into(), "concurrent".into()]),
+            [
+                (
+                    "parallel",
+                    function(
+                        vec![Type::List(Box::new(Type::Error))],
+                        Type::List(Box::new(Type::Error)),
+                    ),
+                ),
+                (
+                    "race",
+                    function(vec![Type::List(Box::new(Type::Error))], Type::Error),
+                ),
+                (
+                    "timeout",
+                    named_function(
+                        vec![
+                            ("callback", function(Vec::new(), Type::Error)),
+                            ("duration", Type::Named("std.DURATION".into())),
+                        ],
+                        Type::Error,
+                    ),
+                ),
+                (
+                    "sleep",
+                    named_function(
+                        vec![("duration", Type::Named("std.DURATION".into()))],
+                        Type::Null,
+                    ),
+                ),
+            ],
+            std::iter::empty::<&str>(),
+        ),
+    );
+}
+
+/// The remaining standard modules: values, UI, text, concurrency and data.
+fn core_std_modules(modules: &mut BTreeMap<Namespace, ModuleHeader>) {
+    let action = Type::Named("std.Action".into());
+    let rows = Type::Named("std.Rows".into());
+    let json = Type::Named("std.JsonValue".into());
+    let document = Type::Named("std.Document".into());
+    let byte_stream = Type::Named("std.ByteStream".into());
+    modules.insert(
+        Namespace(vec!["std".into(), "action".into()]),
+        catalogue_module(
+            Namespace(vec!["std".into(), "action".into()]),
+            [("Action", action)],
+            std::iter::empty::<&str>(),
+        ),
+    );
+    modules.insert(
+        Namespace(vec!["std".into(), "data".into()]),
+        catalogue_module(
+            Namespace(vec!["std".into(), "data".into()]),
+            [("Rows", rows.clone())],
+            std::iter::empty::<&str>(),
+        ),
+    );
+    modules.insert(
+        Namespace(vec!["std".into(), "json".into()]),
+        catalogue_module(
+            Namespace(vec!["std".into(), "json".into()]),
+            [
+                ("Value", json.clone()),
+                ("encode", function(vec![json], byte_stream.clone())),
+            ],
+            std::iter::empty::<&str>(),
+        ),
+    );
+    modules.insert(
+        Namespace(vec!["std".into(), "encoding".into(), "json".into()]),
+        catalogue_module(
+            Namespace(vec!["std".into(), "encoding".into(), "json".into()]),
+            [
+                (
+                    "encode",
+                    named_function(vec![("value", Type::Error)], byte_stream.clone()),
+                ),
+                (
+                    "decode",
+                    named_function(
+                        vec![("value", Type::Error), ("as", Type::Error)],
+                        Type::Error,
+                    ),
+                ),
+            ],
+            std::iter::empty::<&str>(),
+        ),
+    );
+    modules.insert(
+        Namespace(vec!["std".into(), "encoding".into(), "orna".into()]),
+        catalogue_module(
+            Namespace(vec!["std".into(), "encoding".into(), "orna".into()]),
+            [(
+                "encode",
+                named_function(vec![("value", Type::Error)], byte_stream.clone()),
+            )],
+            std::iter::empty::<&str>(),
+        ),
+    );
+    let duration = Type::Named("std.DURATION".into());
+    for segment in ["compact", "clock", "words", "iso"] {
+        let namespace = Namespace(vec![
+            "std".into(),
+            "time".into(),
+            "duration".into(),
+            segment.into(),
+        ]);
+        modules.insert(
+            namespace.clone(),
+            catalogue_module(
+                namespace,
+                [(
+                    "format",
+                    named_function(vec![("duration", duration.clone())], Type::Text),
+                )],
+                std::iter::empty::<&str>(),
+            ),
+        );
+    }
+    modules.insert(
+        Namespace(vec!["std".into(), "money".into()]),
+        catalogue_module(
+            Namespace(vec!["std".into(), "money".into()]),
+            [(
+                "format",
+                named_function(
+                    vec![
+                        (
+                            "value",
+                            Type::Applied {
+                                base: "Money".into(),
+                                arguments: vec![Type::Error],
+                            },
+                        ),
+                        ("locale", Type::Named("Locale".into())),
+                    ],
+                    Type::Text,
+                ),
+            )],
+            std::iter::empty::<&str>(),
+        ),
+    );
+    modules.insert(
+        Namespace(vec!["std".into(), "terminal".into()]),
+        catalogue_module(
+            Namespace(vec!["std".into(), "terminal".into()]),
+            [
+                ("Document", document.clone()),
+                ("present_table", function(vec![rows], document)),
+            ],
+            std::iter::empty::<&str>(),
+        ),
+    );
+    modules.insert(
+        Namespace(vec!["std".into(), "io".into()]),
+        catalogue_module(
+            Namespace(vec!["std".into(), "io".into()]),
+            [("ByteStream", byte_stream)],
+            std::iter::empty::<&str>(),
+        ),
+    );
+    modules.insert(
+        Namespace(vec!["std".into(), "net".into(), "http".into()]),
+        catalogue_module(
+            Namespace(vec!["std".into(), "net".into(), "http".into()]),
+            [("get", named_function(vec![("url", Type::Text)], Type::Text))],
+            std::iter::empty::<&str>(),
+        ),
+    );
+    let secret_ref = Type::Named("std.SecretRef".into());
+    modules.insert(
+        Namespace(vec!["std".into(), "secret".into()]),
+        catalogue_module(
+            Namespace(vec!["std".into(), "secret".into()]),
+            [
+                (
+                    "ref",
+                    named_function(vec![("name", Type::Text)], secret_ref.clone()),
+                ),
+                (
+                    "open",
+                    named_function(
+                        vec![("reference", secret_ref), ("as", Type::Error)],
+                        Type::Applied {
+                            base: "Secret".into(),
+                            arguments: vec![Type::Error],
+                        },
+                    ),
+                ),
+            ],
+            std::iter::empty::<&str>(),
+        ),
+    );
+    let ui = Type::Named("std.UI".into());
+    let page_builder = Type::Function {
+        parameters: vec![Type::Error],
+        parameter_names: None,
+        default_parameters: BTreeSet::new(),
+        result: Box::new(ui.clone()),
+    };
+    modules.insert(
+        Namespace(vec!["std".into(), "ui".into()]),
+        catalogue_module(
+            Namespace(vec!["std".into(), "ui".into()]),
+            [
+                ("UI", ui.clone()),
+                ("Action", Type::Named("std.ui.Action".into())),
+                ("text", function(vec![Type::Text], ui.clone())),
+                ("button", function(vec![Type::Text, Type::Bool], ui.clone())),
+                (
+                    "action",
+                    named_function(
+                        vec![
+                            ("action_id", Type::Text),
+                            ("as", Type::Error),
+                            ("debug_kind", Type::Optional(Box::new(Type::Text))),
+                        ],
+                        Type::Named("std.ui.Action".into()),
+                    ),
+                ),
+                (
+                    "Page",
+                    named_function(
+                        vec![("path", Type::Text), ("builder", page_builder)],
+                        ui.clone(),
+                    ),
+                ),
+                ("List", function(vec![Type::Error], ui.clone())),
+                ("Table", function(vec![Type::Error], ui.clone())),
+                ("panel", function(vec![ui.clone()], ui.clone())),
+                ("row", function(vec![ui.clone()], ui.clone())),
+                ("column", function(vec![ui.clone()], ui.clone())),
+                (
+                    "text_input",
+                    function(vec![Type::Text, Type::Text, Type::Bool], ui.clone()),
+                ),
+                ("tabs", function(vec![ui.clone()], ui.clone())),
+                ("window", function(vec![Type::Text, ui.clone()], ui)),
+            ],
+            std::iter::empty::<&str>(),
+        ),
+    );
+    modules.insert(
+        Namespace(vec!["std".into(), "cli".into()]),
+        catalogue_module(
+            Namespace(vec!["std".into(), "cli".into()]),
+            [("repl", function(vec![], Type::Named("std.UI".into())))],
+            std::iter::empty::<&str>(),
+        ),
+    );
+}
+
+/// The row, table and connector types the fixture environment attaches.
+struct FixtureRows {
+    reading: Type,
+    message: Type,
+    email: Type,
+    note: Type,
+    customer: Type,
+    order: Type,
+    payment: Type,
+    audit: Type,
+    contact_table: (String, Symbol),
+}
+
+fn fixture_rows() -> FixtureRows {
+    let contact = Type::Record(BTreeMap::from([
+        ("first".into(), Type::Text),
+        ("emails".into(), Type::List(Box::new(Type::Text))),
+        ("full_name".into(), Type::Text),
+        ("id".into(), Type::Text),
+        ("last".into(), Type::Text),
+        ("name".into(), Type::Text),
+    ]));
+    let reading = Type::Record(BTreeMap::from([
+        ("rpm".into(), Type::Int),
+        (
+            "speed".into(),
+            Type::Applied {
+                base: "Float".into(),
+                arguments: vec![Type::Named("mph".into())],
+            },
+        ),
+        ("time".into(), Type::Instant),
+    ]));
+    let message = Type::Record(BTreeMap::from([
+        ("body_html".into(), Type::Text),
+        ("body_text".into(), Type::Text),
+        ("from".into(), Type::Text),
+        ("id".into(), Type::Text),
+        ("received".into(), Type::Instant),
+        ("sent".into(), Type::Instant),
+        ("subject".into(), Type::Text),
+        ("to".into(), Type::Text),
+    ]));
+    // A stored email has provider identity in addition to the connector's
+    // message fields; provider messages do not themselves acquire it.
+    let email = match &message {
+        Type::Record(fields) => {
+            let mut fields = fields.clone();
+            fields.insert("provider".into(), Type::Text);
+            Type::Record(fields)
+        }
+        _ => unreachable!("message catalogue shape is a record"),
+    };
+    let note = Type::Record(BTreeMap::from([
+        ("created".into(), Type::Instant),
+        ("text".into(), Type::Text),
+    ]));
+    let customer = Type::Named("Customer".into());
+    let order = Type::Record(BTreeMap::from([
+        ("created".into(), Type::Instant),
+        ("customer".into(), customer.clone()),
+    ]));
+    let payment = Type::Record(BTreeMap::from([
+        ("amount".into(), Type::Error),
+        ("order".into(), Type::Named("Order".into())),
+    ]));
+    let audit = Type::Record(BTreeMap::from([
+        ("action".into(), Type::Text),
+        ("order".into(), Type::Named("Order".into())),
+    ]));
+
+    let contact_table = fixture_table_with_admission(
+        "Contact",
+        contact.clone(),
+        TableAdmission {
+            required: BTreeSet::from(["name".into()]),
+            private_required: false,
+            computed: BTreeSet::from(["full_name".into()]),
+            keys: vec![("id".into(), Type::Text)],
+            automatic_key: false,
+        },
+    );
+    FixtureRows {
+        reading,
+        message,
+        email,
+        note,
+        customer,
+        order,
+        payment,
+        audit,
+        contact_table,
+    }
+}
+
+/// The fixture rows and the attached tables/connectors they name.
+fn fixture_attached_symbols(catalogue: &mut Catalogue, rows: &FixtureRows) {
+    catalogue.attached_symbols = [
+        fixture_type("Account", Type::Named("Account".into())),
+        fixture_table("Audit", rows.audit.clone()),
+        rows.contact_table.clone(),
+        fixture_type("Customer", rows.customer.clone()),
+        // The corpus snippets use `GBP` and `EUR` without declaring them;
+        // the manifest's fixture environment supplies that support.
+        fixture_currency("EUR"),
+        fixture_currency("GBP"),
+        fixture_table("Message", Type::Named("Message".into())),
+        fixture_nominal_type(
+            "EmailHeader",
+            Type::Record(BTreeMap::from([("address".into(), Type::Text)])),
+        ),
+        fixture_function(
+            "valid_email",
+            named_function(vec![("value", Type::Text)], Type::Bool),
+        ),
+        fixture_table("Note", rows.note.clone()),
+        fixture_table("Order", rows.order.clone()),
+        fixture_table("Payment", rows.payment.clone()),
+    ]
+    .into_iter()
+    .collect();
+}
+
+/// The fixture's connector and unit modules.
+fn fixture_modules(catalogue: &mut Catalogue, rows: &FixtureRows) {
+    catalogue.modules.insert(
+        Namespace(vec!["Message".into()]),
+        fixture_module(
+            Namespace(vec!["Message".into()]),
+            [fixture_function(
+                "default",
+                function(Vec::new(), Type::Named("Message".into())),
+            )],
+            true,
+        ),
+    );
+    catalogue.modules.insert(
+        Namespace(vec!["contacts".into()]),
+        fixture_module(
+            Namespace(vec!["contacts".into()]),
+            [rows.contact_table.clone()],
+            true,
+        ),
+    );
+    catalogue.modules.insert(
+        Namespace(vec!["energy".into()]),
+        fixture_module(
+            Namespace(vec!["energy".into()]),
+            [
+                fixture_function("daily", function(vec![Type::Error], Type::Error)),
+                fixture_table("Reading", rows.reading.clone()),
+            ],
+            true,
+        ),
+    );
+    // The frozen historical-program example is backed by this explicit
+    // retained projection, not by treating every current fixture module as
+    // historical code.  Its `daily` declaration is intentionally the
+    // historical zero-argument signature.
+    let historical_contact = catalogue
+        .modules
+        .get(&Namespace(vec!["contacts".into()]))
+        .and_then(|module| module.exports.get("Contact"))
+        .cloned()
+        .expect("fixture Contact projection");
+    catalogue.historical_modules.insert(
+        Namespace(vec!["directory".into()]),
+        fixture_module(
+            Namespace(vec!["directory".into()]),
+            [("Contact".into(), historical_contact)],
+            true,
+        ),
+    );
+    catalogue.historical_modules.insert(
+        Namespace(vec!["energy".into()]),
+        fixture_module(
+            Namespace(vec!["energy".into()]),
+            [
+                fixture_function("daily", function(Vec::new(), Type::Error)),
+                fixture_table("Reading", rows.reading.clone()),
+            ],
+            true,
+        ),
+    );
+    catalogue.modules.insert(
+        Namespace(vec!["mail".into()]),
+        fixture_module(
+            Namespace(vec!["mail".into()]),
+            [fixture_table("Email", rows.email.clone())],
+            true,
+        ),
+    );
+    catalogue.modules.insert(
+        Namespace(vec!["mail".into(), "google".into()]),
+        fixture_module(
+            Namespace(vec!["mail".into(), "google".into()]),
+            [fixture_connector_function("sync", Vec::new(), Type::Null)],
+            true,
+        ),
+    );
+    catalogue.modules.insert(
+        Namespace(vec!["finance".into()]),
+        fixture_module(Namespace(vec!["finance".into()]), [], true),
+    );
+    catalogue.modules.insert(
+        Namespace(vec!["finance".into(), "openbanking".into()]),
+        fixture_module(
+            Namespace(vec!["finance".into(), "openbanking".into()]),
+            [fixture_connector_function(
+                "sync",
+                vec![("account", Type::Named("Account".into()))],
+                Type::Null,
+            )],
+            true,
+        ),
+    );
+    catalogue.modules.insert(
+        Namespace(vec!["openbanking".into()]),
+        fixture_module(
+            Namespace(vec!["openbanking".into()]),
+            [fixture_function(
+                "transactions",
+                function(Vec::new(), Type::Stream(Box::new(Type::Error))),
+            )],
+            true,
+        ),
+    );
+    catalogue.modules.insert(
+        Namespace(vec!["google".into()]),
+        fixture_module(
+            Namespace(vec!["google".into()]),
+            [fixture_function(
+                "mail",
+                named_function(
+                    vec![("credential", Type::Named("std.SecretRef".into()))],
+                    Type::Stream(Box::new(rows.message.clone())),
+                ),
+            )],
+            true,
+        ),
+    );
+    catalogue.modules.insert(
+        Namespace(vec!["vehicle".into()]),
+        fixture_module(Namespace(vec!["vehicle".into()]), [], true),
+    );
+    catalogue.modules.insert(
+        Namespace(vec!["vehicle".into(), "corsa".into()]),
+        fixture_module(
+            Namespace(vec!["vehicle".into(), "corsa".into()]),
+            [
+                fixture_table("Reading", rows.reading.clone()),
+                fixture_value("trips", Type::Named("vehicle.corsa.trips".into())),
+            ],
+            true,
+        ),
+    );
+    catalogue.modules.insert(
+        Namespace(vec!["vehicle".into(), "corsa".into(), "freematics".into()]),
+        fixture_module(
+            Namespace(vec!["vehicle".into(), "corsa".into(), "freematics".into()]),
+            [fixture_connector_function(
+                "sync",
+                vec![("source", Type::Text)],
+                Type::Null,
+            )],
+            true,
+        ),
+    );
+    catalogue.modules.insert(
+        Namespace(vec!["bank".into()]),
+        fixture_module(
+            Namespace(vec!["bank".into()]),
+            [fixture_value("main", Type::Named("Account".into()))],
+            true,
+        ),
+    );
+    catalogue.modules.insert(
+        Namespace(vec!["Europe".into()]),
+        fixture_module(
+            Namespace(vec!["Europe".into()]),
+            [fixture_value("London", Type::Named("std.TimeZone".into()))],
+            true,
+        ),
+    );
+    catalogue.modules.insert(
+        Namespace(vec!["std".into(), "concurrent".into()]),
+        fixture_module(
+            Namespace(vec!["std".into(), "concurrent".into()]),
+            [
+                fixture_function(
+                    "parallel",
+                    function(
+                        vec![Type::List(Box::new(Type::Error))],
+                        Type::List(Box::new(Type::Error)),
+                    ),
+                ),
+                fixture_function(
+                    "timeout",
+                    named_function(
+                        vec![
+                            ("callback", function(Vec::new(), Type::Error)),
+                            ("duration", Type::Named("std.DURATION".into())),
+                        ],
+                        Type::Error,
+                    ),
+                ),
+            ],
+            false,
+        ),
+    );
+    catalogue.modules.insert(
+        Namespace(vec!["std".into(), "encoding".into(), "csv".into()]),
+        fixture_module(
+            Namespace(vec!["std".into(), "encoding".into(), "csv".into()]),
+            [fixture_function(
+                "rows",
+                function(
+                    vec![Type::Named("std.ByteStream".into())],
+                    Type::Stream(Box::new(Type::Record(BTreeMap::new()))),
+                ),
+            )],
+            false,
+        ),
+    );
+    catalogue.modules.insert(
+        Namespace(vec!["std".into(), "io".into(), "fs".into()]),
+        fixture_module(
+            Namespace(vec!["std".into(), "io".into(), "fs".into()]),
+            [fixture_function(
+                "read",
+                function(vec![Type::Text], Type::Named("std.ByteStream".into())),
+            )],
+            false,
+        ),
+    );
+    // The reference fixtures use these units without declaring them; the
+    // conformance manifest requires their semantic support to be supplied
+    // explicitly. `work` is the attached database of
+    // `examples/valid/unit-cross-database.orna`.
+    catalogue.modules.insert(
+        Namespace(vec!["work".into()]),
+        fixture_module(Namespace(vec!["work".into()]), [], true),
+    );
 }
 
 /// Dimension and unit support for the reference fixtures, following the
