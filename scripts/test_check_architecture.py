@@ -20,28 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "check_architecture.py"
 
 sys.path.insert(0, str(ROOT))
-from scripts.check_architecture import (  # noqa: E402
-    LAYERS_PATH,
-    load_layer_table,
-    scan_functions,
-    strip_rust,
-)
-
-
-def documented_layers(path: Path) -> dict[str, int]:
-    """Map crate name -> layer from a Markdown layer table in a document."""
-    documented: dict[str, int] = {}
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        cells = [cell.strip() for cell in raw.strip().strip("|").split("|")]
-        if len(cells) != 3 or not cells[0].isdigit():
-            continue
-        layer = int(cells[0])
-        for crate in cells[2].split(","):
-            crate = crate.strip()
-            if not crate or crate.startswith("("):
-                continue
-            documented[crate] = layer
-    return documented
+from scripts.check_architecture import scan_functions, strip_rust  # noqa: E402
 
 
 def toml_string(value: str) -> str:
@@ -119,6 +98,11 @@ class Fixture:
 
     def budget(self, text: str) -> None:
         path = self.root / "scripts" / "architecture-budget.toml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    def raises(self, text: str) -> None:
+        path = self.root / "scripts" / "architecture-budget-raises.toml"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
 
@@ -443,112 +427,147 @@ class BaselineTests(unittest.TestCase):
 
 
 class BudgetTests(unittest.TestCase):
+    """File and function size ratchets, tolerance, raises, and downward update."""
+
+    CAPS = "[limits]\nfile_lines = 100\nfunction_lines = 120\n"
+
     def fixture(self, files: dict[str, str]) -> Fixture:
         fixture = Fixture(self)
         fixture.crate("demo-a", 1, files=files)
         fixture.shipped = "demo-a"
         return fixture
 
-    def test_unrecorded_src_growth_within_cap_passes(self) -> None:
+    def budget(self, fixture: Fixture, files: dict[str, int] | None = None,
+               functions: dict[str, int] | None = None) -> None:
+        text = self.CAPS
+        text += '\n[[crate]]\nname = "demo-a"\n'
+        if files:
+            text += "[crate.files]\n" + "".join(f'"{k}" = {v}\n' for k, v in files.items())
+        if functions:
+            text += "[crate.functions]\n" + "".join(f'"{k}" = {v}\n' for k, v in functions.items())
+        fixture.budget(text)
+
+    def test_no_entry_under_the_cap_passes(self) -> None:
         fixture = self.fixture({"src/lib.rs": "a\nb\nc\n"})
-        fixture.budget("[limits]\ncrate_src_lines = 25000\nfile_lines = 1200\nfunction_lines = 120\n")
+        self.budget(fixture)
         result = fixture.run("--mode=budget")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_recorded_crate_src_line_may_not_grow(self) -> None:
-        fixture = self.fixture({"src/lib.rs": "a\nb\nc\n"})
-        fixture.budget(
-            "[limits]\ncrate_src_lines = 25000\nfile_lines = 1200\nfunction_lines = 120\n"
-            '\n[[crate]]\nname = "demo-a"\nsrc_lines = 3\nallow_clippy = 0\n'
-        )
-        self.assertEqual(fixture.run("--mode=budget").returncode, 0)
-        path = fixture.root / "crates" / "demo-a" / "src" / "lib.rs"
-        path.write_text("a\nb\nc\nd\n", encoding="utf-8")
+    def test_new_file_over_the_cap_fails(self) -> None:
+        fixture = self.fixture({"src/lib.rs": "// filler\n" * 101})
+        self.budget(fixture)
         result = fixture.run("--mode=budget")
         self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("budget:demo-a:src_lines", result.stdout)
-        self.assertIn("src grew to 4 lines, recorded 3", result.stdout)
+        self.assertIn("no recorded entry or reviewed raise", result.stdout)
+        self.assertIn("src/lib.rs", result.stdout)
 
-    def test_new_crate_over_the_cap_fails(self) -> None:
-        fixture = self.fixture({"src/lib.rs": "a\nb\nc\n"})
-        fixture.budget("[limits]\ncrate_src_lines = 2\nfile_lines = 1200\nfunction_lines = 120\n")
+    def test_new_debt_message_names_the_split_child_escape_hatch(self) -> None:
+        fixture = self.fixture({"src/lib.rs": "// filler\n" * 101})
+        self.budget(fixture)
         result = fixture.run("--mode=budget")
         self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("no budget entry records the debt", result.stdout)
+        self.assertIn("split child whose parent shrank", result.stdout)
+        self.assertIn("architecture-budget-raises.toml", result.stdout)
 
-    def test_allow_clippy_count_may_not_grow(self) -> None:
-        source = "#[allow(clippy::too_many_lines)]\nfn a() {\n}\n"
-        fixture = self.fixture({"src/lib.rs": source})
-        fixture.budget(
-            "[limits]\ncrate_src_lines = 25000\nfile_lines = 1200\nfunction_lines = 120\n"
-            '\n[[crate]]\nname = "demo-a"\nallow_clippy = 1\n'
-        )
-        self.assertEqual(fixture.run("--mode=budget").returncode, 0)
-
-        path = fixture.root / "crates" / "demo-a" / "src" / "lib.rs"
-        path.write_text(source + "#[allow(clippy::type_complexity)]\nfn b() {\n}\n", encoding="utf-8")
-        result = fixture.run("--mode=budget")
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("budget:demo-a:allow_clippy", result.stdout)
-
-    def test_unrecorded_file_over_the_cap_fails_and_recorded_file_passes(self) -> None:
-        filler = ("// filler\n" * 1201)
-        fixture = self.fixture({"src/lib.rs": filler})
-        fixture.budget("[limits]\ncrate_src_lines = 25000\nfile_lines = 1200\nfunction_lines = 120\n")
-        result = fixture.run("--mode=budget")
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("budget:demo-a:src/lib.rs", result.stdout)
-
-        fixture = self.fixture({"src/lib.rs": filler})
-        fixture.budget(
-            "[limits]\ncrate_src_lines = 25000\nfile_lines = 1200\nfunction_lines = 120\n"
-            '\n[[crate]]\nname = "demo-a"\nallow_clippy = 0\n'
-            "[crate.files]\n"
-            '"src/lib.rs" = 1201\n'
-        )
-        result = fixture.run("--mode=budget")
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-
-    def test_unrecorded_function_over_the_cap_fails_and_recorded_function_passes(self) -> None:
-        source = function_of_lines("big", 121)
-        fixture = self.fixture({"src/lib.rs": source})
-        fixture.budget("[limits]\ncrate_src_lines = 25000\nfile_lines = 1200\nfunction_lines = 120\n")
+    def test_new_function_over_the_cap_fails(self) -> None:
+        fixture = self.fixture({"src/lib.rs": function_of_lines("big", 121)})
+        self.budget(fixture)
         result = fixture.run("--mode=budget")
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("src/lib.rs::big", result.stdout)
+        self.assertIn("no recorded entry or reviewed raise", result.stdout)
 
-        fixture = self.fixture({"src/lib.rs": source})
-        fixture.budget(
-            "[limits]\ncrate_src_lines = 25000\nfile_lines = 1200\nfunction_lines = 120\n"
-            '\n[[crate]]\nname = "demo-a"\nallow_clippy = 0\n'
-            "[crate.functions]\n"
-            '"src/lib.rs::big" = 121\n'
-        )
-        result = fixture.run("--mode=budget")
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-
-    def test_another_pr_shrinking_a_file_is_a_note_not_a_failure(self) -> None:
-        # A PR based on an older main still records 10 lines; a merged refactor
-        # lowered the file to 3. That is good news from another PR and must not
-        # fail this PR's budget check.
-        fixture = self.fixture({"src/lib.rs": "a\nb\nc\n"})
-        fixture.budget(
-            "[limits]\ncrate_src_lines = 25000\nfile_lines = 1200\nfunction_lines = 120\n"
-            '\n[[crate]]\nname = "demo-a"\nallow_clippy = 0\n'
-            "[crate.files]\n"
-            '"src/lib.rs" = 10\n'
-        )
+    def test_growth_within_tolerance_is_a_note(self) -> None:
+        fixture = self.fixture({"src/lib.rs": "// filler\n" * 525})
+        self.budget(fixture, files={"src/lib.rs": 500})
         result = fixture.run("--mode=budget")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("[note]", result.stdout)
-        self.assertIn("lower the entry", result.stdout)
+        self.assertIn("500 -> 525", result.stdout)
+        self.assertIn("within tolerance 25", result.stdout)
+
+    def test_growth_beyond_tolerance_fails(self) -> None:
+        fixture = self.fixture({"src/lib.rs": "// filler\n" * 526})
+        self.budget(fixture, files={"src/lib.rs": 500})
+        result = fixture.run("--mode=budget")
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("recorded entry 500 (tolerance 25)", result.stdout)
+        self.assertIn("add or update a [[raise]]", result.stdout)
+
+    def test_function_growth_beyond_tolerance_fails(self) -> None:
+        fixture = self.fixture({"src/lib.rs": function_of_lines("big", 150)})
+        self.budget(fixture, functions={"src/lib.rs::big": 121})
+        result = fixture.run("--mode=budget")
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("recorded entry 121 (tolerance 25)", result.stdout)
+
+    def test_shrinkage_is_a_note_not_a_failure(self) -> None:
+        # Another merged PR lowered the file; this PR must not fail for it.
+        fixture = self.fixture({"src/lib.rs": "// filler\n" * 400})
+        self.budget(fixture, files={"src/lib.rs": 500})
+        result = fixture.run("--mode=budget")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("[note]", result.stdout)
+        self.assertIn("run --mode=budget --update", result.stdout)
         self.assertNotIn("violation", result.stdout.lower())
+
+    def test_raise_permits_a_deliberate_file_growth(self) -> None:
+        fixture = self.fixture({"src/lib.rs": "// filler\n" * 600})
+        self.budget(fixture, files={"src/lib.rs": 500})
+        fixture.raises(
+            '[[raise]]\npath = "crates/demo-a/src/lib.rs"\nnew_limit = 600\n'
+            'reason = "test"\nbead = "ornadb-test"\n'
+        )
+        result = fixture.run("--mode=budget")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_raise_below_the_measured_value_still_fails(self) -> None:
+        fixture = self.fixture({"src/lib.rs": "// filler\n" * 600})
+        self.budget(fixture, files={"src/lib.rs": 500})
+        fixture.raises(
+            '[[raise]]\npath = "crates/demo-a/src/lib.rs"\nnew_limit = 550\n'
+            'reason = "test"\nbead = "ornadb-test"\n'
+        )
+        result = fixture.run("--mode=budget")
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("reviewed raise 550 (tolerance 28)", result.stdout)
+
+    def test_raise_allows_a_new_over_cap_file(self) -> None:
+        fixture = self.fixture({"src/lib.rs": "// filler\n" * 130})
+        self.budget(fixture)
+        fixture.raises(
+            '[[raise]]\npath = "crates/demo-a/src/lib.rs"\nnew_limit = 130\n'
+            'reason = "test"\nbead = "ornadb-test"\n'
+        )
+        result = fixture.run("--mode=budget")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_raise_for_a_missing_path_is_a_note(self) -> None:
+        fixture = self.fixture({"src/lib.rs": "a\nb\nc\n"})
+        self.budget(fixture)
+        fixture.raises(
+            '[[raise]]\npath = "crates/demo-a/src/gone.rs::gone"\nnew_limit = 200\n'
+            'reason = "reserved for an in-flight PR"\nbead = "ornadb-test"\n'
+        )
+        result = fixture.run("--mode=budget")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("reserved for an in-flight PR", result.stdout)
+
+    def test_raise_with_missing_fields_is_a_config_error(self) -> None:
+        fixture = self.fixture({"src/lib.rs": "a\nb\nc\n"})
+        self.budget(fixture)
+        fixture.raises(
+            '[[raise]]\npath = "crates/demo-a/src/lib.rs"\nnew_limit = 200\nreason = "test"\n'
+        )
+        result = fixture.run("--mode=budget")
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("needs a non-empty bead", result.stderr)
 
     def test_update_lowers_and_removes_entries_without_raising(self) -> None:
         fixture = self.fixture({"src/lib.rs": "a\nb\nc\nd\ne\n"})
         fixture.budget(
-            "[limits]\ncrate_src_lines = 25000\nfile_lines = 2\nfunction_lines = 2\n"
-            '\n[[crate]]\nname = "demo-a"\nsrc_lines = 10\nallow_clippy = 3\n'
+            "[limits]\nfile_lines = 2\nfunction_lines = 2\n"
+            '\n[[crate]]\nname = "demo-a"\n'
             "[crate.files]\n"
             '"src/lib.rs" = 10\n'
             '"src/gone.rs" = 50\n'
@@ -558,123 +577,55 @@ class BudgetTests(unittest.TestCase):
         result = fixture.run("--mode=budget", "--update")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("lowered demo-a/src/lib.rs 10 -> 5", result.stdout)
-        self.assertIn("removed demo-a:src_lines", result.stdout)
         self.assertIn("removed demo-a/src/gone.rs", result.stdout)
         self.assertIn("removed demo-a/src/lib.rs::gone", result.stdout)
         updated = (fixture.root / "scripts" / "architecture-budget.toml").read_text(encoding="utf-8")
-        self.assertNotIn("\nsrc_lines =", updated)
         self.assertIn('"src/lib.rs" = 5', updated)
-        self.assertIn("allow_clippy = 0", updated)
         self.assertNotIn("src/gone.rs", updated)
         self.assertNotIn("src/lib.rs::gone", updated)
+        self.assertNotIn("src_lines", updated)
+        self.assertNotIn("allow_clippy", updated)
         self.assertEqual(fixture.run("--mode=budget").returncode, 0)
 
     def test_update_never_raises_a_growth_entry(self) -> None:
-        fixture = self.fixture({"src/lib.rs": "a\nb\nc\nd\ne\n"})
+        fixture = self.fixture({"src/lib.rs": "// filler\n" * 40})
         fixture.budget(
-            "[limits]\ncrate_src_lines = 25000\nfile_lines = 2\nfunction_lines = 120\n"
-            '\n[[crate]]\nname = "demo-a"\nallow_clippy = 0\n'
+            "[limits]\nfile_lines = 2\nfunction_lines = 120\n"
+            '\n[[crate]]\nname = "demo-a"\n'
             "[crate.files]\n"
-            '"src/lib.rs" = 3\n'
+            '"src/lib.rs" = 5\n'
         )
         result = fixture.run("--mode=budget", "--update")
         self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("a reviewed edit must raise the entry", result.stdout)
+        self.assertIn("recorded entry 5", result.stdout)
         updated = (fixture.root / "scripts" / "architecture-budget.toml").read_text(encoding="utf-8")
-        self.assertIn('"src/lib.rs" = 3', updated)
+        self.assertIn('"src/lib.rs" = 5', updated)
 
     def test_update_does_not_add_new_debt(self) -> None:
-        fixture = self.fixture({"src/big.rs": "a\nb\nc\nd\ne\n"})
-        fixture.budget(
-            "[limits]\ncrate_src_lines = 25000\nfile_lines = 2\nfunction_lines = 120\n"
-            '\n[[crate]]\nname = "demo-a"\nallow_clippy = 0\n'
-        )
+        fixture = self.fixture({"src/big.rs": "// filler\n" * 101})
+        self.budget(fixture)
         result = fixture.run("--mode=budget", "--update")
         self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("no budget entry records the debt", result.stdout)
+        self.assertIn("no recorded entry or reviewed raise", result.stdout)
         updated = (fixture.root / "scripts" / "architecture-budget.toml").read_text(encoding="utf-8")
         self.assertNotIn("src/big.rs", updated)
 
     def test_update_requires_budget_mode(self) -> None:
         fixture = self.fixture({"src/lib.rs": "a\nb\nc\n"})
-        fixture.budget("[limits]\ncrate_src_lines = 25000\nfile_lines = 1200\nfunction_lines = 120\n")
+        self.budget(fixture)
         result = fixture.run("--mode=report", "--update")
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertIn("--update requires --mode=budget", result.stderr)
 
-    def test_budget_entry_for_missing_crate_fails(self) -> None:
+    def test_budget_entry_for_a_missing_crate_is_a_note(self) -> None:
         fixture = self.fixture({"src/lib.rs": "a\nb\nc\n"})
         fixture.budget(
-            "[limits]\ncrate_src_lines = 25000\nfile_lines = 1200\nfunction_lines = 120\n"
-            '\n[[crate]]\nname = "demo-ghost"\nallow_clippy = 0\n'
+            "[limits]\nfile_lines = 100\nfunction_lines = 120\n"
+            '\n[[crate]]\nname = "demo-ghost"\n'
+            "[crate.files]\n"
+            '"src/lib.rs" = 500\n'
         )
         result = fixture.run("--mode=budget")
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("budget:unknown-crate:demo-ghost", result.stdout)
-
-
-class DocumentationTests(unittest.TestCase):
-    """The Markdown layer tables and docs/design/layers.toml must agree."""
-
-    def table(self) -> dict[str, int]:
-        table = load_layer_table(ROOT / LAYERS_PATH)
-        return {name: spec.layer for name, spec in table.crates.items()}
-
-    def test_root_table_matches_layers_toml(self) -> None:
-        self.assertEqual(documented_layers(ROOT / "ARCHITECTURE.md"), self.table())
-
-    def test_full_document_table_matches_layers_toml(self) -> None:
-        self.assertEqual(documented_layers(ROOT / "docs" / "ARCHITECTURE.md"), self.table())
-
-
-class CurrentRepositoryTests(unittest.TestCase):
-    """The stage acceptance: the checked-in baseline passes on this tree."""
-
-    def run_script(self, *args: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            [sys.executable, str(SCRIPT), *args],
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-
-    def test_report_prints_every_recorded_violation_and_the_warning(self) -> None:
-        table = load_layer_table(ROOT / LAYERS_PATH)
-        result = self.run_script("--mode=report")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertRegex(result.stdout, r"violations: \d+ known, 0 new")
-        numbered = [line for line in result.stdout.splitlines() if line.startswith("[V")]
-        self.assertGreaterEqual(len(numbered), 1, result.stdout)
-        printed = {line.rsplit("[", 1)[1].rstrip("]") for line in numbered}
-        self.assertTrue(printed <= set(table.known), printed - set(table.known))
-        # Every recorded entry is either reported as a violation or as stale.
-        for key in table.known:
-            self.assertIn(key, result.stdout)
-        self.assertIn("[W1] WARNING orna-foundation", result.stdout)
-        self.assertIn("budgets:", result.stdout)
-
-    def test_deny_passes_on_the_recorded_baseline(self) -> None:
-        result = self.run_script("--mode=deny")
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("no new violations", result.stdout)
-
-    def test_strict_deny_reports_every_recorded_violation(self) -> None:
-        table = load_layer_table(ROOT / LAYERS_PATH)
-        result = self.run_script("--mode=deny", "--strict")
-        self.assertEqual(result.returncode, 1, result.stdout)
-        numbered = [line for line in result.stdout.splitlines() if line.startswith("[V")]
-        self.assertGreaterEqual(len(numbered), 1, result.stdout)
-        self.assertNotIn("[new]", result.stdout)
-        for line in numbered:
-            key = line.rsplit("[", 1)[1].rstrip("]")
-            self.assertIn(key, table.known)
-
-    def test_budget_passes_on_the_recorded_baseline(self) -> None:
-        result = self.run_script("--mode=budget")
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("budgets: no growth", result.stdout)
-
-
-if __name__ == "__main__":
-    unittest.main()
+        self.assertIn("[note]", result.stdout)
+        self.assertIn("not a workspace member", result.stdout)

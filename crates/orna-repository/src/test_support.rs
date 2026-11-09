@@ -33,6 +33,42 @@ pub(crate) fn configure_fixture_git_identity(directory: &Path) {
     }
 }
 
+/// Runs one fixture Git command and returns its trimmed UTF-8 stdout.
+pub(crate) fn git(directory: &Path, arguments: &[&str]) -> String {
+    run_fixture_git(directory, arguments, false)
+}
+
+/// Runs one fixture Git command that is expected to produce no output under
+/// test, asserting success.
+pub(crate) fn git_ok(directory: &Path, arguments: &[&str]) {
+    let _ = run_fixture_git(directory, arguments, false);
+}
+
+/// Runs one fixture Git command with lazy fetching disabled, returning its
+/// trimmed UTF-8 stdout. Fixtures that build unreachable objects must not let
+/// Git ask a configured remote for them.
+pub(crate) fn git_no_lazy(directory: &Path, arguments: &[&str]) -> String {
+    run_fixture_git(directory, arguments, true)
+}
+
+fn run_fixture_git(directory: &Path, arguments: &[&str], no_lazy_fetch: bool) -> String {
+    let mut command = Command::new("git");
+    command.current_dir(directory).args(arguments);
+    if no_lazy_fetch {
+        command.env("GIT_NO_LAZY_FETCH", "1");
+    }
+    let output = command.output().expect("fixture git must start");
+    assert!(
+        output.status.success(),
+        "git {arguments:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("fixture git output is UTF-8")
+        .trim()
+        .to_owned()
+}
+
 /// Runs one Git command with `input` on stdin and returns its trimmed stdout.
 pub(crate) fn git_with_input(directory: &Path, arguments: &[&str], input: &str) -> String {
     let mut child = Command::new("git")
