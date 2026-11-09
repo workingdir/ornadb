@@ -1033,6 +1033,18 @@ impl Functions {
     }
 }
 
+fn root_collection_intrinsic(name: &str) -> Option<orna_intrinsics::IntrinsicId> {
+    use orna_intrinsics::IntrinsicId;
+    Some(match name {
+        "pairs" => IntrinsicId::CollectionPairs,
+        "window" => IntrinsicId::CollectionWindow,
+        "rank" => IntrinsicId::CollectionRank,
+        "bucket_by" => IntrinsicId::CollectionBucketBy,
+        "__recursive_cte" => IntrinsicId::CollectionRecursiveCte,
+        _ => return None,
+    })
+}
+
 fn legacy_intrinsic(name: &str) -> Option<orna_intrinsics::IntrinsicId> {
     use orna_intrinsics::IntrinsicId;
     Some(match name.rsplit('.').next()? {
@@ -7298,11 +7310,15 @@ impl Context<'_, '_> {
             .or_else(|| {
                 let name = function_name(callee)?;
                 (!scope.0.contains_key(&name))
-                    .then(|| orna_intrinsics::root_intrinsic(&name))
+                    .then(|| {
+                        orna_intrinsics::root_intrinsic(&name)
+                            .or_else(|| root_collection_intrinsic(&name))
+                    })
                     .flatten()
             })?;
         let intrinsic = orna_intrinsics::by_id(id);
-        let name = intrinsic.leaf.unwrap_or(intrinsic.name);
+        let spelling = function_name(callee).unwrap_or_else(|| intrinsic.name.to_owned());
+        let name = spelling.rsplit('.').next().unwrap_or(intrinsic.name);
         let statistics_operation = intrinsic.module == orna_intrinsics::Module::Stats;
         let pipeline_relation = matches!(input, Some(Value::Relation(_)));
         let relation_argument = relation_call_candidate(name, arguments, scope, self.functions);
@@ -9318,10 +9334,34 @@ impl Context<'_, '_> {
             return Ok(CallRoute::Native(id));
         }
         if site.resolved.is_none()
+            && let Some(spelling) = site.spelled.as_deref()
+            && let Some((module_path, name)) = spelling.rsplit_once('.')
+            && let Some(module) = orna_intrinsics::Module::from_path(module_path)
+            && module != orna_intrinsics::Module::Time
+            && let Some(intrinsic) = orna_intrinsics::lookup(module, name)
+            && (intrinsic.dispatch != orna_intrinsics::Dispatch::SourceOnly
+                || module == orna_intrinsics::Module::Math)
+            && intrinsic.pins.contains(orna_intrinsics::CURRENT_STD_PIN)
+        {
+            return Ok(CallRoute::Native(intrinsic.id));
+        }
+        if site.resolved.is_none()
             && let Some(name) = site.spelled.as_deref()
             && !scope.0.contains_key(name)
         {
             if let Some(id) = orna_intrinsics::root_intrinsic(name) {
+                if !matches!(
+                    id,
+                    orna_intrinsics::IntrinsicId::CoreSome
+                        | orna_intrinsics::IntrinsicId::CoreNow
+                        | orna_intrinsics::IntrinsicId::CoreUuid7
+                        | orna_intrinsics::IntrinsicId::CoreError
+                        | orna_intrinsics::IntrinsicId::CoreFail
+                ) {
+                    return Ok(CallRoute::Native(id));
+                }
+            }
+            if let Some(id) = root_collection_intrinsic(name) {
                 return Ok(CallRoute::Native(id));
             }
             match name {
@@ -9506,7 +9546,12 @@ impl Context<'_, '_> {
         depth: usize,
     ) -> Result<Value, EvaluationError> {
         let intrinsic = orna_intrinsics::by_id(id);
-        let name = intrinsic.leaf.unwrap_or(intrinsic.name);
+        let spelling = site
+            .spelled
+            .as_deref()
+            .or(site.resolved.as_deref())
+            .unwrap_or(intrinsic.name);
+        let name = spelling.rsplit('.').next().unwrap_or(intrinsic.name);
         let (callee, arguments) = (site.callee, site.arguments);
         let implicit = usize::from(input.is_some());
         self.items(arguments.len() + implicit)?;
@@ -9544,7 +9589,7 @@ impl Context<'_, '_> {
     fn dispatch(
         &mut self,
         id: orna_intrinsics::IntrinsicId,
-        name: &'static str,
+        name: &str,
         values: Vec<Value>,
         callee: &Expr,
         scope: &Scope,
@@ -9719,6 +9764,9 @@ impl Context<'_, '_> {
                     .position(|param| param.name == name)
                     .or_else(|| match name {
                         "values" if params.first().is_some_and(|param| param.name == "rows") => {
+                            Some(0)
+                        }
+                        "rows" if params.first().is_some_and(|param| param.name == "values") => {
                             Some(0)
                         }
                         "min" if params.get(1).is_some_and(|param| param.name == "lower") => {
