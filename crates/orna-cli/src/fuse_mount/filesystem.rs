@@ -1,4 +1,5 @@
 use super::*;
+use orna_sys::SysFailureCode;
 
 pub(crate) const ROOT_INODE: u64 = 1;
 pub(crate) const ROW_PAGE_LIMIT: usize = 256;
@@ -2228,11 +2229,11 @@ impl WorkspaceFilesystem {
         state: &FsBuilder,
         for_unmount: bool,
     ) -> Vec<UnresolvedDraft> {
-        // The `sys.vfs.*` code of an internal cause, when the cause has one.
+        // The generated `sys` code of an internal cause, when the cause names one.
         fn spec_code(cause: &'static str) -> Option<&'static str> {
-            cause.starts_with("sys.").then_some(cause)
+            SysFailureCode::parse(cause).map(SysFailureCode::as_str)
         }
-        const DRAFT_RETAINED: &str = "sys.vfs.draft_retained";
+        let draft_retained = SysFailureCode::VfsDraftRetained.as_str();
         // inode -> (code, draft id, detail). The code is the spec code of the internal
         // cause; otherwise `draft_retained` when a candidate was kept; otherwise empty.
         let mut unresolved: BTreeMap<u64, (&'static str, String, String)> = BTreeMap::new();
@@ -2246,7 +2247,7 @@ impl WorkspaceFilesystem {
                 continue;
             }
             let code = spec_code(refusal.cause)
-                .or_else(|| refusal.draft.as_ref().map(|_| DRAFT_RETAINED))
+                .or_else(|| refusal.draft.as_ref().map(|_| draft_retained))
                 .unwrap_or("");
             let (draft, detail) = match &refusal.draft {
                 Some(draft) => (
@@ -2283,7 +2284,7 @@ impl WorkspaceFilesystem {
                 continue;
             }
             let code = spec_code(refusal.cause)
-                .or_else(|| refusal.draft.as_ref().map(|_| DRAFT_RETAINED))
+                .or_else(|| refusal.draft.as_ref().map(|_| draft_retained))
                 .unwrap_or("");
             let (draft, detail) = match &refusal.draft {
                 Some(draft) => (
@@ -2303,7 +2304,7 @@ impl WorkspaceFilesystem {
         for (inode, refusal) in &draft_state.rejected_scratch {
             captured.insert(*inode, refusal.path.clone());
             let code = spec_code(refusal.cause)
-                .or_else(|| refusal.kept.then_some(DRAFT_RETAINED))
+                .or_else(|| refusal.kept.then_some(draft_retained))
                 .unwrap_or("");
             unresolved.entry(*inode).or_insert_with(|| {
                 (
@@ -2316,7 +2317,7 @@ impl WorkspaceFilesystem {
         for inode in &draft_state.retained_scratch {
             unresolved.entry(*inode).or_insert_with(|| {
                 (
-                    DRAFT_RETAINED,
+                    draft_retained,
                     String::new(),
                     "scratch file not renamed".to_owned(),
                 )
