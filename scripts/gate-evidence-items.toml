@@ -333,7 +333,7 @@ select = [
   { record = "workspace-rest", package = "orna-runtime", target = "lib", test = "legacy_running_request_recovers_as_uncertain_after_takeover" },
   { record = "workspace-rest", package = "orna-runtime", target = "lib", test = "recovery_retains_uncertainty_and_clears_old_owner_evidence" },
 ]
-limitations = ["Process kill covers only the ref-cas and tail publication boundaries; the other external-effect boundaries are covered by library tests only."]
+limitations = ["Process kill covers only the ref-cas and tail publication boundaries; the other external-effect boundaries are covered by library tests only.", "The ControlledEffectToken is not bound to the request identity: it proves only that the evaluation that minted it was admitted as controlled, not which request it belongs to. admit_sys_host derives the controlled verdict from the caller's host objects, so a caller that passes the wrong host objects is not detected. The controlled-transaction marker is feature-gated and is not cryptographic. Safe in-process Rust can still perform I/O, so the verdict is a contract on the evaluator's host bindings, not a sandbox."]
 
 # Gate E: actual writable mount. The workspace-cli record runs with ORNA_REQUIRE_FUSE=1.
 
