@@ -155,14 +155,13 @@ name = "orna-compat-v1"
 [[crate]]
 name = "orna-evaluator"
 [crate.files]
-"src/lib.rs" = 20535
+"src/lib.rs" = 19960
 "src/relation.rs" = 1375
 "src/repl.rs" = 1766
 "src/sys_bindings.rs" = 2392
 [crate.functions]
 "src/lib.rs::apply_binary" = 203
 "src/lib.rs::call_blob_operation" = 123
-"src/lib.rs::call_native" = 121
 "src/lib.rs::collection" = 187
 "src/lib.rs::concurrent" = 134
 "src/lib.rs::consume_provider_stream" = 289
@@ -170,10 +169,7 @@ name = "orna-evaluator"
 "src/lib.rs::context_named_invocation_preserves_owner_context_after_ovb2_effects" = 147
 "src/lib.rs::evaluate_node" = 308
 "src/lib.rs::extreme" = 139
-"src/lib.rs::named_arguments" = 202
-"src/lib.rs::raw" = 200
 "src/lib.rs::relation_call" = 173
-"src/lib.rs::route_call" = 154
 "src/lib.rs::stream" = 432
 "src/row_admission.rs::admit_row" = 147
 "src/sys_bindings.rs::rov3_descriptor_only_is_unavailable_and_self_equal" = 159
