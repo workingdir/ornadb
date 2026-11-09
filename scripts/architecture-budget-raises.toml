@@ -260,24 +260,6 @@ reason = "PR #9777 replaces three duplicated add/remove/replace walkers with one
 bead = "ornadb-xssb1"
 
 [[raise]]
-path = "crates/orna-runtime/src/publication.rs"
-new_limit = 1445
-reason = "main's #9794 writer-entry fence grows publication.rs; recorded with the fence bead so the budget gate stays green"
-bead = "ornadb-5il1.127"
-
-[[raise]]
-path = "crates/orna-runtime/src/lib.rs::replaying_a_published_vfs_save_keeps_the_durable_generation"
-new_limit = 122
-reason = "main's #9794 writer-entry fence adds the replay test; recorded with the fence bead"
-bead = "ornadb-5il1.127"
-
-[[raise]]
-path = "crates/orna-runtime/src/lib.rs::replaying_a_published_vfs_save_reports_the_idempotent_outcome"
-new_limit = 124
-reason = "main's #9794 writer-entry fence adds the replay test; recorded with the fence bead"
-bead = "ornadb-5il1.127"
-
-[[raise]]
 path = "crates/orna-semantic/src/calls.rs"
 new_limit = 3738
 reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
@@ -601,3 +583,39 @@ new_limit = 132
 reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
 bead = "ornadb-rkn8m"
 
+
+[[raise]]
+path = "crates/orna-repository/src/journal.rs::decode"
+new_limit = 137
+reason = "pure split of orna-repository lib.rs along its seams: the publication journal decoder moved here unchanged"
+bead = "ornadb-kdfff"
+
+[[raise]]
+path = "crates/orna-repository/src/repository/index.rs::reconcile_store_worktree_transition"
+new_limit = 127
+reason = "pure split of orna-repository lib.rs along its seams: this method moved here unchanged"
+bead = "ornadb-kdfff"
+
+[[raise]]
+path = "crates/orna-repository/src/repository/object.rs::materialize_managed_file_impl_with_quarantine_locked"
+new_limit = 186
+reason = "pure split of orna-repository lib.rs along its seams: this method moved here unchanged"
+bead = "ornadb-kdfff"
+
+[[raise]]
+path = "crates/orna-repository/src/repository/publish.rs::publish_candidate_body"
+new_limit = 174
+reason = "pure split of orna-repository lib.rs along its seams: this method moved here unchanged"
+bead = "ornadb-kdfff"
+
+[[raise]]
+path = "crates/orna-repository/src/repository/publish.rs::recover_publication"
+new_limit = 173
+reason = "pure split of orna-repository lib.rs along its seams: this method moved here unchanged"
+bead = "ornadb-kdfff"
+
+[[raise]]
+path = "crates/orna-repository/src/repository/review.rs::commit_reviewed_candidate_with_stage_hook"
+new_limit = 181
+reason = "pure split of orna-repository lib.rs along its seams: this method moved here unchanged"
+bead = "ornadb-kdfff"
