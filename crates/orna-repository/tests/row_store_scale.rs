@@ -2834,7 +2834,7 @@ async fn admit_bulk_production_rows(rows: u64) -> BulkProductionRows {
             [0xc4; 32],
             TerminalOutcome::new(vec![0xc5]).expect("a one-byte terminal outcome is valid"),
             &NoFault,
-            orna_runtime::EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
+            orna_evaluator::EffectGate::admit_unbound_for_test(),
         )
         .await
         .expect("the runtime commits the bulk request");
