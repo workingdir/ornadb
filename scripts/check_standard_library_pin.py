@@ -4,7 +4,7 @@
 The superproject pins `stdlib/std` by commit. This checker proves that the pinned
 commit is an ancestor of the submodule's `origin/main`, that the submodule checkout
 is exactly that commit with no local edits, and that every file the Rust standard
-source mirror includes with `include_str!` is byte-identical to the pinned blob. It
+source mirror embeds (one `reference_standard_modules!` row per file) is byte-identical to the pinned blob. It
 also requires every tracked `.orna` file at the pin to be mirrored or listed in
 `UNMIRRORED_SOURCES` with a reason, so a new standard module cannot slip past the
 Rust side silently.
@@ -24,16 +24,12 @@ MIRROR_SOURCE = WORKSPACE_ROOT / "crates/orna-standard-sources/src/lib.rs"
 UPSTREAM_MAIN_REF = "refs/remotes/origin/main"
 # Bump when the checker's flags or output formats change, so CI logs show which interface ran.
 CHECKER_VERSION = "1"
-INCLUDE_PATTERN = re.compile(r'include_str!\(\s*"\.\./\.\./\.\./stdlib/std/([^"]+)"\s*\)')
+# One row per mirrored module: the literal is both the public path const and the file embedded below stdlib/.
+MODULE_ROW_PATTERN = re.compile(r'^\s*REFERENCE_STANDARD_(\w+)_PATH_V1\s*=\s*"std/([^"]+)"', re.MULTILINE)
+# The macro must keep deriving each include from its row's path literal; that is what makes a row's path and text one fact.
+SOURCE_DERIVATION = 'include_str!(concat!("../../../stdlib/", $path))'
 GITLINK_PATTERN = re.compile(r"^160000 commit ([0-9a-f]{40})\t(.+)$")
 SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
-SOURCE_CONST_PATTERN = re.compile(
-    r'const REFERENCE_STANDARD_(\w+)_SOURCE_V1:\s*&str\s*=\s*include_str!\(\s*"\.\./\.\./\.\./stdlib/std/([^"]+)"\s*\)\s*;'
-)
-PATH_CONST_PATTERN = re.compile(r'pub const REFERENCE_STANDARD_(\w+)_PATH_V1:\s*&str\s*=\s*"([^"]+)"\s*;')
-ARRAY_PAIR_PATTERN = re.compile(
-    r"\(\s*REFERENCE_STANDARD_(\w+)_PATH_V1\.into\(\)\s*,\s*REFERENCE_STANDARD_(\w+)_SOURCE_V1\.into\(\)\s*,?\s*\)"
-)
 # Tracked standard sources that intentionally have no Rust mirror entry. Each needs a reason.
 UNMIRRORED_SOURCES: dict[str, str] = {
     ".orna/database.orna": "pinned database root identity; repository metadata, not a standard unit",
@@ -74,36 +70,27 @@ def gitlink_commit(superproject: Path, submodule_path: str = SUBMODULE_PATH) -> 
 
 
 def mirrored_paths(mirror_text: str) -> list[str]:
-    """Return the stdlib/std-relative paths the Rust mirror includes, in source order."""
-    paths = INCLUDE_PATTERN.findall(mirror_text)
+    """Return the stdlib/std-relative paths the Rust mirror embeds, in source order."""
+    paths = [relative for _, relative in MODULE_ROW_PATTERN.findall(mirror_text)]
     if len(paths) != len(set(paths)):
         duplicates = sorted({path for path in paths if paths.count(path) > 1})
         raise PinError(f"mirror includes the same source twice: {', '.join(duplicates)}")
     return paths
 
 
-def check_const_pairing(mirror_text: str) -> None:
-    """Require each mirrored source const to pair with the path const of the same stem.
+def check_mirror_derivation(mirror_text: str) -> None:
+    """Require the mirror to derive every embedded file from its row's path literal.
 
-    The mirror declares `REFERENCE_STANDARD_<STEM>_PATH_V1 = "std/<rel>"` and
-    `REFERENCE_STANDARD_<STEM>_SOURCE_V1 = include_str!(".../std/<rel>")`, and the
-    reference array pairs them. A wrong path, a missing path const, or a swapped
-    array pair fails.
+    The mirror declares `REFERENCE_STANDARD_<STEM>_PATH_V1 = "std/<rel>"` rows and
+    embeds `stdlib/<that literal>`, so a path const and its text cannot be paired
+    wrongly. This guards the derivation the byte check below relies on: if the macro
+    stopped deriving the include from the literal, the rows would no longer name the
+    files that are embedded.
     """
-    source_consts = dict(SOURCE_CONST_PATTERN.findall(mirror_text))
-    path_consts = dict(PATH_CONST_PATTERN.findall(mirror_text))
-    if not source_consts:
-        raise PinError("mirror declares no standard source consts")
-    for stem, relative in source_consts.items():
-        if stem not in path_consts:
-            raise PinError(f"source const {stem}_SOURCE_V1 has no path const {stem}_PATH_V1")
-        if path_consts[stem] != f"std/{relative}":
-            raise PinError(
-                f"{stem}_PATH_V1 is {path_consts[stem]!r} but {stem}_SOURCE_V1 includes {relative!r}"
-            )
-    for path_stem, source_stem in ARRAY_PAIR_PATTERN.findall(mirror_text):
-        if path_stem != source_stem:
-            raise PinError(f"array pairs {path_stem}_PATH_V1 with {source_stem}_SOURCE_V1")
+    if not MODULE_ROW_PATTERN.search(mirror_text):
+        raise PinError("mirror declares no standard modules")
+    if SOURCE_DERIVATION not in mirror_text:
+        raise PinError("mirror no longer embeds each module from its row's path literal")
 
 
 def ensure_upstream_main(submodule: Path) -> None:
@@ -189,7 +176,7 @@ def run_checks(superproject: Path, mirror_source: Path, submodule_path: str = SU
     check_reachable_from_main(submodule, pin)
     mirror_text = mirror_source.read_text(encoding="utf-8")
     mirrored = mirrored_paths(mirror_text)
-    check_const_pairing(mirror_text)
+    check_mirror_derivation(mirror_text)
     check_mirror_bytes(submodule, pin, mirrored)
     check_every_source_accounted_for(submodule, pin, mirrored)
     return (

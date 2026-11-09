@@ -6,11 +6,12 @@ use crate::{
         verify_standard_library_snapshot,
     },
     catalogue::{
-        EnumTypeDefinition, FieldDefinition, FunctionDefinition, FunctionDomain, FunctionReturn,
-        FunctionReturnColumnDefinition, FunctionSecurity, FunctionTransaction, FunctionVolatility,
-        ObjectTypeDefinition, ParameterDefinition, QualifiedSemanticName,
-        RecordValueFieldDefinition, RecordValueTypeDefinition, SchemaDefinition, TypeBinding,
-        ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
+        CatalogueDefinitions, EnumTypeDefinition, FieldDefinition, FunctionDefinition,
+        FunctionDomain, FunctionReturn, FunctionReturnColumnDefinition, FunctionSecurity,
+        FunctionTransaction, FunctionVolatility, ObjectTypeDefinition, ParameterDefinition,
+        QualifiedSemanticName, RecordValueFieldDefinition, RecordValueTypeDefinition,
+        SchemaDefinition, TypeBinding, ValueTypeDefinition, ValueTypeMutability,
+        ValueTypePersistence,
     },
     types::{ResolvedType, StandardScalar, TypeDescriptor, TypeDescriptorKind},
 };
@@ -640,67 +641,70 @@ fn active_for_flat_type_conversion(
 }
 
 fn flat_type_application_catalogue() -> CatalogueSnapshot {
-    CatalogueSnapshot::new_with_record_value_types(
+    CatalogueSnapshot::from_definitions(
         CatalogueRevisionId::from_bytes(id::<7>()),
-        vec![SchemaDefinition::new(
-            SchemaId::from_bytes(id::<8>()),
-            QualifiedSemanticName::new(["crm"]).unwrap(),
-        )],
-        vec![ObjectTypeDefinition::new(
-            TypeId::from_bytes(id::<80>()),
-            QualifiedSemanticName::new(["crm", "contact"]).unwrap(),
-            vec![],
-        )],
-        vec![ValueTypeDefinition::opaque(
-            TypeId::from_bytes(id::<81>()),
-            QualifiedSemanticName::new(["crm", "token"]).unwrap(),
-            "crm.token@1",
-        )],
-        vec![EnumTypeDefinition::new(
-            TypeId::from_bytes(id::<82>()),
-            QualifiedSemanticName::new(["crm", "stage"]).unwrap(),
-            ["lead"],
-        )],
-        vec![RecordValueTypeDefinition::new(
-            TypeId::from_bytes(id::<83>()),
-            QualifiedSemanticName::new(["crm", "status"]).unwrap(),
-            vec![
-                RecordValueFieldDefinition::try_new_descriptor(
-                    FieldId::from_bytes(id::<84>()),
-                    "active",
-                    0,
-                    TypeDescriptor::named(TypeId::from_bytes(id::<71>())),
-                )
-                .unwrap(),
-            ],
-        )],
-        vec![],
+        CatalogueDefinitions {
+            schemas: vec![SchemaDefinition::new(
+                SchemaId::from_bytes(id::<8>()),
+                QualifiedSemanticName::new(["crm"]).unwrap(),
+            )],
+            object_types: vec![ObjectTypeDefinition::new(
+                TypeId::from_bytes(id::<80>()),
+                QualifiedSemanticName::new(["crm", "contact"]).unwrap(),
+                vec![],
+            )],
+            value_types: vec![ValueTypeDefinition::opaque(
+                TypeId::from_bytes(id::<81>()),
+                QualifiedSemanticName::new(["crm", "token"]).unwrap(),
+                "crm.token@1",
+            )],
+            enum_types: vec![EnumTypeDefinition::new(
+                TypeId::from_bytes(id::<82>()),
+                QualifiedSemanticName::new(["crm", "stage"]).unwrap(),
+                ["lead"],
+            )],
+            record_value_types: vec![RecordValueTypeDefinition::new(
+                TypeId::from_bytes(id::<83>()),
+                QualifiedSemanticName::new(["crm", "status"]).unwrap(),
+                vec![
+                    RecordValueFieldDefinition::try_new_descriptor(
+                        FieldId::from_bytes(id::<84>()),
+                        "active",
+                        0,
+                        TypeDescriptor::named(TypeId::from_bytes(id::<71>())),
+                    )
+                    .unwrap(),
+                ],
+            )],
+            ..CatalogueDefinitions::default()
+        },
     )
     .unwrap()
 }
 
 fn flat_type_standard_context() -> CatalogueHashContext {
-    let catalogue = CatalogueSnapshot::new_with_enum_types(
+    let catalogue = CatalogueSnapshot::from_definitions(
         CatalogueRevisionId::from_bytes(id::<72>()),
-        vec![SchemaDefinition::new(
-            SchemaId::from_bytes(id::<73>()),
-            QualifiedSemanticName::new(["std"]).unwrap(),
-        )],
-        vec![],
-        vec![
-            standard_boolean_definition(),
-            ValueTypeDefinition::opaque(
-                TypeId::from_bytes(id::<74>()),
-                QualifiedSemanticName::new(["std", "token"]).unwrap(),
-                "std.token@1",
-            ),
-        ],
-        vec![EnumTypeDefinition::new(
-            TypeId::from_bytes(id::<75>()),
-            QualifiedSemanticName::new(["std", "mode"]).unwrap(),
-            ["safe"],
-        )],
-        vec![],
+        CatalogueDefinitions {
+            schemas: vec![SchemaDefinition::new(
+                SchemaId::from_bytes(id::<73>()),
+                QualifiedSemanticName::new(["std"]).unwrap(),
+            )],
+            value_types: vec![
+                standard_boolean_definition(),
+                ValueTypeDefinition::opaque(
+                    TypeId::from_bytes(id::<74>()),
+                    QualifiedSemanticName::new(["std", "token"]).unwrap(),
+                    "std.token@1",
+                ),
+            ],
+            enum_types: vec![EnumTypeDefinition::new(
+                TypeId::from_bytes(id::<75>()),
+                QualifiedSemanticName::new(["std", "mode"]).unwrap(),
+                ["safe"],
+            )],
+            ..CatalogueDefinitions::default()
+        },
     )
     .unwrap();
     let content = "standard flat type descriptor fixture";
@@ -886,20 +890,20 @@ fn active_revision_flat_type_conversion_closes_version_one_and_colliding_identit
     );
 
     let collision = TypeId::from_bytes(id::<75>());
-    let application = CatalogueSnapshot::new_with_enum_types(
+    let application = CatalogueSnapshot::from_definitions(
         CatalogueRevisionId::from_bytes(id::<7>()),
-        vec![SchemaDefinition::new(
-            SchemaId::from_bytes(id::<8>()),
-            QualifiedSemanticName::new(["crm"]).unwrap(),
-        )],
-        vec![],
-        vec![],
-        vec![EnumTypeDefinition::new(
-            collision,
-            QualifiedSemanticName::new(["crm", "mode"]).unwrap(),
-            ["open"],
-        )],
-        vec![],
+        CatalogueDefinitions {
+            schemas: vec![SchemaDefinition::new(
+                SchemaId::from_bytes(id::<8>()),
+                QualifiedSemanticName::new(["crm"]).unwrap(),
+            )],
+            enum_types: vec![EnumTypeDefinition::new(
+                collision,
+                QualifiedSemanticName::new(["crm", "mode"]).unwrap(),
+                ["open"],
+            )],
+            ..CatalogueDefinitions::default()
+        },
     )
     .unwrap();
     let active = active_for_flat_type_conversion(application, flat_type_standard_context());
@@ -1037,11 +1041,14 @@ fn function_catalogue_with_identity(
         None,
         FunctionVolatility::Stable,
     );
-    CatalogueSnapshot::new_with_functions(
+    CatalogueSnapshot::from_definitions(
         CatalogueRevisionId::from_bytes(id::<7>()),
-        vec![schema],
-        object_types,
-        vec![function],
+        CatalogueDefinitions {
+            schemas: vec![schema],
+            object_types,
+            functions: vec![function],
+            ..CatalogueDefinitions::default()
+        },
     )
     .unwrap()
 }
@@ -1089,11 +1096,13 @@ fn function_catalogue_with_functions(functions: Vec<FunctionDefinition>) -> Cata
         SchemaId::from_bytes(id::<8>()),
         QualifiedSemanticName::new(namespace.iter().cloned()).unwrap(),
     );
-    CatalogueSnapshot::new_with_functions(
+    CatalogueSnapshot::from_definitions(
         CatalogueRevisionId::from_bytes(id::<7>()),
-        vec![schema],
-        vec![],
-        functions,
+        CatalogueDefinitions {
+            schemas: vec![schema],
+            functions,
+            ..CatalogueDefinitions::default()
+        },
     )
     .unwrap()
 }
@@ -1138,11 +1147,14 @@ fn resolved_type_slots_catalogue(
         None,
         FunctionVolatility::Immutable,
     );
-    CatalogueSnapshot::new_with_functions(
+    CatalogueSnapshot::from_definitions(
         CatalogueRevisionId::from_bytes(id::<7>()),
-        vec![schema],
-        vec![object_type],
-        vec![function],
+        CatalogueDefinitions {
+            schemas: vec![schema],
+            object_types: vec![object_type],
+            functions: vec![function],
+            ..CatalogueDefinitions::default()
+        },
     )
     .unwrap()
 }
@@ -1169,11 +1181,13 @@ fn catalogue_with_opaque_client_return(
         None,
         volatility,
     );
-    CatalogueSnapshot::new_with_functions(
+    CatalogueSnapshot::from_definitions(
         CatalogueRevisionId::from_bytes(id::<7>()),
-        vec![schema],
-        vec![],
-        vec![function],
+        CatalogueDefinitions {
+            schemas: vec![schema],
+            functions: vec![function],
+            ..CatalogueDefinitions::default()
+        },
     )
     .unwrap()
 }
@@ -1441,21 +1455,23 @@ fn version_two_standard_snapshot_requires_complete_ordered_executable_evidence()
         SchemaId::from_bytes(id::<92>()),
         QualifiedSemanticName::new(["std", "invoke"]).unwrap(),
     );
-    let catalogue = CatalogueSnapshot::new_with_functions(
+    let catalogue = CatalogueSnapshot::from_definitions(
         CatalogueRevisionId::from_bytes(id::<93>()),
-        vec![schema.clone()],
-        vec![],
-        vec![FunctionDefinition::new(
-            function,
-            QualifiedSemanticName::new(["std", "invoke", "echo"]).unwrap(),
-            FunctionDomain::Server,
-            vec![],
-            FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Integer)),
-            function_revision,
-            FunctionSecurity::Invoker,
-            Some(FunctionTransaction::ReadOnly),
-            FunctionVolatility::Stable,
-        )],
+        CatalogueDefinitions {
+            schemas: vec![schema.clone()],
+            functions: vec![FunctionDefinition::new(
+                function,
+                QualifiedSemanticName::new(["std", "invoke", "echo"]).unwrap(),
+                FunctionDomain::Server,
+                vec![],
+                FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Integer)),
+                function_revision,
+                FunctionSecurity::Invoker,
+                Some(FunctionTransaction::ReadOnly),
+                FunctionVolatility::Stable,
+            )],
+            ..CatalogueDefinitions::default()
+        },
     )
     .unwrap();
     let snapshot_source = source(Some(SourceRevisionId::from_bytes(id::<94>())));
@@ -1507,14 +1523,16 @@ fn version_two_standard_snapshot_requires_complete_ordered_executable_evidence()
         Some(FunctionTransaction::ReadOnly),
         FunctionVolatility::Stable,
     );
-    let reordered_catalogue = CatalogueSnapshot::new_with_functions(
+    let reordered_catalogue = CatalogueSnapshot::from_definitions(
         CatalogueRevisionId::from_bytes(id::<93>()),
-        vec![schema.clone()],
-        vec![],
-        vec![
-            snapshot.catalogue().functions()[0].clone(),
-            lower_definition,
-        ],
+        CatalogueDefinitions {
+            schemas: vec![schema.clone()],
+            functions: vec![
+                snapshot.catalogue().functions()[0].clone(),
+                lower_definition,
+            ],
+            ..CatalogueDefinitions::default()
+        },
     )
     .unwrap();
     let lower_executable = StandardExecutable::new(
@@ -1793,11 +1811,13 @@ fn mixed_function_catalogue(
             FunctionVolatility::Stable,
         )
     });
-    CatalogueSnapshot::new_with_functions(
+    CatalogueSnapshot::from_definitions(
         CatalogueRevisionId::from_bytes(id::<7>()),
-        vec![schema],
-        vec![],
-        functions.into(),
+        CatalogueDefinitions {
+            schemas: vec![schema],
+            functions: functions.into(),
+            ..CatalogueDefinitions::default()
+        },
     )
     .unwrap()
 }
@@ -1874,15 +1894,16 @@ fn standard_context_with_value_types(
         .iter()
         .map(ValueTypeDefinition::id)
         .collect::<Vec<_>>();
-    let catalogue = CatalogueSnapshot::new_with_types(
+    let catalogue = CatalogueSnapshot::from_definitions(
         CatalogueRevisionId::from_bytes(id::<72>()),
-        vec![SchemaDefinition::new(
-            SchemaId::from_bytes(id::<73>()),
-            QualifiedSemanticName::new(["std"]).unwrap(),
-        )],
-        vec![],
-        value_types,
-        vec![],
+        CatalogueDefinitions {
+            schemas: vec![SchemaDefinition::new(
+                SchemaId::from_bytes(id::<73>()),
+                QualifiedSemanticName::new(["std"]).unwrap(),
+            )],
+            value_types,
+            ..CatalogueDefinitions::default()
+        },
     )
     .unwrap();
     let mut origins = vec![DefinitionOrigin::new(
@@ -1930,68 +1951,68 @@ fn standard_context_with_value_types(
 }
 
 fn value_type_catalogue() -> CatalogueSnapshot {
-    CatalogueSnapshot::new_with_types(
+    CatalogueSnapshot::from_definitions(
         CatalogueRevisionId::from_bytes(id::<7>()),
-        vec![SchemaDefinition::new(
-            SchemaId::from_bytes(id::<8>()),
-            QualifiedSemanticName::new(["crm"]).unwrap(),
-        )],
-        vec![],
-        vec![ValueTypeDefinition::primitive(
-            TypeId::from_bytes(id::<71>()),
-            QualifiedSemanticName::new(["crm", "flag"]).unwrap(),
-            ValueTypeMutability::Immutable,
-            ValueTypePersistence::Persistable,
-            "orna.kernel.value.flag@1",
-        )],
-        vec![],
+        CatalogueDefinitions {
+            schemas: vec![SchemaDefinition::new(
+                SchemaId::from_bytes(id::<8>()),
+                QualifiedSemanticName::new(["crm"]).unwrap(),
+            )],
+            value_types: vec![ValueTypeDefinition::primitive(
+                TypeId::from_bytes(id::<71>()),
+                QualifiedSemanticName::new(["crm", "flag"]).unwrap(),
+                ValueTypeMutability::Immutable,
+                ValueTypePersistence::Persistable,
+                "orna.kernel.value.flag@1",
+            )],
+            ..CatalogueDefinitions::default()
+        },
     )
     .unwrap()
 }
 
 fn enum_type_catalogue() -> CatalogueSnapshot {
-    CatalogueSnapshot::new_with_enum_types(
+    CatalogueSnapshot::from_definitions(
         CatalogueRevisionId::from_bytes(id::<7>()),
-        vec![SchemaDefinition::new(
-            SchemaId::from_bytes(id::<8>()),
-            QualifiedSemanticName::new(["crm"]).unwrap(),
-        )],
-        vec![],
-        vec![],
-        vec![EnumTypeDefinition::new(
-            TypeId::from_bytes(id::<71>()),
-            QualifiedSemanticName::new(["crm", "stage"]).unwrap(),
-            ["lead", "customer"],
-        )],
-        vec![],
+        CatalogueDefinitions {
+            schemas: vec![SchemaDefinition::new(
+                SchemaId::from_bytes(id::<8>()),
+                QualifiedSemanticName::new(["crm"]).unwrap(),
+            )],
+            enum_types: vec![EnumTypeDefinition::new(
+                TypeId::from_bytes(id::<71>()),
+                QualifiedSemanticName::new(["crm", "stage"]).unwrap(),
+                ["lead", "customer"],
+            )],
+            ..CatalogueDefinitions::default()
+        },
     )
     .unwrap()
 }
 
 fn record_value_type_catalogue() -> CatalogueSnapshot {
-    CatalogueSnapshot::new_with_record_value_types(
+    CatalogueSnapshot::from_definitions(
         CatalogueRevisionId::from_bytes(id::<7>()),
-        vec![SchemaDefinition::new(
-            SchemaId::from_bytes(id::<8>()),
-            QualifiedSemanticName::new(["crm"]).unwrap(),
-        )],
-        vec![],
-        vec![],
-        vec![],
-        vec![RecordValueTypeDefinition::new(
-            TypeId::from_bytes(id::<76>()),
-            QualifiedSemanticName::new(["crm", "status"]).unwrap(),
-            vec![
-                RecordValueFieldDefinition::try_new_descriptor(
-                    FieldId::from_bytes(id::<77>()),
-                    "active",
-                    0,
-                    TypeDescriptor::named(TypeId::from_bytes(id::<71>())),
-                )
-                .unwrap(),
-            ],
-        )],
-        vec![],
+        CatalogueDefinitions {
+            schemas: vec![SchemaDefinition::new(
+                SchemaId::from_bytes(id::<8>()),
+                QualifiedSemanticName::new(["crm"]).unwrap(),
+            )],
+            record_value_types: vec![RecordValueTypeDefinition::new(
+                TypeId::from_bytes(id::<76>()),
+                QualifiedSemanticName::new(["crm", "status"]).unwrap(),
+                vec![
+                    RecordValueFieldDefinition::try_new_descriptor(
+                        FieldId::from_bytes(id::<77>()),
+                        "active",
+                        0,
+                        TypeDescriptor::named(TypeId::from_bytes(id::<71>())),
+                    )
+                    .unwrap(),
+                ],
+            )],
+            ..CatalogueDefinitions::default()
+        },
     )
     .unwrap()
 }
@@ -2061,19 +2082,21 @@ fn binding_catalogue() -> (CatalogueSnapshot, TypeBindingId) {
     )
     .unwrap();
     let binding_id = binding.id();
-    let catalogue = CatalogueSnapshot::new_with_types(
+    let catalogue = CatalogueSnapshot::from_definitions(
         CatalogueRevisionId::from_bytes(id::<7>()),
-        vec![SchemaDefinition::new(
-            SchemaId::from_bytes(id::<8>()),
-            QualifiedSemanticName::new(["crm"]).unwrap(),
-        )],
-        vec![ObjectTypeDefinition::new(
-            TypeId::from_bytes(id::<12>()),
-            QualifiedSemanticName::new(["crm", "contact"]).unwrap(),
-            vec![],
-        )],
-        vec![],
-        vec![binding],
+        CatalogueDefinitions {
+            schemas: vec![SchemaDefinition::new(
+                SchemaId::from_bytes(id::<8>()),
+                QualifiedSemanticName::new(["crm"]).unwrap(),
+            )],
+            object_types: vec![ObjectTypeDefinition::new(
+                TypeId::from_bytes(id::<12>()),
+                QualifiedSemanticName::new(["crm", "contact"]).unwrap(),
+                vec![],
+            )],
+            type_bindings: vec![binding],
+            ..CatalogueDefinitions::default()
+        },
     )
     .unwrap();
     (catalogue, binding_id)
@@ -3610,32 +3633,34 @@ fn active_and_deployable_revisions_accept_a_standalone_pinned_opaque_definition(
 #[test]
 fn version_one_rejects_an_opaque_definition_before_slot_validation() {
     let opaque = TypeId::from_bytes(id::<72>());
-    let catalogue = CatalogueSnapshot::new_with_types(
+    let catalogue = CatalogueSnapshot::from_definitions(
         CatalogueRevisionId::from_bytes(id::<7>()),
-        vec![SchemaDefinition::new(
-            SchemaId::from_bytes(id::<8>()),
-            QualifiedSemanticName::new(["crm"]).unwrap(),
-        )],
-        vec![ObjectTypeDefinition::new(
-            TypeId::from_bytes(id::<80>()),
-            QualifiedSemanticName::new(["crm", "task"]).unwrap(),
-            vec![FieldDefinition::new(
-                FieldId::from_bytes(id::<81>()),
-                "value",
-                0,
-                ResolvedType::value(TypeId::from_bytes(id::<99>())),
-                false,
-                false,
-                None,
-                None,
+        CatalogueDefinitions {
+            schemas: vec![SchemaDefinition::new(
+                SchemaId::from_bytes(id::<8>()),
+                QualifiedSemanticName::new(["crm"]).unwrap(),
             )],
-        )],
-        vec![ValueTypeDefinition::opaque(
-            opaque,
-            QualifiedSemanticName::new(["crm", "token"]).unwrap(),
-            "crm.token@1",
-        )],
-        vec![],
+            object_types: vec![ObjectTypeDefinition::new(
+                TypeId::from_bytes(id::<80>()),
+                QualifiedSemanticName::new(["crm", "task"]).unwrap(),
+                vec![FieldDefinition::new(
+                    FieldId::from_bytes(id::<81>()),
+                    "value",
+                    0,
+                    ResolvedType::value(TypeId::from_bytes(id::<99>())),
+                    false,
+                    false,
+                    None,
+                    None,
+                )],
+            )],
+            value_types: vec![ValueTypeDefinition::opaque(
+                opaque,
+                QualifiedSemanticName::new(["crm", "token"]).unwrap(),
+                "crm.token@1",
+            )],
+            ..CatalogueDefinitions::default()
+        },
     )
     .unwrap();
 

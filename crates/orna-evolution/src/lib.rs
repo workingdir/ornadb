@@ -163,30 +163,43 @@ pub enum MigrationOperation {
     },
 }
 
+/// The total order of a plan: table, then operation rank, then the affected
+/// identity, then the affected name or canonical key bytes. Names compare by
+/// their UTF-8 bytes, the same order the canonical key encoding uses.
+type OperationSortKey = (ObjectId, u8, ObjectId, Vec<u8>);
+
 impl MigrationOperation {
-    fn sort_key(&self) -> (ObjectId, u8, ObjectId, String) {
-        match self {
-            Self::DeleteTable { table } => (table.id, 0, table.id, table.name.clone()),
-            Self::CreateTable { table } => (table.id, 1, table.id, table.name.clone()),
-            Self::RenameTable { table, to, .. } => (*table, 2, *table, to.clone()),
-            Self::DeleteField { table, field } => (*table, 3, field.id, field.name.clone()),
+    fn sort_key(&self) -> Result<OperationSortKey, PlanningError> {
+        Ok(match self {
+            Self::DeleteTable { table } => (table.id, 0, table.id, table.name.clone().into_bytes()),
+            Self::CreateTable { table } => (table.id, 1, table.id, table.name.clone().into_bytes()),
+            Self::RenameTable { table, to, .. } => (*table, 2, *table, to.clone().into_bytes()),
+            Self::DeleteField { table, field } => {
+                (*table, 3, field.id, field.name.clone().into_bytes())
+            }
             Self::RenameField {
                 table, field, to, ..
-            } => (*table, 4, *field, to.clone()),
-            Self::AddOptionalField { table, field } => (*table, 5, field.id, field.name.clone()),
-            Self::AddRequiredFieldWithFallback { table, field } => {
-                (*table, 6, field.id, field.name.clone())
+            } => (*table, 4, *field, to.clone().into_bytes()),
+            Self::AddOptionalField { table, field } => {
+                (*table, 5, field.id, field.name.clone().into_bytes())
             }
-            Self::RekeyRow { table, old_key, .. } => (*table, 7, *table, canonical_key(old_key)),
-        }
+            Self::AddRequiredFieldWithFallback { table, field } => {
+                (*table, 6, field.id, field.name.clone().into_bytes())
+            }
+            Self::RekeyRow { table, old_key, .. } => {
+                (*table, 7, *table, canonical_key(*table, old_key)?)
+            }
+        })
     }
 }
 
-fn canonical_key(value: &CanonicalValue) -> String {
-    value
-        .encode()
-        .map(hex)
-        .unwrap_or_else(|_| "invalid-canonical-value".into())
+/// The canonical OVB-1 encoding of a row key. Its bytes give both the key
+/// identity used by the re-key ambiguity checks and the canonical key order.
+fn canonical_key(table: ObjectId, key: &CanonicalValue) -> Result<Vec<u8>, PlanningError> {
+    key.encode().map_err(|_| PlanningError::InvalidRekey {
+        table,
+        reason: "re-key key is not canonical",
+    })
 }
 
 fn contains_float(value: &orna_foundation::OvbRaw) -> bool {
@@ -203,9 +216,6 @@ fn contains_float(value: &orna_foundation::OvbRaw) -> bool {
         | orna_foundation::OvbRaw::Bytes(_)
         | orna_foundation::OvbRaw::Text(_) => false,
     }
-}
-fn hex(bytes: Vec<u8>) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// A fully validated, immutable plan. Operations are canonicalized once at
@@ -340,7 +350,14 @@ pub fn plan(
         }
     }
     validate_rekeys(&new_tables, &request.rekeys, &mut operations)?;
-    operations.sort_by_key(MigrationOperation::sort_key);
+    // Each key is derived once and may fail, so sort by a precomputed key
+    // instead of recomputing it inside the comparator.
+    let mut keyed = operations
+        .into_iter()
+        .map(|operation| operation.sort_key().map(|key| (key, operation)))
+        .collect::<Result<Vec<_>, _>>()?;
+    keyed.sort_by(|left, right| left.0.cmp(&right.0));
+    let operations = keyed.into_iter().map(|(_, operation)| operation).collect();
     Ok(MigrationPlan { operations })
 }
 
@@ -560,8 +577,8 @@ fn validate_rekeys(
                 reason: "old and new key are equal",
             });
         }
-        let old = (rekey.table, canonical_key(&rekey.old_key));
-        let new = (rekey.table, canonical_key(&rekey.new_key));
+        let old = (rekey.table, canonical_key(rekey.table, &rekey.old_key)?);
+        let new = (rekey.table, canonical_key(rekey.table, &rekey.new_key)?);
         if old_keys.contains(&new) || new_keys.contains(&old) {
             return Err(PlanningError::AmbiguousRekey {
                 table: rekey.table,
@@ -1168,7 +1185,7 @@ mod tests {
             expected
                 .operations()
                 .windows(2)
-                .all(|pair| pair[0].sort_key() <= pair[1].sort_key())
+                .all(|pair| pair[0].sort_key().unwrap() <= pair[1].sort_key().unwrap())
         );
     }
 

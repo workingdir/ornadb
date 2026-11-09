@@ -35,6 +35,8 @@ use std::{error::Error, fmt, time::SystemTime};
 
 use crate::{
     FunctionId, PrincipalId, StateSlotId, TypeId,
+    invocation::{InvocationEventBody, InvokeRequest},
+    system::is_sealed_inspect_type_id,
     types::{ResolvedType, TypeDescriptor, TypeDescriptorKind},
     value::{ConstructedValueKind, RuntimeType, RuntimeValue},
 };
@@ -49,27 +51,6 @@ fn validate_state_text(component: &str, what: &str) -> Result<(), UserStateError
         });
     }
     Ok(())
-}
-
-/// Returns whether a type identity is one of the transient sealed Inspector
-/// carriers. The identities are the existing sealed system registry entries;
-/// USER state must never turn any of them into durable value type identity.
-fn is_sealed_inspect_type_id(type_id: TypeId) -> bool {
-    matches!(
-        type_id,
-        crate::system::SYS_INSPECT_INVOCATION_TYPE_ID
-            | crate::system::SYS_INSPECT_SNAPSHOT_TYPE_ID
-            | crate::system::SYS_INSPECT_SNAPSHOT_OPTIONS_TYPE_ID
-            | crate::system::SYS_INSPECT_TRACE_EVENT_TYPE_ID
-            | crate::system::SYS_INSPECT_INVOCATION_NODES_TYPE_ID
-            | crate::system::SYS_INSPECT_CALLS_TYPE_ID
-            | crate::system::SYS_INSPECT_RESOURCES_TYPE_ID
-            | crate::system::SYS_INSPECT_STATE_CELLS_TYPE_ID
-            | crate::system::SYS_INSPECT_UI_NODES_TYPE_ID
-            | crate::system::SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID
-            | crate::system::SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID
-            | crate::system::SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID
-    )
 }
 
 fn descriptor_contains_sealed_inspect_type(descriptor: &TypeDescriptor) -> bool {
@@ -106,6 +87,8 @@ pub fn is_sealed_inspect_runtime_value(value: &RuntimeValue) -> bool {
         return true;
     }
 
+    // Every variant is named so that a new value shape must decide whether it
+    // can carry a sealed identity; a leaf has no nested value to inspect.
     match value {
         RuntimeValue::Record(record) => record.fields().iter().any(is_sealed_inspect_runtime_value),
         RuntimeValue::Constructed(constructed) => match constructed.kind() {
@@ -122,44 +105,9 @@ pub fn is_sealed_inspect_runtime_value(value: &RuntimeValue) -> bool {
         RuntimeValue::InvokeValue(invoke_value) => {
             is_sealed_inspect_runtime_value(invoke_value.value())
         }
-        RuntimeValue::InvokeRequest(request) => {
-            request
-                .arguments()
-                .iter()
-                .any(|argument| is_sealed_inspect_runtime_value(argument.value().value()))
-                || request
-                    .caller_context()
-                    .preference_policy()
-                    .is_some_and(|value| is_sealed_inspect_runtime_value(value.value()))
-                || request
-                    .client_offer()
-                    .limits()
-                    .is_some_and(|value| is_sealed_inspect_runtime_value(value.value()))
-                || request
-                    .client_offer()
-                    .preferences()
-                    .is_some_and(|value| is_sealed_inspect_runtime_value(value.value()))
-                || request.client_offer().sink_offers().iter().any(|offer| {
-                    descriptor_contains_sealed_inspect_type(offer.descriptor())
-                        || offer
-                            .limits()
-                            .is_some_and(|value| is_sealed_inspect_runtime_value(value.value()))
-                })
-                || request.client_offer().runtime_offers().iter().any(|offer| {
-                    offer
-                        .consumed_descriptors()
-                        .iter()
-                        .any(descriptor_contains_sealed_inspect_type)
-                        || offer
-                            .limits()
-                            .is_some_and(|value| is_sealed_inspect_runtime_value(value.value()))
-                })
-                || request
-                    .observer_context()
-                    .is_some_and(|value| is_sealed_inspect_runtime_value(value.value()))
-        }
+        RuntimeValue::InvokeRequest(request) => request_contains_sealed_inspect(request),
         RuntimeValue::InvokeEvent(event) => match event.body() {
-            crate::invocation::InvocationEventBody::ValueBatch { schema, values } => {
+            InvocationEventBody::ValueBatch { schema, values } => {
                 schema
                     .as_ref()
                     .is_some_and(|value| is_sealed_inspect_runtime_value(value.value()))
@@ -167,13 +115,56 @@ pub fn is_sealed_inspect_runtime_value(value: &RuntimeValue) -> bool {
                         .iter()
                         .any(|value| is_sealed_inspect_runtime_value(value.value()))
             }
-            crate::invocation::InvocationEventBody::Failed(failure) => failure
+            InvocationEventBody::Failed(failure) => failure
                 .details()
                 .is_some_and(|value| is_sealed_inspect_runtime_value(value.value())),
-            _ => false,
+            InvocationEventBody::Started { .. }
+            | InvocationEventBody::Diagnostic(_)
+            | InvocationEventBody::Completed { .. }
+            | InvocationEventBody::Cancelled { .. } => false,
         },
-        _ => false,
+        RuntimeValue::Null(_)
+        | RuntimeValue::Boolean(_)
+        | RuntimeValue::Integer(_)
+        | RuntimeValue::BigInt(_)
+        | RuntimeValue::Float(_)
+        | RuntimeValue::Text(_)
+        | RuntimeValue::Bytes(_)
+        | RuntimeValue::Uuid(_)
+        | RuntimeValue::Reference { .. }
+        | RuntimeValue::Enum(_)
+        | RuntimeValue::Opaque(_) => false,
     }
+}
+
+/// Reports whether any typed value or descriptor carried by a root invocation
+/// request names a sealed Inspector identity.
+fn request_contains_sealed_inspect(request: &InvokeRequest) -> bool {
+    let sealed =
+        |value: &crate::invocation::InvokeValue| is_sealed_inspect_runtime_value(value.value());
+    let offer = request.client_offer();
+    request
+        .arguments()
+        .iter()
+        .any(|argument| sealed(argument.value()))
+        || request
+            .caller_context()
+            .preference_policy()
+            .is_some_and(sealed)
+        || offer.limits().is_some_and(sealed)
+        || offer.preferences().is_some_and(sealed)
+        || offer.sink_offers().iter().any(|sink| {
+            descriptor_contains_sealed_inspect_type(sink.descriptor())
+                || sink.limits().is_some_and(sealed)
+        })
+        || offer.runtime_offers().iter().any(|runtime| {
+            runtime
+                .consumed_descriptors()
+                .iter()
+                .any(descriptor_contains_sealed_inspect_type)
+                || runtime.limits().is_some_and(sealed)
+        })
+        || request.observer_context().is_some_and(sealed)
 }
 
 fn reject_sealed_inspect_value(value: &RuntimeValue) -> Result<(), UserStateError> {
@@ -264,11 +255,7 @@ impl UserStateKeyWithoutPrincipal {
     pub fn with_principal(self, principal: PrincipalId) -> UserStateKey {
         UserStateKey {
             principal,
-            root_function: self.root_function,
-            state_profile: self.state_profile,
-            function: self.function,
-            instance_key: self.instance_key,
-            state_slot: self.state_slot,
+            cell: self,
         }
     }
 }
@@ -295,11 +282,7 @@ impl fmt::Display for UserStateKeyWithoutPrincipal {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct UserStateKey {
     principal: PrincipalId,
-    root_function: FunctionId,
-    state_profile: String,
-    function: FunctionId,
-    instance_key: String,
-    state_slot: StateSlotId,
+    cell: UserStateKeyWithoutPrincipal,
 }
 
 impl UserStateKey {
@@ -316,16 +299,14 @@ impl UserStateKey {
         instance_key: String,
         state_slot: StateSlotId,
     ) -> Result<Self, UserStateError> {
-        validate_state_text(&state_profile, "state profile")?;
-        validate_state_text(&instance_key, "instance key")?;
-        Ok(Self {
-            principal,
+        Ok(UserStateKeyWithoutPrincipal::new(
             root_function,
             state_profile,
             function,
             instance_key,
             state_slot,
-        })
+        )?
+        .with_principal(principal))
     }
 
     /// Returns the authenticated session principal that owns this cell.
@@ -335,50 +316,39 @@ impl UserStateKey {
 
     /// Returns the root function whose invocation owns this cell.
     pub const fn root_function(&self) -> FunctionId {
-        self.root_function
+        self.cell.root_function()
     }
 
     /// Returns the state profile; the empty string is the default profile.
     pub fn state_profile(&self) -> &str {
-        &self.state_profile
+        self.cell.state_profile()
     }
 
     /// Returns the function that owns the state slot.
     pub const fn function(&self) -> FunctionId {
-        self.function
+        self.cell.function()
     }
 
     /// Returns the function-instance identity; the empty string is the
     /// default instance.
     pub fn instance_key(&self) -> &str {
-        &self.instance_key
+        self.cell.instance_key()
     }
 
     /// Returns the stable state-slot identity.
     pub const fn state_slot(&self) -> StateSlotId {
-        self.state_slot
+        self.cell.state_slot()
     }
 
     /// Returns this key without the session principal.
-    pub fn without_principal(&self) -> UserStateKeyWithoutPrincipal {
-        UserStateKeyWithoutPrincipal {
-            root_function: self.root_function,
-            state_profile: self.state_profile.clone(),
-            function: self.function,
-            instance_key: self.instance_key.clone(),
-            state_slot: self.state_slot,
-        }
+    pub const fn without_principal(&self) -> &UserStateKeyWithoutPrincipal {
+        &self.cell
     }
 }
 
 impl fmt::Display for UserStateKey {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "principal={} {}",
-            self.principal,
-            self.without_principal()
-        )
+        write!(formatter, "principal={} {}", self.principal, self.cell)
     }
 }
 
@@ -452,11 +422,7 @@ impl UserStateCell {
 /// typed: the change carries the runtime value and its type together.
 #[derive(Clone, Debug, PartialEq)]
 pub struct UserStateChange {
-    root_function: FunctionId,
-    state_profile: String,
-    function: FunctionId,
-    instance_key: String,
-    state_slot: StateSlotId,
+    key: UserStateKeyWithoutPrincipal,
     expected_revision: Option<u64>,
     value: RuntimeValue,
     value_type: TypeId,
@@ -481,16 +447,17 @@ impl UserStateChange {
         value: RuntimeValue,
         value_type: TypeId,
     ) -> Result<Self, UserStateError> {
-        validate_state_text(&state_profile, "state profile")?;
-        validate_state_text(&instance_key, "instance key")?;
-        reject_sealed_inspect_type_id(value_type)?;
-        reject_sealed_inspect_value(&value)?;
-        Ok(Self {
+        let key = UserStateKeyWithoutPrincipal::new(
             root_function,
             state_profile,
             function,
             instance_key,
             state_slot,
+        )?;
+        reject_sealed_inspect_type_id(value_type)?;
+        reject_sealed_inspect_value(&value)?;
+        Ok(Self {
+            key,
             expected_revision,
             value,
             value_type,
@@ -499,28 +466,28 @@ impl UserStateChange {
 
     /// Returns the root function whose invocation owns the target cell.
     pub const fn root_function(&self) -> FunctionId {
-        self.root_function
+        self.key.root_function()
     }
 
     /// Returns the state profile; the empty string is the default profile.
     pub fn state_profile(&self) -> &str {
-        &self.state_profile
+        self.key.state_profile()
     }
 
     /// Returns the function that owns the state slot.
     pub const fn function(&self) -> FunctionId {
-        self.function
+        self.key.function()
     }
 
     /// Returns the function-instance identity; the empty string is the
     /// default instance.
     pub fn instance_key(&self) -> &str {
-        &self.instance_key
+        self.key.instance_key()
     }
 
     /// Returns the stable state-slot identity.
     pub const fn state_slot(&self) -> StateSlotId {
-        self.state_slot
+        self.key.state_slot()
     }
 
     /// Returns the expected current revision; `None` requires the cell not
@@ -540,14 +507,8 @@ impl UserStateChange {
     }
 
     /// Returns the affected cell key without the session principal.
-    pub fn key_without_principal(&self) -> UserStateKeyWithoutPrincipal {
-        UserStateKeyWithoutPrincipal {
-            root_function: self.root_function,
-            state_profile: self.state_profile.clone(),
-            function: self.function,
-            instance_key: self.instance_key.clone(),
-            state_slot: self.state_slot,
-        }
+    pub const fn key_without_principal(&self) -> &UserStateKeyWithoutPrincipal {
+        &self.key
     }
 }
 
@@ -729,7 +690,7 @@ pub fn apply_change(
     change: &UserStateChange,
     principal: PrincipalId,
 ) -> Result<UserStateWriteResult, UserStateError> {
-    let key = change.key_without_principal();
+    let key = change.key_without_principal().clone();
     let Some(cell) = cell else {
         reject_sealed_inspect_type_id(change.value_type())?;
         reject_sealed_inspect_value(change.value())?;
@@ -752,7 +713,7 @@ pub fn apply_change(
             session_principal: principal,
         });
     }
-    if cell.key().without_principal() != key {
+    if *cell.key().without_principal() != key {
         return Err(UserStateError::InvalidChange {
             reason: format!(
                 "the supplied cell key does not match the change key {key}: {}",
@@ -1601,12 +1562,12 @@ mod tests {
         let second_result = apply_change(None, &second, principal_id(PRINCIPAL_A))
             .expect("the second create-only write must succeed");
 
-        assert_eq!(first_result.key(), &first.key_without_principal());
+        assert_eq!(first_result.key(), first.key_without_principal());
         assert_eq!(
             first_result.outcome(),
             UserStateWriteOutcome::Written { revision: 1 }
         );
-        assert_eq!(second_result.key(), &second.key_without_principal());
+        assert_eq!(second_result.key(), second.key_without_principal());
         assert_eq!(second_result.key().state_profile(), "dark");
         assert_eq!(second_result.key().instance_key(), "tab-2");
         assert_eq!(

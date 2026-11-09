@@ -55,10 +55,6 @@ impl SourceDraft {
             refusal: None,
         }
     }
-
-    pub(super) fn is_unresolved(&self) -> bool {
-        self.dirty || self.refusal.is_some()
-    }
 }
 
 /// A group member as it stood when its commit began.

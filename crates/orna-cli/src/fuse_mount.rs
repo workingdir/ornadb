@@ -13,6 +13,7 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 use crate::cli_dispatch::{
     checked_project_source_path, restore_source_after_failed_write, write_source_atomically,
 };
+use crate::encoding::hex;
 use fuser::{
     Config, Errno, FileAttr, FileType, Filesystem, Generation, INodeNo, MountOption, RenameFlags,
     ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen,
@@ -52,22 +53,29 @@ use sha2::{Digest, Sha256};
 
 mod source_write;
 
+// The extended attributes through which a mount's owner is queried and
+// controlled. The daemon serves them from its root directory and the CLI calls
+// them against the mountpoint, so both ends name them here.
+
+/// Set to `1` to stop accepting edits before an unmount, to `0` to resume.
+pub(super) const XATTR_UNMOUNT_QUIESCE: &str = "user.orna.unmount-quiesce";
+/// Set to `1` to keep every unresolved draft in recovery storage.
+pub(super) const XATTR_RETAIN_DRAFTS: &str = "user.orna.retain-drafts";
+/// `1` while an unresolved draft remains, `0` otherwise.
+pub(super) const XATTR_UNRESOLVED_DRAFTS: &str = "user.orna.unresolved-drafts";
+/// One `path<TAB>detail` line per unresolved draft.
+pub(super) const XATTR_UNRESOLVED_DRAFT_LIST: &str = "user.orna.unresolved-draft-list";
+/// One `path<TAB>code<TAB>draft<TAB>detail` line per unresolved draft.
+pub(super) const XATTR_UNRESOLVED_DRAFT_FIELDS: &str = "user.orna.unresolved-draft-fields";
+/// An explicit edit request: `mode NUL path NUL draft NUL digest`.
+pub(super) const XATTR_EDIT_COMMIT: &str = "user.orna.edit-commit";
+
 /// Implementation draft quota for every mounted draft and scratch file: 64 MiB,
 /// the compact publication file bound (ORNA-PUB-001). It is not a VFS spec
 /// bound. A write or truncate that grows a file past it is quota-rejected
 /// (EDQUOT) and never admitted; shrinking an existing larger baseline is allowed.
 #[allow(clippy::cast_possible_truncation)]
 const DRAFT_FILE_BOUND_BYTES: usize = COMPACT_FILE_BOUND_BYTES as usize;
-
-/// Lowercase hex of an identity, as the mount's diagnostics spell it.
-fn hex_lower(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        write!(out, "{byte:02x}").expect("writing to a String cannot fail");
-    }
-    out
-}
 
 /// Bound on unbound editor scratch files one mount may create (41-vfs.md Temporary-save
 /// replacement). Unbound scratch is recovery state, so an editor cannot grow it without limit.
@@ -993,7 +1001,7 @@ impl VfsRetainedDraftStore {
             Ok(())
         })?;
         let digest = digest.finalize();
-        let id = hex_bytes(&digest[..16]);
+        let id = hex(&digest[..16]);
         let record = self.directory.join(format!("{id}.draft"));
         if record.is_file() {
             // A record already on disk, written by another process, counts too.
@@ -1152,9 +1160,6 @@ struct HistoricalTableSchemas {
     /// The stored constant default of each field that schema evolution introduced, as frozen by
     /// the commit that introduced it (ORNA-FIELD-003, ORNA-EVOL-009).
     introductions: BTreeMap<[u8; 16], Raw>,
-    /// The number of commits that carry no committed identities for the table and so declare
-    /// nothing (F7). They are counted rather than skipped silently.
-    unidentified_commits: usize,
 }
 
 enum HistoricalState {
@@ -1346,13 +1351,12 @@ fn advance_historical_scan(
     if unidentified > 0 {
         eprintln!(
             "committed schema scan of table {}: skipped {unidentified} commit(s) without committed identities",
-            hex_lower(&relation_id)
+            hex(&relation_id)
         );
     }
     Ok(HistoricalStep::Settled(HistoricalTableSchemas {
         generations,
         introductions,
-        unidentified_commits: unidentified,
     }))
 }
 
@@ -3430,7 +3434,7 @@ impl WorkspaceFilesystem {
 /// The digest an explicit edit carries from its read to its save (41-vfs.md:75-77): the
 /// lowercase hex SHA-256 of the mounted bytes the editor was seeded from.
 pub(crate) fn edit_view_digest(bytes: &[u8]) -> String {
-    hex_lower(&Sha256::digest(bytes))
+    hex(&Sha256::digest(bytes))
 }
 
 /// Reads an editor draft through one descriptor opened without following a
@@ -3491,7 +3495,7 @@ pub(super) enum UnmountPreparationError {
 pub(super) fn begin_unmount(mountpoint: &Path) -> Result<(), UnmountPreparationError> {
     rustix::fs::setxattr(
         mountpoint,
-        "user.orna.unmount-quiesce",
+        XATTR_UNMOUNT_QUIESCE,
         b"1",
         rustix::fs::XattrFlags::empty(),
     )
@@ -3511,7 +3515,7 @@ pub(super) fn begin_unmount(mountpoint: &Path) -> Result<(), UnmountPreparationE
 pub(super) fn cancel_unmount(mountpoint: &Path) -> Result<(), String> {
     rustix::fs::setxattr(
         mountpoint,
-        "user.orna.unmount-quiesce",
+        XATTR_UNMOUNT_QUIESCE,
         b"0",
         rustix::fs::XattrFlags::empty(),
     )
@@ -3519,7 +3523,7 @@ pub(super) fn cancel_unmount(mountpoint: &Path) -> Result<(), String> {
 }
 pub(super) fn has_unresolved_drafts(mountpoint: &Path) -> Result<bool, String> {
     let mut value = [0_u8; 1];
-    let length = rustix::fs::getxattr(mountpoint, "user.orna.unresolved-drafts", &mut value)
+    let length = rustix::fs::getxattr(mountpoint, XATTR_UNRESOLVED_DRAFTS, &mut value)
         .map_err(|error| format!("could not read Orna mount draft state: {error}"))?;
     if length != 1 {
         return Err("Orna mount returned an invalid draft-state length".to_owned());
@@ -3564,13 +3568,13 @@ fn read_draft_xattr(mountpoint: &Path, name: &str) -> Result<String, rustix::io:
 /// The unresolved drafts of a live mount, one `path<TAB>detail` line each, for
 /// an unmount refusal that names what blocks it (W15-03).
 pub(super) fn unresolved_draft_list(mountpoint: &Path) -> Result<String, rustix::io::Errno> {
-    read_draft_xattr(mountpoint, "user.orna.unresolved-draft-list")
+    read_draft_xattr(mountpoint, XATTR_UNRESOLVED_DRAFT_LIST)
 }
 
 /// The unresolved drafts of a live mount, one `path<TAB>code<TAB>draft<TAB>detail`
 /// line each, for `mount status`.
 pub(super) fn unresolved_draft_fields(mountpoint: &Path) -> Result<String, rustix::io::Errno> {
-    read_draft_xattr(mountpoint, "user.orna.unresolved-draft-fields")
+    read_draft_xattr(mountpoint, XATTR_UNRESOLVED_DRAFT_FIELDS)
 }
 
 /// Why stop-time draft retention did not finish (ORNA-VFS-024).
@@ -3594,7 +3598,7 @@ pub(super) fn retain_drafts_for_shutdown(mountpoint: &Path) -> Result<bool, Draf
         }
         Err(UnmountPreparationError::UnresolvedDrafts) => rustix::fs::setxattr(
             mountpoint,
-            "user.orna.retain-drafts",
+            XATTR_RETAIN_DRAFTS,
             b"1",
             rustix::fs::XattrFlags::empty(),
         )
@@ -5442,17 +5446,15 @@ impl Filesystem for WorkspaceFilesystem {
                 reply.error(Errno::ENODATA);
                 return;
             }
-            Some("user.orna.unresolved-drafts") => {
+            Some(XATTR_UNRESOLVED_DRAFTS) => {
                 if self.has_unresolved_drafts() {
                     b"1".to_vec()
                 } else {
                     b"0".to_vec()
                 }
             }
-            Some("user.orna.unresolved-draft-list") => self.unresolved_draft_report().into_bytes(),
-            Some("user.orna.unresolved-draft-fields") => {
-                self.unresolved_draft_fields().into_bytes()
-            }
+            Some(XATTR_UNRESOLVED_DRAFT_LIST) => self.unresolved_draft_report().into_bytes(),
+            Some(XATTR_UNRESOLVED_DRAFT_FIELDS) => self.unresolved_draft_fields().into_bytes(),
             _ => {
                 reply.error(Errno::ENODATA);
                 return;
@@ -5476,7 +5478,7 @@ impl Filesystem for WorkspaceFilesystem {
         position: u32,
         reply: ReplyEmpty,
     ) {
-        if name.to_str() == Some("user.orna.edit-commit") {
+        if name.to_str() == Some(XATTR_EDIT_COMMIT) {
             if inode.0 != ROOT_INODE {
                 reply.error(Errno::ENODATA);
                 return;
@@ -5518,8 +5520,8 @@ impl Filesystem for WorkspaceFilesystem {
             return;
         }
         let retain = match name.to_str() {
-            Some("user.orna.unmount-quiesce") if inode.0 == ROOT_INODE => false,
-            Some("user.orna.retain-drafts") if inode.0 == ROOT_INODE => true,
+            Some(XATTR_UNMOUNT_QUIESCE) if inode.0 == ROOT_INODE => false,
+            Some(XATTR_RETAIN_DRAFTS) if inode.0 == ROOT_INODE => true,
             _ => {
                 reply.error(refuse_unsupported("setxattr"));
                 return;
@@ -10298,13 +10300,6 @@ fn is_replacement_scratch_for(name: &str, file_name: &str) -> bool {
         return false;
     };
     !suffix.is_empty() && suffix != "." && suffix != ".." && !suffix.contains('/') && suffix != "/"
-}
-fn hex_bytes(bytes: &[u8]) -> String {
-    let mut text = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        let _ = write!(text, "{byte:02x}");
-    }
-    text
 }
 
 #[cfg(test)]

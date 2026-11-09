@@ -1875,9 +1875,10 @@ impl NullValue {
 pub struct RuntimeFloat(f64);
 
 impl RuntimeFloat {
-    /// Creates one FLOAT value without changing its binary64 value.
-    pub fn new(value: f64) -> Result<Self, ResultRowsError> {
-        Ok(Self(value))
+    /// Creates one FLOAT value without changing its binary64 value; every bit
+    /// pattern, including NaN and the infinities, is a valid FLOAT.
+    pub const fn new(value: f64) -> Self {
+        Self(value)
     }
 
     /// Returns the binary64 floating-point value.
@@ -2056,8 +2057,6 @@ pub enum ResultRowsError {
     EmptyColumnName,
     /// A type has no representation in the initial runtime subset.
     UnsupportedRuntimeType { resolved_type: ResolvedType },
-    /// A FLOAT value is not finite.
-    NonFiniteFloat,
     /// Two result columns have the same exact name.
     DuplicateColumnName {
         first: usize,
@@ -2116,7 +2115,6 @@ impl fmt::Display for ResultRowsError {
             Self::UnsupportedRuntimeType { .. } => {
                 formatter.write_str("type is not supported by the runtime subset")
             }
-            Self::NonFiniteFloat => formatter.write_str("FLOAT value must be finite"),
             Self::DuplicateColumnName {
                 first,
                 duplicate,

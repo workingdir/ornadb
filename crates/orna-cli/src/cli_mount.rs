@@ -11,6 +11,8 @@ use std::{
     fs,
     os::unix::ffi::{OsStrExt, OsStringExt},
 };
+#[cfg(target_os = "linux")]
+use tokio::signal::unix::{Signal, SignalKind, signal};
 
 use super::*;
 use orna_repository::{MountStatus, MountView, Repository};
@@ -43,42 +45,69 @@ pub(super) fn run_mount(
     let repository = open_repository(endpoint)?;
     release_dead_mount(&repository, mountpoint)?;
     let view = MountView::attach(&repository, mountpoint, selector).map_err(attach_refusal)?;
+    serve_attached_view(view, |view, status, source| {
+        crate::fuse_mount::spawn_read_only(
+            &repository,
+            view.commit(),
+            view.context(),
+            status.mountpoint(),
+            source,
+        )
+    })
+}
+
+/// Verifies the registered `view`, installs the stop-signal handlers, starts
+/// the FUSE session that `spawn` builds for it and serves the mount until it
+/// ends. A failure before the mount serves releases the registration again.
+#[cfg(target_os = "linux")]
+fn serve_attached_view(
+    view: MountView,
+    spawn: impl FnOnce(&MountView, &MountStatus, String) -> Result<fuser::BackgroundSession, String>,
+) -> Result<(), Diagnostic> {
     let status = match view.verify_record() {
         Ok(status) => status,
         Err(error) => {
-            let _ = view.detach();
-            return Err(mount_error(
-                "Mount record could not be verified",
-                error.to_string(),
+            return Err(abort_start(
+                view,
+                mount_error("Mount record could not be verified", error.to_string()),
             ));
         }
     };
     let signal_handler = match MountSignalHandler::new() {
         Ok(handler) => handler,
         Err(error) => {
-            let _ = view.detach();
-            return Err(mount_error(
-                "Mount signal handling could not be started",
-                error,
+            return Err(abort_start(
+                view,
+                mount_error("Mount signal handling could not be started", error),
             ));
         }
     };
     let source = format!("orna-{}", status.view_hex());
-    let session = match crate::fuse_mount::spawn_read_only(
-        &repository,
-        view.commit(),
-        view.context(),
-        status.mountpoint(),
-        source,
-    ) {
+    let session = match spawn(&view, &status, source) {
         Ok(session) => session,
         Err(error) => {
             drop(signal_handler);
-            let _ = view.detach();
-            return Err(mount_error("Mount was refused", error));
+            return Err(abort_start(view, mount_error("Mount was refused", error)));
         }
     };
     serve_mount(view, &status, signal_handler, session)
+}
+
+/// Releases the registration of a view whose mount never started. A release
+/// that fails too is reported with the original failure, so a record left
+/// behind is not silent: `orna unmount DIR` removes it.
+#[cfg(target_os = "linux")]
+fn abort_start(view: MountView, mut failure: Diagnostic) -> Diagnostic {
+    if let Err(error) = view.detach() {
+        let leftover = format!(
+            "the view registration could not be released ({error}); run `orna unmount DIR` to remove it"
+        );
+        failure.detail = Some(match failure.detail.take() {
+            Some(detail) => format!("{detail}; {leftover}"),
+            None => leftover,
+        });
+    }
+    failure
 }
 
 /// Refuses an attach, naming the remedy for a view left by a mount that is no
@@ -227,6 +256,8 @@ fn serve_mount(
     if let Err(error) = view.verify_record() {
         let cleanup = session.umount_and_join();
         drop(signal_handler);
+        // The record is already gone, which is why the check failed, so a
+        // detach that finds nothing to remove is expected.
         let _ = view.detach();
         let detail = match cleanup {
             Ok(()) => error.to_string(),
@@ -310,43 +341,16 @@ pub(super) fn run_mount_cwd(endpoint: &Endpoint, mountpoint: &Path) -> Result<()
     release_dead_mount(&repository, mountpoint)?;
     let view = MountView::attach_writable(&repository, mountpoint, commit.as_str())
         .map_err(attach_refusal)?;
-    let status = match view.verify_record() {
-        Ok(status) => status,
-        Err(error) => {
-            let _ = view.detach();
-            return Err(mount_error(
-                "Mount record could not be verified",
-                error.to_string(),
-            ));
-        }
-    };
-    let signal_handler = match MountSignalHandler::new() {
-        Ok(handler) => handler,
-        Err(error) => {
-            let _ = view.detach();
-            return Err(mount_error(
-                "Mount signal handling could not be started",
-                error,
-            ));
-        }
-    };
-    let source = format!("orna-{}", status.view_hex());
-    let session = match crate::fuse_mount::spawn_editor(
-        &repository,
-        &commit,
-        view.context(),
-        status.mountpoint(),
-        source,
-        view.row_baselines(),
-    ) {
-        Ok(session) => session,
-        Err(error) => {
-            drop(signal_handler);
-            let _ = view.detach();
-            return Err(mount_error("Mount was refused", error));
-        }
-    };
-    serve_mount(view, &status, signal_handler, session)
+    serve_attached_view(view, |view, status, source| {
+        crate::fuse_mount::spawn_editor(
+            &repository,
+            &commit,
+            view.context(),
+            status.mountpoint(),
+            source,
+            view.row_baselines(),
+        )
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -450,7 +454,7 @@ fn edit_via_owner(
     request.extend_from_slice(crate::fuse_mount::edit_view_digest(&initial).as_bytes());
     match rustix::fs::setxattr(
         mountpoint,
-        "user.orna.edit-commit",
+        crate::fuse_mount::XATTR_EDIT_COMMIT,
         &request,
         rustix::fs::XattrFlags::empty(),
     ) {
@@ -687,13 +691,13 @@ const SIGNAL_UNMOUNT_RETRY: std::time::Duration = std::time::Duration::from_mill
 #[cfg(target_os = "linux")]
 const RETENTION_LOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// The join loop re-checks the registered view every this many 25 ms ticks.
+/// How often a serving mount looks for a stop signal or a finished session.
+#[cfg(target_os = "linux")]
+const STOP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
+
+/// The join loop re-checks the registered view every this many polls.
 #[cfg(target_os = "linux")]
 const VIEW_CHECK_TICKS: u32 = 8;
-
-/// Stop cause when the registered view disappears under a serving mount.
-#[cfg(target_os = "linux")]
-const VIEW_DETACHED: &str = "its view was unmounted";
 
 /// Unmounts a quiesced live mount, retrying while the kernel reports it busy.
 ///
@@ -739,44 +743,90 @@ async fn unmount_after_signal(
     }
 }
 
+/// Why a serving mount is being stopped.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StopCause {
+    /// A termination signal, by name.
+    Signal(&'static str),
+    /// The registered view disappeared under the mount.
+    ViewDetached,
+}
+
+#[cfg(target_os = "linux")]
+impl std::fmt::Display for StopCause {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Signal(name) => formatter.write_str(name),
+            Self::ViewDetached => formatter.write_str("its view was unmounted"),
+        }
+    }
+}
+
+/// What stop-time draft retention left behind (ORNA-VFS-024).
+#[cfg(target_os = "linux")]
+enum DraftRetention {
+    /// The mount holds no unresolved draft.
+    NothingUnresolved,
+    /// Every unresolved draft is in recovery storage and was reported.
+    Retained,
+    /// The mount could not be quiesced but holds no unresolved draft, so it is
+    /// unmounted and the failure is reported afterwards.
+    QuiesceFailed(String),
+    /// The wait was abandoned while drafts were still at risk. The mount stays
+    /// up, because unmount refuses unresolved drafts.
+    Abandoned(String),
+}
+
+/// The three stop signals of a serving mount.
+#[cfg(target_os = "linux")]
+struct StopSignals {
+    interrupt: Signal,
+    terminate: Signal,
+    hangup: Signal,
+}
+
+#[cfg(target_os = "linux")]
+impl StopSignals {
+    /// Resolves with the name of the next stop signal.
+    async fn next(&mut self) -> &'static str {
+        tokio::select! {
+            Some(()) = self.interrupt.recv() => "SIGINT",
+            Some(()) = self.terminate.recv() => "SIGTERM",
+            Some(()) = self.hangup.recv() => "SIGHUP",
+            else => std::future::pending().await,
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
 struct MountSignalHandler {
     runtime: tokio::runtime::Runtime,
-    interrupt: tokio::signal::unix::Signal,
-    terminate: tokio::signal::unix::Signal,
-    hangup: tokio::signal::unix::Signal,
+    signals: StopSignals,
 }
 
 #[cfg(target_os = "linux")]
 impl MountSignalHandler {
-    #[allow(clippy::items_after_statements)]
     fn new() -> Result<Self, String> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|error| format!("signal runtime could not be created: {error}"))?;
-        let (interrupt, terminate, hangup) = {
-            let _entered = runtime.enter();
-            use tokio::signal::unix::{SignalKind, signal};
-            (
-                signal(SignalKind::interrupt())
-                    .map_err(|error| format!("SIGINT handler could not be installed: {error}"))?,
-                signal(SignalKind::terminate())
-                    .map_err(|error| format!("SIGTERM handler could not be installed: {error}"))?,
-                signal(SignalKind::hangup())
-                    .map_err(|error| format!("SIGHUP handler could not be installed: {error}"))?,
-            )
+        let install = |kind: SignalKind, name: &str| {
+            signal(kind).map_err(|error| format!("{name} handler could not be installed: {error}"))
         };
-        Ok(Self {
-            runtime,
-            interrupt,
-            terminate,
-            hangup,
-        })
+        let signals = {
+            // A signal stream registers with the reactor of the runtime that is current.
+            let _entered = runtime.enter();
+            StopSignals {
+                interrupt: install(SignalKind::interrupt(), "SIGINT")?,
+                terminate: install(SignalKind::terminate(), "SIGTERM")?,
+                hangup: install(SignalKind::hangup(), "SIGHUP")?,
+            }
+        };
+        Ok(Self { runtime, signals })
     }
 
-    #[allow(clippy::items_after_statements)]
-    #[allow(clippy::too_many_lines)]
     /// Waits for the FUSE session to end. A termination signal, or the loss of
     /// the registered view, stops the mount: unresolved drafts are retained and
     /// reported first (ORNA-VFS-024), then the mount is unmounted.
@@ -789,146 +839,168 @@ impl MountSignalHandler {
     ) -> Result<MountEnd, String> {
         let Self {
             runtime,
-            mut interrupt,
-            mut terminate,
-            mut hangup,
+            mut signals,
         } = self;
-        let mountpoint = mountpoint.to_path_buf();
-        let source = source.to_owned();
-        let mut session = Some(session);
-        runtime.block_on(async move {
-            let mut ticks = 0_u32;
-            let stop = loop {
-                if session
-                    .as_ref()
-                    .is_some_and(|session| session.guard.is_finished())
-                {
-                    break None;
+        runtime.block_on(async {
+            let Some(cause) = wait_for_stop(&mut signals, &session, registered).await else {
+                return join_session(session, MountEnd::Clean, None);
+            };
+            let mut end = MountEnd::Clean;
+            let mut quiesce_failure = None;
+            let session = if session.guard.is_finished() {
+                session
+            } else {
+                // Only the live Orna mount can retain its drafts; a mount that
+                // is already gone is ending normally.
+                if orna_mount_is_listed(mountpoint, source) {
+                    match retain_drafts(&mut signals, mountpoint).await {
+                        DraftRetention::NothingUnresolved => {}
+                        DraftRetention::Retained => end = MountEnd::DraftsRetained,
+                        DraftRetention::QuiesceFailed(error) => quiesce_failure = Some(error),
+                        DraftRetention::Abandoned(reason) => {
+                            report_lost_drafts(mountpoint, &reason);
+                            // The mount is deliberately left up and the session is
+                            // never joined: unmount refuses unresolved drafts
+                            // (ORNA-VFS-024).
+                            std::mem::forget(session);
+                            return Err(format!(
+                                "unretained drafts will be lost: stop abandoned ({reason})"
+                            ));
+                        }
+                    }
                 }
-                ticks = ticks.wrapping_add(1);
-                if ticks.is_multiple_of(VIEW_CHECK_TICKS) && !registered() {
-                    break Some(VIEW_DETACHED);
+                unmount_after_stop(session, mountpoint, cause).await?
+            };
+            if cause == StopCause::ViewDetached {
+                end = MountEnd::ViewDetached;
+            }
+            join_session(session, end, quiesce_failure)
+        })
+    }
+}
+
+/// Waits until the FUSE session ends on its own (`None`), a stop signal
+/// arrives, or the registered view disappears.
+#[cfg(target_os = "linux")]
+async fn wait_for_stop(
+    signals: &mut StopSignals,
+    session: &fuser::BackgroundSession,
+    registered: &dyn Fn() -> bool,
+) -> Option<StopCause> {
+    let mut ticks = 0_u32;
+    loop {
+        if session.guard.is_finished() {
+            return None;
+        }
+        ticks = ticks.wrapping_add(1);
+        if ticks.is_multiple_of(VIEW_CHECK_TICKS) && !registered() {
+            return Some(StopCause::ViewDetached);
+        }
+        tokio::select! {
+            signal = signals.next() => return Some(StopCause::Signal(signal)),
+            () = tokio::time::sleep(STOP_POLL_INTERVAL) => {}
+        }
+    }
+}
+
+/// Stop does not unmount until every unresolved draft is kept (ORNA-VFS-024).
+/// A failed retention resumes the mount and is retried. The first stop signal
+/// starts that wait; a second one abandons it, and the drafts not yet kept are
+/// reported as lost.
+#[cfg(target_os = "linux")]
+async fn retain_drafts(signals: &mut StopSignals, mountpoint: &Path) -> DraftRetention {
+    use crate::fuse_mount::DraftRetentionStop;
+    let mut last_logged: Option<std::time::Instant> = None;
+    loop {
+        match crate::fuse_mount::retain_drafts_for_shutdown(mountpoint) {
+            Ok(true) => return DraftRetention::Retained,
+            Ok(false) => return DraftRetention::NothingUnresolved,
+            Err(DraftRetentionStop::Retention(error)) => {
+                if last_logged.is_none_or(|at| at.elapsed() >= RETENTION_LOG_INTERVAL) {
+                    let unresolved = crate::fuse_mount::unresolved_draft_list(mountpoint)
+                        .map_or(0, |list| {
+                            list.lines().filter(|line| !line.is_empty()).count()
+                        });
+                    eprintln!(
+                        "{error}; {unresolved} unresolved draft(s) not retained; retrying draft retention before unmount (a second stop signal abandons the wait)"
+                    );
+                    last_logged = Some(std::time::Instant::now());
+                }
+                if let Err(resume) = crate::fuse_mount::cancel_unmount(mountpoint) {
+                    eprintln!("{resume}");
                 }
                 tokio::select! {
-                    Some(()) = interrupt.recv() => break Some("SIGINT"),
-                    Some(()) = terminate.recv() => break Some("SIGTERM"),
-                    Some(()) = hangup.recv() => break Some("SIGHUP"),
-                    () = tokio::time::sleep(std::time::Duration::from_millis(25)) => {}
-                }
-            };
-
-            let mut end = MountEnd::Clean;
-            let mut retention_error = None;
-            if let Some(signal) = stop {
-                let still_mounted = session
-                    .as_ref()
-                    .is_some_and(|session| !session.guard.is_finished());
-                if still_mounted {
-                    // Only the live Orna mount can retain its drafts; a mount
-                    // that is already gone is ending normally.
-                    if orna_mount_is_listed(&mountpoint, &source) {
-                        // Stop does not unmount until every unresolved draft is kept
-                        // (ORNA-VFS-024). A failed retention resumes the mount and is
-                        // retried. The first stop signal starts that wait; a second one
-                        // abandons it, and the drafts not yet kept are reported as lost.
-                        let mut last_logged: Option<std::time::Instant> = None;
-                        let mut abandon: Option<String> = None;
-                        loop {
-                            match crate::fuse_mount::retain_drafts_for_shutdown(&mountpoint) {
-                                Ok(true) => {
-                                    end = MountEnd::DraftsRetained;
-                                    break;
-                                }
-                                Ok(false) => break,
-                                Err(crate::fuse_mount::DraftRetentionStop::Retention(error)) => {
-                                    if last_logged.is_none_or(|at| at.elapsed() >= RETENTION_LOG_INTERVAL) {
-                                        let unresolved = crate::fuse_mount::unresolved_draft_list(&mountpoint)
-                                            .map_or(0, |list| list.lines().filter(|line| !line.is_empty()).count());
-                                        eprintln!(
-                                            "{error}; {unresolved} unresolved draft(s) not retained; retrying draft retention before unmount (a second stop signal abandons the wait)"
-                                        );
-                                        last_logged = Some(std::time::Instant::now());
-                                    }
-                                    if let Err(resume) = crate::fuse_mount::cancel_unmount(&mountpoint) {
-                                        eprintln!("{resume}");
-                                    }
-                                    let second = tokio::select! {
-                                        () = tokio::time::sleep(SIGNAL_UNMOUNT_RETRY) => None,
-                                        Some(()) = interrupt.recv() => Some("SIGINT"),
-                                        Some(()) = terminate.recv() => Some("SIGTERM"),
-                                        Some(()) = hangup.recv() => Some("SIGHUP"),
-                                    };
-                                    if let Some(second) = second {
-                                        abandon = Some(format!("{second} repeated while draft retention was failing"));
-                                        break;
-                                    }
-                                }
-                                Err(crate::fuse_mount::DraftRetentionStop::Mount(error)) => {
-                                    retention_error = Some(error);
-                                    break;
-                                }
-                            }
-                        }
-                        if abandon.is_none()
-                            && retention_error.is_some()
-                            && crate::fuse_mount::has_unresolved_drafts(&mountpoint).unwrap_or(true)
-                        {
-                            abandon = Some("the mount could not be quiesced to keep its drafts".to_owned());
-                        }
-                        if let Some(reason) = abandon {
-                            let lost = crate::fuse_mount::unresolved_draft_list(&mountpoint)
-                                .unwrap_or_else(|error| format!("could not list unresolved drafts: {error}"));
-                            eprintln!("stop abandoned ({reason}); these unretained drafts will be lost:");
-                            for line in lost.lines().filter(|line| !line.is_empty()) {
-                                eprintln!("  {line}");
-                            }
-                            // The mount is deliberately left up and the session is never joined:
-                            // unmount refuses unresolved drafts (ORNA-VFS-024).
-                            std::mem::forget(session.take().expect("live FUSE session is retained"));
-                            return Err(format!("unretained drafts will be lost: stop abandoned ({reason})"));
-                        }
-                    }
-                    let live = session.as_ref().expect("live FUSE session is retained");
-                    let unmount_error = unmount_after_signal(live, &mountpoint)
-                        .await
-                        .err()
-                        .map(|error| format!("FUSE unmount failed after {signal}: {error}"));
-                    if let Some(error) = unmount_error
-                        && session
-                            .as_ref()
-                            .is_some_and(|session| !session.guard.is_finished())
-                    {
-                        let fallback = session
-                            .take()
-                            .expect("live FUSE session is retained")
-                            .umount_and_join();
-                        return match fallback {
-                            // The graceful unmount failed. Report that failure even though the
-                            // lazy detach cleaned up, so a busy mount never exits as success.
-                            Ok(()) => Err(error),
-                            Err(fallback_error) => Err(format!(
-                                "{error}; FUSE session cleanup also failed: {fallback_error}"
-                            )),
-                        };
+                    () = tokio::time::sleep(SIGNAL_UNMOUNT_RETRY) => {}
+                    second = signals.next() => {
+                        return DraftRetention::Abandoned(format!(
+                            "{second} repeated while draft retention was failing"
+                        ));
                     }
                 }
-                if signal == VIEW_DETACHED {
-                    end = MountEnd::ViewDetached;
-                }
             }
+            Err(DraftRetentionStop::Mount(error)) => {
+                return if crate::fuse_mount::has_unresolved_drafts(mountpoint).unwrap_or(true) {
+                    DraftRetention::Abandoned(
+                        "the mount could not be quiesced to keep its drafts".to_owned(),
+                    )
+                } else {
+                    DraftRetention::QuiesceFailed(error)
+                };
+            }
+        }
+    }
+}
 
-            session
-                .take()
-                .expect("FUSE session is retained until it is joined")
-                .join()
-                .map_err(|error| format!("FUSE session join failed: {error}"))?;
-            match retention_error {
-                Some(error) => Err(format!(
-                    "unresolved drafts could not be retained before the mount stopped: {error}"
-                )),
-                None => Ok(end),
-            }
-        })
+/// Names the drafts an abandoned stop will lose.
+#[cfg(target_os = "linux")]
+fn report_lost_drafts(mountpoint: &Path, reason: &str) {
+    let lost = crate::fuse_mount::unresolved_draft_list(mountpoint)
+        .unwrap_or_else(|error| format!("could not list unresolved drafts: {error}"));
+    eprintln!("stop abandoned ({reason}); these unretained drafts will be lost:");
+    for line in lost.lines().filter(|line| !line.is_empty()) {
+        eprintln!("  {line}");
+    }
+}
+
+/// Unmounts the live session after a stop. A graceful unmount that stays busy
+/// falls back to a lazy detach, and the failure is reported even when that
+/// cleaned up, so a busy mount never exits as success. `Ok` returns the
+/// session still to be joined.
+#[cfg(target_os = "linux")]
+async fn unmount_after_stop(
+    session: fuser::BackgroundSession,
+    mountpoint: &Path,
+    cause: StopCause,
+) -> Result<fuser::BackgroundSession, String> {
+    let Err(error) = unmount_after_signal(&session, mountpoint).await else {
+        return Ok(session);
+    };
+    if session.guard.is_finished() {
+        return Ok(session);
+    }
+    let error = format!("FUSE unmount failed after {cause}: {error}");
+    Err(match session.umount_and_join() {
+        Ok(()) => error,
+        Err(fallback) => format!("{error}; FUSE session cleanup also failed: {fallback}"),
+    })
+}
+
+/// Joins the ended session. A quiesce failure that was deferred until the
+/// mount was down is reported now.
+#[cfg(target_os = "linux")]
+fn join_session(
+    session: fuser::BackgroundSession,
+    end: MountEnd,
+    quiesce_failure: Option<String>,
+) -> Result<MountEnd, String> {
+    session
+        .join()
+        .map_err(|error| format!("FUSE session join failed: {error}"))?;
+    match quiesce_failure {
+        Some(error) => Err(format!(
+            "unresolved drafts could not be retained before the mount stopped: {error}"
+        )),
+        None => Ok(end),
     }
 }
 
@@ -940,219 +1012,257 @@ pub(super) fn run_mount_cwd(_endpoint: &Endpoint, _mountpoint: &Path) -> Result<
     ))
 }
 
-#[allow(clippy::too_many_lines)]
 pub(super) fn run_unmount(endpoint: &Endpoint, mountpoint: &Path) -> Result<(), Diagnostic> {
     let repository = open_repository(endpoint)?;
-    #[cfg(target_os = "linux")]
+    unmount_view(&repository, mountpoint)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn unmount_view(repository: &Repository, mountpoint: &Path) -> Result<(), Diagnostic> {
+    let status = repository
+        .unmount_view(mountpoint)
+        .map_err(|error| mount_error("Unmount was refused", error.to_string()))?;
+    writeln!(
+        io::stdout().lock(),
+        "unmounted {} snapshot {}",
+        status.mountpoint().display(),
+        status.snapshot_hex(),
+    )
+    .map_err(|_| stdout_error())
+}
+
+/// Unmounts what `mountpoint` holds: a live Orna FUSE mount together with its
+/// registered view, or only the stale registration of a mount that is gone.
+#[cfg(target_os = "linux")]
+fn unmount_view(repository: &Repository, mountpoint: &Path) -> Result<(), Diagnostic> {
     let mountpoint = canonical_mountpoint_or_original(mountpoint);
-    #[cfg(not(target_os = "linux"))]
-    let mountpoint = mountpoint.to_path_buf();
-
-    #[cfg(target_os = "linux")]
-    {
-        if let Some(mount_identity) = mounted_mount_for_path(&mountpoint)? {
-            let filesystem = mount_identity.filesystem.as_str();
-            let source = mount_identity.source.as_str();
-            if !filesystem.starts_with("fuse") || !is_orna_mount_source(source) {
-                return Err(mount_error(
-                    "Unmount was refused",
-                    format!("mountpoint belongs to {filesystem} {source}, not an Orna FUSE mount"),
-                ));
-            }
-            let Some(view_id_hex) = source.strip_prefix("orna-") else {
-                return Err(mount_error(
-                    "Unmount was refused",
-                    "FUSE source has no Orna view identity",
-                ));
-            };
-            let attached_view = match repository.open_mount_view_by_id(view_id_hex) {
-                Ok(view) => {
-                    let status = view.verify_record().map_err(|error| {
-                        mount_error("Mount view could not be verified", error.to_string())
-                    })?;
-                    if status.mountpoint() != mountpoint {
-                        return Err(mount_error(
-                            "Unmount was refused",
-                            format!(
-                                "FUSE source identifies a view attached at {}, not {}",
-                                status.mountpoint().display(),
-                                mountpoint.display(),
-                            ),
-                        ));
-                    }
-                    Some((view, status))
-                }
-                Err(orna_repository::MountError::NotAttached) => {
-                    let statuses = repository.mount_status().map_err(|error| {
-                        mount_error("Mount status could not be read", error.to_string())
-                    })?;
-                    if let Some(other_view) = statuses
-                        .iter()
-                        .find(|status| status.mountpoint() == mountpoint)
-                    {
-                        return Err(mount_error(
-                            "Unmount was refused",
-                            format!(
-                                "mountpoint record identifies view {}, not FUSE source {}",
-                                other_view.view_hex(),
-                                view_id_hex,
-                            ),
-                        ));
-                    }
-                    None
-                }
-                Err(error) => {
-                    return Err(mount_error(
-                        "Mount view could not be opened",
-                        error.to_string(),
-                    ));
-                }
-            };
-            let (quiesced, dead) = match crate::fuse_mount::begin_unmount(&mountpoint) {
-                Ok(()) => (true, false),
-                Err(crate::fuse_mount::UnmountPreparationError::UnresolvedDrafts) => {
-                    return Err(unresolved_drafts_refusal(&mountpoint));
-                }
-                Err(crate::fuse_mount::UnmountPreparationError::ReadOnlyMount) => {
-                    let unresolved = crate::fuse_mount::has_unresolved_drafts(&mountpoint)
-                        .map_err(|error| {
-                            mount_error("Mount draft state could not be read", error)
-                        })?;
-                    if unresolved {
-                        return Err(unresolved_drafts_refusal(&mountpoint));
-                    }
-                    (false, false)
-                }
-                // The FUSE daemon is gone (killed, W15-05): the kernel mount
-                // answers ENOTCONN and holds no live drafts. Release it and its
-                // view; accepted saves and fsynced scratch are in the runtime.
-                Err(crate::fuse_mount::UnmountPreparationError::Disconnected) => (false, true),
-                Err(crate::fuse_mount::UnmountPreparationError::Operation(error)) => {
-                    return Err(mount_error(
-                        "Mount draft state could not be quiesced",
-                        error,
-                    ));
-                }
-            };
-            match mounted_mount_for_path(&mountpoint)? {
-                Some(current) if current == mount_identity => {
-                    let unmount_error = if dead {
-                        crate::fuse_mount::unmount_dead_mountpoint(&mountpoint)
-                    } else {
-                        unmount_with_busy_retry(&mountpoint)
-                    }
-                    .err();
-                    let remaining = mounted_mount_for_path(&mountpoint)?;
-                    if remaining.as_ref() == Some(&mount_identity) {
-                        let detail = unmount_error.unwrap_or_else(|| {
-                            "FUSE unmount helper returned successfully but the validated mount remains attached".to_owned()
-                        });
-                        if quiesced {
-                            crate::fuse_mount::cancel_unmount(&mountpoint).map_err(
-                                |resume_error| {
-                                    mount_error(
-                                        "FUSE unmount failed and the mount could not resume",
-                                        format!("{detail}; {resume_error}"),
-                                    )
-                                },
-                            )?;
-                        }
-                        return Err(mount_error("FUSE unmount failed", detail));
-                    }
-                }
-                Some(_) => {
-                    return Err(mount_error(
-                        "Unmount was refused",
-                        "mount identity changed before unmount; the replacement mount was left untouched",
-                    ));
-                }
-                None => {}
-            }
-            if let Some((attached_view, status)) = attached_view {
-                detach_view_with_retry(&repository, &status, attached_view)?;
-                let written = if dead {
-                    writeln!(
-                        io::stdout().lock(),
-                        "unmounted {} snapshot {}; its mount process had stopped, accepted saves are kept and fsynced scratch is restored by the next mount",
-                        status.mountpoint().display(),
-                        status.snapshot_hex(),
-                    )
-                } else {
-                    writeln!(
-                        io::stdout().lock(),
-                        "unmounted {} snapshot {}",
-                        status.mountpoint().display(),
-                        status.snapshot_hex(),
-                    )
-                };
-                written.map_err(|_| stdout_error())?;
-            } else {
-                writeln!(
-                    io::stdout().lock(),
-                    "unmounted orphan FUSE mount {}",
-                    mountpoint.display(),
-                )
-                .map_err(|_| stdout_error())?;
-            }
-            return Ok(());
-        }
-
-        let statuses = repository
-            .mount_status()
-            .map_err(|error| mount_error("Mount status could not be read", error.to_string()))?;
-        let Some(status) = statuses
-            .into_iter()
-            .find(|status| status.mountpoint() == mountpoint)
-        else {
-            writeln!(
-                io::stdout().lock(),
-                "already unmounted {}",
-                mountpoint.display()
-            )
-            .map_err(|_| stdout_error())?;
-            return Ok(());
-        };
-        let view = repository
-            .open_mount_view_by_id(&status.view_hex())
-            .map_err(|error| mount_error("Mount view could not be opened", error.to_string()))?;
-        if view
-            .verify_record()
-            .map_err(|error| mount_error("Mount view could not be verified", error.to_string()))?
-            != status
-        {
-            return Err(mount_error(
-                "Unmount was refused",
-                "mount view changed after its status was read",
-            ));
-        }
-        detach_view_with_retry(&repository, &status, view)?;
-        writeln!(
-            io::stdout().lock(),
-            "unmounted {} snapshot {}",
-            status.mountpoint().display(),
-            status.snapshot_hex(),
-        )
-        .map_err(|_| stdout_error())?;
-        Ok(())
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        let status = repository
-            .unmount_view(&mountpoint)
-            .map_err(|error| mount_error("Unmount was refused", error.to_string()))?;
-        writeln!(
-            io::stdout().lock(),
-            "unmounted {} snapshot {}",
-            status.mountpoint().display(),
-            status.snapshot_hex(),
-        )
-        .map_err(|_| stdout_error())?;
-        Ok(())
+    match mounted_mount_for_path(&mountpoint)? {
+        Some(mount) => unmount_orna_mount(repository, &mountpoint, &mount),
+        None => detach_stale_view(repository, &mountpoint),
     }
 }
 
-#[allow(clippy::too_many_lines)]
+/// How a live mount is taken down.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UnmountMode {
+    /// A writable mount quiesced so that it accepts no more edits. A failed
+    /// unmount resumes it.
+    Quiesced,
+    /// A read-only mount: it holds no draft and needs no quiesce.
+    ReadOnly,
+    /// The FUSE daemon is gone (killed, W15-05): the kernel mount answers
+    /// ENOTCONN and holds no live drafts. The mount is released with its view;
+    /// accepted saves and fsynced scratch are in the runtime.
+    Disconnected,
+}
+
+#[cfg(target_os = "linux")]
+fn unmount_orna_mount(
+    repository: &Repository,
+    mountpoint: &Path,
+    mount: &MountedFuseIdentity,
+) -> Result<(), Diagnostic> {
+    let filesystem = mount.filesystem.as_str();
+    let source = mount.source.as_str();
+    if !filesystem.starts_with("fuse") || !is_orna_mount_source(source) {
+        return Err(mount_error(
+            "Unmount was refused",
+            format!("mountpoint belongs to {filesystem} {source}, not an Orna FUSE mount"),
+        ));
+    }
+    let Some(view_id) = source.strip_prefix("orna-") else {
+        return Err(mount_error(
+            "Unmount was refused",
+            "FUSE source has no Orna view identity",
+        ));
+    };
+    let attached = attached_view(repository, mountpoint, view_id)?;
+    let mode = quiesce_for_unmount(mountpoint)?;
+    take_down_mount(mountpoint, mount, mode)?;
+    let Some((view, status)) = attached else {
+        return writeln!(
+            io::stdout().lock(),
+            "unmounted orphan FUSE mount {}",
+            mountpoint.display(),
+        )
+        .map_err(|_| stdout_error());
+    };
+    detach_view_with_retry(repository, &status, view)?;
+    let released = if mode == UnmountMode::Disconnected {
+        "; its mount process had stopped, accepted saves are kept and fsynced scratch is restored by the next mount"
+    } else {
+        ""
+    };
+    writeln!(
+        io::stdout().lock(),
+        "unmounted {} snapshot {}{released}",
+        status.mountpoint().display(),
+        status.snapshot_hex(),
+    )
+    .map_err(|_| stdout_error())
+}
+
+/// The registered view a mount's FUSE source names, with its verified record,
+/// or `None` when that view is not registered with this repository.
+#[cfg(target_os = "linux")]
+fn attached_view(
+    repository: &Repository,
+    mountpoint: &Path,
+    view_id: &str,
+) -> Result<Option<(MountView, MountStatus)>, Diagnostic> {
+    match repository.open_mount_view_by_id(view_id) {
+        Ok(view) => {
+            let status = view.verify_record().map_err(|error| {
+                mount_error("Mount view could not be verified", error.to_string())
+            })?;
+            if status.mountpoint() != mountpoint {
+                return Err(mount_error(
+                    "Unmount was refused",
+                    format!(
+                        "FUSE source identifies a view attached at {}, not {}",
+                        status.mountpoint().display(),
+                        mountpoint.display(),
+                    ),
+                ));
+            }
+            Ok(Some((view, status)))
+        }
+        Err(orna_repository::MountError::NotAttached) => {
+            let statuses = repository.mount_status().map_err(|error| {
+                mount_error("Mount status could not be read", error.to_string())
+            })?;
+            match statuses
+                .iter()
+                .find(|status| status.mountpoint() == mountpoint)
+            {
+                Some(other_view) => Err(mount_error(
+                    "Unmount was refused",
+                    format!(
+                        "mountpoint record identifies view {}, not FUSE source {view_id}",
+                        other_view.view_hex(),
+                    ),
+                )),
+                None => Ok(None),
+            }
+        }
+        Err(error) => Err(mount_error(
+            "Mount view could not be opened",
+            error.to_string(),
+        )),
+    }
+}
+
+/// Stops a live mount from accepting edits so that it can be unmounted, or
+/// decides that it needs none.
+#[cfg(target_os = "linux")]
+fn quiesce_for_unmount(mountpoint: &Path) -> Result<UnmountMode, Diagnostic> {
+    use crate::fuse_mount::UnmountPreparationError;
+    match crate::fuse_mount::begin_unmount(mountpoint) {
+        Ok(()) => Ok(UnmountMode::Quiesced),
+        Err(UnmountPreparationError::UnresolvedDrafts) => {
+            Err(unresolved_drafts_refusal(mountpoint))
+        }
+        Err(UnmountPreparationError::ReadOnlyMount) => {
+            let unresolved = crate::fuse_mount::has_unresolved_drafts(mountpoint)
+                .map_err(|error| mount_error("Mount draft state could not be read", error))?;
+            if unresolved {
+                Err(unresolved_drafts_refusal(mountpoint))
+            } else {
+                Ok(UnmountMode::ReadOnly)
+            }
+        }
+        Err(UnmountPreparationError::Disconnected) => Ok(UnmountMode::Disconnected),
+        Err(UnmountPreparationError::Operation(error)) => Err(mount_error(
+            "Mount draft state could not be quiesced",
+            error,
+        )),
+    }
+}
+
+/// Unmounts the validated mount. A mount that another mount replaced since it
+/// was validated is left untouched, and a failed unmount resumes a quiesced
+/// mount.
+#[cfg(target_os = "linux")]
+fn take_down_mount(
+    mountpoint: &Path,
+    mount: &MountedFuseIdentity,
+    mode: UnmountMode,
+) -> Result<(), Diagnostic> {
+    match mounted_mount_for_path(mountpoint)? {
+        Some(current) if current == *mount => {}
+        Some(_) => {
+            return Err(mount_error(
+                "Unmount was refused",
+                "mount identity changed before unmount; the replacement mount was left untouched",
+            ));
+        }
+        None => return Ok(()),
+    }
+    let unmount_error = if mode == UnmountMode::Disconnected {
+        crate::fuse_mount::unmount_dead_mountpoint(mountpoint)
+    } else {
+        unmount_with_busy_retry(mountpoint)
+    }
+    .err();
+    if mounted_mount_for_path(mountpoint)?.as_ref() != Some(mount) {
+        return Ok(());
+    }
+    let detail = unmount_error.unwrap_or_else(|| {
+        "FUSE unmount helper returned successfully but the validated mount remains attached"
+            .to_owned()
+    });
+    if mode == UnmountMode::Quiesced {
+        crate::fuse_mount::cancel_unmount(mountpoint).map_err(|resume_error| {
+            mount_error(
+                "FUSE unmount failed and the mount could not resume",
+                format!("{detail}; {resume_error}"),
+            )
+        })?;
+    }
+    Err(mount_error("FUSE unmount failed", detail))
+}
+
+/// Releases the registration of a view whose mount is already gone.
+#[cfg(target_os = "linux")]
+fn detach_stale_view(repository: &Repository, mountpoint: &Path) -> Result<(), Diagnostic> {
+    let statuses = repository
+        .mount_status()
+        .map_err(|error| mount_error("Mount status could not be read", error.to_string()))?;
+    let Some(status) = statuses
+        .into_iter()
+        .find(|status| status.mountpoint() == mountpoint)
+    else {
+        return writeln!(
+            io::stdout().lock(),
+            "already unmounted {}",
+            mountpoint.display()
+        )
+        .map_err(|_| stdout_error());
+    };
+    let view = repository
+        .open_mount_view_by_id(&status.view_hex())
+        .map_err(|error| mount_error("Mount view could not be opened", error.to_string()))?;
+    if view
+        .verify_record()
+        .map_err(|error| mount_error("Mount view could not be verified", error.to_string()))?
+        != status
+    {
+        return Err(mount_error(
+            "Unmount was refused",
+            "mount view changed after its status was read",
+        ));
+    }
+    detach_view_with_retry(repository, &status, view)?;
+    writeln!(
+        io::stdout().lock(),
+        "unmounted {} snapshot {}",
+        status.mountpoint().display(),
+        status.snapshot_hex(),
+    )
+    .map_err(|_| stdout_error())
+}
+
 /// Refuses an unmount that would discard unresolved drafts (ORNA-VFS-024),
 /// naming each draft, its state and its cause code on stderr first, so the
 /// remedy applies to known files (W15-03).

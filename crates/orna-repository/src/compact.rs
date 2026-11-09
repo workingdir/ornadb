@@ -25,6 +25,7 @@ use uuid::{Uuid, Version};
 
 #[cfg(any(test, feature = "legacy-fixture-writer"))]
 use crate::PublicationJournalEntry;
+use crate::hex::hex_encode;
 use crate::{
     GitCommitRef, IndexGeneration, ManagedFileChange, ManagedPath, PrivateCommit,
     PublicationJournal, Repository, RepositoryError,
@@ -2202,7 +2203,7 @@ fn required_physical_metadata(
     BTreeMap::from([
         ("orna.profile".to_owned(), COMPACT_PROFILE.to_owned()),
         ("orna.table".to_owned(), table.to_string()),
-        ("orna.schema.sha256".to_owned(), hex(&schema)),
+        ("orna.schema.sha256".to_owned(), hex_encode(&schema)),
         (
             "orna.columns.ovb".to_owned(),
             orna_value::base64_encode(columns),
@@ -4099,7 +4100,7 @@ fn canonical_manifest(
     let mut output = format!(
         "{{profile: \"{COMPACT_PROFILE}\", table: \"{}\", schema: \"{}\", next_generation: {}, shards: [",
         manifest.table,
-        hex(&manifest.schema),
+        hex_encode(&manifest.schema),
         manifest.next_generation,
     );
     for (index, shard) in shards.iter().enumerate() {
@@ -4115,11 +4116,11 @@ fn canonical_manifest(
         output.push_str(&format!(
             "{{number: {}, min_key: \"{}\", max_key: \"{}\", entries: {}, file: \"{}\", hash: \"{}\"}}",
             shard.number,
-            hex(&shard.min_key),
-            hex(&shard.max_key),
+            hex_encode(&shard.min_key),
+            hex_encode(&shard.max_key),
             shard.entries,
             relative.to_str().ok_or(RepositoryError::InvalidCompactManifest)?,
-            hex(&shard.hash),
+            hex_encode(&shard.hash),
         ));
     }
     output.push_str("]}\n");
@@ -4143,13 +4144,13 @@ fn canonical_shard(entries: &[&CompactManifestEntry]) -> Result<Vec<u8>, Reposit
             entry.segment_id,
             entry.role.as_str(),
             entry.generation,
-            hex(&entry.schema),
+            hex_encode(&entry.schema),
             entry.encoder_version,
             entry.relative_path.as_path().to_str().ok_or(RepositoryError::InvalidCompactManifest)?,
             entry.git_object_id,
-            hex(&entry.sha256),
-            hex(&entry.min_key),
-            hex(&entry.max_key),
+            hex_encode(&entry.sha256),
+            hex_encode(&entry.min_key),
+            hex_encode(&entry.max_key),
             entry.min_event_time.as_ref().map(|value| format!("\"{value}\"")).unwrap_or_else(|| "null".into()),
             entry.max_event_time.as_ref().map(|value| format!("\"{value}\"")).unwrap_or_else(|| "null".into()),
             entry.row_count,
@@ -4447,16 +4448,6 @@ fn list_field<'a>(
         return Err(RepositoryError::InvalidCompactManifest);
     };
     Ok(elements)
-}
-
-fn hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut result = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        result.push(HEX[usize::from(byte >> 4)] as char);
-        result.push(HEX[usize::from(byte & 15)] as char);
-    }
-    result
 }
 
 fn decode_hex(value: &str) -> Result<Vec<u8>, RepositoryError> {
@@ -4876,7 +4867,7 @@ mod tests {
             KeyValue::new("orna.table".into(), Some(NESTED_TABLE.to_string())),
             KeyValue::new(
                 "orna.schema.sha256".into(),
-                Some(hex(&schema_descriptor_fingerprint(schema).unwrap())),
+                Some(hex_encode(&schema_descriptor_fingerprint(schema).unwrap())),
             ),
             KeyValue::new(
                 "orna.schema.ovb".into(),
@@ -5054,7 +5045,7 @@ mod tests {
             KeyValue::new("orna.table".to_owned(), Some(table.to_string())),
             KeyValue::new(
                 "orna.schema.sha256".to_owned(),
-                Some(hex(&schema_descriptor_fingerprint(schema).unwrap())),
+                Some(hex_encode(&schema_descriptor_fingerprint(schema).unwrap())),
             ),
             KeyValue::new(
                 "orna.schema.ovb".to_owned(),

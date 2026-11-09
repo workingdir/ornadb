@@ -647,10 +647,12 @@ pub fn admit_format3_row(
         schema,
         context,
         canonical_key.to_vec(),
-        &stored_row_fields,
-        &BTreeMap::new(),
-        blob_bindings,
-        Vec::new(),
+        StoredRowInputs {
+            row_fields: &stored_row_fields,
+            defaults: &BTreeMap::new(),
+            blob_bindings,
+            owner_field_values: Vec::new(),
+        },
         mutation_id,
     )
 }
@@ -662,9 +664,6 @@ pub fn admit_format3_row(
 /// The legacy `key-path-v1` spelling (`~xx`, `~ff`) is refused with
 /// `InvalidSourceRow`: legacy loose rows are read only through their recorded
 /// import context (Orna-1.1.0.md, "File extension"), which this path does not admit.
-/// The eight values are one source row's admission record, and every caller
-/// reads them from the same load request.
-#[allow(clippy::too_many_arguments)]
 pub fn admit_source_row(
     project: &LoadedProject,
     logical_path: &str,
@@ -674,7 +673,7 @@ pub fn admit_source_row(
     blob_bindings: Vec<(String, OrpBlobBinding)>,
     mutation_id: [u8; 16],
 ) -> Result<AdmittedSourceRow, ProjectLoadError> {
-    admit_source_row_with_owner_fields_inner(
+    admit_source_row_with_owner_fields(
         project,
         logical_path,
         source,
@@ -689,36 +688,11 @@ pub fn admit_source_row(
 
 /// Admit a source row while filling additional stored scalar fields supplied
 /// by the trusted source owner (for example, payload size derived from a Blob).
-/// One source row plus the scalar fields its trusted owner derives, which every
-/// caller passes from the same capture record.
+///
+/// The nine positional values are kept because callers in other crates share
+/// this signature.
 #[allow(clippy::too_many_arguments)]
 pub fn admit_source_row_with_owner_fields(
-    project: &LoadedProject,
-    logical_path: &str,
-    source: &str,
-    schema: &ResolvedTableSchema,
-    context: &Format3Context,
-    blob_bindings: Vec<(String, OrpBlobBinding)>,
-    owner_field_values: Vec<(String, Raw)>,
-    key_components: &[KeyComponentText],
-    mutation_id: [u8; 16],
-) -> Result<AdmittedSourceRow, ProjectLoadError> {
-    admit_source_row_with_owner_fields_inner(
-        project,
-        logical_path,
-        source,
-        schema,
-        context,
-        blob_bindings,
-        owner_field_values,
-        key_components,
-        mutation_id,
-    )
-}
-
-/// The inner form mirrors the public entry point's admission record.
-#[allow(clippy::too_many_arguments)]
-fn admit_source_row_with_owner_fields_inner(
     project: &LoadedProject,
     logical_path: &str,
     source: &str,
@@ -834,10 +808,12 @@ fn admit_source_row_with_owner_fields_inner(
         schema,
         context,
         lowered.canonical_key,
-        &row_fields,
-        &defaults,
-        blob_bindings,
-        owner_field_values,
+        StoredRowInputs {
+            row_fields: &row_fields,
+            defaults: &defaults,
+            blob_bindings,
+            owner_field_values,
+        },
         mutation_id,
     )
 }
@@ -928,21 +904,31 @@ fn table_constant_defaults(
     defaults
 }
 
+/// What a stored row is assembled from. Every stored field comes from exactly
+/// one of the row, an owner-supplied value, a Blob binding or a constant
+/// default.
+struct StoredRowInputs<'a> {
+    row_fields: &'a BTreeMap<&'a str, &'a Raw>,
+    defaults: &'a BTreeMap<String, Raw>,
+    blob_bindings: Vec<(String, OrpBlobBinding)>,
+    owner_field_values: Vec<(String, Raw)>,
+}
+
 /// Lowers a source row's fields against its committed descriptor and binds
-/// its Blob fields. Every stored field comes from exactly one of the row,
-/// an owner-supplied value, a Blob binding or a constant default; each value
-/// is lowered to its stored type (ORNA-FORMAT-004).
-#[allow(clippy::too_many_arguments)]
+/// its Blob fields. Each value is lowered to its stored type (ORNA-FORMAT-004).
 fn admit_stored_source_row(
     schema: &ResolvedTableSchema,
     context: &Format3Context,
     canonical_key: Vec<u8>,
-    row_fields: &BTreeMap<&str, &Raw>,
-    defaults: &BTreeMap<String, Raw>,
-    blob_bindings: Vec<(String, OrpBlobBinding)>,
-    owner_field_values: Vec<(String, Raw)>,
+    inputs: StoredRowInputs<'_>,
     mutation_id: [u8; 16],
 ) -> Result<AdmittedSourceRow, ProjectLoadError> {
+    let StoredRowInputs {
+        row_fields,
+        defaults,
+        blob_bindings,
+        owner_field_values,
+    } = inputs;
     let stored_schema =
         StoredSchema::new(schema.descriptor()).map_err(|_| ProjectLoadError::InvalidSourceRow)?;
     let (descriptor_table_id, fields) = source_schema_fields(schema.descriptor())?;
@@ -955,7 +941,7 @@ fn admit_stored_source_row(
         .map_err(|_| ProjectLoadError::InvalidSourceRow)?;
     let mut key_fields = fields.iter().filter(|field| field.role == 0);
     let is_text_primary_key = match (key_fields.next(), key_fields.next()) {
-        (Some(field), None) => field.is_text,
+        (Some(field), None) => field.kind == SourceColumnKind::Text,
         _ => false,
     };
     let mutation_key = if is_text_primary_key {
@@ -976,7 +962,7 @@ fn admit_stored_source_row(
     if pending_owner_fields.keys().any(|name| {
         !fields
             .iter()
-            .any(|field| field.name == *name && field.role == 1 && !field.is_blob)
+            .any(|field| field.name == *name && field.role == 1 && !field.kind.is_blob())
     }) {
         return Err(ProjectLoadError::InvalidSourceRow);
     }
@@ -984,7 +970,7 @@ fn admit_stored_source_row(
     for (field_name, binding) in blob_bindings {
         let field = fields
             .iter()
-            .find(|field| field.name == field_name && field.role == 1 && field.is_blob)
+            .find(|field| field.name == field_name && field.role == 1 && field.kind.is_blob())
             .ok_or(ProjectLoadError::InvalidSourceRow)?;
         if pending_bindings.insert(field.id, binding).is_some() {
             return Err(ProjectLoadError::InvalidSourceRow);
@@ -994,12 +980,12 @@ fn admit_stored_source_row(
     let mut stored_fields = Vec::new();
     let mut retained_bindings = Vec::new();
     for field in fields.iter().filter(|field| field.role == 1) {
-        if field.is_blob {
+        if field.kind.is_blob() {
             if pending_owner_fields.contains_key(&field.name) {
                 return Err(ProjectLoadError::InvalidSourceRow);
             }
             let Some(binding) = pending_bindings.remove(&field.id) else {
-                if field.is_optional_blob
+                if field.kind == SourceColumnKind::OptionalBlob
                     && row_fields
                         .get(field.name.as_str())
                         .is_some_and(|value| **value == Raw::Null)
@@ -1023,7 +1009,7 @@ fn admit_stored_source_row(
                 return Err(ProjectLoadError::InvalidSourceRow);
             }
             let encoded_blob = decoded.into_raw();
-            stored_fields.push(if field.is_optional_blob {
+            stored_fields.push(if field.kind == SourceColumnKind::OptionalBlob {
                 Raw::Tag(
                     60013,
                     Box::new(Raw::Array(vec![Raw::Int(1.into()), encoded_blob])),
@@ -1116,26 +1102,49 @@ struct SourceSchemaField {
     id: [u8; 16],
     name: String,
     role: u64,
-    is_blob: bool,
-    is_optional_blob: bool,
-    is_text: bool,
+    kind: SourceColumnKind,
 }
 
-fn source_schema_blob_optional(ty: &Raw) -> Option<bool> {
-    let Raw::Array(parts) = ty else {
-        return None;
-    };
-    match parts.as_slice() {
-        [Raw::Int(kind), Raw::Text(name)]
-            if kind.to_string() == "0"
-                && matches!(name.as_str(), "Blob" | "std.BINARY_LARGE_OBJECT") =>
-        {
-            Some(false)
+/// The stored-type class of a source schema field that admission treats
+/// specially.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SourceColumnKind {
+    /// A Blob column, bound through a captured Blob binding.
+    Blob,
+    /// An optional Blob column: bound like a Blob, or stored as the absent
+    /// marker when the row says null.
+    OptionalBlob,
+    /// A text column. A sole text primary key mutates by its UTF-8 bytes.
+    Text,
+    /// Every other column type is lowered through the stored schema.
+    Other,
+}
+
+impl SourceColumnKind {
+    fn is_blob(self) -> bool {
+        matches!(self, Self::Blob | Self::OptionalBlob)
+    }
+
+    /// Classifies a committed descriptor type.
+    fn of(ty: &Raw) -> Self {
+        let Raw::Array(parts) = ty else {
+            return Self::Other;
+        };
+        match parts.as_slice() {
+            [Raw::Int(kind), Raw::Text(name)]
+                if kind.to_string() == "0"
+                    && matches!(name.as_str(), "Blob" | "std.BINARY_LARGE_OBJECT") =>
+            {
+                Self::Blob
+            }
+            [Raw::Int(kind), Raw::Text(name)] if kind.to_string() == "0" && name == "Str" => {
+                Self::Text
+            }
+            [Raw::Int(kind), inner] if kind.to_string() == "2" && Self::of(inner).is_blob() => {
+                Self::OptionalBlob
+            }
+            _ => Self::Other,
         }
-        [Raw::Int(kind), inner] if kind.to_string() == "2" => {
-            source_schema_blob_optional(inner).map(|_| true)
-        }
-        _ => None,
     }
 }
 
@@ -1164,7 +1173,6 @@ fn source_schema_fields(
         if !ids.insert(id) || !names.insert(name.clone()) {
             return Err(ProjectLoadError::InvalidSourceRow);
         }
-        let blob_optional = source_schema_blob_optional(ty);
         let role = role
             .to_string()
             .parse::<u64>()
@@ -1177,14 +1185,7 @@ fn source_schema_fields(
             id,
             name: name.clone(),
             role,
-            is_blob: blob_optional.is_some(),
-            is_optional_blob: blob_optional == Some(true),
-            is_text: matches!(
-                ty,
-                Raw::Array(parts)
-                    if matches!(parts.as_slice(), [Raw::Int(kind), Raw::Text(name)]
-                        if kind.to_string() == "0" && name == "Str")
-            ),
+            kind: SourceColumnKind::of(ty),
         });
     }
     Ok((table_id, fields))
