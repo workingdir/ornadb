@@ -2,6 +2,9 @@
 
 use super::*;
 
+/// Version marker of the force-discard recovery journal.
+pub(crate) const CHECKOUT_JOURNAL_MAGIC: &[u8] = b"ORNA-CHECKOUT-JOURNAL\0";
+
 /// A generation supplied by the embedded runtime state layer.
 ///
 /// The repository layer does not open `state.db`: doing so would conflate the
