@@ -7,6 +7,7 @@
 //! activation context and is never published by this crate.
 
 use num_bigint::BigInt;
+use orna_evaluator::{ActivationEffectReport, EffectGate};
 use orna_evaluator::{
     EffectHandler, Environment, EvaluationError, Functions, Limits, NominalDefinitions,
     Ovb2EffectHandler, PureFunction, RelationPage, ReplSession, StandardLayer, StepBudget,
@@ -16,8 +17,8 @@ use orna_evaluator::{
 };
 use orna_foundation::{CanonicalSnapshot, CanonicalValue, OvbRaw, SafeText};
 use orna_live::{
-    Error as LiveError, LiveAdminEffectDispatcher, LiveApplication, LiveApplicationWorkLease,
-    LiveEvalResponse, LiveEvalTransaction,
+    Error as LiveError, FirstPartyEffectTrust, LiveAdminEffectDispatcher, LiveApplication,
+    LiveApplicationWorkLease, LiveEvalResponse, LiveEvalTransaction,
 };
 use orna_project::{
     AdmittedSourceRow, CommittedReadLimits, LoadedProject, ProjectLimits, ResolvedTableSchema,
@@ -29,9 +30,9 @@ use orna_protocol::{
 };
 use orna_repository::{GitCommitRef, ProtectedContentPin, RepositoryCaptureCapability};
 use orna_runtime::{
-    ActivationEffectReport, EffectGate, NoFault, RequestIdentity, RuntimeActivationContext,
-    RuntimeError, RuntimePublicationMetadataRows, RuntimeTableActivationSnapshot,
-    RuntimeTableIdentity, RuntimeTableRows, StagedTableActivation, TableMutation, TableObjectId,
+    NoFault, RequestIdentity, RuntimeActivationContext, RuntimeError,
+    RuntimePublicationMetadataRows, RuntimeTableActivationSnapshot, RuntimeTableIdentity,
+    RuntimeTableRows, StagedTableActivation, TableMutation, TableObjectId,
 };
 pub use orna_security::{
     CostAcknowledgement, RecordedRemoteAnalysis, RemoteAnalysisDecision, RemoteAnalysisPolicy,
@@ -1270,10 +1271,12 @@ type ActivationParts = (
 );
 
 impl StagedActivation {
-    /// The effect report this activation declared when it was evaluated.
+    /// Consumes the activation and yields the effect report it declared when it
+    /// was evaluated. The report is evaluator-minted and not cloneable, so it
+    /// moves into exactly one transaction.
     #[must_use]
-    pub fn effects(&self) -> ActivationEffectReport {
-        self.effects.clone()
+    pub fn into_effects(self) -> ActivationEffectReport {
+        self.effects
     }
 
     #[must_use]
@@ -1921,10 +1924,7 @@ impl SourceMutationEffectHandler {
     /// with a sys host attached reports `ExternalPossible` from the attachment
     /// alone. Adding a registry field here requires passing it as `bindings`.
     pub(crate) fn effect_report(&self) -> ActivationEffectReport {
-        EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::bound(
-            self.sys_host.as_ref(),
-            None,
-        ))
+        EffectGate::admit_sys_host(self.sys_host.as_ref(), None)
     }
 
     /// Finishes evaluation while retaining source schema and protected pins.
@@ -4052,8 +4052,11 @@ impl LiveApplication for ApplicationLiveAdapter {
     // `ControlledOnly` whatever the authority binds. That is only true when the
     // authority binds no sys host; a bound host can reach state the handler does
     // not observe, so its reports are downgraded at the commit boundary.
-    fn trusts_controlled_effect_reports(&self) -> bool {
-        self.authority.sys_host.is_none()
+    fn first_party_effect_trust(&self) -> Option<FirstPartyEffectTrust> {
+        self.authority
+            .sys_host
+            .is_none()
+            .then(FirstPartyEffectTrust::mint)
     }
 
     fn eval(
@@ -4551,14 +4554,11 @@ mod tests {
         let registry = orna_evaluator::SysHostBindingRegistry::default();
         assert!(registry.may_reach_external_state());
         assert!(matches!(
-            EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::bound(
-                None,
-                Some(&registry)
-            )),
+            EffectGate::admit_sys_host(None, Some(&registry)),
             ActivationEffectReport::ExternalPossible
         ));
         assert!(matches!(
-            EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
+            EffectGate::admit_unbound_for_test(),
             ActivationEffectReport::ControlledOnly(_)
         ));
     }
