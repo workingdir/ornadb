@@ -2,14 +2,15 @@
 //!
 //! This crate deliberately has no transport, clock, persistence, identity
 //! provider, or host-I/O implementation.  An integration authenticates an
-//! opaque [`Credential`], calls [`Serving::admit`], and reports destructive
-//! identity operations through the explicit fail-closed methods.  Protocol
-//! envelope validation remains owned by `orna-protocol`; this crate checks
-//! the small serving-state subset that it consumes.
+//! opaque [`OpaqueCredential`], calls [`Serving::admit`], and reports
+//! destructive identity operations through the explicit fail-closed methods.
+//! Protocol envelope validation remains owned by `orna-protocol`; this crate
+//! checks the small serving-state subset that it consumes.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use orna_protocol::{Envelope, Message, TargetKind};
+use orna_security::OpaqueCredential;
 
 pub mod media_preview;
 pub type Id = [u8; 16];
@@ -51,36 +52,6 @@ impl Limits {
             return Err(Error::InvalidLimits);
         }
         Ok(self)
-    }
-}
-
-/// Opaque, comparable authentication material.  It intentionally has no
-/// accessor, `Display`, or derived `Debug`, so diagnostics cannot leak it.
-/// Equality is constant-time; a derived `PartialEq` would stop at the first
-/// differing byte.
-#[derive(Clone, Eq)]
-pub struct Credential([u8; 32]);
-
-impl Credential {
-    pub const fn new(bytes: [u8; 32]) -> Self {
-        Self(bytes)
-    }
-}
-
-impl PartialEq for Credential {
-    #[inline(never)]
-    fn eq(&self, other: &Self) -> bool {
-        let mut difference = 0u8;
-        for (&left, &right) in self.0.iter().zip(other.0.iter()) {
-            difference |= left ^ right;
-        }
-        std::hint::black_box(difference == 0)
-    }
-}
-
-impl core::fmt::Debug for Credential {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("Credential(REDACTED)")
     }
 }
 
@@ -200,7 +171,7 @@ enum Link {
 
 #[derive(Clone, Debug)]
 struct Session {
-    credential: Credential,
+    credential: OpaqueCredential,
     origin: Origin,
     link: Link,
     page: BTreeMap<String, String>,
@@ -245,7 +216,7 @@ impl Serving {
     pub fn admit(
         &mut self,
         session_id: Id,
-        credential: Credential,
+        credential: OpaqueCredential,
         origin: Origin,
         envelope: &Envelope,
     ) -> Result<()> {
@@ -283,7 +254,7 @@ impl Serving {
 
     /// Reconnect has no implicit re-admission: the exact credential remains
     /// required and a deletion failure leaves this session closed.
-    pub fn reconnect(&mut self, session_id: Id, credential: &Credential) -> Result<()> {
+    pub fn reconnect(&mut self, session_id: Id, credential: &OpaqueCredential) -> Result<()> {
         let session = self.session_mut(session_id)?;
         if session.credential != *credential {
             return Err(Error::CredentialRejected);
@@ -298,7 +269,7 @@ impl Serving {
     /// # Errors
     ///
     /// Returns the same session or credential error as [`Self::reconnect`].
-    pub fn validate_reconnect(&self, session_id: Id, credential: &Credential) -> Result<()> {
+    pub fn validate_reconnect(&self, session_id: Id, credential: &OpaqueCredential) -> Result<()> {
         let session = self.session(session_id)?;
         if session.credential != *credential {
             return Err(Error::CredentialRejected);
@@ -312,8 +283,8 @@ impl Serving {
     pub fn rotate_credential(
         &mut self,
         session_id: Id,
-        current: &Credential,
-        replacement: Credential,
+        current: &OpaqueCredential,
+        replacement: OpaqueCredential,
     ) -> Result<()> {
         let session = self.session_mut(session_id)?;
         if session.credential != *current {
@@ -607,8 +578,8 @@ mod tests {
     fn id(value: u8) -> Id {
         [value; 16]
     }
-    fn credential() -> Credential {
-        Credential::new([7; 32])
+    fn credential() -> OpaqueCredential {
+        OpaqueCredential::from_bytes([7; 32])
     }
     fn pin(revision: u64) -> RetainedPin {
         RetainedPin {
@@ -662,19 +633,19 @@ mod tests {
             .unwrap();
         state.disconnect(id(1)).unwrap();
         assert_eq!(
-            state.reconnect(id(1), &Credential::new([8; 32])),
+            state.reconnect(id(1), &OpaqueCredential::from_bytes([8; 32])),
             Err(Error::CredentialRejected)
         );
         assert_eq!(
-            state.validate_reconnect(id(1), &Credential::new([8; 32])),
+            state.validate_reconnect(id(1), &OpaqueCredential::from_bytes([8; 32])),
             Err(Error::CredentialRejected)
         );
-        let replacement = Credential::new([9; 32]);
+        let replacement = OpaqueCredential::from_bytes([9; 32]);
         state
             .rotate_credential(id(1), &credential(), replacement.clone())
             .unwrap();
         assert_eq!(
-            state.rotate_credential(id(1), &credential(), Credential::new([10; 32])),
+            state.rotate_credential(id(1), &credential(), OpaqueCredential::from_bytes([10; 32])),
             Err(Error::CredentialRejected)
         );
         state.validate_reconnect(id(1), &replacement).unwrap();
@@ -742,15 +713,15 @@ mod tests {
     #[test]
     fn credential_matching_is_exact_and_redacted() {
         let expected = credential();
-        assert_eq!(expected, Credential::new([7; 32]));
+        assert_eq!(expected, OpaqueCredential::from_bytes([7; 32]));
 
         let mut first_byte_differs = [7; 32];
         first_byte_differs[0] = 8;
         let mut last_byte_differs = [7; 32];
         last_byte_differs[31] = 8;
-        assert_ne!(expected, Credential::new(first_byte_differs));
-        assert_ne!(expected, Credential::new(last_byte_differs));
-        assert_eq!(format!("{expected:?}"), "Credential(REDACTED)");
+        assert_ne!(expected, OpaqueCredential::from_bytes(first_byte_differs));
+        assert_ne!(expected, OpaqueCredential::from_bytes(last_byte_differs));
+        assert_eq!(format!("{expected:?}"), "OpaqueCredential([REDACTED])");
     }
 
     #[test]
@@ -1005,7 +976,10 @@ mod tests {
             state.reconnect(id(1), &credential()),
             Err(Error::SessionClosed)
         );
-        assert_eq!(format!("{:?}", credential()), "Credential(REDACTED)");
+        assert_eq!(
+            format!("{:?}", credential()),
+            "OpaqueCredential([REDACTED])"
+        );
     }
 
     #[test]

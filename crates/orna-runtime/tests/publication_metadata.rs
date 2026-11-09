@@ -100,17 +100,23 @@ async fn publication_metadata_tracks_frozen_prefix_and_matches_both_projections(
     .expect("open runtime");
     assert!(
         state
+            .publication_writer(&repository)
+            .expect("publication lease")
             .set_publication_compressed_target_bytes(8 * 1024 * 1024 - 1)
             .await
             .is_err()
     );
     assert!(
         state
+            .publication_writer(&repository)
+            .expect("publication lease")
             .set_publication_compressed_target_bytes(32 * 1024 * 1024 + 1)
             .await
             .is_err()
     );
     state
+        .publication_writer(&repository)
+        .expect("publication lease")
         .set_publication_compressed_target_bytes(24 * 1024 * 1024)
         .await
         .expect("persist an in-range publication target");
@@ -130,6 +136,8 @@ async fn publication_metadata_tracks_frozen_prefix_and_matches_both_projections(
         .await
         .expect("append frozen mutation");
     let freeze = state
+        .publication_writer(&repository)
+        .expect("publication lease")
         .freeze(
             [7; 16],
             &state
@@ -286,15 +294,20 @@ async fn publication_metadata_tracks_frozen_prefix_and_matches_both_projections(
     ));
 
     let commit = PublicationCommitId::new(vec![b'a'; 40]).expect("valid commit id");
-    state
-        .complete_publication(&freeze, &commit)
-        .await
-        .expect("complete publication");
-    // A replayed successful completion must not double-count the prefix.
-    state
-        .complete_publication(&freeze, &commit)
-        .await
-        .expect("retry publication completion");
+    {
+        let publication = state
+            .publication_writer(&repository)
+            .expect("publication lease");
+        publication
+            .complete_publication(&freeze, &commit)
+            .await
+            .expect("complete publication");
+        // A replayed successful completion must not double-count the prefix.
+        publication
+            .complete_publication(&freeze, &commit)
+            .await
+            .expect("retry publication completion");
+    }
 
     let published_metadata = state
         .publication_metadata()

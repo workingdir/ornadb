@@ -61,8 +61,8 @@ use orna_syntax::{
     parse_expression, parse_module,
 };
 use orna_sys::{
-    AdmissionError, AdmissionRequest, ExecutionBoundary, FunctionDescriptor, InvocationExecutor,
-    InvocationHandle, InvocationResult, InvocationState, RuntimeSupervisor, TypedValue,
+    AdmissionError, AdmissionRequest, ExecutionBoundary, FunctionDescriptor, InvocationCompletion,
+    InvocationExecutor, InvocationHandle, InvocationState, RuntimeSupervisor, TypedValue,
 };
 use orna_table::{ActivationError, DatabaseActivation, DatabaseRuntime, TableError};
 use sha2::{Digest, Sha256};
@@ -348,21 +348,23 @@ struct BoundedSourceExecutor {
 }
 
 impl InvocationExecutor for BoundedSourceExecutor {
-    fn execute(&mut self, boundary: &ExecutionBoundary) -> InvocationResult<TypedValue> {
+    fn execute(&mut self, boundary: &ExecutionBoundary) -> InvocationCompletion<TypedValue> {
         // The supervisor admits arguments and result witnesses first. Retain
         // the independent function/snapshot pin at the evaluator edge too.
         if boundary.function != self.descriptor.identity {
-            return InvocationResult::OrdinaryFailure(AdmissionError::SourceMismatch.diagnostic());
+            return InvocationCompletion::OrdinaryFailure(
+                AdmissionError::SourceMismatch.diagnostic(),
+            );
         }
         let mut arguments = Environment::new();
         for (name, value) in boundary.arguments.entries() {
             let Some(canonical) = value.canonical() else {
-                return InvocationResult::OrdinaryFailure(
+                return InvocationCompletion::OrdinaryFailure(
                     AdmissionError::SourceMismatch.diagnostic(),
                 );
             };
             let Ok(value) = Value::decode(canonical) else {
-                return InvocationResult::OrdinaryFailure(
+                return InvocationCompletion::OrdinaryFailure(
                     AdmissionError::SourceMismatch.diagnostic(),
                 );
             };
@@ -376,16 +378,16 @@ impl InvocationExecutor for BoundedSourceExecutor {
             self.limits,
         ) {
             Ok(value) => match value.encode() {
-                Ok(canonical) => InvocationResult::Success(TypedValue::public(
+                Ok(canonical) => InvocationCompletion::Success(TypedValue::public(
                     self.descriptor.result_type.clone(),
                     canonical,
                 )),
-                Err(_) => {
-                    InvocationResult::OrdinaryFailure(AdmissionError::SourceMismatch.diagnostic())
-                }
+                Err(_) => InvocationCompletion::OrdinaryFailure(
+                    AdmissionError::SourceMismatch.diagnostic(),
+                ),
             },
             Err(_) => {
-                InvocationResult::OrdinaryFailure(AdmissionError::SourceMismatch.diagnostic())
+                InvocationCompletion::OrdinaryFailure(AdmissionError::SourceMismatch.diagnostic())
             }
         }
     }
@@ -4232,7 +4234,10 @@ impl DurableTransactionalEvaluator {
         checkpoint: &orna_runtime::Checkpoint,
         message: &str,
     ) -> Result<orna_repository::IndexGeneration, RuntimeError> {
-        let freeze = runtime.freeze(intent_id, checkpoint).await?;
+        let freeze = runtime
+            .publication_writer(repository)?
+            .freeze(intent_id, checkpoint)
+            .await?;
         let index = repository
             .index_generation()
             .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -4253,7 +4258,10 @@ impl DurableTransactionalEvaluator {
             let commit_id =
                 orna_runtime::PublicationCommitId::new(commit.as_str().as_bytes().to_vec())
                     .map_err(|_| RuntimeError::StorageUnavailable)?;
-            runtime.complete_publication(&freeze, &commit_id).await?;
+            runtime
+                .publication_writer(repository)?
+                .complete_publication(&freeze, &commit_id)
+                .await?;
             // The no-op range advanced no ref, so the ordinary index is still
             // the generation this call captured; re-read it rather than clone.
             return repository

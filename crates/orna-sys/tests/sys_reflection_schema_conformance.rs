@@ -6,15 +6,7 @@
 use orna_sys::{system_api_json, system_api_schema_json};
 use serde_json::{Value, json};
 
-#[path = "../src/abi_version.rs"]
-mod abi_version;
-#[path = "../src/host_registry_model.rs"]
-#[allow(dead_code)]
-mod host_registry_model;
-
-#[path = "../build_host.rs"]
-#[allow(dead_code)]
-mod build_host;
+use orna_sys_codegen::build_host;
 
 const CODE: &str = "sys.codec.unsupported_value_profile";
 

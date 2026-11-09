@@ -1,6 +1,6 @@
 use std::time::{Duration, SystemTime};
 
-use orna_core::{
+use orna_compat_v1::{
     CatalogueRevisionId, FunctionId, InspectEpochId, InvocationId, PrincipalId, SourceRevisionId,
     StateSlotId, TypeId,
     inspect::{
@@ -239,7 +239,7 @@ fn structural_inspect_and_trace_events_do_not_publish_secret_fixture_values() {
         &InspectSnapshotOptions::structural(),
         Vec::new(),
         vec![
-            orna_core::inspect::CallRow::new(
+            orna_compat_v1::inspect::CallRow::new(
                 InvocationId::from_bytes([0x66; 16]),
                 Some(secret.clone()),
                 1,
@@ -260,10 +260,10 @@ fn structural_inspect_and_trace_events_do_not_publish_secret_fixture_values() {
     assert!(epoch.calls()[0].schema().is_none());
     assert!(!format!("{epoch:?}").contains(fixture));
 
-    let event = orna_core::inspect::InspectTraceEvent::new(
+    let event = orna_compat_v1::inspect::InspectTraceEvent::new(
         InvocationId::from_bytes([0x66; 16]),
         0,
-        orna_core::inspect::InspectTracePayload::ValueBatch {
+        orna_compat_v1::inspect::InspectTracePayload::ValueBatch {
             schema: Some(secret.clone()),
             values: vec![secret],
         },
@@ -274,16 +274,16 @@ fn structural_inspect_and_trace_events_do_not_publish_secret_fixture_values() {
     .expect("secret trace batch is normalized at construction");
     assert!(matches!(
         event.payload(),
-        orna_core::inspect::InspectTracePayload::ValueBatchRedacted { value_count: 1 }
+        orna_compat_v1::inspect::InspectTracePayload::ValueBatchRedacted { value_count: 1 }
     ));
     assert!(!format!("{event:?}").contains(fixture));
 
     let invocation = InvocationId::from_bytes([0x66; 16]);
-    let mut trace = orna_core::inspect::InspectTrace::new(invocation);
-    let failed = orna_core::inspect::InspectTraceEvent::new(
+    let mut trace = orna_compat_v1::inspect::InspectTrace::new(invocation);
+    let failed = orna_compat_v1::inspect::InspectTraceEvent::new(
         invocation,
         0,
-        orna_core::inspect::InspectTracePayload::Failed {
+        orna_compat_v1::inspect::InspectTracePayload::Failed {
             code: fixture.to_owned(),
         },
         SystemTime::UNIX_EPOCH,
@@ -293,15 +293,15 @@ fn structural_inspect_and_trace_events_do_not_publish_secret_fixture_values() {
     .expect("failure trace text is redacted before retention");
     assert!(matches!(
         failed.payload(),
-        orna_core::inspect::InspectTracePayload::Failed { code } if code == "<redacted>"
+        orna_compat_v1::inspect::InspectTracePayload::Failed { code } if code == "<redacted>"
     ));
     assert_eq!(failed.purpose(), Some("<redacted>"));
     trace.push(failed).unwrap();
 
-    let cancelled = orna_core::inspect::InspectTraceEvent::new(
+    let cancelled = orna_compat_v1::inspect::InspectTraceEvent::new(
         invocation,
         1,
-        orna_core::inspect::InspectTracePayload::Cancelled {
+        orna_compat_v1::inspect::InspectTracePayload::Cancelled {
             reason: Some(fixture.to_owned()),
         },
         SystemTime::UNIX_EPOCH,
@@ -311,7 +311,7 @@ fn structural_inspect_and_trace_events_do_not_publish_secret_fixture_values() {
     .expect("cancellation trace text is redacted before retention");
     assert!(matches!(
         cancelled.payload(),
-        orna_core::inspect::InspectTracePayload::Cancelled { reason: Some(reason) }
+        orna_compat_v1::inspect::InspectTracePayload::Cancelled { reason: Some(reason) }
             if reason == "<redacted>"
     ));
     trace.push(cancelled).unwrap();

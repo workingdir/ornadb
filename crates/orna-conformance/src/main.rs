@@ -14,8 +14,9 @@ use orna_protocol::{
 };
 use orna_repository::Repository;
 use orna_runtime::{RequestIdentity, RequestState, RuntimeError, RuntimeIdentity, RuntimeState};
+use orna_security::OpaqueCredential;
 use orna_semantic::{ModuleInput, analyze};
-use orna_serving::{Credential, Limits as ServingLimits, Origin, Patch, RetainedPin, Serving};
+use orna_serving::{Limits as ServingLimits, Origin, Patch, RetainedPin, Serving};
 use std::collections::BTreeMap;
 use std::{
     fs,
@@ -868,7 +869,7 @@ fn run_live_keyed_update_scenario(scenario: &Scenario) -> StageOutcome<Diagnosti
     if serving
         .admit(
             [13; 16],
-            Credential::new([14; 32]),
+            OpaqueCredential::from_bytes([14; 32]),
             Origin([15; 16]),
             &subscribe,
         )
@@ -970,7 +971,7 @@ fn run_live_unkeyed_update_scenario(scenario: &Scenario) -> StageOutcome<Diagnos
     if serving
         .admit(
             [23; 16],
-            Credential::new([24; 32]),
+            OpaqueCredential::from_bytes([24; 32]),
             Origin([25; 16]),
             &subscribe,
         )
@@ -1058,7 +1059,7 @@ fn run_live_fallback_scenario(scenario: &Scenario) -> StageOutcome<Diagnostic> {
     if serving
         .admit(
             [33; 16],
-            Credential::new([34; 32]),
+            OpaqueCredential::from_bytes([34; 32]),
             Origin([35; 16]),
             &subscribe,
         )
@@ -1128,7 +1129,7 @@ fn run_live_resync_scenario(scenario: &Scenario) -> StageOutcome<Diagnostic> {
     if serving
         .admit(
             [3; 16],
-            Credential::new([4; 32]),
+            OpaqueCredential::from_bytes([4; 32]),
             Origin([5; 16]),
             &subscribe,
         )

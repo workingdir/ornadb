@@ -25,7 +25,7 @@
 //! | reference (`REF T`) | `@<type-name>/<object-id>` | [`RuntimeValue::Reference`] |
 //!
 //! A UUID value converts to its 16 network-order bytes while retaining the
-//! UUID runtime type. orna-core cannot name the standard `std.types.uuid`
+//! UUID runtime type. orna-compat-v1 cannot name the standard `std.types.uuid`
 //! identity, so the caller resolves the UUID value-type identity and
 //! representation when encoding through the sealed route (ADR 0056 step 3).
 //! Named and opaque value types are likewise
@@ -35,7 +35,7 @@
 //! value-type identity to its scalar form before converting.
 //!
 //! A reference type-name is validated structurally as a qualified name only;
-//! orna-core cannot resolve names to type identities without a catalogue.
+//! orna-compat-v1 cannot resolve names to type identities without a catalogue.
 //! The caller may verify that the supplied type-name matches the resolved
 //! reference target.
 
@@ -353,7 +353,7 @@ pub fn convert_cli_string(
 /// Converts one canonical `@<type-name>/<object-id>` reference string.
 ///
 /// The type-name is validated structurally as a qualified name; the object
-/// identity must be canonical opaque [`ObjectId`] text. orna-core cannot
+/// identity must be canonical opaque [`ObjectId`] text. orna-compat-v1 cannot
 /// resolve the type-name to the resolved target identity, so the caller may
 /// verify that match after binding.
 fn convert_reference(

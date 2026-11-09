@@ -296,10 +296,11 @@ select = [
   { record = "gate-d-crash-matrix", package = "orna-cli", target = "test:publication_crash_matrix", test = "cli_publication_reopens_after_process_kill_at_each_reachable_boundary" },
   { record = "gate-d-crash-matrix", package = "orna-cli", target = "test:publication_crash_matrix", test = "capture_and_row_commit_recover_after_process_kill" },
   { record = "workspace-rest", package = "orna-runtime", target = "test:owner_fence_gate_d" },
+  { record = "workspace-rest", package = "orna-runtime", target = "test:publication_writer_fence" },
   { record = "workspace-cli", package = "orna-cli", target = "test:live_owner_fence", test = "paused_live_owner_admits_outside_publish" },
 ]
 limitations = [
-  "Dead owners are fenced after real SIGKILL of a lease-holding child (owner_fence_gate_d.rs). A paused live owner does not block an outside `orna publish`: the publish admits the durable tail through the publication lock and the owner keeps its lock (live_owner_fence.rs). Takeover of a live owner is not exercised, because the owner flock is process-lifetime and a live process cannot lose it. Publication entry points below the CLI (freeze, complete_publication) still carry no owner check (ornadb-5il1.127, ornadb-5il1.58).",
+  "Dead owners are fenced after real SIGKILL of a lease-holding child (owner_fence_gate_d.rs). A paused live owner does not block an outside `orna publish`: the publish admits the durable tail through the publication lock and the owner keeps its lock (live_owner_fence.rs). Takeover of a live owner is not exercised, because the owner flock is process-lifetime and a live process cannot lose it (ornadb-5il1.127, ornadb-5il1.58).",
 ]
 
 [[item]]

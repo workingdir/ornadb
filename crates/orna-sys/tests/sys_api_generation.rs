@@ -7,9 +7,7 @@ use orna_sys::{
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-#[path = "../build_support.rs"]
-#[allow(dead_code)]
-mod build_support;
+use orna_sys_codegen::build_support;
 
 const SYS_API_1_1_SHA256: &str = "10ef7dab9665de4e065ee2b96797b2751c7c3f98f9886241011aee0cc8c0d40e";
 const SYSTEM_API_FIXTURE: &str = include_str!("fixtures/system-api-annotation.orna");

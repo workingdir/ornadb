@@ -1,12 +1,16 @@
 //! Unit tests for the supervisor, ledger and value model in the crate root.
 
 use super::*;
+use crate::{runtime::bind, runtime::identity, supervisor::SynchronousExecutions};
+use orna_security::{SecretMetadata, SecretRef};
+use std::collections::BTreeMap;
 use std::sync::mpsc;
 use std::sync::{
     Arc, Condvar, Mutex,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 fn ty(name: &str) -> TypeId {
     TypeId::new(name)
 }
@@ -141,7 +145,7 @@ fn the_first_cancellation_request_keeps_its_reason_and_beats_a_late_success() {
     );
 
     runtime
-        .retain_terminal(&handle, InvocationResult::Success(value("Str", "late")))
+        .retain_terminal(&handle, InvocationCompletion::Success(value("Str", "late")))
         .unwrap();
     assert_eq!(
         runtime.invocation_state(&handle),
@@ -216,10 +220,10 @@ fn args(entries: Vec<Argument>) -> ArgumentMap {
 }
 struct Executor {
     calls: usize,
-    result: InvocationResult<TypedValue>,
+    result: InvocationCompletion<TypedValue>,
 }
 impl InvocationExecutor for Executor {
-    fn execute(&mut self, _: &ExecutionBoundary) -> InvocationResult<TypedValue> {
+    fn execute(&mut self, _: &ExecutionBoundary) -> InvocationCompletion<TypedValue> {
         self.calls += 1;
         self.result.clone()
     }
@@ -228,18 +232,18 @@ struct CountingExecutor {
     calls: Arc<AtomicUsize>,
 }
 impl InvocationExecutor for CountingExecutor {
-    fn execute(&mut self, _: &ExecutionBoundary) -> InvocationResult<TypedValue> {
+    fn execute(&mut self, _: &ExecutionBoundary) -> InvocationCompletion<TypedValue> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        InvocationResult::Success(value("Str", "unexpected"))
+        InvocationCompletion::Success(value("Str", "unexpected"))
     }
 }
 struct BlockingExecutor {
     gate: Arc<(Mutex<bool>, Condvar)>,
     calls: Arc<AtomicUsize>,
-    result: InvocationResult<TypedValue>,
+    result: InvocationCompletion<TypedValue>,
 }
 impl InvocationExecutor for BlockingExecutor {
-    fn execute(&mut self, _: &ExecutionBoundary) -> InvocationResult<TypedValue> {
+    fn execute(&mut self, _: &ExecutionBoundary) -> InvocationCompletion<TypedValue> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let (open, wake) = &*self.gate;
         let mut open = open.lock().unwrap();
@@ -253,20 +257,20 @@ struct AdmissionLifecycleExecutor {
     started: Arc<AtomicBool>,
 }
 impl InvocationExecutor for AdmissionLifecycleExecutor {
-    fn execute(&mut self, _: &ExecutionBoundary) -> InvocationResult<TypedValue> {
-        InvocationResult::Success(value("Str", "unexpected"))
+    fn execute(&mut self, _: &ExecutionBoundary) -> InvocationCompletion<TypedValue> {
+        InvocationCompletion::Success(value("Str", "unexpected"))
     }
 
     fn execute_controlled(
         &mut self,
         _: &ExecutionBoundary,
         cancellation: &CancellationToken,
-    ) -> InvocationResult<TypedValue> {
+    ) -> InvocationCompletion<TypedValue> {
         self.started.store(true, Ordering::SeqCst);
         while !cancellation.is_cancelled() {
             thread::yield_now();
         }
-        InvocationResult::Cancelled(None)
+        InvocationCompletion::Cancelled(None)
     }
 }
 struct CancellableExecutor {
@@ -274,21 +278,21 @@ struct CancellableExecutor {
     observed: Arc<AtomicBool>,
 }
 impl InvocationExecutor for CancellableExecutor {
-    fn execute(&mut self, _: &ExecutionBoundary) -> InvocationResult<TypedValue> {
-        InvocationResult::Success(value("Str", "uncancelled"))
+    fn execute(&mut self, _: &ExecutionBoundary) -> InvocationCompletion<TypedValue> {
+        InvocationCompletion::Success(value("Str", "uncancelled"))
     }
 
     fn execute_controlled(
         &mut self,
         _: &ExecutionBoundary,
         cancellation: &CancellationToken,
-    ) -> InvocationResult<TypedValue> {
+    ) -> InvocationCompletion<TypedValue> {
         self.started.store(true, Ordering::SeqCst);
         while !cancellation.is_cancelled() {
             thread::yield_now();
         }
         self.observed.store(true, Ordering::SeqCst);
-        InvocationResult::Cancelled(None)
+        InvocationCompletion::Cancelled(None)
     }
 }
 struct ReentrantExecutor {
@@ -296,17 +300,17 @@ struct ReentrantExecutor {
     restarted: Arc<AtomicBool>,
 }
 impl InvocationExecutor for ReentrantExecutor {
-    fn execute(&mut self, _: &ExecutionBoundary) -> InvocationResult<TypedValue> {
+    fn execute(&mut self, _: &ExecutionBoundary) -> InvocationCompletion<TypedValue> {
         self.restarted
             .store(self.supervisor.restart().is_err(), Ordering::SeqCst);
-        InvocationResult::Success(value("Str", "stale"))
+        InvocationCompletion::Success(value("Str", "stale"))
     }
 }
 struct PanicExecutor {
     calls: Arc<AtomicUsize>,
 }
 impl InvocationExecutor for PanicExecutor {
-    fn execute(&mut self, _: &ExecutionBoundary) -> InvocationResult<TypedValue> {
+    fn execute(&mut self, _: &ExecutionBoundary) -> InvocationCompletion<TypedValue> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         panic!("executor panic")
     }
@@ -580,7 +584,10 @@ fn invocation_metadata_projects_failure_without_inventing_diagnostic_identity() 
         causes: Vec::new(),
     };
     runtime
-        .retain_terminal(&handle, InvocationResult::OrdinaryFailure(failure.clone()))
+        .retain_terminal(
+            &handle,
+            InvocationCompletion::OrdinaryFailure(failure.clone()),
+        )
         .unwrap();
 
     let projection = runtime.invocation_metadata(&handle).unwrap();
@@ -661,7 +668,10 @@ fn idempotency_replays_active_terminal_and_conflicts() {
         Admission::Active { .. }
     ));
     runtime
-        .retain_terminal(&handle, InvocationResult::Success(value("Str", "answer")))
+        .retain_terminal(
+            &handle,
+            InvocationCompletion::Success(value("Str", "answer")),
+        )
         .unwrap();
     let replayed = runtime.admit(first.clone()).unwrap();
     let Admission::Terminal {
@@ -708,7 +718,7 @@ fn run_executes_new_idempotent_work_once_and_replays_terminal_state() {
     request.idempotency_key = Some("key".into());
     let mut first = Executor {
         calls: 0,
-        result: InvocationResult::Success(value("Str", "answer")),
+        result: InvocationCompletion::Success(value("Str", "answer")),
     };
     assert!(matches!(
         runtime.run(request.clone(), &mut first),
@@ -720,7 +730,7 @@ fn run_executes_new_idempotent_work_once_and_replays_terminal_state() {
 
     let mut replay = Executor {
         calls: 0,
-        result: InvocationResult::Success(value("Str", "wrong")),
+        result: InvocationCompletion::Success(value("Str", "wrong")),
     };
     assert!(matches!(
         runtime.run(request, &mut replay),
@@ -738,7 +748,7 @@ fn run_rejects_async_mode_before_admission_or_effect() {
     runtime_request.transaction = TransactionMode::Separate;
     let mut executor = Executor {
         calls: 0,
-        result: InvocationResult::Success(value("Str", "must-not-run")),
+        result: InvocationCompletion::Success(value("Str", "must-not-run")),
     };
 
     assert_eq!(
@@ -755,7 +765,7 @@ fn run_rejects_async_mode_before_admission_or_effect() {
     supervisor_request.transaction = TransactionMode::Separate;
     let mut executor = Executor {
         calls: 0,
-        result: InvocationResult::Success(value("Str", "must-not-run")),
+        result: InvocationCompletion::Success(value("Str", "must-not-run")),
     };
     assert_eq!(
         supervisor.run(supervisor_request, &mut executor),
@@ -769,7 +779,7 @@ fn run_retains_cancellation_as_a_terminal_classification() {
     let mut runtime = Runtime::new(RuntimeId::new("r"));
     let mut executor = Executor {
         calls: 0,
-        result: InvocationResult::Cancelled(Some(diagnostic("cancelled"))),
+        result: InvocationCompletion::Cancelled(Some(diagnostic("cancelled"))),
     };
     let state = runtime.run(
         request(Some(value("Int", "1")), ArgumentMap::default()),
@@ -790,7 +800,7 @@ fn supervised_run_replays_the_retained_terminal_result_and_obeys_restart_fence()
     request.idempotency_key = Some("key".into());
     let mut first = Executor {
         calls: 0,
-        result: InvocationResult::Success(value("Str", "answer")),
+        result: InvocationCompletion::Success(value("Str", "answer")),
     };
     assert!(matches!(
         supervisor.run(request.clone(), &mut first),
@@ -801,7 +811,7 @@ fn supervised_run_replays_the_retained_terminal_result_and_obeys_restart_fence()
 
     let mut replay = Executor {
         calls: 0,
-        result: InvocationResult::Success(value("Str", "wrong")),
+        result: InvocationCompletion::Success(value("Str", "wrong")),
     };
     assert!(matches!(
         supervisor.run(request.clone(), &mut replay),
@@ -813,7 +823,7 @@ fn supervised_run_replays_the_retained_terminal_result_and_obeys_restart_fence()
     supervisor.restart().unwrap();
     let mut after_restart = Executor {
         calls: 0,
-        result: InvocationResult::Success(value("Str", "after-restart")),
+        result: InvocationCompletion::Success(value("Str", "after-restart")),
     };
     assert!(matches!(
         supervisor.run(request, &mut after_restart),
@@ -836,7 +846,7 @@ fn supervised_run_does_not_block_cancel_or_timeout_observation() {
             BlockingExecutor {
                 gate: Arc::clone(&active_gate),
                 calls: Arc::new(AtomicUsize::new(0)),
-                result: InvocationResult::Success(value("Str", "active")),
+                result: InvocationCompletion::Success(value("Str", "active")),
             },
         )
         .unwrap();
@@ -851,7 +861,7 @@ fn supervised_run_does_not_block_cancel_or_timeout_observation() {
             let mut executor = BlockingExecutor {
                 gate: run_gate,
                 calls: run_calls,
-                result: InvocationResult::Success(value("Str", "run")),
+                result: InvocationCompletion::Success(value("Str", "run")),
             };
             supervisor.run(
                 request(Some(value("Int", "2")), ArgumentMap::default()),
@@ -948,7 +958,7 @@ fn supervised_run_fences_restart_before_admission_and_execution() {
     let run_thread = thread::spawn(move || {
         let mut executor = Executor {
             calls: 0,
-            result: InvocationResult::Success(value("Str", "done")),
+            result: InvocationCompletion::Success(value("Str", "done")),
         };
         run_supervisor.run(
             request(Some(value("Int", "1")), ArgumentMap::default()),
@@ -1034,7 +1044,7 @@ fn restart_waits_for_a_running_synchronous_callback() {
             let mut executor = BlockingExecutor {
                 gate,
                 calls,
-                result: InvocationResult::Success(value("Str", "done")),
+                result: InvocationCompletion::Success(value("Str", "done")),
             };
             supervisor.run(
                 request(Some(value("Int", "1")), ArgumentMap::default()),
@@ -1087,7 +1097,7 @@ fn restart_pending_does_not_block_callback_cancel_or_await() {
             BlockingExecutor {
                 gate: Arc::clone(&gate),
                 calls: Arc::clone(&calls),
-                result: InvocationResult::Success(value("Str", "done")),
+                result: InvocationCompletion::Success(value("Str", "done")),
             },
         )
         .unwrap();
@@ -1154,7 +1164,7 @@ fn active_worker_terminal_drop_recovers_poisoned_execution_state() {
             BlockingExecutor {
                 gate: Arc::clone(&gate),
                 calls: Arc::clone(&calls),
-                result: InvocationResult::Success(value("Str", "done")),
+                result: InvocationCompletion::Success(value("Str", "done")),
             },
         )
         .unwrap();
@@ -1202,7 +1212,7 @@ fn restart_fences_admission_before_a_new_callback_can_begin() {
         let mut executor = BlockingExecutor {
             gate: run_gate,
             calls: run_calls,
-            result: InvocationResult::Success(value("Str", "unexpected")),
+            result: InvocationCompletion::Success(value("Str", "unexpected")),
         };
         run_supervisor.run(
             request(Some(value("Int", "1")), ArgumentMap::default()),
@@ -1261,7 +1271,7 @@ fn supervised_start_timeout_does_not_cancel_or_duplicate_work() {
             BlockingExecutor {
                 gate: Arc::clone(&gate),
                 calls: Arc::clone(&calls),
-                result: InvocationResult::Success(value("Str", "answer")),
+                result: InvocationCompletion::Success(value("Str", "answer")),
             },
         )
         .unwrap();
@@ -1300,7 +1310,7 @@ fn supervised_start_timeout_does_not_cancel_or_duplicate_work() {
             BlockingExecutor {
                 gate,
                 calls: Arc::clone(&replay_calls),
-                result: InvocationResult::Success(value("Str", "wrong")),
+                result: InvocationCompletion::Success(value("Str", "wrong")),
             },
         )
         .unwrap();
@@ -1585,7 +1595,7 @@ fn supervised_start_recovers_workers_mutex_poison_for_later_admission() {
             initial_request,
             Executor {
                 calls: 0,
-                result: InvocationResult::Success(value("Str", "must-not-run")),
+                result: InvocationCompletion::Success(value("Str", "must-not-run")),
             },
         ),
         Err(AdmissionError::RuntimeUnavailable)
@@ -1599,7 +1609,7 @@ fn supervised_start_recovers_workers_mutex_poison_for_later_admission() {
             fresh_request,
             Executor {
                 calls: 0,
-                result: InvocationResult::Success(value("Str", "recovered")),
+                result: InvocationCompletion::Success(value("Str", "recovered")),
             },
         )
         .unwrap();
@@ -1624,7 +1634,7 @@ fn supervised_await_reaps_the_completed_worker() {
             request,
             Executor {
                 calls: 0,
-                result: InvocationResult::Success(value("Str", "answer")),
+                result: InvocationCompletion::Success(value("Str", "answer")),
             },
         )
         .unwrap();
@@ -1651,7 +1661,7 @@ fn supervised_await_reaps_completed_worker_after_workers_mutex_poison() {
             request,
             Executor {
                 calls: 0,
-                result: InvocationResult::Success(value("Str", "done")),
+                result: InvocationCompletion::Success(value("Str", "done")),
             },
         )
         .unwrap();
@@ -1694,7 +1704,7 @@ fn public_handle_and_await_result_have_the_portable_terminal_shape() {
             request,
             Executor {
                 calls: 0,
-                result: InvocationResult::Success(value("Str", "answer")),
+                result: InvocationCompletion::Success(value("Str", "answer")),
             },
         )
         .unwrap();
@@ -1769,7 +1779,7 @@ fn supervised_start_retains_explicit_cancellation() {
             BlockingExecutor {
                 gate: Arc::clone(&gate),
                 calls: Arc::new(AtomicUsize::new(0)),
-                result: InvocationResult::Cancelled(None),
+                result: InvocationCompletion::Cancelled(None),
             },
         )
         .unwrap();
@@ -1840,13 +1850,13 @@ fn fences_foreign_and_stale_handles() {
     assert_eq!(
         right.retain_terminal(
             &handle,
-            InvocationResult::OrdinaryFailure(diagnostic("failed")),
+            InvocationCompletion::OrdinaryFailure(diagnostic("failed")),
         ),
         Err(AdmissionError::ForeignRuntime)
     );
     left.retain_terminal(
         &handle,
-        InvocationResult::OrdinaryFailure(diagnostic("failed")),
+        InvocationCompletion::OrdinaryFailure(diagnostic("failed")),
     )
     .unwrap();
     left.expire(&handle).unwrap();
@@ -1861,7 +1871,7 @@ fn fences_foreign_and_stale_handles() {
     assert_eq!(
         left.retain_terminal(
             &handle,
-            InvocationResult::OrdinaryFailure(diagnostic("failed")),
+            InvocationCompletion::OrdinaryFailure(diagnostic("failed")),
         ),
         Err(AdmissionError::ExpiredHandle)
     );
@@ -1905,7 +1915,7 @@ fn restart_changes_runtime_generation_and_retains_active_as_orphaned() {
 
     let mut executor = Executor {
         calls: 0,
-        result: InvocationResult::Success(value("Str", "must-not-run")),
+        result: InvocationCompletion::Success(value("Str", "must-not-run")),
     };
     assert!(matches!(
         runtime.run(active_request, &mut executor),
@@ -1936,7 +1946,7 @@ fn restart_preserves_terminal_result_and_fences_old_handle() {
     runtime
         .retain_terminal(
             &old_handle,
-            InvocationResult::Success(value("Str", "answer")),
+            InvocationCompletion::Success(value("Str", "answer")),
         )
         .unwrap();
 
@@ -1948,7 +1958,7 @@ fn restart_preserves_terminal_result_and_fences_old_handle() {
     );
     let mut executor = Executor {
         calls: 0,
-        result: InvocationResult::Success(value("Str", "must-not-run")),
+        result: InvocationCompletion::Success(value("Str", "must-not-run")),
     };
     assert!(matches!(
         runtime.run(request, &mut executor),
@@ -2069,7 +2079,10 @@ fn terminal_expiration_retains_complete_result_without_operational_handle() {
     };
 
     runtime
-        .retain_terminal(&handle, InvocationResult::Success(value("Str", "answer")))
+        .retain_terminal(
+            &handle,
+            InvocationCompletion::Success(value("Str", "answer")),
+        )
         .unwrap();
     runtime.expire(&handle).unwrap();
 
@@ -2089,7 +2102,7 @@ fn terminal_expiration_retains_complete_result_without_operational_handle() {
 
     let mut executor = Executor {
         calls: 0,
-        result: InvocationResult::Success(value("Str", "rerun")),
+        result: InvocationCompletion::Success(value("Str", "rerun")),
     };
     assert!(matches!(
         runtime.run(request.clone(), &mut executor),
@@ -2116,14 +2129,17 @@ fn terminal_expiration_retains_complete_result_across_restart() {
         _ => unreachable!(),
     };
     runtime
-        .retain_terminal(&handle, InvocationResult::Success(value("Str", "before")))
+        .retain_terminal(
+            &handle,
+            InvocationCompletion::Success(value("Str", "before")),
+        )
         .unwrap();
     runtime.expire(&handle).unwrap();
     runtime.restart();
 
     let mut executor = Executor {
         calls: 0,
-        result: InvocationResult::Success(value("Str", "after")),
+        result: InvocationCompletion::Success(value("Str", "after")),
     };
     assert!(matches!(
         runtime.run(request, &mut executor),
@@ -2146,7 +2162,7 @@ fn invocation_id_exhaustion_fails_closed_without_overwriting_retained_state() {
     runtime
         .retain_terminal(
             &retained_handle,
-            InvocationResult::Success(value("Str", "retained")),
+            InvocationCompletion::Success(value("Str", "retained")),
         )
         .unwrap();
 
@@ -2171,13 +2187,12 @@ fn invocation_id_exhaustion_fails_closed_without_overwriting_retained_state() {
 }
 #[test]
 fn cancellation_is_not_ordinary_failure() {
-    let cancelled: InvocationResult<()> = InvocationResult::Cancelled(Some(Diagnostic {
+    let cancelled: InvocationCompletion<()> = InvocationCompletion::Cancelled(Some(Diagnostic {
         code: "cancelled",
         message: "cancelled",
         fields: BTreeMap::new(),
         causes: Vec::new(),
     }));
-    assert_eq!(cancelled.ordinary_failure(), None);
     assert_eq!(cancelled.terminal_class(), TerminalClass::Cancelled);
 }
 #[test]
@@ -2201,7 +2216,7 @@ fn cancellation_request_is_idempotent_and_wins_over_late_completion() {
     );
 
     runtime
-        .retain_terminal(&handle, InvocationResult::Cancelled(None))
+        .retain_terminal(&handle, InvocationCompletion::Cancelled(None))
         .unwrap();
     assert!(runtime.cancel(&handle, None).unwrap());
     assert_eq!(
@@ -2223,7 +2238,7 @@ fn cancellation_request_is_idempotent_and_wins_over_late_completion() {
     completed
         .retain_terminal(
             &completed_handle,
-            InvocationResult::Success(value("Str", "done")),
+            InvocationCompletion::Success(value("Str", "done")),
         )
         .unwrap();
     assert!(completed.cancel(&completed_handle, None).unwrap());
@@ -2250,7 +2265,7 @@ fn cancellation_wins_over_late_terminal_classification() {
         .cancel(&handle, Some(diagnostic("cancelled")))
         .unwrap();
     runtime
-        .retain_terminal(&handle, InvocationResult::Success(value("Str", "late")))
+        .retain_terminal(&handle, InvocationCompletion::Success(value("Str", "late")))
         .unwrap();
 
     assert_eq!(
@@ -2271,7 +2286,7 @@ fn committed_terminal_classification_wins_over_late_cancellation() {
     };
 
     runtime
-        .retain_terminal(&handle, InvocationResult::Success(value("Str", "done")))
+        .retain_terminal(&handle, InvocationCompletion::Success(value("Str", "done")))
         .unwrap();
     runtime
         .classify_terminal(&handle, TerminalClass::Cancelled)
@@ -2320,12 +2335,15 @@ fn retained_terminal_result_is_absorbing() {
     };
 
     runtime
-        .retain_terminal(&handle, InvocationResult::Success(value("Str", "answer")))
+        .retain_terminal(
+            &handle,
+            InvocationCompletion::Success(value("Str", "answer")),
+        )
         .unwrap();
     runtime
         .retain_terminal(
             &handle,
-            InvocationResult::Cancelled(Some(diagnostic("cancelled"))),
+            InvocationCompletion::Cancelled(Some(diagnostic("cancelled"))),
         )
         .unwrap();
 
@@ -2352,7 +2370,7 @@ fn terminal_result_type_is_validated_before_retention() {
     assert_eq!(
         runtime.retain_terminal(
             &handle,
-            InvocationResult::Success(value("Int", "not-a-string")),
+            InvocationCompletion::Success(value("Int", "not-a-string")),
         ),
         Err(AdmissionError::ReturnType)
     );
@@ -2365,48 +2383,11 @@ fn terminal_result_type_is_validated_before_retention() {
 }
 
 #[test]
-fn malformed_synchronous_completion_is_redacted_terminal_failure_before_error() {
-    let mut runtime = Runtime::new(RuntimeId::new("r"));
-    let mut request = request(Some(value("Int", "1")), ArgumentMap::default());
-    request.idempotency_key = Some("malformed".into());
-    let mut executor = Executor {
-        calls: 0,
-        result: InvocationResult {
-            invocation: InvocationRef::from_id(InvocationId::new("forged")),
-            status: InvocationStatus::Running,
-            value: Some(value("Str", "must-not-retain")),
-            failure: Some(diagnostic("must-not-retain")),
-            started: Some(Instant::now()),
-            ended: Instant::now(),
-            duration: Some(Duration::from_secs(1)),
-        },
-    };
-
-    assert_eq!(
-        runtime.run(request.clone(), &mut executor),
-        Err(AdmissionError::MalformedCompletion)
-    );
-    assert_eq!(executor.calls, 1);
-    assert!(matches!(
-        runtime.admit(request),
-        Ok(Admission::Terminal {
-            outcome: TerminalClass::Failed,
-            result: RetainedInvocationResult::OrdinaryFailure(Diagnostic {
-                code: "sys.invoke.malformed_completion",
-                fields,
-                ..
-            }),
-            ..
-        }) if fields.is_empty()
-    ));
-}
-
-#[test]
 fn failure_cancellation_and_orphan_are_complete_terminal_results() {
     let outcomes = [
-        InvocationResult::OrdinaryFailure(diagnostic("failed")),
-        InvocationResult::Cancelled(Some(diagnostic("cancelled"))),
-        InvocationResult::Orphaned(Some(diagnostic("orphaned"))),
+        InvocationCompletion::OrdinaryFailure(diagnostic("failed")),
+        InvocationCompletion::Cancelled(Some(diagnostic("cancelled"))),
+        InvocationCompletion::Orphaned(Some(diagnostic("orphaned"))),
     ];
     let expected = [
         TerminalClass::Failed,
@@ -2463,7 +2444,7 @@ fn protected_success_discards_canonical_bytes_before_retention() {
     runtime
         .retain_terminal(
             &handle,
-            InvocationResult::Success(TypedValue::protected(
+            InvocationCompletion::Success(TypedValue::protected(
                 ty("Str"),
                 include_str!("../tests/fixtures/secret-surface.orna").as_bytes(),
             )),

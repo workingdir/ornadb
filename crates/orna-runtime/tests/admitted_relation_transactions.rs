@@ -95,12 +95,21 @@ async fn commit(
         .expect("checkpoint retained")
 }
 
-async fn publish(state: &RuntimeState, checkpoint: &Checkpoint, intent: u8, commit_id: &str) {
-    let freeze = state
+async fn publish(
+    repository: &Repository,
+    state: &RuntimeState,
+    checkpoint: &Checkpoint,
+    intent: u8,
+    commit_id: &str,
+) {
+    let writer = state
+        .publication_writer(repository)
+        .expect("take the worktree publication lease");
+    let freeze = writer
         .freeze([intent; 16], checkpoint)
         .await
         .expect("freeze published checkpoint");
-    state
+    writer
         .complete_publication(
             &freeze,
             &PublicationCommitId::new(commit_id).expect("commit id"),
@@ -143,6 +152,7 @@ async fn admitted_relation_reads_published_head_and_excludes_the_unpublished_tai
 
     let published = commit(&state, writer, &[admitted(21, 1, b"published")], 5).await;
     publish(
+        &repository,
         &state,
         &published,
         6,
@@ -216,6 +226,7 @@ async fn admitted_relation_head_ignores_a_freeze_that_never_completed() {
     )
     .await;
     publish(
+        &repository,
         &state,
         &first,
         6,
@@ -231,7 +242,12 @@ async fn admitted_relation_head_ignores_a_freeze_that_never_completed() {
         7,
     )
     .await;
-    state.freeze([8; 16], &second).await.expect("freeze tail");
+    state
+        .publication_writer(&repository)
+        .expect("take the worktree publication lease")
+        .freeze([8; 16], &second)
+        .await
+        .expect("freeze tail");
 
     let head = state
         .select_published_snapshot()
@@ -552,6 +568,7 @@ async fn admitted_relations_read_together_share_one_published_head_pin() {
     )
     .await;
     publish(
+        &repository,
         &state,
         &published,
         6,

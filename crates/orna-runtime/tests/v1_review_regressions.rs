@@ -361,7 +361,7 @@ async fn unadmitted_data_only_generation_allows_first_catalogue_admission() {
 
 #[tokio::test]
 async fn compact_freeze_publishes_authoritative_ordered_mutations_and_recovers() {
-    let (directory, state) = {
+    let (directory, repository, state) = {
         let (directory, repository) = repository();
         let state = RuntimeState::open(
             &repository,
@@ -373,7 +373,7 @@ async fn compact_freeze_publishes_authoritative_ordered_mutations_and_recovers()
         )
         .await
         .expect("open fresh runtime");
-        (directory, state)
+        (directory, repository, state)
     };
     let lease = state
         .acquire_lease([15; 16])
@@ -408,6 +408,8 @@ async fn compact_freeze_publishes_authoritative_ordered_mutations_and_recovers()
         candidate_generation: checkpoint.generation,
     };
     let freeze = state
+        .publication_writer(&repository)
+        .expect("publication lease")
         .freeze_compact([73; 16], &checkpoint, std::slice::from_ref(&identity))
         .await
         .expect("freeze compact candidate");
@@ -500,6 +502,8 @@ async fn compact_freeze_publishes_authoritative_ordered_mutations_and_recovers()
     };
     assert_eq!(
         state
+            .publication_writer(&repository)
+            .expect("publication lease")
             .freeze_compact([74; 16], &checkpoint, &[stale_identity])
             .await,
         Err(orna_runtime::RuntimeError::RecoveryInvalid)
@@ -511,6 +515,8 @@ async fn compact_freeze_publishes_authoritative_ordered_mutations_and_recovers()
     };
     assert_eq!(
         state
+            .publication_writer(&repository)
+            .expect("publication lease")
             .freeze_compact(
                 [74; 16],
                 &stale,

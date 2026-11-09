@@ -605,7 +605,12 @@ async fn publish_recovers_ref_advanced_journal_before_selecting_pending_tail() {
     );
 
     let checkpoint = state.latest_checkpoint().await.unwrap().unwrap();
-    let freeze = state.freeze([0xd1; 16], &checkpoint).await.unwrap();
+    let freeze = state
+        .publication_writer(&repository)
+        .unwrap()
+        .freeze([0xd1; 16], &checkpoint)
+        .await
+        .unwrap();
     let base_head = repository.head().unwrap().unwrap();
     let index = repository.index_generation().unwrap();
     let prepared = orna_storage::RuntimePublicationCoordinator::prepare(

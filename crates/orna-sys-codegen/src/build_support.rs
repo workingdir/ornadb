@@ -10,6 +10,10 @@ use syn::{
     visit::{self, Visit},
 };
 
+use orna_sys_model::signature::{
+    matching_delimiter, split_top_level as split_signature, valid_identifier,
+};
+
 pub const GENERATED_API_LANGUAGE_VERSION: &str = "1.1.0";
 pub const GENERATED_API_SYS_VERSION: &str = "1.1";
 const GENERATED_API_STATUS: &str =
@@ -20,7 +24,6 @@ const SYS_API_SOURCE_OF_TRUTH: &str =
     "api/sys.json; normative semantics in source chapters and generated system reference";
 #[derive(Clone, Debug)]
 pub struct Function {
-    #[allow(dead_code)] // Read by collector proofs; not needed while emitting API JSON.
     pub method: String,
     pub metadata: Value,
     /// Compiler-known semantic role, omitted from frozen `api/sys.json`.
@@ -490,7 +493,6 @@ const PUBLISHED_API_TOP_LEVEL_ORDER: [&str; 16] = [
 /// graph and operation descriptors collected from annotated implementations.
 /// Counts are derived here so the checked-in artifact cannot become an input
 /// to its own generator.
-#[allow(dead_code)] // Called by build.rs; integration proofs validate its build output.
 pub fn generate_system_api_document(
     mut inventory: Value,
     functions: Vec<Value>,
@@ -1394,57 +1396,8 @@ fn parse_signature_identity(signature: &str) -> Result<SignatureIdentity, String
 }
 
 fn split_top_level(input: &str) -> Result<Vec<&str>, String> {
-    let mut parts = Vec::new();
-    let (mut angle, mut square, mut paren) = (0_i32, 0_i32, 0_i32);
-    let mut start = 0;
-    for (index, character) in input.char_indices() {
-        match character {
-            '<' => angle += 1,
-            '>' => angle -= 1,
-            '[' => square += 1,
-            ']' => square -= 1,
-            '(' => paren += 1,
-            ')' => paren -= 1,
-            ',' if angle == 0 && square == 0 && paren == 0 => {
-                parts.push(&input[start..index]);
-                start = index + character.len_utf8();
-            }
-            _ => {}
-        }
-        if angle < 0 || square < 0 || paren < 0 {
-            return Err("function signature has unbalanced parameter types".to_owned());
-        }
-    }
-    if angle != 0 || square != 0 || paren != 0 {
-        return Err("function signature has unbalanced parameter types".to_owned());
-    }
-    if !input[start..].trim().is_empty() {
-        parts.push(&input[start..]);
-    }
-    Ok(parts)
-}
-
-fn matching_delimiter(input: &str, open: usize, left: char, right: char) -> Option<usize> {
-    let mut depth = 0;
-    for (index, character) in input.char_indices().skip_while(|(index, _)| *index < open) {
-        if character == left {
-            depth += 1;
-        } else if character == right {
-            depth -= 1;
-            if depth == 0 {
-                return Some(index);
-            }
-        }
-    }
-    None
-}
-
-fn valid_identifier(identifier: &str) -> bool {
-    let mut chars = identifier.chars();
-    chars
-        .next()
-        .is_some_and(|first| first == '_' || first.is_ascii_alphabetic())
-        && chars.all(|character| character == '_' || character.is_ascii_alphanumeric())
+    split_signature(input, ',')
+        .map_err(|_| "function signature has unbalanced parameter types".to_owned())
 }
 
 fn valid_sys_path(path: &str) -> bool {

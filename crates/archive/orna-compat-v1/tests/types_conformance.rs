@@ -4,9 +4,9 @@
 //! cover the finite/non-finite admission boundary, IEEE ordinary equality,
 //! unordered NaN comparisons, bit preservation and checked result-row
 //! transport. Type checking and aggregate execution are compiler/evaluator
-//! responsibilities, not implemented by `orna-core`.
+//! responsibilities, not implemented by `orna-compat-v1`.
 
-use orna_core::{
+use orna_compat_v1::{
     types::{ResolvedType, StandardScalar},
     value::{ResultColumn, ResultRow, ResultRows, RuntimeFloat, RuntimeValue},
 };

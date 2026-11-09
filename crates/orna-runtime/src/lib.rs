@@ -79,6 +79,7 @@ mod invocation;
 mod lease;
 mod observation;
 mod publication;
+mod publication_writer;
 mod query;
 mod recovery;
 mod repository_identity;
@@ -140,6 +141,7 @@ pub use publication::{
     PublicationTableIdentity, PublicationValueEncoding, RuntimePublicationMetadata,
     RuntimePublicationMetadataRows, RuntimePublicationPolicy,
 };
+pub use publication_writer::PublicationWriter;
 pub use request::{
     MAX_TERMINAL_OUTCOME_BYTES, RecoveredRequest, RecoveryDisposition, RequestAdmissionCapability,
     RequestIdentity, RequestOwner, RequestState, RequestStatus, TerminalOutcome,
@@ -205,6 +207,9 @@ pub struct RuntimeState {
     system_dispatch: &'static orna_sys::SystemDispatchTable,
     system_provider_roles: orna_sys::ProviderRoleRegistry,
     vfs_repository_cache: vfs::VfsRepositoryCache,
+    /// The runtime root this database belongs to. A publication lease taken
+    /// for another worktree never authorises this state (PUB-3 step 7).
+    pub(crate) runtime_root: PathBuf,
 }
 
 enum RequestActivationTransactionError {
@@ -589,6 +594,10 @@ impl RuntimeState {
             system_provider_roles,
             vfs_repository_cache,
             writer_authority,
+            runtime_root: path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from(".")),
         };
         state.migrate_observation_projection_schema().await?;
         state.migrate_stream_observation_failure_identity().await?;
@@ -4176,6 +4185,32 @@ mod tests {
         );
     }
 
+    /// Publishes the pending mutation of an accepted VFS save through the
+    /// worktree publication writer, leaving the checkpoint consumed.
+    async fn publish_saved_generation(
+        state: &RuntimeState,
+        repo: &orna_repository::Repository,
+        intent: [u8; 16],
+    ) {
+        let checkpoint = state
+            .latest_checkpoint()
+            .await
+            .unwrap()
+            .expect("the save publishes its checkpoint");
+        let freeze = state
+            .publication_writer(repo)
+            .unwrap()
+            .freeze(intent, &checkpoint)
+            .await
+            .unwrap();
+        state
+            .publication_writer(repo)
+            .unwrap()
+            .complete_publication(&freeze, &PublicationCommitId::new(vec![b'a'; 40]).unwrap())
+            .await
+            .unwrap();
+    }
+
     /// ORNA-VFS-008: publication prunes the pending mutation record. An exact
     /// replay of an already-accepted candidate after publication must not
     /// advance the durable generation or re-admit the mutation. This asserts
@@ -4246,16 +4281,7 @@ mod tests {
         ));
 
         // Publication consumes the pending mutation record of the accepted save.
-        let checkpoint = state
-            .latest_checkpoint()
-            .await
-            .unwrap()
-            .expect("the save publishes its checkpoint");
-        let freeze = state.freeze(id(9), &checkpoint).await.unwrap();
-        state
-            .complete_publication(&freeze, &PublicationCommitId::new(vec![b'a'; 40]).unwrap())
-            .await
-            .unwrap();
+        publish_saved_generation(&state, &repo, id(9)).await;
         assert!(state.pending().await.unwrap().is_empty());
 
         // The replay of the identical candidate arrives after publication.
@@ -4369,16 +4395,7 @@ mod tests {
         ));
 
         // Publication consumes the pending mutation record of the accepted save.
-        let checkpoint = state
-            .latest_checkpoint()
-            .await
-            .unwrap()
-            .expect("the save publishes its checkpoint");
-        let freeze = state.freeze(id(9), &checkpoint).await.unwrap();
-        state
-            .complete_publication(&freeze, &PublicationCommitId::new(vec![b'a'; 40]).unwrap())
-            .await
-            .unwrap();
+        publish_saved_generation(&state, &repo, id(9)).await;
         assert!(state.pending().await.unwrap().is_empty());
 
         // The replay of the identical candidate arrives after publication.
@@ -4678,8 +4695,15 @@ mod tests {
             .await
             .unwrap()
             .expect("the save publishes its checkpoint");
-        let freeze = state.freeze(id(9), &checkpoint).await.unwrap();
+        let freeze = state
+            .publication_writer(&repo)
+            .unwrap()
+            .freeze(id(9), &checkpoint)
+            .await
+            .unwrap();
         state
+            .publication_writer(&repo)
+            .unwrap()
             .complete_publication(&freeze, &PublicationCommitId::new(vec![b'a'; 40]).unwrap())
             .await
             .unwrap();
@@ -6715,8 +6739,15 @@ mod tests {
             .await
             .unwrap();
         let checkpoint = state.latest_checkpoint().await.unwrap().unwrap();
-        let freeze = state.freeze(id(7), &checkpoint).await.unwrap();
+        let freeze = state
+            .publication_writer(&repo)
+            .unwrap()
+            .freeze(id(7), &checkpoint)
+            .await
+            .unwrap();
         state
+            .publication_writer(&repo)
+            .unwrap()
             .complete_publication(&freeze, &PublicationCommitId::new(vec![b'a'; 40]).unwrap())
             .await
             .unwrap();
@@ -16085,7 +16116,12 @@ mod tests {
             .await
             .unwrap();
         let checkpoint = state.latest_checkpoint().await.unwrap().unwrap();
-        let freeze = state.freeze(id(7), &checkpoint).await.unwrap();
+        let freeze = state
+            .publication_writer(&repo)
+            .unwrap()
+            .freeze(id(7), &checkpoint)
+            .await
+            .unwrap();
         assert_eq!(
             state
                 .pending_table_mutations_through(&freeze)
@@ -16113,6 +16149,8 @@ mod tests {
 
         let checkpoint = state.latest_checkpoint().await.unwrap().unwrap();
         let freeze = state
+            .publication_writer(&repo)
+            .unwrap()
             .freeze_compact(
                 id(9),
                 &checkpoint,
@@ -30228,20 +30266,23 @@ mod tests {
             digest: digest(6),
             mutation_sequence: 1,
         };
-        let first = state.freeze(id(7), &checkpoint).await.unwrap();
-        assert_eq!(state.freeze(id(7), &checkpoint).await.unwrap(), first);
-        assert_eq!(
-            state
-                .freeze(
-                    id(7),
-                    &Checkpoint {
-                        digest: digest(8),
-                        ..checkpoint
-                    }
-                )
-                .await,
-            Err(RuntimeError::ConflictingPublicationIntent)
-        );
+        {
+            let writer = state.publication_writer(&repo).unwrap();
+            let first = writer.freeze(id(7), &checkpoint).await.unwrap();
+            assert_eq!(writer.freeze(id(7), &checkpoint).await.unwrap(), first);
+            assert_eq!(
+                writer
+                    .freeze(
+                        id(7),
+                        &Checkpoint {
+                            digest: digest(8),
+                            ..checkpoint
+                        }
+                    )
+                    .await,
+                Err(RuntimeError::ConflictingPublicationIntent)
+            );
+        }
         drop(state);
         let reopened = open_state(&repo).await;
         reopened.validate_recovery().await.unwrap();
@@ -30312,6 +30353,8 @@ mod tests {
             .await
             .unwrap();
         let freeze = state
+            .publication_writer(&repo)
+            .unwrap()
             .freeze(
                 id(7),
                 &Checkpoint {
@@ -30338,21 +30381,24 @@ mod tests {
         );
 
         let published = PublicationCommitId::new(vec![b'a'; 40]).unwrap();
-        state
-            .complete_publication(&freeze, &published)
-            .await
-            .unwrap();
-        assert_eq!(state.pending_through(&freeze).await.unwrap(), Vec::new());
-        assert_eq!(state.pending().await.unwrap(), vec![mutation(8)]);
-        state
-            .complete_publication(&freeze, &published)
-            .await
-            .unwrap();
-        let different = PublicationCommitId::new(vec![b'b'; 40]).unwrap();
-        assert_eq!(
-            state.complete_publication(&freeze, &different).await,
-            Err(RuntimeError::ConflictingPublicationCommit)
-        );
+        {
+            let writer = state.publication_writer(&repo).unwrap();
+            writer
+                .complete_publication(&freeze, &published)
+                .await
+                .unwrap();
+            assert_eq!(state.pending_through(&freeze).await.unwrap(), Vec::new());
+            assert_eq!(state.pending().await.unwrap(), vec![mutation(8)]);
+            writer
+                .complete_publication(&freeze, &published)
+                .await
+                .unwrap();
+            let different = PublicationCommitId::new(vec![b'b'; 40]).unwrap();
+            assert_eq!(
+                writer.complete_publication(&freeze, &different).await,
+                Err(RuntimeError::ConflictingPublicationCommit)
+            );
+        }
 
         drop(state);
         let reopened = open_state(&repo).await;
@@ -30371,6 +30417,8 @@ mod tests {
             .await
             .unwrap();
         let freeze = state
+            .publication_writer(&repo)
+            .unwrap()
             .freeze(
                 id(7),
                 &Checkpoint {
@@ -30403,6 +30451,8 @@ mod tests {
 
         assert_eq!(
             state
+                .publication_writer(&repo)
+                .unwrap()
                 .complete_publication(&freeze, &PublicationCommitId::new(vec![b'a'; 40]).unwrap(),)
                 .await,
             Err(RuntimeError::CompactPublicationRequired)
@@ -30425,6 +30475,8 @@ mod tests {
             .await
             .unwrap();
         let freeze = state
+            .publication_writer(&repo)
+            .unwrap()
             .freeze(
                 id(7),
                 &Checkpoint {
@@ -32738,7 +32790,12 @@ mod tests {
             .await
             .unwrap();
         let checkpoint = state.latest_checkpoint().await.unwrap().unwrap();
-        state.freeze(id(7), &checkpoint).await.unwrap();
+        state
+            .publication_writer(&repo)
+            .unwrap()
+            .freeze(id(7), &checkpoint)
+            .await
+            .unwrap();
         state
             .connection
             .execute(
