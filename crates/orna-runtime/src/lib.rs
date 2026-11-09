@@ -10299,24 +10299,7 @@ impl RuntimeState {
     /// takeover.
     pub async fn current_lease(&self) -> Result<Option<WriterLease>, RuntimeError> {
         self.require_lease_authority()?;
-        let mut rows = self
-            .connection
-            .query(
-                "SELECT owner_id, epoch FROM writer_lease WHERE singleton = 1",
-                (),
-            )
-            .await?;
-        let Some(row) = rows.next().await? else {
-            return Ok(None);
-        };
-        let owner_id = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
-        let epoch: i64 = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
-        let epoch = u64::try_from(epoch).map_err(|_| RuntimeError::RecoveryInvalid)?;
-        validate_id(owner_id)?;
-        if epoch == 0 {
-            return Err(RuntimeError::RecoveryInvalid);
-        }
-        Ok(Some(WriterLease { owner_id, epoch }))
+        current_writer_lease_tx(&self.connection).await
     }
 
     /// Atomically replaces exactly the expected abandoned writer lease.
@@ -10485,7 +10468,7 @@ impl RuntimeState {
             .ok_or(RuntimeError::RecoveryInvalid)?
             .get(0)
             .map_err(|_| RuntimeError::RecoveryInvalid)?;
-        let epoch = u64::try_from(epoch).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let epoch = decode_stored_epoch(epoch)?;
         Ok(WriterLease {
             owner_id: replacement,
             epoch,
@@ -10533,9 +10516,11 @@ impl RuntimeState {
         let Some(row) = fence.next().await? else {
             return Ok(TakeoverBarrier::Clear);
         };
-        let owner = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
-        let epoch: i64 = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
-        if owner != replacement.owner_id || u64::try_from(epoch).ok() != Some(replacement.epoch) {
+        let owner = decode_stored_writer_lease(
+            row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?;
+        if owner != replacement {
             return Err(RuntimeError::RecoveryPending);
         }
         let mut running = transaction
@@ -12154,9 +12139,9 @@ impl RuntimeState {
     /// Starts a legacy request without durable ownership.
     ///
     /// This compatibility path is only valid before a writer lease exists;
-    /// live writers must use [`Self::start_request_with_owner`]. A legacy
-    /// Running row that already exists before lease acquisition remains
-    /// recoverable through [`Self::recover_legacy_running_request`].
+    /// live writers must use [`Self::start_request_with_owner_and_admission`].
+    /// A legacy Running row that already exists before lease acquisition
+    /// remains recoverable through [`Self::recover_legacy_running_request`].
     pub async fn start_request(
         &self,
         identity: RequestIdentity,
@@ -12170,37 +12155,6 @@ impl RuntimeState {
             None,
         )
         .await
-    }
-
-    /// Rejects owner-only promotion of a Reserved row. Reserved requests must
-    /// use the capability-bound start path so persisted reservations cannot be
-    /// promoted without authenticated admission evidence.
-    pub async fn start_request_with_owner(
-        &self,
-        identity: RequestIdentity,
-        fingerprint: [u8; 32],
-        owner: WriterLease,
-    ) -> Result<RequestStatus, RuntimeError> {
-        validate_request_identity(identity)?;
-        validate_id(owner.owner_id)?;
-        if owner.epoch == 0 {
-            return Err(RuntimeError::InvalidIdentity);
-        }
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await?;
-        self.require_owner(&tx, owner).await?;
-        let current = request_status_tx(&tx, identity)
-            .await?
-            .ok_or(RuntimeError::RequestUnknown)?;
-        require_fingerprint(&current, fingerprint)?;
-        if current.state != RequestState::Reserved {
-            return Err(RuntimeError::RequestStateConflict);
-        }
-        // This owner-only compatibility entry point has no capability to
-        // authenticate. Reserved rows must use the capability-bound path.
-        Err(RuntimeError::RequestStateConflict)
     }
 
     /// Starts a newly admitted request with the exact capability issued by
@@ -14267,9 +14221,11 @@ impl RuntimeState {
         let Some(row) = rows.next().await? else {
             return Ok(());
         };
-        let owner = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
-        let epoch: i64 = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
-        if owner != lease.owner_id || u64::try_from(epoch).ok() != Some(lease.epoch) {
+        let owner = decode_stored_writer_lease(
+            row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?;
+        if owner != lease {
             return Err(RuntimeError::RecoveryPending);
         }
         Ok(())
@@ -14294,16 +14250,10 @@ impl RuntimeState {
         lease: WriterLease,
     ) -> Result<(), RuntimeError> {
         self.require_lease_authority()?;
-        let mut rows = tx
-            .query(
-                "SELECT owner_id, epoch FROM writer_lease WHERE singleton = 1",
-                (),
-            )
-            .await?;
-        let row = rows.next().await?.ok_or(RuntimeError::OwnerLost)?;
-        let owner = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
-        let epoch: i64 = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
-        if owner != lease.owner_id || u64::try_from(epoch).ok() != Some(lease.epoch) {
+        let owner = current_writer_lease_row_tx(tx)
+            .await?
+            .ok_or(RuntimeError::OwnerLost)?;
+        if owner != lease {
             return Err(RuntimeError::OwnerLost);
         }
         Ok(())
@@ -18563,7 +18513,37 @@ async fn record_published_prefix_tx(
     Ok(())
 }
 
-async fn current_writer_lease_tx(
+/// Decodes a stored writer epoch.
+///
+/// The `writer_lease` and `takeover_recovery_pending` schemas forbid a zero
+/// epoch (`CHECK (epoch > 0)` / `CHECK (owner_epoch > 0)`), so a stored zero
+/// means the row contradicts the schema and the store cannot supply the
+/// required data: `sys.storage.unavailable`
+/// (`reference/Orna-1.1.0/source/34-system-reference.md:3533`). Every reader
+/// of a stored lease or fence row uses this decoder so that corrupted row has
+/// one code instead of the caller-input validator's `InvalidIdentity`.
+fn decode_stored_epoch(epoch: i64) -> Result<u64, RuntimeError> {
+    let epoch = u64::try_from(epoch).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    if epoch == 0 {
+        return Err(RuntimeError::StorageUnavailable);
+    }
+    Ok(epoch)
+}
+
+/// Decodes one stored `(owner_id, epoch)` lease or takeover-fence row.
+///
+/// The identity itself is validated by callers that treat a stored zero owner
+/// as an invalid identity; comparison readers keep their existing mismatch
+/// outcome.
+fn decode_stored_writer_lease(owner_id: Vec<u8>, epoch: i64) -> Result<WriterLease, RuntimeError> {
+    Ok(WriterLease {
+        owner_id: fixed(owner_id)?,
+        epoch: decode_stored_epoch(epoch)?,
+    })
+}
+
+/// The current `writer_lease` row, decoded once for every reader.
+async fn current_writer_lease_row_tx(
     connection: &Connection,
 ) -> Result<Option<WriterLease>, RuntimeError> {
     let mut rows = connection
@@ -18575,15 +18555,26 @@ async fn current_writer_lease_tx(
     let Some(row) = rows.next().await? else {
         return Ok(None);
     };
-    let owner_id = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
-    let epoch = u64::try_from(
-        row.get::<i64>(1)
-            .map_err(|_| RuntimeError::RecoveryInvalid)?,
-    )
-    .map_err(|_| RuntimeError::RecoveryInvalid)?;
-    let lease = WriterLease { owner_id, epoch };
-    validate_writer_lease(lease)?;
-    Ok(Some(lease))
+    Ok(Some(decode_stored_writer_lease(
+        row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
+    )?))
+}
+
+/// The current `writer_lease` row with the identity a bearer may hold.
+///
+/// A stored zero owner is the caller-input identity validator's
+/// `InvalidIdentity`; every other shape is [`decode_stored_writer_lease`].
+async fn current_writer_lease_tx(
+    connection: &Connection,
+) -> Result<Option<WriterLease>, RuntimeError> {
+    let lease = current_writer_lease_row_tx(connection).await?;
+    if let Some(lease) = lease {
+        validate_id(lease.owner_id)?;
+        Ok(Some(lease))
+    } else {
+        Ok(None)
+    }
 }
 
 /// The current writer lease and the runtime owner lock identity it is bound
@@ -18601,14 +18592,11 @@ async fn bound_writer_lease_tx(
     let Some(row) = rows.next().await? else {
         return Ok(None);
     };
-    let owner_id = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
-    let epoch = u64::try_from(
-        row.get::<i64>(1)
-            .map_err(|_| RuntimeError::RecoveryInvalid)?,
-    )
-    .map_err(|_| RuntimeError::RecoveryInvalid)?;
-    let lease = WriterLease { owner_id, epoch };
-    validate_writer_lease(lease)?;
+    let lease = decode_stored_writer_lease(
+        row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
+    )?;
+    validate_id(lease.owner_id)?;
     let lock_id = row
         .get::<Option<Vec<u8>>>(2)
         .map_err(|_| RuntimeError::RecoveryInvalid)?
@@ -48509,12 +48497,6 @@ mod tests {
             .await
             .unwrap();
         let capability = capability.expect("fresh owner-bound capability");
-        assert_eq!(
-            state
-                .start_request_with_owner(registration.request, fingerprint, owner)
-                .await,
-            Err(RuntimeError::RequestStateConflict)
-        );
         let started = state
             .begin_observed_request_with_admission(
                 registration.clone(),
@@ -50349,7 +50331,7 @@ mod tests {
         let state = open_state(&repo).await;
         let identity = request(4, 5);
         let fingerprint = digest(6);
-        let owner = state.acquire_lease(id(7)).await.unwrap();
+        state.acquire_lease(id(7)).await.unwrap();
         state.reserve_request(identity, fingerprint).await.unwrap();
 
         assert_eq!(
@@ -50364,12 +50346,6 @@ mod tests {
                 .unwrap()
                 .state,
             RequestState::Reserved
-        );
-        assert_eq!(
-            state
-                .start_request_with_owner(identity, fingerprint, owner)
-                .await,
-            Err(RuntimeError::RequestStateConflict)
         );
     }
     #[tokio::test]
