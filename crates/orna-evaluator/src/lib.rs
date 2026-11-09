@@ -4908,18 +4908,50 @@ enum RelationRow {
     End,
 }
 
+/// What one stage of a running relation plan remembers between rows.
+#[derive(Default)]
+struct RelationStageState {
+    /// Rows a `Drop` stage has skipped or a `Take` stage has passed on.
+    count: usize,
+    /// The rows a `Distinct` stage has kept.
+    distinct: DistinctValueFold,
+    /// The previous row of a `Pairs` stage.
+    previous: Option<Value>,
+    /// The open windows of a `Window` stage.
+    window: Option<RelationWindowState>,
+}
+
+impl RelationStageState {
+    /// Fresh state for each of `stage_count` stages. A state is indexed by its
+    /// stage's absolute position in the plan, so a stage keeps its state when
+    /// the plan is split around a sort or bucket stage.
+    fn for_stages(stage_count: usize) -> Vec<Self> {
+        (0..stage_count).map(|_| Self::default()).collect()
+    }
+}
+
+/// Whether some `Take` stage of `stages` has already passed on everything it
+/// will take. `stage_offset` is the absolute position of `stages[0]`.
+fn take_exhausted(
+    stages: &[RelationStage],
+    states: &[RelationStageState],
+    stage_offset: usize,
+) -> bool {
+    stages.iter().enumerate().any(|(offset, stage)| {
+        matches!(stage, RelationStage::Take(count) if states[stage_offset + offset].count >= *count)
+    })
+}
+
 /// A downstream stage can reject a value after an earlier `take` has already
 /// emitted its full result. Preserve the rejection while also closing the
 /// source scan so the next page is not read just to rediscover that bound.
 fn rejected_relation_rows(
     stages: &[RelationStage],
-    counters: &[usize],
+    states: &[RelationStageState],
     stage_offset: usize,
 ) -> Vec<RelationRow> {
     let mut rows = vec![RelationRow::Skip];
-    if stages.iter().enumerate().any(|(offset, stage)| {
-        matches!(stage, RelationStage::Take(count) if counters[stage_offset + offset] >= *count)
-    }) {
+    if take_exhausted(stages, states, stage_offset) {
         rows.push(RelationRow::End);
     }
     rows
@@ -7285,52 +7317,27 @@ impl Context<'_, '_> {
             else {
                 unreachable!("sort_by returns a list");
             };
-            let mut distinct_seen = vec![DistinctValueFold::default(); plan.stages.len()];
-            let mut pair_previous = vec![None; plan.stages.len()];
-            let mut window_states = (0..plan.stages.len())
-                .map(|_| None)
-                .collect::<Vec<Option<RelationWindowState>>>();
+            let mut states = RelationStageState::for_stages(plan.stages.len());
             return self.for_each_buffered_relation(
                 sorted.into_vec(),
                 &suffix[sort_pos + 1..],
                 bucket_index + sort_pos + 2,
                 depth,
-                &mut distinct_seen,
-                &mut pair_previous,
-                &mut window_states,
+                &mut states,
                 visit,
             );
         }
-        let mut counters = vec![0usize; plan.stages.len()];
-        let mut distinct_seen = vec![DistinctValueFold::default(); plan.stages.len()];
-        let mut pair_previous = vec![None; plan.stages.len()];
-        let mut window_states = (0..plan.stages.len())
-            .map(|_| None)
-            .collect::<Vec<Option<RelationWindowState>>>();
+        let mut states = RelationStageState::for_stages(plan.stages.len());
         let mut emit =
             |context: &mut Self, bucket: RelationBucket| -> Result<bool, EvaluationError> {
                 let rows = context.apply_relation_stages(
                     Value::list(bucket.values),
                     suffix,
-                    &mut counters,
-                    &mut distinct_seen,
-                    &mut pair_previous,
-                    &mut window_states,
+                    &mut states,
                     bucket_index + 1,
                     depth + 1,
                 )?;
-                for row in rows {
-                    match row {
-                        RelationRow::Skip => {}
-                        RelationRow::End => return Ok(false),
-                        RelationRow::Yield(value) => {
-                            if !visit(context, *value)? {
-                                return Ok(false);
-                            }
-                        }
-                    }
-                }
-                Ok(true)
+                context.deliver_relation_rows(rows, &mut *visit)
             };
         let mut ended = false;
         self.for_each_sorted_relation(&prefix, depth, |context, value| {
@@ -7692,38 +7699,14 @@ impl Context<'_, '_> {
             self.validate_relation_plan_sources(plan)?;
             return Ok(());
         }
-        let mut counters = vec![0usize; plan.stages.len()];
-        let mut distinct_seen = vec![DistinctValueFold::default(); plan.stages.len()];
-        let mut pair_previous = vec![None; plan.stages.len()];
-        let mut window_states = (0..plan.stages.len())
-            .map(|_| None)
-            .collect::<Vec<Option<RelationWindowState>>>();
+        let mut states = RelationStageState::for_stages(plan.stages.len());
         // A04-05: a scan charges every streamed row one step. Only values that
         // a stage or terminal retains count against `max_collection_items`.
         self.for_each_relation_source_value(plan, depth, page_limit, &mut |context, value| {
             context.step()?;
-            let rows = context.apply_relation_stages(
-                value,
-                &plan.stages,
-                &mut counters,
-                &mut distinct_seen,
-                &mut pair_previous,
-                &mut window_states,
-                0,
-                depth + 1,
-            )?;
-            for row in rows {
-                match row {
-                    RelationRow::Skip => {}
-                    RelationRow::End => return Ok(false),
-                    RelationRow::Yield(value) => {
-                        if !visit(context, *value)? {
-                            return Ok(false);
-                        }
-                    }
-                }
-            }
-            Ok(true)
+            let rows =
+                context.apply_relation_stages(value, &plan.stages, &mut states, 0, depth + 1)?;
+            context.deliver_relation_rows(rows, &mut visit)
         })
     }
 
@@ -7818,17 +7801,38 @@ impl Context<'_, '_> {
         Ok(true)
     }
 
-    /// these from the plan they are walking.
-    /// One relation stage's rows, counters and visitor: the stage callers pass
-    #[allow(clippy::too_many_arguments)]
+    /// Hands one stage run's rows to `visit`. Returns `false` once the run is
+    /// over: a stage ended it or `visit` asked to stop.
+    fn deliver_relation_rows<V>(
+        &mut self,
+        rows: Vec<RelationRow>,
+        visit: &mut V,
+    ) -> Result<bool, EvaluationError>
+    where
+        V: FnMut(&mut Self, Value) -> Result<bool, EvaluationError> + ?Sized,
+    {
+        for row in rows {
+            match row {
+                RelationRow::Skip => {}
+                RelationRow::End => return Ok(false),
+                RelationRow::Yield(value) => {
+                    if !visit(self, *value)? {
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    /// Runs one value through `stages` and returns the rows to hand on.
+    /// `stage_offset` is the absolute position of `stages[0]`, which indexes
+    /// `states`.
     fn apply_relation_stages(
         &mut self,
         mut value: Value,
         stages: &[RelationStage],
-        counters: &mut [usize],
-        distinct_seen: &mut [DistinctValueFold],
-        pair_previous: &mut [Option<Value>],
-        window_states: &mut [Option<RelationWindowState>],
+        states: &mut [RelationStageState],
         stage_offset: usize,
         depth: usize,
     ) -> Result<Vec<RelationRow>, EvaluationError> {
@@ -7837,13 +7841,13 @@ impl Context<'_, '_> {
             match stage {
                 RelationStage::Filter(predicates) => {
                     if !self.relation_filter_passes(&value, predicates.iter(), depth + 1)? {
-                        return Ok(rejected_relation_rows(stages, counters, stage_offset));
+                        return Ok(rejected_relation_rows(stages, states, stage_offset));
                     }
                 }
                 RelationStage::SharedFilter(batch) => {
                     let predicates = batch.chunks().iter().flat_map(|chunk| chunk.iter());
                     if !self.relation_filter_passes(&value, predicates, depth + 1)? {
-                        return Ok(rejected_relation_rows(stages, counters, stage_offset));
+                        return Ok(rejected_relation_rows(stages, states, stage_offset));
                     }
                 }
                 RelationStage::Map(transform) => {
@@ -7852,57 +7856,52 @@ impl Context<'_, '_> {
                 RelationStage::FlatMap(transform) => {
                     self.step()?;
                     let mapped = self.invoke_predicate(transform, value, depth + 1)?;
-                    let suffix = &stages[local_index + 1..];
                     return self.apply_relation_flat_map(
                         mapped,
                         stages,
-                        suffix,
-                        counters,
-                        distinct_seen,
-                        pair_previous,
-                        window_states,
+                        local_index,
+                        states,
                         stage_offset,
-                        index + 1,
                         depth + 1,
                     );
                 }
                 RelationStage::BucketBy(_) => return Err(error("ORNA-EVAL-UNSUPPORTED")),
                 RelationStage::Distinct => {
-                    let seen = &mut distinct_seen[index];
+                    let seen = &mut states[index].distinct;
                     if !seen.insert(value.clone())? {
-                        return Ok(rejected_relation_rows(stages, counters, stage_offset));
+                        return Ok(rejected_relation_rows(stages, states, stage_offset));
                     }
                     self.items(seen.len())?;
                 }
                 RelationStage::Pairs => {
-                    let Some(previous) = pair_previous[index].replace(value.clone()) else {
-                        return Ok(rejected_relation_rows(stages, counters, stage_offset));
+                    let Some(previous) = states[index].previous.replace(value.clone()) else {
+                        return Ok(rejected_relation_rows(stages, states, stage_offset));
                     };
                     self.items(2)?;
                     value = Value::Tuple(vec![previous, value]);
                 }
                 RelationStage::Window(size, step) => {
-                    let state = window_states[index].get_or_insert_with(|| {
+                    let state = states[index].window.get_or_insert_with(|| {
                         RelationWindowState::try_new(*size, *step)
                             .expect("window stage parameters are validated")
                     });
                     self.items(state.next_item_bound())?;
                     let Some(window) = state.push(value) else {
-                        return Ok(rejected_relation_rows(stages, counters, stage_offset));
+                        return Ok(rejected_relation_rows(stages, states, stage_offset));
                     };
                     value = Value::list(window);
                 }
                 RelationStage::Drop(count) => {
-                    if counters[index] < *count {
-                        counters[index] += 1;
-                        return Ok(rejected_relation_rows(stages, counters, stage_offset));
+                    if states[index].count < *count {
+                        states[index].count += 1;
+                        return Ok(rejected_relation_rows(stages, states, stage_offset));
                     }
                 }
                 RelationStage::Take(count) => {
-                    if counters[index] >= *count {
+                    if states[index].count >= *count {
                         return Ok(vec![RelationRow::End]);
                     }
-                    counters[index] += 1;
+                    states[index].count += 1;
                 }
                 RelationStage::SortBy(_) => {
                     return Err(error("ORNA-EVAL-UNSUPPORTED"));
@@ -7910,30 +7909,25 @@ impl Context<'_, '_> {
             }
         }
         let mut rows = vec![RelationRow::Yield(Box::new(value))];
-        if stages.iter().enumerate().any(|(offset, stage)| {
-            matches!(stage, RelationStage::Take(count) if counters[stage_offset + offset] >= *count)
-        }) {
+        if take_exhausted(stages, states, stage_offset) {
             rows.push(RelationRow::End);
         }
         Ok(rows)
     }
 
-    /// these from the plan they are walking.
-    /// One relation stage's rows, counters and visitor: the stage callers pass
-    #[allow(clippy::too_many_arguments)]
+    /// Feeds every inner row of a `flat_map` result through the stages after
+    /// the `flat_map` at `stages[flat_map_index]`.
     fn apply_relation_flat_map(
         &mut self,
         mapped: Value,
         stages: &[RelationStage],
-        suffix: &[RelationStage],
-        counters: &mut [usize],
-        distinct_seen: &mut [DistinctValueFold],
-        pair_previous: &mut [Option<Value>],
-        window_states: &mut [Option<RelationWindowState>],
+        flat_map_index: usize,
+        states: &mut [RelationStageState],
         stage_offset: usize,
-        suffix_offset: usize,
         depth: usize,
     ) -> Result<Vec<RelationRow>, EvaluationError> {
+        let suffix = &stages[flat_map_index + 1..];
+        let suffix_offset = stage_offset + flat_map_index + 1;
         let mut rows = Vec::new();
         match mapped {
             Value::List(inner) => {
@@ -7946,10 +7940,7 @@ impl Context<'_, '_> {
                     let inner_rows = self.apply_relation_stages(
                         inner_value,
                         suffix,
-                        counters,
-                        distinct_seen,
-                        pair_previous,
-                        window_states,
+                        states,
                         suffix_offset,
                         depth + 1,
                     )?;
@@ -7972,10 +7963,7 @@ impl Context<'_, '_> {
                     let inner_rows = context.apply_relation_stages(
                         inner_value,
                         suffix,
-                        counters,
-                        distinct_seen,
-                        pair_previous,
-                        window_states,
+                        states,
                         suffix_offset,
                         depth + 1,
                     )?;
@@ -7988,9 +7976,7 @@ impl Context<'_, '_> {
             _ => return Err(error("ORNA-EVAL-TYPE")),
         }
         if !rows.iter().any(|row| matches!(row, RelationRow::End))
-            && stages.iter().enumerate().any(|(offset, stage)| {
-                matches!(stage, RelationStage::Take(count) if counters[stage_offset + offset] >= *count)
-            })
+            && take_exhausted(stages, states, stage_offset)
         {
             rows.push(RelationRow::End);
         }
@@ -8043,35 +8029,26 @@ impl Context<'_, '_> {
             unreachable!("sort_by returns a list")
         };
         let suffix = &plan.stages[sort_index + 1..];
-        let mut distinct_seen = vec![DistinctValueFold::default(); plan.stages.len()];
-        let mut pair_previous = vec![None; plan.stages.len()];
-        let mut window_states = (0..plan.stages.len())
-            .map(|_| None)
-            .collect::<Vec<Option<RelationWindowState>>>();
+        let mut states = RelationStageState::for_stages(plan.stages.len());
         self.for_each_buffered_relation(
             sorted.into_vec(),
             suffix,
             sort_index + 1,
             depth,
-            &mut distinct_seen,
-            &mut pair_previous,
-            &mut window_states,
+            &mut states,
             visit,
         )
     }
 
-    /// these from the plan they are walking.
-    /// One relation stage's rows, counters and visitor: the stage callers pass
-    #[allow(clippy::too_many_arguments)]
+    /// Runs buffered `values` through `stages`, sorting at each `SortBy`
+    /// stage. `stage_offset` is the absolute position of `stages[0]`.
     fn for_each_buffered_relation(
         &mut self,
         values: Vec<Value>,
         stages: &[RelationStage],
         stage_offset: usize,
         depth: usize,
-        distinct_seen: &mut [DistinctValueFold],
-        pair_previous: &mut [Option<Value>],
-        window_states: &mut [Option<RelationWindowState>],
+        states: &mut [RelationStageState],
         visit: impl FnMut(&mut Self, Value) -> Result<bool, EvaluationError>,
     ) -> Result<(), EvaluationError> {
         let Some(sort_index) = stages
@@ -8083,9 +8060,7 @@ impl Context<'_, '_> {
                 stages,
                 stage_offset,
                 depth,
-                distinct_seen,
-                pair_previous,
-                window_states,
+                states,
                 visit,
             );
         };
@@ -8096,9 +8071,7 @@ impl Context<'_, '_> {
             prefix,
             stage_offset,
             depth,
-            distinct_seen,
-            pair_previous,
-            window_states,
+            states,
             |context, value| {
                 upstream.push(value);
                 context.items(upstream.len())?;
@@ -8117,25 +8090,19 @@ impl Context<'_, '_> {
             &stages[sort_index + 1..],
             stage_offset + sort_index + 1,
             depth,
-            distinct_seen,
-            pair_previous,
-            window_states,
+            states,
             visit,
         )
     }
 
-    /// these from the plan they are walking.
-    /// One relation stage's rows, counters and visitor: the stage callers pass
-    #[allow(clippy::too_many_arguments)]
+    /// Runs buffered `values` through sort-free `stages`.
     fn for_each_buffered_stages(
         &mut self,
         values: Vec<Value>,
         stages: &[RelationStage],
         stage_offset: usize,
         depth: usize,
-        distinct_seen: &mut [DistinctValueFold],
-        pair_previous: &mut [Option<Value>],
-        window_states: &mut [Option<RelationWindowState>],
+        states: &mut [RelationStageState],
         mut visit: impl FnMut(&mut Self, Value) -> Result<bool, EvaluationError>,
     ) -> Result<(), EvaluationError> {
         if stages
@@ -8144,32 +8111,15 @@ impl Context<'_, '_> {
         {
             return Ok(());
         }
-        let mut counters = vec![0usize; stage_offset + stages.len()];
         for value in values {
             // Buffered relation stages can run without a predicate or visitor
             // that performs its own evaluator step. Keep this materialized
             // path as cancellation-aware as the paged source path.
             self.step()?;
-            let rows = self.apply_relation_stages(
-                value,
-                stages,
-                &mut counters,
-                distinct_seen,
-                pair_previous,
-                window_states,
-                stage_offset,
-                depth + 1,
-            )?;
-            for row in rows {
-                match row {
-                    RelationRow::Skip => {}
-                    RelationRow::End => return Ok(()),
-                    RelationRow::Yield(value) => {
-                        if !visit(self, *value)? {
-                            return Ok(());
-                        }
-                    }
-                }
+            let rows =
+                self.apply_relation_stages(value, stages, states, stage_offset, depth + 1)?;
+            if !self.deliver_relation_rows(rows, &mut visit)? {
+                return Ok(());
             }
         }
         Ok(())
@@ -19379,18 +19329,14 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
             ..Context::new(Limits::default(), &functions)
         };
         let mut callbacks = 0;
-        let mut distinct_seen = Vec::new();
-        let mut pair_previous = Vec::new();
-        let mut window_states = Vec::new();
+        let mut states = Vec::new();
 
         let result = context.for_each_buffered_stages(
             vec![Value::Int(1.into()), Value::Int(2.into())],
             &[],
             0,
             0,
-            &mut distinct_seen,
-            &mut pair_previous,
-            &mut window_states,
+            &mut states,
             |_, _| {
                 callbacks += 1;
                 Ok(true)
