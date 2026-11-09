@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
-use crate::cli_dispatch::{
+use crate::cli_source_edit::{
     checked_project_source_path, restore_source_after_failed_write, write_source_atomically,
 };
 use crate::encoding::hex;
