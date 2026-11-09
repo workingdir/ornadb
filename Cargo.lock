@@ -1703,6 +1703,7 @@ dependencies = [
  "num-bigint 0.4.8",
  "num-traits",
  "orna-foundation",
+ "orna-intrinsics",
  "orna-syntax",
  "orna-sys",
  "orna-value",
