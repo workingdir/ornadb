@@ -7,7 +7,7 @@
 //! envelope validation remains owned by `orna-protocol`; this crate checks
 //! the small serving-state subset that it consumes.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use orna_protocol::{Envelope, Message, TargetKind};
 
@@ -56,12 +56,25 @@ impl Limits {
 
 /// Opaque, comparable authentication material.  It intentionally has no
 /// accessor, `Display`, or derived `Debug`, so diagnostics cannot leak it.
-#[derive(Clone, Eq, PartialEq)]
+/// Equality is constant-time; a derived `PartialEq` would stop at the first
+/// differing byte.
+#[derive(Clone, Eq)]
 pub struct Credential([u8; 32]);
 
 impl Credential {
     pub const fn new(bytes: [u8; 32]) -> Self {
         Self(bytes)
+    }
+}
+
+impl PartialEq for Credential {
+    #[inline(never)]
+    fn eq(&self, other: &Self) -> bool {
+        let mut difference = 0u8;
+        for (&left, &right) in self.0.iter().zip(other.0.iter()) {
+            difference |= left ^ right;
+        }
+        std::hint::black_box(difference == 0)
     }
 }
 
@@ -141,15 +154,6 @@ impl core::fmt::Display for Error {
 impl std::error::Error for Error {}
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[inline(never)]
-fn credentials_equal(left: &Credential, right: &Credential) -> bool {
-    let mut difference = 0u8;
-    for (&left, &right) in left.0.iter().zip(right.0.iter()) {
-        difference |= left ^ right;
-    }
-    std::hint::black_box(difference == 0)
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Patch {
     Set { key: String, value: String },
@@ -183,16 +187,41 @@ struct Watch {
     next_action: u64,
 }
 
+/// Connection lifecycle of one session.
+///
+/// `Closed` is terminal: [`Serving::session`] and [`Serving::session_mut`] refuse a
+/// closed session, so no operation can observe or revive it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Link {
+    Connected,
+    Disconnected,
+    Closed,
+}
+
 #[derive(Clone, Debug)]
 struct Session {
     credential: Credential,
     origin: Origin,
-    connected: bool,
-    closed: bool,
+    link: Link,
     page: BTreeMap<String, String>,
     retained: VecDeque<PageRevision>,
     watches: BTreeMap<Id, Watch>,
     requests: BTreeMap<Id, RequestState>,
+}
+
+impl Session {
+    /// A lost transport starts the finite reconnection lease, during which no
+    /// new client operation is admitted.
+    fn require_connected(&self) -> Result<()> {
+        match self.link {
+            Link::Connected => Ok(()),
+            Link::Disconnected | Link::Closed => Err(Error::SessionClosed),
+        }
+    }
+
+    fn close(&mut self) {
+        self.link = Link::Closed;
+    }
 }
 
 /// Pure session state.  The caller owns scheduling, authentication lookup,
@@ -229,7 +258,7 @@ impl Serving {
         if self.sessions.contains_key(&session_id) {
             return Err(Error::SessionExists);
         }
-        if self.sessions.len() == self.limits.max_sessions {
+        if self.sessions.len() >= self.limits.max_sessions {
             return Err(Error::SessionLimit);
         }
         self.sessions.insert(
@@ -237,8 +266,7 @@ impl Serving {
             Session {
                 credential,
                 origin,
-                connected: true,
-                closed: false,
+                link: Link::Connected,
                 page: BTreeMap::new(),
                 retained: VecDeque::new(),
                 watches: BTreeMap::new(),
@@ -249,7 +277,7 @@ impl Serving {
     }
 
     pub fn disconnect(&mut self, session_id: Id) -> Result<()> {
-        self.session_mut(session_id)?.connected = false;
+        self.session_mut(session_id)?.link = Link::Disconnected;
         Ok(())
     }
 
@@ -257,10 +285,10 @@ impl Serving {
     /// required and a deletion failure leaves this session closed.
     pub fn reconnect(&mut self, session_id: Id, credential: &Credential) -> Result<()> {
         let session = self.session_mut(session_id)?;
-        if !credentials_equal(&session.credential, credential) {
+        if session.credential != *credential {
             return Err(Error::CredentialRejected);
         }
-        session.connected = true;
+        session.link = Link::Connected;
         Ok(())
     }
 
@@ -272,7 +300,7 @@ impl Serving {
     /// Returns the same session or credential error as [`Self::reconnect`].
     pub fn validate_reconnect(&self, session_id: Id, credential: &Credential) -> Result<()> {
         let session = self.session(session_id)?;
-        if !credentials_equal(&session.credential, credential) {
+        if session.credential != *credential {
             return Err(Error::CredentialRejected);
         }
         Ok(())
@@ -288,7 +316,7 @@ impl Serving {
         replacement: Credential,
     ) -> Result<()> {
         let session = self.session_mut(session_id)?;
-        if !credentials_equal(&session.credential, current) {
+        if session.credential != *current {
             return Err(Error::CredentialRejected);
         }
         session.credential = replacement;
@@ -307,9 +335,7 @@ impl Serving {
     /// closed, requiring the transport layer to request a fresh snapshot.
     pub fn resync(&mut self, session_id: Id, after: u64) -> Result<Vec<PageRevision>> {
         let session = self.session_mut(session_id)?;
-        if !session.connected {
-            return Err(Error::SessionClosed);
-        }
+        session.require_connected()?;
         let first = session.retained.front().map(|entry| entry.revision);
         if first.is_some_and(|revision| after.saturating_add(1) < revision) {
             return Err(Error::ReplayRequired);
@@ -344,12 +370,12 @@ impl Serving {
             return Err(Error::RevisionMismatch);
         }
         let mut candidate = session.page.clone();
-        let mut touched = BTreeMap::<&str, ()>::new();
+        let mut touched = BTreeSet::<&str>::new();
         for patch in patches {
             let key = match patch {
                 Patch::Set { key, .. } | Patch::Remove { key } => key,
             };
-            if key.is_empty() || touched.insert(key, ()).is_some() {
+            if key.is_empty() || !touched.insert(key) {
                 return Err(Error::PatchMalformed);
             }
             match patch {
@@ -378,7 +404,7 @@ impl Serving {
             watch.revision = new_revision;
         }
         if session.retained.len() > max_replay {
-            let _ = session.retained.pop_front();
+            session.retained.pop_front();
         }
         Ok(())
     }
@@ -386,10 +412,8 @@ impl Serving {
     pub fn open_watch(&mut self, session_id: Id, watch_id: Id, revision: u64) -> Result<()> {
         let max_watches = self.limits.max_watches_per_session;
         let session = self.session_mut(session_id)?;
-        if !session.connected {
-            return Err(Error::SessionClosed);
-        }
-        if session.watches.contains_key(&watch_id) || session.watches.len() == max_watches {
+        session.require_connected()?;
+        if session.watches.contains_key(&watch_id) || session.watches.len() >= max_watches {
             return Err(Error::WatchLimit);
         }
         let current = session.retained.back().map_or(0, |entry| entry.revision);
@@ -422,9 +446,7 @@ impl Serving {
     ) -> Result<()> {
         let action_limit = self.limits.max_actions_per_watch;
         let session = self.session_mut(session_id)?;
-        if !session.connected {
-            return Err(Error::SessionClosed);
-        }
+        session.require_connected()?;
         let watch = session
             .watches
             .get_mut(&watch_id)
@@ -445,11 +467,7 @@ impl Serving {
     pub fn reserve_request(&mut self, session_id: Id, request_id: Id) -> Result<()> {
         let max_requests = self.limits.max_requests_per_session;
         let session = self.session_mut(session_id)?;
-        // A lost WebSocket starts the finite reconnection lease, but it must
-        // not admit any new client operation while that lease is running.
-        if !session.connected {
-            return Err(Error::SessionClosed);
-        }
+        session.require_connected()?;
         if session.requests.contains_key(&request_id) {
             return Err(Error::RequestTerminal);
         }
@@ -515,28 +533,25 @@ impl Serving {
     /// failure is terminal: no reconnect is permitted afterwards.
     pub fn credential_deleted(&mut self, session_id: Id, deleted: bool) -> Result<()> {
         let session = self.session_mut(session_id)?;
-        if !deleted {
-            session.closed = true;
-            session.connected = false;
-            return Err(Error::CredentialDeletionFailed);
+        session.close();
+        if deleted {
+            Ok(())
+        } else {
+            Err(Error::CredentialDeletionFailed)
         }
-        session.closed = true;
-        session.connected = false;
-        Ok(())
     }
 
     /// Origin deletion follows the same fail-closed rule.  Origin identity is
     /// retained solely internally and never included in an error.
     pub fn origin_deleted(&mut self, session_id: Id, origin: Origin, deleted: bool) -> Result<()> {
         let session = self.session_mut(session_id)?;
-        if session.origin != origin || !deleted {
-            session.closed = true;
-            session.connected = false;
-            return Err(Error::OriginDeletionFailed);
+        let confirmed = deleted && session.origin == origin;
+        session.close();
+        if confirmed {
+            Ok(())
+        } else {
+            Err(Error::OriginDeletionFailed)
         }
-        session.closed = true;
-        session.connected = false;
-        Ok(())
     }
 
     /// Recognise cancellation requests in the protocol vocabulary without
@@ -546,22 +561,16 @@ impl Serving {
     pub fn cancel_envelope(&mut self, session_id: Id, envelope: &Envelope) -> Result<()> {
         match &envelope.message {
             Message::Cancel {
-                target_kind: TargetKind::Request,
+                target_kind,
                 target,
             } if envelope.request.is_some()
                 && envelope.watch.is_none()
                 && envelope.request != Some(*target) =>
             {
-                self.cancel_request(session_id, *target)
-            }
-            Message::Cancel {
-                target_kind: TargetKind::Watch,
-                target,
-            } if envelope.request.is_some()
-                && envelope.watch.is_none()
-                && envelope.request != Some(*target) =>
-            {
-                self.close_watch(session_id, *target)
+                match target_kind {
+                    TargetKind::Request => self.cancel_request(session_id, *target),
+                    TargetKind::Watch => self.close_watch(session_id, *target),
+                }
             }
             _ => Err(Error::MalformedAdmission),
         }
@@ -572,7 +581,7 @@ impl Serving {
             .sessions
             .get(&session_id)
             .ok_or(Error::SessionUnknown)?;
-        if session.closed {
+        if session.link == Link::Closed {
             return Err(Error::SessionClosed);
         }
         Ok(session)
@@ -583,7 +592,7 @@ impl Serving {
             .sessions
             .get_mut(&session_id)
             .ok_or(Error::SessionUnknown)?;
-        if session.closed {
+        if session.link == Link::Closed {
             return Err(Error::SessionClosed);
         }
         Ok(session)
@@ -733,20 +742,14 @@ mod tests {
     #[test]
     fn credential_matching_is_exact_and_redacted() {
         let expected = credential();
-        assert!(credentials_equal(&expected, &Credential::new([7; 32])));
+        assert_eq!(expected, Credential::new([7; 32]));
 
         let mut first_byte_differs = [7; 32];
         first_byte_differs[0] = 8;
         let mut last_byte_differs = [7; 32];
         last_byte_differs[31] = 8;
-        assert!(!credentials_equal(
-            &expected,
-            &Credential::new(first_byte_differs)
-        ));
-        assert!(!credentials_equal(
-            &expected,
-            &Credential::new(last_byte_differs)
-        ));
+        assert_ne!(expected, Credential::new(first_byte_differs));
+        assert_ne!(expected, Credential::new(last_byte_differs));
         assert_eq!(format!("{expected:?}"), "Credential(REDACTED)");
     }
 
@@ -1013,5 +1016,32 @@ mod tests {
             Err(Error::OriginDeletionFailed)
         );
         assert_eq!(state.disconnect(id(1),), Err(Error::SessionClosed));
+    }
+
+    #[test]
+    fn confirmed_deletion_still_closes_the_session() {
+        let mut credential_gone = admitted();
+        assert_eq!(credential_gone.credential_deleted(id(1), true), Ok(()));
+        assert_eq!(
+            credential_gone.reconnect(id(1), &credential()),
+            Err(Error::SessionClosed)
+        );
+
+        let mut origin_gone = admitted();
+        assert_eq!(
+            origin_gone.origin_deleted(id(1), Origin(id(2)), true),
+            Ok(())
+        );
+        assert_eq!(origin_gone.disconnect(id(1)), Err(Error::SessionClosed));
+    }
+
+    #[test]
+    fn origin_deletion_for_another_origin_fails_closed() {
+        let mut state = admitted();
+        assert_eq!(
+            state.origin_deleted(id(1), Origin(id(9)), true),
+            Err(Error::OriginDeletionFailed)
+        );
+        assert_eq!(state.disconnect(id(1)), Err(Error::SessionClosed));
     }
 }
