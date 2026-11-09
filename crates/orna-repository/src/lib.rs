@@ -2974,8 +2974,6 @@ impl Repository {
         &self,
         max_commits: usize,
     ) -> Result<Vec<CommittedLogEntry>, RepositoryError> {
-        const MAX_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
-
         if max_commits == 0 || self.head()?.is_none() {
             return Ok(Vec::new());
         }
@@ -2986,30 +2984,8 @@ impl Repository {
             .args(["log", "-z"])
             .arg(format!("--max-count={max_commits}"))
             .arg("--format=format:%H%x00%cI%x00%an%x00%s%x00")
-            .arg("HEAD")
-            .stdout(Stdio::piped());
-        let mut child = command
-            .spawn()
-            .map_err(|_| RepositoryError::GitUnavailable)?;
-        let mut output = Vec::new();
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or(RepositoryError::GitOperationFailed)?;
-        let read_result = stdout
-            .take((MAX_OUTPUT_BYTES + 1) as u64)
-            .read_to_end(&mut output);
-        if read_result.is_err() || output.len() > MAX_OUTPUT_BYTES {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(RepositoryError::GitOperationFailed);
-        }
-        let status = child
-            .wait()
-            .map_err(|_| RepositoryError::GitOperationFailed)?;
-        if !status.success() {
-            return Err(RepositoryError::GitOperationFailed);
-        }
+            .arg("HEAD");
+        let output = run_bounded_listing(command)?;
 
         let object_id_length = self.native_object_id_length()?;
         let mut fields = output.split(|byte| *byte == 0);
@@ -3052,8 +3028,6 @@ impl Repository {
         start: &str,
         max_commits: usize,
     ) -> Result<Vec<CommittedRevisionSnapshot>, RepositoryError> {
-        const MAX_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
-
         if max_commits > MAX_COMMITTED_REVISION_WALK {
             return Err(RepositoryError::SourceTreeLimit);
         }
@@ -3063,37 +3037,13 @@ impl Repository {
 
         let object_id_length = self.native_object_id_length()?;
         let mut command = self.command();
-        command
-            .env("GIT_NO_LAZY_FETCH", "1")
-            .args([
-                "log",
-                &format!("--max-count={max_commits}"),
-                "--format=%H %T%x09%ct%x09%an <%ae>%x09%(trailers:key=Orna-Migration,valueonly)",
-                start,
-            ])
-            .stdout(Stdio::piped());
-        let mut child = command
-            .spawn()
-            .map_err(|_| RepositoryError::GitUnavailable)?;
-        let mut output = Vec::new();
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or(RepositoryError::GitOperationFailed)?;
-        let read_result = stdout
-            .take((MAX_OUTPUT_BYTES + 1) as u64)
-            .read_to_end(&mut output);
-        if read_result.is_err() || output.len() > MAX_OUTPUT_BYTES {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(RepositoryError::GitOperationFailed);
-        }
-        let status = child
-            .wait()
-            .map_err(|_| RepositoryError::GitOperationFailed)?;
-        if !status.success() {
-            return Err(RepositoryError::GitOperationFailed);
-        }
+        command.env("GIT_NO_LAZY_FETCH", "1").args([
+            "log",
+            &format!("--max-count={max_commits}"),
+            "--format=%H %T%x09%ct%x09%an <%ae>%x09%(trailers:key=Orna-Migration,valueonly)",
+            start,
+        ]);
+        let output = run_bounded_listing(command)?;
         let text = std::str::from_utf8(&output).map_err(|_| RepositoryError::GitOperationFailed)?;
         let mut snapshots = Vec::new();
         for line in text.lines() {
@@ -3167,8 +3117,6 @@ impl Repository {
         &self,
         max_branches: usize,
     ) -> Result<Vec<CommittedBranch>, RepositoryError> {
-        const MAX_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
-
         if max_branches == 0 {
             return Ok(Vec::new());
         }
@@ -3179,30 +3127,8 @@ impl Repository {
             .args(["for-each-ref", "--count"])
             .arg(max_branches.to_string())
             .arg("--format=%(refname:strip=2)%00%(objectname)")
-            .arg("refs/heads")
-            .stdout(Stdio::piped());
-        let mut child = command
-            .spawn()
-            .map_err(|_| RepositoryError::GitUnavailable)?;
-        let mut output = Vec::new();
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or(RepositoryError::GitOperationFailed)?;
-        let read_result = stdout
-            .take((MAX_OUTPUT_BYTES + 1) as u64)
-            .read_to_end(&mut output);
-        if read_result.is_err() || output.len() > MAX_OUTPUT_BYTES {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(RepositoryError::GitOperationFailed);
-        }
-        let status = child
-            .wait()
-            .map_err(|_| RepositoryError::GitOperationFailed)?;
-        if !status.success() {
-            return Err(RepositoryError::GitOperationFailed);
-        }
+            .arg("refs/heads");
+        let output = run_bounded_listing(command)?;
 
         let object_id_length = self.native_object_id_length()?;
         let mut branches = Vec::new();
@@ -11022,6 +10948,41 @@ fn take_optional_bytes(
     *cursor = end;
     Ok(Some(value))
 }
+/// Most output a bounded Git listing (history, branches) may produce.
+const MAX_LISTING_BYTES: usize = 4 * 1024 * 1024;
+
+/// Runs `command` and returns its stdout, refusing anything past
+/// `MAX_LISTING_BYTES`. The child is killed once the bound is crossed, so a
+/// runaway listing cannot make this process buffer without limit.
+fn run_bounded_listing(mut command: Command) -> Result<Vec<u8>, RepositoryError> {
+    command.stdout(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|_| RepositoryError::GitUnavailable)?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or(RepositoryError::GitOperationFailed)?;
+    let mut output = Vec::new();
+    let read = stdout
+        .take(MAX_LISTING_BYTES as u64 + 1)
+        .read_to_end(&mut output);
+    if read.is_err() || output.len() > MAX_LISTING_BYTES {
+        // The child may already have exited, so a failed kill is not an
+        // error; the wait reaps it either way.
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(RepositoryError::GitOperationFailed);
+    }
+    let status = child
+        .wait()
+        .map_err(|_| RepositoryError::GitOperationFailed)?;
+    if !status.success() {
+        return Err(RepositoryError::GitOperationFailed);
+    }
+    Ok(output)
+}
+
 fn run_command(mut command: Command) -> Result<Output, RepositoryError> {
     let output = command
         .output()
