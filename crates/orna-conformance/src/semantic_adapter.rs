@@ -5408,7 +5408,7 @@ fn assertion_site(assertion: &AdmittedAssertion) -> String {
     format!(
         "{kind} {} assertion at {}{}..{}",
         assertion.owner_name,
-        span.file.as_deref().unwrap_or("source"),
+        span.file().unwrap_or("source"),
         span.start,
         span.end,
     )

@@ -33,10 +33,10 @@ use lsp_types::{
     CodeLensOptions, CodeLensParams, CompletionOptions, CompletionParams, CompletionResponse,
     Diagnostic, DiagnosticOptions, DiagnosticServerCapabilities, DocumentDiagnosticParams,
     DocumentDiagnosticReport, DocumentFormattingParams, DocumentHighlight, DocumentHighlightKind,
-    DocumentHighlightParams, DocumentLink, DocumentLinkOptions, DocumentLinkParams,
+    DocumentHighlightParams, DocumentLinkOptions, DocumentLinkParams,
     DocumentRangeFormattingParams, DocumentSymbolParams, DocumentSymbolResponse, FoldingRange,
     FoldingRangeParams, FoldingRangeProviderCapability, FullDocumentDiagnosticReport,
-    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability,
+    GotoDefinitionParams, GotoDefinitionResponse, HoverParams, HoverProviderCapability,
     InitializeParams, InlayHintOptions, InlayHintParams, InlayHintServerCapabilities, InlineValue,
     InlineValueOptions, InlineValueParams, InlineValueServerCapabilities,
     InlineValueVariableLookup, LinkedEditingRangeParams, LinkedEditingRangeServerCapabilities,
@@ -51,6 +51,7 @@ use lsp_types::{
     TypeHierarchyPrepareParams, TypeHierarchySubtypesParams, TypeHierarchySupertypesParams,
     UnchangedDocumentDiagnosticReport, Uri, WorkspaceEdit,
 };
+use orna_syntax::MissingSemicolon;
 
 /// Transport threads for the server's standard input and output streams.
 ///
@@ -651,33 +652,93 @@ fn apply_content_changes(
     Some(candidate)
 }
 
+/// The result every request handler returns.
+type HandlerResult = Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>>;
+
+/// Answers a request addressed to one document position.
+///
+/// `extract` decodes the request's typed params and `serialise` encodes the
+/// analysis result. Both stay at the call site because this crate depends
+/// only on `serde_json`: a generic `serde` bound would need a dependency the
+/// crate does not declare. `null` answers a position outside every analysable
+/// document.
+fn locate_request<P, T>(
+    state: &RequestContext,
+    request: Request,
+    extract: impl FnOnce(Request) -> Result<P, lsp_server::ExtractError<Request>>,
+    position: impl FnOnce(&P) -> (&Uri, Position),
+    analyse: impl FnOnce(&P, &Arc<Workspace>, usize, usize) -> T,
+    serialise: impl FnOnce(T) -> HandlerResult,
+) -> HandlerResult {
+    let params = extract(request)?;
+    let (uri, at) = position(&params);
+    let Some((workspace, module, byte)) = state.locate(uri, at) else {
+        return Ok(serde_json::Value::Null);
+    };
+    serialise(analyse(&params, &workspace, module, byte))
+}
+
+/// Answers a request addressed to a whole document that belongs to a
+/// workspace. A document outside every workspace answers `null`.
+fn workspace_request<P, T>(
+    state: &RequestContext,
+    request: Request,
+    extract: impl FnOnce(Request) -> Result<P, lsp_server::ExtractError<Request>>,
+    uri: impl FnOnce(&P) -> &Uri,
+    analyse: impl FnOnce(&P, &Arc<Workspace>, usize) -> T,
+    serialise: impl FnOnce(T) -> HandlerResult,
+) -> HandlerResult {
+    let params = extract(request)?;
+    let Some((workspace, module)) = state.views.workspace(&state.documents, uri(&params)) else {
+        return Ok(serde_json::Value::Null);
+    };
+    serialise(analyse(&params, &workspace, module))
+}
+
 fn request_hover(
     state: &RequestContext,
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
-    let (_, params) = request.extract::<HoverParams>("textDocument/hover")?;
-    let uri = params.text_document_position_params.text_document.uri;
-    let position = params.text_document_position_params.position;
-    let Some((workspace, module, byte)) = state.locate(&uri, position) else {
-        return Ok(serde_json::Value::Null);
-    };
-    let hover: Option<Hover> = analysis::hover(&workspace, module, byte);
-    Ok(serde_json::to_value(hover)?)
+    locate_request(
+        state,
+        request,
+        |request| {
+            request
+                .extract::<HoverParams>("textDocument/hover")
+                .map(|(_, params)| params)
+        },
+        |params| {
+            (
+                &params.text_document_position_params.text_document.uri,
+                params.text_document_position_params.position,
+            )
+        },
+        |_, workspace, module, byte| analysis::hover(workspace, module, byte),
+        |value| Ok(serde_json::to_value(value)?),
+    )
 }
 
 fn request_signature_help(
     state: &RequestContext,
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
-    let (_, params) =
-        request.extract::<lsp_types::SignatureHelpParams>("textDocument/signatureHelp")?;
-    let uri = params.text_document_position_params.text_document.uri;
-    let position = params.text_document_position_params.position;
-    let Some((workspace, module, byte)) = state.locate(&uri, position) else {
-        return Ok(serde_json::Value::Null);
-    };
-    let help = analysis::signature_help(&workspace, module, byte);
-    Ok(serde_json::to_value(help)?)
+    locate_request(
+        state,
+        request,
+        |request| {
+            request
+                .extract::<lsp_types::SignatureHelpParams>("textDocument/signatureHelp")
+                .map(|(_, params)| params)
+        },
+        |params| {
+            (
+                &params.text_document_position_params.text_document.uri,
+                params.text_document_position_params.position,
+            )
+        },
+        |_, workspace, module, byte| analysis::signature_help(workspace, module, byte),
+        |value| Ok(serde_json::to_value(value)?),
+    )
 }
 
 fn request_code_actions(
@@ -703,20 +764,23 @@ fn request_code_actions(
     for diagnostic in diagnostics {
         let start = mapper.byte_offset(diagnostic.range.start);
         let end = mapper.byte_offset(diagnostic.range.end);
-        if start > request_end
-            || request_start > end
-            || !matches_missing_semicolon_diagnostic(&diagnostic)
-            || (!params.context.diagnostics.is_empty()
-                && !params.context.diagnostics.iter().any(|requested| {
-                    requested.range == diagnostic.range
-                        && requested.code == diagnostic.code
-                        && requested.message == diagnostic.message
-                }))
+        if start > request_end || request_start > end {
+            continue;
+        }
+        let Some(reason) = missing_semicolon(&diagnostic) else {
+            continue;
+        };
+        if !params.context.diagnostics.is_empty()
+            && !params.context.diagnostics.iter().any(|requested| {
+                requested.range == diagnostic.range
+                    && requested.code == diagnostic.code
+                    && requested.message == diagnostic.message
+            })
         {
             continue;
         }
         let Some(edit_position) =
-            missing_semicolon_position(document, &file.tokens, parse, &diagnostic, &mapper)
+            missing_semicolon_position(document, &file.tokens, parse, &diagnostic, reason, &mapper)
         else {
             continue;
         };
@@ -752,29 +816,15 @@ fn requests_quickfix(only: Option<&[CodeActionKind]>) -> bool {
     })
 }
 
-fn matches_missing_semicolon_diagnostic(diagnostic: &Diagnostic) -> bool {
-    let is_parse_002 = matches!(
-        diagnostic.code.as_ref(),
-        Some(NumberOrString::String(code)) if code == "ORNA-PARSE-002"
-    );
-    is_parse_002
-        && matches!(
-            diagnostic.message.as_str(),
-            "dimension declarations require `;`"
-                | "unit declarations require `;`"
-                | "assertion statements require `;`"
-                | "let statements require `;`"
-                | "use declarations require `;`"
-                | "expected `;` after function expression"
-                | "implementation static properties require `;`"
-                | "expected `;` after let statement"
-                | "expected `;` after control statement"
-                | "expected `;` after expression statement"
-                | "expected `;` after table assertion"
-                | "expected `;` after static property"
-                | "protocol functions require `;`"
-                | "expected `;` after type assertion"
-        )
+/// The repairable missing terminator a diagnostic reports, classified by the
+/// parser's own table rather than by matching its message text here.
+fn missing_semicolon(diagnostic: &Diagnostic) -> Option<MissingSemicolon> {
+    match diagnostic.code.as_ref() {
+        Some(NumberOrString::String(code)) => {
+            MissingSemicolon::classify(code, diagnostic.message.as_str())
+        }
+        _ => None,
+    }
 }
 
 fn missing_semicolon_position(
@@ -782,6 +832,7 @@ fn missing_semicolon_position(
     tokens: &[orna_syntax::Token],
     parse: &analysis::EditorParse,
     diagnostic: &Diagnostic,
+    reason: MissingSemicolon,
     mapper: &PositionMapper<'_>,
 ) -> Option<Position> {
     let diagnostic_byte = mapper.byte_offset(diagnostic.range.start);
@@ -802,7 +853,9 @@ fn missing_semicolon_position(
         parse
             .diagnostics
             .iter()
-            .filter(|item| item.code == "ORNA-PARSE-002" && item.message == diagnostic.message)
+            .filter(|item| {
+                MissingSemicolon::classify(item.code, item.message.as_str()) == Some(reason)
+            })
             .count()
     };
     if repaired_parse.diagnostics.len() >= parse.diagnostics.len()
@@ -817,78 +870,108 @@ fn request_definition(
     state: &RequestContext,
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
-    let (_, params) = request.extract::<GotoDefinitionParams>("textDocument/definition")?;
-    let uri = params.text_document_position_params.text_document.uri;
-    let position = params.text_document_position_params.position;
-    let Some((workspace, module, byte)) = state.locate(&uri, position) else {
-        return Ok(serde_json::Value::Null);
-    };
-    let response =
-        analysis::definition(&workspace, module, byte).map(GotoDefinitionResponse::Scalar);
-    Ok(serde_json::to_value(response)?)
+    locate_request(
+        state,
+        request,
+        |request| {
+            request
+                .extract::<GotoDefinitionParams>("textDocument/definition")
+                .map(|(_, params)| params)
+        },
+        |params| {
+            (
+                &params.text_document_position_params.text_document.uri,
+                params.text_document_position_params.position,
+            )
+        },
+        |_, workspace, module, byte| {
+            analysis::definition(workspace, module, byte).map(GotoDefinitionResponse::Scalar)
+        },
+        |value| Ok(serde_json::to_value(value)?),
+    )
 }
 
 fn request_references(
     state: &RequestContext,
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
-    let (_, params) = request.extract::<ReferenceParams>("textDocument/references")?;
-    let uri = params.text_document_position.text_document.uri;
-    let position = params.text_document_position.position;
-    let Some((workspace, module, byte)) = state.locate(&uri, position) else {
-        return Ok(serde_json::Value::Null);
-    };
-    let locations =
-        analysis::references(&workspace, module, byte, params.context.include_declaration);
-    Ok(serde_json::to_value(locations)?)
+    locate_request(
+        state,
+        request,
+        |request| {
+            request
+                .extract::<ReferenceParams>("textDocument/references")
+                .map(|(_, params)| params)
+        },
+        |params| {
+            (
+                &params.text_document_position.text_document.uri,
+                params.text_document_position.position,
+            )
+        },
+        |params, workspace, module, byte| {
+            analysis::references(workspace, module, byte, params.context.include_declaration)
+        },
+        |value| Ok(serde_json::to_value(value)?),
+    )
 }
 
 fn request_document_highlights(
     state: &RequestContext,
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
-    let (_, params) =
-        request.extract::<DocumentHighlightParams>("textDocument/documentHighlight")?;
-    let uri = params.text_document_position_params.text_document.uri;
-    let position = params.text_document_position_params.position;
-    let Some((workspace, module, byte)) = state.locate(&uri, position) else {
-        return Ok(serde_json::Value::Null);
-    };
-    let Some(target) = workspace
-        .resolve_at(module, byte)
-        .and_then(|(_, resolved)| resolved.target())
-    else {
-        return Ok(serde_json::to_value(Vec::<DocumentHighlight>::new())?);
-    };
-    let names = &workspace.file(module).names;
-    let mapper = PositionMapper::new(workspace.file(module).text());
-    let highlights = workspace
-        .search(&target)
-        .found
-        .into_iter()
-        .filter(|(found_module, _)| *found_module == module)
-        .map(|(_, span)| {
-            let declaration = names.binding_at(&span).is_some_and(|binding| {
-                let selection = &names.binding(binding).selection;
-                selection.start == span.start && selection.end == span.end
-            }) || names.declared_at(&span).is_some();
-            let write = names.occurrence(&span).is_some_and(|occurrence| {
-                matches!(
-                    occurrence.role,
-                    Role::Value { write: true } | Role::Member { write: true, .. }
-                )
-            });
-            DocumentHighlight {
-                kind: Some(if declaration || write {
-                    DocumentHighlightKind::WRITE
-                } else {
-                    DocumentHighlightKind::READ
-                }),
-                range: mapper.range(&span),
-            }
-        })
-        .collect::<Vec<_>>();
-    Ok(serde_json::to_value(highlights)?)
+    locate_request(
+        state,
+        request,
+        |request| {
+            request
+                .extract::<DocumentHighlightParams>("textDocument/documentHighlight")
+                .map(|(_, params)| params)
+        },
+        |params| {
+            (
+                &params.text_document_position_params.text_document.uri,
+                params.text_document_position_params.position,
+            )
+        },
+        |_, workspace, module, byte| {
+            let Some(target) = workspace
+                .resolve_at(module, byte)
+                .and_then(|(_, resolved)| resolved.target())
+            else {
+                return Vec::new();
+            };
+            let names = &workspace.file(module).names;
+            let mapper = PositionMapper::new(workspace.file(module).text());
+            workspace
+                .search(&target)
+                .found
+                .into_iter()
+                .filter(|(found_module, _)| *found_module == module)
+                .map(|(_, span)| {
+                    let declaration = names.binding_at(&span).is_some_and(|binding| {
+                        let selection = &names.binding(binding).selection;
+                        selection.start == span.start && selection.end == span.end
+                    }) || names.declared_at(&span).is_some();
+                    let write = names.occurrence(&span).is_some_and(|occurrence| {
+                        matches!(
+                            occurrence.role,
+                            Role::Value { write: true } | Role::Member { write: true, .. }
+                        )
+                    });
+                    DocumentHighlight {
+                        kind: Some(if declaration || write {
+                            DocumentHighlightKind::WRITE
+                        } else {
+                            DocumentHighlightKind::READ
+                        }),
+                        range: mapper.range(&span),
+                    }
+                })
+                .collect()
+        },
+        |value| Ok(serde_json::to_value(value)?),
+    )
 }
 
 fn apply_text_edits(source: &str, edits: &[TextEdit]) -> Option<String> {
@@ -1206,21 +1289,33 @@ fn request_prepare_call_hierarchy(
     state: &RequestContext,
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
-    let (_, params) = request
-        .extract::<lsp_types::CallHierarchyPrepareParams>("textDocument/prepareCallHierarchy")?;
-    let uri = params.text_document_position_params.text_document.uri;
-    let position = params.text_document_position_params.position;
-    let Some((workspace, module, byte)) = state.locate(&uri, position) else {
-        return Ok(serde_json::Value::Null);
-    };
-    // A module with syntax errors has no reliable declarations to prepare,
-    // so preparation fails closed as the other parser-error refusals do.
-    if !workspace.file(module).parse.diagnostics.is_empty() {
-        return Ok(serde_json::Value::Null);
-    }
-    Ok(serde_json::to_value(hierarchy::prepare_call_hierarchy(
-        &workspace, module, byte,
-    ))?)
+    locate_request(
+        state,
+        request,
+        |request| {
+            request
+                .extract::<lsp_types::CallHierarchyPrepareParams>(
+                    "textDocument/prepareCallHierarchy",
+                )
+                .map(|(_, params)| params)
+        },
+        |params| {
+            (
+                &params.text_document_position_params.text_document.uri,
+                params.text_document_position_params.position,
+            )
+        },
+        |_, workspace, module, byte| {
+            // A module with syntax errors has no reliable declarations to
+            // prepare, so preparation fails closed as the other parser-error
+            // refusals do.
+            if !workspace.file(module).parse.diagnostics.is_empty() {
+                return None;
+            }
+            hierarchy::prepare_call_hierarchy(workspace, module, byte)
+        },
+        |value| Ok(serde_json::to_value(value)?),
+    )
 }
 
 fn request_incoming_calls(
@@ -1255,16 +1350,23 @@ fn request_prepare_type_hierarchy(
     state: &RequestContext,
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
-    let (_, params) =
-        request.extract::<TypeHierarchyPrepareParams>("textDocument/prepareTypeHierarchy")?;
-    let uri = params.text_document_position_params.text_document.uri;
-    let position = params.text_document_position_params.position;
-    let Some((workspace, module, byte)) = state.locate(&uri, position) else {
-        return Ok(serde_json::Value::Null);
-    };
-    Ok(serde_json::to_value(hierarchy::prepare_type_hierarchy(
-        &workspace, module, byte,
-    ))?)
+    locate_request(
+        state,
+        request,
+        |request| {
+            request
+                .extract::<TypeHierarchyPrepareParams>("textDocument/prepareTypeHierarchy")
+                .map(|(_, params)| params)
+        },
+        |params| {
+            (
+                &params.text_document_position_params.text_document.uri,
+                params.text_document_position_params.position,
+            )
+        },
+        |_, workspace, module, byte| hierarchy::prepare_type_hierarchy(workspace, module, byte),
+        |value| Ok(serde_json::to_value(value)?),
+    )
 }
 
 fn request_type_hierarchy_supertypes(
@@ -1298,31 +1400,41 @@ fn request_moniker(
     state: &RequestContext,
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
-    let (_, params) = request.extract::<MonikerParams>("textDocument/moniker")?;
-    let uri = params.text_document_position_params.text_document.uri;
-    let position = params.text_document_position_params.position;
-    let Some((workspace, module, byte)) = state.locate(&uri, position) else {
-        return Ok(serde_json::Value::Null);
-    };
-    Ok(serde_json::to_value(hierarchy::moniker(
-        &workspace, module, byte,
-    ))?)
+    locate_request(
+        state,
+        request,
+        |request| {
+            request
+                .extract::<MonikerParams>("textDocument/moniker")
+                .map(|(_, params)| params)
+        },
+        |params| {
+            (
+                &params.text_document_position_params.text_document.uri,
+                params.text_document_position_params.position,
+            )
+        },
+        |_, workspace, module, byte| hierarchy::moniker(workspace, module, byte),
+        |value| Ok(serde_json::to_value(value)?),
+    )
 }
 
 fn request_code_lenses(
     state: &RequestContext,
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
-    let (_, params) = request.extract::<CodeLensParams>("textDocument/codeLens")?;
-    let Some((workspace, module)) = state
-        .views
-        .workspace(&state.documents, &params.text_document.uri)
-    else {
-        return Ok(serde_json::Value::Null);
-    };
-    Ok(serde_json::to_value(hierarchy::code_lenses(
-        &workspace, module,
-    ))?)
+    workspace_request(
+        state,
+        request,
+        |request| {
+            request
+                .extract::<CodeLensParams>("textDocument/codeLens")
+                .map(|(_, params)| params)
+        },
+        |params| &params.text_document.uri,
+        |_, workspace, module| hierarchy::code_lenses(workspace, module),
+        |value| Ok(serde_json::to_value(value)?),
+    )
 }
 
 fn request_semantic_tokens_full(
@@ -1427,36 +1539,42 @@ fn request_semantic_tokens_range(
     state: &RequestContext,
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
-    let (_, params) =
-        request.extract::<SemanticTokensRangeParams>("textDocument/semanticTokens/range")?;
-    let uri = params.text_document.uri;
-    let Some((workspace, module)) = state.views.workspace(&state.documents, &uri) else {
-        return Ok(serde_json::Value::Null);
-    };
-    let mapper = PositionMapper::new(workspace.file(module).text());
-    let data = semantic::semantic_tokens(&workspace, module, &mapper, Some(&params.range));
-    Ok(serde_json::to_value(SemanticTokens {
-        result_id: None,
-        data,
-    })?)
+    workspace_request(
+        state,
+        request,
+        |request| {
+            request
+                .extract::<SemanticTokensRangeParams>("textDocument/semanticTokens/range")
+                .map(|(_, params)| params)
+        },
+        |params| &params.text_document.uri,
+        |params, workspace, module| {
+            let mapper = PositionMapper::new(workspace.file(module).text());
+            SemanticTokens {
+                result_id: None,
+                data: semantic::semantic_tokens(workspace, module, &mapper, Some(&params.range)),
+            }
+        },
+        |value| Ok(serde_json::to_value(value)?),
+    )
 }
 
 fn request_inlay_hints(
     state: &RequestContext,
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
-    let (_, params) = request.extract::<InlayHintParams>("textDocument/inlayHint")?;
-    let Some((workspace, module)) = state
-        .views
-        .workspace(&state.documents, &params.text_document.uri)
-    else {
-        return Ok(serde_json::Value::Null);
-    };
-    Ok(serde_json::to_value(inlay::inlay_hints(
-        &workspace,
-        module,
-        &params.range,
-    ))?)
+    workspace_request(
+        state,
+        request,
+        |request| {
+            request
+                .extract::<InlayHintParams>("textDocument/inlayHint")
+                .map(|(_, params)| params)
+        },
+        |params| &params.text_document.uri,
+        |params, workspace, module| inlay::inlay_hints(workspace, module, &params.range),
+        |value| Ok(serde_json::to_value(value)?),
+    )
 }
 
 fn request_inline_values(
@@ -1522,56 +1640,76 @@ fn request_linked_editing_range(
     state: &RequestContext,
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
-    let (_, params) =
-        request.extract::<LinkedEditingRangeParams>("textDocument/linkedEditingRange")?;
-    let uri = params.text_document_position_params.text_document.uri;
-    let position = params.text_document_position_params.position;
-    let Some((workspace, module, byte)) = state.locate(&uri, position) else {
-        return Ok(serde_json::Value::Null);
-    };
-    let file = workspace.file(module);
-    if !file.parse.diagnostics.is_empty() {
-        return Ok(serde_json::Value::Null);
-    }
-    let Some((span, target)) = workspace
-        .resolve_at(module, byte)
-        .and_then(|(span, resolved)| Some((span, resolved.target()?)))
-    else {
-        return Ok(serde_json::Value::Null);
-    };
-    let name = &file.text()[span.start..span.end];
-    let mapper = PositionMapper::new(file.text());
-    let ranges = workspace
-        .search(&target)
-        .found
-        .into_iter()
-        .filter(|(found_module, found)| {
-            *found_module == module && file.text().get(found.start..found.end) == Some(name)
-        })
-        .map(|(_, found)| mapper.range(&found))
-        .collect::<Vec<_>>();
-    if ranges.len() < 2 {
-        return Ok(serde_json::Value::Null);
-    }
-    Ok(serde_json::to_value(LinkedEditingRanges {
-        ranges,
-        word_pattern: None,
-    })?)
+    locate_request(
+        state,
+        request,
+        |request| {
+            request
+                .extract::<LinkedEditingRangeParams>("textDocument/linkedEditingRange")
+                .map(|(_, params)| params)
+        },
+        |params| {
+            (
+                &params.text_document_position_params.text_document.uri,
+                params.text_document_position_params.position,
+            )
+        },
+        |_, workspace, module, byte| {
+            let file = workspace.file(module);
+            if !file.parse.diagnostics.is_empty() {
+                return None;
+            }
+            let (span, target) = workspace
+                .resolve_at(module, byte)
+                .and_then(|(span, resolved)| Some((span, resolved.target()?)))?;
+            let name = &file.text()[span.start..span.end];
+            let mapper = PositionMapper::new(file.text());
+            let ranges = workspace
+                .search(&target)
+                .found
+                .into_iter()
+                .filter(|(found_module, found)| {
+                    *found_module == module && file.text().get(found.start..found.end) == Some(name)
+                })
+                .map(|(_, found)| mapper.range(&found))
+                .collect::<Vec<_>>();
+            (ranges.len() >= 2).then_some(LinkedEditingRanges {
+                ranges,
+                word_pattern: None,
+            })
+        },
+        |value| Ok(serde_json::to_value(value)?),
+    )
 }
 
 fn request_completion(
     state: &RequestContext,
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
-    let (_, params) = request.extract::<CompletionParams>("textDocument/completion")?;
-    let uri = params.text_document_position.text_document.uri;
-    let position = params.text_document_position.position;
-    let Some((workspace, module, byte)) = state.locate(&uri, position) else {
-        return Ok(serde_json::Value::Null);
-    };
-    let items = analysis::completion_at(&workspace, module, Some(byte), params.context.as_ref());
-    let response = CompletionResponse::Array(items);
-    Ok(serde_json::to_value(response)?)
+    locate_request(
+        state,
+        request,
+        |request| {
+            request
+                .extract::<CompletionParams>("textDocument/completion")
+                .map(|(_, params)| params)
+        },
+        |params| {
+            (
+                &params.text_document_position.text_document.uri,
+                params.text_document_position.position,
+            )
+        },
+        |params, workspace, module, byte| {
+            CompletionResponse::Array(analysis::completion_at(
+                workspace,
+                module,
+                Some(byte),
+                params.context.as_ref(),
+            ))
+        },
+        |value| Ok(serde_json::to_value(value)?),
+    )
 }
 
 fn request_formatting(
@@ -1647,13 +1785,18 @@ fn request_document_links(
     state: &RequestContext,
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
-    let (_, params) = request.extract::<DocumentLinkParams>("textDocument/documentLink")?;
-    let links: Vec<DocumentLink> = state
-        .views
-        .workspace(&state.documents, &params.text_document.uri)
-        .map(|(workspace, module)| analysis::document_links(&workspace, module))
-        .unwrap_or_default();
-    Ok(serde_json::to_value(links)?)
+    workspace_request(
+        state,
+        request,
+        |request| {
+            request
+                .extract::<DocumentLinkParams>("textDocument/documentLink")
+                .map(|(_, params)| params)
+        },
+        |params| &params.text_document.uri,
+        |_, workspace, module| analysis::document_links(workspace, module),
+        |value| Ok(serde_json::to_value(value)?),
+    )
 }
 
 fn request_folding_ranges(

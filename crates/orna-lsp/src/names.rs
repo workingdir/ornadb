@@ -13,6 +13,7 @@
 
 use std::collections::HashMap;
 
+use orna_syntax::visit::{Visit, walk_type};
 use orna_syntax::{
     Argument, AssignmentTarget, CaseArm, ControlKind, Declaration, Expr, FieldInitializer,
     ImplMember, Implementation, Item, LiteralKind, Parameter, Pattern, RecordField, Statement,
@@ -556,7 +557,7 @@ impl Walker<'_> {
                                 span,
                             } => {
                                 walker.declare_typed(name, span, DeclaredKind::Field, Some(ty));
-                                walker.type_expr(ty);
+                                walker.visit_type(ty);
                                 if let Some(
                                     FieldInitializer::Default(value)
                                     | FieldInitializer::Computed(value),
@@ -581,7 +582,7 @@ impl Walker<'_> {
                 let protocol = self.declare(name, &item.span, &item.span, DeclaredKind::Protocol);
                 for generic in generics {
                     for bound in &generic.bounds {
-                        self.type_expr(bound);
+                        self.visit_type(bound);
                     }
                 }
                 self.with_owner(protocol, |walker| {
@@ -593,7 +594,7 @@ impl Walker<'_> {
                             }
                             orna_syntax::ProtocolMember::Static { name, ty, span } => {
                                 walker.declare_typed(name, span, DeclaredKind::Static, Some(ty));
-                                walker.type_expr(ty);
+                                walker.visit_type(ty);
                             }
                         }
                     }
@@ -607,7 +608,7 @@ impl Walker<'_> {
                 let enumeration = self.declare(name, &item.span, &item.span, DeclaredKind::Enum);
                 for generic in generics {
                     for bound in &generic.bounds {
-                        self.type_expr(bound);
+                        self.visit_type(bound);
                     }
                 }
                 self.with_owner(enumeration, |walker| {
@@ -626,7 +627,7 @@ impl Walker<'_> {
                                     DeclaredKind::PayloadField,
                                     Some(&field.ty),
                                 );
-                                walker.type_expr(&field.ty);
+                                walker.visit_type(&field.ty);
                             }
                         });
                     }
@@ -636,7 +637,7 @@ impl Walker<'_> {
                 self.declare(name, &item.span, &item.span, DeclaredKind::Dimension);
                 if let Some(expression) = expression {
                     for (_, ty, _, _) in &expression.terms {
-                        self.type_expr(ty);
+                        self.visit_type(ty);
                     }
                 }
             }
@@ -646,7 +647,7 @@ impl Walker<'_> {
                 definition,
             } => {
                 self.declare(name, &item.span, &item.span, DeclaredKind::Unit);
-                self.type_expr(dimension);
+                self.visit_type(dimension);
                 if let UnitDefinition::Derived { value, offset, .. } = definition {
                     self.expr(value);
                     if let Some(offset) = offset {
@@ -662,13 +663,13 @@ impl Walker<'_> {
                 let declared = self.declare(name, &item.span, &item.span, DeclaredKind::Type);
                 for generic in generics {
                     for bound in &generic.bounds {
-                        self.type_expr(bound);
+                        self.visit_type(bound);
                     }
                 }
                 let owner = Hint::Owner(item.span.clone());
                 let members = match representation {
                     TypeRepresentation::Alias { ty, refinements } => {
-                        self.type_expr(ty);
+                        self.visit_type(ty);
                         refinements
                     }
                     TypeRepresentation::Nominal { members } => members,
@@ -684,7 +685,7 @@ impl Walker<'_> {
                                 ..
                             } => {
                                 walker.declare_typed(name, span, DeclaredKind::Field, Some(ty));
-                                walker.type_expr(ty);
+                                walker.visit_type(ty);
                                 if let Some(initializer) = initializer {
                                     walker.expr(initializer);
                                 }
@@ -704,7 +705,7 @@ impl Walker<'_> {
                 value,
             } => {
                 if let Some(annotation) = annotation {
-                    self.type_expr(annotation);
+                    self.visit_type(annotation);
                 }
                 self.expr(value);
                 // A module-level `let` declares module values, not locals.
@@ -714,7 +715,7 @@ impl Walker<'_> {
     }
 
     fn implementation(&mut self, implementation: &Implementation, owner: &Hint) {
-        self.type_expr(&implementation.protocol);
+        self.visit_type(&implementation.protocol);
         for member in &implementation.members {
             match member {
                 ImplMember::Function {
@@ -735,7 +736,7 @@ impl Walker<'_> {
                 } => {
                     self.declare_typed(name, span, DeclaredKind::Static, ty.as_ref());
                     if let Some(ty) = ty {
-                        self.type_expr(ty);
+                        self.visit_type(ty);
                     }
                     self.expr(value);
                 }
@@ -746,19 +747,19 @@ impl Walker<'_> {
     fn signature_types(&mut self, signature: &orna_syntax::FunctionSignature) {
         for generic in &signature.generics {
             for bound in &generic.bounds {
-                self.type_expr(bound);
+                self.visit_type(bound);
             }
         }
         for parameter in &signature.parameters {
             if let Some(annotation) = &parameter.annotation {
-                self.type_expr(annotation);
+                self.visit_type(annotation);
             }
             if let Some(default) = &parameter.default {
                 self.expr(default);
             }
         }
         if let Some(result) = &signature.result {
-            self.type_expr(result);
+            self.visit_type(result);
         }
     }
 
@@ -793,7 +794,7 @@ impl Walker<'_> {
             );
         }
         if let Some(annotation) = &parameter.annotation {
-            self.type_expr(annotation);
+            self.visit_type(annotation);
         }
         if let Some(default) = &parameter.default {
             self.expr(default);
@@ -990,67 +991,38 @@ impl Walker<'_> {
             Pattern::Wildcard(_) | Pattern::Literal { .. } => {}
         }
     }
+}
 
-    fn type_expr(&mut self, ty: &TypeExpr) {
-        match ty {
-            TypeExpr::Name {
-                path,
-                arguments,
-                span,
-            } => {
-                let keys = path
-                    .iter()
-                    .map(|segment| key_of(segment))
-                    .collect::<Vec<_>>();
-                let segments = self
-                    .identifiers(span)
-                    .take(path.len())
-                    .map(|token| token.span.clone())
-                    .collect::<Vec<_>>();
-                if segments.len() == path.len() {
-                    for (index, (segment, span)) in path.iter().zip(segments).enumerate() {
-                        self.occur(
-                            span,
-                            segment,
-                            Role::Path {
-                                path: keys.clone(),
-                                index,
-                            },
-                        );
-                    }
+impl Visit for Walker<'_> {
+    fn visit_type(&mut self, ty: &TypeExpr) {
+        if let TypeExpr::Name { path, span, .. } = ty {
+            let keys = path
+                .iter()
+                .map(|segment| key_of(segment))
+                .collect::<Vec<_>>();
+            let segments = self
+                .identifiers(span)
+                .take(path.len())
+                .map(|token| token.span.clone())
+                .collect::<Vec<_>>();
+            if segments.len() == path.len() {
+                for (index, (segment, span)) in path.iter().zip(segments).enumerate() {
+                    self.occur(
+                        span,
+                        segment,
+                        Role::Path {
+                            path: keys.clone(),
+                            index,
+                        },
+                    );
                 }
-                for argument in arguments {
-                    self.type_expr(argument);
-                }
-            }
-            TypeExpr::Optional { inner, .. } | TypeExpr::List { inner, .. } => {
-                self.type_expr(inner)
-            }
-            TypeExpr::Product { lhs, rhs, .. } => {
-                self.type_expr(lhs);
-                self.type_expr(rhs);
-            }
-            TypeExpr::Record { fields, .. } => {
-                for (_, ty, _) in fields {
-                    self.type_expr(ty);
-                }
-            }
-            TypeExpr::Tuple { elements, .. } => {
-                for element in elements {
-                    self.type_expr(element);
-                }
-            }
-            TypeExpr::Function {
-                parameters, result, ..
-            } => {
-                for parameter in parameters {
-                    self.type_expr(parameter);
-                }
-                self.type_expr(result);
             }
         }
+        walk_type(self, ty);
     }
+}
 
+impl Walker<'_> {
     fn expr(&mut self, expression: &Expr) {
         match expression {
             Expr::Name { text, span } => {
@@ -1092,7 +1064,7 @@ impl Walker<'_> {
                 ..
             } => {
                 for ty in type_arguments {
-                    self.type_expr(ty);
+                    self.visit_type(ty);
                 }
                 self.call(callee, arguments, None);
             }
@@ -1232,7 +1204,7 @@ impl Walker<'_> {
             } => {
                 if let Expr::GenericCall { type_arguments, .. } = stage {
                     for ty in type_arguments {
-                        self.type_expr(ty);
+                        self.visit_type(ty);
                     }
                 }
                 let element = Hint::Element(Box::new(source.clone()));
@@ -1311,7 +1283,7 @@ impl Walker<'_> {
                 None => Hint::Unknown,
             };
             if let Some(annotation) = &parameter.annotation {
-                self.type_expr(annotation);
+                self.visit_type(annotation);
             }
             self.bind_pattern(
                 &parameter.pattern,
@@ -1349,7 +1321,7 @@ impl Walker<'_> {
                 span,
             } => {
                 if let Some(annotation) = annotation {
-                    self.type_expr(annotation);
+                    self.visit_type(annotation);
                 }
                 self.expr(value);
                 let hint = match annotation {

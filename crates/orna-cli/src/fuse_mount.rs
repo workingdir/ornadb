@@ -8100,7 +8100,7 @@ impl FsBuilder {
                 let value_oid = selected
                     .descriptor_oid()
                     .ok_or_else(|| "committed Blob field has no descriptor identity".to_owned())?;
-                let algorithm = match value_oid.len() {
+                let algorithm = match value_oid.width() {
                     20 => GitHashAlgorithm::Sha1,
                     32 => GitHashAlgorithm::Sha256,
                     _ => return Err("committed Blob descriptor has an invalid OID width".into()),

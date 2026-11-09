@@ -218,19 +218,20 @@ struct Lexer<'a> {
 }
 impl<'a> Lexer<'a> {
     fn run(&mut self) {
-        self.code(false, 0);
+        self.code(None);
     }
 
-    /// Scan ordinary source, optionally stopping at the matching end of a
-    /// string interpolation. Braces nested in the expression remain ordinary
-    /// punctuation, so expression tokenisation is identical to top-level
-    /// source tokenisation.
-    fn code(&mut self, interpolation: bool, interpolation_start: usize) -> bool {
+    /// Scan ordinary source, or the body of a string interpolation when given
+    /// the byte offset of the interpolated string, stopping at the matching
+    /// end of that interpolation. Braces nested in the expression remain
+    /// ordinary punctuation, so expression tokenisation is identical to
+    /// top-level source tokenisation.
+    fn code(&mut self, interpolation_start: Option<usize>) -> bool {
         let mut brace_depth = 0usize;
         while self.at < self.source.len() {
             let start = self.at;
             let c = self.peek();
-            if interpolation && c == '}' {
+            if interpolation_start.is_some() && c == '}' {
                 if brace_depth == 0 {
                     self.bump();
                     self.push(TokenKind::InterpolationEnd, start);
@@ -281,7 +282,7 @@ impl<'a> Lexer<'a> {
                 self.push(TokenKind::Punct(x), start);
                 continue;
             }
-            if c == '{' && interpolation {
+            if c == '{' && interpolation_start.is_some() {
                 brace_depth += 1;
             }
             let one = PUNCTUATION
@@ -297,7 +298,7 @@ impl<'a> Lexer<'a> {
                 self.error("ORNA-LEX-001", "unexpected character", start, self.at)
             }
         }
-        if interpolation {
+        if let Some(interpolation_start) = interpolation_start {
             self.error(
                 "ORNA-LEX-012",
                 "unterminated string interpolation",
@@ -481,7 +482,7 @@ impl<'a> Lexer<'a> {
                 }
                 self.bump();
                 self.push_range(TokenKind::InterpolationStart, self.at - 1, self.at);
-                if !self.code(true, start) {
+                if !self.code(Some(start)) {
                     return;
                 }
                 segment_start = self.at;

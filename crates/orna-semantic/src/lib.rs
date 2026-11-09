@@ -20940,7 +20940,7 @@ fn is_snapshot_ref_value(ty: &Type) -> bool {
 fn scope_snapshot_ref_parameter_pattern(pattern: &Pattern, ty: &Type) -> Type {
     match (pattern, ty) {
         (Pattern::Name(name, span), ty) if is_snapshot_ref_value(ty) => {
-            let source = span.file.as_deref().unwrap_or("<unknown>");
+            let source = span.file().unwrap_or("<unknown>");
             contextual_snapshot_ref(&format!(
                 "selector:binder:{source}@{}..{}:parameter:{name}",
                 span.start, span.end
@@ -21029,7 +21029,7 @@ fn snapshot_selector_context(
         }
         Expr::Name { text, span } => format!(
             "dynamic:{}:{text}@{}..{}",
-            span.file.as_deref().unwrap_or("<unknown>"),
+            span.file().unwrap_or("<unknown>"),
             span.start,
             span.end
         ),
@@ -21238,7 +21238,7 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
                         .unwrap_or_else(|| format!(":formal-selector:{selector}"));
                     contextual_snapshot_ref(&format!(
                         "selector:dynamic-call:{}:{}..{}:parameter:{parameter}{formal_identity}",
-                        call_span.file.as_deref().unwrap_or("<unknown>"),
+                        call_span.file().unwrap_or("<unknown>"),
                         call_span.start,
                         call_span.end,
                     ))
@@ -21649,7 +21649,7 @@ fn call_argument_snapshot_context(
         }
         _ => format!(
             "dynamic-call:{}:{}..{}",
-            call_span.file.as_deref().unwrap_or("<unknown>"),
+            call_span.file().unwrap_or("<unknown>"),
             call_span.start,
             call_span.end,
         ),

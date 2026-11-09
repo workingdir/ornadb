@@ -514,17 +514,17 @@ impl RepositoryCaptureCapability {
             pin: pin.clone(),
         });
         let quota = Format3Quota::new(MAX_RANGE_READ_BYTES, 0)?;
-        Format3Context::from_persisted(
-            self.graph.database_id,
+        Format3Context::from_persisted(orna_value::Format3ContextInputs {
+            database_uuid: self.graph.database_id,
             pin,
-            git_hash,
+            git_oid_algorithm: git_hash,
             schema_root,
             store_root,
-            AvailabilityState::Available,
-            OwnerLifetime::new(self.graph.owner_id),
+            availability: AvailabilityState::Available,
+            owner: OwnerLifetime::new(self.graph.owner_id),
             quota,
             resolver,
-        )
+        })
     }
 }
 

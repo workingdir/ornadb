@@ -9,11 +9,14 @@ mod budget;
 pub mod editor;
 mod lexer;
 mod parser;
+mod semicolon;
 mod string_literal;
+pub mod visit;
 
 pub use admission::{
     ParseContext, SourceDocumentId, SyntaxAdmissionError, admit_diagnostic, admit_span,
 };
+pub use semicolon::MissingSemicolon;
 pub use string_literal::{StringEscapeError, unescape_string_body, unescape_string_literal};
 
 pub use lexer::{
@@ -26,8 +29,8 @@ pub use parser::{
     FieldInitializer, FunctionSignature, GenericParameter, ImplMember, Implementation,
     ImportSegment, Item, ItemKind, Label, LambdaParameter, LiteralKind, NameSegment, Parameter,
     Parse, ParseError, Pattern, PatternField, ProtocolMember, RecordField, ReplInput,
-    SourcePosition, SourceSpan as SyntaxSpan, Statement, StringSegment, SyntaxTree, TableMember,
-    TypeExpr, TypeMember, TypeRepresentation, UnitDefinition, UseTail, Visibility,
+    SourcePosition, SourceSpan as SyntaxSpan, SpanLocation, Statement, StringSegment, SyntaxTree,
+    TableMember, TypeExpr, TypeMember, TypeRepresentation, UnitDefinition, UseTail, Visibility,
     parse_expression, parse_expression_with_file, parse_module, parse_module_with_file, parse_repl,
     parse_repl_with_file, parse_row, parse_row_with_file,
 };
