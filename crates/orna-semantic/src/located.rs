@@ -44,10 +44,7 @@ pub fn analyze_with_catalogue_located(
     inputs: &[ModuleInput],
     catalogue: &Catalogue,
 ) -> LocatedAnalysis {
-    let mut recorder = OriginRecorder {
-        enabled: true,
-        ..OriginRecorder::disabled()
-    };
+    let mut recorder = OriginRecorder::enabled();
     let (analysis, _) = crate::analyze_recording_origins(
         inputs,
         catalogue,
