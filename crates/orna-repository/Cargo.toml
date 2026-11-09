@@ -17,6 +17,7 @@ fs2 = "0.4.3"
 libc = "0.2.180"
 num-bigint = "0.4.6"
 orna-base = { path = "../orna-base" }
+orna-format3 = { path = "../orna-format3" }
 orna-value = { path = "../orna-value" }
 orna-syntax = { path = "../orna-syntax" }
 parquet = { version = "59.3.0", default-features = false, features = ["crc", "zstd"] }
@@ -26,6 +27,7 @@ tempfile = "3.23.0"
 uuid.workspace = true
 
 [dev-dependencies]
+orna-format3 = { path = "../orna-format3", features = ["test-support"] }
 orna-conformance = { path = "../orna-conformance" }
 orna-evaluator = { path = "../orna-evaluator", features = ["test-evidence"] }
 orna-project = { path = "../orna-project" }

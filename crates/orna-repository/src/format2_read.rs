@@ -18,15 +18,15 @@
 use std::cell::RefCell;
 use std::fmt;
 
-use crate::format2_ogb::{
-    OGB_MAX_CHUNK, OGB_MAX_READ_CALL, OgbError, OgbObjects, OgbTreeEntry, read_ogb_root,
-};
-use crate::format2_orr::{Orr2BlobField, Orr2DecodeError, decode_orr2_blob_field};
-use crate::format2_rov::{Rov2Blob, Rov2DecodeError, decode_rov2_blob};
 use crate::hex::{decode_text, hex_encode};
 use crate::object_reader::{ObjectKind, ObjectReader, TreeEntry, TreeEntryMode};
 use crate::{FormatContextError, RepositoryFormat};
 use crate::{GitCommitRef, Repository, RepositoryError};
+use orna_format3::format2_ogb::{
+    OGB_MAX_CHUNK, OGB_MAX_READ_CALL, OgbError, OgbObjects, OgbTreeEntry, read_ogb_root,
+};
+use orna_format3::format2_orr::{Orr2BlobField, Orr2DecodeError, decode_orr2_blob_field};
+use orna_format3::format2_rov::{Rov2Blob, Rov2DecodeError, decode_rov2_blob};
 
 /// Why a format-2 Blob field could not be read. `Git` and `RootMissing` are
 /// not evidence of corruption; `Ogb` and `RecordMismatch` are.
@@ -321,9 +321,9 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     use super::*;
-    use crate::format2_ogb::OgbTreeEntry;
-    use crate::format2_ogb::tests::{MemStore, abc_root};
     use crate::test_support::configure_fixture_git_identity;
+    use orna_format3::format2_ogb::OgbTreeEntry;
+    use orna_format3::format2_ogb::test_support::{MemStore, abc_root};
 
     const FORMAT2_RECORD: &str = "{\n  repository_format: 2,\n  row_profile: \"ORR-2\",\n  blob_profile: \"OGB-1\",\n  semantic_profile: \"SOV-2\",\n  compact_profile: \"compact-storage-v2\",\n}\n";
     const FORMAT1_RECORD: &str =

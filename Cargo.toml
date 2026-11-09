@@ -7,6 +7,7 @@ members = [
     "crates/orna-intrinsics",
     "crates/orna-conformance",
     "crates/orna-evolution",
+    "crates/orna-format3",
     "crates/orna-evaluator",
     "crates/orna-lsp",
     "crates/orna-live",
