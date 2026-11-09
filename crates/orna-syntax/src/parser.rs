@@ -1,3 +1,4 @@
+use crate::budget::NestingBudget;
 use crate::lexer::{Keyword, LexError, Token, TokenKind, lex};
 
 mod lookahead;
@@ -952,7 +953,7 @@ pub fn parse_module(source: &str) -> Parse<SyntaxTree> {
     p.validate_token_grammar();
     let mut items = Vec::new();
     while !p.eof() {
-        p.reset_syntax_budget();
+        p.budget.reset();
         if let Some(item) = p.item(true) {
             items.push(item)
         } else {
@@ -1629,14 +1630,23 @@ enum NominalBraceMode {
     Control,
 }
 
-#[derive(Clone)]
+/// A rewind point for speculative parsing. The tokens and the lookahead index
+/// never change, so the cursor, the diagnostics and the nesting budget are
+/// everything a speculative parse can touch.
+#[derive(Clone, Copy)]
+struct Mark {
+    at: usize,
+    errors: usize,
+    incomplete_errors: usize,
+    budget: NestingBudget,
+}
+
 struct Parser {
     tokens: Vec<Token>,
     at: usize,
     errors: Vec<Diagnostic>,
     incomplete_errors: usize,
-    nesting_depth: usize,
-    syntax_limit_reported: bool,
+    budget: NestingBudget,
     lookahead: TokenLookahead,
 }
 impl Parser {
@@ -1658,28 +1668,41 @@ impl Parser {
             at: 0,
             errors,
             incomplete_errors: 0,
-            nesting_depth: 0,
-            syntax_limit_reported: false,
+            budget: NestingBudget::new(MAX_PARSE_NESTING),
         }
     }
-    fn reset_syntax_budget(&mut self) {
-        self.nesting_depth = 0;
-        self.syntax_limit_reported = false;
+    fn mark(&self) -> Mark {
+        Mark {
+            at: self.at,
+            errors: self.errors.len(),
+            incomplete_errors: self.incomplete_errors,
+            budget: self.budget,
+        }
+    }
+    /// Undoes everything parsed since `mark`: tokens consumed, diagnostics
+    /// reported and the nesting budget spent.
+    fn rewind(&mut self, mark: Mark) {
+        self.at = mark.at;
+        self.errors.truncate(mark.errors);
+        self.incomplete_errors = mark.incomplete_errors;
+        self.budget = mark.budget;
+    }
+    /// Whether anything reported a diagnostic since `mark`.
+    fn reported_since(&self, mark: Mark) -> bool {
+        self.errors.len() != mark.errors || self.incomplete_errors != mark.incomplete_errors
     }
     fn recurse<T>(&mut self, parse: impl FnOnce(&mut Self) -> Option<T>) -> Option<T> {
-        if self.nesting_depth == MAX_PARSE_NESTING {
+        if !self.budget.enter() {
             self.syntax_limit();
             return None;
         }
-        self.nesting_depth += 1;
         let value = parse(self);
-        self.nesting_depth -= 1;
+        self.budget.leave();
         value
     }
     fn syntax_limit(&mut self) {
-        if !self.syntax_limit_reported {
+        if self.budget.first_overflow() {
             self.error_invalid_here("ORNA-PARSE-001", "maximum syntax nesting exceeded");
-            self.syntax_limit_reported = true;
         }
     }
     fn within_depth(&mut self, depth: usize) -> bool {
@@ -4106,16 +4129,10 @@ impl Parser {
         if !self.generic_call_ahead() {
             return None;
         }
-        let at = self.at;
-        let errors = self.errors.len();
-        let incomplete_errors = self.incomplete_errors;
-        let syntax_limit_reported = self.syntax_limit_reported;
+        let mark = self.mark();
         let arguments = self.parse_generic_type_arguments();
         if arguments.is_none() {
-            self.at = at;
-            self.errors.truncate(errors);
-            self.incomplete_errors = incomplete_errors;
-            self.syntax_limit_reported = syntax_limit_reported;
+            self.rewind(mark);
         }
         arguments
     }
@@ -5323,7 +5340,7 @@ impl Parser {
                 Some(TokenKind::Punct(":"))
             )
     }
-    fn case_arm_header_ahead(&self) -> bool {
+    fn case_arm_header_ahead(&mut self) -> bool {
         if self.simple_case_arm_header_ahead() {
             return true;
         }
@@ -5349,32 +5366,30 @@ impl Parser {
             return false;
         }
 
-        // A local parser probe uses the same pattern and guard grammar as the
+        // A speculative parse uses the same pattern and guard grammar as the
         // real case parser, so nested delimiters and guard expressions cannot
-        // be mistaken for an implicit arm boundary.
-        let mut probe = self.clone();
-        let start = probe.at;
-        let errors = probe.errors.len();
-        let incomplete_errors = probe.incomplete_errors;
-        probe.parse_pattern();
-        if probe.at == start
-            || probe.errors.len() != errors
-            || probe.incomplete_errors != incomplete_errors
-        {
+        // be mistaken for an implicit arm boundary. It runs in place and
+        // rewinds: a probe costs the header it parses, where cloning the
+        // parser copied every token once per probe.
+        let mark = self.mark();
+        let reaches_colon = self.parse_case_arm_header(mark);
+        self.rewind(mark);
+        reaches_colon
+    }
+    /// Whether a pattern and optional guard parse without diagnostics up to
+    /// an arm colon.
+    fn parse_case_arm_header(&mut self, mark: Mark) -> bool {
+        self.parse_pattern();
+        if self.at == mark.at || self.reported_since(mark) {
             return false;
         }
-        if probe.keyword() == Some(Keyword::If) {
-            probe.bump();
-            if probe.expr().is_none()
-                || probe.errors.len() != errors
-                || probe.incomplete_errors != incomplete_errors
-            {
+        if self.keyword() == Some(Keyword::If) {
+            self.bump();
+            if self.expr().is_none() || self.reported_since(mark) {
                 return false;
             }
         }
-        probe.is_punct(":")
-            && probe.errors.len() == errors
-            && probe.incomplete_errors == incomplete_errors
+        self.is_punct(":") && !self.reported_since(mark)
     }
     fn contextual(&self) -> bool {
         matches!(
