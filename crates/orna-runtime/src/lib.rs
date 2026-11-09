@@ -1747,6 +1747,47 @@ pub struct PublicationFreeze {
     pub mutations: Vec<PublicationFreezeMutation>,
 }
 
+/// The compact-binding columns of one `publication_freeze` row.
+///
+/// The schema CHECK admits only all-NULL (an ordinary freeze) or all-set (a
+/// freeze bound to one compact publication). The impossible mixed shape stays
+/// a third case because the two readers report it differently: binding refuses
+/// it as a conflicting intent, while completing an ordinary publication keeps
+/// reporting that a compact receipt is required.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum FreezeBinding {
+    /// No compact publication claims the freeze.
+    Unbound,
+    /// Every compact column is present.
+    CompactBound {
+        watermark: Vec<u8>,
+        commit: Vec<u8>,
+        verifier: Vec<u8>,
+    },
+    /// Some, but not all, compact columns are present.
+    Inconsistent,
+}
+
+/// Decodes the three nullable compact columns selected from
+/// `publication_freeze`. Lengths are checked by the caller that consumes the
+/// digests, so the bind path and the ordinary completion path keep their
+/// existing validation.
+fn decode_freeze_binding(
+    watermark: Option<Vec<u8>>,
+    commit: Option<Vec<u8>>,
+    verifier: Option<Vec<u8>>,
+) -> FreezeBinding {
+    match (watermark, commit, verifier) {
+        (None, None, None) => FreezeBinding::Unbound,
+        (Some(watermark), Some(commit), Some(verifier)) => FreezeBinding::CompactBound {
+            watermark,
+            commit,
+            verifier,
+        },
+        _ => FreezeBinding::Inconsistent,
+    }
+}
+
 /// An operation for projecting frozen runtime mutations against a pinned row root.
 ///
 /// Insert remains insert-only; replacement may create or replace a row, while
@@ -11630,7 +11671,7 @@ impl RuntimeState {
         let mut rows = self
             .connection
             .query(
-                "SELECT generation, digest, mutation_sequence FROM checkpoint ORDER BY generation DESC LIMIT 1",
+                "SELECT generation, mutation_sequence, digest FROM checkpoint ORDER BY generation DESC LIMIT 1",
                 (),
             )
             .await
@@ -11638,14 +11679,7 @@ impl RuntimeState {
         let Some(row) = rows.next().await? else {
             return Ok(None);
         };
-        let generation: i64 = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
-        let mutation_sequence: i64 = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
-        Ok(Some(Checkpoint {
-            generation: u64::try_from(generation).map_err(|_| RuntimeError::RecoveryInvalid)?,
-            digest: fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
-            mutation_sequence: u64::try_from(mutation_sequence)
-                .map_err(|_| RuntimeError::RecoveryInvalid)?,
-        }))
+        Ok(Some(decode_checkpoint_row(&row)?))
     }
 
     pub async fn freeze(
@@ -11774,20 +11808,7 @@ impl RuntimeState {
             )
             .await?;
         let row = rows.next().await?.ok_or(RuntimeError::RecoveryInvalid)?;
-        let stored = Checkpoint {
-            generation: u64::try_from(
-                row.get::<i64>(0)
-                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
-            )
-            .map_err(|_| RuntimeError::RecoveryInvalid)?,
-            mutation_sequence: u64::try_from(
-                row.get::<i64>(1)
-                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
-            )
-            .map_err(|_| RuntimeError::RecoveryInvalid)?,
-            digest: fixed(row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
-        };
-        if stored != freeze.checkpoint {
+        if decode_checkpoint_row(&row)? != freeze.checkpoint {
             return Err(RuntimeError::ConflictingPublicationIntent);
         }
         let mut completed_rows = transaction
@@ -11825,8 +11846,8 @@ impl RuntimeState {
         let watermark: Option<Vec<u8>> = row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?;
         let commit: Option<Vec<u8>> = row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?;
         let verifier: Option<Vec<u8>> = row.get(5).map_err(|_| RuntimeError::RecoveryInvalid)?;
-        match (watermark, commit, verifier) {
-            (None, None, None) => {
+        match decode_freeze_binding(watermark, commit, verifier) {
+            FreezeBinding::Unbound => {
                 transaction
                     .execute(
                         "UPDATE publication_freeze SET compact_watermark = ?1, \
@@ -11841,7 +11862,11 @@ impl RuntimeState {
                     )
                     .await?;
             }
-            (Some(watermark), Some(commit), Some(verifier)) => {
+            FreezeBinding::CompactBound {
+                watermark,
+                commit,
+                verifier,
+            } => {
                 if fixed::<32>(watermark)? != pending.cleanup_watermark()
                     || commit != pending.commit().as_str().as_bytes()
                     || fixed::<32>(verifier)? != pending.journal_verifier()
@@ -11849,7 +11874,7 @@ impl RuntimeState {
                     return Err(RuntimeError::ConflictingPublicationIntent);
                 }
             }
-            _ => return Err(RuntimeError::ConflictingPublicationIntent),
+            FreezeBinding::Inconsistent => return Err(RuntimeError::ConflictingPublicationIntent),
         }
         transaction.commit().await.map_err(RuntimeError::from)
     }
@@ -11926,27 +11951,7 @@ impl RuntimeState {
             tx.commit().await?;
             return Ok(existing);
         }
-        let mut batch_rows = tx
-            .query(
-                "SELECT COUNT(*), COALESCE(SUM(length(payload)), 0) \
-                 FROM pending_mutation WHERE sequence <= ?1",
-                params![upper],
-            )
-            .await?;
-        let batch = batch_rows
-            .next()
-            .await?
-            .ok_or(RuntimeError::RecoveryInvalid)?;
-        let published_rows: i64 = batch.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
-        let published_bytes: i64 = batch.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
-        tx.execute(
-            "UPDATE publication_metadata SET \
-             published_mutations = published_mutations + ?1, \
-             published_payload_bytes = published_payload_bytes + ?2, \
-             last_publication_ms = ?3 WHERE singleton = 1",
-            params![published_rows, published_bytes, now_ms()?],
-        )
-        .await?;
+        record_published_prefix_tx(&tx, upper).await?;
         tx.execute(
             "INSERT INTO publication_commit (intent_id, commit_id, compact_receipt)
              VALUES (?1, ?2, ?3)",
@@ -12000,8 +12005,11 @@ impl RuntimeState {
         let commit: Option<Vec<u8>> = binding.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
         let verifier: Option<Vec<u8>> =
             binding.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
-        if watermark.is_some() || commit.is_some() || verifier.is_some() {
-            return Err(RuntimeError::CompactPublicationRequired);
+        match decode_freeze_binding(watermark, commit, verifier) {
+            FreezeBinding::Unbound => {}
+            FreezeBinding::CompactBound { .. } | FreezeBinding::Inconsistent => {
+                return Err(RuntimeError::CompactPublicationRequired);
+            }
         }
         let upper = i64::try_from(freeze.checkpoint.mutation_sequence)
             .map_err(|_| RuntimeError::RecoveryInvalid)?;
@@ -12028,27 +12036,7 @@ impl RuntimeState {
                 params![freeze.intent_id.to_vec(), commit_id.as_bytes().to_vec()],
             )
             .await?;
-            let mut batch_rows = tx
-                .query(
-                    "SELECT COUNT(*), COALESCE(SUM(length(payload)), 0) \
-                     FROM pending_mutation WHERE sequence <= ?1",
-                    params![upper],
-                )
-                .await?;
-            let batch = batch_rows
-                .next()
-                .await?
-                .ok_or(RuntimeError::RecoveryInvalid)?;
-            let published_rows: i64 = batch.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
-            let published_bytes: i64 = batch.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
-            tx.execute(
-                "UPDATE publication_metadata SET \
-                 published_mutations = published_mutations + ?1, \
-                 published_payload_bytes = published_payload_bytes + ?2, \
-                 last_publication_ms = ?3 WHERE singleton = 1",
-                params![published_rows, published_bytes, now_ms()?],
-            )
-            .await?;
+            record_published_prefix_tx(&tx, upper).await?;
         }
         tx.execute(
             "DELETE FROM pending_mutation WHERE sequence <= ?1",
@@ -13319,14 +13307,7 @@ impl RuntimeState {
         let Some(row) = rows.next().await? else {
             return Ok(None);
         };
-        let generation: i64 = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
-        let mutation_sequence: i64 = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
-        Ok(Some(Checkpoint {
-            generation: u64::try_from(generation).map_err(|_| RuntimeError::RecoveryInvalid)?,
-            digest: fixed(row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
-            mutation_sequence: u64::try_from(mutation_sequence)
-                .map_err(|_| RuntimeError::RecoveryInvalid)?,
-        }))
+        Ok(Some(decode_checkpoint_row(&row)?))
     }
 
     /// Reconstructs a persisted publication freeze for restart recovery.
@@ -18526,6 +18507,60 @@ fn publication_candidate_digest<'a>(
         }
     }
     hasher.finalize().into()
+}
+
+/// Decodes one `checkpoint` row selected as
+/// `(generation, mutation_sequence, digest)`.
+fn decode_checkpoint_row(row: &libsql::Row) -> Result<Checkpoint, RuntimeError> {
+    let generation = u64::try_from(
+        row.get::<i64>(0)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?,
+    )
+    .map_err(|_| RuntimeError::RecoveryInvalid)?;
+    let mutation_sequence = u64::try_from(
+        row.get::<i64>(1)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?,
+    )
+    .map_err(|_| RuntimeError::RecoveryInvalid)?;
+    Ok(Checkpoint {
+        generation,
+        digest: fixed(row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+        mutation_sequence,
+    })
+}
+
+/// Counts the frozen pending prefix through `upper` and adds it to the
+/// publication statistics row inside the caller's transaction.
+///
+/// Ordinary and compact completion publish the same prefix; one helper keeps
+/// the measured range and the accumulated counters equal on both paths.
+async fn record_published_prefix_tx(
+    transaction: &Connection,
+    upper: i64,
+) -> Result<(), RuntimeError> {
+    let mut batch_rows = transaction
+        .query(
+            "SELECT COUNT(*), COALESCE(SUM(length(payload)), 0) \
+             FROM pending_mutation WHERE sequence <= ?1",
+            params![upper],
+        )
+        .await?;
+    let batch = batch_rows
+        .next()
+        .await?
+        .ok_or(RuntimeError::RecoveryInvalid)?;
+    let published_rows: i64 = batch.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    let published_bytes: i64 = batch.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    transaction
+        .execute(
+            "UPDATE publication_metadata SET \
+             published_mutations = published_mutations + ?1, \
+             published_payload_bytes = published_payload_bytes + ?2, \
+             last_publication_ms = ?3 WHERE singleton = 1",
+            params![published_rows, published_bytes, now_ms()?],
+        )
+        .await?;
+    Ok(())
 }
 
 async fn current_writer_lease_tx(
