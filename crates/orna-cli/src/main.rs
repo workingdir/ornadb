@@ -1,7 +1,3 @@
-#![allow(
-    dead_code,
-    reason = "The bounded binary exposes planning and session seams for a later integration adapter."
-)]
 // Every command returns `Result<(), Diagnostic>` with the full command
 // diagnostic: code, message and the hints a user needs to fix the call. Boxing
 // it would push a Box onto every command without shrinking what a user reads.
@@ -26,6 +22,7 @@ mod cli_row_key;
 mod cli_serve;
 mod cli_stage;
 mod cli_status;
+mod encoding;
 #[cfg(test)]
 #[path = "../tests/support/format3.rs"]
 mod format3;
@@ -48,6 +45,7 @@ use cli_args::{
     requested_debug_mode,
 };
 use cli_dispatch::execute;
+use encoding::hex_digit;
 use repl::{AnsiColor, write_rendered_error, write_styled, write_styled_display};
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -95,8 +93,6 @@ fn cli_request_nonce() -> u128 {
         ^ (u128::from(std::process::id()) << 16)
         ^ u128::from(CLI_REQUEST_NONCE.fetch_add(1, AtomicOrdering::Relaxed))
 }
-
-const SENSOR_SOURCE_IDENTITY: &str = "example:sensors:v1";
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum ColorMode {
@@ -146,17 +142,15 @@ fn write_cli_line(text: &[u8], color: AnsiColor, color_enabled: bool) -> Result<
             body: None,
         })
 }
-#[allow(
-    dead_code,
-    reason = "The bounded CLI records the complete specified exit-status space."
-)]
+/// The process exit status of a failed command, as the `--help` exit status
+/// table lists it. Status 0 (success) is the absence of a diagnostic and
+/// status 4 (authorisation) belongs to remote transports this build does not
+/// have, so neither is a status a `Diagnostic` can carry.
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Exit {
-    Success = 0,
     Target = 1,
     Usage = 2,
     Connection = 3,
-    Authorisation = 4,
     Presentation = 5,
     Cancelled = 6,
     Protocol = 7,
@@ -308,209 +302,214 @@ struct DiagnosticDocumentation {
     help: &'static str,
 }
 
-#[allow(clippy::too_many_lines)]
+/// The catalogued diagnostics `orna explain` documents and the REPL and
+/// one-shot runners publish runtime failures under.
+const DIAGNOSTIC_DOCUMENTATION: &[DiagnosticDocumentation] = &[
+    DiagnosticDocumentation {
+        code: "ORNA-S010-IMPORT",
+        title: "imported module is unavailable",
+        explanation: "The project names a module that is not part of its captured dependencies, so the module cannot be checked or executed.",
+        help: "use a captured standard dependency or remove the import",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA-S011-AMBIGUOUS",
+        title: "standard import name is ambiguous",
+        explanation: "Two standard imports bind the same unqualified name to different functions, so the name cannot be resolved.",
+        help: "import the functions under distinct names or use their qualified paths",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA-S012-UNRESOLVED",
+        title: "name could not be resolved",
+        explanation: "The source refers to a name that is not declared or imported in the current namespace.",
+        help: "declare the name or add the matching `use` import before using it",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA-S021-TYPE",
+        title: "expression has the wrong type",
+        explanation: "The value produced by an expression does not satisfy the type required at that source location.",
+        help: "change the expression or its declared type so the value and requirement agree",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA-REPL-EFFECT",
+        title: "REPL preview cannot perform an effect",
+        explanation: "Interactive previews are read-only and cannot perform network, filesystem, process, or other external effects.",
+        help: "evaluate a pure expression or invoke the operation through its admitted runtime entry point",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA-REPL-EFFECT-UNCERTAIN",
+        title: "REPL effect outcome is uncertain",
+        explanation: "The input was evaluated before its request was durably committed, so external effects may already have happened. The outcome is uncertain and recovery is pending; the request is not replayed.",
+        help: "check the external system for the effect before repeating the input, because repeating it may repeat an external effect",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA-REPL-AT",
+        title: "snapshot selection failed",
+        explanation: "The requested CWD, HEAD, or reference snapshot could not be loaded as an admitted REPL context.",
+        help: "choose an existing snapshot and keep the repository available while selecting it",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA091-E-RETURN-ARROW",
+        title: "function return type uses the arrow form",
+        explanation: "Orna function declarations separate the parameter list from the return type with a colon.",
+        help: "replace `->` with `:` in the function declaration",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA091-E-VAR",
+        title: "local declaration uses `var`",
+        explanation: "Orna uses `let` for local declarations; reassignment updates that binding when permitted.",
+        help: "replace `var` with `let`",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA-A091-001",
+        title: "refined type uses the legacy `where self` form",
+        explanation: "Refined Orna types state their invariant in a brace-delimited assertion block owned by the type.",
+        help: "replace `where self` with a brace-delimited `assert` block",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA-A091-002",
+        title: "table assertion repeats its owner",
+        explanation: "A table assertion is already evaluated for its owning table, so an explicit owner pipeline is redundant.",
+        help: "remove the leading `self |` or table-name pipeline from the assertion",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA-A091-003",
+        title: "module assertion belongs to one table",
+        explanation: "An assertion that depends on only one table must live with that table so its owner is explicit.",
+        help: "move the assertion into the table body it depends on",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA-A091-004",
+        title: "assertion predicate has the wrong owner",
+        explanation: "The declaration's predicate does not describe the type or table that owns the assertion.",
+        help: "rewrite the predicate for the reported owner type",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA-A091-005",
+        title: "assertion is missing its terminator",
+        explanation: "An assertion clause must end with a semicolon before the next declaration.",
+        help: "terminate the assertion clause with `;`",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA-A091-006",
+        title: "assertion uses a dedicated recovery branch",
+        explanation: "Assertions report failed propositions; they do not provide an assertion-specific `else` branch.",
+        help: "use ordinary failure, recovery, or control flow instead",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA-A091-007",
+        title: "assertion has a forbidden effect",
+        explanation: "Declaration and refined assertions must be deterministic and cannot perform external effects.",
+        help: "remove the identified effect or nondeterministic operation",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA-A091-008",
+        title: "assertion is false",
+        explanation: "The executable or refined assertion does not hold for the value being checked.",
+        help: "inspect the owner and proposition, then provide a safe value",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA-A091-009",
+        title: "table or cross-table assertion is false",
+        explanation: "A table or cross-table invariant does not hold for the deterministic rows being checked.",
+        help: "inspect the reported witness and repair the affected table data",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA-A091-010",
+        title: "assertion form is unsupported",
+        explanation: "Orna 1.0 supports the sole owner-local `assert` form for declarations and tables.",
+        help: "rewrite the construct using the supported `assert` form",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA-A091-011",
+        title: "assertion is empty",
+        explanation: "An assertion must contain a proposition that can be checked.",
+        help: "provide a proposition after `assert`",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA-A091-012",
+        title: "module assertion has no table dependency",
+        explanation: "A module assertion is only valid when it depends on a table; otherwise it has no executable owner.",
+        help: "place the check in executable or test code",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA091-E-MATCH",
+        title: "value branching uses the legacy `match` form",
+        explanation: "Orna branches on values with `case` and colon-separated arms rather than `match` and arrows.",
+        help: "replace `match` with `case` and use `:` for each arm",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA091-E-RESULT",
+        title: "source uses an explicit `Result` value",
+        explanation: "Orna returns the successful type directly and propagates failures automatically.",
+        help: "return the successful type and use `|?` for recovery",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA091-E-POSTFIX-QUESTION",
+        title: "operation uses postfix failure propagation",
+        explanation: "Orna propagates operation failures automatically instead of using a postfix `?` operator.",
+        help: "remove the postfix `?` and use `|?` only for recovery",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA091-E-CURRENCY",
+        title: "source uses a special currency declaration",
+        explanation: "Currencies are nominal types with a nested `Currency` implementation, not a separate declaration form.",
+        help: "replace the currency declaration with a nominal type and nested `impl Currency`",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA091-E-CURRENCY-SYMBOL",
+        title: "currency declares a universal symbol",
+        explanation: "Currency symbols and placement depend on locale formatter data rather than a universal static field.",
+        help: "move symbol and placement choices to the locale-aware money formatter",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA091-E-IMPL-FOR",
+        title: "protocol implementation uses the legacy top-level form",
+        explanation: "Orna protocol implementations are nested inside the type that owns them.",
+        help: "nest `impl P` inside the owning type instead of writing `impl P for T`",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA091-E-BOUND-COLON",
+        title: "generic bound uses the legacy colon form",
+        explanation: "Generic protocol bounds use the `impl` keyword in Orna type parameters.",
+        help: "replace `<T: P>` with `<T impl P>`",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA091-E-STATIC-FN",
+        title: "protocol declares a static function",
+        explanation: "Protocols expose static properties or ordinary functions rather than static function declarations.",
+        help: "use a static property or an ordinary function",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA091-E-TRYFROM",
+        title: "source uses `TryFrom`",
+        explanation: "Orna's `From<S>` conversion may fail without wrapping the successful value in a separate result type.",
+        help: "use `From<S>` for a conversion that may fail",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA091-E-CONVERSION-CHAIN",
+        title: "conversion chain is implicit",
+        explanation: "Orna does not search for unspoken multi-step conversions between types.",
+        help: "name each conversion step explicitly",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA091-E-OPAQUE",
+        title: "source uses an opaque type declaration",
+        explanation: "Orna uses one nominal or refined `type` form instead of a separate opaque declaration.",
+        help: "replace `opaque Name` with the unified nominal or refined `type` form",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA091-E-FIELD-CONSTRAINT",
+        title: "field declares a legacy constraint",
+        explanation: "Field uniqueness and checks are table assertions owned by the table, not field suffixes.",
+        help: "write an owner-local table assertion using `all_unique` or `every`",
+    },
+];
+
 fn diagnostic_documentation(code: &str) -> Option<DiagnosticDocumentation> {
-    Some(match code {
-        "ORNA-S010-IMPORT" => DiagnosticDocumentation {
-            code: "ORNA-S010-IMPORT",
-            title: "imported module is unavailable",
-            explanation: "The project names a module that is not part of its captured dependencies, so the module cannot be checked or executed.",
-            help: "use a captured standard dependency or remove the import",
-        },
-        "ORNA-S011-AMBIGUOUS" => DiagnosticDocumentation {
-            code: "ORNA-S011-AMBIGUOUS",
-            title: "standard import name is ambiguous",
-            explanation: "Two standard imports bind the same unqualified name to different functions, so the name cannot be resolved.",
-            help: "import the functions under distinct names or use their qualified paths",
-        },
-        "ORNA-S012-UNRESOLVED" => DiagnosticDocumentation {
-            code: "ORNA-S012-UNRESOLVED",
-            title: "name could not be resolved",
-            explanation: "The source refers to a name that is not declared or imported in the current namespace.",
-            help: "declare the name or add the matching `use` import before using it",
-        },
-        "ORNA-S021-TYPE" => DiagnosticDocumentation {
-            code: "ORNA-S021-TYPE",
-            title: "expression has the wrong type",
-            explanation: "The value produced by an expression does not satisfy the type required at that source location.",
-            help: "change the expression or its declared type so the value and requirement agree",
-        },
-        "ORNA-REPL-EFFECT" => DiagnosticDocumentation {
-            code: "ORNA-REPL-EFFECT",
-            title: "REPL preview cannot perform an effect",
-            explanation: "Interactive previews are read-only and cannot perform network, filesystem, process, or other external effects.",
-            help: "evaluate a pure expression or invoke the operation through its admitted runtime entry point",
-        },
-        "ORNA-REPL-EFFECT-UNCERTAIN" => DiagnosticDocumentation {
-            code: "ORNA-REPL-EFFECT-UNCERTAIN",
-            title: "REPL effect outcome is uncertain",
-            explanation: "The input was evaluated before its request was durably committed, so external effects may already have happened. The outcome is uncertain and recovery is pending; the request is not replayed.",
-            help: "check the external system for the effect before repeating the input, because repeating it may repeat an external effect",
-        },
-        "ORNA-REPL-AT" => DiagnosticDocumentation {
-            code: "ORNA-REPL-AT",
-            title: "snapshot selection failed",
-            explanation: "The requested CWD, HEAD, or reference snapshot could not be loaded as an admitted REPL context.",
-            help: "choose an existing snapshot and keep the repository available while selecting it",
-        },
-        "ORNA091-E-RETURN-ARROW" => DiagnosticDocumentation {
-            code: "ORNA091-E-RETURN-ARROW",
-            title: "function return type uses the arrow form",
-            explanation: "Orna function declarations separate the parameter list from the return type with a colon.",
-            help: "replace `->` with `:` in the function declaration",
-        },
-        "ORNA091-E-VAR" => DiagnosticDocumentation {
-            code: "ORNA091-E-VAR",
-            title: "local declaration uses `var`",
-            explanation: "Orna uses `let` for local declarations; reassignment updates that binding when permitted.",
-            help: "replace `var` with `let`",
-        },
-        "ORNA-A091-001" => DiagnosticDocumentation {
-            code: "ORNA-A091-001",
-            title: "refined type uses the legacy `where self` form",
-            explanation: "Refined Orna types state their invariant in a brace-delimited assertion block owned by the type.",
-            help: "replace `where self` with a brace-delimited `assert` block",
-        },
-        "ORNA-A091-002" => DiagnosticDocumentation {
-            code: "ORNA-A091-002",
-            title: "table assertion repeats its owner",
-            explanation: "A table assertion is already evaluated for its owning table, so an explicit owner pipeline is redundant.",
-            help: "remove the leading `self |` or table-name pipeline from the assertion",
-        },
-        "ORNA-A091-003" => DiagnosticDocumentation {
-            code: "ORNA-A091-003",
-            title: "module assertion belongs to one table",
-            explanation: "An assertion that depends on only one table must live with that table so its owner is explicit.",
-            help: "move the assertion into the table body it depends on",
-        },
-        "ORNA-A091-004" => DiagnosticDocumentation {
-            code: "ORNA-A091-004",
-            title: "assertion predicate has the wrong owner",
-            explanation: "The declaration's predicate does not describe the type or table that owns the assertion.",
-            help: "rewrite the predicate for the reported owner type",
-        },
-        "ORNA-A091-005" => DiagnosticDocumentation {
-            code: "ORNA-A091-005",
-            title: "assertion is missing its terminator",
-            explanation: "An assertion clause must end with a semicolon before the next declaration.",
-            help: "terminate the assertion clause with `;`",
-        },
-        "ORNA-A091-006" => DiagnosticDocumentation {
-            code: "ORNA-A091-006",
-            title: "assertion uses a dedicated recovery branch",
-            explanation: "Assertions report failed propositions; they do not provide an assertion-specific `else` branch.",
-            help: "use ordinary failure, recovery, or control flow instead",
-        },
-        "ORNA-A091-007" => DiagnosticDocumentation {
-            code: "ORNA-A091-007",
-            title: "assertion has a forbidden effect",
-            explanation: "Declaration and refined assertions must be deterministic and cannot perform external effects.",
-            help: "remove the identified effect or nondeterministic operation",
-        },
-        "ORNA-A091-008" => DiagnosticDocumentation {
-            code: "ORNA-A091-008",
-            title: "assertion is false",
-            explanation: "The executable or refined assertion does not hold for the value being checked.",
-            help: "inspect the owner and proposition, then provide a safe value",
-        },
-        "ORNA-A091-009" => DiagnosticDocumentation {
-            code: "ORNA-A091-009",
-            title: "table or cross-table assertion is false",
-            explanation: "A table or cross-table invariant does not hold for the deterministic rows being checked.",
-            help: "inspect the reported witness and repair the affected table data",
-        },
-        "ORNA-A091-010" => DiagnosticDocumentation {
-            code: "ORNA-A091-010",
-            title: "assertion form is unsupported",
-            explanation: "Orna 1.0 supports the sole owner-local `assert` form for declarations and tables.",
-            help: "rewrite the construct using the supported `assert` form",
-        },
-        "ORNA-A091-011" => DiagnosticDocumentation {
-            code: "ORNA-A091-011",
-            title: "assertion is empty",
-            explanation: "An assertion must contain a proposition that can be checked.",
-            help: "provide a proposition after `assert`",
-        },
-        "ORNA-A091-012" => DiagnosticDocumentation {
-            code: "ORNA-A091-012",
-            title: "module assertion has no table dependency",
-            explanation: "A module assertion is only valid when it depends on a table; otherwise it has no executable owner.",
-            help: "place the check in executable or test code",
-        },
-        "ORNA091-E-MATCH" => DiagnosticDocumentation {
-            code: "ORNA091-E-MATCH",
-            title: "value branching uses the legacy `match` form",
-            explanation: "Orna branches on values with `case` and colon-separated arms rather than `match` and arrows.",
-            help: "replace `match` with `case` and use `:` for each arm",
-        },
-        "ORNA091-E-RESULT" => DiagnosticDocumentation {
-            code: "ORNA091-E-RESULT",
-            title: "source uses an explicit `Result` value",
-            explanation: "Orna returns the successful type directly and propagates failures automatically.",
-            help: "return the successful type and use `|?` for recovery",
-        },
-        "ORNA091-E-POSTFIX-QUESTION" => DiagnosticDocumentation {
-            code: "ORNA091-E-POSTFIX-QUESTION",
-            title: "operation uses postfix failure propagation",
-            explanation: "Orna propagates operation failures automatically instead of using a postfix `?` operator.",
-            help: "remove the postfix `?` and use `|?` only for recovery",
-        },
-        "ORNA091-E-CURRENCY" => DiagnosticDocumentation {
-            code: "ORNA091-E-CURRENCY",
-            title: "source uses a special currency declaration",
-            explanation: "Currencies are nominal types with a nested `Currency` implementation, not a separate declaration form.",
-            help: "replace the currency declaration with a nominal type and nested `impl Currency`",
-        },
-        "ORNA091-E-CURRENCY-SYMBOL" => DiagnosticDocumentation {
-            code: "ORNA091-E-CURRENCY-SYMBOL",
-            title: "currency declares a universal symbol",
-            explanation: "Currency symbols and placement depend on locale formatter data rather than a universal static field.",
-            help: "move symbol and placement choices to the locale-aware money formatter",
-        },
-        "ORNA091-E-IMPL-FOR" => DiagnosticDocumentation {
-            code: "ORNA091-E-IMPL-FOR",
-            title: "protocol implementation uses the legacy top-level form",
-            explanation: "Orna protocol implementations are nested inside the type that owns them.",
-            help: "nest `impl P` inside the owning type instead of writing `impl P for T`",
-        },
-        "ORNA091-E-BOUND-COLON" => DiagnosticDocumentation {
-            code: "ORNA091-E-BOUND-COLON",
-            title: "generic bound uses the legacy colon form",
-            explanation: "Generic protocol bounds use the `impl` keyword in Orna type parameters.",
-            help: "replace `<T: P>` with `<T impl P>`",
-        },
-        "ORNA091-E-STATIC-FN" => DiagnosticDocumentation {
-            code: "ORNA091-E-STATIC-FN",
-            title: "protocol declares a static function",
-            explanation: "Protocols expose static properties or ordinary functions rather than static function declarations.",
-            help: "use a static property or an ordinary function",
-        },
-        "ORNA091-E-TRYFROM" => DiagnosticDocumentation {
-            code: "ORNA091-E-TRYFROM",
-            title: "source uses `TryFrom`",
-            explanation: "Orna's `From<S>` conversion may fail without wrapping the successful value in a separate result type.",
-            help: "use `From<S>` for a conversion that may fail",
-        },
-        "ORNA091-E-CONVERSION-CHAIN" => DiagnosticDocumentation {
-            code: "ORNA091-E-CONVERSION-CHAIN",
-            title: "conversion chain is implicit",
-            explanation: "Orna does not search for unspoken multi-step conversions between types.",
-            help: "name each conversion step explicitly",
-        },
-        "ORNA091-E-OPAQUE" => DiagnosticDocumentation {
-            code: "ORNA091-E-OPAQUE",
-            title: "source uses an opaque type declaration",
-            explanation: "Orna uses one nominal or refined `type` form instead of a separate opaque declaration.",
-            help: "replace `opaque Name` with the unified nominal or refined `type` form",
-        },
-        "ORNA091-E-FIELD-CONSTRAINT" => DiagnosticDocumentation {
-            code: "ORNA091-E-FIELD-CONSTRAINT",
-            title: "field declares a legacy constraint",
-            explanation: "Field uniqueness and checks are table assertions owned by the table, not field suffixes.",
-            help: "write an owner-local table assertion using `all_unique` or `every`",
-        },
-        _ => return None,
-    })
+    DIAGNOSTIC_DOCUMENTATION
+        .iter()
+        .find(|documentation| documentation.code == code)
+        .copied()
 }
 
 fn explain_diagnostic(code: &str) -> Result<String, Diagnostic> {
@@ -742,225 +741,6 @@ fn valid_percent_text(text: &str) -> bool {
     true
 }
 
-fn hex_digit(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' | b'A'..=b'F' => Some(byte.to_ascii_lowercase() - b'a' + 10),
-        _ => None,
-    }
-}
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum SessionState {
-    Open,
-    Closing,
-    Closed,
-}
-trait SessionAdapter {
-    fn is_terminal(&mut self, child: u64) -> Result<bool, Diagnostic>;
-    fn cancel(&mut self, child: u64) -> Result<(), Diagnostic>;
-    fn drain_terminal(&mut self) -> Result<(), Diagnostic>;
-    fn close_transport(&mut self) -> Result<(), Diagnostic>;
-}
-struct Session {
-    state: SessionState,
-    owned: BTreeSet<u64>,
-}
-impl Session {
-    fn new() -> Self {
-        Self {
-            state: SessionState::Open,
-            owned: BTreeSet::new(),
-        }
-    }
-    fn own(&mut self, child: u64) -> Result<(), Diagnostic> {
-        if self.state != SessionState::Open {
-            return Err(Diagnostic::target(
-                "E1201",
-                "cannot add an invocation to a closed session",
-                "start a new root session before creating child actions",
-            ));
-        }
-        self.owned.insert(child);
-        Ok(())
-    }
-    fn close<A: SessionAdapter>(&mut self, adapter: &mut A) -> Result<bool, Diagnostic> {
-        if self.state == SessionState::Closed {
-            return Ok(false);
-        }
-        self.state = SessionState::Closing;
-        let mut first_error = None;
-        for child in self.owned.iter().copied() {
-            let should_cancel = match adapter.is_terminal(child) {
-                Ok(terminal) => !terminal,
-                Err(error) => {
-                    first_error.get_or_insert(error);
-                    true
-                }
-            };
-            if should_cancel && let Err(error) = adapter.cancel(child) {
-                first_error.get_or_insert(error);
-            }
-        }
-        if let Some(error) = first_error {
-            return Err(error);
-        }
-        adapter.drain_terminal()?;
-        adapter.close_transport()?;
-        self.owned.clear();
-        self.state = SessionState::Closed;
-        Ok(true)
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Default)]
-struct ReferenceState {
-    initialized: bool,
-    books: BTreeSet<&'static str>,
-    loans: BTreeMap<&'static str, &'static str>,
-    stock: BTreeMap<(&'static str, &'static str), i32>,
-    readings: BTreeMap<(&'static str, u8), &'static str>,
-    checkpoint: u8,
-}
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum Step {
-    Init,
-    Seed,
-    Exercise,
-    Sensors,
-    Noop(&'static str),
-}
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct Plan {
-    steps: Vec<Step>,
-}
-fn seeded(s: &ReferenceState) -> bool {
-    s.books == BTreeSet::from(["book-1", "book-2"])
-        && s.stock == BTreeMap::from([(("north", "pencil"), 12), (("south", "pencil"), 4)])
-}
-fn exercised(s: &ReferenceState) -> bool {
-    s.loans == BTreeMap::from([("book-1", "reader-1")])
-        && s.stock == BTreeMap::from([(("north", "pencil"), 9), (("south", "pencil"), 7)])
-}
-fn seed(s: &mut ReferenceState) -> Result<(), Diagnostic> {
-    if !s.initialized {
-        return Err(Diagnostic::target(
-            "E2002",
-            "reference database is not initialized",
-            "initialize it before invoking the reference seed",
-        ));
-    }
-    if !s.books.is_empty() || !s.stock.is_empty() {
-        return Err(Diagnostic::target(
-            "E2003",
-            "reference seed would create duplicate keys",
-            "use a fresh database or workflow planning after confirming the seed postcondition",
-        ));
-    }
-    s.books.extend(["book-1", "book-2"]);
-    s.stock.insert(("north", "pencil"), 12);
-    s.stock.insert(("south", "pencil"), 4);
-    Ok(())
-}
-fn exercise(s: &mut ReferenceState) -> Result<(), Diagnostic> {
-    if !seeded(s) {
-        return Err(Diagnostic::target(
-            "E2004",
-            "reference exercise requires the exact seeded state",
-            "seed an empty initialized reference database before exercising it",
-        ));
-    }
-    if !s.loans.is_empty() {
-        return Err(Diagnostic::target(
-            "E2005",
-            "reference exercise would create a duplicate loan key",
-            "use workflow planning after confirming the exercise postcondition",
-        ));
-    }
-    s.stock.insert(("north", "pencil"), 9);
-    s.stock.insert(("south", "pencil"), 7);
-    s.loans.insert("book-1", "reader-1");
-    Ok(())
-}
-fn sensors(s: &mut ReferenceState) -> Result<(), Diagnostic> {
-    if !s.initialized {
-        return Err(Diagnostic::target(
-            "E2002",
-            "reference database is not initialized",
-            "initialize it before invoking sensor ingestion",
-        ));
-    }
-    for (sensor, sequence, value) in [
-        ("greenhouse", 0, "18.25"),
-        ("greenhouse", 1, "18.50"),
-        ("greenhouse", 2, "18.75"),
-    ]
-    .into_iter()
-    .skip(usize::from(s.checkpoint))
-    {
-        if s.readings.insert((sensor, sequence), value).is_some() {
-            return Err(Diagnostic::target(
-                "E2009",
-                "sensor ingestion would create a duplicate reading key",
-                "restore the matching checkpoint or use a fresh reference database",
-            ));
-        }
-        s.checkpoint = sequence + 1;
-    }
-    Ok(())
-}
-fn plan(s: &ReferenceState) -> Result<Plan, Diagnostic> {
-    let mut p = s.clone();
-    let mut steps = Vec::new();
-    if p.initialized {
-        steps.push(Step::Noop("already initialized"));
-    } else {
-        p.initialized = true;
-        steps.push(Step::Init);
-    }
-    if seeded(&p) || exercised(&p) {
-        steps.push(Step::Noop("seed postcondition holds"));
-    } else {
-        seed(&mut p)?;
-        steps.push(Step::Seed);
-    }
-    if exercised(&p) {
-        steps.push(Step::Noop("exercise postcondition holds"));
-    } else {
-        exercise(&mut p)?;
-        steps.push(Step::Exercise);
-    }
-    if p.checkpoint == 3 && p.readings.len() == 3 {
-        steps.push(Step::Noop("sensor consumer at exhaustion"));
-    } else {
-        sensors(&mut p)?;
-        steps.push(Step::Sensors);
-    }
-    Ok(Plan { steps })
-}
-fn apply(s: &mut ReferenceState, p: &Plan) -> Result<(), Diagnostic> {
-    let mut candidate = s.clone();
-    for step in &p.steps {
-        match step {
-            Step::Init => {
-                if candidate.initialized {
-                    return Err(Diagnostic::target(
-                        "E2001",
-                        "reference database is already initialized",
-                        "use workflow planning to make initialization idempotent",
-                    ));
-                }
-                candidate.initialized = true;
-            }
-            Step::Seed => seed(&mut candidate)?,
-            Step::Exercise => exercise(&mut candidate)?,
-            Step::Sensors => sensors(&mut candidate)?,
-            Step::Noop(_) => {}
-        }
-    }
-    *s = candidate;
-    Ok(())
-}
-
 fn local_project_path(endpoint: &Endpoint) -> Result<&str, Diagnostic> {
     match endpoint {
         Endpoint::ManagedLocal => Ok("."),
@@ -988,40 +768,31 @@ fn pure_sys_host_context(
     ))
 }
 
+const DISCOVER_WORKTREE_HELP: &str =
+    "run the command inside a Git worktree or provide a local project path";
+
+/// The local Git worktree `endpoint` names, or the `E2100` refusal whose
+/// remedy is `help`.
+fn discover_worktree(
+    endpoint: &Endpoint,
+    help: &'static str,
+) -> Result<orna_repository::Repository, Diagnostic> {
+    orna_repository::Repository::discover(local_project_path(endpoint)?).map_err(|_| {
+        Diagnostic::target("E2100", "local Git worktree could not be discovered", help)
+    })
+}
+
 fn run_status(endpoint: &Endpoint) -> Result<(), Diagnostic> {
-    let path = local_project_path(endpoint)?;
-    let repository = orna_repository::Repository::discover(path).map_err(|_| {
-        Diagnostic::target(
-            "E2100",
-            "local Git worktree could not be discovered",
-            "run the command inside a Git worktree or provide a local project path",
-        )
-    })?;
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(repository.worktree())
-        .args(["-c", "color.status=false", "status", "--porcelain"])
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
-        .env_remove("GIT_COMMON_DIR")
-        .env_remove("GIT_OBJECT_DIRECTORY")
-        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
-        .output()
-        .map_err(|_| {
-            Diagnostic::target(
-                "E2100",
-                "local Git worktree status could not be read",
-                "check that Git can read the local worktree, then retry `status --porcelain`",
-            )
-        })?;
-    if !output.status.success() {
-        return Err(Diagnostic::target(
-            "E2100",
-            "local Git worktree status could not be read",
-            "check that Git can read the local worktree, then retry `status --porcelain`",
-        ));
-    }
+    let repository = discover_worktree(endpoint, DISCOVER_WORKTREE_HELP)?;
+    let output = cli_status::git_output(
+        cli_status::git_in(repository.worktree()).args([
+            "-c",
+            "color.status=false",
+            "status",
+            "--porcelain",
+        ]),
+        "check that Git can read the local worktree, then retry `status --porcelain`",
+    )?;
     io::stdout().write_all(&output.stdout).map_err(|_| {
         Diagnostic::target(
             "E2100",
@@ -1033,56 +804,20 @@ fn run_status(endpoint: &Endpoint) -> Result<(), Diagnostic> {
 }
 
 fn run_status_json(endpoint: &Endpoint) -> Result<(), Diagnostic> {
-    let path = local_project_path(endpoint)?;
-    let repository = orna_repository::Repository::discover(path).map_err(|_| {
-        Diagnostic::target(
-            "E2100",
-            "local Git worktree could not be discovered",
-            "run the command inside a Git worktree or provide a local project path",
-        )
-    })?;
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(repository.worktree())
-        .args([
+    let repository = discover_worktree(endpoint, DISCOVER_WORKTREE_HELP)?;
+    let output = cli_status::git_output(
+        cli_status::git_in(repository.worktree()).args([
             "-c",
             "color.status=false",
             "status",
             "--porcelain=v1",
             "-z",
             "--untracked-files=all",
-        ])
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
-        .env_remove("GIT_COMMON_DIR")
-        .env_remove("GIT_OBJECT_DIRECTORY")
-        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
-        .output()
-        .map_err(|_| {
-            Diagnostic::target(
-                "E2100",
-                "local Git worktree status could not be read",
-                "check that Git can read the local worktree, then retry `status --format json`",
-            )
-        })?;
-    if !output.status.success() {
-        return Err(Diagnostic::target(
-            "E2100",
-            "local Git worktree status could not be read",
-            "check that Git can read the local worktree, then retry `status --format json`",
-        ));
-    }
-    let branch_output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(repository.worktree())
+        ]),
+        "check that Git can read the local worktree, then retry `status --format json`",
+    )?;
+    let branch_output = cli_status::git_in(repository.worktree())
         .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
-        .env_remove("GIT_COMMON_DIR")
-        .env_remove("GIT_OBJECT_DIRECTORY")
-        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
         .output()
         .map_err(|_| {
             Diagnostic::target(
@@ -1568,40 +1303,12 @@ fn write_short_status<W: io::Write>(
 }
 
 fn run_status_human(endpoint: &Endpoint, color_enabled: bool) -> Result<(), Diagnostic> {
-    let path = local_project_path(endpoint)?;
-    let repository = orna_repository::Repository::discover(path).map_err(|_| {
-        Diagnostic::target(
-            "E2100",
-            "local Git worktree could not be discovered",
-            "run the command inside a Git worktree or provide a local project path",
-        )
-    })?;
+    let repository = discover_worktree(endpoint, DISCOVER_WORKTREE_HELP)?;
     let unpublished_count = unpublished_mutation_count(&repository)?;
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(repository.worktree())
-        .args(["-c", "color.status=false", "status"])
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
-        .env_remove("GIT_COMMON_DIR")
-        .env_remove("GIT_OBJECT_DIRECTORY")
-        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
-        .output()
-        .map_err(|_| {
-            Diagnostic::target(
-                "E2100",
-                "local Git worktree status could not be read",
-                "check that Git can read the local worktree, then retry `status`",
-            )
-        })?;
-    if !output.status.success() {
-        return Err(Diagnostic::target(
-            "E2100",
-            "local Git worktree status could not be read",
-            "check that Git can read the local worktree, then retry `status`",
-        ));
-    }
+    let output = cli_status::git_output(
+        cli_status::git_in(repository.worktree()).args(["-c", "color.status=false", "status"]),
+        "check that Git can read the local worktree, then retry `status`",
+    )?;
     let stdout = io::stdout();
     let link_root = if stdout.is_terminal() && terminal_supports_osc8() {
         repository.worktree().canonicalize().ok()
@@ -1633,45 +1340,17 @@ fn run_status_human(endpoint: &Endpoint, color_enabled: bool) -> Result<(), Diag
 }
 
 fn run_status_short(endpoint: &Endpoint, color_enabled: bool) -> Result<(), Diagnostic> {
-    let path = local_project_path(endpoint)?;
-    let repository = orna_repository::Repository::discover(path).map_err(|_| {
-        Diagnostic::target(
-            "E2100",
-            "local Git worktree could not be discovered",
-            "run the command inside a Git worktree or provide a local project path",
-        )
-    })?;
-    let mut git_dir = std::process::Command::new("git");
-    let git_dir_output = git_dir
-        .arg("-C")
-        .arg(repository.worktree())
-        .args(["rev-parse", "--git-dir"])
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
-        .env_remove("GIT_COMMON_DIR")
-        .env_remove("GIT_OBJECT_DIRECTORY")
-        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
-        .output()
-        .map_err(|_| {
-            Diagnostic::target(
-                "E2100",
-                "local Git worktree status could not be read",
-                "check that Git can read the local worktree, then retry `status --short`",
-            )
-        })?;
-    if !git_dir_output.status.success() {
-        return Err(Diagnostic::target(
-            "E2100",
-            "local Git worktree status could not be read",
-            "check that Git can read the local worktree, then retry `status --short`",
-        ));
-    }
+    const RETRY: &str = "check that Git can read the local worktree, then retry `status --short`";
+    let repository = discover_worktree(endpoint, DISCOVER_WORKTREE_HELP)?;
+    let git_dir_output = cli_status::git_output(
+        cli_status::git_in(repository.worktree()).args(["rev-parse", "--git-dir"]),
+        RETRY,
+    )?;
     let git_dir = String::from_utf8(git_dir_output.stdout).map_err(|_| {
         Diagnostic::target(
             "E2100",
             "local Git worktree status could not be read",
-            "check that Git can read the local worktree, then retry `status --short`",
+            RETRY,
         )
     })?;
     let git_dir = std::path::Path::new(git_dir.trim());
@@ -1680,33 +1359,15 @@ fn run_status_short(endpoint: &Endpoint, color_enabled: bool) -> Result<(), Diag
     } else {
         repository.worktree().join(git_dir)
     };
-    let output = std::process::Command::new("git")
-        .arg("--git-dir")
-        .arg(&git_dir)
-        .arg("--work-tree")
-        .arg(repository.worktree())
-        .args(["-c", "color.status=false", "status", "--short"])
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
-        .env_remove("GIT_COMMON_DIR")
-        .env_remove("GIT_OBJECT_DIRECTORY")
-        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
-        .output()
-        .map_err(|_| {
-            Diagnostic::target(
-                "E2100",
-                "local Git worktree status could not be read",
-                "check that Git can read the local worktree, then retry `status --short`",
-            )
-        })?;
-    if !output.status.success() {
-        return Err(Diagnostic::target(
-            "E2100",
-            "local Git worktree status could not be read",
-            "check that Git can read the local worktree, then retry `status --short`",
-        ));
-    }
+    let output = cli_status::git_output(
+        cli_status::scrubbed_git()
+            .arg("--git-dir")
+            .arg(&git_dir)
+            .arg("--work-tree")
+            .arg(repository.worktree())
+            .args(["-c", "color.status=false", "status", "--short"]),
+        RETRY,
+    )?;
     let mut stdout = io::stdout().lock();
     write_short_status(&output.stdout, &mut stdout, color_enabled).map_err(|_| {
         Diagnostic::target(
@@ -3380,16 +3041,7 @@ impl repl::SnapshotSessionLoader for ReplSnapshotSessionLoader<'_> {
 /// A located `ORNA-REPL-EFFECT` failure for a project binding the REPL cannot
 /// honour, naming what is wrong and the remedy to apply.
 fn repl_effect_failure(message: &str, remedy: &str) -> repl::ReplFailure {
-    repl::ReplFailure {
-        code: "ORNA-REPL-EFFECT".to_owned(),
-        detail: Some(orna_project_repl::ReplDetail {
-            code: "ORNA-REPL-EFFECT".to_owned(),
-            message: message.to_owned(),
-            span: None,
-            notes: Vec::new(),
-            help: vec![remedy.to_owned()],
-        }),
-    }
+    repl::ReplFailure::located("ORNA-REPL-EFFECT", message, vec![remedy.to_owned()])
 }
 
 /// Locates a REPL refusal to take the repository writer lease (ORNA-TURSO-005).
@@ -3403,18 +3055,11 @@ fn repl_lease_failure(error: &RuntimeError, state: &RuntimeState) -> repl::ReplF
     if state.holds_runtime_owner_lock() {
         // This process holds the runtime owner lock, so no mount is implicated
         // on this path and no remedy is offered for it.
-        return repl::ReplFailure {
-            code: "ORNA-REPL-EFFECT".to_owned(),
-            detail: Some(orna_project_repl::ReplDetail {
-                code: "ORNA-REPL-EFFECT".to_owned(),
-                message:
-                    "another writer owns the repository writer lease for this runtime owner lock"
-                        .to_owned(),
-                span: None,
-                notes: Vec::new(),
-                help: Vec::new(),
-            }),
-        };
+        return repl::ReplFailure::located(
+            "ORNA-REPL-EFFECT",
+            "another writer owns the repository writer lease for this runtime owner lock",
+            Vec::new(),
+        );
     }
     repl_effect_failure(
         "the repository writer lease is held by a live writer: the runtime owner lock is held by another live process (such as a mounted editor), so this REPL cannot take the writer lease",
@@ -3886,34 +3531,20 @@ fn repl_evaluation_failure(failure: ReplEvaluationFailure) -> repl::ReplFailure 
 /// happened. The code stays `ORNA-REPL-EFFECT-UNCERTAIN`; `message` names the
 /// cause that stopped settlement, so the outcome is diagnosable without replay.
 fn repl_effect_uncertain(message: String) -> repl::ReplFailure {
-    repl::ReplFailure {
-        code: REPL_EFFECT_UNCERTAIN.to_owned(),
-        detail: Some(orna_project_repl::ReplDetail {
-            code: REPL_EFFECT_UNCERTAIN.to_owned(),
-            message,
-            span: None,
-            notes: Vec::new(),
-            help: vec![
-                "the input is not replayed; the request row stays running for fenced recovery"
-                    .to_owned(),
-            ],
-        }),
-    }
+    repl::ReplFailure::located(
+        REPL_EFFECT_UNCERTAIN,
+        message,
+        vec![
+            "the input is not replayed; the request row stays running for fenced recovery"
+                .to_owned(),
+        ],
+    )
 }
 
 /// Submission failure for an input that was not published and is cancelled.
 /// `message` names the cause so the failure stays diagnosable.
 fn repl_effect_cancelled(message: String) -> repl::ReplFailure {
-    repl::ReplFailure {
-        code: "ORNA-REPL-EFFECT".to_owned(),
-        detail: Some(orna_project_repl::ReplDetail {
-            code: "ORNA-REPL-EFFECT".to_owned(),
-            message,
-            span: None,
-            notes: Vec::new(),
-            help: Vec::new(),
-        }),
-    }
+    repl::ReplFailure::located("ORNA-REPL-EFFECT", message, Vec::new())
 }
 
 /// The failure that stopped settlement, named for the uncertain detail.
@@ -3947,18 +3578,6 @@ fn stage_outcome_cause(outcome: &StageOutcome<orna_foundation::Diagnostic>) -> S
         StageOutcome::Skipped { reason } => reason.clone(),
         StageOutcome::Passed => "validator build produced no validator".to_owned(),
     }
-}
-
-fn run_repl_submission<W: io::Write>(
-    session: &mut AdmittedReplSession,
-    source: &str,
-    writer: &mut W,
-    color_enabled: bool,
-) -> Result<(), Diagnostic> {
-    let mut submitter = |session: &mut AdmittedReplSession, source: &str| {
-        session.submit(source).map_err(repl::ReplFailure::from)
-    };
-    run_repl_submission_with(session, source, writer, color_enabled, &mut submitter)
 }
 
 fn run_repl_submission_with<W, S>(
@@ -4064,7 +3683,7 @@ fn run_repl(
         repository: runtime.repository.as_ref(),
         host_bindings,
     };
-    repl::run_with_snapshot_loader_and_color_and_submitter(
+    repl::run_with_loader_and_submitter(
         &mut BufReader::new(stdin.lock()),
         &mut stdout.lock(),
         &mut runtime.session,
@@ -4191,14 +3810,10 @@ fn run_fetch(
     branch: &str,
     color_enabled: bool,
 ) -> Result<(), Diagnostic> {
-    let path = local_project_path(endpoint)?;
-    let repository = orna_repository::Repository::discover(path).map_err(|_| {
-        Diagnostic::target(
-            "E2100",
-            "local Git worktree could not be discovered",
-            "run `fetch` inside a Git worktree or provide a local project path",
-        )
-    })?;
+    let repository = discover_worktree(
+        endpoint,
+        "run `fetch` inside a Git worktree or provide a local project path",
+    )?;
     let requested = orna_repository::RequestedRef::branch(branch.to_owned()).map_err(|error| {
         Diagnostic::target_with_detail(
             "E2100",
@@ -4274,14 +3889,10 @@ fn run_push(
     branch: Option<&str>,
     color_enabled: bool,
 ) -> Result<(), Diagnostic> {
-    let path = local_project_path(endpoint)?;
-    let repository = orna_repository::Repository::discover(path).map_err(|_| {
-        Diagnostic::target(
-            "E2100",
-            "local Git worktree could not be discovered",
-            "run `push` inside a Git worktree or provide a local project path",
-        )
-    })?;
+    let repository = discover_worktree(
+        endpoint,
+        "run `push` inside a Git worktree or provide a local project path",
+    )?;
     let branch = match branch {
         Some(branch) => branch.to_owned(),
         None => repository
@@ -5396,6 +5007,20 @@ mod tests {
         );
     }
 
+    /// One single-expression REPL submission against a bare session, the path
+    /// `orna repl EXPR` takes without a project transaction authority.
+    fn run_repl_submission<W: io::Write>(
+        session: &mut AdmittedReplSession,
+        source: &str,
+        writer: &mut W,
+        color_enabled: bool,
+    ) -> Result<(), Diagnostic> {
+        let mut submitter = |session: &mut AdmittedReplSession, source: &str| {
+            session.submit(source).map_err(repl::ReplFailure::from)
+        };
+        run_repl_submission_with(session, source, writer, color_enabled, &mut submitter)
+    }
+
     #[test]
     fn single_expression_repl_reports_visible_success_failure_and_quit() {
         let mut session = AdmittedReplSession::new(Limits::default());
@@ -5892,187 +5517,6 @@ mod tests {
             Endpoint::parse("orna://[::1]:7443/team%2Fwork").expect("IPv6 TLS endpoint"),
             Endpoint::RemoteTls("orna://[::1]:7443/team%2Fwork".into())
         );
-    }
-    #[test]
-    fn workflow_is_deterministic_and_idempotent() {
-        let mut state = ReferenceState::default();
-        let first = plan(&state).expect("plan");
-        assert_eq!(
-            first.steps,
-            vec![Step::Init, Step::Seed, Step::Exercise, Step::Sensors]
-        );
-        apply(&mut state, &first).expect("apply");
-        assert_eq!(
-            (
-                state.checkpoint,
-                state.readings.len(),
-                state.stock.get(&("north", "pencil"))
-            ),
-            (3, 3, Some(&9))
-        );
-        let repeat = plan(&state).expect("replan");
-        assert!(
-            repeat
-                .steps
-                .iter()
-                .all(|step| matches!(step, Step::Noop(_)))
-        );
-    }
-    #[test]
-    fn invalid_workflow_rolls_back_candidate() {
-        let mut state = ReferenceState {
-            initialized: true,
-            ..ReferenceState::default()
-        };
-        let before = state.clone();
-        let invalid = Plan {
-            steps: vec![Step::Exercise],
-        };
-        assert_eq!(
-            apply(&mut state, &invalid).expect_err("invalid").code,
-            "E2004"
-        );
-        assert_eq!(state, before);
-    }
-    #[test]
-    fn direct_seed_preserves_reference_duplicate_failure() {
-        let mut state = ReferenceState {
-            initialized: true,
-            ..ReferenceState::default()
-        };
-        seed(&mut state).expect("first seed");
-        assert_eq!(seed(&mut state).expect_err("duplicate").code, "E2003");
-    }
-    #[derive(Default)]
-    struct Recording {
-        calls: Vec<String>,
-        terminal: BTreeSet<u64>,
-        fail_cancel: BTreeSet<u64>,
-        fail_drain: bool,
-    }
-    impl SessionAdapter for Recording {
-        fn is_terminal(&mut self, child: u64) -> Result<bool, Diagnostic> {
-            self.calls.push(format!("terminal:{child}"));
-            Ok(self.terminal.contains(&child))
-        }
-        fn cancel(&mut self, child: u64) -> Result<(), Diagnostic> {
-            self.calls.push(format!("cancel:{child}"));
-            if self.fail_cancel.contains(&child) {
-                return Err(Diagnostic::target(
-                    "E1203",
-                    "session child cancellation is incomplete",
-                    "retry close after child cancellation becomes available",
-                ));
-            }
-            Ok(())
-        }
-        fn drain_terminal(&mut self) -> Result<(), Diagnostic> {
-            self.calls.push("drain".into());
-            if self.fail_drain {
-                return Err(Diagnostic::target(
-                    "E1202",
-                    "session cleanup is incomplete",
-                    "retry close after child cleanup completes",
-                ));
-            }
-            Ok(())
-        }
-        fn close_transport(&mut self) -> Result<(), Diagnostic> {
-            self.calls.push("close".into());
-            Ok(())
-        }
-    }
-    #[test]
-    fn close_cancels_only_owned_unfinished_children_then_drains_and_is_idempotent() {
-        let mut session = Session::new();
-        session.own(9).expect("open");
-        session.own(2).expect("open");
-        let mut adapter = Recording {
-            terminal: BTreeSet::from([9]),
-            ..Recording::default()
-        };
-        assert_eq!(session.close(&mut adapter), Ok(true));
-        assert_eq!(
-            adapter.calls,
-            ["terminal:2", "cancel:2", "terminal:9", "drain", "close"]
-        );
-        assert_eq!(session.close(&mut adapter), Ok(false));
-        assert_eq!(adapter.calls.len(), 5);
-    }
-    #[test]
-    fn failed_close_keeps_the_session_closed_to_new_children_until_cleanup_retries() {
-        let mut session = Session::new();
-        session.own(2).expect("open");
-        let mut adapter = Recording {
-            fail_drain: true,
-            ..Recording::default()
-        };
-
-        assert_eq!(
-            session.close(&mut adapter).expect_err("drain failure").code,
-            "E1202"
-        );
-        assert_eq!(session.own(3).expect_err("admission sealed").code, "E1201");
-
-        adapter.fail_drain = false;
-        assert_eq!(session.close(&mut adapter), Ok(true));
-        assert_eq!(
-            adapter.calls,
-            [
-                "terminal:2",
-                "cancel:2",
-                "drain",
-                "terminal:2",
-                "cancel:2",
-                "drain",
-                "close"
-            ]
-        );
-    }
-    #[test]
-    fn failed_child_cancellation_still_attempts_every_owned_child() {
-        let mut session = Session::new();
-        session.own(2).expect("open");
-        session.own(3).expect("open");
-        let mut adapter = Recording {
-            fail_cancel: BTreeSet::from([2]),
-            ..Recording::default()
-        };
-
-        assert_eq!(
-            session
-                .close(&mut adapter)
-                .expect_err("first cancellation fails")
-                .code,
-            "E1203"
-        );
-        assert_eq!(
-            adapter.calls,
-            ["terminal:2", "cancel:2", "terminal:3", "cancel:3"]
-        );
-        assert_eq!(session.own(4).expect_err("admission sealed").code, "E1201");
-
-        adapter.fail_cancel.clear();
-        assert_eq!(session.close(&mut adapter), Ok(true));
-        assert_eq!(
-            adapter.calls,
-            [
-                "terminal:2",
-                "cancel:2",
-                "terminal:3",
-                "cancel:3",
-                "terminal:2",
-                "cancel:2",
-                "terminal:3",
-                "cancel:3",
-                "drain",
-                "close",
-            ]
-        );
-    }
-    #[test]
-    fn identity_is_declared_for_adapter_integration() {
-        assert_eq!(SENSOR_SOURCE_IDENTITY, "example:sensors:v1");
     }
     #[test]
     fn init_parse_defaults_to_the_current_directory_target() {
