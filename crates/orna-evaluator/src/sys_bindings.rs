@@ -11,65 +11,21 @@ use orna_repository::{
 use orna_syntax::Expr;
 use orna_sys::{
     CaptureFileError, ClockProvider, EnvironmentDispatchValue, EnvironmentProvider,
-    EnvironmentProviderError, FailureCode, FilesystemProvider, HostHttpResponse,
-    HostOperationDescriptor, HttpProvider, OperationContract, OperationId, ProcessProvider,
-    ProviderDiagnostic, ProviderFailure, ProviderOffer, SemanticRoleContract,
-    SystemOperationProvider, TypeId, TypedValue, system_host_operation_registry,
+    EnvironmentProviderError, FailureCode, FilesystemProvider, HostHttpResponse, HostOperation,
+    HostOperationDescriptor, HostProvider, HttpProvider, OperationContract, OperationId, Origin,
+    ProcessProvider, ProviderDiagnostic, ProviderFailure, ProviderOffer, SemanticRoleContract,
+    SysEffect, SysFunction, SysFunctionBinding, SysFunctionHost, SystemOperationProvider, TypeId,
+    TypedValue,
 };
 use orna_value::{Blob, ContextValue, Error as ValueError, ValueFormat};
 
+use crate::sys_dispatch::{self, RegisteredOperation};
 use crate::{
     CancellationToken, EffectHandler, EvaluationError, Ovb2EffectHandler, StepBudget,
     SysHostAttachment, SysHostContext, Value,
 };
 
 const MAX_RANDOM_BYTES: usize = 1_048_576;
-
-/// The filesystem operation an admitted descriptor names.
-///
-/// Every admitted operation repeats the last component of its name as its
-/// `implementation`; classifying once keeps the dispatch exhaustive, so a new
-/// registry operation is a compile error here instead of a silent
-/// `ORNA-EVAL-UNSUPPORTED`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum FilesystemOperation {
-    ReadText,
-    WriteText,
-    AppendText,
-    Exists,
-    IsDirectory,
-    List,
-    Metadata,
-    SymlinkMetadata,
-    CreateDir,
-    RemoveFile,
-    CopyFile,
-    MoveFile,
-}
-
-impl FilesystemOperation {
-    fn from_descriptor(operation: &HostOperationDescriptor) -> Option<Self> {
-        let name = operation.name.as_str();
-        if operation.implementation != name.rsplit('.').next().unwrap_or("") {
-            return None;
-        }
-        Some(match name {
-            "std.io.fs.read_text" => Self::ReadText,
-            "std.io.fs.write_text" => Self::WriteText,
-            "std.io.fs.append_text" => Self::AppendText,
-            "std.io.fs.exists" => Self::Exists,
-            "std.io.fs.is_directory" => Self::IsDirectory,
-            "std.io.fs.list" => Self::List,
-            "std.io.fs.metadata" => Self::Metadata,
-            "std.io.fs.symlink_metadata" => Self::SymlinkMetadata,
-            "std.io.fs.create_dir" => Self::CreateDir,
-            "std.io.fs.remove_file" => Self::RemoveFile,
-            "std.io.fs.copy_file" => Self::CopyFile,
-            "std.io.fs.move_file" => Self::MoveFile,
-            _ => return None,
-        })
-    }
-}
 
 /// The decoded arguments of one `std.io.process.run` call.
 struct ProcessRequest<'a> {
@@ -186,6 +142,267 @@ impl PartialEq for SysHostBindingRegistry {
 }
 
 impl Eq for SysHostBindingRegistry {}
+
+impl SysHostBindingRegistry {
+    /// Classifies one catalogued callable for this host.
+    ///
+    /// The generated dispatcher matches every `SysFunction` variant exactly once;
+    /// the classification below says which arms this evaluator serves and which
+    /// remain unbound here (ORNA-SYS-008).
+    #[must_use]
+    pub(crate) fn binding(&self, function: SysFunction) -> SysFunctionBinding {
+        orna_sys::dispatch_sys_function(self, function)
+    }
+}
+
+impl SysFunctionHost for SysHostBindingRegistry {
+    fn meta(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn object(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn resolve(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn resolve_function(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn describe(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn source_object_ref(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn source_file_ref(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn history_object_ref(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn history_file_ref(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn blame_file_ref(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn blame_row_ref(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn dependencies(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn dependents(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn snapshot_snapshot_ref(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn snapshot_commit_ref(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn snapshot_branch_ref(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn snapshot_tag_ref(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn snapshot_git_oid(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn snapshot_str(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn diff(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn changes(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn explain_query(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Implemented
+    }
+    fn explain_function_ref(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Implemented
+    }
+    fn explain_diagnostic(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Implemented
+    }
+    fn checkpoint(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn render_diagnostic(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn rt_info(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Implemented
+    }
+    fn invoke_value(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn invoke_t(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn start_value(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn start_t(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn r#await(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn cancel(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn admin_commit(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn admin_checkout_snapshot_ref(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn admin_checkout_commit_ref(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn admin_checkout_branch_ref(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn admin_checkout_tag_ref(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn admin_checkout_git_oid(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn admin_checkout_str(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn admin_create_branch_snapshot_ref(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn admin_create_branch_commit_ref(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn admin_create_branch_branch_ref(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn admin_create_branch_tag_ref(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn admin_create_branch_git_oid(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn admin_create_branch_str(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn admin_flush(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn admin_compact(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn admin_verify(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn admin_cancel_run(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn admin_pause_stream(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn admin_resume_stream(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn admin_reset_checkpoint(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn admin_retry_failure(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn admin_skip_failure(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn admin_replay_failure(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn admin_resolve_failure(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn consumer_identity(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn admin_plan_checkout_snapshot_ref(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn admin_plan_checkout_commit_ref(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn admin_plan_checkout_branch_ref(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn admin_plan_checkout_tag_ref(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn admin_plan_checkout_git_oid(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn admin_plan_checkout_str(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn blob_length(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Implemented
+    }
+    fn blob_digest(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Implemented
+    }
+    fn blob_read(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Implemented
+    }
+    fn blob_verify(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Implemented
+    }
+    fn blob_from_bytes(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Implemented
+    }
+    fn blob_to_bytes(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Implemented
+    }
+    fn blob_begin(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn blob_append(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn blob_finish(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn blob_abort(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn blob_capture_file(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Implemented
+    }
+    fn blob_resource(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn admin_review_commit(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn admin_commit_reviewed(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Unavailable(Origin::Portable)
+    }
+    fn blob_media_type(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Implemented
+    }
+    fn blob_suffix(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Implemented
+    }
+    fn blob_annotate(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Implemented
+    }
+    fn blob_same_content(&self) -> SysFunctionBinding {
+        SysFunctionBinding::Implemented
+    }
+}
 
 /// Environment reads are conservatively external (ORNA-CAP-005): every
 /// registry binds the environment provider, and its snapshot is host state
@@ -333,61 +550,79 @@ impl SysHostBindingRegistry {
 
     fn dispatch(
         &self,
-        operation_name: &str,
+        operation: RegisteredOperation,
         arguments: &[CanonicalValue],
         cancellation: Option<&CancellationToken>,
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
-        if operation_name == "std.random.entropy" {
-            if !self.system_random {
-                return Err(redacted_error("ORNA-EVAL-UNSUPPORTED"));
-            }
-            let [count] = arguments else {
-                return Err(redacted_error("ORNA-EVAL-ARGUMENT"));
-            };
-            let OvbRaw::Int(count) = count.raw() else {
-                return Err(redacted_error("ORNA-EVAL-TYPE"));
-            };
-            let count = count
-                .to_usize()
-                .ok_or_else(|| redacted_error("ORNA-EVAL-VALUE"))?;
-            if count > MAX_RANDOM_BYTES {
-                return Err(redacted_error("ORNA-EVAL-LIMIT"));
-            }
-            let mut bytes = vec![0; count];
-            getrandom::fill(&mut bytes).map_err(|_| redacted_error("ORNA-EVAL-UNSUPPORTED"))?;
-            return CanonicalValue::new(OvbRaw::Bytes(bytes))
-                .map(Some)
-                .map_err(|_| redacted_error("ORNA-EVAL-VALUE"));
+        match operation {
+            RegisteredOperation::StdRandomEntropy => self.random_entropy(arguments),
+            RegisteredOperation::Host(host) => self.dispatch_host(host, arguments, cancellation),
         }
-        let registry = system_host_operation_registry();
-        let Some(operation) = registry.operation(operation_name) else {
+    }
+
+    /// Fills one requested entropy count from the operating-system CSPRNG.
+    fn random_entropy(
+        &self,
+        arguments: &[CanonicalValue],
+    ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        if !self.system_random {
+            return Err(redacted_error("ORNA-EVAL-UNSUPPORTED"));
+        }
+        let [count] = arguments else {
+            return Err(redacted_error("ORNA-EVAL-ARGUMENT"));
+        };
+        let OvbRaw::Int(count) = count.raw() else {
+            return Err(redacted_error("ORNA-EVAL-TYPE"));
+        };
+        let count = count
+            .to_usize()
+            .ok_or_else(|| redacted_error("ORNA-EVAL-VALUE"))?;
+        if count > MAX_RANDOM_BYTES {
+            return Err(redacted_error("ORNA-EVAL-LIMIT"));
+        }
+        let mut bytes = vec![0; count];
+        getrandom::fill(&mut bytes).map_err(|_| redacted_error("ORNA-EVAL-UNSUPPORTED"))?;
+        CanonicalValue::new(OvbRaw::Bytes(bytes))
+            .map(Some)
+            .map_err(|_| redacted_error("ORNA-EVAL-VALUE"))
+    }
+
+    /// Dispatches one generated host operation by its typed identity.
+    fn dispatch_host(
+        &self,
+        host: HostOperation,
+        arguments: &[CanonicalValue],
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        let Some(operation) = sys_dispatch::host_descriptor(host) else {
             return Ok(None);
         };
         if operation
             .effects
             .iter()
-            .any(|effect| !matches!(effect.as_str(), "read" | "invoke"))
+            .any(|effect| !matches!(effect, SysEffect::Read | SysEffect::Invoke))
         {
             return Err(redacted_error("ORNA-EVAL-UNSUPPORTED"));
         }
-        let role = registry
+        let role = orna_sys::system_host_operation_registry()
             .role_by_id(&operation.role)
             .ok_or_else(|| redacted_error("ORNA-EVAL-UNSUPPORTED"))?;
-        if role.provider.as_str() != operation.provider.name()
+        let provider = HostProvider::parse(role.provider.as_str())
+            .ok_or_else(|| redacted_error("ORNA-EVAL-UNSUPPORTED"))?;
+        if operation.provider != provider
             || !role
                 .operations
                 .iter()
-                .any(|candidate| candidate == operation_name)
+                .any(|candidate| candidate.as_str() == operation.name.label())
         {
             return Err(redacted_error("ORNA-EVAL-UNSUPPORTED"));
         }
-        match role.provider.as_str() {
-            "orna.sys.host.environment.v1" => self.dispatch_environment(operation, arguments),
-            "orna.sys.host.process.v1" => self.dispatch_process(operation, arguments),
-            "orna.sys.host.clock.v1" => self.dispatch_clock(operation, arguments, cancellation),
-            "orna.sys.host.filesystem.v1" => self.dispatch_filesystem(operation, arguments),
-            "orna.sys.host.http.v1" => self.dispatch_http(operation, arguments),
-            _ => Err(redacted_error("ORNA-EVAL-UNSUPPORTED")),
+        match provider {
+            HostProvider::Environment => self.dispatch_environment(operation, arguments),
+            HostProvider::Process => self.dispatch_process(operation, arguments),
+            HostProvider::Clock => self.dispatch_clock(operation, arguments, cancellation),
+            HostProvider::Filesystem => self.dispatch_filesystem(operation, arguments),
+            HostProvider::Http => self.dispatch_http(operation, arguments),
         }
     }
 
@@ -400,44 +635,55 @@ impl SysHostBindingRegistry {
             .filesystem
             .as_ref()
             .ok_or_else(|| redacted_error("ORNA-EVAL-UNSUPPORTED"))?;
-        let value = match FilesystemOperation::from_descriptor(operation) {
-            Some(FilesystemOperation::ReadText) => {
+        if operation.implementation != last_name_component(operation.name.label()) {
+            return Err(redacted_error("ORNA-EVAL-UNSUPPORTED"));
+        }
+        let value = match operation.name {
+            HostOperation::StdIoFsReadText => {
                 self.filesystem_read_text(operation, provider, arguments)?
             }
-            Some(FilesystemOperation::WriteText) => {
+            HostOperation::StdIoFsWriteText => {
                 self.filesystem_write_text(operation, provider, arguments)?
             }
-            Some(FilesystemOperation::AppendText) => {
+            HostOperation::StdIoFsAppendText => {
                 self.filesystem_append_text(operation, provider, arguments)?
             }
-            Some(FilesystemOperation::Exists) => {
+            HostOperation::StdIoFsExists => {
                 self.filesystem_exists(operation, provider, arguments)?
             }
-            Some(FilesystemOperation::IsDirectory) => {
+            HostOperation::StdIoFsIsDirectory => {
                 self.filesystem_is_directory(operation, provider, arguments)?
             }
-            Some(FilesystemOperation::List) => {
-                self.filesystem_list(operation, provider, arguments)?
-            }
-            Some(FilesystemOperation::Metadata) => {
+            HostOperation::StdIoFsList => self.filesystem_list(operation, provider, arguments)?,
+            HostOperation::StdIoFsMetadata => {
                 self.filesystem_metadata(operation, provider, arguments, true)?
             }
-            Some(FilesystemOperation::SymlinkMetadata) => {
+            HostOperation::StdIoFsSymlinkMetadata => {
                 self.filesystem_metadata(operation, provider, arguments, false)?
             }
-            Some(FilesystemOperation::CreateDir) => {
+            HostOperation::StdIoFsCreateDir => {
                 self.filesystem_create_dir(operation, provider, arguments)?
             }
-            Some(FilesystemOperation::RemoveFile) => {
+            HostOperation::StdIoFsRemoveFile => {
                 self.filesystem_remove_file(operation, provider, arguments)?
             }
-            Some(FilesystemOperation::CopyFile) => {
+            HostOperation::StdIoFsCopyFile => {
                 self.filesystem_copy_file(operation, provider, arguments)?
             }
-            Some(FilesystemOperation::MoveFile) => {
+            HostOperation::StdIoFsMoveFile => {
                 self.filesystem_move_file(operation, provider, arguments)?
             }
-            None => return Err(redacted_error("ORNA-EVAL-UNSUPPORTED")),
+            HostOperation::StdConcurrentSleep
+            | HostOperation::StdIoEnvironmentGet
+            | HostOperation::StdIoEnvironmentRequire
+            | HostOperation::StdIoProcessRun
+            | HostOperation::StdNetHttpCancel
+            | HostOperation::StdNetHttpSend
+            | HostOperation::StdNetHttpStart
+            | HostOperation::StdNetHttpWait
+            | HostOperation::SysBlobCaptureFile => {
+                return Err(redacted_error("ORNA-EVAL-UNSUPPORTED"));
+            }
         };
         CanonicalValue::new(value)
             .map(Some)
@@ -661,16 +907,34 @@ impl SysHostBindingRegistry {
         operation: &HostOperationDescriptor,
         arguments: &[CanonicalValue],
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
-        if !matches!(
-            operation.name.as_str(),
-            "std.net.http.send"
-                | "std.net.http.start"
-                | "std.net.http.wait"
-                | "std.net.http.cancel"
-        ) || operation.implementation != operation.name.rsplit('.').next().unwrap_or("")
-            || operation.role != "host.std.net.http@1.0"
-            || operation.provider != "orna.sys.host.http.v1"
-            || operation.effects != ["invoke"]
+        let admitted = match operation.name {
+            HostOperation::StdNetHttpSend
+            | HostOperation::StdNetHttpStart
+            | HostOperation::StdNetHttpWait
+            | HostOperation::StdNetHttpCancel => true,
+            HostOperation::StdConcurrentSleep
+            | HostOperation::StdIoEnvironmentGet
+            | HostOperation::StdIoEnvironmentRequire
+            | HostOperation::StdIoFsAppendText
+            | HostOperation::StdIoFsCopyFile
+            | HostOperation::StdIoFsCreateDir
+            | HostOperation::StdIoFsExists
+            | HostOperation::StdIoFsIsDirectory
+            | HostOperation::StdIoFsList
+            | HostOperation::StdIoFsMetadata
+            | HostOperation::StdIoFsMoveFile
+            | HostOperation::StdIoFsReadText
+            | HostOperation::StdIoFsRemoveFile
+            | HostOperation::StdIoFsSymlinkMetadata
+            | HostOperation::StdIoFsWriteText
+            | HostOperation::StdIoProcessRun
+            | HostOperation::SysBlobCaptureFile => false,
+        };
+        if !admitted
+            || operation.implementation != last_name_component(operation.name.label())
+            || operation.role != HostOperation::StdNetHttpSend.role()
+            || operation.provider != HostProvider::Http
+            || operation.effects != [SysEffect::Invoke]
         {
             return Err(redacted_error("ORNA-EVAL-UNSUPPORTED"));
         }
@@ -678,39 +942,40 @@ impl SysHostBindingRegistry {
             .http
             .as_ref()
             .ok_or_else(|| redacted_error("ORNA-EVAL-UNSUPPORTED"))?;
-        let raw = match operation.name.as_str() {
-            "std.net.http.send" | "std.net.http.start" => {
+        let raw = match operation.name {
+            HostOperation::StdNetHttpSend => {
                 let (method, url, headers, body, timeout, max_headers, max_body) =
                     parse_http_request_arguments(arguments)?;
-                if operation.name == "std.net.http.send" {
-                    let response = provider
-                        .send(
-                            &method,
-                            &url,
-                            &headers,
-                            body.as_deref(),
-                            timeout,
-                            max_headers,
-                            max_body,
-                        )
-                        .map_err(|failure| self.failure(operation, failure.code()))?;
-                    http_response_raw(response)
-                } else {
-                    let handle = provider
-                        .start(
-                            &method,
-                            &url,
-                            &headers,
-                            body.as_deref(),
-                            timeout,
-                            max_headers,
-                            max_body,
-                        )
-                        .map_err(|failure| self.failure(operation, failure.code()))?;
-                    Ok(OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(handle.to_vec()))))
-                }
+                let response = provider
+                    .send(
+                        &method,
+                        &url,
+                        &headers,
+                        body.as_deref(),
+                        timeout,
+                        max_headers,
+                        max_body,
+                    )
+                    .map_err(|failure| self.failure(operation, failure.code()))?;
+                http_response_raw(response)
             }
-            "std.net.http.wait" => {
+            HostOperation::StdNetHttpStart => {
+                let (method, url, headers, body, timeout, max_headers, max_body) =
+                    parse_http_request_arguments(arguments)?;
+                let handle = provider
+                    .start(
+                        &method,
+                        &url,
+                        &headers,
+                        body.as_deref(),
+                        timeout,
+                        max_headers,
+                        max_body,
+                    )
+                    .map_err(|failure| self.failure(operation, failure.code()))?;
+                Ok(OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(handle.to_vec()))))
+            }
+            HostOperation::StdNetHttpWait => {
                 let [handle, timeout] = arguments else {
                     return Err(redacted_error("ORNA-EVAL-ARGUMENT"));
                 };
@@ -722,7 +987,7 @@ impl SysHostBindingRegistry {
                     .map_err(|failure| self.failure(operation, failure.code()))?;
                 http_response_raw(response)
             }
-            "std.net.http.cancel" => {
+            HostOperation::StdNetHttpCancel => {
                 let [handle] = arguments else {
                     return Err(redacted_error("ORNA-EVAL-ARGUMENT"));
                 };
@@ -732,7 +997,25 @@ impl SysHostBindingRegistry {
                     |failure| self.failure(operation, failure.code()),
                 )?))
             }
-            _ => return Err(redacted_error("ORNA-EVAL-UNSUPPORTED")),
+            HostOperation::StdConcurrentSleep
+            | HostOperation::StdIoEnvironmentGet
+            | HostOperation::StdIoEnvironmentRequire
+            | HostOperation::StdIoFsAppendText
+            | HostOperation::StdIoFsCopyFile
+            | HostOperation::StdIoFsCreateDir
+            | HostOperation::StdIoFsExists
+            | HostOperation::StdIoFsIsDirectory
+            | HostOperation::StdIoFsList
+            | HostOperation::StdIoFsMetadata
+            | HostOperation::StdIoFsMoveFile
+            | HostOperation::StdIoFsReadText
+            | HostOperation::StdIoFsRemoveFile
+            | HostOperation::StdIoFsSymlinkMetadata
+            | HostOperation::StdIoFsWriteText
+            | HostOperation::StdIoProcessRun
+            | HostOperation::SysBlobCaptureFile => {
+                return Err(redacted_error("ORNA-EVAL-UNSUPPORTED"));
+            }
         };
         CanonicalValue::new(raw?)
             .map(Some)
@@ -778,11 +1061,11 @@ impl SysHostBindingRegistry {
         operation: &HostOperationDescriptor,
         arguments: &[CanonicalValue],
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
-        if operation.name != "std.io.process.run"
+        if operation.name != HostOperation::StdIoProcessRun
             || operation.implementation != "run"
-            || operation.role != "host.std.io.process@1.0"
-            || operation.provider != "orna.sys.host.process.v1"
-            || operation.effects != ["invoke"]
+            || operation.role != HostOperation::StdIoProcessRun.role()
+            || operation.provider != HostProvider::Process
+            || operation.effects != [SysEffect::Invoke]
         {
             return Err(redacted_error("ORNA-EVAL-UNSUPPORTED"));
         }
@@ -821,11 +1104,11 @@ impl SysHostBindingRegistry {
         arguments: &[CanonicalValue],
         cancellation: Option<&CancellationToken>,
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
-        if operation.name != "std.concurrent.sleep"
+        if operation.name != HostOperation::StdConcurrentSleep
             || operation.implementation != "sleep"
-            || operation.role != "host.std.concurrent.clock@1.0"
-            || operation.provider != "orna.sys.host.clock.v1"
-            || operation.effects != ["invoke"]
+            || operation.role != HostOperation::StdConcurrentSleep.role()
+            || operation.provider != HostProvider::Clock
+            || operation.effects != [SysEffect::Invoke]
         {
             return Err(redacted_error("ORNA-EVAL-UNSUPPORTED"));
         }
@@ -1078,6 +1361,9 @@ impl EffectHandler for SysHostBindingRegistry {
         arguments: &[CanonicalValue],
         _budget: &mut StepBudget,
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        let Some(operation) = sys_dispatch::registered_operation(operation) else {
+            return Ok(None);
+        };
         self.dispatch(operation, arguments, None)
     }
 
@@ -1089,6 +1375,9 @@ impl EffectHandler for SysHostBindingRegistry {
         _budget: &mut StepBudget,
         cancellation: Option<&CancellationToken>,
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        let Some(operation) = sys_dispatch::registered_operation(operation) else {
+            return Ok(None);
+        };
         self.dispatch(operation, arguments, cancellation)
     }
 
@@ -1114,13 +1403,16 @@ impl Ovb2EffectHandler for SysHostBindingRegistry {
         callee: &Expr,
         arguments: &[ContextValue],
     ) -> Result<Option<ContextValue>, EvaluationError> {
-        let Some(operation_name) = static_call_name(callee) else {
+        let Some(function) = static_call_name(callee)
+            .as_deref()
+            .and_then(sys_dispatch::sys_function)
+        else {
             return Err(redacted_error("ORNA-EVAL-UNSUPPORTED"));
         };
-        if operation_name != "sys.blob.capture_file" {
+        if function != SysFunction::BlobCaptureFile {
             return Err(redacted_error("ORNA-EVAL-UNSUPPORTED"));
         }
-        self.capture_file_ovb2(&operation_name, arguments, None)
+        self.capture_file_ovb2(function, arguments, None)
     }
 
     fn handle_registered_with_budget(
@@ -1143,25 +1435,32 @@ impl Ovb2EffectHandler for SysHostBindingRegistry {
         _budget: &mut StepBudget,
         cancellation: Option<&CancellationToken>,
     ) -> Result<Option<ContextValue>, EvaluationError> {
-        self.capture_file_ovb2(operation_name, arguments, cancellation)
+        let Some(function) = sys_dispatch::sys_function(operation_name) else {
+            return Err(redacted_error("ORNA-EVAL-UNSUPPORTED"));
+        };
+        self.capture_file_ovb2(function, arguments, cancellation)
     }
 }
 
 impl SysHostBindingRegistry {
     fn capture_file_ovb2(
         &self,
-        operation_name: &str,
+        function: SysFunction,
         arguments: &[ContextValue],
         cancellation: Option<&CancellationToken>,
     ) -> Result<Option<ContextValue>, EvaluationError> {
-        system_host_operation_registry()
-            .operation(operation_name)
+        if !matches!(self.binding(function), SysFunctionBinding::Implemented)
+            || function != SysFunction::BlobCaptureFile
+        {
+            return Err(redacted_error("ORNA-EVAL-UNSUPPORTED"));
+        }
+        sys_dispatch::host_descriptor(HostOperation::SysBlobCaptureFile)
             .filter(|operation| {
-                operation.name == "sys.blob.capture_file"
+                operation.function == Some(function)
                     && operation.implementation == "capture_file"
-                    && operation.role == "host.sys.blob.capture@1.0"
-                    && operation.provider == "orna.sys.host.filesystem.v1"
-                    && operation.effects == ["invoke"]
+                    && operation.role == HostOperation::SysBlobCaptureFile.role()
+                    && operation.provider == HostProvider::Filesystem
+                    && operation.effects == [SysEffect::Invoke]
             })
             .ok_or_else(|| redacted_error("ORNA-EVAL-UNSUPPORTED"))?;
         let [root, path, max_bytes] = arguments else {
@@ -1241,40 +1540,38 @@ impl SysHostBindingRegistry {
 /// Generated semantic role that owns the portable annotated-Blob operations.
 const BLOB_ANNOTATION_ROLE: &str = "langitem.sys.blob.annotate";
 
-/// The single portable operation that role currently declares.
+/// Generated semantic contract consumed by the native Blob annotation binding.
+const BLOB_ANNOTATION_CONTRACT: &str = "annotated-blob-format-3";
+
+/// True when `function` is the generated portable Blob annotation operation.
 ///
 /// This is only an admission filter: parameter names, order, declared types,
 /// defaults, the result type and the declared failure vocabulary all come from
 /// the build-generated typed registry, never from this module.
-const BLOB_ANNOTATION_OPERATION: &str = "sys.blob.annotate";
-/// Generated semantic contract consumed by the native Blob annotation binding.
-const BLOB_ANNOTATION_CONTRACT: &str = "annotated-blob-format-3";
-
-/// True when `operation` is the generated portable Blob annotation operation.
-pub(crate) fn is_blob_annotation_operation(operation: &str) -> bool {
-    operation == BLOB_ANNOTATION_OPERATION
+pub(crate) fn is_blob_annotation_operation(function: SysFunction) -> bool {
+    function == SysFunction::BlobAnnotate
 }
 
-/// True when `operation` is a metadata or content reflection over a Blob value
+/// True when `function` is a metadata or content reflection over a Blob value
 /// (`sys.blob.media_type`, `sys.blob.suffix`, `sys.blob.same_content`).
 ///
 /// These declare no role: the generated `annotated-blob-format-3` contract
 /// names them and the evaluator answers them natively from the Blob value.
-pub(crate) fn is_blob_reflection_operation(operation: &str) -> bool {
+pub(crate) fn is_blob_reflection_operation(function: SysFunction) -> bool {
     matches!(
-        operation,
-        "sys.blob.media_type" | "sys.blob.suffix" | "sys.blob.same_content"
+        function,
+        SysFunction::BlobMediaType | SysFunction::BlobSuffix | SysFunction::BlobSameContent
     )
 }
 
-/// True when the evaluator dispatches `operation` natively: a Blob annotation,
+/// True when the evaluator dispatches `function` natively: a Blob annotation,
 /// a Blob reflection, a read-side Blob operation, or a Blob construction from
 /// bytes.
-pub(crate) fn is_blob_host_operation(operation: &str) -> bool {
-    is_blob_annotation_operation(operation)
-        || is_blob_reflection_operation(operation)
-        || is_blob_read_operation(operation)
-        || is_blob_from_bytes_operation(operation)
+pub(crate) fn is_blob_host_operation(function: SysFunction) -> bool {
+    is_blob_annotation_operation(function)
+        || is_blob_reflection_operation(function)
+        || is_blob_read_operation(function)
+        || is_blob_from_bytes_operation(function)
 }
 
 /// Answers a generated Blob reflection call from the value's own annotation.
@@ -1285,32 +1582,32 @@ pub(crate) fn is_blob_host_operation(operation: &str) -> bool {
 /// portable `sys.blob.*` code. Arity is fixed by the reflection contract
 /// declared for each operation, not by this dispatcher.
 pub(crate) fn dispatch_blob_reflection(
-    operation: &str,
+    function: SysFunction,
     arguments: &[ContextValue],
     cancellation: Option<&CancellationToken>,
 ) -> Result<Value, EvaluationError> {
-    if !is_blob_reflection_operation(operation) {
+    if !is_blob_reflection_operation(function) {
         return Err(redacted_error("ORNA-EVAL-UNSUPPORTED"));
     }
     let contract = orna_sys::system_dispatch_table()
-        .operation(operation)
+        .operation(function.label())
         .ok_or_else(|| redacted_error("ORNA-EVAL-UNSUPPORTED"))?;
     if contract.role.is_some() || contract.contract.as_deref() != Some(BLOB_ANNOTATION_CONTRACT) {
         return Err(redacted_error("ORNA-EVAL-UNSUPPORTED"));
     }
-    match (operation, arguments) {
-        ("sys.blob.media_type", [value]) => {
+    match (function, arguments) {
+        (SysFunction::BlobMediaType, [value]) => {
             let blob = value.blob().map_err(blob_reflection_failure)?;
             Ok(Value::String(blob.media_type().to_owned()))
         }
-        ("sys.blob.suffix", [value]) => {
+        (SysFunction::BlobSuffix, [value]) => {
             let blob = value.blob().map_err(blob_reflection_failure)?;
             Ok(Value::Option(
                 blob.suffix()
                     .map(|suffix| Box::new(Value::String(suffix.to_owned()))),
             ))
         }
-        ("sys.blob.same_content", [left, right]) => {
+        (SysFunction::BlobSameContent, [left, right]) => {
             let left = left.blob().map_err(blob_reflection_failure)?;
             let right = right.blob().map_err(blob_reflection_failure)?;
             left.same_content_checked(&right, || {
@@ -1363,13 +1660,13 @@ fn static_failure(code: &'static str) -> FailureCode {
 /// binding to the portable Blob annotation role, so dispatch follows the same
 /// semantic metadata that emits the language declaration.
 fn blob_annotation_contract(
-    operation: &str,
+    function: SysFunction,
 ) -> Result<&'static OperationContract, EvaluationError> {
-    if !is_blob_annotation_operation(operation) {
+    if !is_blob_annotation_operation(function) {
         return Err(redacted_error("ORNA-EVAL-UNSUPPORTED"));
     }
     let contract = orna_sys::system_dispatch_table()
-        .operation(operation)
+        .operation(function.label())
         .ok_or_else(|| redacted_error("ORNA-EVAL-UNSUPPORTED"))?;
     if contract.role.as_ref().map(|role| role.as_str()) != Some(BLOB_ANNOTATION_ROLE)
         || contract.contract.as_deref() != Some(BLOB_ANNOTATION_CONTRACT)
@@ -1388,6 +1685,7 @@ fn blob_annotation_contract(
 /// This pure language operation needs no host-operation effect grant.
 struct BlobAnnotationProvider<'a> {
     offer: ProviderOffer,
+    function: SysFunction,
     source: &'a ContextValue,
 }
 
@@ -1395,6 +1693,7 @@ impl<'a> BlobAnnotationProvider<'a> {
     /// Links a provider offer to the generated role and source Blob.
     fn linked(
         role: &SemanticRoleContract,
+        function: SysFunction,
         source: &'a ContextValue,
     ) -> Result<Self, EvaluationError> {
         if !matches!(
@@ -1413,6 +1712,7 @@ impl<'a> BlobAnnotationProvider<'a> {
                 version: role.version,
                 effects: role.effects.clone(),
             },
+            function,
             source,
         })
     }
@@ -1429,7 +1729,19 @@ impl SystemOperationProvider for BlobAnnotationProvider<'_> {
         arguments: &[TypedValue],
     ) -> Result<TypedValue, ProviderFailure> {
         let table = orna_sys::system_dispatch_table();
-        let Some(contract) = table.operation(operation.as_str()) else {
+        let Some(function) = sys_dispatch::sys_function(operation.as_str()) else {
+            return Err(ProviderFailure {
+                code: static_failure("sys.abi.unavailable"),
+                payload: None,
+            });
+        };
+        if function != self.function {
+            return Err(ProviderFailure {
+                code: static_failure("sys.abi.unavailable"),
+                payload: None,
+            });
+        }
+        let Some(contract) = table.operation(self.function.label()) else {
             return Err(ProviderFailure {
                 code: static_failure("sys.abi.unavailable"),
                 payload: None,
@@ -1449,12 +1761,11 @@ impl SystemOperationProvider for BlobAnnotationProvider<'_> {
             return Err(provider_failure());
         };
         let suffix = decode_argument(suffix)?;
-        let annotated =
-            apply_blob_annotation(operation.as_str(), self.source, media_type, suffix.raw())
-                .map_err(|code| ProviderFailure {
-                    code,
-                    payload: None,
-                })?;
+        let annotated = apply_blob_annotation(function, self.source, media_type, suffix.raw())
+            .map_err(|code| ProviderFailure {
+                code,
+                payload: None,
+            })?;
         let canonical = annotated.encode().map_err(|_| provider_failure())?;
         Ok(TypedValue::public(
             TypeId::new(contract.signature.result.canonical()),
@@ -1465,12 +1776,12 @@ impl SystemOperationProvider for BlobAnnotationProvider<'_> {
 
 /// Applies the portable MIME-1 annotation without reconstructing Blob bytes.
 fn apply_blob_annotation(
-    operation: &str,
+    function: SysFunction,
     source: &ContextValue,
     media_type: &str,
     suffix: &OvbRaw,
 ) -> Result<ContextValue, FailureCode> {
-    if operation != BLOB_ANNOTATION_OPERATION {
+    if !is_blob_annotation_operation(function) {
         return Err(static_failure("sys.abi.unavailable"));
     }
     let suffix = blob_suffix_argument(suffix)?;
@@ -1494,11 +1805,11 @@ fn provider_failure() -> ProviderFailure {
 /// `arguments` is positional and complete: the caller resolves declared
 /// defaults before calling.
 pub(crate) fn dispatch_blob_annotation(
-    operation: &str,
+    function: SysFunction,
     arguments: &[ContextValue],
 ) -> Result<ContextValue, EvaluationError> {
     let table = orna_sys::system_dispatch_table();
-    let contract = blob_annotation_contract(operation)?;
+    let contract = blob_annotation_contract(function)?;
     let parameters = &contract.signature.parameters;
     if arguments.len() != parameters.len() {
         return Err(redacted_error("ORNA-EVAL-ARGUMENT"));
@@ -1509,7 +1820,7 @@ pub(crate) fn dispatch_blob_annotation(
     let source = arguments
         .first()
         .ok_or_else(|| redacted_error("ORNA-EVAL-ARGUMENT"))?;
-    let provider = BlobAnnotationProvider::linked(role, source)?;
+    let provider = BlobAnnotationProvider::linked(role, function, source)?;
     let mut typed = Vec::with_capacity(parameters.len());
     for (parameter, argument) in parameters.iter().zip(arguments) {
         let canonical = if matches!(
@@ -1530,7 +1841,7 @@ pub(crate) fn dispatch_blob_annotation(
             canonical,
         ));
     }
-    match table.dispatch_to_provider(operation, &provider, &typed, |_| Ok(())) {
+    match table.dispatch_to_provider(function.label(), &provider, &typed, |_| Ok(())) {
         Ok(orna_sys::SystemDispatchResult::Returned(value)) => {
             let canonical = value
                 .canonical()
@@ -1553,28 +1864,28 @@ pub(crate) fn dispatch_blob_annotation(
     }
 }
 
-/// Portable read-side Blob operations. Length, digest, bounded reads and full
-/// verification use only the Blob value's own identity and content, so they
-/// need no host effect grant and never reach native I/O.
-const BLOB_READ_OPERATIONS: [&str; 5] = [
-    "sys.blob.length",
-    "sys.blob.digest",
-    "sys.blob.read",
-    "sys.blob.verify",
-    "sys.blob.to_bytes",
-];
-
 /// Largest byte count one read-side call may return or materialise (ORNA-BLOB-011).
 pub(crate) const MAX_BLOB_CALL_BYTES: u64 = 8 * 1024 * 1024;
 
-/// True when `operation` is one of the portable read-side Blob operations.
-pub(crate) fn is_blob_read_operation(operation: &str) -> bool {
-    BLOB_READ_OPERATIONS.contains(&operation)
+/// True when `function` is one of the portable read-side Blob operations.
+///
+/// Length, digest, bounded reads and full verification use only the Blob value's
+/// own identity and content, so they need no host effect grant and never reach
+/// native I/O.
+pub(crate) fn is_blob_read_operation(function: SysFunction) -> bool {
+    matches!(
+        function,
+        SysFunction::BlobLength
+            | SysFunction::BlobDigest
+            | SysFunction::BlobRead
+            | SysFunction::BlobVerify
+            | SysFunction::BlobToBytes
+    )
 }
 
-/// True when `operation` is the portable Blob constructor from integer bytes.
-pub(crate) fn is_blob_from_bytes_operation(operation: &str) -> bool {
-    operation == "sys.blob.from_bytes"
+/// True when `function` is the portable Blob constructor from integer bytes.
+pub(crate) fn is_blob_from_bytes_operation(function: SysFunction) -> bool {
+    function == SysFunction::BlobFromBytes
 }
 
 /// Builds the Blob of `sys.blob.from_bytes` from integers in `0..=255`. The
@@ -1646,23 +1957,25 @@ fn blob_read_failure(error: ValueError) -> EvaluationError {
 /// arguments of `sys.blob.read` (offset, length) in declared order and is
 /// empty for every other operation; the caller has checked arity and types.
 pub(crate) fn dispatch_blob_read(
-    operation: &str,
+    function: SysFunction,
     source: &ContextValue,
     bounds: &[BigInt],
 ) -> Result<BlobReadValue, EvaluationError> {
     let blob = source.blob().map_err(blob_read_failure)?;
-    match (operation, bounds) {
-        ("sys.blob.length", []) => Ok(BlobReadValue::Int(blob.length())),
-        ("sys.blob.digest", []) => Ok(BlobReadValue::Digest(blob.content_identity().sha256())),
+    match (function, bounds) {
+        (SysFunction::BlobLength, []) => Ok(BlobReadValue::Int(blob.length())),
+        (SysFunction::BlobDigest, []) => {
+            Ok(BlobReadValue::Digest(blob.content_identity().sha256()))
+        }
         // Verifies raw content only. Orna-1.1.0 34-system-reference.md:3312-3314
         // also requires the native dependency structure (ORNA-GRAPH-002,
         // ORNA-OGB-004); that check is not implemented (ornadb-5il1.120), so this
         // arm is narrower than the documented contract.
-        ("sys.blob.verify", []) => {
+        (SysFunction::BlobVerify, []) => {
             blob.verify().map_err(blob_read_failure)?;
             Ok(BlobReadValue::Unit)
         }
-        ("sys.blob.to_bytes", []) => {
+        (SysFunction::BlobToBytes, []) => {
             if blob.length() > MAX_BLOB_CALL_BYTES {
                 return Err(redacted_error("sys.blob.limit"));
             }
@@ -1670,7 +1983,7 @@ pub(crate) fn dispatch_blob_read(
                 .map(BlobReadValue::Bytes)
                 .map_err(blob_read_failure)
         }
-        ("sys.blob.read", [offset, length]) => {
+        (SysFunction::BlobRead, [offset, length]) => {
             // Negative or unrepresentable bounds, a start past EOF and checked
             // overflow are bounds failures before any byte is read (ORNA-BLOB-011).
             let offset = offset
@@ -1740,6 +2053,11 @@ fn static_call_name(expression: &Expr) -> Option<String> {
     }
 }
 
+/// The last dotted component of a generated operation label.
+fn last_name_component(name: &str) -> &str {
+    name.rsplit('.').next().unwrap_or("")
+}
+
 /// Surfaces a capture failure with its portable code (ORNA-SYS-097); the
 /// generated host operation declares exactly these codes.
 fn capture_file_failure(failure: CaptureFileError) -> EvaluationError {
@@ -1753,6 +2071,7 @@ fn redacted_error(code: &'static str) -> EvaluationError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orna_sys::system_host_operation_registry;
     use orna_value::Blob;
 
     #[test]
@@ -1763,6 +2082,42 @@ mod tests {
         let annotate = blob_value_failure(ValueError::InvalidProfile);
         assert_eq!(read.code(), "sys.codec.unsupported_value_profile");
         assert_eq!(annotate.as_str(), "sys.codec.unsupported_value_profile");
+    }
+
+    #[test]
+    fn every_catalogued_callable_is_classified() {
+        let registry = SysHostBindingRegistry::default();
+        let mut implemented = Vec::new();
+        for function in SysFunction::ALL {
+            match registry.binding(function) {
+                SysFunctionBinding::Implemented => implemented.push(function),
+                SysFunctionBinding::Unavailable(Origin::Portable) => {}
+                SysFunctionBinding::Unavailable(origin) => {
+                    panic!("{} has non-portable origin {origin:?}", function.label());
+                }
+            }
+        }
+        assert_eq!(
+            implemented,
+            [
+                SysFunction::ExplainQuery,
+                SysFunction::ExplainFunctionRef,
+                SysFunction::ExplainDiagnostic,
+                SysFunction::RtInfo,
+                SysFunction::BlobLength,
+                SysFunction::BlobDigest,
+                SysFunction::BlobRead,
+                SysFunction::BlobVerify,
+                SysFunction::BlobFromBytes,
+                SysFunction::BlobToBytes,
+                SysFunction::BlobCaptureFile,
+                SysFunction::BlobMediaType,
+                SysFunction::BlobSuffix,
+                SysFunction::BlobAnnotate,
+                SysFunction::BlobSameContent,
+            ],
+            "the evaluator's native callable set changed without classification"
+        );
     }
 
     #[test]
@@ -1789,20 +2144,20 @@ mod tests {
 
         for operation in system_host_operation_registry().operations() {
             checked += 1;
-            if operation.name == "sys.blob.capture_file" {
+            if operation.name == HostOperation::SysBlobCaptureFile {
                 assert_eq!(
                     bindings
-                        .dispatch(&operation.name, &[], None)
+                        .dispatch(RegisteredOperation::Host(operation.name), &[], None,)
                         .expect_err("Blob capture has no OVB-1 fallback")
                         .code(),
                     "ORNA-EVAL-UNSUPPORTED"
                 );
                 continue;
             }
-            if operation.provider == "orna.sys.host.environment.v1" {
+            if operation.provider == HostProvider::Environment {
                 let actual = bindings
                     .dispatch(
-                        &operation.name,
+                        RegisteredOperation::Host(operation.name),
                         std::slice::from_ref(&environment_argument),
                         None,
                     )
@@ -1810,21 +2165,23 @@ mod tests {
                         panic!("{} dispatch failed: {}", operation.name, error.code())
                     })
                     .expect("environment operation returns a value");
-                let expected = match operation.name.as_str() {
-                    "std.io.environment.get" => OvbRaw::Tag(
+                let expected = match operation.name {
+                    HostOperation::StdIoEnvironmentGet => OvbRaw::Tag(
                         60013,
                         Box::new(OvbRaw::Array(vec![
                             OvbRaw::Int(1.into()),
                             OvbRaw::Text("fixture-home".to_owned()),
                         ])),
                     ),
-                    "std.io.environment.require" => OvbRaw::Text("fixture-home".to_owned()),
+                    HostOperation::StdIoEnvironmentRequire => {
+                        OvbRaw::Text("fixture-home".to_owned())
+                    }
                     name => panic!("unmapped environment operation {name}"),
                 };
                 assert_eq!(actual.raw(), &expected, "{} result", operation.name);
             } else {
                 let error = bindings
-                    .dispatch(&operation.name, &[], None)
+                    .dispatch(RegisteredOperation::Host(operation.name), &[], None)
                     .expect_err("empty args must reach a registered handler and fail arity");
                 assert_eq!(
                     error.code(),
@@ -1895,7 +2252,7 @@ mod tests {
         ];
         assert_eq!(
             SysHostBindingRegistry::default()
-                .capture_file_ovb2("sys.blob.capture_file", &negative_bound, None)
+                .capture_file_ovb2(SysFunction::BlobCaptureFile, &negative_bound, None)
                 .expect_err("a negative byte bound is out of range")
                 .code(),
             "sys.blob.bounds"
@@ -1921,7 +2278,7 @@ mod tests {
         let without_filesystem = SysHostBindingRegistry::default();
         assert_eq!(
             without_filesystem
-                .capture_file_ovb2("sys.blob.capture_file", &arguments, None)
+                .capture_file_ovb2(SysFunction::BlobCaptureFile, &arguments, None)
                 .expect_err("a host without a filesystem provider authorises no root")
                 .code(),
             "sys.blob.source_denied"
@@ -1930,7 +2287,7 @@ mod tests {
             SysHostBindingRegistry::default().with_filesystem_provider(FilesystemProvider::new());
         assert_eq!(
             without_writer
-                .capture_file_ovb2("sys.blob.capture_file", &arguments, None)
+                .capture_file_ovb2(SysFunction::BlobCaptureFile, &arguments, None)
                 .expect_err("a host without a repository Blob writer cannot capture")
                 .code(),
             "sys.version.incompatible"
@@ -2029,7 +2386,7 @@ mod tests {
                     .unwrap(),
             ];
 
-            let annotated = dispatch_blob_annotation(BLOB_ANNOTATION_OPERATION, &arguments)
+            let annotated = dispatch_blob_annotation(SysFunction::BlobAnnotate, &arguments)
                 .expect("annotation dispatch preserves its source profile");
 
             assert_eq!(annotated.format(), format);
@@ -2061,7 +2418,7 @@ mod tests {
             .expect("generated Blob annotation role exists");
         let legacy = ContextValue::new(ValueFormat::Ovb1, OvbRaw::Bytes(payload.to_vec())).unwrap();
         assert_eq!(
-            BlobAnnotationProvider::linked(role, &legacy)
+            BlobAnnotationProvider::linked(role, SysFunction::BlobAnnotate, &legacy)
                 .err()
                 .map(|error| error.code().to_owned()),
             Some("sys.codec.unsupported_value_profile".to_owned()),
@@ -2089,12 +2446,14 @@ mod tests {
     fn blob_read_length_digest_verify_and_bytes_come_from_the_value() {
         let payload = b"0123456789";
         let source = blob_source(payload);
-        let Ok(BlobReadValue::Int(length)) = dispatch_blob_read("sys.blob.length", &source, &[])
+        let Ok(BlobReadValue::Int(length)) =
+            dispatch_blob_read(SysFunction::BlobLength, &source, &[])
         else {
             panic!("length must return Int");
         };
         assert_eq!(length, 10);
-        let Ok(BlobReadValue::Digest(digest)) = dispatch_blob_read("sys.blob.digest", &source, &[])
+        let Ok(BlobReadValue::Digest(digest)) =
+            dispatch_blob_read(SysFunction::BlobDigest, &source, &[])
         else {
             panic!("digest must return Digest");
         };
@@ -2105,10 +2464,11 @@ mod tests {
             "84d89877f0d4041efb6bf91a16f0248f2fd573e6af05c19f96bedb9f882f7882"
         );
         assert!(matches!(
-            dispatch_blob_read("sys.blob.verify", &source, &[]),
+            dispatch_blob_read(SysFunction::BlobVerify, &source, &[]),
             Ok(BlobReadValue::Unit)
         ));
-        let Ok(BlobReadValue::Bytes(bytes)) = dispatch_blob_read("sys.blob.to_bytes", &source, &[])
+        let Ok(BlobReadValue::Bytes(bytes)) =
+            dispatch_blob_read(SysFunction::BlobToBytes, &source, &[])
         else {
             panic!("to_bytes must return bytes");
         };
@@ -2123,7 +2483,8 @@ mod tests {
         // a Blob over the 8 MiB call limit still reports its commitment.
         let over_limit = vec![7u8; MAX_BLOB_CALL_BYTES as usize + 1];
         let source = blob_source(&over_limit);
-        let Ok(BlobReadValue::Digest(digest)) = dispatch_blob_read("sys.blob.digest", &source, &[])
+        let Ok(BlobReadValue::Digest(digest)) =
+            dispatch_blob_read(SysFunction::BlobDigest, &source, &[])
         else {
             panic!("digest must not be refused by the read limit");
         };
@@ -2135,7 +2496,7 @@ mod tests {
     fn blob_read_returns_a_bounded_slice_clipped_only_at_known_eof() {
         let source = blob_source(b"0123456789");
         let Ok(BlobReadValue::Blob(slice)) =
-            dispatch_blob_read("sys.blob.read", &source, &bounds(&[2, 3]))
+            dispatch_blob_read(SysFunction::BlobRead, &source, &bounds(&[2, 3]))
         else {
             panic!("read must return a Blob");
         };
@@ -2144,7 +2505,7 @@ mod tests {
             b"234"
         );
         let Ok(BlobReadValue::Blob(clipped)) =
-            dispatch_blob_read("sys.blob.read", &source, &bounds(&[8, 5]))
+            dispatch_blob_read(SysFunction::BlobRead, &source, &bounds(&[8, 5]))
         else {
             panic!("read past EOF must clip to the known end");
         };
@@ -2159,7 +2520,7 @@ mod tests {
         let source = blob_source(b"0123456789");
         assert_eq!(
             read_code(dispatch_blob_read(
-                "sys.blob.read",
+                SysFunction::BlobRead,
                 &source,
                 &bounds(&[-1, 1])
             )),
@@ -2167,7 +2528,7 @@ mod tests {
         );
         assert_eq!(
             read_code(dispatch_blob_read(
-                "sys.blob.read",
+                SysFunction::BlobRead,
                 &source,
                 &bounds(&[11, 1])
             )),
@@ -2175,7 +2536,7 @@ mod tests {
         );
         assert_eq!(
             read_code(dispatch_blob_read(
-                "sys.blob.read",
+                SysFunction::BlobRead,
                 &source,
                 &bounds(&[i64::MAX, i64::MAX])
             )),
@@ -2183,7 +2544,7 @@ mod tests {
         );
         assert_eq!(
             read_code(dispatch_blob_read(
-                "sys.blob.read",
+                SysFunction::BlobRead,
                 &source,
                 &bounds(&[0, 8 * 1024 * 1024 + 1])
             )),
@@ -2225,7 +2586,7 @@ mod tests {
     fn blob_to_bytes_materialises_at_most_the_call_limit() {
         let at_limit = vec![7u8; MAX_BLOB_CALL_BYTES as usize];
         let Ok(BlobReadValue::Bytes(bytes)) =
-            dispatch_blob_read("sys.blob.to_bytes", &blob_source(&at_limit), &[])
+            dispatch_blob_read(SysFunction::BlobToBytes, &blob_source(&at_limit), &[])
         else {
             panic!("to_bytes at the 8 MiB limit must succeed");
         };
@@ -2234,7 +2595,7 @@ mod tests {
         let over_limit = vec![7u8; MAX_BLOB_CALL_BYTES as usize + 1];
         assert_eq!(
             read_code(dispatch_blob_read(
-                "sys.blob.to_bytes",
+                SysFunction::BlobToBytes,
                 &blob_source(&over_limit),
                 &[]
             )),
@@ -2419,12 +2780,12 @@ mod tests {
             ContextValue::new(ValueFormat::Ovb2, OvbRaw::Text(value.to_owned())).unwrap()
         };
         let rov3_annotated = dispatch_blob_annotation(
-            BLOB_ANNOTATION_OPERATION,
+            SysFunction::BlobAnnotate,
             &[rov3.clone(), rov3_text("audio/mp4"), rov3_text("m4b")],
         )
         .expect("annotation keeps the ROV-3 profile");
         let ovb2_annotated = dispatch_blob_annotation(
-            BLOB_ANNOTATION_OPERATION,
+            SysFunction::BlobAnnotate,
             &[ovb2.clone(), ovb2_text("audio/mp4"), ovb2_text("m4b")],
         )
         .expect("annotation keeps the OVB-2 profile");
@@ -2432,7 +2793,7 @@ mod tests {
         assert_eq!(ovb2_annotated.format(), ValueFormat::Ovb2);
 
         let media_type = |value: &ContextValue| match dispatch_blob_reflection(
-            "sys.blob.media_type",
+            SysFunction::BlobMediaType,
             std::slice::from_ref(value),
             None,
         )
@@ -2442,7 +2803,7 @@ mod tests {
             _ => panic!("media_type returns Str"),
         };
         let suffix = |value: &ContextValue| {
-            dispatch_blob_reflection("sys.blob.suffix", std::slice::from_ref(value), None)
+            dispatch_blob_reflection(SysFunction::BlobSuffix, std::slice::from_ref(value), None)
                 .expect("suffix reads metadata")
         };
         assert_eq!(media_type(&rov3), "application/octet-stream");
@@ -2457,7 +2818,7 @@ mod tests {
 
         let same_content =
             |left: &ContextValue, right: &ContextValue| match dispatch_blob_reflection(
-                "sys.blob.same_content",
+                SysFunction::BlobSameContent,
                 &[left.clone(), right.clone()],
                 None,
             )
@@ -2468,7 +2829,7 @@ mod tests {
             };
         let same_content_code = |left: &ContextValue, right: &ContextValue| {
             dispatch_blob_reflection(
-                "sys.blob.same_content",
+                SysFunction::BlobSameContent,
                 &[left.clone(), right.clone()],
                 None,
             )
@@ -2502,14 +2863,14 @@ mod tests {
         // Different identities are decided without reading bytes.
         assert!(!same_content(&ovb2, &other));
 
-        let undeclared = dispatch_blob_reflection("sys.blob.media_type", &[], None)
+        let undeclared = dispatch_blob_reflection(SysFunction::BlobMediaType, &[], None)
             .err()
             .map(|error| error.code().to_owned());
         assert_eq!(undeclared, Some("ORNA-EVAL-ARGUMENT".to_owned()));
-        assert!(is_blob_host_operation("sys.blob.suffix"));
-        assert!(is_blob_host_operation("sys.blob.read"));
-        assert!(is_blob_host_operation("sys.blob.from_bytes"));
-        assert!(!is_blob_host_operation("sys.blob.capture_file"));
+        assert!(is_blob_host_operation(SysFunction::BlobSuffix));
+        assert!(is_blob_host_operation(SysFunction::BlobRead));
+        assert!(is_blob_host_operation(SysFunction::BlobFromBytes));
+        assert!(!is_blob_host_operation(SysFunction::BlobCaptureFile));
     }
 
     #[test]
@@ -2524,12 +2885,16 @@ mod tests {
     fn blob_read_rejects_arity_outside_the_declared_signature() {
         let source = blob_source(b"0123456789");
         assert_eq!(
-            read_code(dispatch_blob_read("sys.blob.read", &source, &bounds(&[1]))),
+            read_code(dispatch_blob_read(
+                SysFunction::BlobRead,
+                &source,
+                &bounds(&[1])
+            )),
             "ORNA-EVAL-ARGUMENT"
         );
         assert_eq!(
             read_code(dispatch_blob_read(
-                "sys.blob.length",
+                SysFunction::BlobLength,
                 &source,
                 &bounds(&[1])
             )),
@@ -2554,7 +2919,7 @@ mod tests {
         let token = CancellationToken::new();
         token.request();
         let result =
-            dispatch_blob_reflection("sys.blob.same_content", &[left, right], Some(&token));
+            dispatch_blob_reflection(SysFunction::BlobSameContent, &[left, right], Some(&token));
         // No partial Bool may escape: the cancelled comparison yields only an error.
         let error = result.expect_err("a requested cancellation must fail the comparison");
         assert_eq!(error.code(), "ORNA-EVAL-CANCELLED");

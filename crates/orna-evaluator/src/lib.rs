@@ -52,6 +52,8 @@ mod runtime_info;
 mod source_enums;
 #[cfg(feature = "system-host-bindings")]
 mod sys_bindings;
+#[cfg(feature = "system-host-bindings")]
+mod sys_dispatch;
 mod timezone;
 mod ui;
 mod unicode_16_case_properties;
@@ -8938,18 +8940,18 @@ impl Context<'_, '_> {
     #[cfg(feature = "system-host-bindings")]
     fn call_blob_operation(
         &mut self,
-        operation: &str,
+        function: orna_sys::SysFunction,
         arguments: &[orna_syntax::Argument],
         input: Option<Value>,
         scope: &mut Scope,
         depth: usize,
     ) -> Result<Value, EvaluationError> {
-        if !crate::sys_bindings::is_blob_host_operation(operation) {
+        if !crate::sys_bindings::is_blob_host_operation(function) {
             return Err(error("ORNA-EVAL-UNSUPPORTED"));
         }
         let table = orna_sys::system_dispatch_table();
         let contract = table
-            .operation(operation)
+            .operation(function.label())
             .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
         let parameters = &contract.signature.parameters;
 
@@ -9002,7 +9004,7 @@ impl Context<'_, '_> {
                 None if parameter.default.as_deref() == Some("null") => Value::Null,
                 None => return Err(error("ORNA-EVAL-ARGUMENT")),
             };
-            if crate::sys_bindings::is_blob_from_bytes_operation(operation) {
+            if crate::sys_bindings::is_blob_from_bytes_operation(function) {
                 let Value::List(items) = value else {
                     return Err(error("ORNA-EVAL-TYPE"));
                 };
@@ -9028,11 +9030,11 @@ impl Context<'_, '_> {
                 supplied_values.push(Self::blob_annotation_argument(value, &parameter.ty)?);
             }
         }
-        if crate::sys_bindings::is_blob_read_operation(operation) {
+        if crate::sys_bindings::is_blob_read_operation(function) {
             let source = supplied_values
                 .first()
                 .ok_or_else(|| error("ORNA-EVAL-ARGUMENT"))?;
-            return match crate::sys_bindings::dispatch_blob_read(operation, source, &bounds)? {
+            return match crate::sys_bindings::dispatch_blob_read(function, source, &bounds)? {
                 crate::sys_bindings::BlobReadValue::Int(length) => {
                     Ok(Value::Int(BigInt::from(length)))
                 }
@@ -9049,14 +9051,14 @@ impl Context<'_, '_> {
                 crate::sys_bindings::BlobReadValue::Digest(value) => Ok(Value::Digest(value)),
             };
         }
-        if crate::sys_bindings::is_blob_reflection_operation(operation) {
+        if crate::sys_bindings::is_blob_reflection_operation(function) {
             return crate::sys_bindings::dispatch_blob_reflection(
-                operation,
+                function,
                 &supplied_values,
                 self.cancellation,
             );
         }
-        let annotated = crate::sys_bindings::dispatch_blob_annotation(operation, &supplied_values)?;
+        let annotated = crate::sys_bindings::dispatch_blob_annotation(function, &supplied_values)?;
         Value::from_context_value(&annotated, self, 0)
     }
 
@@ -9422,14 +9424,14 @@ impl Context<'_, '_> {
         // Every `sys.explain` overload is evaluated natively against the host
         // catalogue, never by a provider invoke. An unshadowed call therefore
         // stays on this path.
-        if spelled == Some("sys.explain") && sys_unshadowed {
+        if spelled == Some(orna_sys::SysFunction::ExplainQuery.path()) && sys_unshadowed {
             return self
                 .call_sys_explain(arguments, input.take(), scope, depth)
                 .map(Some);
         }
         // `sys.rt.info()` reports the activation the host attached. Like
         // `sys.explain`, it is lowered here, never by a provider invoke.
-        if spelled == Some("sys.rt.info") && sys_unshadowed {
+        if spelled == Some(orna_sys::SysFunction::RtInfo.path()) && sys_unshadowed {
             return self.call_sys_rt_info(arguments, input.take()).map(Some);
         }
 
@@ -9439,22 +9441,31 @@ impl Context<'_, '_> {
         // `sys.blob.*` call is accepted so the generated declarations stay
         // callable, and a resolved non-Blob function never falls through.
         let declared = match site.resolved.as_deref() {
-            Some(name) if crate::sys_bindings::is_blob_host_operation(name) => Some(name),
-            Some(_) => None,
+            Some(name) => crate::sys_dispatch::sys_function(name)
+                .filter(|function| crate::sys_bindings::is_blob_host_operation(*function)),
             None => spelled
-                .filter(|name| sys_unshadowed && crate::sys_bindings::is_blob_host_operation(name)),
+                .filter(|_| sys_unshadowed)
+                .and_then(crate::sys_dispatch::sys_function)
+                .filter(|function| crate::sys_bindings::is_blob_host_operation(*function)),
         }
-        .filter(|name| orna_sys::system_dispatch_table().operation(name).is_some());
-        if let Some(operation) = declared {
+        .filter(|function| {
+            orna_sys::system_dispatch_table()
+                .operation(function.label())
+                .is_some()
+        });
+        if let Some(function) = declared {
             return self
-                .call_blob_operation(operation, arguments, input.take(), scope, depth)
+                .call_blob_operation(function, arguments, input.take(), scope, depth)
                 .map(Some);
         }
-        let Some(operation_name) = site.resolved.as_deref() else {
+        let Some(crate::sys_dispatch::RegisteredOperation::Host(operation_name)) = site
+            .resolved
+            .as_deref()
+            .and_then(crate::sys_dispatch::registered_operation)
+        else {
             return Ok(None);
         };
-        let Some(operation) = orna_sys::system_host_operation_registry().operation(operation_name)
-        else {
+        let Some(operation) = crate::sys_dispatch::host_descriptor(operation_name) else {
             return Ok(None);
         };
         if self.effects.is_none() {
@@ -9469,7 +9480,7 @@ impl Context<'_, '_> {
             let value = self.evaluate(&argument.value, scope, depth + 1)?;
             self.push_effect_argument(&mut values, value)?;
         }
-        self.dispatch_effect(callee, Some(operation_name), &values)
+        self.dispatch_effect(callee, Some(operation_name.label()), &values)
     }
 
     /// Without the `system-host-bindings` feature no host can attach.

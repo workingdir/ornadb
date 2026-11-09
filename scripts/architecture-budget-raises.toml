@@ -33,9 +33,9 @@ bead = "ornadb-qvsyc"
 
 [[raise]]
 path = "crates/orna-evaluator/src/sys_bindings.rs"
-new_limit = 2556
-reason = "PR #9764 classifies filesystem and process dispatch once instead of an implicit god function; the split is the remaining ornadb-aok6t work"
-bead = "ornadb-aok6t"
+new_limit = 2927
+reason = "PR #9764 classifies filesystem and process dispatch once instead of an implicit god function (split remains ornadb-aok6t); S3 additionally requires one generated SysFunctionHost classification method per catalogue callable in this file"
+bead = "ornadb-ouxeq.4"
 
 [[raise]]
 path = "crates/orna-cli/src/repl.rs"

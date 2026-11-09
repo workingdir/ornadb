@@ -70,12 +70,13 @@ pub struct Generated {
     pub relations: String,
     pub removed: String,
     pub tables: String,
+    pub dispatch: String,
 }
 
 impl Generated {
     /// The generated files in a stable order.
     #[must_use]
-    pub fn files(&self) -> [(&'static str, &str); 6] {
+    pub fn files(&self) -> [(&'static str, &str); 7] {
         [
             ("functions.rs", &self.functions),
             ("codes.rs", &self.codes),
@@ -83,6 +84,7 @@ impl Generated {
             ("relations.rs", &self.relations),
             ("removed.rs", &self.removed),
             ("tables.rs", &self.tables),
+            ("dispatch.rs", &self.dispatch),
         ]
     }
 }
@@ -138,6 +140,7 @@ pub fn generate_unchecked(sys_json: &str, engine_json: &str) -> Result<Generated
         relations: render_relations(&catalogue, &engine),
         removed: render_removed(&catalogue),
         tables: render_tables(&catalogue, &engine),
+        dispatch: render_dispatch(&catalogue),
     })
 }
 
@@ -4138,4 +4141,133 @@ fn render_optional_id(value: Option<[u8; 16]>) -> String {
         Some(id) => format!("Some({})", render_id(id)),
         None => "None".to_owned(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Exhaustive callable dispatch
+// ---------------------------------------------------------------------------
+
+fn snake_case(variant: &str) -> String {
+    let mut out = String::with_capacity(variant.len() + 8);
+    for (index, character) in variant.chars().enumerate() {
+        if character.is_ascii_uppercase() {
+            if index > 0 {
+                out.push('_');
+            }
+            out.push(character.to_ascii_lowercase());
+        } else {
+            out.push(character);
+        }
+    }
+    out
+}
+
+/// The trait method for one catalogue variant, escaped when it is a keyword.
+fn method_name(variant: &str) -> String {
+    const KEYWORDS: &[&str] = &[
+        "abstract", "as", "async", "await", "become", "box", "break", "const", "continue", "crate",
+        "do", "dyn", "else", "enum", "extern", "false", "final", "fn", "for", "gen", "if", "impl",
+        "in", "let", "loop", "macro", "match", "mod", "move", "mut", "override", "priv", "pub",
+        "ref", "return", "self", "static", "struct", "super", "trait", "true", "try", "type",
+        "typeof", "unsafe", "unsized", "use", "virtual", "where", "while", "yield",
+    ];
+    let method = snake_case(variant);
+    if KEYWORDS.contains(&method.as_str()) {
+        format!("r#{method}")
+    } else {
+        method
+    }
+}
+
+fn render_dispatch(catalogue: &Catalogue) -> String {
+    let mut out = String::new();
+    out.push_str(HEADER);
+    writeln!(
+        out,
+        "// Generated exhaustive dispatch over the 1.1.0 callable catalogue."
+    )
+    .unwrap();
+    out.push('\n');
+    writeln!(out, "use crate::{{function::SysFunction, Origin}};").unwrap();
+    out.push('\n');
+
+    writeln!(out, "/// How one host classifies a catalogued callable.").unwrap();
+    writeln!(out, "#[derive(Clone, Copy, Debug, Eq, PartialEq)]").unwrap();
+    writeln!(out, "pub enum SysFunctionBinding {{").unwrap();
+    writeln!(out, "    /// The host implements the callable natively.").unwrap();
+    writeln!(out, "    Implemented,").unwrap();
+    writeln!(
+        out,
+        "    /// The member is catalogued but no provider is linked in this host."
+    )
+    .unwrap();
+    writeln!(out, "    Unavailable(Origin),").unwrap();
+    writeln!(out, "}}").unwrap();
+    out.push('\n');
+
+    writeln!(
+        out,
+        "/// Per-callable classification supplied by a dispatching host."
+    )
+    .unwrap();
+    writeln!(out, "///").unwrap();
+    writeln!(
+        out,
+        "/// There is one required method per catalogue variant, so adding a callable"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "/// stops every implementation compiling until the new identity is classified."
+    )
+    .unwrap();
+    writeln!(out, "pub trait SysFunctionHost {{").unwrap();
+    for function in &catalogue.functions {
+        writeln!(out, "    /// Classifies `{}`.", function.label).unwrap();
+        writeln!(out, "    #[must_use]").unwrap();
+        writeln!(
+            out,
+            "    fn {}(&self) -> SysFunctionBinding;",
+            method_name(&function.variant)
+        )
+        .unwrap();
+        out.push('\n');
+    }
+    if out.ends_with('\n') {
+        out.pop();
+    }
+    writeln!(out, "}}").unwrap();
+    out.push('\n');
+
+    writeln!(
+        out,
+        "/// Dispatches one catalogue identity to its host method."
+    )
+    .unwrap();
+    writeln!(out, "///").unwrap();
+    writeln!(
+        out,
+        "/// One arm per variant, in catalogue order, with no wildcard arm."
+    )
+    .unwrap();
+    writeln!(out, "#[must_use]").unwrap();
+    writeln!(
+        out,
+        "pub fn dispatch<H: SysFunctionHost>(host: &H, function: SysFunction) -> SysFunctionBinding {{"
+    )
+    .unwrap();
+    writeln!(out, "    match function {{").unwrap();
+    for function in &catalogue.functions {
+        writeln!(
+            out,
+            "        SysFunction::{} => host.{}(),",
+            function.variant,
+            method_name(&function.variant)
+        )
+        .unwrap();
+    }
+    writeln!(out, "    }}").unwrap();
+    writeln!(out, "}}").unwrap();
+
+    out
 }
