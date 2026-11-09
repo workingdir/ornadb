@@ -58,7 +58,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hex_is_lowercase_and_zero_padded() {
+    fn encoding_is_lowercase_and_zero_padded() {
         assert_eq!(hex(&[]), "");
         assert_eq!(hex(&[0x00, 0x0f, 0xa0, 0xff]), "000fa0ff");
     }

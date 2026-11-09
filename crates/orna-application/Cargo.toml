@@ -15,6 +15,7 @@ default = []
 browser-wasm = ["orna-evaluator/browser-wasm"]
 test-support = []
 [dependencies]
+orna-base = { path = "../orna-base" }
 orna-sys-id = { path = "../orna-sys-id" }
 orna-evaluator = { path = "../orna-evaluator" }
 orna-project-repl = { path = "../orna-project-repl" }

@@ -63,11 +63,4 @@ fn exported_rows_keep_the_order_they_were_written_in() {
     assert_eq!(plan_keys, vec![b"c".to_vec(), b"a".to_vec(), b"b".to_vec()]);
 }
 
-fn hex(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        write!(out, "{byte:02x}").expect("writing to a String cannot fail");
-    }
-    out
-}
+use orna_base::hex;

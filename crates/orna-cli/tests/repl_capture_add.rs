@@ -135,14 +135,7 @@ async fn committed_media_row(
     key: &str,
 ) -> Option<Vec<u8>> {
     /// Lowercase hex of a relation id, as the committed table key spells it.
-    fn hex_encode(bytes: &[u8; 16]) -> String {
-        use std::fmt::Write as _;
-        let mut out = String::with_capacity(32);
-        for byte in bytes {
-            write!(out, "{byte:02x}").expect("writing to a String cannot fail");
-        }
-        out
-    }
+    use orna_base::hex as hex_encode;
 
     let logical_key = key.as_bytes();
     let table_oid = hex_encode(&relation_id);

@@ -25,7 +25,7 @@ use uuid::{Uuid, Version};
 
 #[cfg(any(test, feature = "legacy-fixture-writer"))]
 use crate::PublicationJournalEntry;
-use crate::hex::{hex_decode, hex_encode, is_hex};
+use crate::hex::{decode_text, hex_encode, is_hex};
 use crate::wire::big::{put_string, put_u32, put_u64, take_fixed, take_string, take_u32, take_u64};
 use crate::{
     GitCommitRef, IndexGeneration, ManagedFileChange, ManagedPath, PrivateCommit,
@@ -4462,7 +4462,7 @@ fn list_field<'a>(
 }
 
 fn decode_hex(value: &str) -> Result<Vec<u8>, RepositoryError> {
-    hex_decode(value).ok_or(RepositoryError::InvalidCompactManifest)
+    decode_text(value).ok_or(RepositoryError::InvalidCompactManifest)
 }
 
 fn parse_hex_32(value: &str) -> Result<[u8; 32], RepositoryError> {

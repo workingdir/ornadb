@@ -46,7 +46,7 @@ pub(crate) struct StandardLibrary {
 static REFERENCE: LazyLock<Arc<StandardLibrary>> = LazyLock::new(|| {
     let sources = orna_standard_sources::reference_standard_sources_v1();
     let digest = StandardDependencyProfile::from_sources("reference", sources.iter().cloned())
-        .map(|profile| hex(&profile.revision_digest()))
+        .map(|profile| orna_base::hex(&profile.revision_digest()))
         .unwrap_or_default();
     Arc::new(StandardLibrary::new(digest, sources))
 });
@@ -69,7 +69,10 @@ impl StandardLibrary {
         profile: &StandardDependencyProfile,
         sources: &[(String, String)],
     ) -> Self {
-        Self::new(hex(&profile.revision_digest()), sources.iter().cloned())
+        Self::new(
+            orna_base::hex(&profile.revision_digest()),
+            sources.iter().cloned(),
+        )
     }
 
     fn new(digest: String, sources: impl IntoIterator<Item = (String, String)>) -> Self {
@@ -307,10 +310,6 @@ fn write_read_only(path: &Path, source: &str) -> Option<()> {
     Some(())
 }
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,7 +342,7 @@ mod tests {
         assert!(library.module_exists("std.io"));
         assert!(library.symbol("std.collection", "answer").is_some());
         assert!(library.symbol("std.collection", "hidden").is_none());
-        assert_eq!(library.digest, hex(&profile.revision_digest()));
+        assert_eq!(library.digest, orna_base::hex(&profile.revision_digest()));
         assert!(!StandardLibrary::none().module_exists("std"));
     }
 

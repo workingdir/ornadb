@@ -492,7 +492,7 @@ impl GitIndexLock {
     #[cfg(target_os = "linux")]
     pub(crate) fn private_prefix(canonical: &OsStr) -> OsString {
         let mut prefix = OsString::from(".orna-reclaim-");
-        prefix.push(Self::hex_digest(canonical.as_bytes()));
+        prefix.push(Self::digest_hex(canonical.as_bytes()));
         prefix.push("-");
         prefix
     }
@@ -500,13 +500,13 @@ impl GitIndexLock {
     #[cfg(target_os = "linux")]
     fn claim_name(canonical: &OsStr, bytes: &[u8]) -> OsString {
         let mut claim = Self::private_prefix(canonical);
-        claim.push(Self::hex_digest(bytes));
+        claim.push(Self::digest_hex(bytes));
         claim
     }
 
     #[cfg(target_os = "linux")]
-    fn hex_digest(bytes: &[u8]) -> String {
-        hex_encode(&Sha256::digest(bytes))
+    fn digest_hex(bytes: &[u8]) -> String {
+        orna_base::hex(bytes)
     }
 
     #[cfg(target_os = "linux")]

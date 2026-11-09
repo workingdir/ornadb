@@ -455,7 +455,6 @@ fn refuse_retired_writer_journal(
 mod tests {
     use super::*;
     use crate::LoosePath;
-    use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
     use bytes::Bytes;
     use orna_repository::{
         CompactManifest, CompactPublicationPlan, CompactPublicationRequest, CompactSegment,
@@ -569,10 +568,7 @@ mod tests {
     }
 
     fn compact_schema_hex(schema: [u8; 32]) -> String {
-        schema
-            .into_iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect()
+        orna_base::hex(&schema)
     }
 
     fn compact_runtime_parquet() -> (Vec<u8>, [u8; 32]) {
@@ -594,10 +590,13 @@ mod tests {
                     "orna.schema.sha256".into(),
                     Some(compact_schema_hex(fingerprint)),
                 ),
-                KeyValue::new("orna.schema.ovb".into(), Some(BASE64.encode(schema_ovb))),
+                KeyValue::new(
+                    "orna.schema.ovb".into(),
+                    Some(orna_base::base64_encode(schema_ovb)),
+                ),
                 KeyValue::new(
                     "orna.columns.ovb".into(),
-                    Some(BASE64.encode(compact_columns())),
+                    Some(orna_base::base64_encode(compact_columns())),
                 ),
                 KeyValue::new("orna.encoder".into(), Some("test-encoder-v1".into())),
             ]),

@@ -47,16 +47,8 @@ fn repository() -> (TempDir, Repository) {
     (directory, repository)
 }
 
-fn hex_bytes(value: &str) -> Vec<u8> {
-    assert_eq!(value.len() % 2, 0);
-    value
-        .as_bytes()
-        .chunks_exact(2)
-        .map(|pair| {
-            let digits = std::str::from_utf8(pair).unwrap();
-            u8::from_str_radix(digits, 16).unwrap()
-        })
-        .collect()
+fn decode_bytes(value: &str) -> Vec<u8> {
+    orna_base::hex_decode(value).expect("canonical hexadecimal")
 }
 
 #[test]
@@ -74,7 +66,7 @@ fn snapshot_and_cwd_reference_round_trip_keep_the_captured_generation() {
     let committed = CanonicalSnapshot::Commit {
         database,
         algorithm: GitHash::Sha1,
-        oid: hex_bytes(head.as_str()),
+        oid: decode_bytes(head.as_str()),
     };
     assert_eq!(
         CanonicalSnapshot::decode_bytes(&committed.encode().unwrap()).unwrap(),

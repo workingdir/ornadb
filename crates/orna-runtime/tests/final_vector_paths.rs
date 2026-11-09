@@ -13,9 +13,7 @@ const FINAL_VECTORS_JSON: &str = include_str!("fixtures/reference/tests/final-ve
 const FINAL_VECTORS_SHA256: &str =
     "985140787cde755ae53034de28d46cb4f5696d8bc95e385876e95ec0c953899d";
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
+use orna_base::hex;
 
 fn final_vectors() -> serde_json::Value {
     assert_eq!(

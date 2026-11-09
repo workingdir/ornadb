@@ -1,7 +1,7 @@
 use orna_value::{Error, Raw, Value, decode_typed, encode_typed};
 
-fn hex_bytes(input: &str) -> Vec<u8> {
-    orna_base::hex_decode(input).expect("valid test vector hex")
+fn decode_bytes(input: &str) -> Vec<u8> {
+    orna_base::hex_decode(input).expect("canonical hexadecimal")
 }
 
 #[test]
@@ -9,7 +9,7 @@ fn option_none_uses_the_canonical_ovb_tag_and_payload() {
     let value: Option<i64> = None;
     let encoded = encode_typed(&value).expect("typed Option encoding succeeds");
 
-    assert_eq!(encoded, hex_bytes("d9ea6d8100"));
+    assert_eq!(encoded, decode_bytes("d9ea6d8100"));
     assert_eq!(decode_typed::<Option<i64>>(&encoded), Ok(value));
 }
 
@@ -22,8 +22,8 @@ fn option_some_null_is_distinct_from_none() {
     let none_bytes = encode_typed(&none).expect("None encoding succeeds");
     let some_null_bytes = encode_typed(&some_null).expect("Some(null) encoding succeeds");
 
-    assert_eq!(none_bytes, hex_bytes("d9ea6d8100"));
-    assert_eq!(some_null_bytes, hex_bytes("d9ea6d8201f6"));
+    assert_eq!(none_bytes, decode_bytes("d9ea6d8100"));
+    assert_eq!(some_null_bytes, decode_bytes("d9ea6d8201f6"));
     assert_ne!(none_bytes, some_null_bytes);
     assert_eq!(
         decode_typed::<Option<Value>>(&some_null_bytes),
@@ -40,8 +40,8 @@ fn nested_options_preserve_some_some_and_some_none() {
         encode_typed(&some_some).expect("nested Some(Some(value)) encoding succeeds");
     let some_none_bytes = encode_typed(&some_none).expect("nested Some(None) encoding succeeds");
 
-    assert_eq!(some_some_bytes, hex_bytes("d9ea6d8201d9ea6d8201182a"));
-    assert_eq!(some_none_bytes, hex_bytes("d9ea6d8201d9ea6d8100"));
+    assert_eq!(some_some_bytes, decode_bytes("d9ea6d8201d9ea6d8201182a"));
+    assert_eq!(some_none_bytes, decode_bytes("d9ea6d8201d9ea6d8100"));
     assert_ne!(some_some_bytes, some_none_bytes);
     assert_eq!(
         decode_typed::<Option<Option<i64>>>(&some_some_bytes),
@@ -58,13 +58,13 @@ fn typed_scalar_option_payload_is_canonical_and_round_trips() {
     let value: Option<i64> = Some(42);
     let encoded = encode_typed(&value).expect("typed scalar Option encoding succeeds");
 
-    assert_eq!(encoded, hex_bytes("d9ea6d8201182a"));
+    assert_eq!(encoded, decode_bytes("d9ea6d8201182a"));
     assert_eq!(decode_typed::<Option<i64>>(&encoded), Ok(value));
 }
 
 #[test]
 fn scalar_type_mismatch_reports_the_option_payload_path() {
-    let encoded = hex_bytes("d9ea6d8201f5");
+    let encoded = decode_bytes("d9ea6d8201f5");
     let error = decode_typed::<Option<i64>>(&encoded).expect_err("Bool cannot decode as Int");
 
     assert_eq!(error.path(), &["Option".to_owned(), "Int".to_owned()]);
@@ -74,7 +74,7 @@ fn scalar_type_mismatch_reports_the_option_payload_path() {
 
 #[test]
 fn nested_scalar_type_mismatch_reports_every_option_layer() {
-    let encoded = hex_bytes("d9ea6d8201d9ea6d8201f5");
+    let encoded = decode_bytes("d9ea6d8201d9ea6d8201f5");
     let error = decode_typed::<Option<Option<i64>>>(&encoded)
         .expect_err("Bool cannot decode as the nested Int payload");
 
@@ -88,7 +88,7 @@ fn nested_scalar_type_mismatch_reports_every_option_layer() {
 
 #[test]
 fn malformed_option_payload_reports_the_failing_option_layer() {
-    let encoded = hex_bytes("d9ea6d8101");
+    let encoded = decode_bytes("d9ea6d8101");
     let error = decode_typed::<Option<i64>>(&encoded)
         .expect_err("Some discriminator without a payload is malformed");
 

@@ -8,11 +8,8 @@ use std::{
 
 use super::*;
 
-fn hex_bytes(value: &str) -> Vec<u8> {
-    (0..value.len())
-        .step_by(2)
-        .map(|at| u8::from_str_radix(&value[at..at + 2], 16).unwrap())
-        .collect()
+fn decode_bytes(value: &str) -> Vec<u8> {
+    orna_base::hex_decode(value).expect("canonical hexadecimal")
 }
 
 fn counting_resolver(bytes: &[u8]) -> Arc<CountingResolver> {
@@ -128,7 +125,7 @@ fn final_vectors() -> serde_json::Value {
 
 /// Bytes of a `{"bytes_hex": ...}` field in a final-vector typed value.
 fn vector_bytes(field: &serde_json::Value) -> Vec<u8> {
-    hex_bytes(field["bytes_hex"].as_str().expect("a typed byte string"))
+    decode_bytes(field["bytes_hex"].as_str().expect("a typed byte string"))
 }
 
 fn vector_identity(length: &serde_json::Value, sha256: &serde_json::Value) -> ContentIdentity {
@@ -164,7 +161,7 @@ fn published_blob_vectors_use_explicit_profiles() {
     let context = test_context(resolver.clone());
     for case in values {
         let id = case["id"].as_str().expect("a vector id");
-        let canonical = hex_bytes(case["canonical_hex"].as_str().expect("canonical bytes"));
+        let canonical = decode_bytes(case["canonical_hex"].as_str().expect("canonical bytes"));
         let fields = case["value"]["value"].as_array().expect("tagged fields");
         match case["value"]["tag"].as_u64().expect("a value tag") {
             60110 => {
@@ -331,7 +328,7 @@ fn ovb2_blob_encoder_preflights_sink_and_streams_public_encoding() {
     )
     .unwrap();
     let expected =
-        hex_bytes("d9eace83436162637818746578742f706c61696e3b636861727365743d7574662d38f6");
+        decode_bytes("d9eace83436162637818746578742f706c61696e3b636861727365743d7574662d38f6");
 
     assert_eq!(
         encode_ovb2_bounded(&blob, u64::try_from(expected.len() - 1).unwrap(),),
@@ -364,7 +361,7 @@ fn reader_ovb2_encoder_preflights_and_requires_exact_source_length() {
         .annotation("text/plain;charset=utf-8", None)
         .unwrap();
     let expected =
-        hex_bytes("d9eace83436162637818746578742f706c61696e3b636861727365743d7574662d38f6");
+        decode_bytes("d9eace83436162637818746578742f706c61696e3b636861727365743d7574662d38f6");
     let mut reader = Cursor::new(&b"abc"[..]);
     let mut output = Vec::new();
 
@@ -412,7 +409,7 @@ fn reader_ovb2_encoder_preflights_and_requires_exact_source_length() {
 #[test]
 fn mime1_annotations_reject_noncanonical_and_unsafe_inputs() {
     assert_eq!(
-        decode_typed::<Vec<u8>>(&hex_bytes("436a7067")).unwrap(),
+        decode_typed::<Vec<u8>>(&decode_bytes("436a7067")).unwrap(),
         b"jpg"
     );
 

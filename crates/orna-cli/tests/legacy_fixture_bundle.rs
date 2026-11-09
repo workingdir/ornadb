@@ -122,13 +122,7 @@ fn encoded_keys(keys: &[CanonicalValue]) -> Vec<Vec<u8>> {
     encoded
 }
 
-fn hex(bytes: &[u8]) -> String {
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        write!(encoded, "{byte:02x}").expect("writing to a String cannot fail");
-    }
-    encoded
-}
+use orna_base::hex;
 
 /// The canonical OVB-1 bytes of one key, which is what the compact profile
 /// stores in `min_key`/`max_key` (hex-authored) and in leaf entries.

@@ -1,8 +1,8 @@
 use num_bigint::BigInt;
 use orna_value::{Decimal, Error, decode_typed, encode_typed};
 
-fn hex_bytes(input: &str) -> Vec<u8> {
-    orna_base::hex_decode(input).expect("valid test vector hex")
+fn decode_bytes(input: &str) -> Vec<u8> {
+    orna_base::hex_decode(input).expect("canonical hexadecimal")
 }
 
 fn assert_decimal_decode_error(bytes: &[u8], expected: Error) {
@@ -20,7 +20,7 @@ fn assert_decimal_decode_error(bytes: &[u8], expected: Error) {
 fn decimal_codec_emits_the_canonical_tag_60000_golden_bytes() {
     let value = Decimal::try_new(BigInt::from(1234), BigInt::from(-2))
         .expect("finite Decimal construction succeeds");
-    let expected = hex_bytes("d9ea60821904d221");
+    let expected = decode_bytes("d9ea60821904d221");
 
     assert_eq!(
         encode_typed(&value).expect("typed Decimal encoding succeeds"),
@@ -34,7 +34,7 @@ fn decimal_zero_uses_one_canonical_coefficient_and_exponent() {
     let value = Decimal::try_new(BigInt::from(0), BigInt::from(99))
         .expect("zero normalizes within the Decimal range");
     let expected = Decimal::try_new(BigInt::from(0), BigInt::from(0)).unwrap();
-    let bytes = hex_bytes("d9ea60820000");
+    let bytes = decode_bytes("d9ea60820000");
 
     assert_eq!(value, expected);
     assert_eq!(
@@ -50,7 +50,7 @@ fn decimal_trailing_zeroes_normalize_before_encoding_and_round_trip() {
         .expect("finite Decimal construction succeeds");
     let normalized = Decimal::try_new(BigInt::from(1234), BigInt::from(-2))
         .expect("finite Decimal construction succeeds");
-    let expected = hex_bytes("d9ea60821904d221");
+    let expected = decode_bytes("d9ea60821904d221");
 
     assert_eq!(unnormalized, normalized);
     assert_eq!(
@@ -72,7 +72,7 @@ fn decimal_codec_rejects_malformed_and_noncanonical_payloads() {
     ];
 
     for (encoded, expected) in cases {
-        assert_decimal_decode_error(&hex_bytes(encoded), expected);
+        assert_decimal_decode_error(&decode_bytes(encoded), expected);
     }
 }
 
@@ -84,8 +84,8 @@ fn decimal_codec_preserves_resource_limit_failures() {
         Err(Error::DecimalLimit)
     );
 
-    let positive = hex_bytes("d9ea6082011a000f4241");
-    let negative = hex_bytes("d9ea6082013a000f4240");
+    let positive = decode_bytes("d9ea6082011a000f4241");
+    let negative = decode_bytes("d9ea6082013a000f4240");
     assert_decimal_decode_error(&positive, Error::DecimalLimit);
     assert_decimal_decode_error(&negative, Error::DecimalLimit);
 }

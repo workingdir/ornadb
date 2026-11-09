@@ -4297,9 +4297,7 @@ pub table Invoice(id: Str) {
     const MEDIA_SCHEMA_DIGEST: &str =
         "554f46c098c0604e2177711c207eed49c75deea6c628d4323202dee5554837a9";
 
-    fn hex(bytes: &[u8]) -> String {
-        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-    }
+    use orna_base::hex;
 
     fn media_identity_manifest() -> ObjectIdentityManifest {
         let record = |kind: ObjectKind, name: &str, byte: u8| ObjectIdentity {

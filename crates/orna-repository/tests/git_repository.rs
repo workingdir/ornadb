@@ -5029,9 +5029,7 @@ fn recovery_preserves_post_ref_external_conflict_and_can_resume() {
     assert_eq!(repo.read_publication_journal().unwrap(), None);
 }
 
-fn hex_digest(digest: &[u8]) -> String {
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
-}
+use orna_base::hex as hex_digest;
 
 #[test]
 fn legacy_format_migration_uses_pub3_journal_and_preserves_user_state() {

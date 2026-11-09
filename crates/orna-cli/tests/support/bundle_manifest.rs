@@ -6,14 +6,7 @@ use std::path::Path;
 use sha2::{Digest, Sha256};
 
 /// Lowercase hex of a digest, shared with the format-3 fixture builder.
-pub(crate) fn hex_encode(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        write!(out, "{byte:02x}").expect("writing to a String cannot fail");
-    }
-    out
-}
+pub(crate) use orna_base::hex as hex_encode;
 
 /// Returns the bundle's relative file paths, sorted: `index.tsv` plus every
 /// file under `media/`.

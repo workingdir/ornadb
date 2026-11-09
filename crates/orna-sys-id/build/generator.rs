@@ -357,18 +357,17 @@ fn variant_from_field(field: &str) -> String {
     pascal(field)
 }
 
-fn hex_id(text: &str, context: &str) -> Result<[u8; 16]> {
-    if text.len() != 32 || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(GenError::new(format!(
+fn id_bytes(text: &str, context: &str) -> Result<[u8; 16]> {
+    let bytes = orna_base::hex_decode(text).map_err(|_| {
+        GenError::new(format!(
+            "{context} must be 32 lowercase hexadecimal characters, found `{text}`"
+        ))
+    })?;
+    bytes.try_into().map_err(|_| {
+        GenError::new(format!(
             "{context} must be 32 hexadecimal characters, found `{text}`"
-        )));
-    }
-    let mut bytes = [0u8; 16];
-    for (index, byte) in bytes.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&text[index * 2..index * 2 + 2], 16)
-            .map_err(|error| GenError::new(format!("{context}: {error}")))?;
-    }
-    Ok(bytes)
+        ))
+    })
 }
 
 fn render_id(id: [u8; 16]) -> String {
@@ -1312,7 +1311,7 @@ impl Engine {
                     "{context} name parts do not spell `{name}`"
                 )));
             }
-            let function_id = hex_id(
+            let function_id = id_bytes(
                 string(member(entry, "function_id", &context)?, &context)?,
                 &context,
             )?;
@@ -1395,7 +1394,7 @@ impl Engine {
             if !names.insert(name.clone()) {
                 return Err(GenError::new(format!("engine name `{name}` appears twice")));
             }
-            let type_id = hex_id(
+            let type_id = id_bytes(
                 string(member(entry, "type_id", &context)?, &context)?,
                 &context,
             )?;
@@ -1673,7 +1672,7 @@ fn parse_optional_id(
 ) -> Result<Option<[u8; 16]>> {
     match object.get(key) {
         None | Some(Value::Null) => Ok(None),
-        Some(value) => Ok(Some(hex_id(string(value, context)?, context)?)),
+        Some(value) => Ok(Some(id_bytes(string(value, context)?, context)?)),
     }
 }
 
@@ -1707,19 +1706,19 @@ fn parse_signature(value: &Value, context: &str) -> Result<SignatureModel> {
         "health" => Ok(SignatureModel::Health),
         "source_introspection" => Ok(SignatureModel::SourceIntrospection),
         "invocation" => Ok(SignatureModel::Invocation {
-            parameter_id: hex_id(
+            parameter_id: id_bytes(
                 string(member(signature, "parameter_id", context)?, context)?,
                 context,
             )?,
             parameter_name: string(member(signature, "parameter_name", context)?, context)?
                 .to_owned(),
-            request_type: hex_id(
+            request_type: id_bytes(
                 string(member(signature, "request_type", context)?, context)?,
                 context,
             )?,
             request_required: boolean(member(signature, "request_required", context)?, context)?,
             request_non_null: boolean(member(signature, "request_non_null", context)?, context)?,
-            event_stream_item_type: hex_id(
+            event_stream_item_type: id_bytes(
                 string(
                     member(signature, "event_stream_item_type", context)?,
                     context,
@@ -1734,7 +1733,7 @@ fn parse_signature(value: &Value, context: &str) -> Result<SignatureModel> {
                 &format!("{context}.parameter_types"),
             )?
             .iter()
-            .map(|value| hex_id(string(value, context)?, context))
+            .map(|value| id_bytes(string(value, context)?, context))
             .collect::<Result<Vec<_>>>()?;
             if parameter_types.len() != parameter_count {
                 return Err(GenError::new(format!(

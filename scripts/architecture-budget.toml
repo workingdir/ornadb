@@ -101,13 +101,13 @@ name = "orna-conformance"
 name = "orna-compat-v1"
 [crate.files]
 "src/canonical_hash.rs" = 2627
-"src/canonical_hash/tests.rs" = 3258
+"src/canonical_hash/tests.rs" = 3256
 "src/catalogue.rs" = 4124
 "src/catalogue_diff.rs" = 1991
 "src/inspect.rs" = 2780
 "src/inspect_carrier.rs" = 1354
 "src/invocation.rs" = 2929
-"src/invocation_binding.rs" = 1229
+"src/invocation_binding.rs" = 1226
 "src/physical.rs" = 1351
 "src/physical/tests.rs" = 4145
 "src/revision.rs" = 4309
@@ -176,7 +176,7 @@ name = "orna-evolution"
 [[crate]]
 name = "orna-live"
 [crate.files]
-"src/lib.rs" = 12257
+"src/lib.rs" = 12208
 "src/live_presentation.rs" = 1623
 [crate.functions]
 "src/lib.rs::complete_application" = 232
@@ -202,7 +202,7 @@ name = "orna-project"
 [crate.files]
 "src/attachments.rs" = 9969
 "src/lib.rs" = 3232
-"src/object_identity.rs" = 4562
+"src/object_identity.rs" = 4560
 "src/typed_row.rs" = 1222
 "src/unicode16.rs" = 1636
 [crate.functions]
@@ -413,7 +413,7 @@ name = "orna-semantic"
 name = "orna-storage"
 [crate.files]
 "src/compact.rs" = 3529
-"src/compact_parquet.rs" = 5011
+"src/compact_parquet.rs" = 5006
 [crate.functions]
 "src/compact.rs::evolution_rekey_consumes_verified_base_and_emits_writer_input" = 144
 "src/compact.rs::lower_publication_freeze" = 125
@@ -482,7 +482,7 @@ name = "orna-traceability"
 name = "orna-value"
 [crate.files]
 "src/blob.rs" = 1248
-"src/format3_context_tests.rs" = 1426
+"src/format3_context_tests.rs" = 1423
 "src/lib.rs" = 2334
 "src/schema.rs" = 1240
 [crate.functions]

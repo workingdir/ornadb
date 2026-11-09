@@ -55,14 +55,7 @@ fn sorted_names(directory: &Path) -> Vec<String> {
     names
 }
 
-fn hex_lower(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        write!(out, "{byte:02x}").expect("writing to a String cannot fail");
-    }
-    out
-}
+use orna_base::hex as hex_lower;
 
 /// profiles/vfs-1.md Row/key directory mapping and bead ornadb-5il1.464: a
 /// reachable source module at a nested logical path projects as its directory

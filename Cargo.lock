@@ -1407,6 +1407,7 @@ dependencies = [
  "getrandom 0.3.4",
  "num-bigint 0.4.8",
  "orna-application",
+ "orna-base",
  "orna-evaluator",
  "orna-intrinsics",
  "orna-live",
@@ -1442,6 +1443,7 @@ dependencies = [
  "libc",
  "libsql",
  "orna-application",
+ "orna-base",
  "orna-conformance",
  "orna-evaluator",
  "orna-live",
@@ -1471,7 +1473,7 @@ dependencies = [
 name = "orna-compat-v1"
 version = "1.0.0"
 dependencies = [
- "base64",
+ "orna-base",
  "orna-syntax",
  "orna-value",
  "proptest",
@@ -1488,6 +1490,7 @@ dependencies = [
  "futures",
  "getrandom 0.3.4",
  "num-bigint 0.4.8",
+ "orna-base",
  "orna-compat-v1",
  "orna-evaluator",
  "orna-live",
@@ -1561,6 +1564,7 @@ version = "1.0.0"
 dependencies = [
  "futures",
  "getrandom 0.3.4",
+ "orna-base",
  "orna-evaluator",
  "orna-live",
  "orna-protocol",
@@ -1579,6 +1583,7 @@ version = "1.0.0"
 dependencies = [
  "lsp-server",
  "lsp-types",
+ "orna-base",
  "orna-project",
  "orna-repository",
  "orna-semantic",
@@ -1725,8 +1730,8 @@ version = "1.0.0"
 name = "orna-storage"
 version = "1.0.0"
 dependencies = [
- "base64",
  "bytes",
+ "orna-base",
  "orna-evolution",
  "orna-repository",
  "orna-runtime",
@@ -1794,6 +1799,7 @@ dependencies = [
 name = "orna-sys-id"
 version = "1.0.0"
 dependencies = [
+ "orna-base",
  "serde_json",
 ]
 

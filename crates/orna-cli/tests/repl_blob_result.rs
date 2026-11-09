@@ -155,14 +155,7 @@ fn query_rows(root: &Path, arguments: &[&str]) -> u64 {
     report["rows"].as_u64().expect("the report counts rows")
 }
 
-fn hex(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        write!(out, "{byte:02x}").expect("writing to a String cannot fail");
-    }
-    out
-}
+use orna_base::hex;
 
 /// Maximal runs of hexadecimal digits at least 40 long. A digest or an OID
 /// printed by the REPL appears as one of these runs.

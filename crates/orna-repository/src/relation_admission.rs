@@ -45,7 +45,7 @@ use crate::{
     bind_tree_entry_in_index,
     blob_store::{ContentIdentity, GearChunker},
     cbor::{bytes as cbor_bytes, head as cbor_head, text as cbor_text},
-    hex::{hex_decode, hex_encode},
+    hex::{decode_text, hex_encode},
     native_graph::{
         ByteIndexEntry, GitHashAlgorithm, GraphError, IndexMaintenance, MAX_GRAPH_HEIGHT, MAX_REFS,
         NativeGraphContext, NativeNodeEnvelope, NativeObjectKind, NativeOid, NodeData,
@@ -772,7 +772,7 @@ impl CommittedRekey {
 /// Decodes one rekey log address: the canonical lowercase hex spelling
 /// `hex_encode` writes, naming a canonical ORP key.
 fn canonical_key_from_hex(text: &str) -> Result<Vec<u8>, RelationAdmissionError> {
-    let key = hex_decode(text).ok_or(RelationAdmissionError::InvalidRekeyLog)?;
+    let key = decode_text(text).ok_or(RelationAdmissionError::InvalidRekeyLog)?;
     TypedKey::decode_canonical(&key).map_err(|_| RelationAdmissionError::InvalidRekeyLog)?;
     Ok(key)
 }
@@ -3564,7 +3564,7 @@ mod tests {
         // A ROV-3 Blob reference is a Tree dependency of the row node: its oid
         // names a git tree, so the staged node graph lists the empty tree.
         let content = b"image bytes";
-        let oid = hex_decode(&crate::test_support::git_with_input(root, &["mktree"], ""))
+        let oid = decode_text(&crate::test_support::git_with_input(root, &["mktree"], ""))
             .expect("a hex tree id");
         let reference = Raw::Tag(
             ROV3_BLOB_TAG,

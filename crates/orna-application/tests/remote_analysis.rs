@@ -73,10 +73,6 @@ fn provenance(fixture: &CommittedProject) -> RemoteAnalysisProvenance {
         .expect("the admitted source is the committed module")
 }
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
 fn disclosed() -> Vec<String> {
     ["source", "dependency-snapshot", "query"]
         .map(str::to_owned)
@@ -110,7 +106,7 @@ fn remote_analysis_is_denied_by_default_and_records_nothing() {
     assert!(
         provenance
             .identity()
-            .starts_with(&format!("git:{}", hex(&snapshot)))
+            .starts_with(&format!("git:{}", orna_base::hex(&snapshot)))
     );
     assert!(provenance.identity().contains(";module:main.orna:"));
 }
