@@ -1,6 +1,6 @@
+use orna_check::{Catalogue, ModuleInput, analyze_with_catalogue};
 use orna_conformance::{SourceUnit, StageOutcome, TransactionalEvaluator};
 use orna_evaluator::Limits;
-use orna_semantic::{Catalogue, ModuleInput, analyze_with_catalogue};
 use orna_value::Value;
 
 #[test]

@@ -185,7 +185,7 @@ fn capture_staged_candidate(
 fn load_staged_project(
     repository: &orna_repository::Repository,
     staged: &StagedCandidate,
-) -> Result<(orna_project::LoadedProject, orna_semantic::Analysis), Diagnostic> {
+) -> Result<(orna_project::LoadedProject, orna_check::Analysis), Diagnostic> {
     let project = orna_project::ProjectLoader::default()
         .load_private_candidate(repository, staged.candidate())
         .map_err(|error| match error {
@@ -201,7 +201,7 @@ fn load_staged_project(
             error => staging_error("staged source could not be loaded", format!("{error:?}")),
         })?;
     let catalogue = semantic_catalogue(&project)?;
-    let analysis = orna_semantic::analyze_with_catalogue(project.modules(), &catalogue);
+    let analysis = orna_check::analyze_with_catalogue(project.modules(), &catalogue);
     if !analysis.is_ok() {
         let first = analysis
             .diagnostics
@@ -247,7 +247,7 @@ fn reconcile_identities(
 /// The relations the staged tables need in the staged store.
 fn build_staged_relations(
     project: &orna_project::LoadedProject,
-    analysis: &orna_semantic::Analysis,
+    analysis: &orna_check::Analysis,
     identities: &orna_project::ObjectIdentityManifest,
     database_id: [u8; 16],
 ) -> Result<orna_application::StagedRelations, Diagnostic> {

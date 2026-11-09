@@ -12,11 +12,11 @@ use std::{
 };
 
 use orna_application::{ApplicationAuthority, CommittedTableIdentity};
+use orna_check::{Catalogue, TableSchema};
 use orna_evaluator::Limits;
 use orna_project::{CommittedReadError, CommittedReadLimits, committed_tables};
 use orna_repository::Repository;
 use orna_runtime::TableObjectId;
-use orna_semantic::{Catalogue, TableSchema};
 
 #[path = "support/format3.rs"]
 mod format3;

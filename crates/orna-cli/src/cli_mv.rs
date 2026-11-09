@@ -175,7 +175,7 @@ pub(super) fn run_mv(
 /// module with the renamed declaration, the exact staged candidate it will be
 /// restaged with, and the inventory the rename moves.
 struct TableRenamePlan {
-    modules: Vec<orna_semantic::ModuleInput>,
+    modules: Vec<orna_check::ModuleInput>,
     module_index: usize,
     source_path: std::path::PathBuf,
     logical_path: String,
@@ -215,10 +215,10 @@ fn plan_table_rename(
     let source_already_renamed = original_source.is_none();
 
     let catalogue = semantic_catalogue(&project)?;
-    let analysis = orna_semantic::analyze_with_providers(
+    let analysis = orna_check::analyze_with_providers(
         &modules,
         &catalogue,
-        orna_semantic::SystemProviders::DeclaredSurface,
+        orna_check::SystemProviders::DeclaredSurface,
     );
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
@@ -451,7 +451,7 @@ fn renameable_kind(
 
 /// Everything one identity rename needs before its first write.
 struct StoreRenamePlan {
-    modules: Vec<orna_semantic::ModuleInput>,
+    modules: Vec<orna_check::ModuleInput>,
     module_index: usize,
     source_path: std::path::PathBuf,
     logical_path: String,
@@ -491,7 +491,7 @@ fn plan_store_rename(
         (module_index, None)
     };
     let catalogue = semantic_catalogue(&project)?;
-    if !orna_semantic::analyze_with_catalogue(&modules, &catalogue).is_ok() {
+    if !orna_check::analyze_with_catalogue(&modules, &catalogue).is_ok() {
         return Err(Diagnostic::target(
             "E2101",
             "the rename would leave the source project invalid",
@@ -603,7 +603,7 @@ fn renamed_name_source(source: &str, span: &orna_syntax::SyntaxSpan, new_leaf: &
 /// names: a table, type, enum or unit declaration, or a table field or key,
 /// an enum variant, a type field or a variant payload field.
 fn declaration_name_span(
-    modules: &[orna_semantic::ModuleInput],
+    modules: &[orna_check::ModuleInput],
     kind: orna_project::ObjectKind,
     qualified: &str,
 ) -> Option<(usize, orna_syntax::SyntaxSpan)> {

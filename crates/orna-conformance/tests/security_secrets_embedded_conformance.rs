@@ -1,9 +1,9 @@
 use std::{cell::Cell, fs, path::Path, process::Command};
 
+use orna_check::{Catalogue, ModuleInput, analyze_with_catalogue};
 use orna_repository::Repository;
 use orna_runtime::{RuntimeIdentity, RuntimeState};
 use orna_security::{SecretBoundaryError, SecretMetadata, SecretRef, SecretResolver};
-use orna_semantic::{Catalogue, ModuleInput, analyze_with_catalogue};
 use orna_syntax::parse_module_with_file;
 use orna_value::{Diagnostic, DiagnosticSeverity, SafeText};
 use tempfile::TempDir;

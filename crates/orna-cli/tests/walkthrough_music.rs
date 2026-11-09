@@ -6,13 +6,13 @@ use std::{
 };
 
 use orna_application::{ApplicationAuthority, CommittedTableIdentity};
+use orna_check::Catalogue;
 use orna_evaluator::{
     Environment, Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects,
 };
 use orna_project::{ProjectLoader, SourceRowRequest, admit_source_row};
 use orna_repository::{GitCommitRef, Repository};
 use orna_runtime::{NoFault, RuntimeState, TableObjectId};
-use orna_semantic::Catalogue;
 use orna_sys::{EnvironmentProvider, FilesystemProvider};
 use orna_value::{
     AvailabilityState, BlobResolver, ContentReference, ContextValue, Error as ValueError,

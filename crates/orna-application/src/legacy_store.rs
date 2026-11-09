@@ -35,15 +35,15 @@
 //! commit's own tree entries rather than from a loaded project.
 //!
 //! Nothing here evaluates source: a row unit is parsed as one record expression
-//! and lowered as data ([`orna_semantic::lower_data_expression`]), and no
+//! and lowered as data ([`orna_check::lower_data_expression`]), and no
 //! blob payload is fetched.
 
+use orna_check::lower_data_expression;
 use orna_project::ProjectLimits;
 use orna_repository::{
     CommittedRevisionSnapshot, CommittedTreeEntryKind, GitCommitRef, Repository, RepositoryError,
     TypedKey, Uuid,
 };
-use orna_semantic::lower_data_expression;
 use orna_syntax::parse_row;
 use orna_value::Raw;
 

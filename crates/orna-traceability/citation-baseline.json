@@ -16,7 +16,7 @@
     "orna-repository",
     "orna-runtime",
     "orna-security",
-    "orna-semantic",
+    "orna-check",
     "orna-serving",
     "orna-standard-sources",
     "orna-storage",

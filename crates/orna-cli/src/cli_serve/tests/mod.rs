@@ -1896,7 +1896,7 @@ fn commit_project_with_identities(root: &Path) {
     git_succeeds(root, &["add", "main.orna", ".orna/database.orna"]);
     git_commit(root, "base");
     let source = std::fs::read_to_string(root.join("main.orna")).expect("project source");
-    let module = orna_semantic::ModuleInput::new("main.orna", source.as_str());
+    let module = orna_check::ModuleInput::new("main.orna", source.as_str());
     let identities =
         orna_project::ObjectIdentityManifest::reconcile(std::slice::from_ref(&module), None)
             .expect("object identities");
@@ -1970,7 +1970,7 @@ fn test_clone(root: &Path, identity: RuntimeIdentity) -> ServedClone {
     ServedClone {
         root: root.to_path_buf(),
         identity,
-        catalogue: orna_semantic::Catalogue::authoritative_core(),
+        catalogue: orna_check::Catalogue::authoritative_core(),
         project: None,
         app: None,
         runtime,

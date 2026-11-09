@@ -1,7 +1,7 @@
 use num_bigint::BigInt;
+use orna_check::{Catalogue, StandardDependencyProfile};
 use orna_evaluator::{Limits, SysHostBindingRegistry};
 use orna_project_repl::AdmittedReplSession;
-use orna_semantic::{Catalogue, StandardDependencyProfile};
 use orna_value::Raw;
 
 fn captured_random_sources() -> Vec<(String, String)> {

@@ -1,6 +1,6 @@
+use orna_check::{Catalogue, StandardDependencyProfile};
 use orna_evaluator::{Environment, Limits, evaluate_expression};
 use orna_project_repl::AdmittedReplSession;
-use orna_semantic::{Catalogue, StandardDependencyProfile};
 use orna_value::CanonicalValue;
 use orna_value::Raw;
 

@@ -1,11 +1,11 @@
 use futures::executor::block_on;
 use orna_application::{ApplicationAuthority, CommittedTableIdentity};
+use orna_check::Catalogue;
 use orna_evaluator::Limits;
 use orna_repository::Repository;
 use orna_runtime::{
     NoFault, RuntimeError, RuntimeIdentity, RuntimeState, TableMutation, TableObjectId, WriterLease,
 };
-use orna_semantic::Catalogue;
 use std::{
     fs,
     path::PathBuf,

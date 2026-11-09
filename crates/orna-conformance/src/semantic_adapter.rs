@@ -1,6 +1,6 @@
 //! Semantic and runtime conformance seams for the frozen v1 contracts.
 //!
-//! `orna-semantic` is a real, deterministic analyzer, but intentionally
+//! `orna-check` is a real, deterministic analyzer, but intentionally
 //! exposes one combined analysis result rather than separate compiler phases.
 //! This adapter executes it and only reports a phase result where that result
 //! is meaningful. `RuntimeEvaluator` remains an explicit seam: the bounded
@@ -18,6 +18,11 @@ use crate::{
     row_admission::{admit_project_rows, preflight_project_rows},
 };
 use num_bigint::{BigInt, Sign};
+use orna_check::{
+    AssertionOwner, AssertionPlan, Catalogue, DIAG_AMBIGUOUS, DIAG_IMPORT, EffectSummary,
+    ModuleInput, Namespace, StandardDependencyProfile, SystemProviders,
+    UNRESOLVED_TABLE_DEPENDENCY, analyze_with_providers, assertion_dependencies_apply,
+};
 use orna_evaluator::{
     ActivationEffectReport, ActivationExplainCatalogue, EffectGate, EffectHandler, Environment,
     EvaluationError, ExplainCatalogue, Functions, Limits as EvaluatorLimits, NominalDefinition,
@@ -40,11 +45,6 @@ use orna_runtime::{
     TableActivationCandidateValidator, TableActivationError, TableMutation, TableObjectId,
     TerminalOutcome, ValidatedTableActivationCommit, ValidatedTableRequestActivationCommit,
     WriterLease,
-};
-use orna_semantic::{
-    AssertionOwner, AssertionPlan, Catalogue, DIAG_AMBIGUOUS, DIAG_IMPORT, EffectSummary,
-    ModuleInput, Namespace, StandardDependencyProfile, SystemProviders,
-    UNRESOLVED_TABLE_DEPENDENCY, analyze_with_providers, assertion_dependencies_apply,
 };
 use orna_storage::RuntimePublicationCoordinator;
 use orna_stream::{
@@ -88,7 +88,7 @@ impl Default for SemanticAdapter {
 }
 
 impl SemanticAdapter {
-    fn project_analysis(&self, project: &ProjectUnit) -> orna_semantic::Analysis {
+    fn project_analysis(&self, project: &ProjectUnit) -> orna_check::Analysis {
         let prefix = format!("{}/", project.project_id.trim_end_matches('/'));
         let inputs = project
             .modules
@@ -315,7 +315,7 @@ pub trait RuntimeEvaluator {
     fn validate_resolved_rows(
         &mut self,
         project: &ProjectUnit,
-        _: &orna_semantic::Analysis,
+        _: &orna_check::Analysis,
     ) -> StageOutcome<Diagnostic> {
         self.validate_rows(project)
     }
@@ -1038,7 +1038,7 @@ impl RuntimeEvaluator for BoundedEvaluator {
     fn validate_resolved_rows(
         &mut self,
         project: &ProjectUnit,
-        analysis: &orna_semantic::Analysis,
+        analysis: &orna_check::Analysis,
     ) -> StageOutcome<Diagnostic> {
         // Placeholder identity: ProjectUnit carries no database id or snapshot
         // tables, so every 60021 stored reference is checked against an empty
@@ -7360,7 +7360,7 @@ fn controlled_table_effects(summary: &EffectSummary) -> bool {
         && summary.effects.iter().all(|effect| {
             matches!(
                 effect,
-                orna_semantic::EffectKind::TableRead | orna_semantic::EffectKind::TableWrite
+                orna_check::EffectKind::TableRead | orna_check::EffectKind::TableWrite
             )
         })
 }
@@ -7377,7 +7377,7 @@ fn effect_admission_diagnostic() -> Diagnostic {
 }
 
 fn project_entry_effects<'a>(
-    analysis: &'a orna_semantic::Analysis,
+    analysis: &'a orna_check::Analysis,
     project: &ProjectUnit,
     entry: &str,
 ) -> Option<&'a EffectSummary> {

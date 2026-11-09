@@ -186,7 +186,7 @@ impl RequestContext {
     fn record_semantic_tokens(&self, uri: Uri, data: Vec<SemanticToken>) -> String {
         let mut results = lock(&self.semantic_tokens);
         results.next += 1;
-        let result_id = format!("orna-semantic-{}", results.next);
+        let result_id = format!("orna-check-{}", results.next);
         results.by_uri.insert(
             uri,
             SemanticTokenSnapshot {
@@ -2066,9 +2066,9 @@ mod rename_request_tests {
 #[cfg(test)]
 mod persisted_object_rename_tests {
     use super::*;
+    use orna_check::ModuleInput;
     use orna_project::{ObjectIdentityManifest, ObjectKind};
     use orna_repository::Repository;
-    use orna_semantic::ModuleInput;
     use std::{
         fs,
         path::{Path, PathBuf},

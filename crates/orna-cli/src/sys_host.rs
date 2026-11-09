@@ -53,10 +53,10 @@ pub(crate) fn std_snapshot_pin(project: &LoadedProject) -> StdSnapshotPin {
 mod tests {
     use super::sys_host_context;
     use orna_application::{ApplicationAuthority, ApplicationLiveAdapter};
+    use orna_check::Catalogue;
     use orna_evaluator::Limits;
     use orna_live::LiveApplication;
     use orna_runtime::RuntimeIdentity;
-    use orna_semantic::Catalogue;
     use orna_sys::{RuntimeMode, StdSnapshotPin};
     use std::path::Path;
 

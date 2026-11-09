@@ -35,7 +35,7 @@ orna-project = { path = "../orna-project" }
 orna-repository = { path = "../orna-repository" }
 orna-runtime = { path = "../orna-runtime" }
 orna-security = { path = "../orna-security" }
-orna-semantic = { path = "../orna-semantic" }
+orna-check = { path = "../orna-check" }
 orna-serving = { path = "../orna-serving" }
 orna-storage = { path = "../orna-storage" }
 orna-syntax = { path = "../orna-syntax" }
