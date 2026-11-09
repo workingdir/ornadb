@@ -17,17 +17,13 @@ use support::{module_of_prefix, registered_spellings};
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum UndeclaredClass {
-    /// The 16 core relation operations re-exported by `std.collection` and
-    /// `std.query` (`spec 09:9`); stage S4 adds explicit declarations.
-    CoreReexport,
     /// The six private leaves that exist only for the v4/v5 module-upgrade pins.
     HistoricalPin,
-    /// `recursive_cte` comes from the Rust addendum fixture, not the pin.
-    Addendum,
-    /// `std.stream.from_provider` has no pinned declaration (D3).
-    EvaluatorOnly,
     /// The `std.query` private leaves are declared in `std.collection`.
     SiblingDeclaration,
+    /// The 16 core relation operations keep their `std.collection` spelling by a
+    /// source re-export in `std.query` with the same intrinsic identity (spec 09:9).
+    ReexportedInQuery,
 }
 
 fn pinned_root() -> PathBuf {
@@ -98,12 +94,6 @@ fn classification() -> BTreeMap<(&'static str, &'static str), UndeclaredClass> {
     let mut classes = BTreeMap::new();
     for prefix in ["std.collection.", "std.query."] {
         for operation in [
-            "filter", "map", "flat_map", "sort_by", "take", "drop", "distinct", "union", "count",
-            "first", "one", "sum", "min", "max", "every", "exists",
-        ] {
-            classes.insert((prefix, operation), UndeclaredClass::CoreReexport);
-        }
-        for operation in [
             "__list_length",
             "__list_concat",
             "__numeric_sum",
@@ -114,17 +104,19 @@ fn classification() -> BTreeMap<(&'static str, &'static str), UndeclaredClass> {
             classes.insert((prefix, operation), UndeclaredClass::HistoricalPin);
         }
     }
-    for operation in ["recursive_cte", "__recursive_cte"] {
-        classes.insert(("std.query.", operation), UndeclaredClass::Addendum);
-    }
-    classes.insert(
-        ("std.stream.", "from_provider"),
-        UndeclaredClass::EvaluatorOnly,
-    );
     for operation in ["__group_by", "__rank", "__asof_join", "__bucket_by"] {
         classes.insert(
             ("std.query.", operation),
             UndeclaredClass::SiblingDeclaration,
+        );
+    }
+    for operation in [
+        "filter", "map", "flat_map", "sort_by", "take", "drop", "distinct", "union", "count",
+        "first", "one", "sum", "min", "max", "every", "exists",
+    ] {
+        classes.insert(
+            ("std.collection.", operation),
+            UndeclaredClass::ReexportedInQuery,
         );
     }
     classes
@@ -147,7 +139,7 @@ fn undeclared_spellings(
 }
 
 #[test]
-fn the_51_undeclared_spellings_are_exactly_classified() {
+fn the_remaining_undeclared_spellings_are_exactly_classified() {
     let undeclared = undeclared_spellings(&registered_spellings());
     let classes = classification();
     let classified = classes.keys().copied().collect::<BTreeSet<_>>();
@@ -155,7 +147,7 @@ fn the_51_undeclared_spellings_are_exactly_classified() {
         undeclared, classified,
         "the undeclared spelling set and its documented classes drifted"
     );
-    assert_eq!(undeclared.len(), 51);
+    assert_eq!(undeclared.len(), 32);
     assert_eq!(
         undeclared
             .iter()
@@ -168,14 +160,14 @@ fn the_51_undeclared_spellings_are_exactly_classified() {
             .iter()
             .filter(|(prefix, _)| *prefix == "std.query.")
             .count(),
-        28
+        10
     );
     assert_eq!(
         undeclared
             .iter()
             .filter(|(prefix, _)| *prefix == "std.stream.")
             .count(),
-        1
+        0
     );
 }
 
@@ -186,11 +178,9 @@ fn every_class_is_nonempty_and_named() {
     for class in classes.values() {
         *counts.entry(*class).or_insert(0usize) += 1;
     }
-    assert_eq!(counts[&UndeclaredClass::CoreReexport], 32);
     assert_eq!(counts[&UndeclaredClass::HistoricalPin], 12);
-    assert_eq!(counts[&UndeclaredClass::Addendum], 2);
-    assert_eq!(counts[&UndeclaredClass::EvaluatorOnly], 1);
     assert_eq!(counts[&UndeclaredClass::SiblingDeclaration], 4);
+    assert_eq!(counts[&UndeclaredClass::ReexportedInQuery], 16);
 }
 
 #[test]
@@ -218,4 +208,22 @@ fn time_submodule_names_are_mapped_to_the_declaration_leaf() {
     assert_eq!(local_name("std.text.", "trim"), "trim");
     assert!(declared("std.time.", "duration.compact.format"));
     assert!(declared("std.time.", "duration.iso.format"));
+}
+
+/// Every `std.collection` spelling classified as a re-export must be declared
+/// by `std.query`, which is what makes the class a source re-export rather than
+/// a silent native-only spelling.
+#[test]
+fn reexported_collection_spellings_are_declared_in_query() {
+    for (prefix, operation) in classification().keys() {
+        if *prefix == "std.collection."
+            && *operation != "__list_length"
+            && !operation.starts_with("__")
+        {
+            assert!(
+                declared("std.query.", operation),
+                "std.query must declare the {operation} re-export"
+            );
+        }
+    }
 }

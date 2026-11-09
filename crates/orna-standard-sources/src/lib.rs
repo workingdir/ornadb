@@ -4,11 +4,10 @@
 ///
 /// One literal is both the public logical path (`std/math.orna`) and the path of
 /// the embedded file below `stdlib/`, so a module's name and its text cannot be
-/// paired wrongly. A `+ "file"` suffix appends that file from this crate's
-/// `src/fixtures/` directory to the module text. Table order is the order of
+/// paired wrongly. Table order is the order of
 /// [`reference_standard_sources_v1`].
 macro_rules! reference_standard_modules {
-    ($($name:ident = $path:literal $(+ $addendum:literal)?;)+) => {
+    ($($name:ident = $path:literal;)+) => {
         $(
             #[doc = concat!("Logical source path of the pinned Orna 1.0.0 reference module `", $path, "`.")]
             pub const $name: &str = $path;
@@ -19,10 +18,7 @@ macro_rules! reference_standard_modules {
         const SOURCES: [(&str, &str); SOURCE_COUNT] = [
             $((
                 $name,
-                concat!(
-                    include_str!(concat!("../../../stdlib/", $path))
-                    $(, include_str!(concat!("fixtures/", $addendum)))?
-                ),
+                include_str!(concat!("../../../stdlib/", $path)),
             )),+
         ];
     };
@@ -31,7 +27,7 @@ macro_rules! reference_standard_modules {
 reference_standard_modules! {
     REFERENCE_STANDARD_MATH_PATH_V1 = "std/math.orna";
     REFERENCE_STANDARD_COLLECTION_PATH_V1 = "std/collection.orna";
-    REFERENCE_STANDARD_QUERY_PATH_V1 = "std/query.orna" + "query_recursive_cte_n0o0e.orna";
+    REFERENCE_STANDARD_QUERY_PATH_V1 = "std/query.orna";
     REFERENCE_STANDARD_TEXT_PATH_V1 = "std/text.orna";
     REFERENCE_STANDARD_BITS_PATH_V1 = "std/bits.orna";
     REFERENCE_STANDARD_STATS_PATH_V1 = "std/stats.orna";
@@ -139,16 +135,5 @@ mod tests {
             assert!(!source.is_empty(), "{path} embeds no source text");
             assert!(seen.insert(path.clone()), "{path} is listed twice");
         }
-    }
-
-    #[test]
-    fn query_module_is_its_file_followed_by_the_recursive_cte_fixture() {
-        let (_, query) = reference_standard_sources_v1()
-            .into_iter()
-            .find(|(path, _)| path == REFERENCE_STANDARD_QUERY_PATH_V1)
-            .expect("the bundle contains std/query.orna");
-        let file = include_str!("../../../stdlib/std/query.orna");
-        let fixture = include_str!("fixtures/query_recursive_cte_n0o0e.orna");
-        assert_eq!(query, format!("{file}{fixture}"));
     }
 }

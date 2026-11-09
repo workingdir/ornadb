@@ -97,7 +97,7 @@ fn signature_type(sig: SigType, subst: &[Option<Type>], container: Container, sl
         SigType::Tuple(elements) => Type::Tuple(
             elements
                 .iter()
-                .map(|element| signature_type(*element, subst, container, false))
+                .map(|element| signature_type(*element, subst, container, slot))
                 .collect(),
         ),
         SigType::Record(fields) => Type::Record(
@@ -1151,7 +1151,12 @@ fn check_bucket_by(
         .is_some_and(|index| arguments[index].name.is_none());
     let calendar = period.is_some_and(|value| is_calendar_period(&value.ty));
     let elapsed = period.is_some_and(|value| value.ty == Type::Named("std.DURATION".into()));
-    let named_zone = zone.is_some_and(|value| value.ty == Type::Named("std.TimeZone".into()));
+    // The pinned `std.collection.bucket_by` declares `zone: Str`; the spec's
+    // `zone: Europe.London` example is the same textual zone identity. Accept
+    // either the captured text form or a resolved TimeZone value.
+    let named_zone = zone.is_some_and(|value| {
+        value.ty == Type::Named("std.TimeZone".into()) || value.ty == Type::Text
+    });
     let message = if !instant {
         Some((
             DIAG_TYPE,
