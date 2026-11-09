@@ -148,9 +148,7 @@ impl EnvironmentProvider {
             .operations
             .iter()
             .any(|candidate| candidate == registered.name.label())
-            || !registered
-                .effects
-                .contains(&orna_sys_id::SysEffect::Read)
+            || !registered.effects.contains(&orna_sys_id::SysEffect::Read)
         {
             return Err(EnvironmentProviderError::Denied);
         }

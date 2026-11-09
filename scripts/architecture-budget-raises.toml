@@ -276,3 +276,15 @@ path = "crates/orna-runtime/src/lib.rs::replaying_a_published_vfs_save_reports_t
 new_limit = 124
 reason = "main's #9794 writer-entry fence adds the replay test; recorded with the fence bead"
 bead = "ornadb-5il1.127"
+
+[[raise]]
+path = "crates/orna-sys/src/host_filesystem.rs"
+new_limit = 2600
+reason = "stage S2 replaces the embedded JSON payloads with typed declaration attributes and # Preconditions doc prose; the facts are unchanged"
+bead = "ornadb-ouxeq.3"
+
+[[raise]]
+path = "crates/orna-sys-codegen/src/build_host.rs"
+new_limit = 1350
+reason = "stage S2 adds the typed declaration parser, doc-comment precondition extraction and generated-vocabulary resolution"
+bead = "ornadb-ouxeq.3"
