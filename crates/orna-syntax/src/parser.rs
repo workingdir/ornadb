@@ -65,6 +65,10 @@ impl SourceSpan {
             .as_ref()
             .map(|location| location.file.as_str())
     }
+    /// The start position, when this span was located in a real document.
+    pub fn start_position(&self) -> Option<&SourcePosition> {
+        self.location.as_ref().map(|location| &location.start)
+    }
 }
 fn position_at(source: &str, at: usize) -> SourcePosition {
     // Offsets produced by the lexer and parser are always UTF-8 boundaries,

@@ -274,11 +274,8 @@ fn project_load_diagnostic(error: orna_project::ProjectLoadError) -> Diagnostic 
     {
         // The first parser diagnostic is the primary code: it is the spec code
         // that names the source contract violation, not a loader wrapper.
-        let location = match &first.span.location {
-            Some(location) => {
-                let start = &location.start;
-                format!("{logical_path}:{}:{}", start.line, start.column)
-            }
+        let location = match first.span.start_position() {
+            Some(position) => format!("{logical_path}:{}:{}", position.line, position.column),
             None => logical_path.clone(),
         };
         return Diagnostic {
