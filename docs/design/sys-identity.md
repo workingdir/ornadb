@@ -389,9 +389,10 @@ wrote for it.
 
 ### 2.7 Runtime cost of the current shape
 
-* Every process that touches `sys` parses 168,272 bytes of JSON and builds eight
-  `BTreeMap<String, _>` covering roughly 407 catalogued members with nine `String`
-  fields per callable (`crates/orna-semantic/src/system_api.rs:27-37`, `:221`). That
+* Every process that touches `sys` parses 168,272 bytes of JSON and builds seven
+  `BTreeMap<String, _>` plus a `BTreeSet<String>` of failure codes
+  (`crates/orna-semantic/src/system_api.rs:27-37`, `:221`) covering roughly 407
+  catalogued members with nine `String` fields per callable (`:90-112`). That
   is roughly 1,150 `String` allocations before the first `sys.` name is resolved.
 * `system_api_json() -> String` clones the full document per call
   (`crates/orna-sys/src/system_api.rs:127`).
@@ -724,7 +725,74 @@ pub enum SysType { DatabaseId, RowRefT, ... }              // 35 value types + 7
 (`sys.Database` -> `sys.catalog.databases`), which is ORNA-SYS-009 encoded in the type
 system instead of in a comment.
 
-### 4.4 Exhaustive dispatch
+### 4.4 Removed names and ORNA rule codes
+
+`removed_names` is part of the catalogue and carries a MUST:
+ORNA-SYS-005 (`source/15-system.md:26`) requires that `sys.runtime` "MUST produce
+`ORNA100-E-SYS-RUNTIME` with `sys.rt` as the suggested spelling. It is not an alias."
+Today that lives in an untitled string map
+(`crates/orna-semantic/src/system_api.rs:33` `removed: BTreeMap<String, RemovedName>`,
+struct at `:131-137` with `replacement: Option<String>`, `diagnostic: String`).
+
+The catalogue field is **heterogeneous**: the four entries under
+`api/sys.json` `removed_names` carry either an `ORNA*` rule code
+(`ORNA100-E-SYS-RUNTIME`, twice) or a `sys.*` failure code
+(`sys.version.incompatible`, twice), and only the retired pair carries a `reason`.
+A single string type cannot represent that without losing the distinction the spec
+draws between a *source* diagnostic and a *runtime* failure, so the generator emits:
+
+```rust
+pub enum SysRemovedName {                       // 4 variants, one per catalogue entry
+    Runtime,                                    // "sys.runtime"
+    RuntimeInfo,                                // "sys.runtime_info"
+    AdminSetStoragePreference,                  // "sys.admin.set_storage_preference"
+    AdminRewriteStorage,                        // "sys.admin.rewrite_storage"
+}
+
+pub enum PortableRemoval {
+    /// Still resolvable through another portable member (never an alias).
+    Replaced { by: SysMemberPath, diagnostic: DiagnosticIdentity },
+    /// Retired with no replacement; the reason is user-visible.
+    Retired { diagnostic: DiagnosticIdentity, reason: &'static str },
+}
+
+/// The replacement target of a removed name. `sys.rt` is a singleton and
+/// `sys.rt.info` is one field of it, so a flat `SysFunction`/`SysRelation`
+/// cannot express these; the path is still a closed set.
+pub enum SysMemberPath {
+    Callable(SysFunction),
+    Relation(SysRelation),
+    GroupedHandle(SysGroupedHandle),
+    Singleton(SysSingleton),
+    SingletonField(SysSingleton, SysField),     // validated at build time
+}
+
+pub enum DiagnosticIdentity {
+    Rule(RuleCode),                             // "ORNA100-E-SYS-RUNTIME"
+    Failure(SysFailureCode),                    // "sys.version.incompatible"
+}
+
+/// A closed `ORNA`-family rule code. Seeded here from the diagnostics the
+/// catalogue itself names; the full `source/33-diagnostics.md` table
+/// (28 codes, currently bare strings in `crates/orna-syntax/src/parser.rs:1876`
+/// and `crates/orna-cli/src/main.rs:351`) is a separate follow-up, so this
+/// type stays small and honest rather than pretending to be complete.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RuleCode(&'static str);
+```
+
+`SysField` is generated from the field lists the catalogue already publishes for
+relations and value types, and `SingletonField` construction is checked at build time -
+so `sys.rt.info` cannot be spelled as a field the catalogue does not declare.
+
+Scope boundary, stated explicitly: `ORNA*` rule codes are **not** part of this epic
+except where `api/sys.json` names one. They get the same treatment later; the design
+keeps `DiagnosticIdentity` ready for it instead of forcing `sys.*` codes and `ORNA*`
+rules into one enum now (they are different vocabularies with different stability
+guarantees: `source/33-diagnostics.md:41` for rule codes, `api/sys.json`
+`failure_codes` for portable failures).
+
+### 4.5 Exhaustive dispatch
 
 The build script emits a dispatcher skeleton *and* a trait, so binding is checked by
 the compiler rather than by `provider_linkage.rs` tests:
@@ -780,7 +848,7 @@ The existing admission machinery (`SystemProviderHost`,
 must fill, and a test asserts every one of the 82 entries is either `Some(host)` or
 documented as deliberately unbound.
 
-### 4.5 Where strings may still exist
+### 4.6 Where strings may still exist
 
 Only four boundaries, each with a single function:
 
@@ -802,7 +870,7 @@ Everything else takes `SysFunction`, `SysFailureCode`, `SysRelation`,
 * `SystemMember<'a>` becomes `SystemMember { Callable(SysFunction), Relation(SysRelation), HistoricalView(SysRelation), Singleton(SysSingleton) }`;
 * `RuntimeError::public_code() -> Option<SysFailureCode>`.
 
-### 4.6 `VersionedId` for `name@version`
+### 4.7 `VersionedId` for `name@version`
 
 ```rust
 // crates/orna-sys-id/src/versioned.rs
@@ -874,14 +942,19 @@ for the `HostOperationDescriptor` field it retypes in S2.
 ### S0 - `orna-sys-id`: generate the identity tables (no consumers)
 
 *Files:* new `crates/orna-sys-id/**` (Cargo.toml, build.rs, `catalogue/sys-1.1.0.json`,
-`catalogue/engine-1.1.0.json`, `src/{lib,versioned,function,error_code,relation,descriptor}.rs`,
-`tests/{catalogue_bijection,versioned_id}.rs`), root `Cargo.toml` members.
+`catalogue/engine-1.1.0.json`, `src/{lib,versioned,function,error_code,relation,removed,descriptor}.rs`,
+`tests/{catalogue_bijection,versioned_id,removed_names}.rs`), root `Cargo.toml` members.
 
 *Content of `engine-1.1.0.json`:* the 27 sealed entries of
 `crates/orna-core/src/system.rs:19-1058` (id bytes, name parts, signature), the 13
 `sys.inspect.*`, 13 `sys.security.*`, 2 `sys.state.*` names, and the engine failure
 codes enumerated in section 1.2. Each entry records `origin: engine`, so the portable
 set stays exactly the 67 catalogue codes.
+
+*Removed names (section 4.4):* `SysRemovedName` (4 variants), `PortableRemoval`,
+`SysMemberPath`, `DiagnosticIdentity`, `RuleCode` and `SysField`, generated from
+`removed_names` plus the catalogue's declared field lists, so `sys.rt` and
+`sys.rt.info` are closed identities and `sys.rt.info` cannot name an undeclared field.
 
 *Acceptance:*
 * `cargo test -p orna-sys-id` green; bijection tests prove:
@@ -999,7 +1072,8 @@ cargo test -p orna-conformance --locked --test sys_api_contract
 ### S5 - semantic admission carries identity
 
 *Files:* `crates/orna-semantic/src/system_api.rs` (`SystemMember` payloads typed,
-`SystemApi` maps keyed by `SysFunction`/`SysRelation`, `enum_constant` returns
+`SystemApi` maps keyed by `SysFunction`/`SysRelation`, `removed` map replaced by
+`SysRemovedName` and `PortableRemoval` from section 4.4, `enum_constant` returns
 `SysEnumValue`), `crates/orna-semantic/src/lib.rs` (`function.name != "sys.invoke"` at
 `:19607`, `spelled == Some("sys.explain")` at `crates/orna-evaluator/src/lib.rs:9145`),
 `crates/orna-sys/src/provider_linkage.rs` (`SystemSurfaceMember` typed,
@@ -1009,7 +1083,12 @@ cargo test -p orna-conformance --locked --test sys_api_contract
 *Acceptance:* `sys_api_contract.rs` (110 literals today) rewritten against typed names
 and still asserting the same document properties; admission of every relation and
 callable is decided by the generated link table, proven by a test that iterates
-`SysFunction::ALL` and `SysRelation::ALL`.
+`SysFunction::ALL` and `SysRelation::ALL`. ORNA-SYS-005 behaviour is byte-identical:
+`sys.runtime` reports `ORNA100-E-SYS-RUNTIME` with the suggestion `sys.rt`,
+`sys.runtime_info` reports the same rule with the suggestion `sys.rt.info`, and
+`sys.admin.set_storage_preference` / `sys.admin.rewrite_storage` report
+`sys.version.incompatible` with no replacement - asserted for all four catalogue
+entries, with the suggestion produced from `SysMemberPath`, not from a string constant.
 
 *Proof commands:*
 ```
@@ -1155,12 +1234,14 @@ cargo clippy --workspace --locked --all-targets -- -D warnings
 * ORNA-SYS-004 (`:24`): vendor extensions cannot change portable failure codes - engine
   codes are a separate `Origin`, and `PORTABLE` is the only set compared to the spec.
 * ORNA-SYS-005 (`:26`): `sys.runtime` -> `ORNA100-E-SYS-RUNTIME` with `sys.rt`
-  suggested; the suggestion lives in the typed `RemovedName` entry, not in a match arm.
+  suggested; the suggestion is a `SysMemberPath` in the generated `PortableRemoval`
+  (section 4.4), so the four catalogue removals cannot disagree with the diagnostic
+  they must raise.
 * ORNA-SYS-009 (`:52`): canonical relation and grouped handle identify the same rows -
   encoded as `SysRelation::handle()`.
 * ORNA-SYS-010 (`:28`): case-sensitive names, no aliasing - exact-literal `match`.
-* ORNA-SYS-016 (`:88`): opaque identifiers are not interchangeable with `Str` - typed
-  ids already hold; `VersionedId` extends the rule to ABI names.
+* ORNA-SYS-016 (`:88`): opaque identifiers are not interchangeable with `Str`; typed
+  ids already hold, and `VersionedId` extends the rule to ABI names.
 * ORNA-SYS-136 (`:114`): explicit overloads, no union - one variant per catalogue label.
 * `source/33-diagnostics.md:41`: codes are stable primary classifications - `as_str`
   bytes are pinned to the catalogue.
