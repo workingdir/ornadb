@@ -40,17 +40,17 @@ fn test_context_with_store_root(
     quota: Format3Quota,
 ) -> Format3Context {
     let database = [1; 16];
-    Format3Context::from_persisted(
-        database,
-        Snapshot::cwd(database, [2; 16], 0.into()).unwrap(),
-        GitHash::Sha1,
-        NativeOid::from_bytes(&[9; 20]).unwrap(),
+    Format3Context::from_persisted(Format3ContextInputs {
+        database_uuid: database,
+        pin: Snapshot::cwd(database, [2; 16], 0.into()).unwrap(),
+        git_oid_algorithm: GitHash::Sha1,
+        schema_root: NativeOid::from_bytes(&[9; 20]).unwrap(),
         store_root,
-        AvailabilityState::Available,
-        OwnerLifetime::new([3; 16]),
+        availability: AvailabilityState::Available,
+        owner: OwnerLifetime::new([3; 16]),
         quota,
         resolver,
-    )
+    })
     .unwrap()
 }
 
@@ -815,45 +815,45 @@ fn raw_reference_and_spoofed_context_cannot_authorize_reads() {
     };
     *id = [0xa5; 32];
     assert!(matches!(
-        Format3Context::from_persisted(
-            database,
-            forged_pin,
-            GitHash::Sha1,
-            NativeOid::from_bytes(&[9; 20]).unwrap(),
-            NativeOid::from_bytes(&[8; 20]).unwrap(),
-            AvailabilityState::Available,
-            owner.clone(),
+        Format3Context::from_persisted(Format3ContextInputs {
+            database_uuid: database,
+            pin: forged_pin,
+            git_oid_algorithm: GitHash::Sha1,
+            schema_root: NativeOid::from_bytes(&[9; 20]).unwrap(),
+            store_root: NativeOid::from_bytes(&[8; 20]).unwrap(),
+            availability: AvailabilityState::Available,
+            owner: owner.clone(),
             quota,
-            resolver.clone(),
-        ),
+            resolver: resolver.clone(),
+        }),
         Err(Error::InvalidContext)
     ));
     assert!(matches!(
-        Format3Context::from_persisted(
-            database,
-            Snapshot::cwd([8; 16], [6; 16], 0.into()).unwrap(),
-            GitHash::Sha1,
-            NativeOid::from_bytes(&[9; 20]).unwrap(),
-            NativeOid::from_bytes(&[8; 20]).unwrap(),
-            AvailabilityState::Available,
+        Format3Context::from_persisted(Format3ContextInputs {
+            database_uuid: database,
+            pin: Snapshot::cwd([8; 16], [6; 16], 0.into()).unwrap(),
+            git_oid_algorithm: GitHash::Sha1,
+            schema_root: NativeOid::from_bytes(&[9; 20]).unwrap(),
+            store_root: NativeOid::from_bytes(&[8; 20]).unwrap(),
+            availability: AvailabilityState::Available,
             owner,
             quota,
-            resolver.clone(),
-        ),
+            resolver: resolver.clone(),
+        }),
         Err(Error::InvalidContext)
     ));
     assert!(matches!(
-        Format3Context::from_persisted(
-            database,
-            valid_pin,
-            GitHash::Sha1,
-            NativeOid::from_bytes(&[9; 32]).unwrap(),
-            NativeOid::from_bytes(&[8; 20]).unwrap(),
-            AvailabilityState::Available,
-            OwnerLifetime::new([5; 16]),
+        Format3Context::from_persisted(Format3ContextInputs {
+            database_uuid: database,
+            pin: valid_pin,
+            git_oid_algorithm: GitHash::Sha1,
+            schema_root: NativeOid::from_bytes(&[9; 32]).unwrap(),
+            store_root: NativeOid::from_bytes(&[8; 20]).unwrap(),
+            availability: AvailabilityState::Available,
+            owner: OwnerLifetime::new([5; 16]),
             quota,
-            resolver.clone(),
-        ),
+            resolver: resolver.clone(),
+        }),
         Err(Error::InvalidContext)
     ));
 

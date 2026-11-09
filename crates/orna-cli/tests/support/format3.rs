@@ -18,7 +18,6 @@ use orna_conformance::DurableTransactionalEvaluator;
 use orna_evaluator::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
 use orna_repository::{AdmittedRow, KeyRange, Repository, TypedKey};
 use orna_runtime::{RuntimeIdentity, RuntimeState, RuntimeTableIdentity, TableObjectId};
-use orna_storage::LoosePath;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
@@ -145,24 +144,21 @@ pub async fn publish_media_row(
         .await
         .unwrap()
         .expect("a committed row leaves a checkpoint");
-    let logical_key = key.to_owned();
     DurableTransactionalEvaluator::default()
         .publish_pending(
             repository,
             state,
             [ordinal; 16],
             &checkpoint,
-            |mutation| LoosePath::for_key(mutation.table(), std::slice::from_ref(&logical_key)),
             &format!("orna: publish {key}"),
         )
         .await
         .expect("the explicit publication boundary succeeds");
 }
-/// Publishes every source row by its canonical mutation key and committed path.
+/// Publishes every source row by its canonical mutation key.
 pub async fn publish_source_rows(
     repository: &Repository,
     state: &RuntimeState,
-    paths_by_key: &std::collections::BTreeMap<Vec<u8>, LoosePath>,
     publish_id: [u8; 16],
 ) {
     let checkpoint = state
@@ -176,12 +172,6 @@ pub async fn publish_source_rows(
             state,
             publish_id,
             &checkpoint,
-            |mutation| {
-                Ok(paths_by_key
-                    .get(mutation.key())
-                    .expect("each source mutation has a committed path")
-                    .clone())
-            },
             "orna: publish source rows",
         )
         .await
@@ -676,21 +666,21 @@ pub fn persisted_format3_context(
         .unwrap()
         .as_bytes();
     let algorithm = GitHash::Sha1;
-    Format3Context::from_persisted(
-        database_id,
-        Snapshot::Commit {
+    Format3Context::from_persisted(orna_value::Format3ContextInputs {
+        database_uuid: database_id,
+        pin: Snapshot::Commit {
             database: database_id,
             algorithm,
             oid: git_oid_bytes(commit),
         },
-        algorithm,
-        NativeOid::from_bytes(&git_oid_bytes(schema_root)).unwrap(),
-        NativeOid::from_bytes(&git_oid_bytes(store_root)).unwrap(),
-        AvailabilityState::Available,
-        OwnerLifetime::new([0x66; 16]),
-        Format3Quota::new(16, 1 << 20).unwrap(),
-        Arc::new(UnreadableFixtureResolver),
-    )
+        git_oid_algorithm: algorithm,
+        schema_root: NativeOid::from_bytes(&git_oid_bytes(schema_root)).unwrap(),
+        store_root: NativeOid::from_bytes(&git_oid_bytes(store_root)).unwrap(),
+        availability: AvailabilityState::Available,
+        owner: OwnerLifetime::new([0x66; 16]),
+        quota: Format3Quota::new(16, 1 << 20).unwrap(),
+        resolver: Arc::new(UnreadableFixtureResolver),
+    })
     .unwrap()
 }
 
@@ -704,21 +694,21 @@ pub fn format3_context_for_snapshot(repository: &Repository, commit: &str) -> Fo
         .as_bytes();
     let algorithm = GitHash::Sha1;
     let root = NativeOid::from_bytes(&[0x55; 20]).unwrap();
-    Format3Context::from_persisted(
-        database_id,
-        Snapshot::Commit {
+    Format3Context::from_persisted(orna_value::Format3ContextInputs {
+        database_uuid: database_id,
+        pin: Snapshot::Commit {
             database: database_id,
             algorithm,
             oid: git_oid_bytes(commit),
         },
-        algorithm,
-        root.clone(),
-        root,
-        AvailabilityState::Available,
-        OwnerLifetime::new([0x66; 16]),
-        Format3Quota::new(16, 1 << 20).unwrap(),
-        Arc::new(UnreadableFixtureResolver),
-    )
+        git_oid_algorithm: algorithm,
+        schema_root: root.clone(),
+        store_root: root,
+        availability: AvailabilityState::Available,
+        owner: OwnerLifetime::new([0x66; 16]),
+        quota: Format3Quota::new(16, 1 << 20).unwrap(),
+        resolver: Arc::new(UnreadableFixtureResolver),
+    })
     .unwrap()
 }
 

@@ -602,21 +602,21 @@ impl BlobResolver for FixtureResolver {
 fn resolver_context(payload: &[u8]) -> (Format3Context, Arc<AtomicU64>) {
     let database = [0x67; 16];
     let bytes_read = Arc::new(AtomicU64::new(0));
-    let context = Format3Context::from_persisted(
-        database,
-        Snapshot::cwd(database, [0x68; 16], 0.into()).unwrap(),
-        GitHash::Sha1,
-        NativeOid::from_bytes(&[0x69; 20]).unwrap(),
-        NativeOid::from_bytes(&[0x6a; 20]).unwrap(),
-        AvailabilityState::Available,
-        OwnerLifetime::new([0x6b; 16]),
-        Format3Quota::new(65_536, 1_u64 << 32).unwrap(),
-        Arc::new(FixtureResolver {
+    let context = Format3Context::from_persisted(orna_value::Format3ContextInputs {
+        database_uuid: database,
+        pin: Snapshot::cwd(database, [0x68; 16], 0.into()).unwrap(),
+        git_oid_algorithm: GitHash::Sha1,
+        schema_root: NativeOid::from_bytes(&[0x69; 20]).unwrap(),
+        store_root: NativeOid::from_bytes(&[0x6a; 20]).unwrap(),
+        availability: AvailabilityState::Available,
+        owner: OwnerLifetime::new([0x6b; 16]),
+        quota: Format3Quota::new(65_536, 1_u64 << 32).unwrap(),
+        resolver: Arc::new(FixtureResolver {
             identity: ContentIdentity::from_bytes(payload),
             payload: Arc::from(payload),
             bytes_read: Arc::clone(&bytes_read),
         }),
-    )
+    })
     .unwrap();
     (context, bytes_read)
 }

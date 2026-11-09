@@ -265,26 +265,40 @@ impl fmt::Debug for Format3Context {
     }
 }
 
+/// The persisted format-3 record a [`Format3Context`] is built from.
+///
+/// The values are written by an owning repository/runtime after verification;
+/// naming them keeps each construction readable and independent of argument
+/// order.
+pub struct Format3ContextInputs {
+    pub database_uuid: [u8; 16],
+    pub pin: Snapshot,
+    pub git_oid_algorithm: GitHash,
+    pub schema_root: NativeOid,
+    pub store_root: NativeOid,
+    pub availability: AvailabilityState,
+    pub owner: OwnerLifetime,
+    pub quota: Format3Quota,
+    pub resolver: Arc<dyn BlobResolver>,
+}
+
 impl Format3Context {
     /// Constructs a format-3 context from metadata already verified by its owning
     /// repository/runtime. The caller must bind the pin and native roots to the
     /// same persisted snapshot and provide a resolver that enforces that pin;
     /// untrusted OIDs or user-selected roots must not be used here.
-    /// The nine values are one persisted format-3 record, and every caller reads
-    /// them from the same stored metadata, so they stay positional here rather
-    /// than moving into a wrapper struct that only this constructor would use.
-    #[allow(clippy::too_many_arguments)]
-    pub fn from_persisted(
-        database_uuid: [u8; 16],
-        pin: Snapshot,
-        git_oid_algorithm: GitHash,
-        schema_root: NativeOid,
-        store_root: NativeOid,
-        availability: AvailabilityState,
-        owner: OwnerLifetime,
-        quota: Format3Quota,
-        resolver: Arc<dyn BlobResolver>,
-    ) -> Result<Self> {
+    pub fn from_persisted(inputs: Format3ContextInputs) -> Result<Self> {
+        let Format3ContextInputs {
+            database_uuid,
+            pin,
+            git_oid_algorithm,
+            schema_root,
+            store_root,
+            availability,
+            owner,
+            quota,
+            resolver,
+        } = inputs;
         validate_format3_metadata(
             database_uuid,
             &pin,
@@ -446,7 +460,7 @@ impl Format3ContextInner {
 }
 
 pub(crate) fn oid_matches_algorithm(oid: &NativeOid, algorithm: GitHash) -> bool {
-    oid.len() == algorithm.oid_width()
+    oid.width() == algorithm.oid_width()
 }
 
 /// A validated value paired with its explicit value profile.

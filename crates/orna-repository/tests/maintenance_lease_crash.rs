@@ -21,7 +21,7 @@ use std::{
 use orna_evaluator::SysHostBindingRegistry;
 use orna_repository::{Repository, RepositoryError};
 use orna_runtime::RuntimeState;
-use orna_storage::{LoosePath, RuntimePublicationCoordinator};
+use orna_storage::RuntimePublicationCoordinator;
 use orna_sys::{EnvironmentProvider, FilesystemProvider};
 use tempfile::TempDir;
 
@@ -271,7 +271,6 @@ async fn prepare_publication(
         &head,
         index,
         &freeze,
-        |_| LoosePath::for_key("media", &[key.to_owned()]),
         "orna: publish format-3 row",
     )
     .await

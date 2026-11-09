@@ -215,7 +215,7 @@ impl RunObservation {
             self.snapshot.database_id(),
             SYS_RUN_TABLE_ID,
             opaque_reference_key(self.id.0),
-            self.snapshot.snapshot().clone(),
+            self.snapshot.snapshot(),
         )
         .map_err(|_| RuntimeError::InvalidObservationReference)?;
         validate_run_reference(reference, &self.snapshot)
@@ -232,7 +232,7 @@ impl RunObservation {
         validate_id(self.invocation_id)?;
         let reference = invocation_reference(
             self.snapshot.database_id(),
-            self.snapshot.snapshot().clone(),
+            self.snapshot.snapshot(),
             self.invocation_id,
         )
         .map_err(|_| RuntimeError::InvalidObservationReference)?;
@@ -373,7 +373,7 @@ impl TryFrom<&RunObservation> for SysRunProjection {
         let invocation = observation.invocation_reference()?;
         let snapshot = snapshot_reference(
             observation.snapshot.database_id(),
-            observation.snapshot.snapshot().clone(),
+            observation.snapshot.snapshot(),
         )
         .map_err(|_| RuntimeError::InvalidObservationReference)?;
         let started = observation_instant(observation.started_ms)?;
@@ -649,7 +649,7 @@ async fn retained_failure_reference_capture(
     current_capture: &CwdCapture,
 ) -> Result<CwdCapture, RuntimeError> {
     let snapshot = reference.as_row_ref().snapshot.clone();
-    if snapshot == *current_capture.snapshot() {
+    if snapshot == current_capture.snapshot() {
         return Ok(current_capture.clone());
     }
     let snapshot_bytes = Value::new(snapshot.raw())
@@ -931,7 +931,7 @@ async fn load_stream_observation_tx(
     }
     let checkpoint_reference = checkpoint_reference(
         parent_capture.database_id(),
-        parent_capture.snapshot().clone(),
+        parent_capture.snapshot(),
         checkpoint.consumer.canonical(),
         checkpoint.source.as_str().to_owned(),
         checkpoint_partition.clone(),
@@ -1068,7 +1068,7 @@ async fn load_stream_observation_failure_reference(
     }
     let reference = failure_reference(
         capture.database_id(),
-        capture.snapshot().clone(),
+        capture.snapshot(),
         checkpoint.consumer.canonical(),
         checkpoint.source.as_str().to_owned(),
         checkpoint

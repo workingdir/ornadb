@@ -579,17 +579,17 @@ mod tests {
 
     fn format3_context() -> Format3Context {
         let database = [1; 16];
-        Format3Context::from_persisted(
-            database,
-            Snapshot::cwd(database, [2; 16], 0.into()).expect("snapshot"),
-            GitHash::Sha1,
-            NativeOid::from_bytes(&[9; 20]).expect("schema root"),
-            NativeOid::from_bytes(&[8; 20]).expect("store root"),
-            AvailabilityState::Available,
-            OwnerLifetime::new([3; 16]),
-            Format3Quota::new(8 * 1024 * 1024, 1_u64 << 62).expect("quota"),
-            Arc::new(NoBytes),
-        )
+        Format3Context::from_persisted(orna_value::Format3ContextInputs {
+            database_uuid: database,
+            pin: Snapshot::cwd(database, [2; 16], 0.into()).expect("snapshot"),
+            git_oid_algorithm: GitHash::Sha1,
+            schema_root: NativeOid::from_bytes(&[9; 20]).expect("schema root"),
+            store_root: NativeOid::from_bytes(&[8; 20]).expect("store root"),
+            availability: AvailabilityState::Available,
+            owner: OwnerLifetime::new([3; 16]),
+            quota: Format3Quota::new(8 * 1024 * 1024, 1_u64 << 62).expect("quota"),
+            resolver: Arc::new(NoBytes),
+        })
         .expect("context")
     }
 

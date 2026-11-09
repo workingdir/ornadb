@@ -203,21 +203,21 @@ fn committed_fixture(table: &str) -> CommittedFixture {
 
 fn pinned_context(fixture: &CommittedFixture, commit: &str) -> Format3Context {
     let algorithm = GitHash::Sha1;
-    Format3Context::from_persisted(
-        DATABASE_ID,
-        Snapshot::Commit {
+    Format3Context::from_persisted(orna_value::Format3ContextInputs {
+        database_uuid: DATABASE_ID,
+        pin: Snapshot::Commit {
             database: DATABASE_ID,
             algorithm,
             oid: oid_bytes(commit),
         },
-        algorithm,
-        NativeOid::from_bytes(&oid_bytes(&fixture.schema_oid)).unwrap(),
-        NativeOid::from_bytes(&oid_bytes(&fixture.store_root_oid)).unwrap(),
-        AvailabilityState::Available,
-        OwnerLifetime::new([0x66; 16]),
-        Format3Quota::new(16, 1 << 20).unwrap(),
-        Arc::new(UnreadableResolver),
-    )
+        git_oid_algorithm: algorithm,
+        schema_root: NativeOid::from_bytes(&oid_bytes(&fixture.schema_oid)).unwrap(),
+        store_root: NativeOid::from_bytes(&oid_bytes(&fixture.store_root_oid)).unwrap(),
+        availability: AvailabilityState::Available,
+        owner: OwnerLifetime::new([0x66; 16]),
+        quota: Format3Quota::new(16, 1 << 20).unwrap(),
+        resolver: Arc::new(UnreadableResolver),
+    })
     .unwrap()
 }
 

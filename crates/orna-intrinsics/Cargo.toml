@@ -1,0 +1,13 @@
+[package]
+name = "orna-intrinsics"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Typed catalogue of the Orna native intrinsic environment"
+
+[[bin]]
+name = "std-api-export"
+path = "src/bin/std-api-export.rs"
+test = false
+bench = false

@@ -1,0 +1,309 @@
+//! `std.stream` descriptors.
+
+use crate::dispatch::{Dispatch, Justification};
+use crate::effect::Effect;
+use crate::id::IntrinsicId;
+use crate::modules::{Intrinsic, Module};
+use crate::pin::PinRange;
+use crate::signature::{Param, SigType, Signature};
+
+pub(crate) const STREAM: &[Intrinsic] = &[
+    Intrinsic {
+        id: IntrinsicId::StreamFromList,
+        module: Module::Stream,
+        name: "from_list",
+        leaf: None,
+        signature: Signature {
+            type_params: &["T"],
+            params: &[
+                Param {
+                    name: "values",
+                    ty: SigType::List(&SigType::Param(0)),
+                    has_default: false,
+                    pipeline: false,
+                },
+                Param {
+                    name: "source_identity",
+                    ty: SigType::Str,
+                    has_default: false,
+                    pipeline: false,
+                },
+            ],
+            result: SigType::Stream(&SigType::Param(0)),
+        },
+        effect: Effect::Pure,
+        dispatch: Dispatch::Native,
+        justification: Justification::PlanOrStreamMachinery,
+        note: "constructs a replayable finite list-backed source with a captured typed identity",
+        pins: PinRange::CURRENT,
+    },
+    Intrinsic {
+        id: IntrinsicId::StreamFromProvider,
+        module: Module::Stream,
+        name: "from_provider",
+        leaf: None,
+        signature: Signature {
+            type_params: &["T"],
+            params: &[
+                Param {
+                    name: "source",
+                    ty: SigType::Str,
+                    has_default: false,
+                    pipeline: false,
+                },
+                Param {
+                    name: "identity",
+                    ty: SigType::Str,
+                    has_default: false,
+                    pipeline: false,
+                },
+            ],
+            result: SigType::Stream(&SigType::Param(0)),
+        },
+        effect: Effect::Stream,
+        dispatch: Dispatch::Native,
+        justification: Justification::PlanOrStreamMachinery,
+        note: "evaluator-only provider constructor; the pinned declaration is added in S4 (D3)",
+        pins: PinRange::CURRENT,
+    },
+    Intrinsic {
+        id: IntrinsicId::StreamForEach,
+        module: Module::Stream,
+        name: "for_each",
+        leaf: None,
+        signature: Signature {
+            type_params: &["T"],
+            params: &[
+                Param {
+                    name: "stream",
+                    ty: SigType::Stream(&SigType::Param(0)),
+                    has_default: false,
+                    pipeline: true,
+                },
+                Param {
+                    name: "action",
+                    ty: SigType::Fn(&[SigType::Param(0)], &SigType::Unit),
+                    has_default: false,
+                    pipeline: false,
+                },
+            ],
+            result: SigType::Unit,
+        },
+        effect: Effect::Stream,
+        dispatch: Dispatch::Native,
+        justification: Justification::PlanOrStreamMachinery,
+        note: "processes one item and checkpoint movement per activation",
+        pins: PinRange::CURRENT,
+    },
+    Intrinsic {
+        id: IntrinsicId::StreamBatch,
+        module: Module::Stream,
+        name: "batch",
+        leaf: None,
+        signature: Signature {
+            type_params: &["T"],
+            params: &[
+                Param {
+                    name: "stream",
+                    ty: SigType::Stream(&SigType::Param(0)),
+                    has_default: false,
+                    pipeline: true,
+                },
+                Param {
+                    name: "size",
+                    ty: SigType::Int,
+                    has_default: false,
+                    pipeline: false,
+                },
+            ],
+            result: SigType::Stream(&SigType::List(&SigType::Param(0))),
+        },
+        effect: Effect::Stream,
+        dispatch: Dispatch::Native,
+        justification: Justification::PlanOrStreamMachinery,
+        note: "emits ordered positive-size batches and commits the final short batch",
+        pins: PinRange::CURRENT,
+    },
+    Intrinsic {
+        id: IntrinsicId::StreamBuffer,
+        module: Module::Stream,
+        name: "buffer",
+        leaf: None,
+        signature: Signature {
+            type_params: &["T"],
+            params: &[
+                Param {
+                    name: "stream",
+                    ty: SigType::Stream(&SigType::Param(0)),
+                    has_default: false,
+                    pipeline: true,
+                },
+                Param {
+                    name: "capacity",
+                    ty: SigType::Int,
+                    has_default: false,
+                    pipeline: false,
+                },
+            ],
+            result: SigType::Stream(&SigType::Param(0)),
+        },
+        effect: Effect::Stream,
+        dispatch: Dispatch::Native,
+        justification: Justification::PlanOrStreamMachinery,
+        note: "bounded queue with default backpressure and no implicit drop",
+        pins: PinRange::CURRENT,
+    },
+    Intrinsic {
+        id: IntrinsicId::StreamMerge,
+        module: Module::Stream,
+        name: "merge",
+        leaf: None,
+        signature: Signature {
+            type_params: &["T"],
+            params: &[Param {
+                name: "streams",
+                ty: SigType::List(&SigType::Stream(&SigType::Param(0))),
+                has_default: false,
+                pipeline: false,
+            }],
+            result: SigType::Stream(&SigType::Param(0)),
+        },
+        effect: Effect::Stream,
+        dispatch: Dispatch::Native,
+        justification: Justification::PlanOrStreamMachinery,
+        note: "interleaves by observed arrival order while preserving each input's order",
+        pins: PinRange::CURRENT,
+    },
+    Intrinsic {
+        id: IntrinsicId::StreamThrottle,
+        module: Module::Stream,
+        name: "throttle",
+        leaf: None,
+        signature: Signature {
+            type_params: &["T"],
+            params: &[
+                Param {
+                    name: "stream",
+                    ty: SigType::Stream(&SigType::Param(0)),
+                    has_default: false,
+                    pipeline: true,
+                },
+                Param {
+                    name: "duration",
+                    ty: SigType::Duration,
+                    has_default: false,
+                    pipeline: false,
+                },
+                Param {
+                    name: "drop_policy",
+                    ty: SigType::Str,
+                    has_default: false,
+                    pipeline: false,
+                },
+            ],
+            result: SigType::Stream(&SigType::Param(0)),
+        },
+        effect: Effect::Host,
+        dispatch: Dispatch::Native,
+        justification: Justification::HostResource,
+        note: "elapsed-time throttling with an explicit caller-recorded drop policy",
+        pins: PinRange::CURRENT,
+    },
+    Intrinsic {
+        id: IntrinsicId::StreamDebounce,
+        module: Module::Stream,
+        name: "debounce",
+        leaf: None,
+        signature: Signature {
+            type_params: &["T"],
+            params: &[
+                Param {
+                    name: "stream",
+                    ty: SigType::Stream(&SigType::Param(0)),
+                    has_default: false,
+                    pipeline: true,
+                },
+                Param {
+                    name: "duration",
+                    ty: SigType::Duration,
+                    has_default: false,
+                    pipeline: false,
+                },
+                Param {
+                    name: "delivery_policy",
+                    ty: SigType::Str,
+                    has_default: false,
+                    pipeline: false,
+                },
+            ],
+            result: SigType::Stream(&SigType::Param(0)),
+        },
+        effect: Effect::Host,
+        dispatch: Dispatch::Native,
+        justification: Justification::HostResource,
+        note: "retains the latest item until a positive quiet interval elapses",
+        pins: PinRange::CURRENT,
+    },
+    Intrinsic {
+        id: IntrinsicId::StreamRetry,
+        module: Module::Stream,
+        name: "retry",
+        leaf: None,
+        signature: Signature {
+            type_params: &["T"],
+            params: &[
+                Param {
+                    name: "stream",
+                    ty: SigType::Stream(&SigType::Param(0)),
+                    has_default: false,
+                    pipeline: true,
+                },
+                Param {
+                    name: "policy",
+                    ty: SigType::Record(&[
+                        ("max_attempts", SigType::Int),
+                        ("initial_delay", SigType::Duration),
+                        ("max_delay", SigType::Duration),
+                    ]),
+                    has_default: false,
+                    pipeline: false,
+                },
+            ],
+            result: SigType::Stream(&SigType::Param(0)),
+        },
+        effect: Effect::Stream,
+        dispatch: Dispatch::Native,
+        justification: Justification::PlanOrStreamMachinery,
+        note: "retries the same blocked delivery under a bounded provider contract",
+        pins: PinRange::CURRENT,
+    },
+    Intrinsic {
+        id: IntrinsicId::StreamRecover,
+        module: Module::Stream,
+        name: "recover",
+        leaf: None,
+        signature: Signature {
+            type_params: &["T"],
+            params: &[
+                Param {
+                    name: "stream",
+                    ty: SigType::Stream(&SigType::Param(0)),
+                    has_default: false,
+                    pipeline: true,
+                },
+                Param {
+                    name: "handler",
+                    ty: SigType::Fn(&[SigType::Error], &SigType::Param(0)),
+                    has_default: false,
+                    pipeline: false,
+                },
+            ],
+            result: SigType::Stream(&SigType::Param(0)),
+        },
+        effect: Effect::Stream,
+        dispatch: Dispatch::Native,
+        justification: Justification::PlanOrStreamMachinery,
+        note: "replaces a permitted source failure with one explicit value",
+        pins: PinRange::CURRENT,
+    },
+];

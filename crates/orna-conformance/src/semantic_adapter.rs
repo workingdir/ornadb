@@ -49,7 +49,7 @@ use orna_semantic::{
     ModuleInput, Namespace, StandardDependencyProfile, SystemProviders,
     UNRESOLVED_TABLE_DEPENDENCY, analyze_with_providers, assertion_dependencies_apply,
 };
-use orna_storage::{LoosePath, RuntimePublicationCoordinator};
+use orna_storage::RuntimePublicationCoordinator;
 use orna_stream::{
     AssertionOwnerKind, AsyncCheckpointBackend, CheckpointKey, CheckpointPrecondition,
     CommitIntent, CommitResult, Component, ConsumerIdentity, DeliveryIdentity, DiagnosticClass,
@@ -4063,7 +4063,7 @@ impl DurableTransactionalEvaluator {
         // The activation can name its admitted tables and the system relations
         // it serves from publication metadata, all at its pinned CWD snapshot.
         let explain_catalogue = match ActivationExplainCatalogue::new(
-            context.capture().snapshot(),
+            &context.capture().snapshot(),
             admitted
                 .key_fields
                 .keys()
@@ -4194,8 +4194,7 @@ impl DurableTransactionalEvaluator {
     /// Publishes the caller-selected frozen runtime prefix into the format-3
     /// native store as one Git commit. Publication is explicit: source
     /// execution only stages durable runtime mutations and never advances the
-    /// repository by itself. Format-3 rows have no loose path, so `path_for`
-    /// is never called.
+    /// repository by itself.
     ///
     /// A format-1/2 `HEAD` keeps its readers but has no row writer
     /// (ORNA-UPGRADE-003). It fails with
@@ -4207,7 +4206,6 @@ impl DurableTransactionalEvaluator {
         runtime: &RuntimeState,
         intent_id: [u8; 16],
         checkpoint: &orna_runtime::Checkpoint,
-        path_for: impl Fn(&TableMutation) -> Result<LoosePath, orna_storage::Error>,
         message: &str,
     ) -> Result<orna_repository::IndexGeneration, PendingPublicationError> {
         let head = repository
@@ -4220,11 +4218,9 @@ impl DurableTransactionalEvaluator {
         {
             return Err(PendingPublicationError::LegacyReadOnly { format });
         }
-        Self::publish_frozen_prefix(
-            repository, runtime, &head, intent_id, checkpoint, path_for, message,
-        )
-        .await
-        .map_err(PendingPublicationError::Runtime)
+        Self::publish_frozen_prefix(repository, runtime, &head, intent_id, checkpoint, message)
+            .await
+            .map_err(PendingPublicationError::Runtime)
     }
 
     /// Freezes the prefix through `checkpoint` and publishes it onto the
@@ -4236,7 +4232,6 @@ impl DurableTransactionalEvaluator {
         head: &orna_repository::GitCommitRef,
         intent_id: [u8; 16],
         checkpoint: &orna_runtime::Checkpoint,
-        path_for: impl Fn(&TableMutation) -> Result<LoosePath, orna_storage::Error>,
         message: &str,
     ) -> Result<orna_repository::IndexGeneration, RuntimeError> {
         let freeze = runtime.freeze(intent_id, checkpoint).await?;
@@ -4244,7 +4239,7 @@ impl DurableTransactionalEvaluator {
             .index_generation()
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         let prepared = RuntimePublicationCoordinator::prepare_allow_noop(
-            repository, runtime, head, index, &freeze, path_for, message,
+            repository, runtime, head, index, &freeze, message,
         )
         .await
         .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -5413,7 +5408,7 @@ fn assertion_site(assertion: &AdmittedAssertion) -> String {
     format!(
         "{kind} {} assertion at {}{}..{}",
         assertion.owner_name,
-        span.file.as_deref().unwrap_or("source"),
+        span.file().unwrap_or("source"),
         span.start,
         span.end,
     )

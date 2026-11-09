@@ -1,5 +1,6 @@
 use crate::budget::NestingBudget;
 use crate::lexer::{Keyword, LexError, Token, TokenKind, lex};
+use crate::semicolon::MissingSemicolon;
 
 mod lookahead;
 use lookahead::TokenLookahead;
@@ -9,44 +10,64 @@ pub struct SourcePosition {
     pub line: u32,
     pub column: u32,
 }
-/// Half-open UTF-8 bytes. Locations are optional for unsaved editor buffers;
-/// when populated they use 1-based Unicode-scalar line/column coordinates.
+/// The file and 1-based Unicode-scalar coordinates of a [`SourceSpan`].
+///
+/// A span either has a complete location or none: the parts are produced
+/// together by [`SourceSpan::located`], so they cannot describe different
+/// files or a half-annotated range.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SpanLocation {
+    pub file: String,
+    pub start: SourcePosition,
+    pub end: SourcePosition,
+}
+/// Half-open UTF-8 bytes. A location is optional for unsaved editor buffers.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SourceSpan {
     pub start: usize,
     pub end: usize,
-    pub file: Option<String>,
-    pub start_position: Option<SourcePosition>,
-    pub end_position: Option<SourcePosition>,
+    pub location: Option<SpanLocation>,
 }
 impl SourceSpan {
     pub const fn new(start: usize, end: usize) -> Self {
         Self {
             start,
             end,
-            file: None,
-            start_position: None,
-            end_position: None,
+            location: None,
         }
     }
     pub fn join(self, other: Self) -> Self {
-        if self.file == other.file {
-            Self {
-                start: self.start,
-                end: other.end,
-                file: self.file,
-                start_position: self.start_position,
-                end_position: other.end_position,
-            }
-        } else {
-            Self::new(self.start, other.end)
+        let location = match (self.location, other.location) {
+            (Some(left), Some(right)) if left.file == right.file => Some(SpanLocation {
+                file: left.file,
+                start: left.start,
+                end: right.end,
+            }),
+            _ => None,
+        };
+        Self {
+            start: self.start,
+            end: other.end,
+            location,
         }
     }
     pub fn located(mut self, file: impl Into<String>, source: &str) -> Self {
-        self.file = Some(file.into());
-        self.start_position = Some(position_at(source, self.start));
-        self.end_position = Some(position_at(source, self.end));
+        self.location = Some(SpanLocation {
+            file: file.into(),
+            start: position_at(source, self.start),
+            end: position_at(source, self.end),
+        });
         self
+    }
+    /// The owning file, when this span was located in a real document.
+    pub fn file(&self) -> Option<&str> {
+        self.location
+            .as_ref()
+            .map(|location| location.file.as_str())
+    }
+    /// The start position, when this span was located in a real document.
+    pub fn start_position(&self) -> Option<&SourcePosition> {
+        self.location.as_ref().map(|location| &location.start)
     }
 }
 fn position_at(source: &str, at: usize) -> SourcePosition {
@@ -1086,9 +1107,11 @@ fn located<T>(
 }
 
 fn annotate_span(span: &mut SourceSpan, source: &SourceLines<'_>, file: &str) {
-    span.file = Some(file.to_owned());
-    span.start_position = Some(source.position(span.start));
-    span.end_position = Some(source.position(span.end));
+    span.location = Some(SpanLocation {
+        file: file.to_owned(),
+        start: source.position(span.start),
+        end: source.position(span.end),
+    });
 }
 fn annotate_item(item: &mut Item, source: &SourceLines<'_>, file: &str) {
     if let Visibility::Public { span } = &mut item.visibility {
@@ -1641,6 +1664,131 @@ struct Mark {
     budget: NestingBudget,
 }
 
+/// One removed pre-1.0 form: the identifier spelling, the token-sequence
+/// check that distinguishes the form from legitimate uses of that spelling,
+/// and the diagnostic it reports.
+struct LegacyForm {
+    text: &'static str,
+    check: LegacyCheck,
+    code: &'static str,
+    message: &'static str,
+}
+
+/// The token-sequence checks the legacy-form table refers to.
+#[derive(Clone, Copy)]
+enum LegacyCheck {
+    Var,
+    Opaque,
+    Currency,
+    AssertionStatement,
+    NamedDeclaration(&'static str),
+    Transaction,
+    On,
+    FieldConstraint,
+    RefinementWhere,
+    ConstraintsBlock,
+}
+
+/// Removed pre-1.0 forms in the order their diagnostics are reported.
+const LEGACY_FORMS: &[LegacyForm] = &[
+    LegacyForm {
+        text: "var",
+        check: LegacyCheck::Var,
+        code: "ORNA091-E-VAR",
+        message: "use `let`; assignment may replace the local slot",
+    },
+    LegacyForm {
+        text: "opaque",
+        check: LegacyCheck::Opaque,
+        code: "ORNA091-E-OPAQUE",
+        message: "use the unified `type` declaration",
+    },
+    LegacyForm {
+        text: "currency",
+        check: LegacyCheck::Currency,
+        code: "ORNA091-E-CURRENCY",
+        message: "declare an ordinary nominal type with a nested Currency implementation",
+    },
+    LegacyForm {
+        text: "ensure",
+        check: LegacyCheck::AssertionStatement,
+        code: "ORNA-A091-010",
+        message: "`ensure` is not an assertion alias; use `assert`",
+    },
+    LegacyForm {
+        text: "fact",
+        check: LegacyCheck::AssertionStatement,
+        code: "ORNA-A091-010",
+        message: "`fact` is not an assertion alias; use `assert`",
+    },
+    LegacyForm {
+        text: "ingest",
+        check: LegacyCheck::NamedDeclaration("="),
+        code: "E1004",
+        message: "`ingest` is not a declaration",
+    },
+    LegacyForm {
+        text: "log",
+        check: LegacyCheck::NamedDeclaration("{"),
+        code: "E1001",
+        message: "`log` is not a declaration in Orna 1.0",
+    },
+    LegacyForm {
+        text: "store",
+        check: LegacyCheck::NamedDeclaration("="),
+        code: "E1003",
+        message: "`store` is not a logical declaration",
+    },
+    LegacyForm {
+        text: "view",
+        check: LegacyCheck::NamedDeclaration("="),
+        code: "E1002",
+        message: "`view` is replaced by an ordinary function",
+    },
+    LegacyForm {
+        text: "transaction",
+        check: LegacyCheck::Transaction,
+        code: "E1007",
+        message: "database writes are transactional by activation; `transaction` is not syntax",
+    },
+    LegacyForm {
+        text: "on",
+        check: LegacyCheck::On,
+        code: "E1005",
+        message: "`on` is not a declaration",
+    },
+    LegacyForm {
+        text: "check",
+        check: LegacyCheck::FieldConstraint,
+        code: "ORNA091-E-FIELD-CONSTRAINT",
+        message: "field `check` syntax was removed; use a table assertion",
+    },
+    LegacyForm {
+        text: "unique",
+        check: LegacyCheck::FieldConstraint,
+        code: "ORNA091-E-FIELD-CONSTRAINT",
+        message: "field `unique` syntax was removed; use all_unique in the table body",
+    },
+    LegacyForm {
+        text: "where",
+        check: LegacyCheck::RefinementWhere,
+        code: "ORNA-A091-001",
+        message: "use a brace-delimited refined-type assertion block",
+    },
+    LegacyForm {
+        text: "constraint",
+        check: LegacyCheck::AssertionStatement,
+        code: "ORNA-A091-010",
+        message: "`constraint` is not an assertion alias; use `assert`",
+    },
+    LegacyForm {
+        text: "constraints",
+        check: LegacyCheck::ConstraintsBlock,
+        code: "ORNA-A091-010",
+        message: "`constraints` is not a declaration; use owner-local `assert`",
+    },
+];
+
 struct Parser {
     tokens: Vec<Token>,
     at: usize,
@@ -1715,6 +1863,25 @@ impl Parser {
     }
     /// Cross-production checks whose meaning depends on token order rather
     /// than a declaration-specific AST. This never inspects source text.
+    /// Whether the removed pre-1.0 form `check` starts at token `at`.
+    fn is_legacy_form(&self, check: LegacyCheck, at: usize) -> bool {
+        match check {
+            LegacyCheck::Var => self.is_legacy_var_declaration(at),
+            LegacyCheck::Opaque => self.is_legacy_opaque_declaration(at),
+            LegacyCheck::Currency => self.is_legacy_currency_declaration(at),
+            LegacyCheck::AssertionStatement => self.is_legacy_assertion_statement(at),
+            LegacyCheck::NamedDeclaration(punct) => self.is_legacy_named_declaration(at, punct),
+            LegacyCheck::Transaction => {
+                Self::is_legacy_module_declaration_start(self.tokens.as_slice(), at)
+                    && Self::token_is_punct(self.tokens.as_slice(), at + 1, "{")
+            }
+            LegacyCheck::On => self.is_legacy_on_declaration(at),
+            LegacyCheck::FieldConstraint => self.is_legacy_field_constraint(at),
+            LegacyCheck::RefinementWhere => self.is_legacy_refinement_where(at),
+            LegacyCheck::ConstraintsBlock => self.is_legacy_constraints_block(at),
+        }
+    }
+
     fn validate_token_grammar(&mut self) {
         let tokens = &self.tokens;
         // Reserved legacy forms are recognized as token sequences.  This is
@@ -1724,77 +1891,17 @@ impl Parser {
             let TokenKind::Identifier { .. } = token.kind else {
                 continue;
             };
-            let diagnostic = match token.text.as_str() {
-                "var" if self.is_legacy_var_declaration(i) => Some((
-                    "ORNA091-E-VAR",
-                    "use `let`; assignment may replace the local slot",
-                )),
-                "opaque" if self.is_legacy_opaque_declaration(i) => {
-                    Some(("ORNA091-E-OPAQUE", "use the unified `type` declaration"))
-                }
-                "currency" if self.is_legacy_currency_declaration(i) => Some((
-                    "ORNA091-E-CURRENCY",
-                    "declare an ordinary nominal type with a nested Currency implementation",
-                )),
-                "ensure" if self.is_legacy_assertion_statement(i) => Some((
-                    "ORNA-A091-010",
-                    "`ensure` is not an assertion alias; use `assert`",
-                )),
-                "fact" if self.is_legacy_assertion_statement(i) => Some((
-                    "ORNA-A091-010",
-                    "`fact` is not an assertion alias; use `assert`",
-                )),
-                "ingest" if self.is_legacy_named_declaration(i, "=") => {
-                    Some(("E1004", "`ingest` is not a declaration"))
-                }
-                "log" if self.is_legacy_named_declaration(i, "{") => {
-                    Some(("E1001", "`log` is not a declaration in Orna 1.0"))
-                }
-                "store" if self.is_legacy_named_declaration(i, "=") => {
-                    Some(("E1003", "`store` is not a logical declaration"))
-                }
-                "view" if self.is_legacy_named_declaration(i, "=") => {
-                    Some(("E1002", "`view` is replaced by an ordinary function"))
-                }
-                "transaction"
-                    if Self::is_legacy_module_declaration_start(tokens, i)
-                        && Self::token_is_punct(tokens, i + 1, "{") =>
-                {
-                    Some((
-                        "E1007",
-                        "database writes are transactional by activation; `transaction` is not syntax",
-                    ))
-                }
-                "on" if self.is_legacy_on_declaration(i) => {
-                    Some(("E1005", "`on` is not a declaration"))
-                }
-                "check" if self.is_legacy_field_constraint(i) => Some((
-                    "ORNA091-E-FIELD-CONSTRAINT",
-                    "field `check` syntax was removed; use a table assertion",
-                )),
-                "unique" if self.is_legacy_field_constraint(i) => Some((
-                    "ORNA091-E-FIELD-CONSTRAINT",
-                    "field `unique` syntax was removed; use all_unique in the table body",
-                )),
-                "where" if self.is_legacy_refinement_where(i) => Some((
-                    "ORNA-A091-001",
-                    "use a brace-delimited refined-type assertion block",
-                )),
-                "constraint" if self.is_legacy_assertion_statement(i) => Some((
-                    "ORNA-A091-010",
-                    "`constraint` is not an assertion alias; use `assert`",
-                )),
-                "constraints" if self.is_legacy_constraints_block(i) => Some((
-                    "ORNA-A091-010",
-                    "`constraints` is not a declaration; use owner-local `assert`",
-                )),
-                _ => None,
+            let Some(form) = LEGACY_FORMS.iter().find(|form| {
+                form.text == token.text.as_str() && self.is_legacy_form(form.check, i)
+            }) else {
+                continue;
             };
-            if let Some((code, message)) = diagnostic {
-                self.errors
-                    .push(Diagnostic::error(code, message, token.span.clone()));
-                break;
-            }
+            self.errors.push(Diagnostic::error(
+                form.code,
+                form.message,
+                token.span.clone(),
+            ));
+            break;
         }
         for i in 0..tokens.len().saturating_sub(1) {
             let diagnostic = match (&tokens[i].kind, &tokens[i + 1].kind) {
@@ -2499,248 +2606,14 @@ impl Parser {
         };
         self.bump();
         let declaration = match kind {
-            ItemKind::Use => {
-                let (path, tail) = self.parse_use_declaration();
-                Declaration::Use { path, tail }
-            }
-            ItemKind::Function => {
-                let name = self.require_name_text();
-                let (signature, body) = self.parse_function_tail(name, start);
-                Declaration::Function { signature, body }
-            }
-            ItemKind::Table | ItemKind::Protocol => {
-                let name = self.require_name_text();
-                let generics = if self.is_punct("<") {
-                    self.parse_generic_parameters()
-                } else {
-                    Vec::new()
-                };
-                let keys = if self.is_punct("(") {
-                    self.parse_function_parameters()
-                } else {
-                    Vec::new()
-                };
-                if self.is_punct("{") {
-                    if kind == ItemKind::Table {
-                        Declaration::Table {
-                            name,
-                            keys,
-                            members: self.parse_table_body(),
-                        }
-                    } else {
-                        Declaration::Protocol {
-                            name,
-                            generics,
-                            members: self.parse_protocol_body(),
-                        }
-                    }
-                } else {
-                    self.error_here("ORNA-PARSE-001", "expected declaration body");
-                    if kind == ItemKind::Table {
-                        Declaration::Table {
-                            name,
-                            keys,
-                            members: Vec::new(),
-                        }
-                    } else {
-                        Declaration::Protocol {
-                            name,
-                            generics,
-                            members: Vec::new(),
-                        }
-                    }
-                }
-            }
-            ItemKind::Dimension => {
-                let name = self.require_name_text();
-                let expression = if self.is_punct("=") {
-                    self.bump();
-                    self.parse_dimension_expression()
-                } else {
-                    None
-                };
-                self.require_semicolon("dimension declarations require `;`");
-                Declaration::Dimension { name, expression }
-            }
-            ItemKind::Unit => {
-                let name = self.require_name_text();
-                self.require_punct(":", "expected `:` after unit name");
-                let dimension = self.parse_type_expr().unwrap_or_else(|| self.error_type());
-                let definition = if self.keyword() == Some(Keyword::Base) {
-                    self.bump();
-                    UnitDefinition::Base
-                } else if self.is_punct("=") {
-                    self.bump();
-                    let value = self.expr().unwrap_or_else(|| self.error_expr());
-                    let offset = if self.keyword() == Some(Keyword::Offset) {
-                        self.bump();
-                        self.expr()
-                    } else {
-                        None
-                    };
-                    let affine = if self.keyword() == Some(Keyword::Affine) {
-                        self.bump();
-                        true
-                    } else {
-                        false
-                    };
-                    UnitDefinition::Derived {
-                        value,
-                        offset,
-                        affine,
-                    }
-                } else {
-                    self.error_here(
-                        "ORNA-PARSE-001",
-                        "expected `base` or `=` in unit declaration",
-                    );
-                    UnitDefinition::Base
-                };
-                self.require_semicolon("unit declarations require `;`");
-                Declaration::Unit {
-                    name,
-                    dimension,
-                    definition,
-                }
-            }
-            ItemKind::Assert => {
-                let keyword = self.previous().span.clone();
-                let (value, _) =
-                    self.parse_assertion_clause(keyword, true, "assertion statements require `;`");
-                Declaration::Assertion {
-                    value: value.unwrap_or_else(|| self.error_expr()),
-                }
-            }
-            ItemKind::Let => {
-                let pattern = self.parse_pattern();
-                let annotation = if self.is_punct(":") {
-                    self.bump();
-                    self.parse_type_expr()
-                } else {
-                    None
-                };
-                self.require_punct("=", "expected `=` in let statement");
-                let value = self.expr().unwrap_or_else(|| self.error_expr());
-                self.require_semicolon("let statements require `;`");
-                Declaration::Let {
-                    pattern,
-                    annotation,
-                    value,
-                }
-            }
-            ItemKind::Enum | ItemKind::Type => {
-                let name = self.require_name_text();
-                let generics = if self.is_punct("<") {
-                    self.parse_generic_parameters()
-                } else {
-                    Vec::new()
-                };
-                if kind == ItemKind::Enum && self.is_punct("{") {
-                    Declaration::Enum {
-                        name,
-                        generics,
-                        variants: self.parse_enum_body(),
-                    }
-                } else if kind == ItemKind::Type && self.is_punct("{") {
-                    Declaration::Type {
-                        name,
-                        generics,
-                        representation: TypeRepresentation::Nominal {
-                            members: self.parse_type_body(),
-                        },
-                    }
-                } else if self.is_punct("=") {
-                    self.bump();
-                    let ty = self.parse_type_expr().unwrap_or_else(|| self.error_type());
-                    if self.is_punct(";") {
-                        self.bump();
-                        if kind == ItemKind::Type {
-                            Declaration::Type {
-                                name,
-                                generics,
-                                representation: TypeRepresentation::Alias {
-                                    ty,
-                                    refinements: Vec::new(),
-                                },
-                            }
-                        } else {
-                            self.error_here("ORNA-PARSE-001", "enums require a nominal body");
-                            Declaration::Enum {
-                                name,
-                                generics,
-                                variants: Vec::new(),
-                            }
-                        }
-                    } else if self.is_punct("{") {
-                        let refinements = self.parse_type_body();
-                        if kind == ItemKind::Type {
-                            Declaration::Type {
-                                name,
-                                generics,
-                                representation: TypeRepresentation::Alias { ty, refinements },
-                            }
-                        } else {
-                            self.error_here("ORNA-PARSE-001", "enums require a nominal body");
-                            Declaration::Enum {
-                                name,
-                                generics,
-                                variants: Vec::new(),
-                            }
-                        }
-                    } else {
-                        self.error_here("ORNA-PARSE-001", "expected `;` or refinement body");
-                        if kind == ItemKind::Type {
-                            Declaration::Type {
-                                name,
-                                generics,
-                                representation: TypeRepresentation::Alias {
-                                    ty,
-                                    refinements: Vec::new(),
-                                },
-                            }
-                        } else {
-                            Declaration::Enum {
-                                name,
-                                generics,
-                                variants: Vec::new(),
-                            }
-                        }
-                    }
-                } else if self.is_punct("{") {
-                    if kind == ItemKind::Enum {
-                        Declaration::Enum {
-                            name,
-                            generics,
-                            variants: self.parse_enum_body(),
-                        }
-                    } else {
-                        Declaration::Type {
-                            name,
-                            generics,
-                            representation: TypeRepresentation::Nominal {
-                                members: self.parse_type_body(),
-                            },
-                        }
-                    }
-                } else {
-                    self.error_here("ORNA-PARSE-001", "expected declaration body");
-                    if kind == ItemKind::Enum {
-                        Declaration::Enum {
-                            name,
-                            generics,
-                            variants: Vec::new(),
-                        }
-                    } else {
-                        Declaration::Type {
-                            name,
-                            generics,
-                            representation: TypeRepresentation::Nominal {
-                                members: Vec::new(),
-                            },
-                        }
-                    }
-                }
-            }
+            ItemKind::Use => self.use_declaration(),
+            ItemKind::Function => self.function_declaration(start),
+            ItemKind::Table | ItemKind::Protocol => self.table_or_protocol_declaration(kind),
+            ItemKind::Dimension => self.dimension_declaration(),
+            ItemKind::Unit => self.unit_declaration(),
+            ItemKind::Assert => self.assertion_declaration(),
+            ItemKind::Let => self.let_declaration(),
+            ItemKind::Enum | ItemKind::Type => self.enum_or_type_declaration(kind),
             ItemKind::Expression => unreachable!(),
         };
         let end = self.previous().span.end;
@@ -2751,6 +2624,256 @@ impl Parser {
             declaration,
         })
     }
+    fn use_declaration(&mut self) -> Declaration {
+        let (path, tail) = self.parse_use_declaration();
+        Declaration::Use { path, tail }
+    }
+
+    fn function_declaration(&mut self, start: usize) -> Declaration {
+        let name = self.require_name_text();
+        let (signature, body) = self.parse_function_tail(name, start);
+        Declaration::Function { signature, body }
+    }
+
+    fn table_or_protocol_declaration(&mut self, kind: ItemKind) -> Declaration {
+        let name = self.require_name_text();
+        let generics = if self.is_punct("<") {
+            self.parse_generic_parameters()
+        } else {
+            Vec::new()
+        };
+        let keys = if self.is_punct("(") {
+            self.parse_function_parameters()
+        } else {
+            Vec::new()
+        };
+        if self.is_punct("{") {
+            if kind == ItemKind::Table {
+                Declaration::Table {
+                    name,
+                    keys,
+                    members: self.parse_table_body(),
+                }
+            } else {
+                Declaration::Protocol {
+                    name,
+                    generics,
+                    members: self.parse_protocol_body(),
+                }
+            }
+        } else {
+            self.error_here("ORNA-PARSE-001", "expected declaration body");
+            if kind == ItemKind::Table {
+                Declaration::Table {
+                    name,
+                    keys,
+                    members: Vec::new(),
+                }
+            } else {
+                Declaration::Protocol {
+                    name,
+                    generics,
+                    members: Vec::new(),
+                }
+            }
+        }
+    }
+
+    fn dimension_declaration(&mut self) -> Declaration {
+        let name = self.require_name_text();
+        let expression = if self.is_punct("=") {
+            self.bump();
+            self.parse_dimension_expression()
+        } else {
+            None
+        };
+        self.require_semicolon(MissingSemicolon::DimensionDeclaration);
+        Declaration::Dimension { name, expression }
+    }
+
+    fn unit_declaration(&mut self) -> Declaration {
+        let name = self.require_name_text();
+        self.require_punct(":", "expected `:` after unit name");
+        let dimension = self.parse_type_expr().unwrap_or_else(|| self.error_type());
+        let definition = if self.keyword() == Some(Keyword::Base) {
+            self.bump();
+            UnitDefinition::Base
+        } else if self.is_punct("=") {
+            self.bump();
+            let value = self.expr().unwrap_or_else(|| self.error_expr());
+            let offset = if self.keyword() == Some(Keyword::Offset) {
+                self.bump();
+                self.expr()
+            } else {
+                None
+            };
+            let affine = if self.keyword() == Some(Keyword::Affine) {
+                self.bump();
+                true
+            } else {
+                false
+            };
+            UnitDefinition::Derived {
+                value,
+                offset,
+                affine,
+            }
+        } else {
+            self.error_here(
+                "ORNA-PARSE-001",
+                "expected `base` or `=` in unit declaration",
+            );
+            UnitDefinition::Base
+        };
+        self.require_semicolon(MissingSemicolon::UnitDeclaration);
+        Declaration::Unit {
+            name,
+            dimension,
+            definition,
+        }
+    }
+
+    fn assertion_declaration(&mut self) -> Declaration {
+        let keyword = self.previous().span.clone();
+        let (value, _) =
+            self.parse_assertion_clause(keyword, true, MissingSemicolon::AssertionItem);
+        Declaration::Assertion {
+            value: value.unwrap_or_else(|| self.error_expr()),
+        }
+    }
+
+    fn let_declaration(&mut self) -> Declaration {
+        let pattern = self.parse_pattern();
+        let annotation = if self.is_punct(":") {
+            self.bump();
+            self.parse_type_expr()
+        } else {
+            None
+        };
+        self.require_punct("=", "expected `=` in let statement");
+        let value = self.expr().unwrap_or_else(|| self.error_expr());
+        self.require_semicolon(MissingSemicolon::LetItem);
+        Declaration::Let {
+            pattern,
+            annotation,
+            value,
+        }
+    }
+
+    fn enum_or_type_declaration(&mut self, kind: ItemKind) -> Declaration {
+        let name = self.require_name_text();
+        let generics = if self.is_punct("<") {
+            self.parse_generic_parameters()
+        } else {
+            Vec::new()
+        };
+        if kind == ItemKind::Enum && self.is_punct("{") {
+            Declaration::Enum {
+                name,
+                generics,
+                variants: self.parse_enum_body(),
+            }
+        } else if kind == ItemKind::Type && self.is_punct("{") {
+            Declaration::Type {
+                name,
+                generics,
+                representation: TypeRepresentation::Nominal {
+                    members: self.parse_type_body(),
+                },
+            }
+        } else if self.is_punct("=") {
+            self.bump();
+            let ty = self.parse_type_expr().unwrap_or_else(|| self.error_type());
+            if self.is_punct(";") {
+                self.bump();
+                if kind == ItemKind::Type {
+                    Declaration::Type {
+                        name,
+                        generics,
+                        representation: TypeRepresentation::Alias {
+                            ty,
+                            refinements: Vec::new(),
+                        },
+                    }
+                } else {
+                    self.error_here("ORNA-PARSE-001", "enums require a nominal body");
+                    Declaration::Enum {
+                        name,
+                        generics,
+                        variants: Vec::new(),
+                    }
+                }
+            } else if self.is_punct("{") {
+                let refinements = self.parse_type_body();
+                if kind == ItemKind::Type {
+                    Declaration::Type {
+                        name,
+                        generics,
+                        representation: TypeRepresentation::Alias { ty, refinements },
+                    }
+                } else {
+                    self.error_here("ORNA-PARSE-001", "enums require a nominal body");
+                    Declaration::Enum {
+                        name,
+                        generics,
+                        variants: Vec::new(),
+                    }
+                }
+            } else {
+                self.error_here("ORNA-PARSE-001", "expected `;` or refinement body");
+                if kind == ItemKind::Type {
+                    Declaration::Type {
+                        name,
+                        generics,
+                        representation: TypeRepresentation::Alias {
+                            ty,
+                            refinements: Vec::new(),
+                        },
+                    }
+                } else {
+                    Declaration::Enum {
+                        name,
+                        generics,
+                        variants: Vec::new(),
+                    }
+                }
+            }
+        } else if self.is_punct("{") {
+            if kind == ItemKind::Enum {
+                Declaration::Enum {
+                    name,
+                    generics,
+                    variants: self.parse_enum_body(),
+                }
+            } else {
+                Declaration::Type {
+                    name,
+                    generics,
+                    representation: TypeRepresentation::Nominal {
+                        members: self.parse_type_body(),
+                    },
+                }
+            }
+        } else {
+            self.error_here("ORNA-PARSE-001", "expected declaration body");
+            if kind == ItemKind::Enum {
+                Declaration::Enum {
+                    name,
+                    generics,
+                    variants: Vec::new(),
+                }
+            } else {
+                Declaration::Type {
+                    name,
+                    generics,
+                    representation: TypeRepresentation::Nominal {
+                        members: Vec::new(),
+                    },
+                }
+            }
+        }
+    }
+
     fn parse_use_declaration(&mut self) -> (Vec<ImportSegment>, UseTail) {
         let mut path = Vec::new();
         if !self.contextual() {
@@ -2826,7 +2949,7 @@ impl Parser {
         } else {
             UseTail::None
         };
-        self.require_semicolon("use declarations require `;`");
+        self.require_semicolon(MissingSemicolon::UseDeclaration);
         (path, tail)
     }
     fn parse_function_tail(&mut self, name: String, start: usize) -> (FunctionSignature, Expr) {
@@ -2853,7 +2976,7 @@ impl Parser {
             if self.is_punct("=") {
                 self.bump();
                 let body = self.expr().unwrap_or_else(|| self.error_expr());
-                self.require_semicolon("expected `;` after function expression");
+                self.require_semicolon(MissingSemicolon::FunctionExpression);
                 (signature, body)
             } else if self.is_punct("{") {
                 (signature, self.parse_block())
@@ -3269,7 +3392,7 @@ impl Parser {
                     if self.is_punct(";") {
                         self.bump()
                     } else {
-                        self.error_here("ORNA-PARSE-002", "expected `;` after let statement");
+                        self.error_here("ORNA-PARSE-002", MissingSemicolon::LetStatement.message());
                         break;
                     }
                 }
@@ -3279,7 +3402,7 @@ impl Parser {
                     let (value, terminated) = self.parse_assertion_clause(
                         statement_start.clone(),
                         false,
-                        "assertion statements require `;`",
+                        MissingSemicolon::AssertionItem,
                     );
                     if let Some(value) = value {
                         let end = value.span();
@@ -3330,7 +3453,10 @@ impl Parser {
                     if self.is_punct(";") {
                         self.bump()
                     } else {
-                        self.error_here("ORNA-PARSE-002", "expected `;` after control statement");
+                        self.error_here(
+                            "ORNA-PARSE-002",
+                            MissingSemicolon::ControlStatement.message(),
+                        );
                         break;
                     }
                 }
@@ -3355,7 +3481,7 @@ impl Parser {
                         statements.push(Statement::Expression { value, span });
                         self.error_here(
                             "ORNA-PARSE-002",
-                            "expected `;` after expression statement",
+                            MissingSemicolon::ExpressionStatement.message(),
                         );
                         // The expression parser stopped at the next block
                         // item. Diagnose the missing boundary, then let the
@@ -3506,7 +3632,7 @@ impl Parser {
                 let (value, _) = self.parse_assertion_clause(
                     start.clone(),
                     true,
-                    "expected `;` after table assertion",
+                    MissingSemicolon::TableAssertion,
                 );
                 if let Some(value) = value {
                     members.push(TableMember::Assertion {
@@ -3599,7 +3725,7 @@ impl Parser {
                         span: start.join(self.previous().span.clone()),
                     })
                 } else {
-                    self.error_here("ORNA-PARSE-002", "expected `;` after static property")
+                    self.error_here("ORNA-PARSE-002", MissingSemicolon::StaticProperty.message())
                 }
             } else if self.keyword() == Some(Keyword::Fn) {
                 let start = self.current().span.clone();
@@ -3631,7 +3757,10 @@ impl Parser {
                         span: start.join(self.previous().span.clone()),
                     })
                 } else {
-                    self.error_here("ORNA-PARSE-002", "protocol functions require `;`")
+                    self.error_here(
+                        "ORNA-PARSE-002",
+                        MissingSemicolon::ProtocolFunction.message(),
+                    )
                 }
             } else {
                 self.error_here("ORNA-PARSE-001", "expected protocol member");
@@ -3719,7 +3848,7 @@ impl Parser {
                 let (value, _) = self.parse_assertion_clause(
                     start.clone(),
                     true,
-                    "expected `;` after type assertion",
+                    MissingSemicolon::TypeAssertion,
                 );
                 if let Some(value) = value {
                     members.push(TypeMember::Assertion {
@@ -3805,7 +3934,7 @@ impl Parser {
                 };
                 self.require_punct("=", "expected `=` in implementation static property");
                 let value = self.expr().unwrap_or_else(|| self.error_expr());
-                self.require_semicolon("implementation static properties require `;`");
+                self.require_semicolon(MissingSemicolon::ImplementationStaticProperty);
                 let span = member_start.join(self.previous().span.clone());
                 members.push(ImplMember::Static {
                     name,
@@ -5098,11 +5227,11 @@ impl Parser {
             self.error_here("ORNA-PARSE-001", message)
         }
     }
-    fn require_semicolon(&mut self, message: &str) {
+    fn require_semicolon(&mut self, missing: MissingSemicolon) {
         if self.is_punct(";") {
             self.bump()
         } else {
-            self.error_here("ORNA-PARSE-002", message)
+            self.error_here("ORNA-PARSE-002", missing.message())
         }
     }
     fn error_expr(&self) -> Expr {
@@ -5129,7 +5258,7 @@ impl Parser {
         &mut self,
         keyword: SourceSpan,
         subjectless: bool,
-        missing_semicolon: &str,
+        missing_semicolon: MissingSemicolon,
     ) -> (Option<Expr>, bool) {
         if self.is_punct(";") {
             self.error_here(
@@ -5164,7 +5293,7 @@ impl Parser {
                 "assertion clause must end with `;`",
                 keyword,
             ));
-            self.error_here("ORNA-PARSE-002", missing_semicolon);
+            self.error_here("ORNA-PARSE-002", missing_semicolon.message());
             false
         };
         (Some(value), terminated)
@@ -5622,7 +5751,7 @@ mod tests {
         );
         assert!(
             path.iter()
-                .all(|segment| segment.span.file.as_deref() == Some("memory.orna"))
+                .all(|segment| segment.span.file() == Some("memory.orna"))
         );
         assert!(
             matches!(tail, UseTail::Names(names) if names.len() == 2 && names[0].name == "abs")
@@ -5639,7 +5768,7 @@ mod tests {
         else {
             panic!("missing public function")
         };
-        assert_eq!(span.file.as_deref(), Some("memory.orna"));
+        assert_eq!(span.file(), Some("memory.orna"));
         assert!(matches!(
             &statements[0],
             Statement::Let {

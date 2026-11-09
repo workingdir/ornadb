@@ -332,17 +332,17 @@ mod tests {
 
     fn context() -> Format3Context {
         let database = [0x21; 16];
-        Format3Context::from_persisted(
-            database,
-            orna_value::Snapshot::cwd(database, [0x22; 16], 0.into()).expect("snapshot"),
-            orna_value::GitHash::Sha1,
-            orna_value::NativeOid::from_bytes(&[0x23; 20]).expect("schema root"),
-            orna_value::NativeOid::from_bytes(&[0x24; 20]).expect("store root"),
-            orna_value::AvailabilityState::Available,
-            orna_value::OwnerLifetime::new([0x25; 16]),
-            orna_value::Format3Quota::new(1024, 1 << 20).expect("quota"),
-            Arc::new(UnavailableResolver),
-        )
+        Format3Context::from_persisted(orna_value::Format3ContextInputs {
+            database_uuid: database,
+            pin: orna_value::Snapshot::cwd(database, [0x22; 16], 0.into()).expect("snapshot"),
+            git_oid_algorithm: orna_value::GitHash::Sha1,
+            schema_root: orna_value::NativeOid::from_bytes(&[0x23; 20]).expect("schema root"),
+            store_root: orna_value::NativeOid::from_bytes(&[0x24; 20]).expect("store root"),
+            availability: orna_value::AvailabilityState::Available,
+            owner: orna_value::OwnerLifetime::new([0x25; 16]),
+            quota: orna_value::Format3Quota::new(1024, 1 << 20).expect("quota"),
+            resolver: Arc::new(UnavailableResolver),
+        })
         .expect("format-3 context")
     }
 

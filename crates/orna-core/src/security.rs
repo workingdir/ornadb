@@ -1392,7 +1392,17 @@ impl SecurityAuditDecision {
     pub const fn user_state_operation(&self) -> Option<UserStateAuditOperation> {
         match self.0 {
             SecurityAuditDecisionShape::UserStateAllowed { operation, .. } => Some(operation),
-            _ => None,
+            SecurityAuditDecisionShape::AuthenticationAllowed { .. }
+            | SecurityAuditDecisionShape::AuthenticationDenied { .. }
+            | SecurityAuditDecisionShape::ExecuteAllowed { .. }
+            | SecurityAuditDecisionShape::ExecuteDenied { .. }
+            | SecurityAuditDecisionShape::CapabilityAllowed { .. }
+            | SecurityAuditDecisionShape::CapabilityDenied { .. }
+            | SecurityAuditDecisionShape::InspectAllowed { .. }
+            | SecurityAuditDecisionShape::InspectDenied { .. }
+            | SecurityAuditDecisionShape::SecurityAdminAllowed { .. }
+            | SecurityAuditDecisionShape::SecurityAdminDenied { .. }
+            | SecurityAuditDecisionShape::SourceApplyAllowed { .. } => None,
         }
     }
 
@@ -1402,7 +1412,17 @@ impl SecurityAuditDecision {
             SecurityAuditDecisionShape::UserStateAllowed { root_function, .. } => {
                 Some(root_function)
             }
-            _ => None,
+            SecurityAuditDecisionShape::AuthenticationAllowed { .. }
+            | SecurityAuditDecisionShape::AuthenticationDenied { .. }
+            | SecurityAuditDecisionShape::ExecuteAllowed { .. }
+            | SecurityAuditDecisionShape::ExecuteDenied { .. }
+            | SecurityAuditDecisionShape::CapabilityAllowed { .. }
+            | SecurityAuditDecisionShape::CapabilityDenied { .. }
+            | SecurityAuditDecisionShape::InspectAllowed { .. }
+            | SecurityAuditDecisionShape::InspectDenied { .. }
+            | SecurityAuditDecisionShape::SecurityAdminAllowed { .. }
+            | SecurityAuditDecisionShape::SecurityAdminDenied { .. }
+            | SecurityAuditDecisionShape::SourceApplyAllowed { .. } => None,
         }
     }
 
@@ -1410,7 +1430,17 @@ impl SecurityAuditDecision {
     pub const fn user_state_cell_count(&self) -> Option<u64> {
         match self.0 {
             SecurityAuditDecisionShape::UserStateAllowed { cell_count, .. } => Some(cell_count),
-            _ => None,
+            SecurityAuditDecisionShape::AuthenticationAllowed { .. }
+            | SecurityAuditDecisionShape::AuthenticationDenied { .. }
+            | SecurityAuditDecisionShape::ExecuteAllowed { .. }
+            | SecurityAuditDecisionShape::ExecuteDenied { .. }
+            | SecurityAuditDecisionShape::CapabilityAllowed { .. }
+            | SecurityAuditDecisionShape::CapabilityDenied { .. }
+            | SecurityAuditDecisionShape::InspectAllowed { .. }
+            | SecurityAuditDecisionShape::InspectDenied { .. }
+            | SecurityAuditDecisionShape::SecurityAdminAllowed { .. }
+            | SecurityAuditDecisionShape::SecurityAdminDenied { .. }
+            | SecurityAuditDecisionShape::SourceApplyAllowed { .. } => None,
         }
     }
 
@@ -1418,7 +1448,17 @@ impl SecurityAuditDecision {
     pub const fn inspect_requested(&self) -> Option<InspectPrivilege> {
         match self.0 {
             SecurityAuditDecisionShape::InspectAllowed { requested, .. } => Some(requested),
-            _ => None,
+            SecurityAuditDecisionShape::AuthenticationAllowed { .. }
+            | SecurityAuditDecisionShape::AuthenticationDenied { .. }
+            | SecurityAuditDecisionShape::ExecuteAllowed { .. }
+            | SecurityAuditDecisionShape::ExecuteDenied { .. }
+            | SecurityAuditDecisionShape::CapabilityAllowed { .. }
+            | SecurityAuditDecisionShape::CapabilityDenied { .. }
+            | SecurityAuditDecisionShape::UserStateAllowed { .. }
+            | SecurityAuditDecisionShape::InspectDenied { .. }
+            | SecurityAuditDecisionShape::SecurityAdminAllowed { .. }
+            | SecurityAuditDecisionShape::SecurityAdminDenied { .. }
+            | SecurityAuditDecisionShape::SourceApplyAllowed { .. } => None,
         }
     }
 
@@ -1426,7 +1466,17 @@ impl SecurityAuditDecision {
     pub const fn inspect_epoch_scope(&self) -> Option<InspectEpochScope> {
         match self.0 {
             SecurityAuditDecisionShape::InspectAllowed { epoch_scope, .. } => Some(epoch_scope),
-            _ => None,
+            SecurityAuditDecisionShape::AuthenticationAllowed { .. }
+            | SecurityAuditDecisionShape::AuthenticationDenied { .. }
+            | SecurityAuditDecisionShape::ExecuteAllowed { .. }
+            | SecurityAuditDecisionShape::ExecuteDenied { .. }
+            | SecurityAuditDecisionShape::CapabilityAllowed { .. }
+            | SecurityAuditDecisionShape::CapabilityDenied { .. }
+            | SecurityAuditDecisionShape::UserStateAllowed { .. }
+            | SecurityAuditDecisionShape::InspectDenied { .. }
+            | SecurityAuditDecisionShape::SecurityAdminAllowed { .. }
+            | SecurityAuditDecisionShape::SecurityAdminDenied { .. }
+            | SecurityAuditDecisionShape::SourceApplyAllowed { .. } => None,
         }
     }
 
@@ -1435,7 +1485,17 @@ impl SecurityAuditDecision {
     pub const fn inspect_denial(&self) -> Option<InspectDenial> {
         match self.0 {
             SecurityAuditDecisionShape::InspectDenied { reason, .. } => Some(reason),
-            _ => None,
+            SecurityAuditDecisionShape::AuthenticationAllowed { .. }
+            | SecurityAuditDecisionShape::AuthenticationDenied { .. }
+            | SecurityAuditDecisionShape::ExecuteAllowed { .. }
+            | SecurityAuditDecisionShape::ExecuteDenied { .. }
+            | SecurityAuditDecisionShape::CapabilityAllowed { .. }
+            | SecurityAuditDecisionShape::CapabilityDenied { .. }
+            | SecurityAuditDecisionShape::UserStateAllowed { .. }
+            | SecurityAuditDecisionShape::InspectAllowed { .. }
+            | SecurityAuditDecisionShape::SecurityAdminAllowed { .. }
+            | SecurityAuditDecisionShape::SecurityAdminDenied { .. }
+            | SecurityAuditDecisionShape::SourceApplyAllowed { .. } => None,
         }
     }
 
@@ -1444,7 +1504,16 @@ impl SecurityAuditDecision {
         match self.0 {
             SecurityAuditDecisionShape::SecurityAdminAllowed { operation, .. }
             | SecurityAuditDecisionShape::SecurityAdminDenied { operation, .. } => Some(operation),
-            _ => None,
+            SecurityAuditDecisionShape::AuthenticationAllowed { .. }
+            | SecurityAuditDecisionShape::AuthenticationDenied { .. }
+            | SecurityAuditDecisionShape::ExecuteAllowed { .. }
+            | SecurityAuditDecisionShape::ExecuteDenied { .. }
+            | SecurityAuditDecisionShape::CapabilityAllowed { .. }
+            | SecurityAuditDecisionShape::CapabilityDenied { .. }
+            | SecurityAuditDecisionShape::UserStateAllowed { .. }
+            | SecurityAuditDecisionShape::InspectAllowed { .. }
+            | SecurityAuditDecisionShape::InspectDenied { .. }
+            | SecurityAuditDecisionShape::SourceApplyAllowed { .. } => None,
         }
     }
 
@@ -1453,7 +1522,17 @@ impl SecurityAuditDecision {
     pub const fn source_apply_candidate(&self) -> Option<RevisionPair> {
         match self.0 {
             SecurityAuditDecisionShape::SourceApplyAllowed { candidate, .. } => Some(candidate),
-            _ => None,
+            SecurityAuditDecisionShape::AuthenticationAllowed { .. }
+            | SecurityAuditDecisionShape::AuthenticationDenied { .. }
+            | SecurityAuditDecisionShape::ExecuteAllowed { .. }
+            | SecurityAuditDecisionShape::ExecuteDenied { .. }
+            | SecurityAuditDecisionShape::CapabilityAllowed { .. }
+            | SecurityAuditDecisionShape::CapabilityDenied { .. }
+            | SecurityAuditDecisionShape::UserStateAllowed { .. }
+            | SecurityAuditDecisionShape::InspectAllowed { .. }
+            | SecurityAuditDecisionShape::InspectDenied { .. }
+            | SecurityAuditDecisionShape::SecurityAdminAllowed { .. }
+            | SecurityAuditDecisionShape::SecurityAdminDenied { .. } => None,
         }
     }
 
@@ -1463,7 +1542,16 @@ impl SecurityAuditDecision {
         match self.0 {
             SecurityAuditDecisionShape::SecurityAdminAllowed { target, .. }
             | SecurityAuditDecisionShape::SecurityAdminDenied { target, .. } => Some(target),
-            _ => None,
+            SecurityAuditDecisionShape::AuthenticationAllowed { .. }
+            | SecurityAuditDecisionShape::AuthenticationDenied { .. }
+            | SecurityAuditDecisionShape::ExecuteAllowed { .. }
+            | SecurityAuditDecisionShape::ExecuteDenied { .. }
+            | SecurityAuditDecisionShape::CapabilityAllowed { .. }
+            | SecurityAuditDecisionShape::CapabilityDenied { .. }
+            | SecurityAuditDecisionShape::UserStateAllowed { .. }
+            | SecurityAuditDecisionShape::InspectAllowed { .. }
+            | SecurityAuditDecisionShape::InspectDenied { .. }
+            | SecurityAuditDecisionShape::SourceApplyAllowed { .. } => None,
         }
     }
 
@@ -1472,7 +1560,17 @@ impl SecurityAuditDecision {
     pub const fn security_admin_denial(&self) -> Option<PrivilegeDenial> {
         match self.0 {
             SecurityAuditDecisionShape::SecurityAdminDenied { reason, .. } => Some(reason),
-            _ => None,
+            SecurityAuditDecisionShape::AuthenticationAllowed { .. }
+            | SecurityAuditDecisionShape::AuthenticationDenied { .. }
+            | SecurityAuditDecisionShape::ExecuteAllowed { .. }
+            | SecurityAuditDecisionShape::ExecuteDenied { .. }
+            | SecurityAuditDecisionShape::CapabilityAllowed { .. }
+            | SecurityAuditDecisionShape::CapabilityDenied { .. }
+            | SecurityAuditDecisionShape::UserStateAllowed { .. }
+            | SecurityAuditDecisionShape::InspectAllowed { .. }
+            | SecurityAuditDecisionShape::InspectDenied { .. }
+            | SecurityAuditDecisionShape::SecurityAdminAllowed { .. }
+            | SecurityAuditDecisionShape::SourceApplyAllowed { .. } => None,
         }
     }
 
@@ -1567,7 +1665,17 @@ impl SecurityAuditDecision {
                 effective_principal,
                 ..
             } => Some(effective_principal),
-            _ => None,
+            SecurityAuditDecisionShape::AuthenticationAllowed { .. }
+            | SecurityAuditDecisionShape::AuthenticationDenied { .. }
+            | SecurityAuditDecisionShape::ExecuteDenied { .. }
+            | SecurityAuditDecisionShape::CapabilityAllowed { .. }
+            | SecurityAuditDecisionShape::CapabilityDenied { .. }
+            | SecurityAuditDecisionShape::UserStateAllowed { .. }
+            | SecurityAuditDecisionShape::InspectAllowed { .. }
+            | SecurityAuditDecisionShape::InspectDenied { .. }
+            | SecurityAuditDecisionShape::SecurityAdminAllowed { .. }
+            | SecurityAuditDecisionShape::SecurityAdminDenied { .. }
+            | SecurityAuditDecisionShape::SourceApplyAllowed { .. } => None,
         }
     }
 
@@ -1578,7 +1686,17 @@ impl SecurityAuditDecision {
                 authorising_principal,
                 ..
             } => Some(authorising_principal),
-            _ => None,
+            SecurityAuditDecisionShape::AuthenticationAllowed { .. }
+            | SecurityAuditDecisionShape::AuthenticationDenied { .. }
+            | SecurityAuditDecisionShape::ExecuteDenied { .. }
+            | SecurityAuditDecisionShape::CapabilityAllowed { .. }
+            | SecurityAuditDecisionShape::CapabilityDenied { .. }
+            | SecurityAuditDecisionShape::UserStateAllowed { .. }
+            | SecurityAuditDecisionShape::InspectAllowed { .. }
+            | SecurityAuditDecisionShape::InspectDenied { .. }
+            | SecurityAuditDecisionShape::SecurityAdminAllowed { .. }
+            | SecurityAuditDecisionShape::SecurityAdminDenied { .. }
+            | SecurityAuditDecisionShape::SourceApplyAllowed { .. } => None,
         }
     }
 
@@ -1589,7 +1707,14 @@ impl SecurityAuditDecision {
             | SecurityAuditDecisionShape::ExecuteDenied { target, .. }
             | SecurityAuditDecisionShape::CapabilityAllowed { target, .. }
             | SecurityAuditDecisionShape::CapabilityDenied { target, .. } => Some(target),
-            _ => None,
+            SecurityAuditDecisionShape::AuthenticationAllowed { .. }
+            | SecurityAuditDecisionShape::AuthenticationDenied { .. }
+            | SecurityAuditDecisionShape::UserStateAllowed { .. }
+            | SecurityAuditDecisionShape::InspectAllowed { .. }
+            | SecurityAuditDecisionShape::InspectDenied { .. }
+            | SecurityAuditDecisionShape::SecurityAdminAllowed { .. }
+            | SecurityAuditDecisionShape::SecurityAdminDenied { .. }
+            | SecurityAuditDecisionShape::SourceApplyAllowed { .. } => None,
         }
     }
 
@@ -1601,7 +1726,16 @@ impl SecurityAuditDecision {
         match &self.0 {
             SecurityAuditDecisionShape::CapabilityAllowed { capability, .. }
             | SecurityAuditDecisionShape::CapabilityDenied { capability, .. } => Some(capability),
-            _ => None,
+            SecurityAuditDecisionShape::AuthenticationAllowed { .. }
+            | SecurityAuditDecisionShape::AuthenticationDenied { .. }
+            | SecurityAuditDecisionShape::ExecuteAllowed { .. }
+            | SecurityAuditDecisionShape::ExecuteDenied { .. }
+            | SecurityAuditDecisionShape::UserStateAllowed { .. }
+            | SecurityAuditDecisionShape::InspectAllowed { .. }
+            | SecurityAuditDecisionShape::InspectDenied { .. }
+            | SecurityAuditDecisionShape::SecurityAdminAllowed { .. }
+            | SecurityAuditDecisionShape::SecurityAdminDenied { .. }
+            | SecurityAuditDecisionShape::SourceApplyAllowed { .. } => None,
         }
     }
 
@@ -1625,7 +1759,13 @@ impl SecurityAuditDecision {
             SecurityAuditDecisionShape::SecurityAdminDenied { reason, .. } => {
                 Some(SecurityAuditDenial::SecurityAdmin(*reason))
             }
-            _ => None,
+            SecurityAuditDecisionShape::AuthenticationAllowed { .. }
+            | SecurityAuditDecisionShape::ExecuteAllowed { .. }
+            | SecurityAuditDecisionShape::CapabilityAllowed { .. }
+            | SecurityAuditDecisionShape::UserStateAllowed { .. }
+            | SecurityAuditDecisionShape::InspectAllowed { .. }
+            | SecurityAuditDecisionShape::SecurityAdminAllowed { .. }
+            | SecurityAuditDecisionShape::SourceApplyAllowed { .. } => None,
         }
     }
 }
@@ -1952,12 +2092,34 @@ fn role_graph_has_cycle(
         .any(|role| visit(role, memberships, &mut visiting, &mut visited))
 }
 
+/// The complete set of definitions validated into one [`SecuritySnapshot`].
+///
+/// A category left out of the literal is empty. The application-only
+/// convenience [`SecuritySnapshot::new`] builds the common case; every other
+/// caller names only the categories it actually supplies.
+#[derive(Clone, Debug, Default)]
+pub struct SecurityDefinitions {
+    /// The closed two-class known function union.
+    pub function_targets: Vec<SecurityFunctionTarget>,
+    /// The principals that may act in this snapshot.
+    pub principals: Vec<Principal>,
+    /// Direct role memberships.
+    pub memberships: Vec<RoleMembership>,
+    /// Execute grants from a principal to a known function.
+    pub execute_grants: Vec<ExecuteGrant>,
+    /// Protected local peer credentials.
+    pub local_peer_credentials: Vec<LocalPeerCredential>,
+    /// Privilege-class grants.
+    pub privilege_grants: Vec<PrivilegeGrant>,
+}
+
 impl SecuritySnapshot {
     /// Creates a security snapshot from an application-only function set.
     ///
     /// Every listed function is an `Application` target. Use
-    /// [`Self::new_with_function_targets`] when the exact verified standard
-    /// snapshot pinned by the revision contributes functions to the union.
+    /// [`Self::from_definitions`] when the exact verified standard snapshot
+    /// pinned by the revision contributes functions to the union, or when the
+    /// snapshot carries local peer credentials or privilege grants.
     pub fn new(
         revision: RevisionPair,
         functions: Vec<FunctionId>,
@@ -1965,87 +2127,23 @@ impl SecuritySnapshot {
         memberships: Vec<RoleMembership>,
         grants: Vec<ExecuteGrant>,
     ) -> Result<Self, SecuritySnapshotError> {
-        Self::new_with_local_peer_credentials(
+        Self::from_definitions(
             revision,
-            functions,
-            principals,
-            memberships,
-            grants,
-            vec![],
+            SecurityDefinitions {
+                function_targets: functions
+                    .into_iter()
+                    .map(SecurityFunctionTarget::application)
+                    .collect(),
+                principals,
+                memberships,
+                execute_grants: grants,
+                ..SecurityDefinitions::default()
+            },
         )
     }
 
-    /// Creates a security snapshot with protected local peer credentials.
-    ///
-    /// Every listed function is an `Application` target. Use
-    /// [`Self::new_with_function_targets_and_local_peer_credentials`] when the
-    /// exact verified standard snapshot contributes functions to the union.
-    pub fn new_with_local_peer_credentials(
-        revision: RevisionPair,
-        functions: Vec<FunctionId>,
-        principals: Vec<Principal>,
-        memberships: Vec<RoleMembership>,
-        grants: Vec<ExecuteGrant>,
-        local_peer_credentials: Vec<LocalPeerCredential>,
-    ) -> Result<Self, SecuritySnapshotError> {
-        Self::new_with_function_targets_and_local_peer_credentials(
-            revision,
-            functions
-                .into_iter()
-                .map(SecurityFunctionTarget::application)
-                .collect(),
-            principals,
-            memberships,
-            grants,
-            local_peer_credentials,
-        )
-    }
-
-    /// Creates a security snapshot from the closed two-class target union.
-    pub fn new_with_function_targets(
-        revision: RevisionPair,
-        functions: Vec<SecurityFunctionTarget>,
-        principals: Vec<Principal>,
-        memberships: Vec<RoleMembership>,
-        grants: Vec<ExecuteGrant>,
-    ) -> Result<Self, SecuritySnapshotError> {
-        Self::new_with_function_targets_and_local_peer_credentials(
-            revision,
-            functions,
-            principals,
-            memberships,
-            grants,
-            vec![],
-        )
-    }
-
-    /// Creates a two-class security snapshot with protected local peer credentials.
-    ///
-    /// The function set is the canonical, identity-ordered union of the pinned
-    /// application catalogue and the exact verified standard snapshot. A
-    /// function identity repeated across the two classes, or twice in either
-    /// class, is a duplicate and fails construction closed.
-    pub fn new_with_function_targets_and_local_peer_credentials(
-        revision: RevisionPair,
-        functions: Vec<SecurityFunctionTarget>,
-        principals: Vec<Principal>,
-        memberships: Vec<RoleMembership>,
-        grants: Vec<ExecuteGrant>,
-        local_peer_credentials: Vec<LocalPeerCredential>,
-    ) -> Result<Self, SecuritySnapshotError> {
-        Self::new_with_function_targets_local_peer_credentials_and_privilege_grants(
-            revision,
-            functions,
-            principals,
-            memberships,
-            grants,
-            local_peer_credentials,
-            vec![],
-        )
-    }
-
-    /// Creates a two-class security snapshot with protected local peer
-    /// credentials and privilege-class grants.
+    /// Validates and creates a security snapshot from every definition
+    /// category.
     ///
     /// The function set is the canonical, identity-ordered union of the
     /// pinned application catalogue and the exact verified standard
@@ -2055,15 +2153,56 @@ impl SecuritySnapshot {
     /// in the snapshot; a grant object is not required to be a member of
     /// the known function union because privilege grants may name sealed
     /// system functions.
-    pub fn new_with_function_targets_local_peer_credentials_and_privilege_grants(
+    pub fn from_definitions(
         revision: RevisionPair,
-        functions: Vec<SecurityFunctionTarget>,
-        principals: Vec<Principal>,
-        memberships: Vec<RoleMembership>,
-        grants: Vec<ExecuteGrant>,
-        local_peer_credentials: Vec<LocalPeerCredential>,
-        privilege_grants: Vec<PrivilegeGrant>,
+        definitions: SecurityDefinitions,
     ) -> Result<Self, SecuritySnapshotError> {
+        let SecurityDefinitions {
+            function_targets,
+            principals,
+            memberships,
+            execute_grants,
+            local_peer_credentials,
+            privilege_grants,
+        } = definitions;
+        let known_functions = Self::validated_function_targets(function_targets)?;
+        let principals_by_id = Self::validated_principals(principals)?;
+        let memberships = Self::validated_memberships(memberships, &principals_by_id)?;
+        let grants =
+            Self::validated_execute_grants(execute_grants, &principals_by_id, &known_functions)?;
+        let local_peer_credentials =
+            Self::validated_local_peer_credentials(local_peer_credentials, &principals_by_id)?;
+        let privilege_grants = Self::validated_privilege_grants(
+            privilege_grants,
+            &principals_by_id,
+            &known_functions,
+        )?;
+
+        let security_context_digest = security_snapshot_digest(
+            revision,
+            &known_functions,
+            &principals_by_id,
+            &memberships,
+            &grants,
+            &privilege_grants,
+            &local_peer_credentials,
+        );
+
+        Ok(Self {
+            revision,
+            function_targets: known_functions,
+            principals: principals_by_id,
+            memberships,
+            grants,
+            privilege_grants,
+            local_peer_credentials,
+            security_context_digest,
+        })
+    }
+
+    fn validated_function_targets(
+        functions: Vec<SecurityFunctionTarget>,
+    ) -> Result<BTreeMap<FunctionId, SecurityFunctionTarget>, SecuritySnapshotError> {
         let mut known_functions = BTreeMap::new();
         for function in functions {
             if known_functions
@@ -2073,7 +2212,12 @@ impl SecuritySnapshot {
                 return Err(SecuritySnapshotError::DuplicateFunction);
             }
         }
+        Ok(known_functions)
+    }
 
+    fn validated_principals(
+        principals: Vec<Principal>,
+    ) -> Result<BTreeMap<PrincipalId, Principal>, SecuritySnapshotError> {
         let mut principals_by_id = BTreeMap::new();
         for principal in principals {
             if principal.id == PrincipalId::from_bytes([0; 16]) {
@@ -2083,7 +2227,13 @@ impl SecuritySnapshot {
                 return Err(SecuritySnapshotError::DuplicatePrincipal);
             }
         }
+        Ok(principals_by_id)
+    }
 
+    fn validated_memberships(
+        memberships: Vec<RoleMembership>,
+        principals_by_id: &BTreeMap<PrincipalId, Principal>,
+    ) -> Result<Vec<RoleMembership>, SecuritySnapshotError> {
         let mut membership_set = HashSet::new();
         let mut validated_memberships = Vec::with_capacity(memberships.len());
         for membership in memberships {
@@ -2106,10 +2256,17 @@ impl SecuritySnapshot {
         }
         validated_memberships
             .sort_unstable_by_key(|membership| (membership.member, membership.role));
-        if role_graph_has_cycle(&validated_memberships, &principals_by_id) {
+        if role_graph_has_cycle(&validated_memberships, principals_by_id) {
             return Err(SecuritySnapshotError::CyclicRoleMembership);
         }
+        Ok(validated_memberships)
+    }
 
+    fn validated_execute_grants(
+        grants: Vec<ExecuteGrant>,
+        principals_by_id: &BTreeMap<PrincipalId, Principal>,
+        known_functions: &BTreeMap<FunctionId, SecurityFunctionTarget>,
+    ) -> Result<BTreeSet<ExecuteGrant>, SecuritySnapshotError> {
         let mut validated_grants = BTreeSet::new();
         for grant in grants {
             if !validated_grants.insert(grant) {
@@ -2122,10 +2279,16 @@ impl SecuritySnapshot {
                 return Err(SecuritySnapshotError::UnknownGrantFunction);
             }
         }
+        Ok(validated_grants)
+    }
 
+    fn validated_local_peer_credentials(
+        credentials: Vec<LocalPeerCredential>,
+        principals_by_id: &BTreeMap<PrincipalId, Principal>,
+    ) -> Result<BTreeMap<u32, LocalPeerCredential>, SecuritySnapshotError> {
         let mut local_peers_by_uid = BTreeMap::new();
         let mut local_peer_principals = BTreeSet::new();
-        for credential in local_peer_credentials {
+        for credential in credentials {
             if local_peers_by_uid
                 .insert(credential.uid, credential)
                 .is_some()
@@ -2139,7 +2302,14 @@ impl SecuritySnapshot {
                 return Err(SecuritySnapshotError::UnknownLocalPeerPrincipal);
             }
         }
+        Ok(local_peers_by_uid)
+    }
 
+    fn validated_privilege_grants(
+        privilege_grants: Vec<PrivilegeGrant>,
+        principals_by_id: &BTreeMap<PrincipalId, Principal>,
+        known_functions: &BTreeMap<FunctionId, SecurityFunctionTarget>,
+    ) -> Result<BTreeSet<PrivilegeGrant>, SecuritySnapshotError> {
         let mut validated_privilege_grants = BTreeSet::new();
         for privilege_grant in privilege_grants {
             if !validated_privilege_grants.insert(privilege_grant) {
@@ -2155,27 +2325,7 @@ impl SecuritySnapshot {
                 return Err(SecuritySnapshotError::UnknownPrivilegeGrantObject);
             }
         }
-
-        let security_context_digest = security_snapshot_digest(
-            revision,
-            &known_functions,
-            &principals_by_id,
-            &validated_memberships,
-            &validated_grants,
-            &validated_privilege_grants,
-            &local_peers_by_uid,
-        );
-
-        Ok(Self {
-            revision,
-            function_targets: known_functions,
-            principals: principals_by_id,
-            memberships: validated_memberships,
-            grants: validated_grants,
-            privilege_grants: validated_privilege_grants,
-            local_peer_credentials: local_peers_by_uid,
-            security_context_digest,
-        })
+        Ok(validated_privilege_grants)
     }
 
     /// Returns the active revision pair that this snapshot authorises.

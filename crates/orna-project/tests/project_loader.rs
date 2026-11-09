@@ -1685,10 +1685,7 @@ fn rejects_malformed_reachable_row_unit_with_parser_code() {
                     .contains("row unit must contain one record expression"),
                 "{first:?}"
             );
-            assert_eq!(
-                first.span.file.as_deref(),
-                Some("contacts/Contact/malformed.orna")
-            );
+            assert_eq!(first.span.file(), Some("contacts/Contact/malformed.orna"));
         }
         other => panic!("expected InvalidRowUnit, got {other:?}"),
     };

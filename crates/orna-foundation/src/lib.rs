@@ -295,7 +295,7 @@ pub fn validate_reference_context<Kind>(
     if reference.database_id != capture.database_id() {
         return Err(SystemReferenceError::DatabaseMismatch);
     }
-    if reference.snapshot != *capture.snapshot() {
+    if !capture.matches_snapshot(&reference.snapshot) {
         return Err(SystemReferenceError::SnapshotMismatch);
     }
     Ok(TypedRowRef::from_row_ref(reference))
@@ -524,56 +524,81 @@ impl Serialize for InvocationStatus {
     }
 }
 
+/// The single launch owner recorded for a durable `sys.Invocation` row.
+///
+/// `sys.Invocation` requires exactly one launch owner: a parent invocation or
+/// an owner session, except a top-level command run. Encoding the owner as an
+/// enum makes zero or multiple owners unrepresentable instead of catching
+/// them at validation time.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InvocationOwner {
+    /// Another invocation launched this row.
+    Parent,
+    /// An authenticated owner session launched this row.
+    OwnerSession,
+    /// A top-level command run with neither a parent nor an owner session.
+    TopLevelCommand,
+}
+
+/// The terminal evidence retained by a durable `sys.Invocation` row.
+///
+/// A result and a failure are mutually exclusive, and neither may accompany an
+/// active row. The variant records that coupling; the status decides which
+/// variants the lifecycle admits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InvocationEvidence {
+    /// Neither a result nor a failure is retained.
+    None,
+    /// A result is retained and no failure is.
+    Result,
+    /// A failure is retained and no result is.
+    Failure,
+}
+
 /// Redaction-safe facts used to validate a durable `sys.Invocation` row.
 ///
-/// This model intentionally stores only presence bits. It does not retain or
+/// This model intentionally stores only presence facts. It does not retain or
 /// construct parent, session, trace, idempotency, result, or failure values,
 /// so validation cannot manufacture public references or leak protected
 /// payloads while the durable store lacks authoritative coordinates.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InvocationFacts {
     pub status: InvocationStatus,
-    pub has_parent: bool,
-    pub has_owner_session: bool,
-    pub is_top_level_command: bool,
-    pub has_result: bool,
-    pub has_failure: bool,
+    pub owner: InvocationOwner,
+    pub evidence: InvocationEvidence,
     pub has_trace: bool,
     pub has_idempotency_key_hash: bool,
 }
 
 impl InvocationFacts {
-    /// Validates ownership, terminal outcome, and unsupported-link facts.
+    /// Validates lifecycle, terminal outcome, and unsupported-link facts.
     pub fn validate(self) -> Result<(), InvocationFactsError> {
-        let owner_count =
-            self.has_parent as u8 + self.has_owner_session as u8 + self.is_top_level_command as u8;
-        if owner_count != 1 {
-            return Err(InvocationFactsError::OwnerExclusivity);
-        }
         if self.has_trace || self.has_idempotency_key_hash {
             return Err(InvocationFactsError::UnsupportedLinkPresent);
         }
 
-        match self.status {
-            InvocationStatus::Queued | InvocationStatus::Running => {
-                if self.has_result || self.has_failure {
-                    return Err(InvocationFactsError::ActiveHasTerminalEvidence);
-                }
+        match (self.status, self.evidence) {
+            (InvocationStatus::Queued | InvocationStatus::Running, InvocationEvidence::None) => {}
+            (InvocationStatus::Queued | InvocationStatus::Running, _) => {
+                return Err(InvocationFactsError::ActiveHasTerminalEvidence);
             }
-            InvocationStatus::Succeeded => {
-                if !self.has_result || self.has_failure {
-                    return Err(InvocationFactsError::SucceededOutcome);
-                }
+            (InvocationStatus::Succeeded, InvocationEvidence::Result) => {}
+            (InvocationStatus::Succeeded, _) => {
+                return Err(InvocationFactsError::SucceededOutcome);
             }
-            InvocationStatus::Failed => {
-                if self.has_result || !self.has_failure {
-                    return Err(InvocationFactsError::FailedOutcome);
-                }
+            (InvocationStatus::Failed, InvocationEvidence::Failure) => {}
+            (InvocationStatus::Failed, _) => {
+                return Err(InvocationFactsError::FailedOutcome);
             }
-            InvocationStatus::Cancelled | InvocationStatus::Orphaned => {
-                if self.has_result {
-                    return Err(InvocationFactsError::CancelledOrOrphanedOutcome);
-                }
+            (
+                InvocationStatus::Cancelled | InvocationStatus::Orphaned,
+                InvocationEvidence::None | InvocationEvidence::Failure,
+            ) => {}
+            (
+                InvocationStatus::Cancelled | InvocationStatus::Orphaned,
+                InvocationEvidence::Result,
+            ) => {
+                return Err(InvocationFactsError::CancelledOrOrphanedOutcome);
             }
         }
         Ok(())
@@ -583,8 +608,6 @@ impl InvocationFacts {
 /// A redaction-safe failure from [`InvocationFacts::validate`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InvocationFactsError {
-    /// Exactly one of parent, owner session, or top-level command is required.
-    OwnerExclusivity,
     /// Trace and idempotency-key links are not retained by this projection.
     UnsupportedLinkPresent,
     /// Active invocations cannot expose terminal result or failure evidence.
@@ -865,7 +888,7 @@ fn validate_coordinates(
     if reference.database_id != capture.database_id() {
         return Err(SystemReferenceError::DatabaseMismatch);
     }
-    if reference.snapshot != *capture.snapshot() {
+    if !capture.matches_snapshot(&reference.snapshot) {
         return Err(SystemReferenceError::SnapshotMismatch);
     }
     if reference.table_id != expected_table {
@@ -926,6 +949,20 @@ impl fmt::Display for SystemReferenceError {
 }
 impl std::error::Error for SystemReferenceError {}
 
+/// The byte and human coordinates of one `sys.SourceSpan`.
+///
+/// The `Int` values can exceed machine integers, so they stay `BigInt` until
+/// [`SourceSpan::new`] validates them.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceSpanExtent {
+    pub start_byte: BigInt,
+    pub end_byte: BigInt,
+    pub start_line: BigInt,
+    pub start_column: BigInt,
+    pub end_line: BigInt,
+    pub end_column: BigInt,
+}
+
 /// Exact `sys.SourceSpan`. Orna `Int` coordinates can exceed machine integers.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SourceSpan {
@@ -938,16 +975,15 @@ pub struct SourceSpan {
     pub end_column: BigInt,
 }
 impl SourceSpan {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        file: FileRef,
-        start_byte: BigInt,
-        end_byte: BigInt,
-        start_line: BigInt,
-        start_column: BigInt,
-        end_line: BigInt,
-        end_column: BigInt,
-    ) -> Result<Self, FoundationError> {
+    pub fn new(file: FileRef, extent: SourceSpanExtent) -> Result<Self, FoundationError> {
+        let SourceSpanExtent {
+            start_byte,
+            end_byte,
+            start_line,
+            start_column,
+            end_line,
+            end_column,
+        } = extent;
         if start_byte.sign() == Sign::Minus
             || end_byte < start_byte
             || [
@@ -1007,12 +1043,14 @@ impl SourceSpan {
         let (end_line, end_column) = coordinate(end_byte);
         Self::new(
             file,
-            start_byte.into(),
-            end_byte.into(),
-            start_line,
-            start_column,
-            end_line,
-            end_column,
+            SourceSpanExtent {
+                start_byte: start_byte.into(),
+                end_byte: end_byte.into(),
+                start_line,
+                start_column,
+                end_line,
+                end_column,
+            },
         )
     }
 }
@@ -1584,9 +1622,17 @@ pub struct RepositoryProfile {
     pub bare: bool,
 }
 /// Exact logical CWD pin; committed snapshots cannot be placed here.
+///
+/// The capture stores the validated CWD coordinates rather than a
+/// `CanonicalSnapshot`, so no accessor can encounter the unreachable commit
+/// variant. [`Self::snapshot`] reconstructs the canonical pin when a caller
+/// needs the enum.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CwdCapture {
-    snapshot: CanonicalSnapshot,
+    database: [u8; 16],
+    runtime: [u8; 16],
+    generation: BigInt,
+    id: [u8; 32],
     /// The durable state digest observed with this logical generation. It is
     /// part of the capture and therefore part of the compare-and-set key.
     generation_digest: [u8; 32],
@@ -1601,41 +1647,59 @@ impl CwdCapture {
             runtime,
             generation,
             id,
-        } = &snapshot
+        } = snapshot
         else {
             return Err(FoundationError::ExpectedCwdSnapshot);
         };
-        if canonical_cwd_id(*database, *runtime, generation.clone())
+        if canonical_cwd_id(database, runtime, generation.clone())
             .map_err(|_| FoundationError::ExpectedCwdSnapshot)?
-            != *id
+            != id
         {
             return Err(FoundationError::ExpectedCwdSnapshot);
         }
         Ok(Self {
-            snapshot,
+            database,
+            runtime,
+            generation,
+            id,
             generation_digest,
         })
     }
     pub fn database_id(&self) -> [u8; 16] {
-        match &self.snapshot {
-            Snapshot::Cwd { database, .. } => *database,
-            Snapshot::Commit { .. } => unreachable!("CwdCapture validates CWD snapshots"),
-        }
+        self.database
     }
     pub fn runtime_id(&self) -> [u8; 16] {
-        match &self.snapshot {
-            Snapshot::Cwd { runtime, .. } => *runtime,
-            Snapshot::Commit { .. } => unreachable!("CwdCapture validates CWD snapshots"),
-        }
+        self.runtime
     }
     pub fn generation(&self) -> &BigInt {
-        match &self.snapshot {
-            Snapshot::Cwd { generation, .. } => generation,
-            Snapshot::Commit { .. } => unreachable!("CwdCapture validates CWD snapshots"),
+        &self.generation
+    }
+    /// Reconstructs the canonical CWD snapshot pin for this capture.
+    pub fn snapshot(&self) -> CanonicalSnapshot {
+        Snapshot::Cwd {
+            database: self.database,
+            runtime: self.runtime,
+            generation: self.generation.clone(),
+            id: self.id,
         }
     }
-    pub fn snapshot(&self) -> &CanonicalSnapshot {
-        &self.snapshot
+    /// Returns whether `snapshot` is the canonical pin this capture holds,
+    /// without reconstructing it.
+    pub(crate) fn matches_snapshot(&self, snapshot: &CanonicalSnapshot) -> bool {
+        match snapshot {
+            Snapshot::Cwd {
+                database,
+                runtime,
+                generation,
+                id,
+            } => {
+                *database == self.database
+                    && *runtime == self.runtime
+                    && *generation == self.generation
+                    && *id == self.id
+            }
+            Snapshot::Commit { .. } => false,
+        }
     }
     pub fn generation_digest(&self) -> [u8; 32] {
         self.generation_digest
@@ -1983,12 +2047,14 @@ mod tests {
         );
         let span = SourceSpan::new(
             file,
-            0.into(),
-            BigInt::from(u64::MAX) + 1,
-            1.into(),
-            1.into(),
-            1.into(),
-            2.into(),
+            SourceSpanExtent {
+                start_byte: 0.into(),
+                end_byte: BigInt::from(u64::MAX) + 1,
+                start_line: 1.into(),
+                start_column: 1.into(),
+                end_line: 1.into(),
+                end_column: 2.into(),
+            },
         )
         .unwrap();
         assert!(span.end_byte > BigInt::from(u64::MAX));
