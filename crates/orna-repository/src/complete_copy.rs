@@ -59,7 +59,7 @@ use std::{
     fmt, fs,
     io::Write,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Stdio,
 };
 
 // Two incompatible `digest` major versions are in the graph: `sha2` 0.11 uses
@@ -71,9 +71,7 @@ use sha2::{Digest as Sha2Digest, Sha256};
 use crate::hex::hex_encode;
 use crate::native_graph::{GitHashAlgorithm, NODE_DATA_LIMIT, NodeData};
 use crate::object_reader::{ObjectKind, ObjectReader, TreeEntryMode};
-use crate::{
-    GitCommitRef, Repository, RepositoryError, RepositoryFormat, scrub_git_routing_environment,
-};
+use crate::{GitCommitRef, Repository, RepositoryError, RepositoryFormat, valid_native_object_id};
 
 const MANIFEST_FILE: &str = "manifest.tsv";
 const SUPERPROJECT_BUNDLE: &str = "superproject.bundle";
@@ -380,7 +378,7 @@ impl CompleteCopyManifest {
             let fields: Vec<&str> = line.split('\t').collect();
             match fields.as_slice() {
                 ["snapshot", commit] => {
-                    if snapshot.is_some() || !valid_object_id(commit) {
+                    if snapshot.is_some() || !valid_native_object_id(commit) {
                         return Err(CompleteCopyError::InvalidArchive("snapshot line"));
                     }
                     snapshot = Some((*commit).to_owned());
@@ -419,7 +417,7 @@ impl CompleteCopyManifest {
                     objects.push(object);
                 }
                 ["dependency", path, commit, origin, bundle] => {
-                    if !valid_object_id(commit)
+                    if !valid_native_object_id(commit)
                         || !valid_dependency_path(path)
                         || origin.is_empty()
                         || !valid_dependency_bundle(bundle)
@@ -445,11 +443,11 @@ impl CompleteCopyManifest {
                 // A current archive names the member that pins each dependency,
                 // because two members may pin the same path differently.
                 ["dependency", path, commit, origin, bundle, member] => {
-                    if !valid_object_id(commit)
+                    if !valid_native_object_id(commit)
                         || !valid_dependency_path(path)
                         || origin.is_empty()
                         || !valid_dependency_bundle(bundle)
-                        || !valid_object_id(member)
+                        || !valid_native_object_id(member)
                     {
                         return Err(CompleteCopyError::InvalidArchive("dependency line"));
                     }
@@ -520,7 +518,7 @@ fn push_member(
     bundle: &str,
     format: Option<RepositoryFormat>,
 ) -> Result<usize, CompleteCopyError> {
-    if !valid_object_id(commit) || !valid_snapshot_bundle(bundle) {
+    if !valid_native_object_id(commit) || !valid_snapshot_bundle(bundle) {
         return Err(CompleteCopyError::InvalidArchive("archive line"));
     }
     if members.len() == MAX_EXPORT_SNAPSHOTS {
@@ -570,7 +568,7 @@ fn decode_object(
 ) -> Result<CompleteCopyObject, CompleteCopyError> {
     let kind = CompleteCopyObjectKind::parse(kind)
         .ok_or(CompleteCopyError::InvalidArchive("object kind"))?;
-    if !valid_object_id(oid) {
+    if !valid_native_object_id(oid) {
         return Err(CompleteCopyError::InvalidArchive("object id"));
     }
     let size = size
@@ -1308,24 +1306,20 @@ fn committed_gitlinks(
         if entries > MAX_EXPORT_OBJECTS {
             return Err(CompleteCopyError::ClosureTooLarge);
         }
-        let separator = record
-            .iter()
-            .position(|byte| *byte == b'\t')
-            .ok_or(CompleteCopyError::GitUnavailable)?;
-        let mut fields = record[..separator].split(|byte| *byte == b' ');
-        let (Some(mode), Some(kind), Some(oid), None) =
-            (fields.next(), fields.next(), fields.next(), fields.next())
-        else {
-            return Err(CompleteCopyError::GitUnavailable);
-        };
-        if mode != b"160000" {
+        let record =
+            crate::GitTreeRecord::parse(record).ok_or(CompleteCopyError::GitUnavailable)?;
+        if record.mode != b"160000" {
             continue;
         }
-        let path = std::str::from_utf8(&record[separator + 1..])
+        let path = std::str::from_utf8(record.path)
             .map_err(|_| CompleteCopyError::InvalidArchive("dependency path is not UTF-8"))?
             .to_owned();
-        let commit = std::str::from_utf8(oid).map_err(|_| CompleteCopyError::GitUnavailable)?;
-        if kind != b"commit" || !valid_object_id(commit) || !valid_dependency_path(&path) {
+        let commit =
+            std::str::from_utf8(record.object).map_err(|_| CompleteCopyError::GitUnavailable)?;
+        if record.kind != b"commit"
+            || !valid_native_object_id(commit)
+            || !valid_dependency_path(&path)
+        {
             return Err(CompleteCopyError::InvalidDependencyPath { path });
         }
         gitlinks.push((path, commit.to_owned()));
@@ -1451,7 +1445,7 @@ fn closure_objects(
     let mut unique = BTreeSet::new();
     for listed_oid in text.split_ascii_whitespace() {
         if let Some(oid) = listed_oid.strip_prefix('?') {
-            if !valid_object_id(oid) {
+            if !valid_native_object_id(oid) {
                 return Err(CompleteCopyError::GitUnavailable);
             }
             return Err(CompleteCopyError::MissingObject {
@@ -1459,7 +1453,7 @@ fn closure_objects(
                 scope: scope.to_owned(),
             });
         }
-        if !valid_object_id(listed_oid) {
+        if !valid_native_object_id(listed_oid) {
             return Err(CompleteCopyError::GitUnavailable);
         }
         unique.insert(listed_oid.to_owned());
@@ -2092,10 +2086,6 @@ fn member_bundle_ref(commit: &str) -> String {
     format!("{MEMBER_REF_PREFIX}{commit}")
 }
 
-fn valid_object_id(oid: &str) -> bool {
-    matches!(oid.len(), 40 | 64) && oid.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
 fn valid_dependency_bundle(bundle: &str) -> bool {
     let Some(name) = bundle.strip_prefix(&format!("{DEPENDENCIES_DIR}/")) else {
         return false;
@@ -2117,7 +2107,7 @@ fn valid_bundle_name(name: &str) -> bool {
     let Some(commit) = name.strip_suffix(".bundle") else {
         return false;
     };
-    !name.contains('/') && valid_object_id(commit)
+    !name.contains('/') && valid_native_object_id(commit)
 }
 
 fn path_text(path: &Path) -> Result<&str, CompleteCopyError> {
@@ -2135,10 +2125,8 @@ fn git_output_stdin(
     args: &[&str],
     stdin: Option<&[u8]>,
 ) -> Result<Vec<u8>, CompleteCopyError> {
-    let mut command = Command::new("git");
-    command.current_dir(directory).args(args);
-    scrub_git_routing_environment(&mut command);
-    crate::bind_git_discovery_to_worktree(&mut command, directory);
+    let mut command = crate::git_command_in(directory);
+    command.args(args);
     // Read only objects already present in this repository; the archive must
     // not depend on a configured remote being reachable.
     command.env("GIT_NO_LAZY_FETCH", "1");
@@ -2176,7 +2164,7 @@ fn git_output_stdin(
 mod tests {
     use super::{
         CompleteCopyError, CompleteCopyManifest, CompleteCopyMember, RepositoryFormat,
-        parse_gitmodules, valid_dependency_bundle, valid_object_id, valid_snapshot_bundle,
+        parse_gitmodules, valid_dependency_bundle, valid_native_object_id, valid_snapshot_bundle,
     };
 
     #[test]
@@ -2386,8 +2374,10 @@ mod tests {
              archive\t0123456789012345678901234567890123456789\tsnapshots/0123456789012345678901234567890123456789.bundle\tformat-9\n"
         )
         .is_err());
-        assert!(!valid_object_id("0123456789"));
-        assert!(valid_object_id("0123456789012345678901234567890123456789"));
+        assert!(!valid_native_object_id("0123456789"));
+        assert!(valid_native_object_id(
+            "0123456789012345678901234567890123456789"
+        ));
     }
 
     #[test]

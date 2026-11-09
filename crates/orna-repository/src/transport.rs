@@ -17,13 +17,12 @@ use std::{
     fs::File,
     io::Write,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Stdio,
 };
 
 use super::{
     NativeObjectId, OrnaInternalRef, RemoteContinuity, Repository, RepositoryError,
-    RequiredInternalRef, scrub_git_routing_environment, trim_output, valid_branch_name,
-    valid_remote_name,
+    RequiredInternalRef, trim_output, valid_branch_name, valid_remote_name,
 };
 
 use crate::native_graph::{sync_all_pack_files, sync_directory};
@@ -894,8 +893,7 @@ impl Repository {
         remote: impl AsRef<str>,
         destination: impl AsRef<Path>,
     ) -> Result<Self, FetchError> {
-        let mut clone = Command::new("git");
-        scrub_git_routing_environment(&mut clone);
+        let mut clone = crate::git_command();
         let status = clone
             .args(["clone", "--filter=blob:none", "--no-checkout", "--"])
             .arg(remote.as_ref())
@@ -1277,21 +1275,13 @@ fn advertise(
     }
     let text =
         std::str::from_utf8(&output.stdout).map_err(|_| FetchError::MalformedAdvertisement)?;
-    if text.is_empty() {
-        return Ok(BTreeMap::new());
-    }
-    let records = text
-        .strip_suffix('\n')
-        .ok_or(FetchError::MalformedAdvertisement)?;
+    let Some(records) = crate::remote_ref_records(text, object_id_length) else {
+        return Err(FetchError::MalformedAdvertisement);
+    };
     let expected = sources.iter().cloned().collect::<BTreeSet<_>>();
     let mut advertised = BTreeMap::new();
-    for record in records.split('\n') {
-        let (object_id, reference) = record
-            .split_once('\t')
-            .ok_or(FetchError::MalformedAdvertisement)?;
+    for (object_id, reference) in records {
         if !expected.contains(reference)
-            || object_id.len() != object_id_length
-            || !object_id.bytes().all(|byte| byte.is_ascii_hexdigit())
             || advertised
                 .insert(reference.to_owned(), object_id.to_ascii_lowercase())
                 .is_some()
@@ -1324,22 +1314,14 @@ fn advertise_fetch(
     }
     let text =
         std::str::from_utf8(&output.stdout).map_err(|_| FetchError::MalformedAdvertisement)?;
-    if text.is_empty() {
-        return Ok(BTreeMap::new());
-    }
-    let records = text
-        .strip_suffix('\n')
-        .ok_or(FetchError::MalformedAdvertisement)?;
+    let Some(records) = crate::remote_ref_records(text, object_id_length) else {
+        return Err(FetchError::MalformedAdvertisement);
+    };
     let expected = sources.iter().cloned().collect::<BTreeSet<_>>();
     let mut advertised = BTreeMap::new();
-    for record in records.split('\n') {
-        let (object_id, reference) = record
-            .split_once('\t')
-            .ok_or(FetchError::MalformedAdvertisement)?;
+    for (object_id, reference) in records {
         if (!expected.contains(reference) && !is_continuity_ref(reference)
-            || !valid_fetch_full_ref(reference)
-            || object_id.len() != object_id_length
-            || !object_id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            || !valid_fetch_full_ref(reference))
             || advertised
                 .insert(reference.to_owned(), object_id.to_ascii_lowercase())
                 .is_some()
@@ -1508,7 +1490,6 @@ fn verify_fetched_objects(repository: &Repository, plans: &[RefPlan]) -> Result<
 /// Resolves one repository-relative Git path for this worktree.
 fn git_path(repository: &Repository, name: &str) -> Result<PathBuf, FetchError> {
     let mut command = repository.observer_command();
-    scrub_git_routing_environment(&mut command);
     let output = command
         .args(["rev-parse", "--git-path", name])
         .output()
@@ -1650,7 +1631,6 @@ fn install_refs(repository: &Repository, plans: &[RefPlan]) -> Result<(), FetchE
         return Ok(());
     }
     let mut command = repository.command();
-    scrub_git_routing_environment(&mut command);
     command
         .args(["update-ref", "--no-deref", "--stdin"])
         .stdin(Stdio::piped())

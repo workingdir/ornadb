@@ -11,7 +11,6 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
-    process::Command,
     str::FromStr,
 };
 
@@ -19,9 +18,7 @@ use fs2::FileExt;
 use tempfile::TempDir;
 use uuid::{Uuid, Version};
 
-use crate::{
-    Repository, RepositoryError, format_context, scrub_git_routing_environment, valid_branch_name,
-};
+use crate::{Repository, RepositoryError, format_context, valid_branch_name};
 
 const FORMAT_DIRECTORY: &str = ".orna";
 const FORMAT_FILE: &str = "format.orna";
@@ -270,14 +267,13 @@ pub fn inspect_legacy_source_metadata(
 }
 
 fn initialize_git(target: &Path) -> Result<(), RepositoryInitError> {
-    let mut command = Command::new("git");
+    let mut command = crate::git_command();
     if let Some(initial_branch) = configured_initial_branch() {
         command
             .arg("-c")
             .arg(format!("init.defaultBranch={initial_branch}"));
     }
     command.arg("init").arg("--").arg(target);
-    scrub_git_routing_environment(&mut command);
     command.env("GIT_CONFIG_NOSYSTEM", "1").env(
         "GIT_CONFIG_GLOBAL",
         if cfg!(windows) { "NUL" } else { "/dev/null" },

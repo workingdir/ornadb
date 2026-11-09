@@ -18,18 +18,11 @@ pub(super) struct PrivateRefCleanupOwner {
 
 impl PrivateRefCleanupOwner {
     pub(super) fn git_command(&self) -> Command {
-        let mut command = Command::new("git");
+        let mut command = crate::git_command_in(self.repository.worktree());
         command
-            .current_dir(self.repository.worktree())
             .env("GIT_NO_LAZY_FETCH", "1")
             .env("GIT_NO_REPLACE_OBJECTS", "1")
-            .env("GIT_OPTIONAL_LOCKS", "0")
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_COMMON_DIR")
-            .env_remove("GIT_OBJECT_DIRECTORY")
-            .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES");
-        crate::bind_git_discovery_to_worktree(&mut command, self.repository.worktree());
+            .env("GIT_OPTIONAL_LOCKS", "0");
         command
     }
 

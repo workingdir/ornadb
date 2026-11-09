@@ -2923,14 +2923,9 @@ impl Repository {
         match records.as_slice() {
             [] => Ok(None),
             [record] => {
-                let header = record
-                    .split(|byte| *byte == b'\t')
-                    .next()
-                    .ok_or(RepositoryError::GitOperationFailed)?;
-                let oid = header
-                    .split(|byte| *byte == b' ')
-                    .nth(1)
-                    .ok_or(RepositoryError::GitOperationFailed)?;
+                let record =
+                    GitListRecord::parse(record).ok_or(RepositoryError::GitOperationFailed)?;
+                let oid = record.field(1).ok_or(RepositoryError::GitOperationFailed)?;
                 let oid =
                     std::str::from_utf8(oid).map_err(|_| RepositoryError::GitOperationFailed)?;
                 Ok(Some(self.git_bytes(["cat-file", "blob", oid])?))
@@ -2952,14 +2947,8 @@ impl Repository {
         else {
             return Ok(None);
         };
-        let header = record
-            .split(|byte| *byte == b'\t')
-            .next()
-            .ok_or(RepositoryError::GitOperationFailed)?;
-        let oid = header
-            .split(|byte| *byte == b' ')
-            .nth(2)
-            .ok_or(RepositoryError::GitOperationFailed)?;
+        let record = GitListRecord::parse(record).ok_or(RepositoryError::GitOperationFailed)?;
+        let oid = record.field(2).ok_or(RepositoryError::GitOperationFailed)?;
         let oid = std::str::from_utf8(oid).map_err(|_| RepositoryError::GitOperationFailed)?;
         Ok(Some(self.git_bytes(["cat-file", "blob", oid])?))
     }
@@ -3104,8 +3093,8 @@ impl Repository {
             .split(|byte| *byte == 0)
             .filter(|record| !record.is_empty())
             .filter_map(|record| {
-                let separator = record.iter().position(|byte| *byte == b'\t')?;
-                Some((&record[..separator], &record[separator + 1..]))
+                let record = GitListRecord::parse(record)?;
+                Some((record.header(), record.name()))
             })
             .any(|(metadata, named)| named == path.as_bytes() && !metadata.starts_with(b"040000 ")))
     }
@@ -3913,24 +3902,17 @@ impl Repository {
             .split(|byte| *byte == 0)
             .filter(|record| !record.is_empty())
         {
-            let tab = record
-                .iter()
-                .position(|byte| *byte == b'\t')
-                .ok_or(RepositoryError::GitOperationFailed)?;
-            let mut fields = record[..tab].split(|byte| *byte == b' ');
-            let mode = fields.next().unwrap_or_default();
-            let kind = fields.next().unwrap_or_default();
-            let object = fields.next().unwrap_or_default();
-            if mode != b"100644" || kind != b"blob" || fields.next().is_some() {
+            let record = GitTreeRecord::parse(record).ok_or(RepositoryError::GitOperationFailed)?;
+            if record.mode != b"100644" || record.kind != b"blob" {
                 return Err(RepositoryError::GitOperationFailed);
             }
-            let path = String::from_utf8(record[tab + 1..].to_vec())
+            let path = String::from_utf8(record.path.to_vec())
                 .map_err(|_| RepositoryError::UnsafeManagedPath)?;
             if !path.starts_with(".orna/store/") {
                 return Err(RepositoryError::UnsafeManagedPath);
             }
             ManagedPath::new(path.as_str())?;
-            let object = String::from_utf8(object.to_vec())
+            let object = String::from_utf8(record.object.to_vec())
                 .map_err(|_| RepositoryError::GitOperationFailed)?;
             if entries.insert(path, object).is_some() {
                 return Err(RepositoryError::GitOperationFailed);
@@ -7378,27 +7360,19 @@ impl Repository {
         if entries.next().is_some() {
             return Err(RepositoryError::GitOperationFailed);
         }
-        let tab = entry
-            .iter()
-            .position(|byte| *byte == b'\t')
-            .ok_or(RepositoryError::GitOperationFailed)?;
-        if &entry[tab + 1..] != path.as_path().as_os_str().as_encoded_bytes() {
+        let record = GitTreeRecord::parse(entry).ok_or(RepositoryError::GitOperationFailed)?;
+        if record.path != path.as_path().as_os_str().as_encoded_bytes() {
             return Err(RepositoryError::GitOperationFailed);
         }
-        let mut fields = entry[..tab].split(|byte| *byte == b' ');
-        let mode = fields.next().unwrap_or_default();
-        let kind = fields.next().unwrap_or_default();
-        let object = fields.next().unwrap_or_default();
-        if fields.next().is_some()
-            || mode != b"160000"
-            || kind != b"commit"
-            || object.len() != self.native_object_id_length()?
-            || !object.iter().all(u8::is_ascii_hexdigit)
+        if record.mode != b"160000"
+            || record.kind != b"commit"
+            || record.object.len() != self.native_object_id_length()?
+            || !record.object.iter().all(u8::is_ascii_hexdigit)
         {
             return Err(RepositoryError::GitOperationFailed);
         }
-        let object =
-            String::from_utf8(object.to_vec()).map_err(|_| RepositoryError::GitOperationFailed)?;
+        let object = String::from_utf8(record.object.to_vec())
+            .map_err(|_| RepositoryError::GitOperationFailed)?;
         GitCommitRef::from_verified_commit(object, self.native_object_id_length()?)
     }
 
@@ -7432,23 +7406,16 @@ impl Repository {
             .split(|byte| *byte == 0)
             .find(|entry| !entry.is_empty())
             .ok_or(RepositoryError::GitOperationFailed)?;
-        let tab = entry
-            .iter()
-            .position(|byte| *byte == b'\t')
-            .ok_or(RepositoryError::GitOperationFailed)?;
-        if &entry[tab + 1..] != path.as_path().as_os_str().as_encoded_bytes() {
+        let record = GitTreeRecord::parse(entry).ok_or(RepositoryError::GitOperationFailed)?;
+        if record.path != path.as_path().as_os_str().as_encoded_bytes() {
             return Err(RepositoryError::GitOperationFailed);
         }
-        let mut fields = entry[..tab].split(|byte| *byte == b' ');
-        let mode = fields.next().unwrap_or_default();
-        let kind = fields.next().unwrap_or_default();
-        let object = fields.next().unwrap_or_default();
-        if fields.next().is_some() || mode != b"100644" && mode != b"100755" || kind != b"blob" {
+        if record.mode != b"100644" && record.mode != b"100755" || record.kind != b"blob" {
             return Err(RepositoryError::GitOperationFailed);
         }
-        let object =
-            String::from_utf8(object.to_vec()).map_err(|_| RepositoryError::GitOperationFailed)?;
-        GitCommitRef::from_verified_commit(object.clone(), self.native_object_id_length()?)?;
+        let object = String::from_utf8(record.object.to_vec())
+            .map_err(|_| RepositoryError::GitOperationFailed)?;
+        require_native_object_id(&object, self.native_object_id_length()?)?;
 
         let mut size_command = self.command();
         size_command
@@ -8624,20 +8591,14 @@ impl Repository {
     }
 
     fn command(&self) -> Command {
-        let mut command = Command::new("git");
-        command.current_dir(&self.worktree);
-        scrub_git_routing_environment(&mut command);
-        bind_git_discovery_to_worktree(&mut command, &self.worktree);
-        command
+        git_command_in(&self.worktree)
     }
 
     /// Constructs a Git command for a passive observer.  This intentionally
     /// ignores inherited routing and object-store overrides so every query is
     /// bound to this repository's selected worktree.
     pub(crate) fn observer_command(&self) -> Command {
-        let mut command = self.command();
-        scrub_git_routing_environment(&mut command);
-        command
+        self.command()
     }
     fn git<const N: usize>(&self, args: [&str; N]) -> Result<String, RepositoryError> {
         Self::git_at(&self.worktree, args)
@@ -8764,31 +8725,20 @@ impl Repository {
         if entry.is_empty() {
             return Ok(None);
         }
-        let tab = entry
-            .iter()
-            .position(|byte| *byte == b'\t')
-            .ok_or(RepositoryError::GitOperationFailed)?;
-        let metadata = &entry[..tab];
-        let encoded_path = &entry[tab + 1..];
-        if encoded_path != path.as_path().as_os_str().as_encoded_bytes() {
+        let record = GitTreeRecord::parse(entry).ok_or(RepositoryError::GitOperationFailed)?;
+        if record.path != path.as_path().as_os_str().as_encoded_bytes() {
             return Err(RepositoryError::GitOperationFailed);
         }
-        let mut fields = metadata.split(|byte| *byte == b' ');
-        let mode = String::from_utf8(fields.next().unwrap_or_default().to_vec())
+        let mode = String::from_utf8(record.mode.to_vec())
             .map_err(|_| RepositoryError::GitOperationFailed)?;
-        let kind = fields.next().unwrap_or_default();
-        let object = String::from_utf8(fields.next().unwrap_or_default().to_vec())
+        let object = String::from_utf8(record.object.to_vec())
             .map_err(|_| RepositoryError::GitOperationFailed)?;
-        if kind == b"blob" {
-            if fields.next().is_some() {
-                return Err(RepositoryError::GitOperationFailed);
-            }
-            GitCommitRef::from_verified_commit(object.clone(), self.native_object_id_length()?)?;
-        } else if path.as_path() == Path::new(".orna/store") && kind == b"tree" && mode == "040000"
+        if record.kind == b"blob" {
+            require_native_object_id(&object, self.native_object_id_length()?)?;
+        } else if path.as_path() == Path::new(".orna/store")
+            && record.kind == b"tree"
+            && mode == "040000"
         {
-            if fields.next().is_some() {
-                return Err(RepositoryError::GitOperationFailed);
-            }
             IndexTreeRef::from_verified_tree(object.clone(), self.native_object_id_length()?)?;
         } else {
             return Err(RepositoryError::GitOperationFailed);
@@ -8872,23 +8822,18 @@ impl Repository {
             match (expected, records.as_slice()) {
                 (None, []) => {}
                 (Some((mode, object)), [record]) => {
-                    let tab = record
-                        .iter()
-                        .position(|byte| *byte == b'\t')
-                        .ok_or(RepositoryError::GitOperationFailed)?;
-                    let metadata = &record[..tab];
-                    let encoded_path = &record[tab + 1..];
-                    if encoded_path != path.as_path().as_os_str().as_encoded_bytes() {
+                    let record =
+                        GitListRecord::parse(record).ok_or(RepositoryError::GitOperationFailed)?;
+                    if record.name() != path.as_path().as_os_str().as_encoded_bytes() {
                         return Ok(false);
                     }
-                    let mut fields = metadata.split(|byte| *byte == b' ');
-                    let actual_mode = fields.next().unwrap_or_default();
-                    let actual_object = fields.next().unwrap_or_default();
-                    let stage = fields.next().unwrap_or_default();
+                    let actual_mode = record.field(0).unwrap_or_default();
+                    let actual_object = record.field(1).unwrap_or_default();
+                    let stage = record.field(2).unwrap_or_default();
                     if actual_mode != mode.as_bytes()
                         || actual_object != object.as_bytes()
                         || stage != b"0"
-                        || fields.next().is_some()
+                        || record.field(3).is_some()
                     {
                         return Ok(false);
                     }
@@ -8925,10 +8870,8 @@ impl Repository {
         directory: &Path,
         args: [&str; N],
     ) -> Result<String, RepositoryError> {
-        let mut command = Command::new("git");
-        command.current_dir(directory).args(args);
-        scrub_git_routing_environment(&mut command);
-        bind_git_discovery_to_worktree(&mut command, directory);
+        let mut command = git_command_in(directory);
+        command.args(args);
         let output = run_command(command)?;
         Ok(trim_output(&output.stdout))
     }
@@ -9312,7 +9255,6 @@ impl Repository {
         path: &ManagedPath,
     ) -> Result<Option<Vec<u8>>, RepositoryError> {
         let mut command = self.command();
-        scrub_git_routing_environment(&mut command);
         command
             .args(["ls-tree", "-z", "--full-tree", expected_head.as_str(), "--"])
             .arg(path.as_path());
@@ -9323,27 +9265,18 @@ impl Repository {
         if entry.is_empty() {
             return Ok(None);
         }
-        let tab = entry
-            .iter()
-            .position(|byte| *byte == b'\t')
-            .ok_or(RepositoryError::GitOperationFailed)?;
-        let metadata = &entry[..tab];
-        let encoded_path = &entry[tab + 1..];
-        if encoded_path != path.as_path().as_os_str().as_encoded_bytes() {
+        let record = GitTreeRecord::parse(entry).ok_or(RepositoryError::GitOperationFailed)?;
+        if record.path != path.as_path().as_os_str().as_encoded_bytes() {
             return Err(RepositoryError::GitOperationFailed);
         }
-        let mut fields = metadata.split(|byte| *byte == b' ');
-        let mode = fields.next().unwrap_or_default();
-        let kind = fields.next().unwrap_or_default();
-        let object = String::from_utf8(fields.next().unwrap_or_default().to_vec())
-            .map_err(|_| RepositoryError::GitOperationFailed)?;
-        if fields.next().is_some() || kind != b"blob" || !matches!(mode, b"100644" | b"100755") {
+        if record.kind != b"blob" || !matches!(record.mode, b"100644" | b"100755") {
             return Err(RepositoryError::ManagedContentConflict);
         }
-        GitCommitRef::from_verified_commit(object.clone(), self.native_object_id_length()?)?;
+        let object = String::from_utf8(record.object.to_vec())
+            .map_err(|_| RepositoryError::GitOperationFailed)?;
+        require_native_object_id(&object, self.native_object_id_length()?)?;
 
         let mut command = self.command();
-        scrub_git_routing_environment(&mut command);
         command.args(["cat-file", "blob", &object]);
         Ok(Some(self.run(command)?.stdout))
     }
@@ -9471,14 +9404,8 @@ impl Repository {
             .split(|byte| *byte == 0)
             .find(|entry| !entry.is_empty())
             .ok_or(RepositoryError::GitOperationFailed)?;
-        let header = entry
-            .split(|byte| *byte == b'\t')
-            .next()
-            .ok_or(RepositoryError::GitOperationFailed)?;
-        let mode = header
-            .split(|byte| *byte == b' ')
-            .next()
-            .ok_or(RepositoryError::GitOperationFailed)?;
+        let record = GitListRecord::parse(entry).ok_or(RepositoryError::GitOperationFailed)?;
+        let mode = record.field(0).ok_or(RepositoryError::GitOperationFailed)?;
         match mode {
             b"100644" => Ok("100644"),
             b"100755" => Ok("100755"),
@@ -9513,8 +9440,14 @@ impl Repository {
         Ok(())
     }
 
+    /// Resolves one Git path for this worktree. Git prints paths as bytes; one
+    /// that is not UTF-8 cannot be returned as a `PathBuf` here without
+    /// silently mangling it, so it is refused instead of lossily replaced.
     fn git_path(&self, name: &str) -> Result<PathBuf, RepositoryError> {
-        let path = PathBuf::from(self.git(["rev-parse", "--git-path", name])?);
+        let output = self.git_bytes(["rev-parse", "--git-path", name])?;
+        let value = std::str::from_utf8(output.trim_ascii_end())
+            .map_err(|_| RepositoryError::GitOperationFailed)?;
+        let path = PathBuf::from(value);
         Ok(if path.is_absolute() {
             path
         } else {
@@ -10661,6 +10594,76 @@ fn trim_output(bytes: &[u8]) -> String {
         .to_owned()
 }
 
+/// One record of a `-z` Git listing (`ls-tree` or `ls-files`): the
+/// space-separated header columns before the first tab, and the path Git
+/// printed after it. Records are NUL-separated, so a name may hold any byte
+/// but NUL; this parser never splits on anything else.
+pub(crate) struct GitListRecord<'a> {
+    fields: &'a [u8],
+    name: &'a [u8],
+}
+
+impl<'a> GitListRecord<'a> {
+    /// Splits one complete record; `None` when it carries no tab.
+    pub(crate) fn parse(record: &'a [u8]) -> Option<Self> {
+        let tab = record.iter().position(|byte| *byte == b'\t')?;
+        Some(Self {
+            fields: &record[..tab],
+            name: &record[tab + 1..],
+        })
+    }
+
+    /// The header columns before the tab, in Git's order.
+    pub(crate) fn fields(&self) -> impl Iterator<Item = &'a [u8]> {
+        self.fields.split(|byte| *byte == b' ')
+    }
+
+    /// The raw header bytes before the tab, for prefix checks.
+    pub(crate) fn header(&self) -> &'a [u8] {
+        self.fields
+    }
+
+    /// The `index`-th header column.
+    pub(crate) fn field(&self, index: usize) -> Option<&'a [u8]> {
+        self.fields().nth(index)
+    }
+
+    /// The path Git printed after the tab.
+    pub(crate) fn name(&self) -> &'a [u8] {
+        self.name
+    }
+}
+
+/// One `git ls-tree` record: the entry's mode, object kind and object id, and
+/// the path it is filed under. A record with another column count is
+/// malformed, so no caller re-checks the header shape.
+pub(crate) struct GitTreeRecord<'a> {
+    pub(crate) mode: &'a [u8],
+    pub(crate) kind: &'a [u8],
+    pub(crate) object: &'a [u8],
+    pub(crate) path: &'a [u8],
+}
+
+impl<'a> GitTreeRecord<'a> {
+    pub(crate) fn parse(record: &'a [u8]) -> Option<Self> {
+        let record = GitListRecord::parse(record)?;
+        let (Some(mode), Some(kind), Some(object), None) = (
+            record.field(0),
+            record.field(1),
+            record.field(2),
+            record.field(3),
+        ) else {
+            return None;
+        };
+        Some(Self {
+            mode,
+            kind,
+            object,
+            path: record.name(),
+        })
+    }
+}
+
 fn checkout_journal_optional_string(
     bytes: &[u8],
     cursor: &mut usize,
@@ -10841,6 +10844,35 @@ fn canonical_or_absolute(path: &std::path::Path) -> std::path::PathBuf {
         .unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// A Git command with every inherited routing variable removed, so the
+/// caller's environment cannot select another repository, worktree or index.
+pub(crate) fn git_command() -> Command {
+    let mut command = Command::new("git");
+    scrub_git_routing_environment(&mut command);
+    command
+}
+
+/// A Git command for work inside `directory`. Discovery stops above a
+/// repository root so a corrupt root cannot fall through to an enclosing
+/// repository, while a plain subdirectory of a worktree still discovers the
+/// enclosing repository it belongs to.
+pub(crate) fn git_command_in(directory: &std::path::Path) -> Command {
+    let mut command = git_command();
+    command.current_dir(directory);
+    bind_git_discovery_to_worktree(&mut command, directory);
+    command
+}
+
+/// A Git command for a directory that must itself be a repository root:
+/// discovery stops at its parent unconditionally, so a directory that is not a
+/// root can never reach an enclosing repository's refs or objects.
+pub(crate) fn git_command_at_root(directory: &std::path::Path) -> Command {
+    let mut command = git_command();
+    command.current_dir(directory);
+    bind_git_ceiling_above(&mut command, directory);
+    command
+}
+
 /// Prevent inherited Git routing from selecting a repository, worktree, or
 /// index other than the explicitly supplied command directory.
 pub(crate) fn scrub_git_routing_environment(command: &mut Command) {
@@ -10950,25 +10982,38 @@ fn valid_orna_internal_ref(reference: &str) -> bool {
         && !reference.ends_with('@')
 }
 
+/// Splits a successful `git ls-remote` listing into its `(object id, ref
+/// name)` records. The listing must end in a newline, and every record must
+/// carry one tab and `object_id_length` hexadecimal object-id digits. Whether
+/// a ref name is expected or well formed stays with each caller, because the
+/// advertisements differ in exactly that rule.
+fn remote_ref_records(output: &str, object_id_length: usize) -> Option<Vec<(&str, &str)>> {
+    if output.is_empty() {
+        return Some(Vec::new());
+    }
+    output
+        .strip_suffix('\n')?
+        .split('\n')
+        .map(|record| {
+            let (object_id, reference) = record.split_once('\t')?;
+            (object_id.len() == object_id_length
+                && object_id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .then_some((object_id, reference))
+        })
+        .collect()
+}
+
 fn parse_remote_orna_refs(
     output: &str,
     object_id_length: usize,
     expected: &std::collections::BTreeMap<&str, &str>,
 ) -> Result<std::collections::BTreeMap<String, String>, RepositoryError> {
-    if output.is_empty() {
-        return Ok(std::collections::BTreeMap::new());
-    }
-    let Some(records) = output.strip_suffix('\n') else {
+    let Some(records) = remote_ref_records(output, object_id_length) else {
         return Err(RepositoryError::GitOperationFailed);
     };
     let mut refs = std::collections::BTreeMap::new();
-    for record in records.split('\n') {
-        let Some((object_id, reference)) = record.split_once('\t') else {
-            return Err(RepositoryError::GitOperationFailed);
-        };
-        if object_id.len() != object_id_length
-            || !object_id.bytes().all(|byte| byte.is_ascii_hexdigit())
-            || !valid_orna_internal_ref(reference)
+    for (object_id, reference) in records {
+        if !valid_orna_internal_ref(reference)
             || !expected.contains_key(reference)
             || refs
                 .insert(reference.to_owned(), object_id.to_ascii_lowercase())
@@ -10984,23 +11029,15 @@ fn parse_committed_tree_entry(
     raw_entry: &[u8],
     object_id_length: usize,
 ) -> Result<CommittedTreeEntry, RepositoryError> {
-    let tab = raw_entry
-        .iter()
-        .position(|byte| *byte == b'\t')
-        .ok_or(RepositoryError::GitOperationFailed)?;
-    let mut fields = raw_entry[..tab].split(|byte| *byte == b' ');
-    let mode = fields.next().unwrap_or_default();
-    let object_kind = fields.next().unwrap_or_default();
-    let object = fields.next().unwrap_or_default();
-    if fields.next().is_some()
-        || object_kind != b"blob" && object_kind != b"commit"
+    let record = GitTreeRecord::parse(raw_entry).ok_or(RepositoryError::GitOperationFailed)?;
+    let (mode, object_kind, object) = (record.mode, record.kind, record.object);
+    if object_kind != b"blob" && object_kind != b"commit"
         || object.len() != object_id_length
         || !object.iter().all(u8::is_ascii_hexdigit)
     {
         return Err(RepositoryError::GitOperationFailed);
     }
-    let path = std::str::from_utf8(&raw_entry[tab + 1..])
-        .map_err(|_| RepositoryError::GitOperationFailed)?;
+    let path = std::str::from_utf8(record.path).map_err(|_| RepositoryError::GitOperationFailed)?;
     let path = ManagedPath::new(path)?;
     let kind = match (mode, object_kind) {
         (b"100644", b"blob") => CommittedTreeEntryKind::File { executable: false },
@@ -11014,6 +11051,21 @@ fn parse_committed_tree_entry(
 
 fn valid_native_object_id(object_id: &str) -> bool {
     matches!(object_id.len(), 40 | 64) && object_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// Checks that one committed listing wrote `object_id` as a Git object id:
+/// exactly `object_id_length` hexadecimal digits. Object ids are opaque bytes,
+/// so nothing about the kind of object they name is claimed here.
+fn require_native_object_id(
+    object_id: &str,
+    object_id_length: usize,
+) -> Result<(), RepositoryError> {
+    if object_id.len() == object_id_length && object_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        Ok(())
+    } else {
+        Err(RepositoryError::InvalidObjectId)
+    }
 }
 
 fn valid_branch_name(name: &str) -> bool {

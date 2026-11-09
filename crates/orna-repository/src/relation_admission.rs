@@ -1695,10 +1695,9 @@ impl Repository {
         ]);
         let listed = self.run(command)?.stdout;
         Ok(listed.split(|byte| *byte == 0).any(|entry| {
-            entry
-                .rsplit(|byte| *byte == b'\t')
-                .next()
-                .is_some_and(|path| path == LEGACY_OBJECT_IDENTITY_SIDECAR_PATH.as_bytes())
+            crate::GitListRecord::parse(entry).is_some_and(|record| {
+                record.name() == LEGACY_OBJECT_IDENTITY_SIDECAR_PATH.as_bytes()
+            })
         }))
     }
 

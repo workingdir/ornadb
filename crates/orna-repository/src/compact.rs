@@ -3145,26 +3145,13 @@ impl Repository {
             .split(|byte| *byte == 0)
             .filter(|record| !record.is_empty())
         {
-            let Some(separator) = record.iter().position(|byte| *byte == b'\t') else {
-                return Err(RepositoryError::InvalidCompactManifest);
-            };
-            let fields = &record[..separator];
-            let mut fields = fields.split(|byte| *byte == b' ');
-            let mode = fields
-                .next()
+            let record = crate::GitTreeRecord::parse(record)
                 .ok_or(RepositoryError::InvalidCompactManifest)?;
-            let kind = fields.next();
-            let object = fields.next();
-            if kind != Some(b"blob")
-                || object.is_none()
-                || fields.next().is_some()
-                || !matches!(mode, b"100644" | b"100755")
-            {
+            if record.kind != b"blob" || !matches!(record.mode, b"100644" | b"100755") {
                 return Err(RepositoryError::InvalidCompactManifest);
             }
-            let path = &record[separator + 1..];
-            let path =
-                std::str::from_utf8(path).map_err(|_| RepositoryError::InvalidCompactManifest)?;
+            let path = std::str::from_utf8(record.path)
+                .map_err(|_| RepositoryError::InvalidCompactManifest)?;
             let Some((table_name, entry)) = path
                 .strip_prefix(".orna/storage/")
                 .and_then(|path| path.split_once('/'))
@@ -3502,24 +3489,12 @@ impl Repository {
             .split(|byte| *byte == 0)
             .filter(|record| !record.is_empty())
         {
-            let Some(separator) = record.iter().position(|byte| *byte == b'\t') else {
-                return Err(RepositoryError::InvalidCompactManifest);
-            };
-            let fields = &record[..separator];
-            let mut fields = fields.split(|byte| *byte == b' ');
-            let mode = fields
-                .next()
+            let record = crate::GitTreeRecord::parse(record)
                 .ok_or(RepositoryError::InvalidCompactManifest)?;
-            let kind = fields.next();
-            let object = fields.next();
-            if kind != Some(b"blob")
-                || object.is_none()
-                || fields.next().is_some()
-                || !matches!(mode, b"100644" | b"100755")
-            {
+            if record.kind != b"blob" || !matches!(record.mode, b"100644" | b"100755") {
                 return Err(RepositoryError::InvalidCompactManifest);
             }
-            let path = std::str::from_utf8(&record[separator + 1..])
+            let path = std::str::from_utf8(record.path)
                 .map_err(|_| RepositoryError::InvalidCompactManifest)?;
             let Some((table_name, entry)) = path
                 .strip_prefix(".orna/storage/")
@@ -4069,24 +4044,15 @@ fn parse_tree_entry(
     if entry.is_empty() {
         return Ok(None);
     }
-    let tab = entry
-        .iter()
-        .position(|byte| *byte == b'\t')
-        .ok_or(RepositoryError::GitOperationFailed)?;
-    if &entry[tab + 1..] != path.as_path().as_os_str().as_encoded_bytes() {
+    let record = crate::GitTreeRecord::parse(entry).ok_or(RepositoryError::GitOperationFailed)?;
+    if record.path != path.as_path().as_os_str().as_encoded_bytes() {
         return Err(RepositoryError::GitOperationFailed);
     }
-    let mut fields = entry[..tab].split(|byte| *byte == b' ');
-    let mode = String::from_utf8(fields.next().unwrap_or_default().to_vec())
+    let mode =
+        String::from_utf8(record.mode.to_vec()).map_err(|_| RepositoryError::GitOperationFailed)?;
+    let object = String::from_utf8(record.object.to_vec())
         .map_err(|_| RepositoryError::GitOperationFailed)?;
-    let kind = fields.next().unwrap_or_default();
-    let object = String::from_utf8(fields.next().unwrap_or_default().to_vec())
-        .map_err(|_| RepositoryError::GitOperationFailed)?;
-    if kind != b"blob"
-        || fields.next().is_some()
-        || object.len() != object_id_length
-        || !is_hex(&object)
-    {
+    if record.kind != b"blob" || object.len() != object_id_length || !is_hex(&object) {
         return Err(RepositoryError::GitOperationFailed);
     }
     Ok(Some((mode, object)))
