@@ -332,8 +332,19 @@ impl ApplicationAuthority {
                         if functions.contains_key(&key) {
                             return Err(StandardCatalogueError::DuplicateDeclaration);
                         }
-                        if let Some(intrinsic) = orna_intrinsics::Module::from_path(&namespace)
-                            .and_then(|module| orna_intrinsics::lookup(module, &signature.name))
+                        let lookup_name =
+                            if let Some(submodule) = namespace.strip_prefix("std.time.") {
+                                format!("{submodule}.{}", signature.name)
+                            } else {
+                                signature.name.clone()
+                            };
+                        let module = orna_intrinsics::Module::from_path(&namespace).or_else(|| {
+                            namespace
+                                .starts_with("std.time.duration.")
+                                .then_some(orna_intrinsics::Module::Time)
+                        });
+                        if let Some(intrinsic) =
+                            module.and_then(|module| orna_intrinsics::lookup(module, &lookup_name))
                         {
                             if intrinsic.dispatch != orna_intrinsics::Dispatch::SourceOnly
                                 && intrinsic.pins.contains(orna_intrinsics::CURRENT_STD_PIN)
