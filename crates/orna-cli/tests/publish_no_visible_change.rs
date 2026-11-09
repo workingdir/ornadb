@@ -90,7 +90,7 @@ async fn commit_capture(
     format_context: &orna_value::Format3Context,
     key_override: Option<&[u8]>,
 ) {
-    use orna_project::{ProjectLoader, admit_source_row_with_owner_fields};
+    use orna_project::{ProjectLoader, SourceRowRequest, admit_source_row};
 
     let loader = ProjectLoader::default();
     let project = loader
@@ -117,16 +117,16 @@ async fn commit_capture(
     )
     .unwrap();
     let blob_binding = bindings.accept_captured_blob_for_row(&value).unwrap();
-    let admitted = admit_source_row_with_owner_fields(
+    let admitted = admit_source_row(
         &project,
-        &logical_path,
-        row_source,
         &schema,
         format_context,
-        vec![("payload".to_owned(), blob_binding)],
-        vec![],
-        &[],
-        [ordinal + 3; 16],
+        SourceRowRequest::new(
+            &logical_path,
+            row_source,
+            vec![("payload".to_owned(), blob_binding)],
+            [ordinal + 3; 16],
+        ),
     )
     .expect("admit a complete source-owned row");
     let (source_mutation, source_bindings, resolved_schema) = admitted.into_mutation_and_bindings();
@@ -185,7 +185,7 @@ async fn commit_capture(
             [ordinal + 4; 32],
             TerminalOutcome::new(vec![ordinal + 5]).unwrap(),
             &NoFault,
-            orna_runtime::EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
+            orna_evaluator::EffectGate::admit_unbound_for_test(),
         )
         .await
         .unwrap();

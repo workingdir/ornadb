@@ -165,10 +165,9 @@ pub(crate) async fn request_status_tx(
             params![identity.session_id.to_vec(), identity.request_id.to_vec()],
         )
         .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        ?;
     rows.next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
+        .await?
         .map(|row| decode_request_status(&row))
         .transpose()
 }
@@ -228,13 +227,8 @@ async fn request_admission_exists_tx(
              WHERE session_id = ?1 AND request_id = ?2",
             params![identity.session_id.to_vec(), identity.request_id.to_vec()],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    Ok(rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-        .is_some())
+        .await?;
+    Ok(rows.next().await?.is_some())
 }
 
 pub(crate) fn validate_request_identity(value: RequestIdentity) -> Result<(), RuntimeError> {
@@ -289,15 +283,12 @@ impl RuntimeState {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         self.require_recovery_barrier_clear(&tx).await?;
         ensure_session_admission_open(&tx, identity.session_id).await?;
         if let Some(status) = request_status_tx(&tx, identity).await? {
             require_fingerprint(&status, fingerprint)?;
-            tx.commit()
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            tx.commit().await?;
             return Ok((status, None));
         }
         let admission = if issue_capability {
@@ -326,7 +317,7 @@ impl RuntimeState {
             ],
         )
         .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        ?;
         if let (Some(capability), Some(owner), Some(generation)) = (&capability, owner, generation)
         {
             tx.execute(
@@ -344,12 +335,9 @@ impl RuntimeState {
                     generation,
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         }
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        tx.commit().await?;
         Ok((
             RequestStatus {
                 identity,
@@ -364,9 +352,9 @@ impl RuntimeState {
     /// Starts a legacy request without durable ownership.
     ///
     /// This compatibility path is only valid before a writer lease exists;
-    /// live writers must use [`Self::start_request_with_owner`]. A legacy
-    /// Running row that already exists before lease acquisition remains
-    /// recoverable through [`Self::recover_legacy_running_request`].
+    /// live writers must use [`Self::start_request_with_owner_and_admission`].
+    /// A legacy Running row that already exists before lease acquisition
+    /// remains recoverable through [`Self::recover_legacy_running_request`].
     pub async fn start_request(
         &self,
         identity: RequestIdentity,
@@ -380,38 +368,6 @@ impl RuntimeState {
             None,
         )
         .await
-    }
-
-    /// Rejects owner-only promotion of a Reserved row. Reserved requests must
-    /// use the capability-bound start path so persisted reservations cannot be
-    /// promoted without authenticated admission evidence.
-    pub async fn start_request_with_owner(
-        &self,
-        identity: RequestIdentity,
-        fingerprint: [u8; 32],
-        owner: WriterLease,
-    ) -> Result<RequestStatus, RuntimeError> {
-        validate_request_identity(identity)?;
-        validate_id(owner.owner_id)?;
-        if owner.epoch == 0 {
-            return Err(RuntimeError::InvalidIdentity);
-        }
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        self.require_owner(&tx, owner).await?;
-        let current = request_status_tx(&tx, identity)
-            .await?
-            .ok_or(RuntimeError::RequestUnknown)?;
-        require_fingerprint(&current, fingerprint)?;
-        if current.state != RequestState::Reserved {
-            return Err(RuntimeError::RequestStateConflict);
-        }
-        // This owner-only compatibility entry point has no capability to
-        // authenticate. Reserved rows must use the capability-bound path.
-        Err(RuntimeError::RequestStateConflict)
     }
 
     /// Starts a newly admitted request with the exact capability issued by
@@ -430,8 +386,7 @@ impl RuntimeState {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         self.require_owner(&tx, owner).await?;
         let current = request_status_tx(&tx, identity)
             .await?
@@ -451,13 +406,8 @@ impl RuntimeState {
                  WHERE session_id = ?1 AND request_id = ?2",
                 params![identity.session_id.to_vec(), identity.request_id.to_vec()],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let Some(row) = admissions
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        else {
+            .await?;
+        let Some(row) = admissions.next().await? else {
             return Err(RuntimeError::RequestStateConflict);
         };
         let admitted_fingerprint = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
@@ -499,8 +449,7 @@ impl RuntimeState {
                     RequestState::Reserved.code(),
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         if changed != 1 {
             return Err(RuntimeError::RequestStateConflict);
         }
@@ -520,15 +469,12 @@ impl RuntimeState {
                     generation,
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         if consumed != 1 {
             return Err(RuntimeError::RequestStateConflict);
         }
         sync_run_request_state_tx(&tx, identity, RunObservationStatus::Running).await?;
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        tx.commit().await?;
         Ok(RequestStatus {
             identity,
             fingerprint,
@@ -741,14 +687,9 @@ impl RuntimeState {
                  ORDER BY session_id, request_id",
                 params![RequestState::Running.code()],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let mut requests = Vec::new();
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        {
+        while let Some(row) = rows.next().await? {
             let status = decode_request_status(&row).map_err(|_| RuntimeError::RecoveryInvalid)?;
             let evidence = decode_request_execution_evidence(&row, 5)?;
             validate_request_execution_evidence(&status, evidence)?;
@@ -783,14 +724,9 @@ impl RuntimeState {
                     RequestState::Running.code(),
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let mut requests = Vec::new();
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        {
+        while let Some(row) = rows.next().await? {
             let status = decode_request_status(&row).map_err(|_| RuntimeError::RecoveryInvalid)?;
             let evidence = decode_request_execution_evidence(&row, 5)?;
             validate_request_execution_evidence(&status, evidence)?;
@@ -831,8 +767,7 @@ impl RuntimeState {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         self.require_recovery_barrier_clear(&tx).await?;
         let current = request_status_tx(&tx, identity)
             .await?
@@ -848,11 +783,9 @@ impl RuntimeState {
             if evidence.owner.is_some()
                 || tx
                     .query("SELECT 1 FROM writer_lease WHERE singleton = 1", ())
-                    .await
-                    .map_err(|_| RuntimeError::StorageUnavailable)?
+                    .await?
                     .next()
-                    .await
-                    .map_err(|_| RuntimeError::StorageUnavailable)?
+                    .await?
                     .is_some()
             {
                 return Err(RuntimeError::RequestOwnerConflict);
@@ -867,11 +800,9 @@ impl RuntimeState {
         if next == RequestState::Running
             && tx
                 .query("SELECT 1 FROM writer_lease WHERE singleton = 1", ())
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?
+                .await?
                 .next()
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?
+                .await?
                 .is_some()
         {
             return Err(RuntimeError::RequestOwnerConflict);
@@ -896,8 +827,7 @@ impl RuntimeState {
                     current.state.code()
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         if changed != 1 {
             return Err(RuntimeError::RecoveryInvalid);
         }
@@ -909,9 +839,7 @@ impl RuntimeState {
             RequestState::Reserved => return Err(RuntimeError::RecoveryInvalid),
         };
         sync_run_request_state_tx(&tx, identity, observation_status).await?;
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        tx.commit().await?;
         Ok(RequestStatus {
             identity,
             fingerprint,
@@ -970,8 +898,7 @@ impl RuntimeState {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         self.require_owner(&tx, owner).await?;
         let current = request_status_tx(&tx, identity)
             .await?
@@ -1010,8 +937,7 @@ impl RuntimeState {
                     i64::try_from(owner.epoch).map_err(|_| RuntimeError::RecoveryInvalid)?,
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .await?
         } else {
             tx.execute(
                 "UPDATE request_ledger
@@ -1033,8 +959,7 @@ impl RuntimeState {
                     RequestState::Reserved.code(),
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .await?
         };
         if changed != 1 {
             return Err(RuntimeError::RequestOwnerConflict);
@@ -1049,9 +974,7 @@ impl RuntimeState {
         if require_observation && observed != 1 {
             return Err(RuntimeError::RecoveryInvalid);
         }
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        tx.commit().await?;
         Ok(RequestStatus {
             identity,
             fingerprint,
@@ -1072,13 +995,8 @@ impl RuntimeState {
                  FROM request_admission",
                 (),
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        {
+            .await?;
+        while let Some(row) = rows.next().await? {
             let identity = RequestIdentity {
                 session_id: fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
                 request_id: fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?,

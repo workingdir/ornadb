@@ -1,9 +1,8 @@
 use orna_sys::{
     DisjunctStormBranchDescription, DisjunctStormCascadeDescription,
-    DisjunctStormLimitRebindDescription, ExplainError, ExpressionRef, ObjectRef,
+    DisjunctStormLimitRebindDescription, ExplainError, ExplainInputs, ExpressionRef, ObjectRef,
     PlanByteCapHandoffRoute, PlanByteCapScopeSegment, PlanDetail, PlanNodeKind,
-    QueryPlanDescription, QuerySourceStatistics, SnapshotRef,
-    explain_query_with_disjunct_storm_branch_limit_chains,
+    QueryPlanDescription, QuerySourceStatistics, SnapshotRef, explain_query_with,
 };
 
 const FIXTURE: &str = include_str!("fixtures/planner_storm_limit_chain_rebinds.orna");
@@ -101,35 +100,38 @@ fn branch_rebinds_run_after_their_limit_and_feed_the_remaining_chain() {
     // ORNA-PLAN leaves rebind placement inside a branch-local limit chain
     // unspecified. Each explicit rebind sees that branch's current rows, and
     // its cascade output becomes the next limit's input.
-    let explained = explain_query_with_disjunct_storm_branch_limit_chains(
+    let explained = explain_query_with(
         &query(Some(100), Some(4096)),
-        &[storm(
-            "expr:outer-storm",
-            vec![
-                branch(
-                    &[20, 6],
-                    1,
-                    vec![
-                        rebind(
-                            1,
-                            vec![storm(
-                                "expr:first-limit-rebind",
-                                vec![branch(&[5], 1, vec![])],
-                            )],
-                        ),
-                        rebind(
-                            2,
-                            vec![storm(
-                                "expr:second-limit-rebind",
-                                vec![branch(&[2], 1, vec![])],
-                            )],
-                        ),
-                    ],
-                ),
-                branch(&[8], 1, vec![]),
-            ],
-        )],
-        &[],
+        ExplainInputs {
+            additional_limits: &[],
+            disjunct_storm_cascades: Some(&[storm(
+                "expr:outer-storm",
+                vec![
+                    branch(
+                        &[20, 6],
+                        1,
+                        vec![
+                            rebind(
+                                1,
+                                vec![storm(
+                                    "expr:first-limit-rebind",
+                                    vec![branch(&[5], 1, vec![])],
+                                )],
+                            ),
+                            rebind(
+                                2,
+                                vec![storm(
+                                    "expr:second-limit-rebind",
+                                    vec![branch(&[2], 1, vec![])],
+                                )],
+                            ),
+                        ],
+                    ),
+                    branch(&[8], 1, vec![]),
+                ],
+            )]),
+            ..ExplainInputs::default()
+        },
     )
     .expect("branch-local rebinds compose with later limits and sibling branches");
 
@@ -160,17 +162,20 @@ fn rebind_overflow_is_preserved_and_positions_are_validated() {
         "expr:overflowing-rebind",
         (0..8).map(|_| branch(&[u64::MAX], 1, vec![])).collect(),
     );
-    let overflow = explain_query_with_disjunct_storm_branch_limit_chains(
+    let overflow = explain_query_with(
         &query(Some(u64::MAX / 4), Some(0)),
-        &[storm(
-            "expr:outer-storm",
-            vec![branch(
-                &[u64::MAX, 0],
-                1,
-                vec![rebind(1, vec![overflowing_child])],
-            )],
-        )],
-        &[],
+        ExplainInputs {
+            additional_limits: &[],
+            disjunct_storm_cascades: Some(&[storm(
+                "expr:outer-storm",
+                vec![branch(
+                    &[u64::MAX, 0],
+                    1,
+                    vec![rebind(1, vec![overflowing_child])],
+                )],
+            )]),
+            ..ExplainInputs::default()
+        },
     )
     .expect("rebind work overflow remains visible after the chain reaches zero");
     assert_eq!(overflow.root().estimated_rows(), Some(0));
@@ -194,36 +199,42 @@ fn rebind_overflow_is_preserved_and_positions_are_validated() {
         rebind(1, vec![]),
     ] {
         assert_eq!(
-            explain_query_with_disjunct_storm_branch_limit_chains(
+            explain_query_with(
                 &query(Some(10), Some(0)),
-                &[storm(
-                    "expr:invalid-rebind",
-                    vec![branch(&[4], 1, vec![invalid_rebind])],
-                )],
-                &[],
+                ExplainInputs {
+                    additional_limits: &[],
+                    disjunct_storm_cascades: Some(&[storm(
+                        "expr:invalid-rebind",
+                        vec![branch(&[4], 1, vec![invalid_rebind])],
+                    )]),
+                    ..ExplainInputs::default()
+                },
             ),
             Err(ExplainError::InvalidExpression)
         );
     }
 
     assert_eq!(
-        explain_query_with_disjunct_storm_branch_limit_chains(
+        explain_query_with(
             &query(Some(10), Some(0)),
-            &[storm(
-                "expr:unordered-rebinds",
-                vec![branch(
-                    &[4, 2],
-                    1,
-                    vec![
-                        rebind(2, vec![storm("expr:later", vec![branch(&[1], 1, vec![])])]),
-                        rebind(
-                            1,
-                            vec![storm("expr:earlier", vec![branch(&[1], 1, vec![])])]
-                        ),
-                    ],
-                )],
-            )],
-            &[],
+            ExplainInputs {
+                additional_limits: &[],
+                disjunct_storm_cascades: Some(&[storm(
+                    "expr:unordered-rebinds",
+                    vec![branch(
+                        &[4, 2],
+                        1,
+                        vec![
+                            rebind(2, vec![storm("expr:later", vec![branch(&[1], 1, vec![])])]),
+                            rebind(
+                                1,
+                                vec![storm("expr:earlier", vec![branch(&[1], 1, vec![])])]
+                            ),
+                        ],
+                    )],
+                )]),
+                ..ExplainInputs::default()
+            },
         ),
         Err(ExplainError::InvalidExpression)
     );
@@ -238,26 +249,29 @@ fn nested_rebind_cascades_stay_inside_each_branch_local_storm_cap() {
     // ORNA-PLAN does not define how nested cascade estimates interact with a
     // parent branch's local cap. Keep each rebind inside its immediate bounded
     // branch input, then combine sibling branches under their shared input cap.
-    let explained = explain_query_with_disjunct_storm_branch_limit_chains(
+    let explained = explain_query_with(
         &query(Some(100), Some(1_000)),
-        &[storm(
-            "expr:outer-cap-storm",
-            vec![
-                branch(
-                    &[4, 100],
-                    1,
-                    vec![rebind(
+        ExplainInputs {
+            additional_limits: &[],
+            disjunct_storm_cascades: Some(&[storm(
+                "expr:outer-cap-storm",
+                vec![
+                    branch(
+                        &[4, 100],
                         1,
-                        vec![storm(
-                            "expr:two-arm-rebind",
-                            vec![branch(&[20], 1, vec![]), branch(&[20], 1, vec![])],
+                        vec![rebind(
+                            1,
+                            vec![storm(
+                                "expr:two-arm-rebind",
+                                vec![branch(&[20], 1, vec![]), branch(&[20], 1, vec![])],
+                            )],
                         )],
-                    )],
-                ),
-                branch(&[12], 1, vec![]),
-            ],
-        )],
-        &[],
+                    ),
+                    branch(&[12], 1, vec![]),
+                ],
+            )]),
+            ..ExplainInputs::default()
+        },
     )
     .expect("nested rebind branches remain isolated by their parent caps");
 
@@ -330,13 +344,16 @@ fn nested_rebind_cascades_keep_caps_isolated_across_each_limit_chain() {
         (0..3).map(|_| branch(&[90], 1, vec![])).collect(),
     ));
 
-    let explained = explain_query_with_disjunct_storm_branch_limit_chains(
+    let explained = explain_query_with(
         &query(Some(100), Some(1_000)),
-        &[storm(
-            "expr:outer-storm",
-            vec![outer_branch, branch(&[20], 1, vec![])],
-        )],
-        &[],
+        ExplainInputs {
+            additional_limits: &[],
+            disjunct_storm_cascades: Some(&[storm(
+                "expr:outer-storm",
+                vec![outer_branch, branch(&[20], 1, vec![])],
+            )]),
+            ..ExplainInputs::default()
+        },
     )
     .expect("nested rebinds preserve every enclosing branch cap");
 
@@ -403,10 +420,13 @@ fn sequential_storms_rebind_from_the_previous_bounded_branch_cascade() {
             ],
         ),
     ];
-    let explained = explain_query_with_disjunct_storm_branch_limit_chains(
+    let explained = explain_query_with(
         &query(Some(100), Some(1_000)),
-        &stages,
-        &[],
+        ExplainInputs {
+            additional_limits: &[],
+            disjunct_storm_cascades: Some(&stages),
+            ..ExplainInputs::default()
+        },
     )
     .expect("later storm rebinds consume the preceding stage's bounded branches");
 
@@ -484,20 +504,23 @@ fn successive_rebind_storms_preserve_caps_through_nested_branch_limit_chains() {
             branch(&[8], 1, vec![]),
         ],
     );
-    let explained = explain_query_with_disjunct_storm_branch_limit_chains(
+    let explained = explain_query_with(
         &query(Some(100), Some(1_000)),
-        &[storm(
-            "expr:outer-stage",
-            vec![
-                branch(
-                    &[10, 100],
-                    1,
-                    vec![rebind(1, vec![first_rebind_stage, second_rebind_stage])],
-                ),
-                branch(&[20], 1, vec![]),
-            ],
-        )],
-        &[],
+        ExplainInputs {
+            additional_limits: &[],
+            disjunct_storm_cascades: Some(&[storm(
+                "expr:outer-stage",
+                vec![
+                    branch(
+                        &[10, 100],
+                        1,
+                        vec![rebind(1, vec![first_rebind_stage, second_rebind_stage])],
+                    ),
+                    branch(&[20], 1, vec![]),
+                ],
+            )]),
+            ..ExplainInputs::default()
+        },
     )
     .expect("each rebind storm consumes the preceding bounded branch result");
 
@@ -549,23 +572,26 @@ fn later_rebind_positions_consume_only_prior_bounded_branch_outputs() {
             branch(&[4], 1, vec![]),
         ],
     );
-    let explained = explain_query_with_disjunct_storm_branch_limit_chains(
+    let explained = explain_query_with(
         &query(Some(100), Some(1_000)),
-        &[storm(
-            "expr:positioned-rebind-outer",
-            vec![
-                branch(
-                    &[12, 40, 100],
-                    1,
-                    vec![
-                        rebind(1, vec![first_position_storm]),
-                        rebind(2, vec![second_position_storm]),
-                    ],
-                ),
-                branch(&[20], 1, vec![]),
-            ],
-        )],
-        &[],
+        ExplainInputs {
+            additional_limits: &[],
+            disjunct_storm_cascades: Some(&[storm(
+                "expr:positioned-rebind-outer",
+                vec![
+                    branch(
+                        &[12, 40, 100],
+                        1,
+                        vec![
+                            rebind(1, vec![first_position_storm]),
+                            rebind(2, vec![second_position_storm]),
+                        ],
+                    ),
+                    branch(&[20], 1, vec![]),
+                ],
+            )]),
+            ..ExplainInputs::default()
+        },
     )
     .expect("later rebind positions receive the preceding branch-local result");
 
@@ -664,10 +690,13 @@ fn sequential_rebind_caps_stay_stable_across_limit_positions_and_storm_stages() 
         "expr:third-cap-stage",
         vec![branch(&[3], 1, vec![]), branch(&[2], 1, vec![])],
     );
-    let explained = explain_query_with_disjunct_storm_branch_limit_chains(
+    let explained = explain_query_with(
         &query(Some(61), Some(257)),
-        &[first_stage, second_stage, third_stage],
-        &[],
+        ExplainInputs {
+            additional_limits: &[],
+            disjunct_storm_cascades: Some(&[first_stage, second_stage, third_stage]),
+            ..ExplainInputs::default()
+        },
     )
     .expect("each limit and rebind stage consumes its bounded predecessor");
 
@@ -776,10 +805,13 @@ fn known_byte_caps_stay_bounded_across_stages_when_row_estimates_are_unknown() {
         "expr:partial-third-stage",
         vec![branch(&[2], 1, vec![]), branch(&[1], 1, vec![])],
     );
-    let explained = explain_query_with_disjunct_storm_branch_limit_chains(
+    let explained = explain_query_with(
         &query(None, Some(1_000)),
-        &[first_stage, second_stage, third_stage],
-        &[],
+        ExplainInputs {
+            additional_limits: &[],
+            disjunct_storm_cascades: Some(&[first_stage, second_stage, third_stage]),
+            ..ExplainInputs::default()
+        },
     )
     .expect("known bytes remain capped even when row counts are unavailable");
 
@@ -900,10 +932,13 @@ fn known_byte_caps_survive_unknown_work_in_nested_rebind_storm_stages() {
         vec![branch(&[2], 1, vec![]), branch(&[1], 1, vec![])],
     );
 
-    let explained = explain_query_with_disjunct_storm_branch_limit_chains(
+    let explained = explain_query_with(
         &query(None, Some(1_000)),
-        &[first_stage, second_stage, third_stage],
-        &[],
+        ExplainInputs {
+            additional_limits: &[],
+            disjunct_storm_cascades: Some(&[first_stage, second_stage, third_stage]),
+            ..ExplainInputs::default()
+        },
     )
     .expect("unknown row work does not erase nested known byte caps");
     let mut stages = explained
@@ -1037,10 +1072,13 @@ fn byte_caps_stay_local_through_deep_unknown_rebind_chains() {
             ],
         ),
     ];
-    let explained = explain_query_with_disjunct_storm_branch_limit_chains(
+    let explained = explain_query_with(
         &query(None, Some(2_048)),
-        &stages,
-        &[],
+        ExplainInputs {
+            additional_limits: &[],
+            disjunct_storm_cascades: Some(&stages),
+            ..ExplainInputs::default()
+        },
     )
     .expect("nested rebinds use only their immediate known-byte branch cap");
     let mut filters = explained
@@ -1110,10 +1148,13 @@ fn nested_rebind_byte_cap_scope_exposes_deepest_unknown_cascade_level() {
     let deepest = wrap_rebind("expr:scope-deepest", level_two);
     let medium = wrap_rebind("expr:scope-medium", level_three);
     let stages = [deepest.clone(), medium, deepest];
-    let explained = explain_query_with_disjunct_storm_branch_limit_chains(
+    let explained = explain_query_with(
         &query(None, Some(2_048)),
-        &stages,
-        &[],
+        ExplainInputs {
+            additional_limits: &[],
+            disjunct_storm_cascades: Some(&stages),
+            ..ExplainInputs::default()
+        },
     )
     .expect("nested cap scope remains visible with unknown row estimates");
 
@@ -1191,10 +1232,13 @@ fn unknown_row_byte_caps_report_each_nested_rebind_scope() {
         vec![branch(&[100], 1, vec![rebind(1, vec![depth_two_rebind])])],
     );
 
-    let explained = explain_query_with_disjunct_storm_branch_limit_chains(
+    let explained = explain_query_with(
         &query(None, Some(2_048)),
-        &[first_stage, second_stage],
-        &[],
+        ExplainInputs {
+            additional_limits: &[],
+            disjunct_storm_cascades: Some(&[first_stage, second_stage]),
+            ..ExplainInputs::default()
+        },
     )
     .expect("known byte caps stay scoped while row estimates remain unknown");
     let mut filters = explained
@@ -1269,10 +1313,13 @@ fn unknown_row_byte_caps_report_rebind_handoffs_by_nested_depth() {
         ],
     );
 
-    let explained = explain_query_with_disjunct_storm_branch_limit_chains(
+    let explained = explain_query_with(
         &query(None, Some(2_048)),
-        &[first_stage, second_stage],
-        &[],
+        ExplainInputs {
+            additional_limits: &[],
+            disjunct_storm_cascades: Some(&[first_stage, second_stage]),
+            ..ExplainInputs::default()
+        },
     )
     .expect("unknown row counts retain byte-cap handoffs through limit rebinds");
     let mut filters = explained
@@ -1360,10 +1407,13 @@ fn unknown_row_byte_caps_report_scoped_handoff_routes_by_nested_depth() {
         ],
     );
 
-    let explained = explain_query_with_disjunct_storm_branch_limit_chains(
+    let explained = explain_query_with(
         &query(None, Some(2_048)),
-        &[first_stage, second_stage],
-        &[],
+        ExplainInputs {
+            additional_limits: &[],
+            disjunct_storm_cascades: Some(&[first_stage, second_stage]),
+            ..ExplainInputs::default()
+        },
     )
     .expect("byte estimates remain attached to each unknown-row rebind handoff");
     let mut filters = explained
@@ -1621,10 +1671,16 @@ fn typed_handoff_routes_preserve_nested_storm_steps_and_unknown_bytes() {
     );
     let mut outer_branch = branch(&[30], 1, vec![]);
     outer_branch.nested_storms.push(nested);
-    let explained = explain_query_with_disjunct_storm_branch_limit_chains(
+    let explained = explain_query_with(
         &query(None, None),
-        &[storm("expr:typed-route-unknown-outer", vec![outer_branch])],
-        &[],
+        ExplainInputs {
+            additional_limits: &[],
+            disjunct_storm_cascades: Some(&[storm(
+                "expr:typed-route-unknown-outer",
+                vec![outer_branch],
+            )]),
+            ..ExplainInputs::default()
+        },
     )
     .expect("unknown byte estimates remain explicit in typed routes");
 
@@ -1715,10 +1771,13 @@ fn typed_handoff_routes_preserve_prior_storm_stage_outputs() {
             )
         })
         .collect::<Vec<_>>();
-    let explained = explain_query_with_disjunct_storm_branch_limit_chains(
+    let explained = explain_query_with(
         &query(Some(256), Some(8_192)),
-        &stages,
-        &[],
+        ExplainInputs {
+            additional_limits: &[],
+            disjunct_storm_cascades: Some(&stages),
+            ..ExplainInputs::default()
+        },
     )
     .expect("three chained storm stages retain typed handoff ancestry");
     let mut filters = explained
@@ -1834,10 +1893,16 @@ fn typed_handoff_routes_preserve_nested_storm_outputs_across_rebinds() {
     );
     let mut outer_branch = branch(&[80], 1, vec![rebind(1, vec![prior_rebind])]);
     outer_branch.nested_storms = nested_storms;
-    let explained = explain_query_with_disjunct_storm_branch_limit_chains(
+    let explained = explain_query_with(
         &query(Some(256), Some(4_096)),
-        &[storm("expr:nested-output-ancestry", vec![outer_branch])],
-        &[],
+        ExplainInputs {
+            additional_limits: &[],
+            disjunct_storm_cascades: Some(&[storm(
+                "expr:nested-output-ancestry",
+                vec![outer_branch],
+            )]),
+            ..ExplainInputs::default()
+        },
     )
     .expect("nested storm handoffs retain each preceding bounded output");
     let filter = explained
@@ -1955,13 +2020,16 @@ fn typed_handoff_routes_keep_nested_ancestry_when_byte_estimates_are_unknown() {
     );
     let mut outer_branch = branch(&[80], 1, vec![rebind(1, vec![prior_rebind])]);
     outer_branch.nested_storms = nested_storms;
-    let explained = explain_query_with_disjunct_storm_branch_limit_chains(
+    let explained = explain_query_with(
         &query(None, None),
-        &[storm(
-            "expr:unknown-byte-output-ancestry",
-            vec![outer_branch],
-        )],
-        &[],
+        ExplainInputs {
+            additional_limits: &[],
+            disjunct_storm_cascades: Some(&[storm(
+                "expr:unknown-byte-output-ancestry",
+                vec![outer_branch],
+            )]),
+            ..ExplainInputs::default()
+        },
     )
     .expect("unknown byte estimates do not erase typed nested ancestry");
     let filter = explained
@@ -2048,13 +2116,16 @@ fn typed_handoff_routes_preserve_nested_outputs_with_unknown_rows() {
         ],
     );
     outer_branch.nested_storms = nested_storms;
-    let explained = explain_query_with_disjunct_storm_branch_limit_chains(
+    let explained = explain_query_with(
         &query(None, Some(4_096)),
-        &[storm(
-            "expr:unknown-row-output-ancestry",
-            vec![outer_branch],
-        )],
-        &[],
+        ExplainInputs {
+            additional_limits: &[],
+            disjunct_storm_cascades: Some(&[storm(
+                "expr:unknown-row-output-ancestry",
+                vec![outer_branch],
+            )]),
+            ..ExplainInputs::default()
+        },
     )
     .expect("unknown row estimates retain nested output ancestry and known byte caps");
     let filter = explained
@@ -2209,13 +2280,16 @@ fn typed_handoff_routes_preserve_nested_outputs_after_unknown_rebinds() {
         ],
     );
     outer_branch.nested_storms = nested_storms;
-    let explained = explain_query_with_disjunct_storm_branch_limit_chains(
+    let explained = explain_query_with(
         &query(None, None),
-        &[storm(
-            "expr:unknown-rebind-output-ancestry",
-            vec![outer_branch],
-        )],
-        &[],
+        ExplainInputs {
+            additional_limits: &[],
+            disjunct_storm_cascades: Some(&[storm(
+                "expr:unknown-rebind-output-ancestry",
+                vec![outer_branch],
+            )]),
+            ..ExplainInputs::default()
+        },
     )
     .expect("unknown rebind outputs preserve typed nested storm ancestry");
     let filter = explained
@@ -2386,13 +2460,16 @@ fn typed_handoff_routes_preserve_ancestry_through_unknown_nested_limit_chains() 
         ],
     );
     outer_branch.nested_storms = nested_storms;
-    let explained = explain_query_with_disjunct_storm_branch_limit_chains(
+    let explained = explain_query_with(
         &query(None, None),
-        &[storm(
-            "expr:unknown-chain-output-ancestry",
-            vec![outer_branch],
-        )],
-        &[],
+        ExplainInputs {
+            additional_limits: &[],
+            disjunct_storm_cascades: Some(&[storm(
+                "expr:unknown-chain-output-ancestry",
+                vec![outer_branch],
+            )]),
+            ..ExplainInputs::default()
+        },
     )
     .expect("unknown rebind outputs retain ancestry through nested limit chains");
     let filter = explained
@@ -2550,17 +2627,20 @@ fn overflowing_rebind_work_keeps_the_parent_branch_cap() {
         "expr:wide-rebind-storm",
         (0..8).map(|_| branch(&[u64::MAX], 1, vec![])).collect(),
     );
-    let explained = explain_query_with_disjunct_storm_branch_limit_chains(
+    let explained = explain_query_with(
         &query(Some(source_rows), Some(0)),
-        &[storm(
-            "expr:outer-cap-storm",
-            vec![branch(
-                &[u64::MAX, u64::MAX],
-                1,
-                vec![rebind(1, vec![overflowing_rebind])],
-            )],
-        )],
-        &[],
+        ExplainInputs {
+            additional_limits: &[],
+            disjunct_storm_cascades: Some(&[storm(
+                "expr:outer-cap-storm",
+                vec![branch(
+                    &[u64::MAX, u64::MAX],
+                    1,
+                    vec![rebind(1, vec![overflowing_rebind])],
+                )],
+            )]),
+            ..ExplainInputs::default()
+        },
     )
     .expect("the branch cap and nested work overflow are both retained");
 

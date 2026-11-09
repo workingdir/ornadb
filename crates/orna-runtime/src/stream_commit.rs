@@ -108,8 +108,7 @@ impl RuntimeState {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         self.require_owner(&tx, writer).await?;
         let current = capture_tx(&tx).await?;
         if &current != expected_capture {
@@ -145,9 +144,7 @@ impl RuntimeState {
             )
             .await?;
         }
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        tx.commit().await?;
         Ok((next, result))
     }
 
@@ -284,8 +281,7 @@ impl RuntimeState {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         self.require_owner(&tx, writer).await?;
         let current = capture_tx(&tx).await?;
         if &current != expected_capture {
@@ -317,9 +313,7 @@ impl RuntimeState {
         } else {
             append_mutations_tx(&tx, expected_capture, mutations, next_digest, faults).await?
         };
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        tx.commit().await?;
         Ok((next, result))
     }
 
@@ -451,8 +445,7 @@ impl RuntimeState {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         self.require_owner(&tx, writer).await?;
         let result = apply_stream_intent_tx(
             &tx,
@@ -467,9 +460,7 @@ impl RuntimeState {
         if matches!(result, CommitResult::ReplayFailed { .. }) {
             faults.check(FaultPoint::AfterReplayFailureRecord)?;
         }
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        tx.commit().await?;
         Ok(result)
     }
 
@@ -484,8 +475,7 @@ impl RuntimeState {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         self.require_owner(&tx, writer).await?;
         let Some(record) = load_stream_failure(&tx, &grant.failure).await? else {
             return Err(RuntimeError::OwnerLost);
@@ -510,8 +500,7 @@ impl RuntimeState {
                     i64::try_from(writer.epoch).map_err(|_| RuntimeError::RecoveryInvalid)?,
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         if deleted != 1 {
             return Err(RuntimeError::OwnerLost);
         }
@@ -527,8 +516,7 @@ impl RuntimeState {
                     encode_status(FailureStatus::Skipped),
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         if changed != 1 {
             return Err(RuntimeError::RecoveryInvalid);
         }
@@ -538,9 +526,7 @@ impl RuntimeState {
                 .ok_or(RuntimeError::RecoveryInvalid)?,
         };
         sync_stream_observation_tx(&tx, &result).await?;
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        tx.commit().await?;
         Ok(result)
     }
 
@@ -556,8 +542,7 @@ impl RuntimeState {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         self.require_owner(&tx, writer).await?;
         let Some(record) = load_stream_failure(&tx, &grant.failure).await? else {
             return Ok(Err(RejectReason::FailureMissing));
@@ -580,14 +565,11 @@ impl RuntimeState {
                     i64::try_from(writer.epoch).map_err(|_| RuntimeError::RecoveryInvalid)?,
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         if changed != 1 {
             return Ok(Err(RejectReason::LeaseAlreadyHeld));
         }
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        tx.commit().await?;
         Ok(Ok(()))
     }
 

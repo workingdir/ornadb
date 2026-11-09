@@ -27,6 +27,7 @@ use std::{
     task::{Poll, Waker},
 };
 
+use orna_evaluator::ActivationEffectReport;
 use orna_foundation::{
     CanonicalSnapshot, CanonicalValue, Diagnostic as FoundationDiagnostic, DiagnosticSeverity,
     OvbRaw, SafeText, Value,
@@ -36,12 +37,12 @@ use orna_protocol::{
     TargetKind, canonical_request_fingerprint,
 };
 use orna_runtime::{
-    ActivationEffectReport, Component, ConsumerIdentity, FaultInjector, RecoveryDisposition,
-    RequestIdentity, RequestOwner, RequestState as DurableRequestState,
-    RequestStatus as DurableRequestStatus, RunObservationRegistration, RuntimeActivationContext,
-    RuntimeError, RuntimeState, StagedTableActivation, TableActivationCandidateValidator,
-    TableActivationError, TableMutation, TerminalOutcome, ValidatedTableRequestActivationCommit,
-    WriterLease, admin_invocation_id, with_terminal_admin_effect,
+    Component, ConsumerIdentity, FaultInjector, RecoveryDisposition, RequestIdentity, RequestOwner,
+    RequestState as DurableRequestState, RequestStatus as DurableRequestStatus,
+    RunObservationRegistration, RuntimeActivationContext, RuntimeError, RuntimeState,
+    StagedTableActivation, TableActivationCandidateValidator, TableActivationError, TableMutation,
+    TerminalOutcome, ValidatedTableRequestActivationCommit, WriterLease, admin_invocation_id,
+    with_terminal_admin_effect,
 };
 use orna_security::{
     AttachOutcome, AttachmentId, BoundaryError, CredentialIssuer, OpaqueCredential, Origin,
@@ -708,6 +709,31 @@ impl Default for LiveApplicationWorkSupervisor {
     }
 }
 
+/// Witness that an application is first-party, so the host may honour its
+/// `ControlledOnly` transaction effect reports.
+///
+/// It has no public constructor. `mint` exists only under the
+/// `first-party-effect-trust` feature, which only the first-party application
+/// adapter enables, so a third-party `LiveApplication` that does not enable the
+/// feature cannot obtain one and always has its controlled reports downgraded.
+/// This is a compile-time capability, not a cryptographic proof: any crate in the
+/// same build that enables the feature (feature unification) can mint one.
+/// Residual tracked as ornadb-5il1.459.
+#[derive(Debug)]
+pub struct FirstPartyEffectTrust {
+    _private: (),
+}
+
+#[cfg(feature = "first-party-effect-trust")]
+impl FirstPartyEffectTrust {
+    /// Mints the first-party witness. Available only with the
+    /// `first-party-effect-trust` feature.
+    #[must_use]
+    pub const fn mint() -> Self {
+        Self { _private: () }
+    }
+}
+
 /// A staged, Orna-controlled table activation returned by a transactional
 /// remote Eval adapter. The host supplies the admitted CWD context and owns
 /// the writer-fenced commit; application code never commits a wire result
@@ -715,7 +741,7 @@ impl Default for LiveApplicationWorkSupervisor {
 pub struct LiveEvalTransaction {
     pub mutations: Vec<TableMutation>,
     pub next_digest: [u8; 32],
-    pub effects: ActivationEffectReport,
+    effects: ActivationEffectReport,
     pub faults: Arc<dyn FaultInjector>,
     request_identity: Option<RequestIdentity>,
     after_commit: Option<Box<dyn FnOnce() + Send>>,
@@ -764,11 +790,11 @@ impl LiveEvalTransaction {
     }
 
     /// Applies the host's trust decision to this transaction's effect report.
-    /// An untrusted application's controlled report is downgraded to
+    /// Without a first-party witness, a controlled report is downgraded to
     /// `ExternalPossible`, so its rollback cannot be recovered as proven.
     #[must_use]
-    pub fn with_effect_report_trust(mut self, trusted: bool) -> Self {
-        if !trusted {
+    fn apply_effect_report_trust(mut self, trust: Option<&FirstPartyEffectTrust>) -> Self {
+        if trust.is_none() {
             self.effects = ActivationEffectReport::ExternalPossible;
         }
         self
@@ -804,7 +830,7 @@ impl LiveEvalResponse {
     /// Applies the host's trust decision to a transactional response's effect
     /// report. Pure responses carry no effect report and pass through.
     #[must_use]
-    pub fn with_effect_report_trust(self, trusted: bool) -> Self {
+    fn apply_effect_report_trust(self, trust: Option<&FirstPartyEffectTrust>) -> Self {
         match self {
             Self::Pure(response) => Self::Pure(response),
             Self::Transaction {
@@ -812,7 +838,7 @@ impl LiveEvalResponse {
                 transaction,
             } => Self::Transaction {
                 response,
-                transaction: transaction.with_effect_report_trust(trusted),
+                transaction: transaction.apply_effect_report_trust(trust),
             },
         }
     }
@@ -1040,25 +1066,17 @@ pub trait LiveApplication {
         })
     }
 
-    /// Declares whether this application's transaction effect reports are
-    /// trusted. A `ControlledOnly` report yields the controlled marker that
-    /// lets recovery prove a rollback (REQUEST-1 step 5, ORNA-CAP-005;
-    /// ACCEPTANCE.md Gate D). The runtime cannot observe what an application
-    /// does, so the host honours a report only from an application that opts
-    /// in here. Any other report is downgraded to `ExternalPossible`, which
-    /// recovers as `ExternalEffectsUncertain` after an observed rollback.
-    /// The default is untrusted.
+    /// Returns the first-party witness that lets the host honour this
+    /// application's `ControlledOnly` transaction effect reports. Such a report
+    /// lets recovery prove a rollback (REQUEST-1 step 5, ORNA-CAP-005; ACCEPTANCE.md
+    /// Gate D). The runtime cannot observe what an application does, so the host
+    /// honours a controlled report only when this returns `Some`. Any other report
+    /// is downgraded to `ExternalPossible`, which recovers as
+    /// `ExternalEffectsUncertain` after an observed rollback. The default is `None`.
     ///
-    /// Returning `true` is an unchecked claim, not a verification: the host
-    /// cannot observe the application's effects, so an implementation that
-    /// returns `true` for an application that reaches external state defeats
-    /// the rollback downgrade. Only the first-party adapter, which is trusted
-    /// by construction, returns `true`, and only when no sys host is attached;
-    /// third-party implementations must keep the default.
-    /// Residual: the trust is a `bool`, not a gate-issued token
-    /// (ornadb-5il1.459 follow-up).
-    fn trusts_controlled_effect_reports(&self) -> bool {
-        false
+    /// The witness has no public constructor; see [`FirstPartyEffectTrust`].
+    fn first_party_effect_trust(&self) -> Option<FirstPartyEffectTrust> {
+        None
     }
 
     /// # Errors
@@ -1574,7 +1592,7 @@ impl LiveApplicationTicket {
         mut self,
         application: &mut impl LiveApplication,
     ) -> LiveApplicationCompletion {
-        let trusted = application.trusts_controlled_effect_reports();
+        let trust = application.first_party_effect_trust();
         let response = if self.invoke_callback {
             if matches!(&*self.message, Message::Eval { .. }) {
                 let session = self.session;
@@ -1631,7 +1649,7 @@ impl LiveApplicationTicket {
                 self.fingerprint,
             )))
         };
-        let response = response.map(|response| response.with_effect_report_trust(trusted));
+        let response = response.map(|response| response.apply_effect_report_trust(trust.as_ref()));
         self.work.complete();
         LiveApplicationCompletion {
             ticket: self,
@@ -2078,6 +2096,9 @@ impl LiveHost {
             ServingOrigin(request.id),
             &subscribe,
         ) {
+            // `revoke` rejects only a session the security layer no longer holds,
+            // and this one was created immediately above; it either closes now or
+            // is already gone, so the serving failure stays the reported cause.
             let _ = self.security.revoke(session_id(request.id));
             return Err(map_serving(error));
         }
@@ -2131,6 +2152,9 @@ impl LiveHost {
             .serving
             .reconnect(request.id, &request.credential.serving)
         {
+            // `revoke` rejects only a session the security layer no longer holds,
+            // and `validate_resume` plus `attach` proved this one exists; the
+            // serving failure stays the reported cause.
             let _ = self.security.revoke(session_id(request.id));
             self.attachments.retain(|_, session| *session != request.id);
             return Err(map_serving(error));
@@ -2331,9 +2355,7 @@ impl LiveHost {
             let lease = match self.writer_lease().await {
                 Ok(lease) => lease,
                 Err(error) => {
-                    if !retryable_failure {
-                        let _ = self.finish_failed_delete(request.id);
-                    }
+                    self.abandon_delete(request.id, retryable_failure);
                     return Err(error);
                 }
             };
@@ -2346,9 +2368,7 @@ impl LiveHost {
             {
                 Ok(()) => Some(lease),
                 Err(error) => {
-                    if !retryable_failure {
-                        let _ = self.finish_failed_delete(request.id);
-                    }
+                    self.abandon_delete(request.id, retryable_failure);
                     return Err(map_runtime(&error));
                 }
             }
@@ -2360,9 +2380,7 @@ impl LiveHost {
             // A failed join remains fail-closed. Do not invoke durable
             // deletion or manufacture success while child termination is
             // unproven.
-            if !retryable_failure {
-                let _ = self.finish_failed_delete(request.id);
-            }
+            self.abandon_delete(request.id, retryable_failure);
             return Err(Error::DeletionFailed);
         }
         if let Some(lease) = deletion_lease {
@@ -2373,9 +2391,7 @@ impl LiveHost {
                 .finish_session_deletion(request.id, lease)
                 .await;
             if let Err(error) = result {
-                if !retryable_failure {
-                    let _ = self.finish_failed_delete(request.id);
-                }
+                self.abandon_delete(request.id, retryable_failure);
                 return Err(map_runtime(&error));
             }
         }
@@ -2536,10 +2552,19 @@ impl LiveHost {
         Ok(())
     }
 
-    fn finish_failed_delete(&mut self, session: [u8; 16]) -> Result<()> {
-        self.serving
-            .credential_deleted(session, false)
-            .map_err(|_| Error::DeletionFailed)
+    /// Marks a failed, non-retryable deletion in the serving layer. A retryable
+    /// failure keeps the reservation for its retry, so it records nothing.
+    ///
+    /// `credential_deleted(session, false)` closes the session and then answers
+    /// `CredentialDeletionFailed`, which is the outcome the caller is already
+    /// returning; the only other rejection is an unknown session, which has no
+    /// serving state left to close. Neither can add information, so the caller's
+    /// own failure stays the one the client acts on.
+    fn abandon_delete(&mut self, session: [u8; 16], retryable_failure: bool) {
+        if retryable_failure {
+            return;
+        }
+        let _ = self.serving.credential_deleted(session, false);
     }
 
     fn finish_delete(&mut self, request: &DeleteRequest<'_>, deleted: bool) -> Result<()> {
@@ -3349,10 +3374,19 @@ impl LiveHost {
         {
             record.terminal = Some(mismatch.clone());
         } else {
-            let _ = self.serving.cancel_request(session, request);
-            self.requests.remove(&(session, request));
+            self.discard_request_record(session, request);
         }
         Ok(mismatch)
+    }
+
+    /// Drops the local record of a request the serving layer would not complete.
+    ///
+    /// `cancel_request` rejects only a terminal or unknown request, which is the
+    /// state that brought the caller here, so its answer says nothing the caller
+    /// does not already know; the local record is dropped either way.
+    fn discard_request_record(&mut self, session: [u8; 16], request: [u8; 16]) {
+        let _ = self.serving.cancel_request(session, request);
+        self.requests.remove(&(session, request));
     }
 
     /// Dispatches one inbound frame to completion in a single call: protocol
@@ -3387,6 +3421,9 @@ impl LiveHost {
             // Only the last local attachment may disconnect that state; an
             // obsolete socket must never disconnect its replacement.
             if !self.attachments.values().any(|owner| *owner == session) {
+                // `disconnect` rejects only a session the serving layer does not
+                // hold, which has no link state left to mark; the attachment
+                // failure stays the reported cause.
                 let _ = self.serving.disconnect(session);
             }
             return Err(map_boundary(error));
@@ -3452,6 +3489,13 @@ impl LiveHost {
                             }
                     )
                 {
+                    // A status or request-cancel answer can come from the local
+                    // record without entering durable admission below, so this
+                    // path completes the takeover barrier itself. The
+                    // prepare/complete split defers to admit_durable_request,
+                    // which recovers before any fresh durable request and is
+                    // the only path that can admit one; a locally replayed
+                    // terminal admits nothing, so it needs no barrier.
                     self.ensure_takeover_recovery().await?;
                 }
                 // Return a known local outcome before checking live handles:
@@ -3847,7 +3891,7 @@ impl LiveHost {
             .map(|dispatcher| dispatcher as &dyn LiveAdminEffectDispatcher);
         let session_id = session;
         let request_id = request;
-        let trusted = application.trusts_controlled_effect_reports();
+        let trust = application.first_party_effect_trust();
         let execute = move || async move {
             application
                 .dispatch_eval_with_effects(
@@ -3870,7 +3914,7 @@ impl LiveHost {
             _ => execute().await,
         };
         work.complete();
-        let result = result?.with_effect_report_trust(trusted);
+        let result = result?.apply_effect_report_trust(trust.as_ref());
         match result {
             LiveEvalResponse::Pure(response) => Ok(response),
             LiveEvalResponse::Transaction {
@@ -3918,7 +3962,7 @@ impl LiveHost {
             None
         };
         let mut work = self.application_work.admit(session, request)?;
-        let trusted = application.trusts_controlled_effect_reports();
+        let trust = application.first_party_effect_trust();
         let result = application
             .dispatch_event_with_work(
                 session,
@@ -3931,7 +3975,7 @@ impl LiveHost {
             )
             .await;
         work.complete();
-        match result?.with_effect_report_trust(trusted) {
+        match result?.apply_effect_report_trust(trust.as_ref()) {
             LiveEvalResponse::Pure(response) => Ok(response),
             LiveEvalResponse::Transaction {
                 response,
@@ -4841,8 +4885,7 @@ impl LiveHost {
             record.terminal = Some(outcome);
             return Ok(());
         }
-        let _ = self.serving.cancel_request(session, request);
-        self.requests.remove(&(session, request));
+        self.discard_request_record(session, request);
         Ok(())
     }
 
@@ -11307,7 +11350,7 @@ mod tests {
             let transaction = LiveEvalTransaction::new(
                 vec![mutation],
                 [24; 32],
-                orna_runtime::EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
+                orna_evaluator::EffectGate::admit_unbound_for_test(),
                 if fail {
                     Arc::new(FailBeforeTableWrite)
                 } else {
@@ -11463,7 +11506,7 @@ mod tests {
         let transaction = LiveEvalTransaction::new(
             vec![mutation],
             [24; 32],
-            orna_runtime::EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
+            orna_evaluator::EffectGate::admit_unbound_for_test(),
             Arc::new(NoFault),
         )
         .for_request(identity)
@@ -11562,7 +11605,7 @@ mod tests {
             let mut transaction = LiveEvalTransaction::new(
                 vec![mutation],
                 [24; 32],
-                orna_runtime::EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
+                orna_evaluator::EffectGate::admit_unbound_for_test(),
                 Arc::new(NoFault),
             );
             if let Some(supplied_identity) = supplied_identity {

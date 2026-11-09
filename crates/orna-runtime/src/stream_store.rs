@@ -262,13 +262,8 @@ async fn load_stream_provider_failure(
     let key_id = stream_key_id(key);
     let mut rows = connection
         .query(STREAM_PROVIDER_FAILURE_SELECT, params![key_id])
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    else {
+        .await?;
+    let Some(row) = rows.next().await? else {
         return Ok(None);
     };
     let checkpoint = load_stream_checkpoint(connection, key).await?;
@@ -433,8 +428,7 @@ pub(crate) async fn ensure_stream_checkpoint(
                 key.position_format.as_str().to_owned(),
             ],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     Ok(())
 }
 
@@ -470,14 +464,8 @@ pub(crate) async fn ensure_stream_position_format_compatible(
                 key.position_format.as_str().to_owned(),
             ],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    if rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-        .is_some()
-    {
+        .await?;
+    if rows.next().await?.is_some() {
         return Err(RuntimeError::StreamIdentityMismatch);
     }
     Ok(())
@@ -490,13 +478,8 @@ pub(crate) async fn load_stream_checkpoint_state(
     let key_id = stream_key_id(key);
     let mut rows = connection
         .query(STREAM_CHECKPOINT_SELECT, params![key_id])
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    else {
+        .await?;
+    let Some(row) = rows.next().await? else {
         return Ok((
             StreamCheckpoint {
                 key: key.clone(),
@@ -540,14 +523,9 @@ pub(crate) async fn load_stream_checkpoint_history(
             STREAM_CHECKPOINT_HISTORY_SELECT,
             params![stream_key_id(key)],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     let mut history = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    {
+    while let Some(row) = rows.next().await? {
         let version = decode_u64(
             row.get::<i64>(0)
                 .map_err(|_| RuntimeError::RecoveryInvalid)?,
@@ -619,8 +597,7 @@ pub(crate) async fn record_stream_checkpoint_watermark_tx(
                 transition_code,
             ],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     Ok(())
 }
 
@@ -633,13 +610,8 @@ pub(crate) async fn load_stream_status(
             "SELECT status FROM stream_control WHERE key_id = ?1",
             params![stream_key_id(key)],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    else {
+        .await?;
+    let Some(row) = rows.next().await? else {
         return Ok(StreamStatus::Running);
     };
     decode_stream_status(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)
@@ -656,8 +628,7 @@ pub(crate) async fn store_stream_status(
              ON CONFLICT(key_id) DO UPDATE SET status = excluded.status",
             params![stream_key_id(key), encode_stream_status(status)],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     Ok(())
 }
 
@@ -670,11 +641,9 @@ pub(crate) async fn load_stream_pause_reason(
             "SELECT reason FROM stream_pause_reason WHERE key_id = ?1",
             params![stream_key_id(key)],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     rows.next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
+        .await?
         .map(|row| row.get(0).map_err(|_| RuntimeError::RecoveryInvalid))
         .transpose()
 }
@@ -690,8 +659,7 @@ pub(crate) async fn store_stream_pause_reason(
              ON CONFLICT(key_id) DO UPDATE SET reason = excluded.reason",
             params![stream_key_id(key), reason],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     Ok(())
 }
 
@@ -704,13 +672,8 @@ pub(crate) async fn stream_pause_pending(
             "SELECT 1 FROM stream_pause_pending WHERE key_id = ?1",
             params![stream_key_id(key)],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    Ok(rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-        .is_some())
+        .await?;
+    Ok(rows.next().await?.is_some())
 }
 
 /// Completes a previously admitted pause once its sole delivery lease has
@@ -725,8 +688,7 @@ pub(crate) async fn publish_pending_stream_pause(
             "DELETE FROM stream_pause_pending WHERE key_id = ?1",
             params![stream_key_id(key)],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     if changed != 0 {
         store_stream_status(connection, key, StreamStatus::Paused).await?;
     }
@@ -748,13 +710,8 @@ pub(crate) async fn has_blocking_stream_failure(
                 encode_status(FailureStatus::Retrying),
             ],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    Ok(rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-        .is_some())
+        .await?;
+    Ok(rows.next().await?.is_some())
 }
 
 pub(crate) async fn has_ordered_blocking_stream_failure(
@@ -772,13 +729,8 @@ pub(crate) async fn has_ordered_blocking_stream_failure(
                 encode_status(FailureStatus::Retrying),
             ],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    Ok(rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-        .is_some())
+        .await?;
+    Ok(rows.next().await?.is_some())
 }
 
 /// Verifies the durable evidence needed to reopen abandoned stream attempts.
@@ -812,13 +764,8 @@ pub(crate) async fn validate_recoverable_stream_attempts(
                 encode_status(FailureStatus::Replaying),
             ],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    {
+        .await?;
+    while let Some(row) = rows.next().await? {
         let identity: String = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
         let key: String = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
         let delivery: String = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
@@ -863,14 +810,8 @@ pub(crate) async fn validate_recoverable_stream_attempts(
              LIMIT 1",
             params![encode_status(FailureStatus::Replaying)],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    if replay_claims
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-        .is_some()
-    {
+        .await?;
+    if replay_claims.next().await?.is_some() {
         return Err(RuntimeError::RecoveryInvalid);
     }
     Ok(())
@@ -894,13 +835,8 @@ pub(crate) async fn load_stream_failure_by_id(
 ) -> Result<Option<FailureRecord>, RuntimeError> {
     let mut rows = connection
         .query(STREAM_FAILURE_SELECT, params![identity_id.clone()])
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    else {
+        .await?;
+    let Some(row) = rows.next().await? else {
         return Ok(None);
     };
     let delivery = DeliveryIdentity {
@@ -957,13 +893,8 @@ async fn load_stream_failure_assertion_detail(
              FROM stream_failure_assertion_detail WHERE identity_id = ?1",
             params![stream_identity_id(identity)],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    else {
+        .await?;
+    let Some(row) = rows.next().await? else {
         return Ok(None);
     };
     if row_text(&row, 0)? != orna_stream::ORNA_A091_009 {
@@ -1056,8 +987,7 @@ pub(crate) async fn store_stream_failure_assertion_detail(
                     .map(|value| value.as_safe_presentation().as_str().to_owned()),
             ],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     Ok(())
 }
 
@@ -1071,13 +1001,8 @@ pub(crate) async fn load_stream_replay_claim(
              FROM stream_replay_claim WHERE identity_id = ?1",
             params![stream_identity_id(identity)],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    else {
+        .await?;
+    let Some(row) = rows.next().await? else {
         return Ok(None);
     };
     let version = decode_u64(
@@ -1191,13 +1116,8 @@ pub(crate) async fn load_stored_stream_failure_payload(
             STREAM_FAILURE_PAYLOAD_SELECT,
             params![stream_identity_id(identity)],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    else {
+        .await?;
+    let Some(row) = rows.next().await? else {
         return Ok(None);
     };
     StoredFailurePayload::from_columns(
@@ -1240,13 +1160,8 @@ pub(crate) async fn load_stream_lease(
              FROM stream_lease WHERE key_id = ?1",
             params![key_id],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    else {
+        .await?;
+    let Some(row) = rows.next().await? else {
         return Ok(None);
     };
     Ok(Some(StoredStreamLease {
@@ -1305,13 +1220,8 @@ impl RuntimeState {
         let mut rows = self
             .connection
             .query("SELECT COUNT(*) FROM stream_failure", ())
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let row = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-            .ok_or(RuntimeError::RecoveryInvalid)?;
+            .await?;
+        let row = rows.next().await?.ok_or(RuntimeError::RecoveryInvalid)?;
         decode_u64(
             row.get::<i64>(0)
                 .map_err(|_| RuntimeError::RecoveryInvalid)?,

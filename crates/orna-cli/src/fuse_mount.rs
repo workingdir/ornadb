@@ -23,7 +23,7 @@ use orna_conformance::transactional_loaded_project_candidate_validator;
 use orna_evaluator::Limits as EvaluatorLimits;
 use orna_project::{
     KeyComponentText, ObjectIdentityManifest, ObjectKind, ProjectLoader, ResolvedTableSchema,
-    StoredSchema, admit_source_row_with_owner_fields,
+    SourceRowRequest, StoredSchema, admit_source_row,
 };
 use orna_repository::schema_evolution::admit_row_under_descriptor;
 use orna_repository::{

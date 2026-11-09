@@ -1,0 +1,23 @@
+# Clippy size thresholds for the OrnaDB workspace.
+#
+# These thresholds are read by clippy for every crate; the lints themselves are
+# enabled by the workspace lint table in a later stage, because enabling
+# `too_many_lines` and `cognitive_complexity` over 491k lines in one step is not
+# reviewable. The budget ratchet in scripts/architecture-budget.toml counts the
+# suppression attributes that become live at that point.
+#
+# clippy.toml is a configuration file, not a lint gate: a threshold alone does
+# not fail a build. `python3 scripts/check_architecture.py --mode=budget`
+# enforces the same 120-line function limit without compiling.
+
+# clippy::pedantic, default 100.
+too-many-lines-threshold = 120
+
+# clippy::complexity, default 7; already live under `-D warnings`.
+too-many-arguments-threshold = 7
+
+# clippy::restriction, default 25; not part of pedantic.
+cognitive-complexity-threshold = 25
+
+# clippy::complexity, default 250; already live under `-D warnings`.
+type-complexity-threshold = 250

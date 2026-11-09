@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 
 use orna_sys::{
-    ExplainError, ExpressionRef, ObjectRef, PlanDetail, PlanNode, PlanNodeKind,
+    ExplainError, ExplainInputs, ExpressionRef, ObjectRef, PlanDetail, PlanNode, PlanNodeKind,
     QueryJoinDescription, QueryPartialIndexDescription, QueryPlanDescription,
-    QuerySourceStatistics, SnapshotRef, explain_query_with_partial_indexes,
+    QuerySourceStatistics, SnapshotRef, explain_query_with,
 };
 
 const FIXTURE: &str =
@@ -207,14 +207,17 @@ fn paired_index_and_predicate_identities_follow_sparse_cost_folds() {
     assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
     assert_eq!(parsed.value.items.len(), 2);
 
-    let explained = explain_query_with_partial_indexes(
+    let explained = explain_query_with(
         &query(sparse_joins([
             "table:Expensive",
             "table:Unknown",
             "table:Small",
             "table:Medium",
         ])),
-        &indexes(),
+        ExplainInputs {
+            partial_indexes: &indexes(),
+            ..ExplainInputs::default()
+        },
     )
     .expect("sparse cost cascade plans its matching partial indexes");
 
@@ -284,24 +287,30 @@ fn paired_index_and_predicate_identities_follow_sparse_cost_folds() {
 
 #[test]
 fn paired_pushdown_values_are_stable_when_declared_fold_order_changes() {
-    let first = explain_query_with_partial_indexes(
+    let first = explain_query_with(
         &query(sparse_joins([
             "table:Expensive",
             "table:Unknown",
             "table:Small",
             "table:Medium",
         ])),
-        &indexes(),
+        ExplainInputs {
+            partial_indexes: &indexes(),
+            ..ExplainInputs::default()
+        },
     )
     .expect("first declaration order plans");
-    let second = explain_query_with_partial_indexes(
+    let second = explain_query_with(
         &query(sparse_joins([
             "table:Medium",
             "table:Small",
             "table:Unknown",
             "table:Expensive",
         ])),
-        &indexes().into_iter().rev().collect::<Vec<_>>(),
+        ExplainInputs {
+            partial_indexes: &indexes().into_iter().rev().collect::<Vec<_>>(),
+            ..ExplainInputs::default()
+        },
     )
     .expect("reversed declaration and candidate order plans");
     let identities = |plan: &orna_sys::ExplainedPlan| {
@@ -343,21 +352,24 @@ fn paired_pushdown_values_are_stable_when_declared_fold_order_changes() {
 
 #[test]
 fn sparse_index_candidates_without_an_exact_table_predicate_pair_are_rejected_from_pushdown() {
-    let explained = explain_query_with_partial_indexes(
+    let explained = explain_query_with(
         &query(vec![join(
             "table:Facts",
             Some(12),
             Some(12_288),
             Some("expr:active-facts"),
         )]),
-        &[
-            index("table:Other", "index:other-active", "expr:active-facts"),
-            index(
-                "table:Facts",
-                "index:wrong-predicate",
-                "expr:inactive-facts",
-            ),
-        ],
+        ExplainInputs {
+            partial_indexes: &[
+                index("table:Other", "index:other-active", "expr:active-facts"),
+                index(
+                    "table:Facts",
+                    "index:wrong-predicate",
+                    "expr:inactive-facts",
+                ),
+            ],
+            ..ExplainInputs::default()
+        },
     )
     .expect("unmatched candidates leave a valid scan plan");
 
@@ -387,32 +399,38 @@ fn sparse_index_candidates_without_an_exact_table_predicate_pair_are_rejected_fr
 
 #[test]
 fn selected_pair_identity_changes_when_its_selected_index_changes() {
-    let old_selection = explain_query_with_partial_indexes(
+    let old_selection = explain_query_with(
         &query(vec![join(
             "table:Facts",
             Some(12),
             Some(12_288),
             Some("expr:active-facts"),
         )]),
-        &[index(
-            "table:Facts",
-            "index:facts-active-a",
-            "expr:active-facts",
-        )],
+        ExplainInputs {
+            partial_indexes: &[index(
+                "table:Facts",
+                "index:facts-active-a",
+                "expr:active-facts",
+            )],
+            ..ExplainInputs::default()
+        },
     )
     .expect("first exact index selection plans");
-    let new_selection = explain_query_with_partial_indexes(
+    let new_selection = explain_query_with(
         &query(vec![join(
             "table:Facts",
             Some(12),
             Some(12_288),
             Some("expr:active-facts"),
         )]),
-        &[index(
-            "table:Facts",
-            "index:facts-active-b",
-            "expr:active-facts",
-        )],
+        ExplainInputs {
+            partial_indexes: &[index(
+                "table:Facts",
+                "index:facts-active-b",
+                "expr:active-facts",
+            )],
+            ..ExplainInputs::default()
+        },
     )
     .expect("second exact index selection plans");
     let identity = |plan: &orna_sys::ExplainedPlan| {
@@ -440,11 +458,14 @@ fn selected_pair_identity_changes_when_its_selected_index_changes() {
 fn unknown_or_invalid_partial_predicates_do_not_gain_a_pair_identity() {
     let invalid_predicate = index("table:Facts", "index:bad", "\n");
     assert_eq!(
-        explain_query_with_partial_indexes(
+        explain_query_with(
             &query(vec![
                 join("table:Facts", Some(1), Some(1), Some("expr:ok"),)
             ]),
-            &[invalid_predicate],
+            ExplainInputs {
+                partial_indexes: &[invalid_predicate],
+                ..ExplainInputs::default()
+            },
         ),
         Err(ExplainError::InvalidExpression)
     );

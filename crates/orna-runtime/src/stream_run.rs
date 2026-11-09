@@ -303,8 +303,7 @@ impl RuntimeState {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         self.require_owner(&transaction, writer).await?;
         ensure_stream_checkpoint(&transaction, &expected.key).await?;
         let current = load_stream_checkpoint(&transaction, &expected.key).await?;
@@ -318,12 +317,10 @@ impl RuntimeState {
                  FROM stream_provider_failure WHERE key_id = ?1",
                 params![key_id.clone()],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let previous = rows
             .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .await?
             .map(|row| {
                 let version = decode_u64(
                     row.get::<i64>(0)
@@ -377,8 +374,7 @@ impl RuntimeState {
                     encode_class(diagnostic.class),
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         sync_stream_observation_event_tx(
             &transaction,
             &expected.key,
@@ -386,10 +382,7 @@ impl RuntimeState {
             Some(diagnostic),
         )
         .await?;
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction.commit().await?;
         Ok(StreamProviderFailure {
             checkpoint: expected.clone(),
             attempts,
@@ -405,20 +398,15 @@ impl RuntimeState {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         self.require_owner(&transaction, writer).await?;
         transaction
             .execute(
                 "DELETE FROM stream_provider_failure WHERE key_id = ?1",
                 params![stream_key_id(key)],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)
+            .await?;
+        transaction.commit().await.map_err(RuntimeError::from)
     }
 
     pub(crate) async fn fail_stream_delivery(
@@ -444,8 +432,7 @@ impl RuntimeState {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         self.require_owner(&transaction, writer).await?;
         let result = self
             .fail_stream_delivery_tx(
@@ -457,10 +444,7 @@ impl RuntimeState {
                 faults,
             )
             .await?;
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction.commit().await?;
         Ok(result)
     }
 
@@ -479,8 +463,7 @@ impl RuntimeState {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         self.require_owner(&transaction, writer).await?;
         let identity = FailureIdentity(delivery.clone());
         let Some(failure) = load_stream_failure(&transaction, &identity).await? else {
@@ -504,10 +487,7 @@ impl RuntimeState {
         let result = self
             .fail_stream_delivery_tx(&transaction, lease, diagnostic, None, payload, &NoFault)
             .await?;
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction.commit().await?;
         Ok(result)
     }
 
@@ -560,8 +540,7 @@ impl RuntimeState {
                         retention,
                     ],
                 )
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
+                .await?;
             faults.check(FaultPoint::AfterFailurePayload)?;
         }
         Ok(result)
@@ -710,8 +689,7 @@ impl RuntimeState {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         self.require_owner(&tx, writer).await?;
         let stream_key = stream_key_id(&lease.delivery.checkpoint_key());
         let mut leases = tx
@@ -720,13 +698,8 @@ impl RuntimeState {
                  FROM stream_lease WHERE key_id = ?1",
                 params![stream_key],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let Some(active_lease) = leases
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        else {
+            .await?;
+        let Some(active_lease) = leases.next().await? else {
             return Err(RuntimeError::RequestStateConflict);
         };
         let position: String = active_lease
@@ -756,16 +729,11 @@ impl RuntimeState {
                  FROM stream_provider_effect_receipt WHERE effect_identity = ?1",
                 params![identity],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let current_fence =
             i64::try_from(lease.fence).map_err(|_| RuntimeError::RecoveryInvalid)?;
         let effect_key = effect_key.as_bytes().to_vec();
-        let preparation = if let Some(row) = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        {
+        let preparation = if let Some(row) = rows.next().await? {
             let stored_digest: Vec<u8> = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
             let stored_key: Vec<u8> = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
             let stored_fence: i64 = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
@@ -782,9 +750,7 @@ impl RuntimeState {
                 {
                     return Err(RuntimeError::RecoveryInvalid);
                 }
-                tx.commit()
-                    .await
-                    .map_err(|_| RuntimeError::StorageUnavailable)?;
+                tx.commit().await?;
                 return Ok(ProviderEffectPreparation::Cached);
             } else if receipt.is_some() || !(1..=4).contains(&status) {
                 return Err(RuntimeError::RecoveryInvalid);
@@ -814,8 +780,7 @@ impl RuntimeState {
                      WHERE effect_identity = ?4",
                     params![current_fence, attempts_in_fence, total_attempts, identity],
                 )
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
+                .await?;
                 ProviderEffectPreparation::Started {
                     attempt: u32::try_from(attempts_in_fence)
                         .map_err(|_| RuntimeError::RecoveryInvalid)?,
@@ -829,13 +794,10 @@ impl RuntimeState {
                  VALUES (?1, ?2, ?3, ?4, 1, 1, 1, NULL)",
                 params![identity, request_digest.to_vec(), effect_key, current_fence],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
             ProviderEffectPreparation::Started { attempt: 1 }
         };
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        tx.commit().await?;
         Ok(preparation)
     }
 
@@ -851,8 +813,7 @@ impl RuntimeState {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         self.require_owner(&tx, writer).await?;
         let changed = tx
             .execute(
@@ -868,14 +829,11 @@ impl RuntimeState {
                     i64::try_from(lease.fence).map_err(|_| RuntimeError::RecoveryInvalid)?,
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         if changed != 1 {
             return Err(RuntimeError::RecoveryInvalid);
         }
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)
+        tx.commit().await.map_err(RuntimeError::from)
     }
 
     async fn fail_stream_provider_effect(
@@ -888,8 +846,7 @@ impl RuntimeState {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         self.require_owner(&tx, writer).await?;
         let changed = tx
             .execute(
@@ -902,14 +859,11 @@ impl RuntimeState {
                     i64::try_from(lease.fence).map_err(|_| RuntimeError::RecoveryInvalid)?,
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         if changed != 1 {
             return Err(RuntimeError::RecoveryInvalid);
         }
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)
+        tx.commit().await.map_err(RuntimeError::from)
     }
 
     /// Runs at most one provider delivery. Polling, handler execution and

@@ -1,7 +1,7 @@
 use orna_sys::{
-    DisjunctStormBranchDescription, DisjunctStormCascadeDescription, ExplainError, ExpressionRef,
-    ObjectRef, PlanDetail, PlanNodeKind, QueryPlanDescription, QuerySourceStatistics, SnapshotRef,
-    explain_query_with_disjunct_storm_branch_limit_chains,
+    DisjunctStormBranchDescription, DisjunctStormCascadeDescription, ExplainError, ExplainInputs,
+    ExpressionRef, ObjectRef, PlanDetail, PlanNodeKind, QueryPlanDescription,
+    QuerySourceStatistics, SnapshotRef, explain_query_with,
 };
 
 const FIXTURE: &str = include_str!("fixtures/planner_storm_nested_branch_cascades.orna");
@@ -58,53 +58,56 @@ fn nested_branch_storms_apply_local_chains_before_cascading_to_later_stages() {
     // The reference does not prescribe nested branch-cascade aggregation.
     // Apply each child cascade to its parent's filtered branch, then combine
     // sibling matches in declaration order, capped by their common input.
-    let explained = explain_query_with_disjunct_storm_branch_limit_chains(
+    let explained = explain_query_with(
         &query(Some(100), Some(0), Some(2)),
-        &[
-            storm(
-                "expr:outer-cascade",
-                vec![
-                    branch(
-                        &[40, 10],
-                        1,
-                        vec![storm(
-                            "expr:first-nested-cascade",
-                            vec![branch(&[6], 1, vec![]), branch(&[12, 4], 2, vec![])],
-                        )],
-                    ),
-                    branch(
-                        &[30],
-                        2,
-                        vec![storm(
-                            "expr:second-nested-cascade",
-                            vec![branch(&[10], 1, vec![]), branch(&[4, 2], 1, vec![])],
-                        )],
-                    ),
-                ],
-            ),
-            storm(
-                "expr:final-cascade",
-                vec![
-                    branch(
-                        &[5],
-                        1,
-                        vec![storm(
-                            "expr:third-nested-cascade",
-                            vec![branch(&[2], 1, vec![]), branch(&[1], 1, vec![])],
-                        )],
-                    ),
-                    branch(
-                        &[3, 2],
-                        2,
-                        vec![storm(
-                            "expr:fourth-nested-cascade",
-                            vec![branch(&[1], 1, vec![]), branch(&[1, 1], 2, vec![])],
-                        )],
-                    ),
-                ],
-            ),
-        ],
-        &[1, 0],
+        ExplainInputs {
+            additional_limits: &[1, 0],
+            disjunct_storm_cascades: Some(&[
+                storm(
+                    "expr:outer-cascade",
+                    vec![
+                        branch(
+                            &[40, 10],
+                            1,
+                            vec![storm(
+                                "expr:first-nested-cascade",
+                                vec![branch(&[6], 1, vec![]), branch(&[12, 4], 2, vec![])],
+                            )],
+                        ),
+                        branch(
+                            &[30],
+                            2,
+                            vec![storm(
+                                "expr:second-nested-cascade",
+                                vec![branch(&[10], 1, vec![]), branch(&[4, 2], 1, vec![])],
+                            )],
+                        ),
+                    ],
+                ),
+                storm(
+                    "expr:final-cascade",
+                    vec![
+                        branch(
+                            &[5],
+                            1,
+                            vec![storm(
+                                "expr:third-nested-cascade",
+                                vec![branch(&[2], 1, vec![]), branch(&[1], 1, vec![])],
+                            )],
+                        ),
+                        branch(
+                            &[3, 2],
+                            2,
+                            vec![storm(
+                                "expr:fourth-nested-cascade",
+                                vec![branch(&[1], 1, vec![]), branch(&[1, 1], 2, vec![])],
+                            )],
+                        ),
+                    ],
+                ),
+            ]),
+            ..ExplainInputs::default()
+        },
     )
     .expect("nested branch-local cascades compose through later storms");
 
@@ -153,19 +156,22 @@ fn nested_work_overflow_survives_later_limits_and_unknown_rows_remain_unknown() 
         "expr:overflowing-nested-cascade",
         (0..8).map(|_| branch(&[u64::MAX], 1, vec![])).collect(),
     );
-    let overflow = explain_query_with_disjunct_storm_branch_limit_chains(
+    let overflow = explain_query_with(
         &query(Some(u64::MAX / 4), Some(0), None),
-        &[
-            storm(
-                "expr:parent-cascade",
-                vec![branch(&[u64::MAX], 1, vec![inner])],
-            ),
-            storm(
-                "expr:zero-after-nested-overflow",
-                vec![branch(&[0], 1, vec![])],
-            ),
-        ],
-        &[0],
+        ExplainInputs {
+            additional_limits: &[0],
+            disjunct_storm_cascades: Some(&[
+                storm(
+                    "expr:parent-cascade",
+                    vec![branch(&[u64::MAX], 1, vec![inner])],
+                ),
+                storm(
+                    "expr:zero-after-nested-overflow",
+                    vec![branch(&[0], 1, vec![])],
+                ),
+            ]),
+            ..ExplainInputs::default()
+        },
     )
     .expect("nested overflow is retained through later zero limits");
     assert_eq!(overflow.root().estimated_rows(), Some(0));
@@ -177,20 +183,23 @@ fn nested_work_overflow_survives_later_limits_and_unknown_rows_remain_unknown() 
         node.details().get("estimated_work_overflow") == Some(&PlanDetail::Boolean(true))
     }));
 
-    let unknown = explain_query_with_disjunct_storm_branch_limit_chains(
+    let unknown = explain_query_with(
         &query(None, Some(4096), None),
-        &[storm(
-            "expr:unknown-parent",
-            vec![branch(
-                &[u64::MAX],
-                1,
-                vec![storm(
-                    "expr:unknown-child",
-                    vec![branch(&[0], 1, vec![]), branch(&[u64::MAX], 2, vec![])],
+        ExplainInputs {
+            additional_limits: &[],
+            disjunct_storm_cascades: Some(&[storm(
+                "expr:unknown-parent",
+                vec![branch(
+                    &[u64::MAX],
+                    1,
+                    vec![storm(
+                        "expr:unknown-child",
+                        vec![branch(&[0], 1, vec![]), branch(&[u64::MAX], 2, vec![])],
+                    )],
                 )],
-            )],
-        )],
-        &[],
+            )]),
+            ..ExplainInputs::default()
+        },
     )
     .expect("nested storms preserve unknown row counts");
     assert_eq!(unknown.root().estimated_rows(), None);
@@ -205,13 +214,16 @@ fn nested_work_overflow_survives_later_limits_and_unknown_rows_remain_unknown() 
 #[test]
 fn nested_storm_shapes_are_bounded_and_validated_recursively() {
     assert_eq!(
-        explain_query_with_disjunct_storm_branch_limit_chains(
+        explain_query_with(
             &query(Some(10), Some(0), None),
-            &[storm(
-                "expr:empty-nested-cascade",
-                vec![branch(&[5], 1, vec![storm("expr:empty-child", vec![])])],
-            )],
-            &[],
+            ExplainInputs {
+                additional_limits: &[],
+                disjunct_storm_cascades: Some(&[storm(
+                    "expr:empty-nested-cascade",
+                    vec![branch(&[5], 1, vec![storm("expr:empty-child", vec![])])],
+                )]),
+                ..ExplainInputs::default()
+            },
         ),
         Err(ExplainError::InvalidExpression)
     );
@@ -224,10 +236,13 @@ fn nested_storm_shapes_are_bounded_and_validated_recursively() {
         );
     }
     assert_eq!(
-        explain_query_with_disjunct_storm_branch_limit_chains(
+        explain_query_with(
             &query(Some(10), Some(0), None),
-            &[too_deep],
-            &[],
+            ExplainInputs {
+                additional_limits: &[],
+                disjunct_storm_cascades: Some(&[too_deep]),
+                ..ExplainInputs::default()
+            },
         ),
         Err(ExplainError::TooManyNodes)
     );

@@ -648,13 +648,8 @@ async fn stream_failure_code_requires_upgrade(
             "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'stream_failure'",
             (),
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    else {
+        .await?;
+    let Some(row) = rows.next().await? else {
         return Err(RuntimeError::RecoveryInvalid);
     };
     let sql: String = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
@@ -672,13 +667,8 @@ pub(crate) async fn load_stream_checkpoint_migration_origin(
              WHERE key_id = ?1",
             params![key_id],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    else {
+        .await?;
+    let Some(row) = rows.next().await? else {
         return Ok((0, None));
     };
     let version = decode_u64(
@@ -716,14 +706,9 @@ pub(crate) async fn migrate_admin_checkpoint_reset_receipts(
              ORDER BY sequence",
             (),
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     let mut receipts = Vec::new();
-    while let Some(row) = receipt_rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    {
+    while let Some(row) = receipt_rows.next().await? {
         receipts.push((
             row.get::<Vec<u8>>(0)
                 .map_err(|_| RuntimeError::RecoveryInvalid)?,
@@ -745,14 +730,9 @@ pub(crate) async fn migrate_admin_checkpoint_reset_receipts(
              FROM stream_checkpoint_reset_audit ORDER BY sequence",
             (),
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     let mut resets = Vec::new();
-    while let Some(row) = reset_rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    {
+    while let Some(row) = reset_rows.next().await? {
         resets.push((
             row.get::<String>(0)
                 .map_err(|_| RuntimeError::RecoveryInvalid)?,
@@ -851,8 +831,7 @@ pub(crate) async fn migrate_admin_checkpoint_reset_receipts(
                          (invocation_id, version, committed_position) VALUES (?1, ?2, ?3)",
                         params![invocation_id, reconciled_version, reconciled_position],
                     )
-                    .await
-                    .map_err(|_| RuntimeError::StorageUnavailable)?;
+                    .await?;
             }
         }
     }
@@ -867,21 +846,15 @@ pub(crate) async fn migrate_runtime_table_history(
 ) -> Result<(), RuntimeError> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     let mut history_metadata = transaction
         .query(
             "SELECT floor_generation, floor_digest
              FROM runtime_table_history_metadata WHERE singleton = 1",
             (),
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    if let Some(row) = history_metadata
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    {
+        .await?;
+    if let Some(row) = history_metadata.next().await? {
         let floor_generation = decode_u64(
             row.get::<i64>(0)
                 .map_err(|_| RuntimeError::RecoveryInvalid)?,
@@ -892,13 +865,11 @@ pub(crate) async fn migrate_runtime_table_history(
                 "SELECT generation FROM runtime_meta WHERE singleton = 1",
                 (),
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let current_generation = decode_u64(
             runtime_meta
                 .next()
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?
+                .await?
                 .ok_or(RuntimeError::RecoveryInvalid)?
                 .get::<i64>(0)
                 .map_err(|_| RuntimeError::RecoveryInvalid)?,
@@ -915,13 +886,11 @@ pub(crate) async fn migrate_runtime_table_history(
                             .map_err(|_| RuntimeError::RecoveryInvalid)?
                     ],
                 )
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
+                .await?;
             let checkpoint_digest: [u8; 32] = fixed(
                 checkpoint
                     .next()
-                    .await
-                    .map_err(|_| RuntimeError::StorageUnavailable)?
+                    .await?
                     .ok_or(RuntimeError::RecoveryInvalid)?
                     .get(0)
                     .map_err(|_| RuntimeError::RecoveryInvalid)?,
@@ -936,12 +905,10 @@ pub(crate) async fn migrate_runtime_table_history(
                 "SELECT generation, generation_digest FROM runtime_meta WHERE singleton = 1",
                 (),
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let row = runtime_meta
             .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .await?
             .ok_or(RuntimeError::RecoveryInvalid)?;
         let floor_generation = decode_u64(
             row.get::<i64>(0)
@@ -957,13 +924,11 @@ pub(crate) async fn migrate_runtime_table_history(
                             .map_err(|_| RuntimeError::RecoveryInvalid)?
                     ],
                 )
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
+                .await?;
             let checkpoint_digest: [u8; 32] = fixed(
                 checkpoint
                     .next()
-                    .await
-                    .map_err(|_| RuntimeError::StorageUnavailable)?
+                    .await?
                     .ok_or(RuntimeError::RecoveryInvalid)?
                     .get(0)
                     .map_err(|_| RuntimeError::RecoveryInvalid)?,
@@ -981,21 +946,15 @@ pub(crate) async fn migrate_runtime_table_history(
                     floor_digest.to_vec(),
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
 
         let mut current_rows = transaction
             .query(
                 "SELECT table_id, row_key, row_value, row_digest FROM table_row",
                 (),
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        while let Some(row) = current_rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        {
+            .await?;
+        while let Some(row) = current_rows.next().await? {
             let table: String = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
             let key: Vec<u8> = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
             let value: Vec<u8> = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
@@ -1010,14 +969,10 @@ pub(crate) async fn migrate_runtime_table_history(
                      VALUES (0, ?1, ?2, ?3, ?4, 0)",
                     params![table, key, value, digest.to_vec()],
                 )
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
+                .await?;
         }
     }
-    transaction
-        .commit()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)
+    transaction.commit().await.map_err(RuntimeError::from)
 }
 
 /// Adds generation cuts for append-only governance records. Older generic
@@ -1029,18 +984,12 @@ pub(crate) async fn migrate_historical_governance(
 ) -> Result<(), RuntimeError> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     let mut columns = BTreeMap::new();
     let mut rows = transaction
         .query("PRAGMA table_info(stream_checkpoint_reset_audit)", ())
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    {
+        .await?;
+    while let Some(row) = rows.next().await? {
         columns.insert(
             row.get::<String>(1)
                 .map_err(|_| RuntimeError::RecoveryInvalid)?,
@@ -1055,8 +1004,7 @@ pub(crate) async fn migrate_historical_governance(
                  CHECK (observed_generation >= -1)",
                 (),
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
     }
     transaction
         .execute(
@@ -1065,8 +1013,7 @@ pub(crate) async fn migrate_historical_governance(
              VALUES (0, 0, 0)",
             (),
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     // Prior versions did not persist exact audit sequence cuts beside a
     // checkpoint. For those generations, observations from strictly earlier
     // CWD generations are the conservative reconstructible prefix.
@@ -1086,20 +1033,15 @@ pub(crate) async fn migrate_historical_governance(
              FROM checkpoint WHERE checkpoint.generation > 0",
             (),
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     transaction
         .execute(
             "INSERT OR IGNORE INTO runtime_schema_migration (migration)
              VALUES ('historical-governance-boundary-v1')",
             (),
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    transaction
-        .commit()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)
+        .await?;
+    transaction.commit().await.map_err(RuntimeError::from)
 }
 
 pub(crate) async fn runtime_table_history_floor(
@@ -1111,13 +1053,8 @@ pub(crate) async fn runtime_table_history_floor(
              FROM runtime_table_history_metadata WHERE singleton = 1",
             (),
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    let row = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-        .ok_or(RuntimeError::RecoveryInvalid)?;
+        .await?;
+    let row = rows.next().await?.ok_or(RuntimeError::RecoveryInvalid)?;
     Ok((
         decode_u64(
             row.get::<i64>(0)
@@ -1132,13 +1069,8 @@ pub(crate) async fn migrate_publication_policy_schema(
 ) -> Result<(), RuntimeError> {
     let mut columns = connection
         .query("PRAGMA table_info(publication_metadata)", ())
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    while let Some(row) = columns
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    {
+        .await?;
+    while let Some(row) = columns.next().await? {
         let name: String = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
         if name == "compressed_target_bytes" {
             return Ok(());
@@ -1151,8 +1083,7 @@ pub(crate) async fn migrate_publication_policy_schema(
              CHECK (compressed_target_bytes BETWEEN 8388608 AND 33554432)",
             (),
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     Ok(())
 }
 
@@ -1161,18 +1092,12 @@ pub(crate) async fn migrate_compact_receipt_schema(
 ) -> Result<(), RuntimeError> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     let mut rows = transaction
         .query("PRAGMA table_info(runtime_meta)", ())
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     let mut runtime_meta_columns = BTreeMap::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    {
+    while let Some(row) = rows.next().await? {
         runtime_meta_columns.insert(
             row.get::<String>(1)
                 .map_err(|_| RuntimeError::RecoveryInvalid)?,
@@ -1190,22 +1115,14 @@ pub(crate) async fn migrate_compact_receipt_schema(
         ),
     ] {
         if !runtime_meta_columns.contains_key(column) {
-            transaction
-                .execute(statement, ())
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            transaction.execute(statement, ()).await?;
         }
     }
     let mut rows = transaction
         .query("PRAGMA table_info(publication_commit)", ())
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     let mut publication_columns = BTreeMap::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    {
+    while let Some(row) = rows.next().await? {
         publication_columns.insert(
             row.get::<String>(1)
                 .map_err(|_| RuntimeError::RecoveryInvalid)?,
@@ -1218,19 +1135,13 @@ pub(crate) async fn migrate_compact_receipt_schema(
                 "ALTER TABLE publication_commit ADD COLUMN compact_receipt BLOB",
                 (),
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
     }
     let mut rows = transaction
         .query("PRAGMA table_info(publication_freeze)", ())
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     let mut freeze_columns = BTreeMap::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    {
+    while let Some(row) = rows.next().await? {
         freeze_columns.insert(
             row.get::<String>(1)
                 .map_err(|_| RuntimeError::RecoveryInvalid)?,
@@ -1252,10 +1163,7 @@ pub(crate) async fn migrate_compact_receipt_schema(
         ),
     ] {
         if !freeze_columns.contains_key(column) {
-            transaction
-                .execute(statement, ())
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            transaction.execute(statement, ()).await?;
         }
     }
     transaction
@@ -1264,12 +1172,8 @@ pub(crate) async fn migrate_compact_receipt_schema(
              VALUES ('compact-runtime-receipt-v1')",
             (),
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    transaction
-        .commit()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)
+        .await?;
+    transaction.commit().await.map_err(RuntimeError::from)
 }
 
 pub(crate) async fn initialize_compact_receipt_key(
@@ -1277,21 +1181,15 @@ pub(crate) async fn initialize_compact_receipt_key(
 ) -> Result<(SigningKey, [u8; 32]), RuntimeError> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     let mut rows = transaction
         .query(
             "SELECT compact_receipt_seed, compact_receipt_public_key
              FROM runtime_meta WHERE singleton = 1",
             (),
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    let row = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-        .ok_or(RuntimeError::RecoveryInvalid)?;
+        .await?;
+    let row = rows.next().await?.ok_or(RuntimeError::RecoveryInvalid)?;
     let seed: Option<Vec<u8>> = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
     let public_key: Option<Vec<u8>> = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
     let (key, public_key) = match (seed, public_key) {
@@ -1317,8 +1215,7 @@ pub(crate) async fn initialize_compact_receipt_key(
                        AND compact_receipt_public_key IS NULL",
                     params![seed.to_vec(), public_key.to_vec()],
                 )
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
+                .await?;
             if changed != 1 {
                 return Err(RuntimeError::CompactReceiptKeyMismatch);
             }
@@ -1326,10 +1223,7 @@ pub(crate) async fn initialize_compact_receipt_key(
         }
         _ => return Err(RuntimeError::CompactReceiptKeyMismatch),
     };
-    transaction
-        .commit()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    transaction.commit().await?;
     Ok((key, public_key))
 }
 
@@ -1375,19 +1269,13 @@ pub(crate) async fn migrate_accepted_content_pin_checkpoint(
 ) -> Result<(), RuntimeError> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     let mut rows = transaction
         .query("PRAGMA table_info(accepted_content_pin)", ())
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     let mut has_descriptor_oid = false;
     let mut has_checkpoint_generation = false;
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    {
+    while let Some(row) = rows.next().await? {
         let column: String = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
         has_descriptor_oid |= column == "descriptor_oid_algorithm";
         has_checkpoint_generation |= column == "checkpoint_generation";
@@ -1400,13 +1288,8 @@ pub(crate) async fn migrate_accepted_content_pin_checkpoint(
              WHERE type = 'table' AND name = 'accepted_content_pin_legacy_unverified_v1'",
             (),
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    let archived_exists = archived_table
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-        .is_some();
+        .await?;
+    let archived_exists = archived_table.next().await?.is_some();
     drop(archived_table);
     if archived_exists {
         let mut archived_count = transaction
@@ -1414,12 +1297,10 @@ pub(crate) async fn migrate_accepted_content_pin_checkpoint(
                 "SELECT COUNT(*) FROM accepted_content_pin_legacy_unverified_v1",
                 (),
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let count = archived_count
             .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .await?
             .ok_or(RuntimeError::RecoveryInvalid)?
             .get::<i64>(0)
             .map_err(|_| RuntimeError::RecoveryInvalid)?;
@@ -1431,12 +1312,10 @@ pub(crate) async fn migrate_accepted_content_pin_checkpoint(
 
     let mut active_count_rows = transaction
         .query("SELECT COUNT(*) FROM accepted_content_pin", ())
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     let active_count = active_count_rows
         .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
+        .await?
         .ok_or(RuntimeError::RecoveryInvalid)?
         .get::<i64>(0)
         .map_err(|_| RuntimeError::RecoveryInvalid)?;
@@ -1448,8 +1327,7 @@ pub(crate) async fn migrate_accepted_content_pin_checkpoint(
         }
         transaction
             .execute("DROP TABLE accepted_content_pin", ())
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         transaction
             .execute(
                 "CREATE TABLE accepted_content_pin (
@@ -1473,7 +1351,7 @@ pub(crate) async fn migrate_accepted_content_pin_checkpoint(
                 (),
             )
             .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            ?;
     } else if !has_checkpoint_generation {
         if active_count != 0 {
             return Err(RuntimeError::RecoveryInvalid);
@@ -1485,20 +1363,17 @@ pub(crate) async fn migrate_accepted_content_pin_checkpoint(
                  REFERENCES checkpoint(generation)",
                 (),
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
     }
     let mut null_generation_rows = transaction
         .query(
             "SELECT COUNT(*) FROM accepted_content_pin WHERE checkpoint_generation IS NULL",
             (),
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     let null_generation_count = null_generation_rows
         .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
+        .await?
         .ok_or(RuntimeError::RecoveryInvalid)?
         .get::<i64>(0)
         .map_err(|_| RuntimeError::RecoveryInvalid)?;
@@ -1509,14 +1384,9 @@ pub(crate) async fn migrate_accepted_content_pin_checkpoint(
 
     let mut checkpoint_columns = transaction
         .query("PRAGMA table_info(checkpoint)", ())
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     let mut has_pin_manifest = false;
-    while let Some(row) = checkpoint_columns
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    {
+    while let Some(row) = checkpoint_columns.next().await? {
         let column: String = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
         has_pin_manifest |= column == "accepted_pin_manifest_digest";
     }
@@ -1533,8 +1403,7 @@ pub(crate) async fn migrate_accepted_content_pin_checkpoint(
                  CHECK (length(accepted_pin_manifest_digest) = 32)",
                 (),
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
     }
     transaction
         .execute(
@@ -1542,12 +1411,8 @@ pub(crate) async fn migrate_accepted_content_pin_checkpoint(
              VALUES ('accepted-content-pin-checkpoint-integrity-v2')",
             (),
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    transaction
-        .commit()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)
+        .await?;
+    transaction.commit().await.map_err(RuntimeError::from)
 }
 
 impl RuntimeState {
@@ -1561,19 +1426,14 @@ impl RuntimeState {
             "INSERT INTO runtime_meta (singleton, database_id, repository_id, runtime_id, generation, generation_digest)
              VALUES (1, ?1, ?2, ?3, 0, ?4) ON CONFLICT(singleton) DO NOTHING",
             params![identity.database_id.to_vec(), identity.repository_id.to_vec(), runtime_id.to_vec(), digest.to_vec()],
-        ).await.map_err(|_| RuntimeError::StorageUnavailable)?;
+        ).await?;
         let mut rows = connection
             .query(
                 "SELECT database_id, repository_id FROM runtime_meta WHERE singleton = 1",
                 (),
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let row = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-            .ok_or(RuntimeError::RecoveryInvalid)?;
+            .await?;
+        let row = rows.next().await?.ok_or(RuntimeError::RecoveryInvalid)?;
         let stored = RuntimeIdentity {
             database_id: fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
             repository_id: fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
@@ -1588,16 +1448,14 @@ impl RuntimeState {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let applied = transaction
             .execute(
                 "INSERT OR IGNORE INTO runtime_schema_migration (migration)
                  VALUES ('stream-failure-payload-v1')",
                 (),
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         if applied == 1 {
             transaction
                 .execute(
@@ -1609,13 +1467,9 @@ impl RuntimeState {
                      WHERE payload.identity_id IS NULL",
                     (),
                 )
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
+                .await?;
         }
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)
+        transaction.commit().await.map_err(RuntimeError::from)
     }
 
     /// Marks the additive assertion-detail relation as available. Existing
@@ -1630,8 +1484,7 @@ impl RuntimeState {
                  VALUES ('stream-failure-assertion-detail-v1')",
                 (),
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         Ok(())
     }
 
@@ -1643,8 +1496,7 @@ impl RuntimeState {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let checkpoint_partition_required =
             stream_partition_required(&transaction, "stream_checkpoint").await?;
         let failure_partition_required =
@@ -1701,20 +1553,17 @@ impl RuntimeState {
                     ALTER TABLE stream_checkpoint_nullable_partition RENAME TO stream_checkpoint;
                     ALTER TABLE stream_failure_nullable_partition RENAME TO stream_failure;",
                 )
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
+                .await?;
         }
         let mut empty_partitions = transaction
             .query(
                 "SELECT COUNT(*) FROM sys_stream_observation WHERE partition = ''",
                 (),
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let empty_partition_count = empty_partitions
             .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .await?
             .ok_or(RuntimeError::RecoveryInvalid)?
             .get::<i64>(0)
             .map_err(|_| RuntimeError::RecoveryInvalid)?;
@@ -1731,20 +1580,15 @@ impl RuntimeState {
                    ON sys_stream_observation (run_id, source_identity, partition)
                    WHERE partition IS NOT NULL;",
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         transaction
             .execute(
                 "INSERT OR IGNORE INTO runtime_schema_migration (migration)
                  VALUES ('nullable-stream-partition-v1')",
                 (),
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)
+            .await?;
+        transaction.commit().await.map_err(RuntimeError::from)
     }
 
     /// Admits the empty text key `""` (VFS-1 `~empty`). Earlier stores carry a
@@ -1756,8 +1600,7 @@ impl RuntimeState {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let mut legacy = transaction
             .query(
                 "SELECT COUNT(*) FROM sqlite_master
@@ -1766,12 +1609,10 @@ impl RuntimeState {
                    AND sql LIKE '%length(row_key) > 0%'",
                 (),
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let legacy_count = legacy
             .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .await?
             .ok_or(RuntimeError::RecoveryInvalid)?
             .get::<i64>(0)
             .map_err(|_| RuntimeError::RecoveryInvalid)?;
@@ -1812,21 +1653,16 @@ impl RuntimeState {
                     CREATE INDEX IF NOT EXISTS runtime_table_history_lookup
                         ON runtime_table_history (table_id, row_key, mutation_sequence);",
                 )
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
+                .await?;
             transaction
                 .execute(
                     "INSERT OR IGNORE INTO runtime_schema_migration (migration)
                      VALUES ('empty-row-key-v1')",
                     (),
                 )
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
+                .await?;
         }
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)
+        transaction.commit().await.map_err(RuntimeError::from)
     }
 
     /// Makes the admin audit's `observed_generation` nullable, so a failed
@@ -1837,18 +1673,12 @@ impl RuntimeState {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let mut columns = transaction
             .query("PRAGMA table_info(admin_invocation_audit)", ())
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let mut generation_required = None;
-        while let Some(column) = columns
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        {
+        while let Some(column) = columns.next().await? {
             let name: String = column.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
             if name == "observed_generation" {
                 let notnull: i64 = column.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?;
@@ -1885,7 +1715,7 @@ impl RuntimeState {
                         RENAME TO admin_invocation_checkpoint_result;",
                 )
                 .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
+                ?;
         }
         transaction
             .execute(
@@ -1893,12 +1723,8 @@ impl RuntimeState {
                  VALUES ('admin-failure-unobservable-v1')",
                 (),
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)
+            .await?;
+        transaction.commit().await.map_err(RuntimeError::from)
     }
 
     /// Upgrades the runtime catalogue kind domain to include committed module
@@ -1910,16 +1736,11 @@ impl RuntimeState {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let mut pragma = transaction
-            .query("PRAGMA foreign_keys", ())
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
+        let mut pragma = transaction.query("PRAGMA foreign_keys", ()).await?;
         let foreign_keys = pragma
             .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .await?
             .ok_or(RuntimeError::RecoveryInvalid)?
             .get::<i64>(0)
             .map_err(|_| RuntimeError::RecoveryInvalid)?;
@@ -1933,15 +1754,8 @@ impl RuntimeState {
                  WHERE type = 'table' AND name = 'runtime_catalogue_identity'",
                 (),
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let identity_sql: Option<String> = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-            .map(|row| row.get(0))
-            .transpose()
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
+        let identity_sql: Option<String> = rows.next().await?.map(|row| row.get(0)).transpose()?;
         drop(rows);
         if identity_sql.is_some_and(|sql| sql.contains("IN (1, 2, 3)")) {
             transaction
@@ -1950,12 +1764,8 @@ impl RuntimeState {
                      VALUES ('runtime-catalogue-identity-v2')",
                     (),
                 )
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
-            return transaction
-                .commit()
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable);
+                .await?;
+            return transaction.commit().await.map_err(RuntimeError::from);
         }
 
         Self::assert_catalogue_foreign_keys_tx(&transaction).await?;
@@ -2040,8 +1850,7 @@ impl RuntimeState {
                  ALTER TABLE runtime_catalogue_function_v2 RENAME TO runtime_catalogue_function;
                  ALTER TABLE runtime_catalogue_parameter_v2 RENAME TO runtime_catalogue_parameter;",
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         Self::assert_catalogue_foreign_keys_tx(&transaction).await?;
         transaction
             .execute(
@@ -2049,27 +1858,15 @@ impl RuntimeState {
                  VALUES ('runtime-catalogue-identity-v2')",
                 (),
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)
+            .await?;
+        transaction.commit().await.map_err(RuntimeError::from)
     }
 
     async fn assert_catalogue_foreign_keys_tx(
         transaction: &libsql::Transaction,
     ) -> Result<(), RuntimeError> {
-        let mut rows = transaction
-            .query("PRAGMA foreign_key_check", ())
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        if rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-            .is_some()
-        {
+        let mut rows = transaction.query("PRAGMA foreign_key_check", ()).await?;
+        if rows.next().await?.is_some() {
             return Err(RuntimeError::RecoveryInvalid);
         }
         Ok(())
@@ -2082,18 +1879,12 @@ impl RuntimeState {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let mut rows = transaction
             .query("PRAGMA table_info(sys_run_observation)", ())
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let mut columns = BTreeMap::new();
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        {
+        while let Some(row) = rows.next().await? {
             columns.insert(
                 row.get::<String>(1)
                     .map_err(|_| RuntimeError::RecoveryInvalid)?,
@@ -2107,16 +1898,14 @@ impl RuntimeState {
                      ADD COLUMN observed_ms INTEGER NOT NULL DEFAULT 0",
                     (),
                 )
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
+                .await?;
             transaction
                 .execute(
                     "UPDATE sys_run_observation
                      SET observed_ms = COALESCE(ended_ms, started_ms)",
                     (),
                 )
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
+                .await?;
         }
         transaction
             .execute(
@@ -2124,12 +1913,8 @@ impl RuntimeState {
                  VALUES ('observation-projection-v1')",
                 (),
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)
+            .await?;
+        transaction.commit().await.map_err(RuntimeError::from)
     }
 
     /// Separates retained per-run stream observations from durable checkpoint
@@ -2141,21 +1926,16 @@ impl RuntimeState {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let applied = transaction
             .execute(
                 "INSERT OR IGNORE INTO runtime_schema_migration (migration)
                  VALUES ('stream-observation-checkpoint-reuse-v1')",
                 (),
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         if applied == 0 {
-            return transaction
-                .commit()
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable);
+            return transaction.commit().await.map_err(RuntimeError::from);
         }
         transaction
             .execute_batch(
@@ -2193,12 +1973,8 @@ impl RuntimeState {
                     ON sys_stream_observation (run_id, source_identity, partition)
                     WHERE partition IS NOT NULL;",
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)
+            .await?;
+        transaction.commit().await.map_err(RuntimeError::from)
     }
 
     /// Adds the causal link from a retained stream observation to its most
@@ -2210,18 +1986,12 @@ impl RuntimeState {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let mut rows = transaction
             .query("PRAGMA table_info(sys_stream_observation)", ())
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let mut found = false;
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        {
+        while let Some(row) = rows.next().await? {
             if row
                 .get::<String>(1)
                 .map_err(|_| RuntimeError::RecoveryInvalid)?
@@ -2236,8 +2006,7 @@ impl RuntimeState {
                     "ALTER TABLE sys_stream_observation ADD COLUMN last_failure_identity TEXT",
                     (),
                 )
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
+                .await?;
         }
         transaction
             .execute(
@@ -2245,12 +2014,8 @@ impl RuntimeState {
                  VALUES ('stream-observation-failure-identity-v1')",
                 (),
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)
+            .await?;
+        transaction.commit().await.map_err(RuntimeError::from)
     }
 
     /// Adds only backward-compatible ledger columns. The migration marker is
@@ -2259,27 +2024,20 @@ impl RuntimeState {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let applied = transaction
             .execute(
                 "INSERT OR IGNORE INTO runtime_schema_migration (migration)
                  VALUES ('request-recovery-evidence-v2')",
                 (),
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         if applied == 1 {
             let mut rows = transaction
                 .query("PRAGMA table_info(request_ledger)", ())
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
+                .await?;
             let mut columns = BTreeMap::new();
-            while let Some(row) = rows
-                .next()
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?
-            {
+            while let Some(row) = rows.next().await? {
                 let name: String = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
                 columns.insert(name, ());
             }
@@ -2310,17 +2068,11 @@ impl RuntimeState {
                 ),
             ] {
                 if !columns.contains_key(column) {
-                    transaction
-                        .execute(sql, ())
-                        .await
-                        .map_err(|_| RuntimeError::StorageUnavailable)?;
+                    transaction.execute(sql, ()).await?;
                 }
             }
         }
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)
+        transaction.commit().await.map_err(RuntimeError::from)
     }
 
     /// Adds the runtime owner lock identity a writer lease is bound to. A
@@ -2331,18 +2083,12 @@ impl RuntimeState {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let mut rows = transaction
             .query("PRAGMA table_info(writer_lease)", ())
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let mut found = false;
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        {
+        while let Some(row) = rows.next().await? {
             if row
                 .get::<String>(1)
                 .map_err(|_| RuntimeError::RecoveryInvalid)?
@@ -2358,8 +2104,7 @@ impl RuntimeState {
                      CHECK (lock_owner_id IS NULL OR length(lock_owner_id) = 16)",
                     (),
                 )
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
+                .await?;
         }
         transaction
             .execute(
@@ -2367,11 +2112,7 @@ impl RuntimeState {
                  VALUES ('writer-lease-lock-binding-v1')",
                 (),
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)
+            .await?;
+        transaction.commit().await.map_err(RuntimeError::from)
     }
 }

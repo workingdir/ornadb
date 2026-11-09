@@ -8,12 +8,15 @@ use std::{
     time::{Duration, Instant},
 };
 
-use orna_evaluator::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
+use orna_evaluator::{
+    ActivationEffectReport, EffectGate, Limits, SysHostBindingRegistry,
+    evaluate_expression_ovb2_with_effects,
+};
 use orna_repository::Repository;
 use orna_runtime::{
-    ActivationEffectReport, EffectGate, FaultInjector, FaultPoint, NoFault, RecoveryDisposition,
-    RequestIdentity, RequestOwner, RequestState, RuntimeError, RuntimeState, TableMutation,
-    TableObjectId, TerminalOutcome, WriterLease,
+    FaultInjector, FaultPoint, NoFault, RecoveryDisposition, RequestIdentity, RequestOwner,
+    RequestState, RuntimeError, RuntimeState, TableMutation, TableObjectId, TerminalOutcome,
+    WriterLease,
 };
 use orna_storage::RuntimePublicationCoordinator;
 use orna_sys::{EnvironmentProvider, FilesystemProvider};
@@ -51,7 +54,7 @@ async fn commit_capture(
     relation_id: [u8; 16],
     format_context: &orna_value::Format3Context,
 ) {
-    use orna_project::{ProjectLoader, admit_source_row_with_owner_fields};
+    use orna_project::{ProjectLoader, SourceRowRequest, admit_source_row};
 
     // Format 3 keeps rows only in `.orna/store` (ORNA-REPO-004): the row
     // source is the fixture document, never a committed file.
@@ -76,16 +79,16 @@ async fn commit_capture(
     )
     .unwrap();
     let blob_binding = bindings.accept_captured_blob_for_row(&value).unwrap();
-    let admitted = admit_source_row_with_owner_fields(
+    let admitted = admit_source_row(
         &project,
-        logical_path,
-        &row_source,
         &schema,
         format_context,
-        vec![("payload".to_owned(), blob_binding)],
-        vec![],
-        &[],
-        owner_id,
+        SourceRowRequest::new(
+            logical_path,
+            &row_source,
+            vec![("payload".to_owned(), blob_binding)],
+            owner_id,
+        ),
     )
     .unwrap();
     let (source_mutation, source_bindings, resolved_schema) = admitted.into_mutation_and_bindings();
@@ -134,7 +137,7 @@ async fn commit_capture(
             [24; 32],
             TerminalOutcome::new(vec![25]).unwrap(),
             &NoFault,
-            orna_runtime::EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
+            orna_evaluator::EffectGate::admit_unbound_for_test(),
         )
         .await
         .unwrap();
@@ -3246,7 +3249,7 @@ async fn kill_at_the_request_row_commit_barrier_keeps_the_row_and_its_recorded_o
                 [78; 32],
                 TerminalOutcome::new(vec![OUTCOME]).unwrap(),
                 &NoFault,
-                EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
+                orna_evaluator::EffectGate::admit_unbound_for_test(),
             )
             .await
             .unwrap();

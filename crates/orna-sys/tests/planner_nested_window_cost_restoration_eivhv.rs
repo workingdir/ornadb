@@ -1,13 +1,13 @@
 use std::collections::BTreeMap;
 
 use orna_sys::{
-    ExpressionRef, MutableBranchSnapshot, ObjectRef, PlanDetail, PlanNode, PlanNodeKind,
-    PlanWindowFrameBound, QueryJoinDescription, QueryJoinPairIdentityDescription,
+    ExplainInputs, ExpressionRef, MutableBranchSnapshot, ObjectRef, PlanDetail, PlanNode,
+    PlanNodeKind, PlanWindowFrameBound, QueryJoinDescription, QueryJoinPairIdentityDescription,
     QueryPairedCheckpointSegmentCompactionChainDescription,
     QueryPairedCheckpointSegmentCompactionStepDescription,
     QueryPairedSegmentRotationChainDescription, QueryPairedSegmentRotationDescription,
     QueryPlanDescription, QuerySourceStatistics, QueryWindowAggregatePushdownDescription,
-    SnapshotRef, explain_query_with_paired_cost_restoration_and_window_pushdowns,
+    SnapshotRef, explain_query_with,
 };
 
 const FIXTURE: &str = include_str!("fixtures/planner_nested_window_cost_restoration_eivhv.orna");
@@ -189,16 +189,19 @@ fn plan(
         rotations.reverse();
         windows.reverse();
     }
-    explain_query_with_paired_cost_restoration_and_window_pushdowns(
+    explain_query_with(
         &query,
-        &pairs,
-        &windows,
-        &checkpoints,
-        &rotations,
-        &[],
-        &[],
-        &[],
-        &[],
+        ExplainInputs {
+            window_aggregates: &windows,
+            join_pair_identities: &pairs,
+            checkpoint_compaction_chains: &checkpoints,
+            segment_rotation_chains: &rotations,
+            stream_compaction_chains: &[],
+            spill_restore_chains: &[],
+            stream_rotation_chains: &[],
+            wal_rotation_chains: &[],
+            ..ExplainInputs::default()
+        },
     )
     .expect("paired window and cost-restoration descriptors produce an explain plan")
 }

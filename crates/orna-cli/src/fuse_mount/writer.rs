@@ -3,12 +3,12 @@ use super::{
     HISTORICAL_SCAN_RETRY, HistoricalState, HistoricalTableSchemas, Instant, MountRowBaselines,
     Mutex, ObjectIdentityManifest, OnceLock, OrpBlobBinding, ProjectLoader, Repository,
     RowLoadError, RowSaveContext, RuntimeState, RuntimeTableActivationSnapshot,
-    RuntimeTableIdentity, SCAN_PENDING, SchemaDescriptor, TableSource, TypedKey,
+    RuntimeTableIdentity, SCAN_PENDING, SchemaDescriptor, SourceRowRequest, TableSource, TypedKey,
     VfsRepositoryCache, VfsRetainedDraftStore, VfsSaveCandidate, VfsSaveCoordinates,
-    VfsScratchStore, VfsTableRowReplacement, admit_row_under_descriptor,
-    admit_source_row_with_owner_fields, runtime_row_baseline_from_rows, settle_historical_scan,
-    source_without_fields, substitute_text_fields,
-    transactional_loaded_project_candidate_validator, validate_blob_descriptors,
+    VfsScratchStore, VfsTableRowReplacement, admit_row_under_descriptor, admit_source_row,
+    runtime_row_baseline_from_rows, settle_historical_scan, source_without_fields,
+    substitute_text_fields, transactional_loaded_project_candidate_validator,
+    validate_blob_descriptors,
 };
 
 pub(crate) struct MountWriter {
@@ -438,16 +438,18 @@ impl MountWriter {
                 orna_runtime::RuntimeError::InvalidTableMutation,
             )
         })?;
-        let admitted = admit_source_row_with_owner_fields(
+        let admitted = admit_source_row(
             &self.project,
-            &row.logical_path,
-            &source,
             &row.source.schema,
             &row.source.value_context,
-            blob_bindings,
-            Vec::new(),
-            &row.key_components,
-            mutation_id,
+            SourceRowRequest {
+                logical_path: &row.logical_path,
+                source: &source,
+                blob_bindings,
+                owner_field_values: Vec::new(),
+                key_components: &row.key_components,
+                mutation_id,
+            },
         )
         .map_err(|error| {
             eprintln!("mounted row source admission failed: {error:?}");

@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 
 use orna_sys::{
-    ExpressionRef, ObjectRef, PlanDetail, PlanNode, PlanNodeKind, PlanWindowFrameBound,
-    QueryJoinDescription, QueryJoinPairIdentityDescription, QueryPlanDescription,
-    QuerySourceStatistics, QueryWindowAggregatePushdownDescription, SnapshotRef,
-    explain_query_with_join_pair_identities_and_window_aggregate_pushdowns,
+    ExplainInputs, ExpressionRef, ObjectRef, PlanDetail, PlanNode, PlanNodeKind,
+    PlanWindowFrameBound, QueryJoinDescription, QueryJoinPairIdentityDescription,
+    QueryPlanDescription, QuerySourceStatistics, QueryWindowAggregatePushdownDescription,
+    SnapshotRef, explain_query_with,
 };
 
 const FIXTURE: &str = include_str!("fixtures/planner_window_identity_cost_fold_m8bnk.orna");
@@ -176,10 +176,13 @@ fn plan(
     pairs: &[QueryJoinPairIdentityDescription],
     aggregates: &[QueryWindowAggregatePushdownDescription],
 ) -> orna_sys::ExplainedPlan {
-    explain_query_with_join_pair_identities_and_window_aggregate_pushdowns(
+    explain_query_with(
         &query(order),
-        pairs,
-        aggregates,
+        ExplainInputs {
+            window_aggregates: aggregates,
+            join_pair_identities: pairs,
+            ..ExplainInputs::default()
+        },
     )
     .expect("join pairs and exact-source window chains plan together")
 }
