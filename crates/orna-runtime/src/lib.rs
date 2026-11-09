@@ -3304,16 +3304,6 @@ pub struct StreamDeliveryCommit<'a> {
     pub faults: &'a dyn FaultInjector,
 }
 
-pub struct StreamTableDeliveryCommit<'a> {
-    pub writer: WriterLease,
-    pub expected_capture: &'a CwdCapture,
-    pub mutations: &'a [TableMutation],
-    pub next_digest: [u8; 32],
-    pub delivery: DeliveryLease,
-    pub expected_stream: CheckpointPrecondition,
-    pub faults: &'a dyn FaultInjector,
-}
-
 /// A stream-table delivery that validates the exact uncommitted table
 /// candidate before its writes and checkpoint become visible.
 pub struct StreamValidatedTableDeliveryCommit<'a> {
@@ -3380,22 +3370,10 @@ pub struct ValidatedTableRequestActivationCommit<'a> {
     pub effects: ActivationEffectReport,
 }
 
-struct StreamDeliveryParts<'a> {
-    writer: WriterLease,
-    expected_capture: &'a CwdCapture,
-    mutations: &'a [Mutation],
-    table_mutations: &'a [TableMutation],
-    next_digest: [u8; 32],
-    delivery: DeliveryLease,
-    expected_stream: CheckpointPrecondition,
-    faults: &'a dyn FaultInjector,
-}
-
 pub struct StreamReplayCommit<'a> {
     pub writer: WriterLease,
     pub expected_capture: &'a CwdCapture,
     pub mutations: &'a [Mutation],
-    pub table_mutations: &'a [TableMutation],
     pub next_digest: [u8; 32],
     pub grant: ReplayGrant,
     pub faults: &'a dyn FaultInjector,
@@ -11182,6 +11160,11 @@ impl RuntimeState {
     /// Commits handler mutations and the corresponding stream checkpoint in
     /// one writer-fenced transaction. A rejected stream precondition rolls
     /// back without exposing any mutation or changing the CWD capture.
+    ///
+    /// Typed table mutations never take this path: they must use
+    /// [`RuntimeState::commit_stream_validated_table_delivery`], which checks
+    /// the candidate relation before committing rows or the stream
+    /// checkpoint.
     pub async fn commit_stream_delivery(
         &self,
         request: StreamDeliveryCommit<'_>,
@@ -11195,32 +11178,55 @@ impl RuntimeState {
             expected_stream,
             faults,
         } = request;
-        self.commit_stream_delivery_inner(StreamDeliveryParts {
-            writer,
-            expected_capture,
-            mutations,
-            table_mutations: &[],
-            next_digest,
-            delivery,
-            expected_stream,
-            faults,
-        })
-        .await
-    }
-
-    /// Rejects the legacy typed delivery entry point.
-    ///
-    /// Typed table mutations must use
-    /// [`RuntimeState::commit_stream_validated_table_delivery`], which checks
-    /// the candidate relation before committing rows or the stream
-    /// checkpoint.
-    pub async fn commit_stream_table_delivery(
-        &self,
-        _request: StreamTableDeliveryCommit<'_>,
-    ) -> Result<(CwdCapture, CommitResult), RuntimeError> {
-        // This legacy entry point has no candidate validator. Refuse it
-        // before observing or mutating durable state.
-        Err(RuntimeError::RecoveryInvalid)
+        validate_id(writer.owner_id)?;
+        validate_stream_mutations(mutations, next_digest)?;
+        if mutations.is_empty() && next_digest != expected_capture.generation_digest() {
+            return Err(RuntimeError::InvalidDigest);
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        self.require_owner(&tx, writer).await?;
+        let current = capture_tx(&tx).await?;
+        if &current != expected_capture {
+            return Err(RuntimeError::StaleCapture {
+                current: Box::new(current),
+            });
+        }
+        let result = apply_stream_intent_tx(
+            &tx,
+            CommitIntent::Complete {
+                lease: delivery,
+                expected: expected_stream,
+            },
+        )
+        .await?;
+        sync_stream_observation_tx(&tx, &result).await?;
+        if matches!(result, CommitResult::Rejected(_)) {
+            let current = capture_tx(&tx).await?;
+            return Ok((current, result));
+        }
+        let next = if mutations.is_empty() {
+            capture_tx(&tx).await?
+        } else {
+            append_mutations_tx(&tx, expected_capture, mutations, next_digest, faults).await?
+        };
+        if let CommitResult::CheckpointAdvanced { checkpoint } = &result {
+            record_stream_checkpoint_watermark_tx(
+                &tx,
+                &checkpoint.key,
+                checkpoint,
+                &next,
+                StreamCheckpointTransition::Complete,
+            )
+            .await?;
+        }
+        tx.commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok((next, result))
     }
 
     /// Commits typed table mutations and a stream checkpoint only after a
@@ -11333,75 +11339,6 @@ impl RuntimeState {
         Ok((next, result))
     }
 
-    async fn commit_stream_delivery_inner(
-        &self,
-        parts: StreamDeliveryParts<'_>,
-    ) -> Result<(CwdCapture, CommitResult), RuntimeError> {
-        let StreamDeliveryParts {
-            writer,
-            expected_capture,
-            mutations,
-            table_mutations,
-            next_digest,
-            delivery,
-            expected_stream,
-            faults,
-        } = parts;
-        validate_id(writer.owner_id)?;
-        validate_stream_mutations(mutations, next_digest)?;
-        if mutations.is_empty() && next_digest != expected_capture.generation_digest() {
-            return Err(RuntimeError::InvalidDigest);
-        }
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        self.require_owner(&tx, writer).await?;
-        let current = capture_tx(&tx).await?;
-        if &current != expected_capture {
-            return Err(RuntimeError::StaleCapture {
-                current: Box::new(current),
-            });
-        }
-        let result = apply_stream_intent_tx(
-            &tx,
-            CommitIntent::Complete {
-                lease: delivery,
-                expected: expected_stream,
-            },
-        )
-        .await?;
-        sync_stream_observation_tx(&tx, &result).await?;
-        if matches!(result, CommitResult::Rejected(_)) {
-            let current = capture_tx(&tx).await?;
-            return Ok((current, result));
-        }
-        let mut base = CommittedTableBase::default();
-        for mutation in table_mutations {
-            apply_table_mutation_tx(&tx, mutation, &mut base).await?;
-        }
-        let next = if mutations.is_empty() {
-            capture_tx(&tx).await?
-        } else {
-            append_mutations_tx(&tx, expected_capture, mutations, next_digest, faults).await?
-        };
-        if let CommitResult::CheckpointAdvanced { checkpoint } = &result {
-            record_stream_checkpoint_watermark_tx(
-                &tx,
-                &checkpoint.key,
-                checkpoint,
-                &next,
-                StreamCheckpointTransition::Complete,
-            )
-            .await?;
-        }
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        Ok((next, result))
-    }
-
     /// Commits replay mutations and the terminal replay transition without
     /// moving the live stream checkpoint. A rejected replay precondition
     /// leaves both the activation capture and failure row unchanged.
@@ -11413,18 +11350,12 @@ impl RuntimeState {
             writer,
             expected_capture,
             mutations,
-            table_mutations,
             next_digest,
             grant,
             faults,
         } = request;
         validate_id(writer.owner_id)?;
         validate_stream_mutations(mutations, next_digest)?;
-        if !table_mutations.is_empty() {
-            // Typed replay must use commit_stream_validated_table_replay so
-            // assertion validation is part of the durable transaction.
-            return Err(RuntimeError::RecoveryInvalid);
-        }
         if mutations.is_empty() && next_digest != expected_capture.generation_digest() {
             return Err(RuntimeError::InvalidDigest);
         }
@@ -11458,10 +11389,6 @@ impl RuntimeState {
         if matches!(result, CommitResult::Rejected(_)) {
             let current = capture_tx(&tx).await?;
             return Ok((current, result));
-        }
-        let mut base = CommittedTableBase::default();
-        for mutation in table_mutations {
-            apply_table_mutation_tx(&tx, mutation, &mut base).await?;
         }
         let next = if mutations.is_empty() {
             capture_tx(&tx).await?
@@ -11914,7 +11841,6 @@ impl RuntimeState {
                     writer,
                     expected_capture: &expected_capture,
                     mutations: &batch.mutations,
-                    table_mutations: &[],
                     next_digest: batch.next_digest,
                     grant,
                     faults: &NoFault,
@@ -46275,7 +46201,6 @@ mod tests {
                     writer,
                     expected_capture: &capture,
                     mutations: &empty_mutations,
-                    table_mutations: &empty_table_mutations,
                     next_digest: capture.generation_digest(),
                     grant: grant.clone(),
                     faults: &NoFault,
@@ -48645,25 +48570,6 @@ mod tests {
                 other => panic!("unexpected stream acquire result: {other:?}"),
             }
         };
-
-        let key = delivery_lease.delivery.checkpoint_key();
-        assert_eq!(
-            state
-                .commit_stream_table_delivery(StreamTableDeliveryCommit {
-                    writer,
-                    expected_capture: &capture,
-                    mutations: &[table_mutation(5, 1, Some(9))],
-                    next_digest: digest(9),
-                    delivery: delivery_lease.clone(),
-                    expected_stream: expected.clone(),
-                    faults: &NoFault,
-                })
-                .await,
-            Err(RuntimeError::RecoveryInvalid)
-        );
-        assert!(state.pending().await.unwrap().is_empty());
-        assert_eq!(state.capture().await.unwrap(), capture);
-        assert_eq!(state.stream_checkpoint(&key).await.unwrap().version, 0);
 
         let mut validator = TablesOnlyValidator {
             tables: vec!["books".into()],
