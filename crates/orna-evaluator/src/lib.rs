@@ -1120,21 +1120,6 @@ fn module_intrinsic(name: &str) -> Option<orna_intrinsics::IntrinsicId> {
     Some(intrinsic.id)
 }
 
-fn qualified_intrinsic(spelling: &str) -> Option<orna_intrinsics::IntrinsicId> {
-    let (module_path, name) = spelling.rsplit_once('.')?;
-    if module_path == "std.math" {
-        return Some(orna_intrinsics::IntrinsicId::MathIncrement);
-    }
-    let module = orna_intrinsics::Module::from_path(module_path)?;
-    let intrinsic = orna_intrinsics::lookup(module, name)?;
-    if intrinsic.module != module {
-        return None;
-    }
-    (intrinsic.dispatch != orna_intrinsics::Dispatch::SourceOnly
-        && intrinsic.pins.contains(orna_intrinsics::CURRENT_STD_PIN))
-    .then_some(intrinsic.id)
-}
-
 fn legacy_intrinsic(name: &str) -> Option<orna_intrinsics::IntrinsicId> {
     use orna_intrinsics::IntrinsicId;
     Some(match name.rsplit('.').next()? {
