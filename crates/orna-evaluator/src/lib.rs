@@ -1077,9 +1077,27 @@ fn module_intrinsic(name: &str) -> Option<orna_intrinsics::IntrinsicId> {
     let (module_path, leaf) = name.rsplit_once('.')?;
     let module = orna_intrinsics::Module::from_path(module_path)?;
     let intrinsic = orna_intrinsics::lookup(module, leaf)?;
-    (intrinsic.dispatch != orna_intrinsics::Dispatch::SourceOnly
-        && intrinsic.pins.contains(orna_intrinsics::CURRENT_STD_PIN))
-    .then_some(intrinsic.id)
+    if intrinsic.dispatch == orna_intrinsics::Dispatch::SourceOnly
+        || !intrinsic.pins.contains(orna_intrinsics::CURRENT_STD_PIN)
+    {
+        return None;
+    }
+    // Modules whose table binds only the private leaf keep their public source
+    // wrapper; binding the public name would skip its validation and hand the
+    // handler a spelling it does not match.
+    let bind_public = !matches!(
+        module,
+        orna_intrinsics::Module::Stats
+            | orna_intrinsics::Module::Ui
+            | orna_intrinsics::Module::Json
+            | orna_intrinsics::Module::OrnaCodec
+            | orna_intrinsics::Module::OvbCodec
+            | orna_intrinsics::Module::Money
+    ) && !(module == orna_intrinsics::Module::Query && intrinsic.leaf.is_some());
+    if !bind_public && !leaf.starts_with("__") {
+        return None;
+    }
+    Some(intrinsic.id)
 }
 
 fn legacy_intrinsic(name: &str) -> Option<orna_intrinsics::IntrinsicId> {
