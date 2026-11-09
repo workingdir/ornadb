@@ -31,7 +31,7 @@ the unit tests assert the two agree.
 |---|---|---|
 | 0 | primitives | (empty until orna-base) |
 | 1 | value | orna-value, orna-foundation |
-| 2 | syntax | orna-syntax |
+| 2 | syntax | orna-syntax, orna-intrinsics |
 | 3 | identity | orna-standard-sources, orna-sys-macros |
 | 4 | analysis | orna-semantic |
 | 5 | evaluation | orna-evaluator |

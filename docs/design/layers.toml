@@ -52,6 +52,11 @@ name = "orna-syntax"
 layer = 2
 
 [[crate]]
+name = "orna-intrinsics"
+layer = 2
+role = "tool"
+
+[[crate]]
 name = "orna-standard-sources"
 layer = 3
 
