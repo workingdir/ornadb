@@ -231,18 +231,31 @@ pub(super) fn find_ordered_entry_with(
     }
 }
 
-/// The parameters describe one record; each caller passes them straight through.
-#[allow(clippy::too_many_arguments)]
+/// One ordered entry to replace: the node it lives under, the domain and
+/// height that node's parent claims, the lower fence key the leaf must sort
+/// above, and the entry's key and new value.
+pub(super) struct OrderedEntryReplacement<'a> {
+    pub(super) node: NodeData,
+    pub(super) domain: &'a [u8],
+    pub(super) height: Option<u8>,
+    pub(super) lower_exclusive: Option<&'a crate::row_store::TypedKey>,
+    pub(super) key: &'a crate::row_store::TypedKey,
+    pub(super) value: Vec<u8>,
+}
+
 pub(super) fn replace_ordered_entry_with(
     read_node: &mut impl FnMut(&NativeOid) -> Result<NodeData, GraphError>,
     write_node: &mut impl FnMut(&NodeData) -> Result<NativeOid, GraphError>,
-    node: NodeData,
-    expected_domain: &[u8],
-    expected_height: Option<u8>,
-    lower_exclusive: Option<&crate::row_store::TypedKey>,
-    key: &crate::row_store::TypedKey,
-    value: Vec<u8>,
+    replacement: OrderedEntryReplacement<'_>,
 ) -> Result<NativeOid, GraphError> {
+    let OrderedEntryReplacement {
+        node,
+        domain: expected_domain,
+        height: expected_height,
+        lower_exclusive,
+        key,
+        value,
+    } = replacement;
     match node {
         NodeData::OrderedLeaf {
             domain,
@@ -317,12 +330,14 @@ pub(super) fn replace_ordered_entry_with(
             entries[index].child = replace_ordered_entry_with(
                 read_node,
                 write_node,
-                child,
-                expected_domain,
-                Some(height - 1),
-                lower_bound.as_ref(),
-                key,
-                value,
+                OrderedEntryReplacement {
+                    node: child,
+                    domain: expected_domain,
+                    height: Some(height - 1),
+                    lower_exclusive: lower_bound.as_ref(),
+                    key,
+                    value,
+                },
             )?;
             write_node(&NodeData::OrderedBranch {
                 domain,
@@ -337,23 +352,41 @@ pub(super) fn replace_ordered_entry_with(
     }
 }
 
-/// The parameters describe one record; each caller passes them straight through.
-#[allow(clippy::too_many_arguments)]
+/// One ordered node visited while collecting a walk's object closure: the
+/// node, the object ID it is stored under, and the domain and height its
+/// parent claims for it.
+pub(super) struct OrderedIndexVisit<'a> {
+    pub(super) node: &'a NodeData,
+    pub(super) oid: &'a NativeOid,
+    pub(super) domain: &'a [u8],
+    pub(super) height: Option<u8>,
+}
+
+/// The object sets one ordered-index walk fills: every node object, every
+/// stored-value payload object, and the `(oid, height)` contexts already
+/// validated. One walk has a single fixed domain; height is included so a
+/// shared OID reached at another level is validated again under that parent
+/// context.
+pub(super) struct OrderedIndexObjects<'a> {
+    pub(super) nodes: &'a mut BTreeSet<NativeOid>,
+    pub(super) payload: &'a mut BTreeSet<NativeOid>,
+    pub(super) validated: &'a mut BTreeSet<(NativeOid, Option<u8>)>,
+}
+
 /// Collects every node object of one ordered index (root, branches and leaves)
 /// plus every stored-value payload object its entries reference, validating
 /// each node against its parent's claims on the way down.
 pub(super) fn collect_ordered_index_objects_with(
     read_node: &mut impl FnMut(&NativeOid) -> Result<NodeData, GraphError>,
-    node: &NodeData,
-    node_oid: &NativeOid,
-    expected_domain: &[u8],
-    expected_height: Option<u8>,
-    nodes: &mut BTreeSet<NativeOid>,
-    payload: &mut BTreeSet<NativeOid>,
-    // One walk has a single fixed domain; include height so a shared OID
-    // reached at another level is validated again under that parent context.
-    validated_contexts: &mut BTreeSet<(NativeOid, Option<u8>)>,
+    visit: OrderedIndexVisit<'_>,
+    objects: &mut OrderedIndexObjects<'_>,
 ) -> Result<(), GraphError> {
+    let OrderedIndexVisit {
+        node,
+        oid: node_oid,
+        domain: expected_domain,
+        height: expected_height,
+    } = visit;
     let context = (node_oid.clone(), expected_height);
     match node {
         NodeData::OrderedLeaf { domain, entries } => {
@@ -361,12 +394,12 @@ pub(super) fn collect_ordered_index_objects_with(
                 return Err(GraphError::InvalidDomain);
             }
             check_leaf_key_order(domain, entries)?;
-            if !validated_contexts.insert(context) {
+            if !objects.validated.insert(context) {
                 return Ok(());
             }
             for entry in entries {
                 for dependency in leaf_value_dependencies(domain, &entry.value)? {
-                    payload.insert(dependency.oid);
+                    objects.payload.insert(dependency.oid);
                 }
             }
             Ok(())
@@ -384,7 +417,7 @@ pub(super) fn collect_ordered_index_objects_with(
                 return Err(GraphError::InvalidDomain);
             }
             check_branch_fence_order(domain, entries)?;
-            if !validated_contexts.insert(context) {
+            if !objects.validated.insert(context) {
                 return Ok(());
             }
             let mut previous_fence: Option<crate::row_store::TypedKey> = None;
@@ -409,16 +442,16 @@ pub(super) fn collect_ordered_index_objects_with(
                     ));
                 }
                 let child_oid = entry.child.clone();
-                nodes.insert(child_oid.clone());
+                objects.nodes.insert(child_oid.clone());
                 collect_ordered_index_objects_with(
                     read_node,
-                    &child,
-                    &child_oid,
-                    expected_domain,
-                    Some(*height - 1),
-                    nodes,
-                    payload,
-                    validated_contexts,
+                    OrderedIndexVisit {
+                        node: &child,
+                        oid: &child_oid,
+                        domain: expected_domain,
+                        height: Some(*height - 1),
+                    },
+                    objects,
                 )?;
                 previous_fence = Some(fence);
             }
@@ -550,20 +583,35 @@ pub(super) fn validate_ordered_root_node(
     Ok(())
 }
 
-/// The parameters describe one record; each caller passes them straight through.
-#[allow(clippy::too_many_arguments)]
+/// One ordered node visited by a bounded range walk: the node, the domain and
+/// height its parent claims, and the interval bounds, resume cursor and result
+/// cap the walk must stay inside.
+pub(super) struct OrderedRangeVisit<'a> {
+    pub(super) node: NodeData,
+    pub(super) domain: &'a [u8],
+    pub(super) height: Option<u8>,
+    pub(super) lower_exclusive: Option<&'a crate::row_store::TypedKey>,
+    pub(super) lower_inclusive: Option<&'a crate::row_store::TypedKey>,
+    pub(super) resume_after: Option<&'a crate::row_store::TypedKey>,
+    pub(super) upper_exclusive: Option<&'a crate::row_store::TypedKey>,
+    pub(super) limit: usize,
+}
+
 pub(super) fn collect_ordered_range_with(
     read_node: &mut impl FnMut(&NativeOid) -> Result<NodeData, GraphError>,
-    node: NodeData,
-    expected_domain: &[u8],
-    expected_height: Option<u8>,
-    lower_exclusive: Option<&crate::row_store::TypedKey>,
-    lower_inclusive: Option<&crate::row_store::TypedKey>,
-    resume_after: Option<&crate::row_store::TypedKey>,
-    upper_exclusive: Option<&crate::row_store::TypedKey>,
-    limit: usize,
+    visit: OrderedRangeVisit<'_>,
     output: &mut Vec<OrderedLeafEntry>,
 ) -> Result<(), GraphError> {
+    let OrderedRangeVisit {
+        node,
+        domain: expected_domain,
+        height: expected_height,
+        lower_exclusive,
+        lower_inclusive,
+        resume_after,
+        upper_exclusive,
+        limit,
+    } = visit;
     if output.len() >= limit {
         return Ok(());
     }
@@ -664,14 +712,16 @@ pub(super) fn collect_ordered_range_with(
                     } else {
                         collect_ordered_range_with(
                             read_node,
-                            child,
-                            expected_domain,
-                            Some(height - 1),
-                            previous_fence.as_ref(),
-                            lower_inclusive,
-                            resume_after,
-                            upper_exclusive,
-                            limit,
+                            OrderedRangeVisit {
+                                node: child,
+                                domain: expected_domain,
+                                height: Some(height - 1),
+                                lower_exclusive: previous_fence.as_ref(),
+                                lower_inclusive,
+                                resume_after,
+                                upper_exclusive,
+                                limit,
+                            },
                             output,
                         )?;
                     }

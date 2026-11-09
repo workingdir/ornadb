@@ -27,10 +27,18 @@ use fs2::FileExt;
 use sha2::{Digest, Sha256};
 pub use uuid::Uuid;
 
+use crate::cbor::{bytes as cbor_bytes, head as cbor_head, text as cbor_text};
 use crate::hex::hex_encode;
+use crate::wire::MAX_JOURNAL_BYTES;
+use crate::wire::little::{
+    put_optional_bytes, put_optional_string, put_string, put_u32, take_byte,
+    take_fixed as take_fixed_array, take_optional_bytes, take_optional_string, take_string,
+    take_u32,
+};
 
 pub mod allocator;
 mod blob_store;
+mod cbor;
 mod compact;
 pub mod complete_copy;
 mod crash_barrier;
@@ -56,6 +64,7 @@ pub mod schema_evolution;
 #[cfg(test)]
 pub(crate) mod test_support;
 mod transport;
+mod wire;
 
 pub use blob_store::{ContentIdentity, raw_content_bytes_digested};
 pub use compact::{
@@ -74,9 +83,10 @@ pub use compact::{
 };
 pub use crash_barrier::{publication_crash_barrier, publication_crash_pause_until_released};
 pub use format_context::{
-    CaptureCapabilityError, CommittedTableBinding, FINAL_REPOSITORY_FORMAT, FinalFormatCapability,
-    FormatContextError, HistoricalFormatContext, LegacyWriteRefused, REPOSITORY_LAYOUT_VERSION,
-    RepositoryFormat, RepositoryFormatContext, RepositorySnapshotPin, SchemaRootPin, StoreRootPin,
+    CaptureCapabilityError, CommittedTableBinding, CommittedTableBindingRequest,
+    FINAL_REPOSITORY_FORMAT, FinalFormatCapability, FormatContextError, HistoricalFormatContext,
+    LegacyWriteRefused, REPOSITORY_LAYOUT_VERSION, RepositoryFormat, RepositoryFormatContext,
+    RepositorySnapshotPin, SchemaRootPin, StoreRootPin,
 };
 pub use init::{
     DatabaseId, RepositoryInitError, RepositoryInitialization, RepositoryMetadata, STORAGE_PROFILE,
@@ -425,57 +435,29 @@ impl ReviewedCandidateReview {
         self.pending_generation
     }
 }
-fn append_cbor_head(bytes: &mut Vec<u8>, major: u8, value: u64) {
-    let prefix = major << 5;
-    match value {
-        0..=23 => bytes.push(prefix | value as u8),
-        24..=0xff => bytes.extend_from_slice(&[prefix | 24, value as u8]),
-        0x100..=0xffff => {
-            bytes.push(prefix | 25);
-            bytes.extend_from_slice(&(value as u16).to_be_bytes());
-        }
-        0x1_0000..=0xffff_ffff => {
-            bytes.push(prefix | 26);
-            bytes.extend_from_slice(&(value as u32).to_be_bytes());
-        }
-        _ => {
-            bytes.push(prefix | 27);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-    }
-}
-
-fn append_cbor_bytes(bytes: &mut Vec<u8>, value: &[u8]) {
-    append_cbor_head(bytes, 2, value.len() as u64);
-    bytes.extend_from_slice(value);
-}
-fn append_cbor_text(bytes: &mut Vec<u8>, value: &str) {
-    append_cbor_head(bytes, 3, value.len() as u64);
-    bytes.extend_from_slice(value.as_bytes());
-}
 fn append_cbor_optional_text(bytes: &mut Vec<u8>, value: Option<&str>) {
     match value {
-        Some(value) => append_cbor_text(bytes, value),
+        Some(value) => cbor_text(bytes, value),
         None => bytes.push(0xf6),
     }
 }
 
 fn reviewed_candidate_token(review: &ReviewedCandidateReview) -> [u8; 32] {
     let mut payload = Vec::with_capacity(256 + review.cwd_snapshot_descriptor.len());
-    append_cbor_head(&mut payload, 4, 11);
-    append_cbor_bytes(&mut payload, review.database_id.as_bytes());
-    append_cbor_bytes(&mut payload, review.runtime_id.as_bytes());
+    cbor_head(&mut payload, 4, 11);
+    cbor_bytes(&mut payload, review.database_id.as_bytes());
+    cbor_bytes(&mut payload, review.runtime_id.as_bytes());
     append_cbor_optional_text(&mut payload, review.cwd.head().map(GitCommitRef::as_str));
     append_cbor_optional_text(&mut payload, review.head_ref.as_deref());
-    append_cbor_text(&mut payload, review.index_tree.as_str());
-    append_cbor_bytes(&mut payload, &review.index_bytes_digest);
-    append_cbor_head(&mut payload, 4, review.candidate_paths.len() as u64);
+    cbor_text(&mut payload, review.index_tree.as_str());
+    cbor_bytes(&mut payload, &review.index_bytes_digest);
+    cbor_head(&mut payload, 4, review.candidate_paths.len() as u64);
     for path in &review.candidate_paths {
-        append_cbor_text(&mut payload, path);
+        cbor_text(&mut payload, path);
     }
-    append_cbor_bytes(&mut payload, &review.cwd_snapshot_descriptor);
-    append_cbor_head(&mut payload, 0, review.pending_generation);
-    append_cbor_head(
+    cbor_bytes(&mut payload, &review.cwd_snapshot_descriptor);
+    cbor_head(&mut payload, 0, review.pending_generation);
+    cbor_head(
         &mut payload,
         0,
         u64::from(review.repository_format.number()),
@@ -518,7 +500,6 @@ fn commit_gate_refusal(error: FormatContextError) -> RepositoryError {
 const JOURNAL_MAGIC: &[u8] = b"ORNA-PUB-JOURNAL\0";
 const CHECKOUT_JOURNAL_MAGIC: &[u8] = b"ORNA-CHECKOUT-JOURNAL\0";
 const GIT_INDEX_LOCK_MAGIC: &[u8] = b"ORNA-GIT-INDEX-LOCK\0";
-const MAX_JOURNAL_BYTES: usize = 64 * 1024 * 1024;
 const MAX_MIGRATION_IDENTITY_RECORDS: usize = 65_536;
 /// Longest a publication waits for the repository coordination lock before it
 /// reports `RepositoryBusy`. Bounded so a hung holder or a same-thread
@@ -1747,9 +1728,10 @@ impl PublicationJournal {
             stage,
             wire_version: version,
         };
+        let quarantine_binding = journal.quarantine_binding()?;
         for (index, entry) in journal.entries.iter().enumerate() {
             if let Some(name) = entry.materialization.quarantine()
-                && name != journal.quarantine_name(index)?
+                && name != Self::quarantine_name_from(quarantine_binding.clone(), index)
             {
                 return Err(RepositoryError::InvalidPublicationJournal);
             }
@@ -1757,7 +1739,10 @@ impl PublicationJournal {
         Ok(journal)
     }
 
-    fn quarantine_name(&self, index: usize) -> Result<String, RepositoryError> {
+    /// The SHA-256 state every quarantine name for this journal extends with
+    /// the entry index. Encoding the journal once here keeps decoding many
+    /// entries linear instead of re-encoding the journal for each name.
+    fn quarantine_binding(&self) -> Result<Sha256, RepositoryError> {
         let mut stable = self.clone();
         stable.stage = PublicationJournalStage::Prepared;
         for entry in &mut stable.entries {
@@ -1765,10 +1750,21 @@ impl PublicationJournal {
         }
         let mut digest = Sha256::new();
         digest.update(stable.encode()?);
-        digest.update(index.to_le_bytes());
-        Ok(format!(
+        Ok(digest)
+    }
+
+    fn quarantine_name_from(mut binding: Sha256, index: usize) -> String {
+        binding.update(index.to_le_bytes());
+        format!(
             ".orna-quarantine-journal-{}",
-            hex_encode(&digest.finalize())
+            hex_encode(&binding.finalize())
+        )
+    }
+
+    fn quarantine_name(&self, index: usize) -> Result<String, RepositoryError> {
+        Ok(Self::quarantine_name_from(
+            self.quarantine_binding()?,
+            index,
         ))
     }
 
@@ -4268,25 +4264,7 @@ impl Repository {
                 .map_err(|_| RepositoryError::LocalStateUnavailable)?
                 .as_nanos()
         ));
-        let result = (|| {
-            let mut file = fs::OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&temporary)
-                .map_err(|_| RepositoryError::LocalStateUnavailable)?;
-            file.write_all(&encoded)
-                .map_err(|_| RepositoryError::LocalStateUnavailable)?;
-            file.sync_all()
-                .map_err(|_| RepositoryError::LocalStateUnavailable)?;
-            fs::rename(&temporary, &path).map_err(|_| RepositoryError::LocalStateUnavailable)?;
-            fs::File::open(self.runtime.root())
-                .and_then(|directory| directory.sync_all())
-                .map_err(|_| RepositoryError::LocalStateUnavailable)
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(&temporary);
-        }
-        result
+        write_atomically(&path, &temporary, &encoded)
     }
 
     /// Reads the last atomically persisted publication journal, if present.
@@ -4559,25 +4537,7 @@ impl Repository {
                 .map_err(|_| RepositoryError::LocalStateUnavailable)?
                 .as_nanos()
         ));
-        let result = (|| {
-            let mut file = fs::OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&temporary)
-                .map_err(|_| RepositoryError::LocalStateUnavailable)?;
-            file.write_all(&encoded)
-                .map_err(|_| RepositoryError::LocalStateUnavailable)?;
-            file.sync_all()
-                .map_err(|_| RepositoryError::LocalStateUnavailable)?;
-            fs::rename(&temporary, &path).map_err(|_| RepositoryError::LocalStateUnavailable)?;
-            fs::File::open(self.runtime.root())
-                .and_then(|directory| directory.sync_all())
-                .map_err(|_| RepositoryError::LocalStateUnavailable)
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(&temporary);
-        }
-        result
+        write_atomically(&path, &temporary, &encoded)
     }
 
     fn read_checkout_recovery_journal_locked(
@@ -7004,7 +6964,7 @@ impl Repository {
         if discard_paths == plan.git.discardable_paths() {
             Ok(ValidatedCheckoutDiscard {
                 preflight: plan.clone(),
-                force_token: *token.expect("authorized force checkout has a token"),
+                force_token: token.copied().ok_or(RepositoryError::CheckoutPlanStale)?,
                 discard_paths: discard_paths.to_vec(),
             })
         } else {
@@ -9169,35 +9129,15 @@ impl Repository {
     ) -> Result<CoordinationLock, RepositoryError> {
         let file = self.open_coordination_lock_file()?;
         let deadline = std::time::Instant::now() + self.coordination_lock_wait;
-        loop {
-            match file.try_lock_exclusive() {
-                Ok(()) => return Ok(CoordinationLock { file }),
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-                    ) =>
-                {
-                    if std::time::Instant::now() >= deadline {
-                        return Err(RepositoryError::RepositoryBusy);
-                    }
-                    std::thread::sleep(COORDINATION_LOCK_POLL);
-                }
-                Err(_) => return Err(RepositoryError::LocalStateUnavailable),
-            }
-        }
+        Ok(CoordinationLock {
+            file: lock_before_deadline(file, deadline, |file| file.try_lock_exclusive())?,
+        })
     }
 
     fn open_coordination_lock_file(&self) -> Result<fs::File, RepositoryError> {
         let locks = self.runtime.locks();
         fs::create_dir_all(&locks).map_err(|_| RepositoryError::LocalStateUnavailable)?;
-        let path = locks.join("coordination.lock");
-        fs::OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(&path)
+        open_lock_file(&locks.join("coordination.lock"))
             .map_err(|_| RepositoryError::LocalStateUnavailable)
     }
 
@@ -9242,35 +9182,14 @@ impl Repository {
     ) -> Result<MaintenanceLease, RepositoryError> {
         let locks = self.runtime.locks();
         fs::create_dir_all(&locks).map_err(|_| RepositoryError::LocalStateUnavailable)?;
-        let file = fs::OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(locks.join("maintenance.lock"))
+        let file = open_lock_file(&locks.join("maintenance.lock"))
             .map_err(|_| RepositoryError::LocalStateUnavailable)?;
         let deadline = std::time::Instant::now() + self.coordination_lock_wait;
-        loop {
-            let attempt = match mode {
-                MaintenanceMode::Shared => FileExt::try_lock_shared(&file),
-                MaintenanceMode::Exclusive => file.try_lock_exclusive(),
-            };
-            match attempt {
-                Ok(()) => return Ok(MaintenanceLease { file }),
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-                    ) =>
-                {
-                    if std::time::Instant::now() >= deadline {
-                        return Err(RepositoryError::RepositoryBusy);
-                    }
-                    std::thread::sleep(COORDINATION_LOCK_POLL);
-                }
-                Err(_) => return Err(RepositoryError::LocalStateUnavailable),
-            }
-        }
+        let file = lock_before_deadline(file, deadline, |file| match mode {
+            MaintenanceMode::Shared => FileExt::try_lock_shared(file),
+            MaintenanceMode::Exclusive => file.try_lock_exclusive(),
+        })?;
+        Ok(MaintenanceLease { file })
     }
 
     /// Acquires the process-lifetime owner lock for this worktree's local
@@ -9289,12 +9208,7 @@ impl Repository {
         }
         let locks = self.runtime.locks();
         fs::create_dir_all(&locks).map_err(|_| RepositoryError::LocalStateUnavailable)?;
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(locks.join("runtime-owner.lock"))
+        let mut file = open_lock_file(&locks.join("runtime-owner.lock"))
             .map_err(|_| RepositoryError::LocalStateUnavailable)?;
         file.try_lock_exclusive()
             .map_err(|_| RepositoryError::RepositoryBusy)?;
@@ -9755,6 +9669,75 @@ impl Drop for MaintenanceLease {
     }
 }
 
+/// Opens an advisory lock file, creating it when absent and never truncating
+/// it. The kernel owns the lock, so the bytes are never read or written back;
+/// `O_NOFOLLOW` keeps a planted symlink from redirecting the lock.
+pub(crate) fn open_lock_file(path: &Path) -> std::io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.create(true).read(true).write(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    options.open(path)
+}
+
+/// Polls `attempt` until it takes the lock or `deadline` passes. A contended
+/// or interrupted attempt is retried; the wait is bounded, so a held or hung
+/// lock is reported as `RepositoryBusy` rather than blocking forever.
+fn lock_before_deadline(
+    file: fs::File,
+    deadline: std::time::Instant,
+    mut attempt: impl FnMut(&fs::File) -> std::io::Result<()>,
+) -> Result<fs::File, RepositoryError> {
+    loop {
+        match attempt(&file) {
+            Ok(()) => return Ok(file),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                ) =>
+            {
+                if std::time::Instant::now() >= deadline {
+                    return Err(RepositoryError::RepositoryBusy);
+                }
+                std::thread::sleep(COORDINATION_LOCK_POLL);
+            }
+            Err(_) => return Err(RepositoryError::LocalStateUnavailable),
+        }
+    }
+}
+
+/// Writes `bytes` to `path` through `temporary`: create it exclusively, write,
+/// sync it, rename it over `path`, then sync the directory so the rename is
+/// durable. A failure removes the temporary and leaves `path` untouched.
+fn write_atomically(path: &Path, temporary: &Path, bytes: &[u8]) -> Result<(), RepositoryError> {
+    let parent = path
+        .parent()
+        .ok_or(RepositoryError::LocalStateUnavailable)?;
+    let result = (|| {
+        let mut file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(temporary)
+            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        file.write_all(bytes)
+            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        file.sync_all()
+            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        fs::rename(temporary, path).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|_| RepositoryError::LocalStateUnavailable)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temporary);
+    }
+    result
+}
+
 const RUNTIME_OWNER_STATE_MAGIC: &[u8; 8] = b"ORNAOWN2";
 const RUNTIME_OWNER_CHAIN_MAX_ENTRIES: usize = 65_536;
 
@@ -9860,25 +9843,14 @@ fn persist_runtime_owner_state(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(_) => return Err(RepositoryError::LocalStateUnavailable),
     }
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)
-        .map_err(|_| RepositoryError::LocalStateUnavailable)?;
-    file.write_all(&bytes)
-        .and_then(|()| file.sync_all())
-        .map_err(|_| RepositoryError::LocalStateUnavailable)?;
-    fs::rename(&temporary, path).map_err(|_| RepositoryError::LocalStateUnavailable)?;
-    fs::File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|_| RepositoryError::LocalStateUnavailable)
+    write_atomically(path, &temporary, &bytes)
 }
 
 /// A file staged next to the one it will replace: an index candidate, or the
 /// private index a candidate commit is built from. Dropping it removes the
 /// file, so every early return leaves nothing behind; a successful rename has
 /// already moved the file away, which makes the removal a no-op.
-struct StagedFile {
+pub(crate) struct StagedFile {
     path: PathBuf,
 }
 
@@ -9893,7 +9865,7 @@ impl StagedFile {
     /// file or symlink at the path, so a candidate is never written through a
     /// link or over an attacker-prepared name, and the guard exists only once
     /// the file is ours to remove.
-    fn create(path: PathBuf, bytes: &[u8]) -> Result<Self, RepositoryError> {
+    pub(crate) fn create(path: PathBuf, bytes: &[u8]) -> Result<Self, RepositoryError> {
         let mut file = fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -9905,7 +9877,7 @@ impl StagedFile {
         Ok(staged)
     }
 
-    fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         &self.path
     }
 }
@@ -10689,80 +10661,6 @@ fn trim_output(bytes: &[u8]) -> String {
         .to_owned()
 }
 
-fn put_u32(bytes: &mut Vec<u8>, value: usize) -> Result<(), RepositoryError> {
-    let value = u32::try_from(value).map_err(|_| RepositoryError::InvalidPublicationJournal)?;
-    bytes.extend_from_slice(&value.to_le_bytes());
-    Ok(())
-}
-
-fn put_string(bytes: &mut Vec<u8>, value: &str) -> Result<(), RepositoryError> {
-    put_u32(bytes, value.len())?;
-    bytes.extend_from_slice(value.as_bytes());
-    Ok(())
-}
-
-fn put_optional_string(bytes: &mut Vec<u8>, value: Option<&str>) -> Result<(), RepositoryError> {
-    match value {
-        Some(value) => put_string(bytes, value),
-        None => {
-            bytes.extend_from_slice(&u32::MAX.to_le_bytes());
-            Ok(())
-        }
-    }
-}
-
-fn put_optional_bytes(bytes: &mut Vec<u8>, value: Option<&[u8]>) -> Result<(), RepositoryError> {
-    match value {
-        Some(value) => {
-            let length = u32::try_from(value.len())
-                .map_err(|_| RepositoryError::InvalidPublicationJournal)?;
-            bytes.extend_from_slice(&length.to_le_bytes());
-            bytes.extend_from_slice(value);
-        }
-        None => bytes.extend_from_slice(&u32::MAX.to_le_bytes()),
-    }
-    Ok(())
-}
-
-fn take_byte(bytes: &[u8], cursor: &mut usize) -> Result<u8, RepositoryError> {
-    let value = *bytes
-        .get(*cursor)
-        .ok_or(RepositoryError::InvalidPublicationJournal)?;
-    *cursor += 1;
-    Ok(value)
-}
-
-fn take_fixed_array<const N: usize>(
-    bytes: &[u8],
-    cursor: &mut usize,
-) -> Result<[u8; N], RepositoryError> {
-    let end = cursor
-        .checked_add(N)
-        .ok_or(RepositoryError::InvalidPublicationJournal)?;
-    let value = bytes
-        .get(*cursor..end)
-        .ok_or(RepositoryError::InvalidPublicationJournal)?;
-    *cursor = end;
-    value
-        .try_into()
-        .map_err(|_| RepositoryError::InvalidPublicationJournal)
-}
-
-fn take_u32(bytes: &[u8], cursor: &mut usize) -> Result<u32, RepositoryError> {
-    let end = cursor
-        .checked_add(4)
-        .ok_or(RepositoryError::InvalidPublicationJournal)?;
-    let value = bytes
-        .get(*cursor..end)
-        .ok_or(RepositoryError::InvalidPublicationJournal)?;
-    *cursor = end;
-    Ok(u32::from_le_bytes(
-        value
-            .try_into()
-            .map_err(|_| RepositoryError::InvalidPublicationJournal)?,
-    ))
-}
-
 fn checkout_journal_optional_string(
     bytes: &[u8],
     cursor: &mut usize,
@@ -10867,66 +10765,6 @@ fn decode_optional_checkout_cwd(
     }
 }
 
-fn take_string(bytes: &[u8], cursor: &mut usize) -> Result<String, RepositoryError> {
-    let length = usize::try_from(take_u32(bytes, cursor)?)
-        .map_err(|_| RepositoryError::InvalidPublicationJournal)?;
-    let end = cursor
-        .checked_add(length)
-        .ok_or(RepositoryError::InvalidPublicationJournal)?;
-    let value = bytes
-        .get(*cursor..end)
-        .ok_or(RepositoryError::InvalidPublicationJournal)?;
-    *cursor = end;
-    String::from_utf8(value.to_vec()).map_err(|_| RepositoryError::InvalidPublicationJournal)
-}
-
-fn take_optional_string(
-    bytes: &[u8],
-    cursor: &mut usize,
-) -> Result<Option<String>, RepositoryError> {
-    let length = take_u32(bytes, cursor)?;
-    if length == u32::MAX {
-        return Ok(None);
-    }
-    let length = usize::try_from(length).map_err(|_| RepositoryError::InvalidPublicationJournal)?;
-    if length > MAX_JOURNAL_BYTES {
-        return Err(RepositoryError::InvalidPublicationJournal);
-    }
-    let end = cursor
-        .checked_add(length)
-        .ok_or(RepositoryError::InvalidPublicationJournal)?;
-    let value = bytes
-        .get(*cursor..end)
-        .ok_or(RepositoryError::InvalidPublicationJournal)?;
-    *cursor = end;
-    Ok(Some(
-        String::from_utf8(value.to_vec())
-            .map_err(|_| RepositoryError::InvalidPublicationJournal)?,
-    ))
-}
-
-fn take_optional_bytes(
-    bytes: &[u8],
-    cursor: &mut usize,
-) -> Result<Option<Vec<u8>>, RepositoryError> {
-    let length = take_u32(bytes, cursor)?;
-    if length == u32::MAX {
-        return Ok(None);
-    }
-    let length = usize::try_from(length).map_err(|_| RepositoryError::InvalidPublicationJournal)?;
-    if length > MAX_JOURNAL_BYTES {
-        return Err(RepositoryError::InvalidPublicationJournal);
-    }
-    let end = cursor
-        .checked_add(length)
-        .ok_or(RepositoryError::InvalidPublicationJournal)?;
-    let value = bytes
-        .get(*cursor..end)
-        .ok_or(RepositoryError::InvalidPublicationJournal)?
-        .to_vec();
-    *cursor = end;
-    Ok(Some(value))
-}
 /// Most output a bounded Git listing (history, branches) may produce.
 const MAX_LISTING_BYTES: usize = 4 * 1024 * 1024;
 

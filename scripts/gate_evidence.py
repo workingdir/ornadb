@@ -89,6 +89,8 @@ RESULT_COUNTS = re.compile(r"^test result: (?:ok|FAILED)\. (?P<passed>\d+) passe
 # Tests in this workspace report an early return as `SKIP: ...` or `... skipped: set NAME=1 ...`.
 SKIP_LINE = re.compile(r"^SKIP: |\bskipped: set [A-Z][A-Z0-9_]*=")
 COUNTER_PAIR = re.compile(r"=(?P<value>\S*)")
+# A real-editor test prints `ORNA-EDITOR-SAVE {json}` after each save: the editor, the save mode and the exact argv.
+EDITOR_SAVE_LINE = "ORNA-EDITOR-SAVE "
 OUTCOMES = {"ok": "passed", "FAILED": "failed", "ignored": "ignored"}
 
 
@@ -769,6 +771,7 @@ def command_run(arguments: argparse.Namespace) -> int:
         "timeout_minutes": arguments.timeout_minutes,
         "log": {"file": log_path.name, "sha256": None, "bytes": None},
         "counters": {"peak_rss_kib": None},
+        "editor_saves": [],
         "totals": {},
         "targets": [],
         "failures": {"new": [], "known": []},
@@ -799,6 +802,16 @@ def command_run(arguments: argparse.Namespace) -> int:
             with log_path.open(encoding="utf-8", errors="replace") as log:
                 parsed = parse_log(log, executables, libraries)
             failures = observed_failures(parsed, status, timed_out)
+        record["editor_saves"] = editor_saves(log_path)
+        saved = {save.get("editor") for save in record["editor_saves"]}
+        failures = [
+            *failures,
+            *(
+                Failure("workspace", "editor-saves", name, "required editor save is not recorded")
+                for name in arguments.require_editor_save
+                if name not in saved
+            ),
+        ]
         new, known = classify(failures, baseline, arguments.record)
         exit_code = 1 if new else 0
     record["finished_at"] = utc_now()
@@ -1028,6 +1041,22 @@ def counter_lines(patterns: list[str], records: list[tuple[dict, Path]]) -> list
                 if any(pattern.search(line) for pattern in compiled):
                     found.append({"record": record["record"], "line": line, "values": counter_values(line)})
     return found
+
+
+def editor_saves(log_path: Path) -> list[dict]:
+    """Read the save settings each real-editor test printed: one JSON object per `ORNA-EDITOR-SAVE` line."""
+    saves = []
+    if not log_path.exists():
+        return saves
+    with log_path.open(encoding="utf-8", errors="replace") as handle:
+        for raw in handle:
+            line = ANSI.sub("", raw.rstrip("\r\n"))
+            if line.startswith(EDITOR_SAVE_LINE):
+                try:
+                    saves.append(json.loads(line[len(EDITOR_SAVE_LINE) :]))
+                except json.JSONDecodeError:
+                    saves.append({"malformed": line})
+    return saves
 
 
 def evaluate_item(item: dict, records: dict[str, dict], directories: dict[str, Path], expected: list[str]) -> dict:
@@ -1499,6 +1528,13 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--tool-version", action="append", default=[], help="version command to record, for example 'fusermount3 -V'")
     run.add_argument("--require-command", action="append", default=[], help="executable that must be on PATH")
     run.add_argument("--require-path", action="append", default=[], help="path that must exist")
+    run.add_argument(
+        "--require-editor-save",
+        action="append",
+        default=[],
+        metavar="EDITOR",
+        help="real editor whose ORNA-EDITOR-SAVE line must appear in the log, else the run fails",
+    )
     run.add_argument(
         "--reviewer",
         default=None,

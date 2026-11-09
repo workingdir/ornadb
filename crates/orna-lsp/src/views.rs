@@ -18,6 +18,7 @@ use orna_project::{LoadedProject, ProjectLoader};
 use crate::documents::Document;
 use crate::project::Project;
 use crate::standard::StandardLibrary;
+use crate::sync::lock;
 use crate::workspace::{FileAnalysis, Module, OpenDocument, Workspace};
 
 /// The open documents, by URI.
@@ -239,10 +240,4 @@ fn fingerprint(documents: &[&Arc<OpenDocument>]) -> Fingerprint {
 
 fn is_orna(uri: &Uri) -> bool {
     uri.as_str().ends_with(".orna")
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }

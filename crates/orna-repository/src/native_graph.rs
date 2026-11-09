@@ -43,7 +43,8 @@ pub(crate) use cbor::{
 };
 
 use ordered::{
-    OrderedDomain, check_branch_fence_order, check_domain, check_leaf_key_order,
+    OrderedDomain, OrderedEntryReplacement, OrderedIndexObjects, OrderedIndexVisit,
+    OrderedRangeVisit, check_branch_fence_order, check_domain, check_leaf_key_order,
     collect_ordered_index_objects_with, collect_ordered_range_with, find_ordered_entry_with,
     parse_ordered_domain, replace_ordered_entry_with, validate_ordered_root_node,
 };
@@ -166,11 +167,9 @@ impl NativeOid {
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 struct ContextIdentity([u8; 32]);
 
-/// Owner-issued access to one validated format-3 repository snapshot.
-///
-/// Construction is crate-private and reserved for repository-context
-/// integration.  The fields bind the local owner, database, immutable store
-/// root and schema generation; callers cannot create a context from raw OIDs.
+/// Owns the repository handle used to create, sync and delete the private refs
+/// that protect uncommitted graph objects. Pending guards share one owner, so
+/// a guard never outlives the repository it cleans refs from.
 #[derive(Debug)]
 pub struct NativeGraphContext {
     repository: crate::Repository,
@@ -1075,14 +1074,16 @@ impl NativeGraphContext {
             let mut entries = Vec::with_capacity(range.limit());
             collect_ordered_range_with(
                 &mut read_node,
-                root_node,
-                &domain,
-                None,
-                None,
-                range.lower_inclusive(),
-                range.resume_after(),
-                range.upper_exclusive(),
-                range.limit(),
+                OrderedRangeVisit {
+                    node: root_node,
+                    domain: &domain,
+                    height: None,
+                    lower_exclusive: None,
+                    lower_inclusive: range.lower_inclusive(),
+                    resume_after: range.resume_after(),
+                    upper_exclusive: range.upper_exclusive(),
+                    limit: range.limit(),
+                },
                 &mut entries,
             )?;
             entries
@@ -1131,14 +1132,16 @@ impl NativeGraphContext {
         let mut entries = Vec::with_capacity(range.limit());
         collect_ordered_range_with(
             &mut read_node,
-            root_node,
-            &domain,
-            None,
-            None,
-            range.lower_inclusive(),
-            range.resume_after(),
-            range.upper_exclusive(),
-            range.limit(),
+            OrderedRangeVisit {
+                node: root_node,
+                domain: &domain,
+                height: None,
+                lower_exclusive: None,
+                lower_inclusive: range.lower_inclusive(),
+                resume_after: range.resume_after(),
+                upper_exclusive: range.upper_exclusive(),
+                limit: range.limit(),
+            },
             &mut entries,
         )?;
         entries
@@ -1468,25 +1471,31 @@ impl NativeGraphContext {
         let mut validated_contexts = BTreeSet::new();
         collect_ordered_index_objects_with(
             &mut read_node,
-            &root,
-            &relation_map,
-            &domain,
-            None,
-            &mut nodes,
-            &mut payload,
-            &mut validated_contexts,
+            OrderedIndexVisit {
+                node: &root,
+                oid: &relation_map,
+                domain: &domain,
+                height: None,
+            },
+            &mut OrderedIndexObjects {
+                nodes: &mut nodes,
+                payload: &mut payload,
+                validated: &mut validated_contexts,
+            },
         )?;
         let mut raw = Vec::new();
         collect_ordered_range_with(
             &mut read_node,
-            root,
-            &domain,
-            None,
-            None,
-            None,
-            None,
-            None,
-            limit,
+            OrderedRangeVisit {
+                node: root,
+                domain: &domain,
+                height: None,
+                lower_exclusive: None,
+                lower_inclusive: None,
+                resume_after: None,
+                upper_exclusive: None,
+                limit,
+            },
             &mut raw,
         )?;
         if raw.len() != limit {
@@ -1579,14 +1588,16 @@ impl NativeGraphContext {
             let mut entries = Vec::with_capacity(range.limit());
             collect_ordered_range_with(
                 &mut read_node,
-                root_node,
-                &domain,
-                None,
-                None,
-                range.lower_inclusive(),
-                range.resume_after(),
-                range.upper_exclusive(),
-                range.limit(),
+                OrderedRangeVisit {
+                    node: root_node,
+                    domain: &domain,
+                    height: None,
+                    lower_exclusive: None,
+                    lower_inclusive: range.lower_inclusive(),
+                    resume_after: range.resume_after(),
+                    upper_exclusive: range.upper_exclusive(),
+                    limit: range.limit(),
+                },
                 &mut entries,
             )?;
             entries
@@ -1702,14 +1713,16 @@ impl NativeGraphContext {
         let mut raw = Vec::new();
         collect_ordered_range_with(
             &mut |oid: &NativeOid| self.read_native_node(oid, scope, &mut objects),
-            root_node,
-            &domain,
-            None,
-            None,
-            None,
-            None,
-            None,
-            limit,
+            OrderedRangeVisit {
+                node: root_node,
+                domain: &domain,
+                height: None,
+                lower_exclusive: None,
+                lower_inclusive: None,
+                resume_after: None,
+                upper_exclusive: None,
+                limit,
+            },
             &mut raw,
         )?;
         let mut rows = Vec::with_capacity(raw.len());
@@ -3260,12 +3273,14 @@ impl NativeGraphContext {
             replace_ordered_entry_with(
                 &mut read_node,
                 &mut write_node,
-                relation_node,
-                &domain,
-                None,
-                None,
-                &key,
-                value,
+                OrderedEntryReplacement {
+                    node: relation_node,
+                    domain: &domain,
+                    height: None,
+                    lower_exclusive: None,
+                    key: &key,
+                    value,
+                },
             )?
         };
         let store_root = self.write_capture_node(
@@ -3289,92 +3304,26 @@ impl NativeGraphContext {
         suffix: Option<&str>,
         mutation: crate::publication_transaction::ProtectedBlobRowInsert,
     ) -> Result<PreparedOrpGraphCandidate, ProtectedBlobRowPreparationError> {
-        let protected_pin_ref = pin.protected_ref.clone();
-        let protected_pin_oid = pin.descriptor_oid.clone();
-        let mut pin_cleanup = Some(PendingPrivateRefCleanup::new(
+        let mut pin_cleanup = PendingPrivateRefCleanup::new(
             Arc::clone(&self.private_ref_owner),
-            protected_pin_ref,
-            protected_pin_oid,
-        ));
-        let mut candidate_cleanup = None;
-        let preparation = (|| -> Result<PreparedOrpGraphCandidate, GraphError> {
-            let binding =
-                self.accept_protected_blob_pin_with_annotation(pin, media_type, suffix)?;
-            let version = self.row_snapshot.version();
-
-            let scope = self.open_read_scope()?;
-            let key = mutation.key().clone();
-            let mut encoded_row = Vec::new();
-            array(&mut encoded_row, 1);
-            encoded_row.extend_from_slice(binding.encoded_value());
-            let candidate = self.maintain_relation_row_candidate(
-                version,
-                &[RowIndexMutation::Insert {
-                    key: key.clone(),
-                    fields: encoded_row,
-                }],
-                &scope,
-            )?;
-            let primary_root = candidate.primary_root;
-            let row_count = candidate.row_count;
-            let store_root = candidate.store_root;
-
-            let provisional_ref = format!(
-                "refs/orna/pins/{}/scratch/row-{}",
-                hex_encode(&self.owner_id),
-                hex_encode(crate::Uuid::new_v4().as_bytes())
-            );
-            candidate_cleanup = Some(PendingPrivateRefCleanup::new(
-                Arc::clone(&self.private_ref_owner),
-                provisional_ref,
-                store_root.clone(),
-            ));
-            let cleanup = candidate_cleanup
-                .as_ref()
-                .expect("candidate cleanup remains armed during preparation");
-            self.create_protected_ref(&cleanup.reference, &store_root)?;
-            self.sync_git_ref(&cleanup.reference)?;
-
-            let candidate = OrpGraphCandidate {
-                context: self.identity,
-                database_id: *version.database_id(),
-                relation_id: *version.relation_id(),
-                schema_digest: *version.schema().schema_digest(),
-                previous_root: version.primary_root().clone(),
-                primary_root,
-                store_root,
-                row_count,
-                key,
-                content_identity: binding.content_identity(),
-                media_type: media_type.to_owned(),
-                suffix: suffix.map(str::to_owned),
-                transfer: binding.transfer_record(),
-            };
-
-            Ok(PreparedOrpGraphCandidate {
+            pin.protected_ref.clone(),
+            pin.descriptor_oid.clone(),
+        );
+        match self.protected_blob_row_guarded(pin, media_type, suffix, mutation) {
+            Ok((candidate, binding, cleanup)) => Ok(PreparedOrpGraphCandidate {
                 candidate,
                 _binding: binding,
-                _cleanup: candidate_cleanup
-                    .take()
-                    .expect("candidate cleanup remains armed after preparation"),
-                pin_cleanup: pin_cleanup
-                    .take()
-                    .expect("protected pin cleanup remains armed during preparation"),
-            })
-        })();
-
-        match preparation {
-            Ok(prepared) => Ok(prepared),
-            Err(graph) => {
+                _cleanup: cleanup,
+                pin_cleanup,
+            }),
+            Err((mut candidate_cleanup, graph)) => {
                 let mut cleanup_failures = Vec::new();
                 if let Some(candidate_cleanup) = candidate_cleanup.as_mut()
                     && let Err(failure) = candidate_cleanup.cleanup_with_identity()
                 {
                     cleanup_failures.push(failure);
                 }
-                if let Some(pin_cleanup) = pin_cleanup.as_mut()
-                    && let Err(failure) = pin_cleanup.cleanup_with_identity()
-                {
+                if let Err(failure) = pin_cleanup.cleanup_with_identity() {
                     cleanup_failures.push(failure);
                 }
                 if cleanup_failures.is_empty() {
@@ -3387,6 +3336,85 @@ impl NativeGraphContext {
                 }
             }
         }
+    }
+
+    /// Builds the candidate and its provisional ref guard. On failure the
+    /// guard that was already created comes back with the error, so the
+    /// caller reports its cleanup failure instead of dropping it silently.
+    fn protected_blob_row_guarded(
+        &self,
+        pin: ProtectedContentPin,
+        media_type: &str,
+        suffix: Option<&str>,
+        mutation: crate::publication_transaction::ProtectedBlobRowInsert,
+    ) -> Result<
+        (OrpGraphCandidate, OrpBlobBinding, PendingPrivateRefCleanup),
+        (Option<PendingPrivateRefCleanup>, GraphError),
+    > {
+        let (candidate, binding) = self
+            .build_protected_blob_row_candidate(pin, media_type, suffix, mutation)
+            .map_err(|error| (None, error))?;
+        let provisional_ref = format!(
+            "refs/orna/pins/{}/scratch/row-{}",
+            hex_encode(&self.owner_id),
+            hex_encode(crate::Uuid::new_v4().as_bytes())
+        );
+        let cleanup = PendingPrivateRefCleanup::new(
+            Arc::clone(&self.private_ref_owner),
+            provisional_ref,
+            candidate.store_root.clone(),
+        );
+        let created = self
+            .create_protected_ref(&cleanup.reference, &cleanup.oid)
+            .and_then(|()| self.sync_git_ref(&cleanup.reference));
+        if let Err(error) = created {
+            return Err((Some(cleanup), error));
+        }
+        Ok((candidate, binding, cleanup))
+    }
+
+    /// The candidate row and the graph objects it names, before the
+    /// provisional ref that keeps them alive exists.
+    fn build_protected_blob_row_candidate(
+        &self,
+        pin: ProtectedContentPin,
+        media_type: &str,
+        suffix: Option<&str>,
+        mutation: crate::publication_transaction::ProtectedBlobRowInsert,
+    ) -> Result<(OrpGraphCandidate, OrpBlobBinding), GraphError> {
+        let binding = self.accept_protected_blob_pin_with_annotation(pin, media_type, suffix)?;
+        let version = self.row_snapshot.version();
+        let scope = self.open_read_scope()?;
+        let key = mutation.key().clone();
+        let mut encoded_row = Vec::new();
+        array(&mut encoded_row, 1);
+        encoded_row.extend_from_slice(binding.encoded_value());
+        let candidate = self.maintain_relation_row_candidate(
+            version,
+            &[RowIndexMutation::Insert {
+                key: key.clone(),
+                fields: encoded_row,
+            }],
+            &scope,
+        )?;
+        Ok((
+            OrpGraphCandidate {
+                context: self.identity,
+                database_id: *version.database_id(),
+                relation_id: *version.relation_id(),
+                schema_digest: *version.schema().schema_digest(),
+                previous_root: version.primary_root().clone(),
+                primary_root: candidate.primary_root,
+                store_root: candidate.store_root,
+                row_count: candidate.row_count,
+                key,
+                content_identity: binding.content_identity(),
+                media_type: media_type.to_owned(),
+                suffix: suffix.map(str::to_owned),
+                transfer: binding.transfer_record(),
+            },
+            binding,
+        ))
     }
 
     /// Looks up the inserted row's Blob metadata from an uncommitted or
@@ -6746,7 +6774,7 @@ fn maintain_row_map(
 #[cfg(test)]
 mod persisted_orp_tests {
     use super::*;
-    use crate::native_graph::cbor::cbor_head;
+    use crate::cbor::head;
     use crate::native_graph::pins::NativeGraphCoordinationLock;
     use crate::row_store::{RowValue, TypedKey};
     use std::future::Future;
@@ -7164,7 +7192,7 @@ mod persisted_orp_tests {
                 row_count: Some(0),
             })
             .expect("consistent fixture row-map version");
-        let snapshot = crate::row_store::RowMapSnapshot::issue(version, [0x34; 32], Vec::new())
+        let snapshot = crate::row_store::RowMapSnapshot::issue_lazy(version, [0x34; 32])
             .expect("sealed empty fixture row map");
         let repository = crate::Repository::discover(root).expect("discover capture repository");
 
@@ -7387,7 +7415,7 @@ mod persisted_orp_tests {
 
         let descriptor_oid = NativeObjectId::new(algorithm, [0x44; 20]).unwrap();
         let mut blob_reference = Vec::new();
-        cbor_head(&mut blob_reference, 6, 60111);
+        head(&mut blob_reference, 6, 60111);
         array(&mut blob_reference, 5);
         uint(&mut blob_reference, 1);
         bytes(&mut blob_reference, &[0x55; 32]);
@@ -7406,7 +7434,7 @@ mod persisted_orp_tests {
         ));
 
         let mut malformed_oid_value = Vec::new();
-        cbor_head(&mut malformed_oid_value, 6, 60111);
+        head(&mut malformed_oid_value, 6, 60111);
         array(&mut malformed_oid_value, 5);
         uint(&mut malformed_oid_value, 1);
         bytes(&mut malformed_oid_value, &[0x55; 32]);
@@ -7423,7 +7451,7 @@ mod persisted_orp_tests {
 
         let overflow_oid = NativeObjectId::new(algorithm, [0x77; 20]).unwrap();
         let mut overflow_value = Vec::new();
-        cbor_head(&mut overflow_value, 6, 60113);
+        head(&mut overflow_value, 6, 60113);
         array(&mut overflow_value, 1);
         bytes(&mut overflow_value, overflow_oid.as_bytes());
         let overflow_node = persisted_row_leaf(overflow_value.clone());
@@ -8115,13 +8143,17 @@ mod persisted_orp_tests {
         assert!(matches!(
             collect_ordered_index_objects_with(
                 &mut read_node,
-                &branch,
-                &root_oid,
-                &domain,
-                None,
-                &mut nodes,
-                &mut payload,
-                &mut validated_contexts,
+                OrderedIndexVisit {
+                    node: &branch,
+                    oid: &root_oid,
+                    domain: &domain,
+                    height: None,
+                },
+                &mut OrderedIndexObjects {
+                    nodes: &mut nodes,
+                    payload: &mut payload,
+                    validated: &mut validated_contexts,
+                },
             ),
             Err(GraphError::InvalidCount(2))
         ));
@@ -9462,15 +9494,15 @@ mod persisted_orp_tests {
         let stored_row = |media_type: &str, suffix: Option<&str>| {
             let mut row = Vec::new();
             array(&mut row, 1);
-            cbor_head(&mut row, 6, 60111);
+            head(&mut row, 6, 60111);
             array(&mut row, 5);
             uint(&mut row, identity.length());
             bytes(&mut row, &identity.sha256());
-            cbor_head(&mut row, 3, media_type.len() as u64);
+            head(&mut row, 3, media_type.len() as u64);
             row.extend_from_slice(media_type.as_bytes());
             match suffix {
                 Some(suffix) => {
-                    cbor_head(&mut row, 3, suffix.len() as u64);
+                    head(&mut row, 3, suffix.len() as u64);
                     row.extend_from_slice(suffix.as_bytes());
                 }
                 None => null(&mut row),
@@ -10476,6 +10508,92 @@ mod persisted_orp_tests {
         )
         .expect("load seeded format-3 row map");
         graph.store_root = seeded_store_root;
+    }
+
+    /// Pages every key of the published map with `limit` rows per page, each
+    /// page resuming after the last key the previous page returned.
+    fn page_all_keys(graph: &NativeGraphContext, limit: usize) -> Vec<TypedKey> {
+        let scope = graph.open_read_scope().expect("paging scope");
+        let base = crate::row_store::KeyRange::new(None, None, limit).expect("valid page");
+        let mut collected = Vec::new();
+        let mut range = base.clone();
+        loop {
+            let page: Vec<TypedKey> = graph
+                .range_rows(&range, &scope)
+                .expect("read one page")
+                .into_iter()
+                .map(|row| row.key().clone())
+                .collect();
+            let short = page.len() < limit;
+            let last = page.last().cloned();
+            collected.extend(page);
+            let Some(last) = last.filter(|_| !short) else {
+                break;
+            };
+            range = base
+                .clone()
+                .with_resume_after(last)
+                .expect("resume cursor inside the map");
+        }
+        collected
+    }
+
+    /// Every key family the row-map seam admits pages through the persisted
+    /// map in logical order: Text, Bytes and Bool, plus a composite key whose
+    /// canonical encoding is exactly 256 bytes beside a 257-byte neighbour.
+    #[test]
+    fn key_families_page_through_the_persisted_row_map_in_order() {
+        let texts = ["a", "b", "c", "d", "e"]
+            .into_iter()
+            .map(|text| TypedKey::Text(text.to_owned()))
+            .collect::<Vec<_>>();
+        let bytes = [vec![0x00], vec![0x00, 0x01], vec![0x01], vec![0xff]]
+            .into_iter()
+            .map(TypedKey::Bytes)
+            .collect::<Vec<_>>();
+        let bools = vec![TypedKey::Bool(false), TypedKey::Bool(true)];
+        let tuple_of = |text_len: usize| {
+            TypedKey::Tuple(vec![TypedKey::Text("x".repeat(text_len)), TypedKey::Int(1)])
+        };
+        let canonical_len = |key: &TypedKey| key.canonical_bytes().expect("canonical key").len();
+        let text_len = (0..512)
+            .find(|&len| canonical_len(&tuple_of(len)) == 256)
+            .expect("some text length encodes the tuple in exactly 256 bytes");
+        let tuples = vec![
+            TypedKey::Tuple(vec![TypedKey::Text("a".to_owned()), TypedKey::Int(1)]),
+            tuple_of(text_len),
+            tuple_of(text_len + 1),
+        ];
+        assert_eq!(canonical_len(&tuples[1]), 256);
+        assert_eq!(canonical_len(&tuples[2]), 257);
+        for keys in [texts, bytes, bools, tuples] {
+            let (_directory, mut graph) = capture_test_context();
+            publish_row_map(&mut graph, keys.clone());
+            for limit in [1, 2, 3, 256] {
+                assert_eq!(page_all_keys(&graph, limit), keys, "limit {limit}");
+            }
+        }
+    }
+
+    /// A bounded interval returns `limit` rows, and each carries the
+    /// snapshot's row-map version, so one page never mixes identities.
+    #[test]
+    fn bounded_interval_returns_limit_rows_pinned_to_the_snapshot() {
+        let (_directory, mut graph) = capture_test_context();
+        publish_row_map(&mut graph, (0..600).map(TypedKey::Int));
+        let scope = graph.open_read_scope().expect("bounded scope");
+        let version = graph.row_snapshot.version().clone();
+        let range =
+            crate::row_store::KeyRange::new(Some(TypedKey::Int(63)), Some(TypedKey::Int(67)), 3)
+                .expect("valid bounded range");
+        let rows = graph
+            .range_rows(&range, &scope)
+            .expect("read bounded range");
+        assert_eq!(
+            rows.iter().map(|row| row.key().clone()).collect::<Vec<_>>(),
+            vec![TypedKey::Int(63), TypedKey::Int(64), TypedKey::Int(65)]
+        );
+        assert!(rows.iter().all(|row| row.version() == &version));
     }
 
     /// A composite key pages in key order through the production row map:
@@ -12109,7 +12227,7 @@ mod persisted_orp_tests {
     fn canonical_reader_admits_exactly_the_format3_registered_tags() {
         let tagged = |tag: u64, payload: &[u8]| {
             let mut bytes = Vec::new();
-            cbor_head(&mut bytes, 6, tag);
+            head(&mut bytes, 6, tag);
             bytes.extend_from_slice(payload);
             bytes
         };

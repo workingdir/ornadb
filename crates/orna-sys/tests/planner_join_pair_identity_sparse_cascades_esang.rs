@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 
 use orna_sys::{
-    ExpressionRef, ObjectRef, PlanDetail, PlanNode, PlanNodeKind, QueryJoinDescription,
-    QueryJoinPairIdentityDescription, QueryPlanDescription, QuerySourceStatistics, SnapshotRef,
-    explain_query_with_join_pair_identities,
+    ExplainInputs, ExpressionRef, ObjectRef, PlanDetail, PlanNode, PlanNodeKind,
+    QueryJoinDescription, QueryJoinPairIdentityDescription, QueryPlanDescription,
+    QuerySourceStatistics, SnapshotRef, explain_query_with,
 };
 
 const JOIN_PAIR_FIXTURE: &str =
@@ -144,7 +144,7 @@ fn pair_identities_remain_with_real_cost_cascade_folds_across_sparse_reordering(
         pair("pair:small", "table:Small", "expr:anchor-small"),
         pair("pair:middle", "table:Middle", "expr:anchor-middle"),
     ];
-    let first = explain_query_with_join_pair_identities(
+    let first = explain_query_with(
         &query(vec![
             join(
                 "table:Large",
@@ -163,11 +163,14 @@ fn pair_identities_remain_with_real_cost_cascade_folds_across_sparse_reordering(
                 "expr:anchor-middle",
             ),
         ]),
-        &pairs,
+        ExplainInputs {
+            join_pair_identities: &pairs,
+            ..ExplainInputs::default()
+        },
     )
     .expect("exact pair identities resolve across unknown-cost join inputs");
     let reversed_pairs = pairs.iter().rev().cloned().collect::<Vec<_>>();
-    let second = explain_query_with_join_pair_identities(
+    let second = explain_query_with(
         &query(vec![
             join(
                 "table:Middle",
@@ -186,7 +189,10 @@ fn pair_identities_remain_with_real_cost_cascade_folds_across_sparse_reordering(
                 "expr:anchor-large",
             ),
         ]),
-        &reversed_pairs,
+        ExplainInputs {
+            join_pair_identities: &reversed_pairs,
+            ..ExplainInputs::default()
+        },
     )
     .expect("pair identities do not depend on declaration offsets");
 
@@ -301,11 +307,23 @@ fn join_pair_identity_requires_an_exact_declared_source_and_predicate() {
     };
 
     assert!(matches!(
-        explain_query_with_join_pair_identities(&query, &[mismatched_predicate]),
+        explain_query_with(
+            &query,
+            ExplainInputs {
+                join_pair_identities: &[mismatched_predicate],
+                ..ExplainInputs::default()
+            },
+        ),
         Err(orna_sys::ExplainError::InvalidObject)
     ));
     assert!(matches!(
-        explain_query_with_join_pair_identities(&query, &[missing_left_source]),
+        explain_query_with(
+            &query,
+            ExplainInputs {
+                join_pair_identities: &[missing_left_source],
+                ..ExplainInputs::default()
+            },
+        ),
         Err(orna_sys::ExplainError::InvalidObject)
     ));
 }
@@ -319,10 +337,22 @@ fn join_pair_identity_contributes_to_the_stable_plan_id() {
     )]);
     let original = pair("pair:small", "table:Small", "expr:anchor-small");
     let renamed = pair("pair:small-v2", "table:Small", "expr:anchor-small");
-    let original_plan = explain_query_with_join_pair_identities(&query, &[original])
-        .expect("original pair identity has a concrete plan");
-    let renamed_plan = explain_query_with_join_pair_identities(&query, &[renamed])
-        .expect("renamed pair identity has a concrete plan");
+    let original_plan = explain_query_with(
+        &query,
+        ExplainInputs {
+            join_pair_identities: &[original],
+            ..ExplainInputs::default()
+        },
+    )
+    .expect("original pair identity has a concrete plan");
+    let renamed_plan = explain_query_with(
+        &query,
+        ExplainInputs {
+            join_pair_identities: &[renamed],
+            ..ExplainInputs::default()
+        },
+    )
+    .expect("renamed pair identity has a concrete plan");
 
     assert_ne!(original_plan.plan().id(), renamed_plan.plan().id());
 }

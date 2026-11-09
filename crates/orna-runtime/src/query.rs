@@ -7,12 +7,16 @@ use orna_foundation::{
     FunctionRef, ObjectRef, OvbRaw, RowRef, SnapshotRef, object_reference, snapshot_reference,
 };
 
-use crate::{
-    CwdCapture, InvocationObservationStatus, RuntimeError, RuntimeState, WriterLease,
-    bigint_to_i64, capture_tx, decode_capture, encode_capture, fixed, now_ms, observation_instant,
-    opaque_reference_key, row_reference_raw, validate_id, validate_observation_text,
-    validate_writer_lease,
+use crate::codec::{
+    bigint_to_i64, capture_tx, decode_capture, encode_capture, fixed, now_ms, validate_id,
+    validate_observation_text,
 };
+use crate::error::RuntimeError;
+use crate::invocation::InvocationObservationStatus;
+use crate::lease::{WriterLease, validate_writer_lease};
+use crate::observation::observation_instant;
+use crate::{RuntimeState, opaque_reference_key, row_reference_raw};
+use orna_foundation::CwdCapture;
 
 /// Stable relation identities for system rows whose typed Foundation aliases
 /// are not yet defined by this implementation's reference layer.
@@ -146,8 +150,7 @@ impl RuntimeState {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         self.require_owner(&tx, writer).await?;
         let current = capture_tx(&tx).await?;
         if current != registration.capture {
@@ -177,9 +180,7 @@ impl RuntimeState {
         )
         .await
         .map_err(|_| RuntimeError::QueryObservationConflict)?;
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        tx.commit().await?;
         Ok(QueryObservation {
             id: registration.id,
             expression: registration.expression,
@@ -209,17 +210,14 @@ impl RuntimeState {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         self.require_owner(&tx, writer).await?;
         let mut observation = load_query_observation_tx(&tx, id)
             .await?
             .ok_or(RuntimeError::QueryObservationConflict)?;
         if observation.status.is_terminal() {
             if observation.status == status {
-                tx.commit()
-                    .await
-                    .map_err(|_| RuntimeError::StorageUnavailable)?;
+                tx.commit().await?;
                 return Ok(observation);
             }
             return Err(RuntimeError::QueryStateConflict);
@@ -239,11 +237,8 @@ impl RuntimeState {
                 query_status_code(InvocationObservationStatus::Running),
             ],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
+        tx.commit().await?;
         observation.ended_ms = Some(ended_ms);
         observation.observed_ms = ended_ms;
         observation.status = status;
@@ -255,12 +250,9 @@ impl RuntimeState {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Deferred)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let observations = load_query_observations(&tx).await?;
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        tx.commit().await?;
         Ok(observations)
     }
 
@@ -271,12 +263,9 @@ impl RuntimeState {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Deferred)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let projections = load_sys_materialization_projections(&tx).await?;
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        tx.commit().await?;
         Ok(projections)
     }
 }
@@ -298,14 +287,9 @@ pub(super) async fn load_query_observations(
             "SELECT query_id FROM sys_query_observation ORDER BY started_ms, query_id",
             (),
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     let mut observations = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    {
+    while let Some(row) = rows.next().await? {
         let id = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
         observations.push(
             load_query_observation_tx(connection, id)
@@ -327,13 +311,8 @@ async fn load_query_observation_tx(
              FROM sys_query_observation WHERE query_id = ?1",
             params![id.to_vec()],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    else {
+        .await?;
+    let Some(row) = rows.next().await? else {
         return Ok(None);
     };
     let expression: Option<String> = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
@@ -397,14 +376,9 @@ async fn load_sys_materialization_projections(
                       materialization.function_object_id, materialization.snapshot",
             (),
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     let mut projections = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    {
+    while let Some(row) = rows.next().await? {
         let function_object_id = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
         let snapshot_bytes: Vec<u8> = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
         let revision_id = fixed::<32>(row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?)?;

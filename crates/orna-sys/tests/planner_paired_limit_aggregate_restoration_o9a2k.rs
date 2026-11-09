@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 
 use orna_sys::{
-    ExpressionRef, ObjectRef, PlanDetail, PlanNode, PlanNodeKind, PlanWindowFrameBound,
-    QueryJoinDescription, QueryJoinPairIdentityDescription, QueryLimitPushdownDescription,
-    QueryPlanDescription, QuerySourceStatistics, QueryWindowAggregatePushdownDescription,
-    SnapshotRef, explain_query_with_join_pair_identities_and_limit_window_aggregate_pushdowns,
+    ExplainInputs, ExpressionRef, ObjectRef, PlanDetail, PlanNode, PlanNodeKind,
+    PlanWindowFrameBound, QueryJoinDescription, QueryJoinPairIdentityDescription,
+    QueryLimitPushdownDescription, QueryPlanDescription, QuerySourceStatistics,
+    QueryWindowAggregatePushdownDescription, SnapshotRef, explain_query_with,
 };
 
 const FIXTURE: &str =
@@ -130,11 +130,14 @@ fn plan(
     limits: &[QueryLimitPushdownDescription],
     aggregates: &[QueryWindowAggregatePushdownDescription],
 ) -> orna_sys::ExplainedPlan {
-    explain_query_with_join_pair_identities_and_limit_window_aggregate_pushdowns(
+    explain_query_with(
         &query(anchor, order),
-        pairs,
-        limits,
-        aggregates,
+        ExplainInputs {
+            window_aggregates: aggregates,
+            join_pair_identities: pairs,
+            input_limit_pushdowns: limits,
+            ..ExplainInputs::default()
+        },
     )
     .expect("paired limits and aggregate restoration chains plan over sparse joins")
 }

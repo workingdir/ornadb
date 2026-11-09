@@ -685,19 +685,36 @@ fn compact_segment_for_schema(
     .unwrap()
 }
 
-#[allow(clippy::too_many_arguments)]
-fn compact_ovb_segment_for_schema(
+/// One OVB compact-segment fixture: the table and ordinal it is filed under,
+/// its role, the schema and physical field saying how its rows are encoded,
+/// the column mapping bytes, and the encoded values with their key bounds and
+/// logical annotation.
+struct OvBSegmentFixture<'a> {
     table: Uuid,
     ordinal: u64,
     role: CompactSegmentRole,
-    schema: &SchemaDescriptor,
+    schema: &'a SchemaDescriptor,
     physical_field: Uuid,
     columns: Vec<u8>,
-    values: &[Vec<u8>],
+    values: &'a [Vec<u8>],
     min_key: Vec<u8>,
     max_key: Vec<u8>,
-    annotation: Option<&str>,
-) -> CompactSegment {
+    annotation: Option<&'a str>,
+}
+
+fn compact_ovb_segment_for_schema(fixture: OvBSegmentFixture<'_>) -> CompactSegment {
+    let OvBSegmentFixture {
+        table,
+        ordinal,
+        role,
+        schema,
+        physical_field,
+        columns,
+        values,
+        min_key,
+        max_key,
+        annotation,
+    } = fixture;
     let segment_id = Uuid::from_u64_pair(0x018f_0000_0000_7000, ordinal | 0x8000_0000_0000_0000);
     let path = ManagedPath::new(format!(
         ".orna/storage/{table}/data/{}/{segment_id}.parquet",
@@ -809,19 +826,33 @@ fn compact_columns_for_leaves(leaves: &[(Uuid, &str, &str)]) -> Vec<u8> {
     .unwrap()
 }
 
-/// Writes an `Int` key column and an unannotated `BYTE_ARRAY` `Blob` column as
-/// one compact segment file (1.0.0 `23-storage.md:184`).
-#[allow(clippy::too_many_arguments)]
-fn compact_key_blob_parquet(
+/// One key/blob Parquet fixture: the table and schema the row is encoded
+/// under, its key and blob columns, the column mapping bytes, the values those
+/// columns hold, and the blob column's logical annotation.
+struct KeyBlobFixture<'a> {
     table: Uuid,
-    schema: &SchemaDescriptor,
+    schema: &'a SchemaDescriptor,
     key_field: Uuid,
     blob_field: Uuid,
-    columns: &[u8],
-    keys: &[i64],
-    blobs: &[&[u8]],
-    blob_annotation: &str,
-) -> Vec<u8> {
+    columns: &'a [u8],
+    keys: &'a [i64],
+    blobs: &'a [&'a [u8]],
+    blob_annotation: &'a str,
+}
+
+/// Writes an `Int` key column and an unannotated `BYTE_ARRAY` `Blob` column as
+/// one compact segment file (1.0.0 `23-storage.md:184`).
+fn compact_key_blob_parquet(fixture: KeyBlobFixture<'_>) -> Vec<u8> {
+    let KeyBlobFixture {
+        table,
+        schema,
+        key_field,
+        blob_field,
+        columns,
+        keys,
+        blobs,
+        blob_annotation,
+    } = fixture;
     assert_eq!(keys.len(), blobs.len());
     let key_path = format!("f_{}", key_field.simple());
     let blob_path = format!("f_{}", blob_field.simple());
@@ -901,18 +932,17 @@ fn compact_key_blob_parquet(
     with_page_checksums(bytes)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn compact_key_blob_segment(
-    table: Uuid,
-    ordinal: u64,
-    schema: &SchemaDescriptor,
-    key_field: Uuid,
-    blob_field: Uuid,
-    columns: Vec<u8>,
-    keys: &[i64],
-    blobs: &[&[u8]],
-    blob_annotation: &str,
-) -> CompactSegment {
+fn compact_key_blob_segment(fixture: KeyBlobFixture<'_>, ordinal: u64) -> CompactSegment {
+    let KeyBlobFixture {
+        table,
+        schema,
+        key_field,
+        blob_field,
+        columns,
+        keys,
+        blobs,
+        blob_annotation,
+    } = fixture;
     let segment_id = Uuid::from_u64_pair(0x018f_0000_0000_7000, ordinal | 0x8000_0000_0000_0000);
     let path = ManagedPath::new(format!(
         ".orna/storage/{table}/data/{}/{segment_id}.parquet",
@@ -925,20 +955,20 @@ fn compact_key_blob_segment(
         schema: schema_fingerprint(schema),
         encoder_version: "test-encoder-v1".to_owned(),
         relative_path: path,
-        bytes: compact_key_blob_parquet(
+        bytes: compact_key_blob_parquet(KeyBlobFixture {
             table,
             schema,
             key_field,
             blob_field,
-            &columns,
+            columns,
             keys,
             blobs,
             blob_annotation,
-        ),
+        }),
         min_key: encoded_int(u64::try_from(*keys.iter().min().unwrap()).unwrap()),
         max_key: encoded_int(u64::try_from(*keys.iter().max().unwrap()).unwrap()),
         row_count: u64::try_from(keys.len()).unwrap(),
-        columns,
+        columns: columns.to_vec(),
         row_group_index: true,
         bloom: false,
     })
@@ -2255,18 +2285,18 @@ fn compact_publication_accepts_immutable_ovb_int_and_bool_key_fallbacks() {
     .unwrap()
     .encode()
     .unwrap();
-    let int_segment = compact_ovb_segment_for_schema(
-        int_table,
-        741,
-        CompactSegmentRole::Data,
-        &int_schema,
-        int_field,
-        compact_columns_for_mapping(int_field, "Int", "ovb"),
-        std::slice::from_ref(&int_value),
-        int_value.clone(),
-        int_value.clone(),
-        None,
-    );
+    let int_segment = compact_ovb_segment_for_schema(OvBSegmentFixture {
+        table: int_table,
+        ordinal: 741,
+        role: CompactSegmentRole::Data,
+        schema: &int_schema,
+        physical_field: int_field,
+        columns: compact_columns_for_mapping(int_field, "Int", "ovb"),
+        values: std::slice::from_ref(&int_value),
+        min_key: int_value.clone(),
+        max_key: int_value.clone(),
+        annotation: None,
+    });
     assert!(
         repo.prepare_compact_publication(CompactPublicationRequest {
             expected_head: &head,
@@ -2293,18 +2323,18 @@ fn compact_publication_accepts_immutable_ovb_int_and_bool_key_fallbacks() {
             .encode()
             .unwrap(),
     ];
-    let bool_segment = compact_ovb_segment_for_schema(
-        bool_table,
-        742,
-        CompactSegmentRole::Data,
-        &bool_schema,
-        bool_field,
-        compact_columns_for_mapping(bool_field, "Bool", "ovb"),
-        &bool_values,
-        bool_values[0].clone(),
-        bool_values[1].clone(),
-        None,
-    );
+    let bool_segment = compact_ovb_segment_for_schema(OvBSegmentFixture {
+        table: bool_table,
+        ordinal: 742,
+        role: CompactSegmentRole::Data,
+        schema: &bool_schema,
+        physical_field: bool_field,
+        columns: compact_columns_for_mapping(bool_field, "Bool", "ovb"),
+        values: &bool_values,
+        min_key: bool_values[0].clone(),
+        max_key: bool_values[1].clone(),
+        annotation: None,
+    });
     assert!(
         repo.prepare_compact_publication(CompactPublicationRequest {
             expected_head: &head,
@@ -2362,18 +2392,18 @@ fn compact_publication_rejects_immutable_ovb_fallback_mismatches() {
         ),
     ];
     for (ordinal, value, columns, annotation) in cases {
-        let segment = compact_ovb_segment_for_schema(
+        let segment = compact_ovb_segment_for_schema(OvBSegmentFixture {
             table,
             ordinal,
-            CompactSegmentRole::Data,
-            &schema,
-            field,
+            role: CompactSegmentRole::Data,
+            schema: &schema,
+            physical_field: field,
             columns,
-            std::slice::from_ref(&value),
-            canonical_int.clone(),
-            canonical_int.clone(),
+            values: std::slice::from_ref(&value),
+            min_key: canonical_int.clone(),
+            max_key: canonical_int.clone(),
             annotation,
-        );
+        });
         assert!(matches!(
             repo.prepare_compact_publication(CompactPublicationRequest {
                 expected_head: &head,
@@ -2957,18 +2987,18 @@ fn legacy_authoritative_read_resolves_key_only_generations_and_deletions_without
     let key = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0802);
     let schema = compact_schema_with_roles(table, &[(key, "key", 0)]);
     let head = repo.head().unwrap().unwrap();
-    let data = compact_ovb_segment_for_schema(
+    let data = compact_ovb_segment_for_schema(OvBSegmentFixture {
         table,
-        801,
-        CompactSegmentRole::Data,
-        &schema,
-        key,
-        compact_columns_for_mapping(key, "Int", "ovb"),
-        &[encoded_int(1), encoded_int(2), encoded_int(3)],
-        encoded_int(1),
-        encoded_int(3),
-        None,
-    );
+        ordinal: 801,
+        role: CompactSegmentRole::Data,
+        schema: &schema,
+        physical_field: key,
+        columns: compact_columns_for_mapping(key, "Int", "ovb"),
+        values: &[encoded_int(1), encoded_int(2), encoded_int(3)],
+        min_key: encoded_int(1),
+        max_key: encoded_int(3),
+        annotation: None,
+    });
     let first = repo
         .prepare_compact_publication(CompactPublicationRequest {
             expected_head: &head,
@@ -2984,18 +3014,18 @@ fn legacy_authoritative_read_resolves_key_only_generations_and_deletions_without
 
     let head = repo.head().unwrap().unwrap();
     let base = repo.read_compact_manifest(&head, table).unwrap().unwrap();
-    let deletion = compact_ovb_segment_for_schema(
+    let deletion = compact_ovb_segment_for_schema(OvBSegmentFixture {
         table,
-        802,
-        CompactSegmentRole::Deletion,
-        &schema,
-        key,
-        compact_columns_for_mapping(key, "Int", "ovb"),
-        &[encoded_int(2)],
-        encoded_int(2),
-        encoded_int(2),
-        None,
-    );
+        ordinal: 802,
+        role: CompactSegmentRole::Deletion,
+        schema: &schema,
+        physical_field: key,
+        columns: compact_columns_for_mapping(key, "Int", "ovb"),
+        values: &[encoded_int(2)],
+        min_key: encoded_int(2),
+        max_key: encoded_int(2),
+        annotation: None,
+    });
     let second = repo
         .prepare_compact_publication(CompactPublicationRequest {
             expected_head: &head,
@@ -3045,15 +3075,17 @@ fn legacy_authoritative_read_decodes_unannotated_blob_column_bytes() {
     // drops empty values fails instead of passing on a benign fixture.
     let payloads: [&[u8]; 2] = [&[0x00, 0xff, 0x80, b'o', b'r', b'n', b'a'], &[]];
     let body = compact_key_blob_segment(
-        table,
+        KeyBlobFixture {
+            table,
+            schema: &schema,
+            key_field: key,
+            blob_field: blob,
+            columns: &columns,
+            keys: &[1, 2],
+            blobs: &payloads,
+            blob_annotation: "",
+        },
         901,
-        &schema,
-        key,
-        blob,
-        columns,
-        &[1, 2],
-        &payloads,
-        "",
     );
     let head = repo.head().unwrap().unwrap();
     let plan = repo
@@ -3138,15 +3170,17 @@ fn compact_publication_refuses_an_annotated_blob_leaf() {
     let columns = compact_columns_for_leaves(&[(key, "Int", "int64"), (blob, "Blob", "blob")]);
     let payloads: [&[u8]; 1] = [b"annotated"];
     let body = compact_key_blob_segment(
-        table,
+        KeyBlobFixture {
+            table,
+            schema: &schema,
+            key_field: key,
+            blob_field: blob,
+            columns: &columns,
+            keys: &[1],
+            blobs: &payloads,
+            blob_annotation: " (STRING)",
+        },
         1001,
-        &schema,
-        key,
-        blob,
-        columns,
-        &[1],
-        &payloads,
-        " (STRING)",
     );
     let head = repo.head().unwrap().unwrap();
     let before = git_state(&repo, root.path());

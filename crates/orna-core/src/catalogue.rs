@@ -2060,6 +2060,68 @@ pub enum CatalogueSnapshotError {
 impl fmt::Display for CatalogueSnapshotError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::DuplicateTypeName { .. }
+            | Self::DuplicateTypeId { .. }
+            | Self::DuplicateObjectTypeName { .. }
+            | Self::DuplicateObjectTypeId { .. }
+            | Self::DuplicateValueTypeName { .. }
+            | Self::DuplicateValueTypeId { .. }
+            | Self::DuplicateEnumTypeName { .. }
+            | Self::DuplicateEnumTypeId { .. }
+            | Self::DuplicateRecordValueTypeName { .. }
+            | Self::DuplicateRecordValueTypeId { .. }
+            | Self::DuplicateTypeBindingId { .. }
+            | Self::DuplicateSchemaName { .. }
+            | Self::DuplicateSchemaId { .. } => self.write_naming_message(formatter),
+            Self::EmptyEnumTypeLabels { .. }
+            | Self::DuplicateEnumTypeLabel { .. }
+            | Self::EnumTypeHasNoSchema { .. }
+            | Self::EnumTypeSchemaNotDeclared { .. }
+            | Self::EmptyRecordValueTypeFields { .. }
+            | Self::RecordValueTypeHasNoSchema { .. }
+            | Self::RecordValueTypeSchemaNotDeclared { .. }
+            | Self::UnsupportedRecordValueFieldType { .. }
+            | Self::EmptyValueTypeRepresentationContract { .. }
+            | Self::ValueTypeHasNoSchema { .. }
+            | Self::ValueTypeSchemaNotDeclared { .. }
+            | Self::TypeBindingTargetNotFound { .. }
+            | Self::QualifiedTypeBindingHasNoSchema { .. }
+            | Self::QualifiedTypeBindingSchemaNotDeclared { .. }
+            | Self::ObjectTypeHasNoSchema { .. }
+            | Self::ObjectTypeSchemaNotDeclared { .. } => self.write_definition_message(formatter),
+            Self::DuplicateFunctionName { .. }
+            | Self::DuplicateFunctionId { .. }
+            | Self::FunctionHasNoSchema { .. }
+            | Self::FunctionSchemaNotDeclared { .. }
+            | Self::ClientFunctionTransaction { .. }
+            | Self::EmptyRowsReturn { .. } => self.write_function_message(formatter),
+            Self::EmptyParameterName { .. }
+            | Self::DuplicateParameterName { .. }
+            | Self::DuplicateParameterId { .. }
+            | Self::DuplicateParameterOrdinal { .. }
+            | Self::ParameterOrdinalOutOfRange { .. }
+            | Self::ParameterOrdinalOutOfSequence { .. } => self.write_parameter_message(formatter),
+            Self::EmptyReturnColumnName { .. }
+            | Self::DuplicateReturnColumnName { .. }
+            | Self::DuplicateReturnColumnOrdinal { .. }
+            | Self::ReturnColumnOrdinalOutOfRange { .. }
+            | Self::ReturnColumnOrdinalOutOfSequence { .. } => {
+                self.write_return_column_message(formatter)
+            }
+            Self::EmptyFieldName { .. }
+            | Self::DuplicateFieldName { .. }
+            | Self::DuplicateFieldId { .. }
+            | Self::DuplicateFieldOrdinal { .. }
+            | Self::FieldOrdinalOutOfRange { .. }
+            | Self::FieldOrdinalOutOfSequence { .. } => self.write_field_message(formatter),
+        }
+    }
+}
+
+impl CatalogueSnapshotError {
+    /// Writes the message of one duplicate-naming invariant.
+    fn write_naming_message(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
             Self::DuplicateTypeName { name } => {
                 write!(formatter, "duplicate type name {name}")
             }
@@ -2084,6 +2146,30 @@ impl fmt::Display for CatalogueSnapshotError {
             Self::DuplicateEnumTypeId { id } => {
                 write!(formatter, "duplicate enum type identity {id}")
             }
+            Self::DuplicateRecordValueTypeName { name } => {
+                write!(formatter, "duplicate record value type name {name}")
+            }
+            Self::DuplicateRecordValueTypeId { id } => {
+                write!(formatter, "duplicate record value type identity {id}")
+            }
+            Self::DuplicateTypeBindingId { id } => {
+                write!(formatter, "duplicate type binding identity {id}")
+            }
+            Self::DuplicateSchemaName { name } => {
+                write!(formatter, "duplicate schema name {name}")
+            }
+            Self::DuplicateSchemaId { id } => {
+                write!(formatter, "duplicate schema identity {id}")
+            }
+            // Display dispatches every variant to exactly one helper, so no
+            // variant can reach this arm.
+            _ => unreachable!("duplicate-naming invariant dispatched to the wrong helper"),
+        }
+    }
+
+    /// Writes the message of one definition invariant.
+    fn write_definition_message(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
             Self::EmptyEnumTypeLabels { enum_type } => {
                 write!(formatter, "enum type {enum_type} has no labels")
             }
@@ -2097,12 +2183,6 @@ impl fmt::Display for CatalogueSnapshotError {
                 formatter,
                 "enum type {enum_type} refers to undeclared schema {schema}"
             ),
-            Self::DuplicateRecordValueTypeName { name } => {
-                write!(formatter, "duplicate record value type name {name}")
-            }
-            Self::DuplicateRecordValueTypeId { id } => {
-                write!(formatter, "duplicate record value type identity {id}")
-            }
             Self::EmptyRecordValueTypeFields { record_value_type } => {
                 write!(
                     formatter,
@@ -2139,9 +2219,6 @@ impl fmt::Display for CatalogueSnapshotError {
                 formatter,
                 "value type {value_type} refers to undeclared schema {schema}"
             ),
-            Self::DuplicateTypeBindingId { id } => {
-                write!(formatter, "duplicate type binding identity {id}")
-            }
             Self::TypeBindingTargetNotFound { binding, target } => write!(
                 formatter,
                 "type binding {binding} refers to undeclared type {target}"
@@ -2156,12 +2233,6 @@ impl fmt::Display for CatalogueSnapshotError {
                 formatter,
                 "qualified type binding {binding} refers to undeclared schema {schema}"
             ),
-            Self::DuplicateSchemaName { name } => {
-                write!(formatter, "duplicate schema name {name}")
-            }
-            Self::DuplicateSchemaId { id } => {
-                write!(formatter, "duplicate schema identity {id}")
-            }
             Self::ObjectTypeHasNoSchema { object_type } => {
                 write!(
                     formatter,
@@ -2175,6 +2246,15 @@ impl fmt::Display for CatalogueSnapshotError {
                 formatter,
                 "object type {object_type} refers to undeclared schema {schema}"
             ),
+            // Display dispatches every variant to exactly one helper, so no
+            // variant can reach this arm.
+            _ => unreachable!("definition invariant dispatched to the wrong helper"),
+        }
+    }
+
+    /// Writes the message of one function invariant.
+    fn write_function_message(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
             Self::DuplicateFunctionName { name } => {
                 write!(formatter, "duplicate function name {name}")
             }
@@ -2194,6 +2274,21 @@ impl fmt::Display for CatalogueSnapshotError {
                     "client function {function} cannot declare server transaction behaviour"
                 )
             }
+            Self::EmptyRowsReturn { function } => {
+                write!(
+                    formatter,
+                    "function {function} has an empty ROWS return shape"
+                )
+            }
+            // Display dispatches every variant to exactly one helper, so no
+            // variant can reach this arm.
+            _ => unreachable!("function invariant dispatched to the wrong helper"),
+        }
+    }
+
+    /// Writes the message of one parameter invariant.
+    fn write_parameter_message(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
             Self::EmptyParameterName { owner, parameter } => {
                 write!(
                     formatter,
@@ -2233,12 +2328,15 @@ impl fmt::Display for CatalogueSnapshotError {
                 formatter,
                 "parameter {parameter} in function {owner} has ordinal {actual}, expected {expected}"
             ),
-            Self::EmptyRowsReturn { function } => {
-                write!(
-                    formatter,
-                    "function {function} has an empty ROWS return shape"
-                )
-            }
+            // Display dispatches every variant to exactly one helper, so no
+            // variant can reach this arm.
+            _ => unreachable!("parameter invariant dispatched to the wrong helper"),
+        }
+    }
+
+    /// Writes the message of one return-column invariant.
+    fn write_return_column_message(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
             Self::EmptyReturnColumnName { owner, ordinal } => {
                 write!(
                     formatter,
@@ -2271,6 +2369,15 @@ impl fmt::Display for CatalogueSnapshotError {
                 formatter,
                 "return column in function {owner} has ordinal {actual}, expected {expected}"
             ),
+            // Display dispatches every variant to exactly one helper, so no
+            // variant can reach this arm.
+            _ => unreachable!("return-column invariant dispatched to the wrong helper"),
+        }
+    }
+
+    /// Writes the message of one field invariant.
+    fn write_field_message(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
             Self::EmptyFieldName { owner, field } => {
                 write!(formatter, "field {field} in type {owner} has an empty name")
             }
@@ -2301,6 +2408,9 @@ impl fmt::Display for CatalogueSnapshotError {
                 formatter,
                 "field {field} in type {owner} has ordinal {actual}, expected {expected}"
             ),
+            // Display dispatches every variant to exactly one helper, so no
+            // variant can reach this arm.
+            _ => unreachable!("field invariant dispatched to the wrong helper"),
         }
     }
 }

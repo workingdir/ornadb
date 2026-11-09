@@ -36,8 +36,6 @@ use serde_json::value::RawValue;
 use sha2::{Digest as _, Sha256};
 use unicode_normalization::UnicodeNormalization;
 
-#[cfg(feature = "project-repl")]
-mod admitted_repl;
 mod browser_profile;
 mod cancellation;
 #[cfg(feature = "system-host-bindings")]
@@ -57,11 +55,6 @@ mod sys_bindings;
 mod timezone;
 mod ui;
 mod unicode_16_case_properties;
-#[cfg(feature = "project-repl")]
-pub use admitted_repl::{
-    AdmittedReplSession, ReplDetail, ReplError, RepositoryScope, StagedReplActivation,
-    effect_rejection,
-};
 pub use browser_profile::{BrowserProfileError, execute_browser_profile};
 pub use cancellation::CancellationToken;
 #[cfg(feature = "system-host-bindings")]
@@ -457,8 +450,10 @@ impl NominalField {
 /// A declaration-owned enum variant retained by the evaluator.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NominalVariant {
-    variant_id: Raw,
-    name: String,
+    #[doc(hidden)]
+    pub variant_id: Raw,
+    #[doc(hidden)]
+    pub name: String,
     /// Declared payload field names; empty for a payload-free variant.
     payload_fields: Vec<String>,
 }
@@ -486,13 +481,15 @@ impl NominalVariant {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NominalDefinition {
     /// The canonical OVB identity retained in tag 60009.
-    type_id: Raw,
+    #[doc(hidden)]
+    pub type_id: Raw,
     /// The module namespace which may construct private fields.
     owner: Option<String>,
     /// Declaration order is significant for defaults and output fields.
     fields: Vec<NominalField>,
     /// Closed enum variants retained for qualified constructor patterns.
-    variants: Vec<NominalVariant>,
+    #[doc(hidden)]
+    pub variants: Vec<NominalVariant>,
     currency: Option<CurrencyMetadata>,
 }
 

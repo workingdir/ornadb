@@ -9,6 +9,8 @@
 
 use super::*;
 
+use crate::cbor::head;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum CborValue {
     Unsigned(u64),
@@ -28,11 +30,11 @@ impl CborValue {
         match self {
             Self::Unsigned(value) => uint(output, *value),
             Self::Negative(value) => {
-                cbor_head(output, 1, *value);
+                head(output, 1, *value);
             }
             Self::Bytes(value) => bytes(output, value),
             Self::Text(value) => {
-                cbor_head(output, 3, value.len() as u64);
+                head(output, 3, value.len() as u64);
                 output.extend_from_slice(value.as_bytes());
             }
             Self::Array(values) => {
@@ -42,14 +44,14 @@ impl CborValue {
                 }
             }
             Self::Map(entries) => {
-                cbor_head(output, 5, entries.len() as u64);
+                head(output, 5, entries.len() as u64);
                 for (key, value) in entries {
                     key.encode(output);
                     value.encode(output);
                 }
             }
             Self::Tag(tag, value) => {
-                cbor_head(output, 6, *tag);
+                head(output, 6, *tag);
                 value.encode(output);
             }
             Self::Bool(value) => output.push(if *value { 0xf5 } else { 0xf4 }),
@@ -271,28 +273,6 @@ fn decode_canonical_cbor_limited(bytes: &[u8], maximum: usize) -> Result<CborVal
     Ok(value)
 }
 
-pub(super) fn cbor_head(output: &mut Vec<u8>, major: u8, value: u64) {
-    let prefix = major << 5;
-    match value {
-        0..=23 => output.push(prefix | value as u8),
-        24..=255 => {
-            output.extend_from_slice(&[prefix | 24, value as u8]);
-        }
-        256..=65_535 => {
-            output.push(prefix | 25);
-            output.extend_from_slice(&(value as u16).to_be_bytes());
-        }
-        65_536..=4_294_967_295 => {
-            output.push(prefix | 26);
-            output.extend_from_slice(&(value as u32).to_be_bytes());
-        }
-        _ => {
-            output.push(prefix | 27);
-            output.extend_from_slice(&value.to_be_bytes());
-        }
-    }
-}
-
 pub(super) fn array(output: &mut Vec<u8>, length: u64) {
     head(output, 4, length);
 }
@@ -308,29 +288,6 @@ pub(super) fn uint(output: &mut Vec<u8>, value: u64) {
 
 pub(super) fn null(output: &mut Vec<u8>) {
     output.push(0xf6);
-}
-
-fn head(output: &mut Vec<u8>, major: u8, value: u64) {
-    let base = major << 5;
-    match value {
-        0..=23 => output.push(base | value as u8),
-        24..=255 => {
-            output.push(base | 24);
-            output.push(value as u8);
-        }
-        256..=65_535 => {
-            output.push(base | 25);
-            output.extend_from_slice(&(value as u16).to_be_bytes());
-        }
-        65_536..=4_294_967_295 => {
-            output.push(base | 26);
-            output.extend_from_slice(&(value as u32).to_be_bytes());
-        }
-        _ => {
-            output.push(base | 27);
-            output.extend_from_slice(&value.to_be_bytes());
-        }
-    }
 }
 
 /// Decodes one node envelope's data bytes into the node it describes. Every
