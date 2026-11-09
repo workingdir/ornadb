@@ -71,12 +71,13 @@ pub struct Generated {
     pub removed: String,
     pub tables: String,
     pub dispatch: String,
+    pub engine_functions: String,
 }
 
 impl Generated {
     /// The generated files in a stable order.
     #[must_use]
-    pub fn files(&self) -> [(&'static str, &str); 7] {
+    pub fn files(&self) -> [(&'static str, &str); 8] {
         [
             ("functions.rs", &self.functions),
             ("codes.rs", &self.codes),
@@ -85,6 +86,7 @@ impl Generated {
             ("removed.rs", &self.removed),
             ("tables.rs", &self.tables),
             ("dispatch.rs", &self.dispatch),
+            ("engine_functions.rs", &self.engine_functions),
         ]
     }
 }
@@ -141,6 +143,7 @@ pub fn generate_unchecked(sys_json: &str, engine_json: &str) -> Result<Generated
         removed: render_removed(&catalogue),
         tables: render_tables(&catalogue, &engine),
         dispatch: render_dispatch(&catalogue),
+        engine_functions: render_engine_functions(&engine)?,
     })
 }
 
@@ -4269,4 +4272,201 @@ fn render_dispatch(catalogue: &Catalogue) -> String {
     writeln!(out, "}}").unwrap();
 
     out
+}
+
+// ---------------------------------------------------------------------------
+// Sealed engine function identity
+// ---------------------------------------------------------------------------
+
+fn engine_function_variant(name_parts: &[String]) -> Result<String> {
+    let parts = name_parts
+        .split_first()
+        .filter(|(first, _)| first.as_str() == "sys")
+        .map(|(_, rest)| rest)
+        .ok_or_else(|| GenError::new("a sealed engine function must start with `sys`"))?;
+    if parts.is_empty() {
+        return Err(GenError::new(
+            "a sealed engine function needs a name after `sys`",
+        ));
+    }
+    let variant = parts
+        .iter()
+        .map(|part| pascal(part))
+        .collect::<Vec<_>>()
+        .join("");
+    Ok(variant)
+}
+
+fn render_engine_functions(engine: &Engine) -> Result<String> {
+    let mut variants = Vec::with_capacity(engine.sealed.len());
+    let mut seen = BTreeSet::new();
+    for function in &engine.sealed {
+        let variant = engine_function_variant(&function.name_parts)?;
+        if !seen.insert(variant.clone()) {
+            return Err(GenError::new(format!(
+                "sealed engine variant `{variant}` is generated twice"
+            )));
+        }
+        variants.push((variant, function));
+    }
+
+    let mut out = String::new();
+    out.push_str(HEADER);
+    writeln!(
+        out,
+        "// Generated sealed engine-function identity from catalogue/engine-1.1.0.json."
+    )
+    .unwrap();
+    out.push('\n');
+    writeln!(out, "use crate::descriptor::EngineSignature;").unwrap();
+    out.push('\n');
+
+    writeln!(
+        out,
+        "#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]"
+    )
+    .unwrap();
+    writeln!(out, "#[repr(u8)]").unwrap();
+    writeln!(out, "pub enum EngineFunction {{").unwrap();
+    for (index, (variant, _)) in variants.iter().enumerate() {
+        writeln!(out, "    {variant} = {index},").unwrap();
+    }
+    writeln!(out, "}}").unwrap();
+    out.push('\n');
+
+    writeln!(
+        out,
+        "/// The number of sealed engine functions fixed by the 1.1.0 engine catalogue."
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "pub const ENGINE_FUNCTION_COUNT: usize = {};",
+        variants.len()
+    )
+    .unwrap();
+    out.push('\n');
+
+    writeln!(out, "impl EngineFunction {{").unwrap();
+    writeln!(
+        out,
+        "    /// Every sealed engine function, in catalogue order."
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "    pub const ALL: [EngineFunction; ENGINE_FUNCTION_COUNT] = ["
+    )
+    .unwrap();
+    for (variant, _) in &variants {
+        writeln!(out, "        EngineFunction::{variant},").unwrap();
+    }
+    writeln!(out, "    ];").unwrap();
+    out.push('\n');
+
+    writeln!(out, "    /// The dense discriminant.").unwrap();
+    writeln!(out, "    #[must_use]").unwrap();
+    writeln!(out, "    pub const fn index(self) -> usize {{").unwrap();
+    writeln!(out, "        self as usize").unwrap();
+    writeln!(out, "    }}").unwrap();
+    out.push('\n');
+
+    writeln!(out, "    /// The exact catalogue spelling.").unwrap();
+    writeln!(out, "    #[must_use]").unwrap();
+    writeln!(out, "    pub const fn label(self) -> &'static str {{").unwrap();
+    writeln!(out, "        match self {{").unwrap();
+    for (variant, function) in &variants {
+        writeln!(out, "            Self::{variant} => \"{}\",", function.name).unwrap();
+    }
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    out.push('\n');
+
+    writeln!(out, "    /// The resolved name parts.").unwrap();
+    writeln!(out, "    #[must_use]").unwrap();
+    writeln!(
+        out,
+        "    pub const fn name_parts(self) -> &'static [&'static str] {{"
+    )
+    .unwrap();
+    writeln!(out, "        match self {{").unwrap();
+    for (variant, function) in &variants {
+        let parts: Vec<String> = function
+            .name_parts
+            .iter()
+            .map(|part| format!("\"{part}\""))
+            .collect();
+        writeln!(
+            out,
+            "            Self::{variant} => &[{}],",
+            parts.join(", ")
+        )
+        .unwrap();
+    }
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    out.push('\n');
+
+    writeln!(out, "    /// The durable 16-byte catalogue identity.").unwrap();
+    writeln!(out, "    #[must_use]").unwrap();
+    writeln!(out, "    pub const fn function_id(self) -> [u8; 16] {{").unwrap();
+    writeln!(out, "        match self {{").unwrap();
+    for (variant, function) in &variants {
+        let bytes = function
+            .function_id
+            .expect("sealed engine functions carry durable ids");
+        let rendered: Vec<String> = bytes.iter().map(|byte| format!("0x{byte:02x}")).collect();
+        writeln!(
+            out,
+            "            Self::{variant} => [{}],",
+            rendered.join(", ")
+        )
+        .unwrap();
+    }
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    out.push('\n');
+
+    writeln!(out, "    /// The declared sealed signature.").unwrap();
+    writeln!(out, "    #[must_use]").unwrap();
+    writeln!(
+        out,
+        "    pub const fn signature(self) -> EngineSignature {{"
+    )
+    .unwrap();
+    writeln!(out, "        match self {{").unwrap();
+    for (variant, function) in &variants {
+        writeln!(
+            out,
+            "            Self::{variant} => {},",
+            render_signature(
+                function
+                    .signature
+                    .as_ref()
+                    .expect("sealed engine functions carry signatures")
+            )
+        )
+        .unwrap();
+    }
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    out.push('\n');
+
+    writeln!(out, "    /// The exact inverse of [`Self::label`].").unwrap();
+    writeln!(out, "    #[must_use]").unwrap();
+    writeln!(out, "    pub fn from_label(label: &str) -> Option<Self> {{").unwrap();
+    writeln!(out, "        match label {{").unwrap();
+    for (variant, function) in &variants {
+        writeln!(
+            out,
+            "            \"{}\" => Some(Self::{variant}),",
+            function.name
+        )
+        .unwrap();
+    }
+    writeln!(out, "            _ => None,").unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out, "}}").unwrap();
+    Ok(out)
 }
