@@ -23,6 +23,8 @@
     "orna-syntax",
     "orna-sys-macros",
     "orna-sys",
+    "orna-sys-codegen",
+    "orna-sys-model",
     "orna-table",
     "orna-traceability",
     "orna-value"
