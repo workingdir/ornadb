@@ -8,9 +8,7 @@
 
 mod compact;
 mod compact_parquet;
-mod maintenance;
 mod publication_policy;
-mod scan_planner;
 
 pub use compact::{
     COMPACT_STORAGE_PROFILE, CompactBaseProjectionError, CompactBaseRow, CompactBaseState,
@@ -29,16 +27,10 @@ pub use compact::{
     apply_migration_plan_to_compact, lower_publication_freeze,
 };
 pub use compact_parquet::{CompactParquetError, CompactParquetKeySource};
-pub use maintenance::{
-    CompactConsolidationError, CompactConsolidationPlan, ConsolidatedRow,
-    ConsolidationVerification, MIN_OVERLAY_BYTES_SHARE_PERCENT,
-    MIN_OVERLAY_SEGMENTS_FOR_CONSOLIDATION, plan_compact_consolidation,
-};
 pub use publication_policy::{
     COMPACT_FILE_BOUND_BYTES, CompactPublicationPolicy, CompactPublicationPolicyError,
     DEFAULT_COMPRESSED_TARGET_BYTES, MAX_COMPRESSED_TARGET_BYTES, MIN_COMPRESSED_TARGET_BYTES,
 };
-pub use scan_planner::{CompactKeyRange, CompactScanPlan, CompactScanPlanError, plan_compact_scan};
 
 use std::{collections::BTreeMap, fmt, sync::Arc};
 
