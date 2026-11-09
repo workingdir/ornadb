@@ -1553,6 +1553,12 @@ grep -rn "allow(clippy::" crates/*/src | wc -l
 grep -l "\[lints" crates/*/Cargo.toml
 grep -rn "optional *= *true" crates/*/Cargo.toml
 gh pr list -R workingdir/ornadb --limit 40 --json number,title,files,isDraft
+
+# layer-direction evidence used to order layers 7-10 and to build Appendix A
+grep -rn 'orna_runtime::' crates/orna-repository/src/        # empty: repository is the lower crate
+grep -rc 'orna_runtime::' crates/orna-storage/src/*.rs       # 6 + 5, mostly fixture-gated
+grep -rn 'orna_sys::' crates/orna-semantic/src/*.rs          # 22 sites, catalogue data only
+grep -rn 'orna_sys::' crates/orna-runtime/src/*.rs           # 21 sites, dispatch tables only
 ```
 
 ## Appendix C: the proposed root `ARCHITECTURE.md`
