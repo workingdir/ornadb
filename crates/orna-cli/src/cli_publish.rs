@@ -533,12 +533,7 @@ async fn publish_frozen_range(
         .index_generation()
         .map_err(|error| publish_error("ordinary index could not be read", format!("{error:?}")))?;
     let prepared = RuntimePublicationCoordinator::prepare_allow_noop(
-        repository,
-        state,
-        &head,
-        index,
-        &freeze,
-        message,
+        repository, state, &head, index, &freeze, message,
     )
     .await
     .map_err(|error| {
