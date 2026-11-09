@@ -1040,6 +1040,9 @@ fn root_collection_intrinsic(name: &str) -> Option<orna_intrinsics::IntrinsicId>
         "window" => IntrinsicId::CollectionWindow,
         "rank" => IntrinsicId::CollectionRank,
         "bucket_by" => IntrinsicId::CollectionBucketBy,
+        // `project` is the relation result-shaping spelling of `map`; the
+        // source has no separate projection grammar. S3 removes the root name.
+        "project" => IntrinsicId::CoreMap,
         "__recursive_cte" => IntrinsicId::CollectionRecursiveCte,
         _ => return None,
     })
