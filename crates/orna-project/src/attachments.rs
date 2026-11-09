@@ -252,205 +252,32 @@ impl PackageResolver {
         })
     }
 
-    /// Loads the exact attachments declared by `primary`'s pinned snapshot.
-    /// Parent history is authoritative: later edits to the primary manifest
-    /// cannot move this session to newer package commits. Resolution is
-    /// all-or-nothing: a failed pin never returns a partially attached session.
-    /// Nested closure is one parent manifest per call; pass a selected attached
-    /// database back to this method to resolve the next edge from its own pin.
-    /// Each manifest alias is a complete lookup key, so prefix-related aliases
-    /// and aliases sharing a repository remain independent. The reference does
-    /// not define host mapping precedence for those aliases; v1 uses exact-key
-    /// lookup for every selected parent's historical manifest.
-    /// After a caller rebinds an alias, selecting that replacement here loads
-    /// its own committed manifest. Sibling aliases remain pinned in the source
-    /// session and do not retarget the replacement's closure. Each replacement
-    /// starts a new resolution branch: aliases from the prior parent's
-    /// manifest are not inherited or used as fallback at the next depth.
-    /// If an alias is rebound through several candidates before nested
-    /// expansion, the currently attached pin supplies that session's next
-    /// manifest; earlier candidates are not accumulated. A caller can retain a
-    /// candidate pin before rebinding again. It remains immutable, and
-    /// explicitly resolving it later reads its own manifest after the source
-    /// session has moved on. Since the reference is silent on storm history,
-    /// v1 treats the explicitly passed pin as the caller's closure choice.
-    /// Repeating detach/attach runs on one session replaces only the selected
-    /// exact alias in sequence. At the end of each run, that session's current
-    /// pin alone supplies the next manifest; previous run candidates remain
-    /// selectable only when the caller kept their pins separately. The
-    /// reference does not define how repeated runs compose, so v1 uses the
-    /// last attached pin for the session's current exact alias.
+    /// Loads the exact attachments declared by `primary`'s pinned snapshot
+    /// (ORNA-PACKAGE-002).
     ///
-    /// Rebinding prefix-related aliases in one session keeps them as
-    /// independent exact-key entries. The session retains every unmodified
-    /// key, including longer prefix-related siblings. Expanding one replacement
-    /// uses only its manifest to create a fresh next-depth session, even when
-    /// that manifest names an alias matching a retained sibling. The reference
-    /// is silent on precedence across rebound alias chains; v1 makes the
-    /// selected parent's committed manifest authoritative at that depth. The
-    /// reference requires exact pins for each historical parent but does not
-    /// require flattening a recursive closure into one session.
-    /// Apply the same precedence independently at every edge of a longer
-    /// chain: rebinding a descendant affects only that descendant session, and
-    /// the next closure uses its final selected pin's manifest. Since the
-    /// reference is silent on repeated storms across nested chains, v1 does
-    /// not overlay manifests from earlier candidates or ancestor sessions.
-    /// A pin retained from an earlier outer storm can still be expanded after
-    /// later storms; its own manifest starts that closure branch. Rebinding a
-    /// descendant in one expanded branch cannot retarget another retained
-    /// branch, and expanding a selected descendant uses only that pin's
-    /// manifest rather than carrying forward the ancestor's prefix siblings.
-    /// This keeps precedence stable across repeated storms at multiple closure
-    /// depths, including when those storms finish in different candidates.
-    /// If the caller returns to an ancestor session after rebinding descendants,
-    /// a later expansion follows the ancestor pin selected at that time. A
-    /// closure already expanded from a retained pin remains its own branch;
-    /// descendant storms do not become fallback pins for a newly selected
-    /// ancestor candidate. Where the reference is silent, v1 gives precedence
-    /// to the exact pin passed to each closure expansion.
-    /// A storm cascade is resolved edge by edge from that pin: selecting a new
-    /// ancestor starts a fresh descendant chain, and the terminal route follows
-    /// the final pin chosen at every edge. Pins retained from an earlier
-    /// cascade continue to resolve their own terminal routes.
-    /// After expanding the terminal parent, rebinding its exact terminal alias
-    /// changes only that closure's route to the latest attached terminal pin.
-    /// Earlier terminal candidates and the manifest-selected snapshot remain
-    /// independently resolvable; v1 applies the same last-pin rule at this
-    /// final edge when the reference does not specify terminal rebind storms.
-    /// Apply that rule separately to every retained closure branch: a terminal
-    /// alias storm follows the exact terminal pin selected through that
-    /// branch's ancestor manifests, and cannot retarget a same-named terminal
-    /// route in another branch. Reopening a retained ancestor starts its own
-    /// terminal route chain from that pin's manifest.
-    /// Expanding one retained parent pin more than once also creates sibling
-    /// closure branches: storms at paired nested depths remain local to each
-    /// session, and each terminal route follows only its branch's selected
-    /// pins.
-    /// A sibling expanded later from the retained ancestor still starts at
-    /// that ancestor's manifest-selected child; an earlier sibling's terminal
-    /// rebind does not supply a fallback for the late branch.
-    /// This remains true through additional nested edges: a late branch reads
-    /// each selected middle and deep manifest in turn, then applies terminal
-    /// alias storms only to the route reached through those exact pins.
-    /// A middle pin retained before a sibling rebind is also an independent
-    /// late-branch root: reopening it follows its own deep manifest and
-    /// terminal route rather than inheriting the sibling's later selections.
-    /// Sibling manifests may converge on the same exact deep and terminal
-    /// pins; rebinding that terminal alias in one closure changes only that
-    /// closure's route, while another retained branch can still resolve the
-    /// shared manifest-selected terminal pin.
-    /// Distinct sibling closures expanded before any terminal rebind also
-    /// keep independent route state when their terminal storms are interleaved.
-    /// Each session follows only its own last attached terminal pin, and a
-    /// fresh expansion from their shared deep pin still starts at the terminal
-    /// pin recorded in that deep manifest. The reference is silent on shared
-    /// terminal route storms, so v1 applies the exact-alias last-pin rule per
+    /// Parent history is authoritative: later edits to the primary manifest
+    /// cannot move the session to newer package commits. Resolution is
+    /// all-or-nothing, so a failed pin never returns a partially attached
     /// session.
-    /// Paired sibling branches may also storm their middle and deep aliases
-    /// independently before reaching a shared terminal pin. Each terminal
-    /// closure still begins at the exact pin in its selected deep manifest;
-    /// interleaving later terminal storms cannot change the other branch or a
-    /// fresh expansion from either retained deep pin.
-    /// Sibling middle pins that converge on one exact deep pin can then take
-    /// independent deep-rebind storms whose candidates select the same
-    /// terminal pin. Terminal closures opened from those selected deep pins
-    /// still begin on that shared route; later terminal rebinds remain local
-    /// to each sibling closure.
-    /// This holds across a wider sibling set as well: when several middle
-    /// routes converge on one deep pin, each branch can take its own paired
-    /// depth and terminal storms while retaining the exact shared route from
-    /// each selected pin's manifest.
-    /// Since the reference does not define an event order across sibling
-    /// sessions, v1 makes independent storms order-stable: interleaving or
-    /// reversing operations across branches leaves each branch at its own
-    /// last selected pin on every edge.
-    /// When distinct sibling middle pins converge on one deep pin, their
-    /// terminal closures may also converge after independent rebind storms.
-    /// Each closure still resolves its terminal edge from the exact selected
-    /// deep pin, and a terminal session retained before rebinding keeps the
-    /// manifest-selected route. Since the reference is silent on this
-    /// reconvergent storm case, v1 keeps convergence based on exact pin
-    /// identity while preserving each session's prior route snapshot.
-    /// Reopening the retained sibling middle pins after those storms starts
-    /// each closure again from its committed manifest. A later rebind wave on
-    /// the new closures remains local and may converge on the same exact
-    /// terminal pin; previously retained storm sessions keep their selections.
-    /// The reference does not define this post-storm reopen sequence, so v1
-    /// treats each newly expanded parent pin as a fresh route root.
-    /// A terminal rebind in one sibling may interleave with a later paired
-    /// middle/deep rebind in another. The new terminal closure follows only
-    /// its selected deep pin's manifest, while the first sibling keeps its
-    /// own last terminal pin. Since the reference is silent on cross-depth
-    /// event order, v1 preserves each closure's exact-pin route independently.
-    /// If another paired middle/deep rebind wave follows that reopen, each
-    /// new terminal closure still starts from its selected deep pin's
-    /// manifest, regardless of terminal pins retained from earlier waves.
-    /// Siblings whose selected deep manifests name the same terminal pin can
-    /// then converge again through local terminal rebinds. The reference is
-    /// silent on repeated post-storm depth waves; v1 keeps each wave rooted
-    /// in the exact pins selected along its own path.
-    /// After an earlier terminal storm across several siblings, a later
-    /// paired middle/deep closure wave also starts from each sibling's newly
-    /// selected middle pin, then follows that middle pin's exact deep pin.
-    /// Rebinding those reopened terminal closures can converge on one exact
-    /// terminal pin without merging their state: prior storm sessions and
-    /// pre-rebind snapshots retain their original routes. Since the reference
-    /// is silent on this wider post-storm sequence, v1 treats every reopened
-    /// closure as a fresh route root and keeps rebinds local to that session.
-    /// If a later paired middle/deep rebind selects different child pins for
-    /// sibling roots, each new deep closure follows the exact middle
-    /// manifest it was opened from. Rebinding its deep alias affects only
-    /// that closure; retained pre-storm and manifest-selected snapshots keep
-    /// their own pins. The reference is silent on diverging post-storm child
-    /// routes, so v1 resolves each edge from its selected immutable pin and
-    /// does not inherit a sibling's prior route.
-    /// Route consistency also applies to retained sessions: each attached
-    /// module resolves through the same package snapshot as that session's
-    /// pin. A paired depth rebind can make a fresh descendant closure follow
-    /// another manifest route, while the old closure keeps its matching pin
-    /// and module route. Since the reference does not define cross-session
-    /// route refresh, v1 keeps pin and module routing in the same session
-    /// snapshot.
-    /// Applying the same paired depth rebinds to sibling sessions in another
-    /// interleaving produces the same per-sibling pin and module-route pairs.
-    /// v1 makes independent sibling route updates order-stable, while keeping
-    /// each earlier closure snapshot tied to its original selected pins.
-    /// Across repeated paired depth storms, distinct sibling middle and deep
-    /// pins may reconverge on a shared terminal pin. The reference is silent
-    /// on this sequence, so v1 derives each route from its exact selected pin.
-    /// Each session's modules follow the pins in that snapshot; later sibling
-    /// rebinds do not refresh or retarget earlier sessions.
-    /// After those paired depth waves, a terminal rebind storm updates only
-    /// that sibling session's terminal pin and module route. Siblings can
-    /// diverge and reconverge on the same terminal pin, while retained
-    /// manifest and pre-rebind snapshots keep their prior routes.
-    /// A later paired depth storm also leaves those rebound terminal
-    /// snapshots intact. Newly opened terminal closures start from their
-    /// latest exact deep pins and follow those pins' manifest routes.
-    /// The reference is silent on terminal rebinds in those reopened
-    /// sessions, so v1 updates only each selected sibling's route and keeps
-    /// every retained manifest snapshot on its original pin-to-module route.
-    /// Reordering terminal rebind events between siblings while preserving
-    /// each sibling's own event order leaves both final routes unchanged.
-    /// v1 treats the sibling sessions as independent; retained snapshots
-    /// continue to use their manifest-selected terminal pins.
-    /// Repeating the same post-storm terminal rebind wave stabilizes each
-    /// sibling on its own final pin while snapshots from earlier waves retain
-    /// the route they captured. The reference is silent on repeated waves, so
-    /// v1 applies the exact-pin rule independently on every rebind.
-    /// Repeating paired middle and deep rebinds after those terminal storms
-    /// opens each new terminal route from the exact selected deep pin; the
-    /// earlier terminal sessions keep their captured routes. The reference
-    /// does not define this post-storm sequence, so v1 resolves each edge from
-    /// the pin selected in that wave.
-    /// Reopening a retained pre-rebind middle snapshot after later paired
-    /// depth waves still follows the deep and terminal pins in that snapshot's
-    /// manifest, even if a sibling's newer rebound route now differs.
-    /// Terminal sessions retained before those waves keep both their
-    /// manifest-selected terminal pin and the ancestor module route captured
-    /// from the selected deep pin. Later sibling depth rebinds do not refresh
-    /// either part of that session snapshot. The reference is silent on
-    /// cross-wave refresh, so v1 keeps both routes bound to the captured pins.
+    ///
+    /// Nested closure is one parent manifest per call. Pass a selected attached
+    /// database back to this method to resolve the next edge from that
+    /// database's own pin. The reference does not define precedence between
+    /// overlapping manifests, so v1 makes the pin passed to each call the
+    /// caller's closure choice:
+    ///
+    /// - Every manifest alias is a complete lookup key. Prefix-related aliases
+    ///   and aliases that share a repository stay independent.
+    /// - An expansion reads only the selected pin's committed manifest. Aliases
+    ///   from the parent's manifest, sibling aliases, earlier rebind candidates
+    ///   and ancestor sessions are never inherited or used as a fallback at the
+    ///   next depth, so rebinding a descendant affects only that descendant.
+    /// - A pin is immutable. A session or pin the caller retained keeps its own
+    ///   route, and expanding it later reads its own manifest whatever other
+    ///   branches have done since. Independent branches are order-stable.
+    /// - Each attached module resolves through the same package snapshot as its
+    ///   session's pin, so a later sibling rebind never refreshes an earlier
+    ///   session's pins or module routes.
     pub fn resolve_for_parent(
         &self,
         primary: PinnedDatabase,
