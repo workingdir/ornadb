@@ -22,6 +22,8 @@
 //! local repository alone: no fetch, no remote, and no media payload.
 
 use super::{Diagnostic, Endpoint, cli_legacy, cli_row_key, local_project_path};
+use crate::cli_row_key::render_key;
+use crate::encoding::hex;
 
 use orna_repository::{
     AdmittedRow, FormatContextError, GitCommitRef, KeyRange, Repository, RepositoryFormatContext,
@@ -524,20 +526,8 @@ fn summary_line(total: usize, present: usize) -> String {
     )
 }
 
-/// Parses a 32-digit hexadecimal relation id into its 16 raw bytes.
 fn parse_relation_id(value: &str) -> Result<[u8; 16], Diagnostic> {
-    if value.len() != 32 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(history_error(
-            "Relation id is not 32 hexadecimal digits",
-            format!("got {value:?}"),
-        ));
-    }
-    let mut bytes = [0_u8; 16];
-    for (index, byte) in bytes.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
-            .expect("hexadecimal digits were checked above");
-    }
-    Ok(bytes)
+    cli_row_key::parse_relation_id(value, history_error)
 }
 
 /// Whether a `--at` selector names one branch, tag or remote branch but is not
@@ -1249,44 +1239,6 @@ fn pair_rekeys(
         after.remove(&end);
     }
     (before, after, pairs)
-}
-
-#[allow(clippy::type_complexity)]
-/// Renders a canonical row key the way `orna query` prints one: a text key as
-/// its text, and a byte key as that same text when its bytes are valid UTF-8,
-/// so a key reported by either verb is greppable the same way.
-fn render_key(key: &TypedKey) -> String {
-    match key {
-        TypedKey::Text(text) => text.clone(),
-        TypedKey::UInt(value) => value.to_string(),
-        TypedKey::Int(value) => value.to_string(),
-        TypedKey::Bool(value) => value.to_string(),
-        TypedKey::Null => "-".to_owned(),
-        TypedKey::Bytes(bytes) => render_bytes(bytes),
-        TypedKey::Tuple(values) => values.iter().map(render_key).collect::<Vec<_>>().join(","),
-        TypedKey::Value(value) => value
-            .canonical_text()
-            .unwrap_or_else(|| format!("cbor:{}", hex(value.canonical_bytes()))),
-    }
-}
-
-fn render_bytes(bytes: &[u8]) -> String {
-    match std::str::from_utf8(bytes) {
-        Ok(text) if !text.is_empty() && text.chars().all(|character| !character.is_control()) => {
-            text.to_owned()
-        }
-        _ => format!("0x{}", hex(bytes)),
-    }
-}
-
-fn hex(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        output.push(DIGITS[(byte >> 4) as usize] as char);
-        output.push(DIGITS[(byte & 0x0f) as usize] as char);
-    }
-    output
 }
 
 fn history_error(title: &'static str, detail: impl Into<String>) -> Diagnostic {

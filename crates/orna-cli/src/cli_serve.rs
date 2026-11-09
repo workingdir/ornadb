@@ -17,6 +17,7 @@
 mod cli_serve_app;
 
 use super::*;
+use crate::encoding::percent_decode;
 use crate::media_range::{MediaMethod, media_reply};
 use orna_application::ApplicationLiveAdapter;
 use orna_live::{
@@ -1519,7 +1520,7 @@ fn content_route(root: &Path, request: &Request, suffix: &str) -> Response {
     let Some(commit) = resolve_listing_commit(&repository, object_id) else {
         return not_found_response();
     };
-    let Ok(decoded_path) = percent_decode(encoded_path) else {
+    let Some(decoded_path) = percent_decode(encoded_path, false) else {
         return bad_request_response();
     };
     let Ok(path) = ManagedPath::new(&decoded_path) else {
@@ -1635,39 +1636,6 @@ fn apply_payload_policy(response: &mut Response, media_type: &str) {
     ensure_header(response, "content-disposition", "attachment");
     ensure_header(response, "x-content-type-options", "nosniff");
     ensure_header(response, "content-security-policy", "sandbox");
-}
-
-fn percent_decode(path: &str) -> Result<String, ()> {
-    let input = path.as_bytes();
-    let mut decoded = Vec::with_capacity(input.len());
-    let mut index = 0;
-    while index < input.len() {
-        if input[index] == b'%' {
-            let high = input
-                .get(index + 1)
-                .and_then(|byte| hex_digit(*byte))
-                .ok_or(())?;
-            let low = input
-                .get(index + 2)
-                .and_then(|byte| hex_digit(*byte))
-                .ok_or(())?;
-            decoded.push((high << 4) | low);
-            index += 3;
-        } else {
-            decoded.push(input[index]);
-            index += 1;
-        }
-    }
-    String::from_utf8(decoded).map_err(|_| ())
-}
-
-fn hex_digit(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
 }
 
 fn git_transport_route(root: &Path, allow_push: bool, request: &Request) -> Option<Response> {

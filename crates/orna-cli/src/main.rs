@@ -22,6 +22,7 @@ mod cli_row_key;
 mod cli_serve;
 mod cli_stage;
 mod cli_status;
+mod encoding;
 #[cfg(test)]
 #[path = "../tests/support/format3.rs"]
 mod format3;
@@ -44,6 +45,7 @@ use cli_args::{
     requested_debug_mode,
 };
 use cli_dispatch::execute;
+use encoding::hex_digit;
 use repl::{AnsiColor, write_rendered_error, write_styled, write_styled_display};
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -731,14 +733,6 @@ fn valid_percent_text(text: &str) -> bool {
         }
     }
     true
-}
-
-fn hex_digit(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' | b'A'..=b'F' => Some(byte.to_ascii_lowercase() - b'a' + 10),
-        _ => None,
-    }
 }
 
 fn local_project_path(endpoint: &Endpoint) -> Result<&str, Diagnostic> {

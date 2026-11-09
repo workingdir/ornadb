@@ -20,6 +20,7 @@ use super::{
     evaluate_over_committed_tables, legacy_bare_module_candidates, legacy_bare_module_table,
     runtime_identity, unavailable_response,
 };
+use crate::encoding::percent_decode;
 use crate::media_range::{MediaMethod, MediaReply, media_reply, plan_media_response};
 use orna_application::{
     AdmittedApplication, ApplicationAuthority, ApplicationError, StagedActivation,
@@ -1044,36 +1045,11 @@ fn console_input(request: &Request) -> Result<String, (u16, &'static str)> {
         return Err((400, "action.invalid_form"));
     };
     let (_, value) = pair.split_once('=').ok_or((400, "action.invalid_form"))?;
-    let source = form_decode(value).ok_or((400, "action.invalid_form"))?;
+    let source = percent_decode(value, true).ok_or((400, "action.invalid_form"))?;
     if source.len() > MAX_CONSOLE_INPUT_BYTES {
         return Err((413, "action.input_too_large"));
     }
     Ok(source)
-}
-
-/// Decodes one form value: `+` is a space and `%XX` is one byte. Returns
-/// `None` for a malformed escape or text that is not UTF-8.
-fn form_decode(value: &str) -> Option<String> {
-    let mut bytes = Vec::with_capacity(value.len());
-    let mut rest = value.bytes();
-    while let Some(byte) = rest.next() {
-        match byte {
-            b'+' => bytes.push(b' '),
-            b'%' => {
-                let high = hex_digit(rest.next()?)?;
-                let low = hex_digit(rest.next()?)?;
-                bytes.push((high << 4) | low);
-            }
-            other => bytes.push(other),
-        }
-    }
-    String::from_utf8(bytes).ok()
-}
-
-fn hex_digit(byte: u8) -> Option<u8> {
-    char::from(byte)
-        .to_digit(16)
-        .and_then(|digit| u8::try_from(digit).ok())
 }
 
 /// A console failure as an HTML fragment. Only stable codes reach this

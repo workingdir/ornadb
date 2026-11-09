@@ -13,6 +13,7 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 use crate::cli_dispatch::{
     checked_project_source_path, restore_source_after_failed_write, write_source_atomically,
 };
+use crate::encoding::hex;
 use fuser::{
     Config, Errno, FileAttr, FileType, Filesystem, Generation, INodeNo, MountOption, RenameFlags,
     ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen,
@@ -58,16 +59,6 @@ mod source_write;
 /// (EDQUOT) and never admitted; shrinking an existing larger baseline is allowed.
 #[allow(clippy::cast_possible_truncation)]
 const DRAFT_FILE_BOUND_BYTES: usize = COMPACT_FILE_BOUND_BYTES as usize;
-
-/// Lowercase hex of an identity, as the mount's diagnostics spell it.
-fn hex_lower(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        write!(out, "{byte:02x}").expect("writing to a String cannot fail");
-    }
-    out
-}
 
 /// Bound on unbound editor scratch files one mount may create (41-vfs.md Temporary-save
 /// replacement). Unbound scratch is recovery state, so an editor cannot grow it without limit.
@@ -993,7 +984,7 @@ impl VfsRetainedDraftStore {
             Ok(())
         })?;
         let digest = digest.finalize();
-        let id = hex_bytes(&digest[..16]);
+        let id = hex(&digest[..16]);
         let record = self.directory.join(format!("{id}.draft"));
         if record.is_file() {
             // A record already on disk, written by another process, counts too.
@@ -1343,7 +1334,7 @@ fn advance_historical_scan(
     if unidentified > 0 {
         eprintln!(
             "committed schema scan of table {}: skipped {unidentified} commit(s) without committed identities",
-            hex_lower(&relation_id)
+            hex(&relation_id)
         );
     }
     Ok(HistoricalStep::Settled(HistoricalTableSchemas {
@@ -3426,7 +3417,7 @@ impl WorkspaceFilesystem {
 /// The digest an explicit edit carries from its read to its save (41-vfs.md:75-77): the
 /// lowercase hex SHA-256 of the mounted bytes the editor was seeded from.
 pub(crate) fn edit_view_digest(bytes: &[u8]) -> String {
-    hex_lower(&Sha256::digest(bytes))
+    hex(&Sha256::digest(bytes))
 }
 
 /// Reads an editor draft through one descriptor opened without following a
@@ -10294,13 +10285,6 @@ fn is_replacement_scratch_for(name: &str, file_name: &str) -> bool {
         return false;
     };
     !suffix.is_empty() && suffix != "." && suffix != ".." && !suffix.contains('/') && suffix != "/"
-}
-fn hex_bytes(bytes: &[u8]) -> String {
-    let mut text = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        let _ = write!(text, "{byte:02x}");
-    }
-    text
 }
 
 #[cfg(test)]
