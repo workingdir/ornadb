@@ -4,7 +4,7 @@
 ///
 /// This is the `stdlib/std` gitlink on `origin/main` when the design was
 /// written; `scripts/check_fixture_manifest.py` keeps the submodule pin honest.
-pub const CURRENT_STD_PIN: &str = "b3ce954c38483e2e1f9edbd9cc2a9906b94680df";
+pub const CURRENT_STD_PIN: &str = "fdf63e87cc2ce52f240ba80328c61f31d38153a9";
 
 /// The pins in which one binding is active (`spec 09:11`, ORNA-LIB-001).
 ///
