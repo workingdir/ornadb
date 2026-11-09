@@ -206,8 +206,9 @@ title = "Ten and one million rows use ORP-1"
 select = [
   { record = "workspace-rest", package = "orna-repository", target = "test:row_store_scale", test = "orp1_production_writer_ten_rows" },
   { record = "gate-c-million-rows", package = "orna-repository", target = "test:row_store_scale", test = "orp1_row_store_one_million_rows" },
+  { record = "gate-c-million-rows", package = "orna-repository", target = "test:row_store_scale", test = "orp1_row_store_one_million_rows_production_written" },
 ]
-counters = ["^ORP-1 production_writer "]
+counters = ["^ORP-1 production_writer"]
 
 [[item]]
 gate = "C"
@@ -233,10 +234,11 @@ select = [
   { record = "workspace-rest", package = "orna-repository", target = "test:row_store_scale", test = "orp1_row_store_ten_rows" },
   { record = "workspace-rest", package = "orna-repository", target = "test:row_store_scale", test = "orp1_production_writer_ten_rows" },
   { record = "gate-c-million-rows", package = "orna-repository", target = "test:row_store_scale", test = "orp1_row_store_one_million_rows" },
+  { record = "gate-c-million-rows", package = "orna-repository", target = "test:row_store_scale", test = "orp1_row_store_one_million_rows_production_written" },
 ]
 counters = ["^ORP-1 "]
 limitations = [
-  "The traffic, latency, allocation and index counters come from the test-side ORP-1 fixture: orp1_row_store_ten_rows, and now orp1_row_store_one_million_rows, whose record carries the aggregate ORP-1 counter line (for example rows=1000000 leaves=12958 branches=163 index_churn=13121, with cold and warm point, range, missing-key and scan timings). orp1_production_writer_ten_rows now reports latency and allocation counters for a production-written graph as well (publish_us, publish_allocations, publish_bytes, read_us, read_allocations, read_bytes, measured around the publication and around the read), so the traffic, latency and allocation figures are no longer fixture-only at ten rows. What remains unmeasured is a production-written graph at one million rows (ornadb-5il1.6).",
+  "The traffic, latency, allocation and index counters come from the test-side ORP-1 fixture (orp1_row_store_ten_rows and orp1_row_store_one_million_rows, whose record carries the aggregate ORP-1 counter line with cold and warm point, range, missing-key and scan timings) and from production-written graphs at ten rows (orp1_production_writer_ten_rows) and one million rows (orp1_row_store_one_million_rows_production_written). The one-million-row production case admits its rows in one runtime request, the batch shape a bulk import uses: the per-row capture fixture costs about 70 ms per row (mostly test-side expression evaluation and Blob capture; the product request commit is about 7 ms) and derives its identities from a u16 ordinal, so it cannot name one million rows. The production-written million-row counters cover rows, leaves, branches, store roots, publication allocations and bytes, and read, point, range and missing-key latency and allocations on the graph the product wrote. Payload traffic on a production-written graph at one million rows stays unmeasured: those rows carry no Blob, and payload traffic at one million rows is measured on the test-side fixture (ornadb-5il1.6).",
 ]
 
 [[item]]
