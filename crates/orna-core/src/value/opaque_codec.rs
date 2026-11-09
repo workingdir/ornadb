@@ -7,6 +7,10 @@ use crate::{
     byte_reader::Reader,
     catalogue::{QualifiedSemanticName, ValueTypeKind, ValueTypeMutability, ValueTypePersistence},
     inspect_carrier::InspectCarrierEnvelope,
+    orv::{
+        ORV_HEADER_BYTES, ORV_MAX_PAYLOAD_BYTES, ORV_MAX_VALUE_DEPTH,
+        ORV_RECORD_FIELD_HEADER_BYTES, ORV3_MARKER, ORV5_MARKER,
+    },
     revision::{ActiveDatabaseRevision, VerifiedStandardLibrarySnapshot},
     system::SYS_SOURCE_FUNCTION_TYPE_ID,
 };
@@ -14,7 +18,7 @@ use crate::{
 use super::{MAX_RUNTIME_VALUE_NODES, inspect_carrier_codec_by_type_id};
 
 /// The maximum payload length accepted by every registered opaque codec.
-pub const MAX_OPAQUE_CODEC_PAYLOAD_LENGTH: usize = 16 * 1024 * 1024;
+pub const MAX_OPAQUE_CODEC_PAYLOAD_LENGTH: usize = ORV_MAX_PAYLOAD_BYTES;
 
 /// The largest number of argument frames accepted by the generic action
 /// descriptor codec. The semantic target and parameter checks remain in the
@@ -25,21 +29,10 @@ pub(super) const ACTION_DOMAIN_CLIENT: u8 = 1;
 const ACTION_DOMAIN_SERVER: u8 = 2;
 pub(super) const ACTION_IDENTITY_BYTES: usize = 16;
 const ACTION_IDENTITY_FIELDS: usize = 5;
-/// Bytes in the fixed header shared by ORV3 and ORV5 value frames: a four-byte
-/// marker, a one-byte tag, a sixteen-byte type identity, and a big-endian
-/// `u32` body length.
-const ORV_HEADER_BYTES: usize = 4 + 1 + 16 + 4;
-const ORV3_MARKER: &[u8; 4] = b"ORV3";
-const ORV5_MARKER: &[u8; 4] = b"ORV5";
-/// The deepest nesting of ORV5 values and descriptors a Rows cell may carry.
-const ROWS_MAX_VALUE_DEPTH: usize = 32;
 /// The fewest bytes one Rows column definition occupies: a `u32` name length,
 /// a one-byte minimum name, the type form, the sixteen-byte type identity and
 /// the nullable flag.
 const ROWS_MIN_COLUMN_BYTES: usize = 4 + 1 + 1 + 16 + 1;
-/// The fewest bytes one ORV5 record field occupies: its sixteen-byte identity
-/// and the `u32` length of its nested value.
-const ROWS_RECORD_FIELD_HEADER_BYTES: usize = 16 + 4;
 
 /// The largest accepted framed-codec magic prefix length in bytes.
 const MAX_OPAQUE_CODEC_MAGIC_LENGTH: usize = 64;
@@ -583,7 +576,7 @@ fn ensure(condition: bool) -> Result<(), ()> {
 }
 
 fn validate_rows_orv5_value(bytes: &[u8], depth: usize) -> Result<(), ()> {
-    if depth > ROWS_MAX_VALUE_DEPTH
+    if depth > ORV_MAX_VALUE_DEPTH
         || bytes.len() < ORV_HEADER_BYTES
         || !bytes.starts_with(ORV5_MARKER)
     {
@@ -617,12 +610,12 @@ fn validate_rows_orv5_value(bytes: &[u8], depth: usize) -> Result<(), ()> {
 }
 
 fn validate_rows_record_payload(payload: &[u8], depth: usize) -> Result<(), ()> {
-    if depth > ROWS_MAX_VALUE_DEPTH {
+    if depth > ORV_MAX_VALUE_DEPTH {
         return Err(());
     }
     let mut reader = Reader::new(payload);
     let count = reader.length()?;
-    if count > reader.remaining() / ROWS_RECORD_FIELD_HEADER_BYTES {
+    if count > reader.remaining() / ORV_RECORD_FIELD_HEADER_BYTES {
         return Err(());
     }
     let mut field_ids = HashSet::with_capacity(count);
@@ -645,7 +638,7 @@ fn validate_rows_constructed_payload(
     payload: &[u8],
     depth: usize,
 ) -> Result<(), ()> {
-    if type_id.iter().any(|byte| *byte != 0) || depth >= ROWS_MAX_VALUE_DEPTH {
+    if type_id.iter().any(|byte| *byte != 0) || depth >= ORV_MAX_VALUE_DEPTH {
         return Err(());
     }
     let mut reader = Reader::new(payload);
@@ -675,7 +668,7 @@ fn validate_rows_descriptor(
     offset: usize,
     depth: usize,
 ) -> Result<(RowsDescriptor, usize), ()> {
-    if depth > ROWS_MAX_VALUE_DEPTH {
+    if depth > ORV_MAX_VALUE_DEPTH {
         return Err(());
     }
     let tag = *bytes.get(offset).ok_or(())?;
@@ -715,7 +708,7 @@ fn validate_rows_constructor_content(
     content: &[u8],
     depth: usize,
 ) -> Result<(), ()> {
-    if depth > ROWS_MAX_VALUE_DEPTH {
+    if depth > ORV_MAX_VALUE_DEPTH {
         return Err(());
     }
     let mut reader = Reader::new(content);
