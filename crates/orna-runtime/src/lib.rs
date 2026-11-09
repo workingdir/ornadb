@@ -10,6 +10,7 @@ use std::{
     fs::{self, OpenOptions},
     future::{Future, Ready, ready},
     io::{ErrorKind, Write},
+    ops::ControlFlow,
     panic::{AssertUnwindSafe, catch_unwind},
     path::{Path, PathBuf},
     pin::Pin,
@@ -4267,6 +4268,57 @@ enum ProviderEffectPreparation {
 enum ProviderEffectDispatchError {
     Runtime(RuntimeError),
     Provider(ProviderEffectFailure),
+}
+
+/// What one provider poll produced, with the checkpoint it was polled at.
+struct PolledStreamItem {
+    checkpoint: StreamCheckpoint,
+    item: Box<StreamItem>,
+}
+
+/// One admitted delivery: the item, the checkpoint precondition it was
+/// admitted under, the lease it holds, and the payload retained should the
+/// delivery fail.
+struct StreamDelivery {
+    item: Box<StreamItem>,
+    expected: CheckpointPrecondition,
+    lease: DeliveryLease,
+    failure_payload: StreamFailurePayload,
+}
+
+/// How a provider poll or wait failure left the run.
+enum ProviderFailureOutcome {
+    /// Cancellation won: the run ended as cancelled and no failure is retained.
+    Cancelled,
+    /// The failure is retained and propagates to the caller.
+    Retained,
+}
+
+/// The step a delivery's closing commit reports, or `None` when the commit
+/// returned a result that closing intent can never produce.
+fn committed_step(result: CommitResult) -> Option<StreamStep> {
+    match result {
+        CommitResult::CheckpointAdvanced { checkpoint } => {
+            Some(StreamStep::Committed { checkpoint })
+        }
+        _ => None,
+    }
+}
+
+fn failed_step(result: CommitResult) -> Option<StreamStep> {
+    match result {
+        CommitResult::Failed { failure } => Some(StreamStep::Failed {
+            failure: Box::new(failure),
+        }),
+        _ => None,
+    }
+}
+
+fn cancelled_step(result: CommitResult) -> Option<StreamStep> {
+    match result {
+        CommitResult::Cancelled { checkpoint, .. } => Some(StreamStep::Cancelled { checkpoint }),
+        _ => None,
+    }
 }
 
 /// Lets a stream owner stop admission between delivery transactions.
@@ -9198,6 +9250,9 @@ impl RuntimeState {
             .await
     }
 
+    /// Runs one provider poll and, when it yields an item, that item's
+    /// delivery. Each phase either ends the step early (`Break`) or hands the
+    /// next phase what it needs (`Continue`).
     async fn run_stream_once_controlled<S, H, C>(
         &self,
         writer: WriterLease,
@@ -9209,6 +9264,35 @@ impl RuntimeState {
     where
         S: StreamSource,
         H: StreamHandler,
+        C: StreamRunControl,
+    {
+        let polled = match self.poll_stream_item(writer, key, source, control).await? {
+            ControlFlow::Continue(polled) => polled,
+            ControlFlow::Break(step) => return Ok(step),
+        };
+        let delivery = match self
+            .admit_stream_delivery(writer, key, source, control, polled)
+            .await?
+        {
+            ControlFlow::Continue(delivery) => delivery,
+            ControlFlow::Break(step) => return Ok(step),
+        };
+        self.deliver_stream_item(writer, handler, control, delivery)
+            .await
+    }
+
+    /// Polls the provider once at the stream's current checkpoint. The step
+    /// ends early when the stream is paused, the poll yields no item, or the
+    /// owner cancelled; otherwise the polled item is handed on.
+    async fn poll_stream_item<S, C>(
+        &self,
+        writer: WriterLease,
+        key: &CheckpointKey,
+        source: &mut S,
+        control: &C,
+    ) -> Result<ControlFlow<StreamStep, PolledStreamItem>, StreamStepError>
+    where
+        S: StreamSource,
         C: StreamRunControl,
     {
         if source.checkpoint_key() != *key {
@@ -9237,7 +9321,7 @@ impl RuntimeState {
             .map_err(StreamStepError::Runtime)?
             == StreamStatus::Paused
         {
-            return Ok(StreamStep::Paused { checkpoint });
+            return Ok(ControlFlow::Break(StreamStep::Paused { checkpoint }));
         }
         self.require_owner(&self.connection, writer)
             .await
@@ -9245,65 +9329,35 @@ impl RuntimeState {
         let next = source.next(&checkpoint);
         let poll = match tokio::select! {
             _ = control.cancellation_wait() => {
-                self.complete_stream_observation(
-                    writer,
-                    key,
-                    StreamObservationStatus::Cancelled,
-                )
-                .await
-                .map_err(StreamStepError::Runtime)?;
-                return Ok(StreamStep::Cancelled { checkpoint });
+                return self.break_stream_cancelled(writer, key, checkpoint).await;
             }
             result = next => result,
         } {
             Ok(poll) => poll,
             Err(diagnostic) => {
-                if control.cancelled() || is_cancellation_diagnostic(diagnostic) {
-                    self.complete_stream_observation(
-                        writer,
-                        key,
-                        StreamObservationStatus::Cancelled,
-                    )
-                    .await
-                    .map_err(StreamStepError::Runtime)?;
-                    return Ok(StreamStep::Cancelled { checkpoint });
-                }
-                self.record_stream_provider_failure(writer, &checkpoint, diagnostic)
-                    .await
-                    .map_err(StreamStepError::Runtime)?;
-                if control.cancelled() {
-                    self.clear_stream_provider_failure(writer, key)
-                        .await
-                        .map_err(StreamStepError::Runtime)?;
-                    self.complete_stream_observation(
-                        writer,
-                        key,
-                        StreamObservationStatus::Cancelled,
-                    )
-                    .await
-                    .map_err(StreamStepError::Runtime)?;
-                    return Ok(StreamStep::Cancelled { checkpoint });
-                }
-                return Err(StreamStepError::Provider(diagnostic));
+                return match self
+                    .settle_provider_failure(writer, key, &checkpoint, control, diagnostic)
+                    .await?
+                {
+                    ProviderFailureOutcome::Cancelled => {
+                        Ok(ControlFlow::Break(StreamStep::Cancelled { checkpoint }))
+                    }
+                    ProviderFailureOutcome::Retained => Err(StreamStepError::Provider(diagnostic)),
+                };
             }
         };
-        let StreamSourcePoll::Item(item) = poll else {
+        let item = match poll {
+            StreamSourcePoll::Item(item) => item,
             // A provider poll is outside the activation transaction and may
             // finish after the owner requests cancellation. Re-check at that
             // boundary before reporting a finite source as exhausted (or an
             // unbounded one as closed): cancellation owns the terminal run
             // classification and must not be turned into source completion.
-            if control.cancelled() {
-                self.complete_stream_observation(writer, key, StreamObservationStatus::Cancelled)
-                    .await
-                    .map_err(StreamStepError::Runtime)?;
-                return Ok(StreamStep::Cancelled { checkpoint });
+            StreamSourcePoll::Waiting | StreamSourcePoll::Exhausted if control.cancelled() => {
+                return self.break_stream_cancelled(writer, key, checkpoint).await;
             }
-            return Ok(match poll {
-                StreamSourcePoll::Waiting => StreamStep::Waiting,
-                StreamSourcePoll::Exhausted => StreamStep::Exhausted,
-                StreamSourcePoll::Item(_) => unreachable!(),
-            });
+            StreamSourcePoll::Waiting => return Ok(ControlFlow::Break(StreamStep::Waiting)),
+            StreamSourcePoll::Exhausted => return Ok(ControlFlow::Break(StreamStep::Exhausted)),
         };
         if item.delivery.checkpoint_key() != *key {
             return Err(StreamStepError::Runtime(
@@ -9311,53 +9365,88 @@ impl RuntimeState {
             ));
         }
         if control.cancelled() {
-            self.complete_stream_observation(writer, key, StreamObservationStatus::Cancelled)
-                .await
-                .map_err(StreamStepError::Runtime)?;
-            return Ok(StreamStep::Cancelled { checkpoint });
+            return self.break_stream_cancelled(writer, key, checkpoint).await;
         }
-        let expected = CheckpointPrecondition::from(&checkpoint);
-        let (lease, failure_payload) = {
-            if !control.acquire_admission() {
-                self.complete_stream_observation(writer, key, StreamObservationStatus::Cancelled)
-                    .await
-                    .map_err(StreamStepError::Runtime)?;
-                return Ok(StreamStep::Cancelled { checkpoint });
-            }
-            let _permit = AdmissionPermit(control);
-            let mut stream = self.stream_backend(writer);
-            let lease = match stream
-                .apply_async(CommitIntent::Acquire {
-                    delivery: item.delivery.clone(),
-                    expected: expected.clone(),
-                    purpose: LeasePurpose::Deliver,
-                })
-                .await
-                .map_err(StreamStepError::Runtime)?
-            {
-                CommitResult::Acquired { lease } => lease,
-                CommitResult::Rejected(RejectReason::StreamPaused) => {
-                    return Ok(StreamStep::Paused { checkpoint });
-                }
-                CommitResult::Rejected(reason) => return Ok(StreamStep::Rejected(reason)),
-                _ => {
-                    return Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid));
-                }
-            };
-            // Delivery admission is the inter-item cancellation boundary.
-            // Once admitted, start this activation and let the bounded
-            // execution check below roll it back if cancellation interrupts
-            // its open work.
-            let failure_payload = source.failure_payload(&item);
-            if matches!(&failure_payload, StreamFailurePayload::Unavailable) {
-                self.release_stream_lease_best_effort(writer, lease.clone())
-                    .await;
-                return Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid));
-            }
-            (lease, failure_payload)
-        };
-        let lease_for_cleanup = lease.clone();
+        Ok(ControlFlow::Continue(PolledStreamItem { checkpoint, item }))
+    }
 
+    /// Admits one polled item as a delivery: takes the admission point,
+    /// acquires the delivery lease under the polled checkpoint, and asks the
+    /// source for the payload retained should the delivery fail. The step
+    /// ends early when cancellation wins admission or the acquire is refused.
+    async fn admit_stream_delivery<S, C>(
+        &self,
+        writer: WriterLease,
+        key: &CheckpointKey,
+        source: &S,
+        control: &C,
+        polled: PolledStreamItem,
+    ) -> Result<ControlFlow<StreamStep, StreamDelivery>, StreamStepError>
+    where
+        S: StreamSource,
+        C: StreamRunControl,
+    {
+        let PolledStreamItem { checkpoint, item } = polled;
+        let expected = CheckpointPrecondition::from(&checkpoint);
+        if !control.acquire_admission() {
+            return self.break_stream_cancelled(writer, key, checkpoint).await;
+        }
+        let _permit = AdmissionPermit(control);
+        let mut stream = self.stream_backend(writer);
+        let lease = match stream
+            .apply_async(CommitIntent::Acquire {
+                delivery: item.delivery.clone(),
+                expected: expected.clone(),
+                purpose: LeasePurpose::Deliver,
+            })
+            .await
+            .map_err(StreamStepError::Runtime)?
+        {
+            CommitResult::Acquired { lease } => lease,
+            CommitResult::Rejected(RejectReason::StreamPaused) => {
+                return Ok(ControlFlow::Break(StreamStep::Paused { checkpoint }));
+            }
+            CommitResult::Rejected(reason) => {
+                return Ok(ControlFlow::Break(StreamStep::Rejected(reason)));
+            }
+            _ => return Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid)),
+        };
+        // Delivery admission is the inter-item cancellation boundary. Once
+        // admitted, start this activation and let the bounded execution check
+        // in `deliver_stream_item` roll it back if cancellation interrupts its
+        // open work.
+        let failure_payload = source.failure_payload(&item);
+        if matches!(&failure_payload, StreamFailurePayload::Unavailable) {
+            self.release_stream_lease_best_effort(writer, lease).await;
+            return Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid));
+        }
+        Ok(ControlFlow::Continue(StreamDelivery {
+            item,
+            expected,
+            lease,
+            failure_payload,
+        }))
+    }
+
+    /// Runs the handler for one admitted delivery and closes the delivery
+    /// lease with the commit, failure or cancellation its result selects.
+    async fn deliver_stream_item<H, C>(
+        &self,
+        writer: WriterLease,
+        handler: &mut H,
+        control: &C,
+        delivery: StreamDelivery,
+    ) -> Result<StreamStep, StreamStepError>
+    where
+        H: StreamHandler,
+        C: StreamRunControl,
+    {
+        let StreamDelivery {
+            item,
+            expected,
+            lease,
+            failure_payload,
+        } = delivery;
         // DELIVERY-1 admits each item as one activation. Capture that
         // activation's CWD generation before user code runs, then use the
         // same fence for either delivery commit path. A concurrent activation
@@ -9367,8 +9456,7 @@ impl RuntimeState {
         let capture = match self.capture().await {
             Ok(capture) => capture,
             Err(error) => {
-                self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
-                    .await;
+                self.release_stream_lease_best_effort(writer, lease).await;
                 return Err(StreamStepError::Runtime(error));
             }
         };
@@ -9385,36 +9473,10 @@ impl RuntimeState {
                 ),
             };
         if !handler_panicked && control.cancelled() {
-            let _ = handler.take_provider_effects();
-            let result = match self
-                .stream_backend(writer)
-                .apply_async(CommitIntent::Cancel {
-                    lease: lease_for_cleanup.clone(),
-                })
-                .await
-            {
-                Ok(result) => result,
-                Err(error) => {
-                    self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
-                        .await;
-                    return Err(StreamStepError::Runtime(error));
-                }
-            };
-            return match result {
-                CommitResult::Cancelled { checkpoint, .. } => {
-                    Ok(StreamStep::Cancelled { checkpoint })
-                }
-                CommitResult::Rejected(reason) => {
-                    self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
-                        .await;
-                    Ok(StreamStep::Rejected(reason))
-                }
-                _ => {
-                    self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
-                        .await;
-                    Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid))
-                }
-            };
+            // A cancelled delivery never reaches the provider, so the effects
+            // the handler staged are dropped unsent.
+            drop(handler.take_provider_effects());
+            return self.cancel_delivery(writer, &lease).await;
         }
 
         let effects = if handler_panicked {
@@ -9428,13 +9490,12 @@ impl RuntimeState {
         ) && !effects.is_empty()
         {
             match self
-                .dispatch_stream_provider_effects(writer, &lease_for_cleanup, handler, &effects)
+                .dispatch_stream_provider_effects(writer, &lease, handler, &effects)
                 .await
             {
                 Ok(()) => {}
                 Err(ProviderEffectDispatchError::Runtime(error)) => {
-                    self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
-                        .await;
+                    self.release_stream_lease_best_effort(writer, lease).await;
                     return Err(StreamStepError::Runtime(error));
                 }
                 Err(ProviderEffectDispatchError::Provider(failure)) => {
@@ -9455,41 +9516,20 @@ impl RuntimeState {
 
         match handler_result {
             StreamHandlerResult::Commit(batch) => {
-                let faults = NoFault;
-                let result = match self
+                let result = self
                     .commit_stream_delivery(StreamDeliveryCommit {
                         writer,
                         expected_capture: &capture,
                         mutations: &batch.mutations,
                         next_digest: batch.next_digest,
-                        delivery: lease_for_cleanup.clone(),
+                        delivery: lease.clone(),
                         expected_stream: expected,
-                        faults: &faults,
+                        faults: &NoFault,
                     })
                     .await
-                {
-                    Ok((_, result)) => result,
-                    Err(error) => {
-                        self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
-                            .await;
-                        return Err(StreamStepError::Runtime(error));
-                    }
-                };
-                match result {
-                    CommitResult::CheckpointAdvanced { checkpoint } => {
-                        Ok(StreamStep::Committed { checkpoint })
-                    }
-                    CommitResult::Rejected(reason) => {
-                        self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
-                            .await;
-                        Ok(StreamStep::Rejected(reason))
-                    }
-                    _ => {
-                        self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
-                            .await;
-                        Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid))
-                    }
-                }
+                    .map(|(_, result)| result);
+                self.settle_delivery(writer, &lease, result, committed_step)
+                    .await
             }
             // A typed table result without a validator cannot cross the
             // durable boundary. Callers must use CommitValidatedTable so the
@@ -9498,161 +9538,42 @@ impl RuntimeState {
                 // Treat the missing validator as a handler failure so the
                 // acquired delivery is durably released and retryable. No
                 // table mutation, checkpoint, or capture is committed.
-                if let Err(error) = self.require_owner(&self.connection, writer).await {
-                    self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
-                        .await;
-                    return Err(StreamStepError::Runtime(error));
-                }
-                let diagnostic = SafeDiagnostic {
-                    code: DiagnosticCode::ExecutionRejected,
-                    class: DiagnosticClass::Permanent,
-                };
-                let result = match self
-                    .stream_backend(writer)
-                    .fail_with_payload_async(lease_for_cleanup.clone(), diagnostic, failure_payload)
-                    .await
-                {
-                    Ok(result) => result,
-                    Err(error) => {
-                        self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
-                            .await;
-                        return Err(StreamStepError::Runtime(error));
-                    }
-                };
-                match result {
-                    CommitResult::Failed { failure } => Ok(StreamStep::Failed {
-                        failure: Box::new(failure),
-                    }),
-                    CommitResult::Rejected(reason) => {
-                        self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
-                            .await;
-                        Ok(StreamStep::Rejected(reason))
-                    }
-                    _ => {
-                        self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
-                            .await;
-                        Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid))
-                    }
-                }
+                self.fail_delivery(
+                    writer,
+                    &lease,
+                    SafeDiagnostic {
+                        code: DiagnosticCode::ExecutionRejected,
+                        class: DiagnosticClass::Permanent,
+                    },
+                    failure_payload,
+                )
+                .await
             }
             StreamHandlerResult::CommitValidatedTable(mut batch) => {
-                let faults = NoFault;
-                let result = self
+                let committed = self
                     .commit_stream_validated_table_delivery(StreamValidatedTableDeliveryCommit {
                         writer,
                         expected_capture: &capture,
                         mutations: &batch.mutations,
                         next_digest: batch.next_digest,
-                        delivery: lease_for_cleanup.clone(),
+                        delivery: lease.clone(),
                         expected_stream: expected,
                         validator: batch.validator.as_mut(),
-                        faults: &faults,
+                        faults: &NoFault,
                     })
                     .await;
-                match result {
-                    Ok((_, CommitResult::CheckpointAdvanced { checkpoint })) => {
-                        Ok(StreamStep::Committed { checkpoint })
-                    }
-                    Ok((_, CommitResult::Rejected(reason))) => {
-                        self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
-                            .await;
-                        Ok(StreamStep::Rejected(reason))
-                    }
-                    Ok(_) => {
-                        self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
-                            .await;
-                        Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid))
+                match committed {
+                    Ok((_, result)) => {
+                        self.settle_delivery(writer, &lease, Ok(result), committed_step)
+                            .await
                     }
                     Err(StreamTableDeliveryError::Runtime(error)) => {
-                        self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
-                            .await;
-                        Err(StreamStepError::Runtime(error))
+                        self.settle_delivery(writer, &lease, Err(error), committed_step)
+                            .await
                     }
                     Err(StreamTableDeliveryError::ValidationFailed(diagnostic)) => {
-                        if is_cancellation_diagnostic(diagnostic) {
-                            let result = match self
-                                .stream_backend(writer)
-                                .apply_async(CommitIntent::Cancel {
-                                    lease: lease_for_cleanup.clone(),
-                                })
-                                .await
-                            {
-                                Ok(result) => result,
-                                Err(error) => {
-                                    self.release_stream_lease_best_effort(
-                                        writer,
-                                        lease_for_cleanup.clone(),
-                                    )
-                                    .await;
-                                    return Err(StreamStepError::Runtime(error));
-                                }
-                            };
-                            return match result {
-                                CommitResult::Cancelled { checkpoint, .. } => {
-                                    Ok(StreamStep::Cancelled { checkpoint })
-                                }
-                                CommitResult::Rejected(reason) => {
-                                    self.release_stream_lease_best_effort(
-                                        writer,
-                                        lease_for_cleanup.clone(),
-                                    )
-                                    .await;
-                                    Ok(StreamStep::Rejected(reason))
-                                }
-                                _ => {
-                                    self.release_stream_lease_best_effort(
-                                        writer,
-                                        lease_for_cleanup.clone(),
-                                    )
-                                    .await;
-                                    Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid))
-                                }
-                            };
-                        }
-                        if let Err(error) = self.require_owner(&self.connection, writer).await {
-                            self.release_stream_lease_best_effort(
-                                writer,
-                                lease_for_cleanup.clone(),
-                            )
-                            .await;
-                            return Err(StreamStepError::Runtime(error));
-                        }
-                        let mut stream = self.stream_backend(writer);
-                        let result = match stream
-                            .fail_with_payload_async(lease, diagnostic, failure_payload)
+                        self.reject_delivery(writer, &lease, diagnostic, failure_payload)
                             .await
-                        {
-                            Ok(result) => result,
-                            Err(error) => {
-                                self.release_stream_lease_best_effort(
-                                    writer,
-                                    lease_for_cleanup.clone(),
-                                )
-                                .await;
-                                return Err(StreamStepError::Runtime(error));
-                            }
-                        };
-                        match result {
-                            CommitResult::Failed { failure } => Ok(StreamStep::Failed {
-                                failure: Box::new(failure),
-                            }),
-                            CommitResult::Rejected(reason) => {
-                                self.release_stream_lease_best_effort(
-                                    writer,
-                                    lease_for_cleanup.clone(),
-                                )
-                                .await;
-                                Ok(StreamStep::Rejected(reason))
-                            }
-                            _ => {
-                                self.release_stream_lease_best_effort(
-                                    writer,
-                                    lease_for_cleanup.clone(),
-                                )
-                                .await;
-                                Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid))
-                            }
-                        }
                     }
                 }
             }
@@ -9663,111 +9584,155 @@ impl RuntimeState {
             // current checkpoint and can be retried under the same identity.
             StreamHandlerResult::FailAfterTable(_, diagnostic)
             | StreamHandlerResult::Fail(diagnostic) => {
-                if is_cancellation_diagnostic(diagnostic) {
-                    let result = match self
-                        .stream_backend(writer)
-                        .apply_async(CommitIntent::Cancel {
-                            lease: lease_for_cleanup.clone(),
-                        })
-                        .await
-                    {
-                        Ok(result) => result,
-                        Err(error) => {
-                            self.release_stream_lease_best_effort(
-                                writer,
-                                lease_for_cleanup.clone(),
-                            )
-                            .await;
-                            return Err(StreamStepError::Runtime(error));
-                        }
-                    };
-                    return match result {
-                        CommitResult::Cancelled { checkpoint, .. } => {
-                            Ok(StreamStep::Cancelled { checkpoint })
-                        }
-                        CommitResult::Rejected(reason) => {
-                            self.release_stream_lease_best_effort(
-                                writer,
-                                lease_for_cleanup.clone(),
-                            )
-                            .await;
-                            Ok(StreamStep::Rejected(reason))
-                        }
-                        _ => {
-                            self.release_stream_lease_best_effort(
-                                writer,
-                                lease_for_cleanup.clone(),
-                            )
-                            .await;
-                            Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid))
-                        }
-                    };
-                }
-                if let Err(error) = self.require_owner(&self.connection, writer).await {
-                    self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
-                        .await;
-                    return Err(StreamStepError::Runtime(error));
-                }
-                let mut stream = self.stream_backend(writer);
-                let result = stream
-                    .fail_with_payload_async(lease_for_cleanup.clone(), diagnostic, failure_payload)
-                    .await;
-                let result = match result {
-                    Ok(result) => result,
-                    Err(error) => {
-                        self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
-                            .await;
-                        return Err(StreamStepError::Runtime(error));
-                    }
-                };
-                match result {
-                    CommitResult::Failed { failure } => Ok(StreamStep::Failed {
-                        failure: Box::new(failure),
-                    }),
-                    CommitResult::Rejected(reason) => {
-                        self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
-                            .await;
-                        Ok(StreamStep::Rejected(reason))
-                    }
-                    _ => {
-                        self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
-                            .await;
-                        Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid))
-                    }
-                }
-            }
-            StreamHandlerResult::Cancelled => {
-                let result = match self
-                    .stream_backend(writer)
-                    .apply_async(CommitIntent::Cancel {
-                        lease: lease_for_cleanup.clone(),
-                    })
+                self.reject_delivery(writer, &lease, diagnostic, failure_payload)
                     .await
-                {
-                    Ok(result) => result,
-                    Err(error) => {
-                        self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
-                            .await;
-                        return Err(StreamStepError::Runtime(error));
-                    }
-                };
-                match result {
-                    CommitResult::Cancelled { checkpoint, .. } => {
-                        Ok(StreamStep::Cancelled { checkpoint })
-                    }
-                    CommitResult::Rejected(reason) => {
-                        self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
-                            .await;
-                        Ok(StreamStep::Rejected(reason))
-                    }
-                    _ => {
-                        self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
-                            .await;
-                        Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid))
-                    }
-                }
             }
+            StreamHandlerResult::Cancelled => self.cancel_delivery(writer, &lease).await,
         }
+    }
+
+    /// Closes a delivery attempt whose closing commit returned `result`.
+    /// `step_for` turns the one result that commit must produce into its
+    /// step. A rejection, any other result, or a commit error leaves the
+    /// delivery lease held, so it is released before the outcome is reported
+    /// and the delivery stays retryable.
+    async fn settle_delivery(
+        &self,
+        writer: WriterLease,
+        lease: &DeliveryLease,
+        result: Result<CommitResult, RuntimeError>,
+        step_for: fn(CommitResult) -> Option<StreamStep>,
+    ) -> Result<StreamStep, StreamStepError> {
+        let unsettled = match result {
+            Ok(CommitResult::Rejected(reason)) => Ok(StreamStep::Rejected(reason)),
+            Ok(result) => match step_for(result) {
+                Some(step) => return Ok(step),
+                None => Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid)),
+            },
+            Err(error) => Err(StreamStepError::Runtime(error)),
+        };
+        self.release_stream_lease_best_effort(writer, lease.clone())
+            .await;
+        unsettled
+    }
+
+    /// Closes the delivery as cancelled at its checkpoint.
+    async fn cancel_delivery(
+        &self,
+        writer: WriterLease,
+        lease: &DeliveryLease,
+    ) -> Result<StreamStep, StreamStepError> {
+        let result = self
+            .stream_backend(writer)
+            .apply_async(CommitIntent::Cancel {
+                lease: lease.clone(),
+            })
+            .await;
+        self.settle_delivery(writer, lease, result, cancelled_step)
+            .await
+    }
+
+    /// Closes the delivery by recording `diagnostic` as its retained failure.
+    async fn fail_delivery(
+        &self,
+        writer: WriterLease,
+        lease: &DeliveryLease,
+        diagnostic: SafeDiagnostic,
+        failure_payload: StreamFailurePayload,
+    ) -> Result<StreamStep, StreamStepError> {
+        if let Err(error) = self.require_owner(&self.connection, writer).await {
+            self.release_stream_lease_best_effort(writer, lease.clone())
+                .await;
+            return Err(StreamStepError::Runtime(error));
+        }
+        let result = self
+            .stream_backend(writer)
+            .fail_with_payload_async(lease.clone(), diagnostic, failure_payload)
+            .await;
+        self.settle_delivery(writer, lease, result, failed_step)
+            .await
+    }
+
+    /// Closes the delivery for a handler or validator that reported
+    /// `diagnostic`: a cancellation diagnostic cancels the delivery, any
+    /// other diagnostic becomes its retained failure.
+    async fn reject_delivery(
+        &self,
+        writer: WriterLease,
+        lease: &DeliveryLease,
+        diagnostic: SafeDiagnostic,
+        failure_payload: StreamFailurePayload,
+    ) -> Result<StreamStep, StreamStepError> {
+        if is_cancellation_diagnostic(diagnostic) {
+            return self.cancel_delivery(writer, lease).await;
+        }
+        self.fail_delivery(writer, lease, diagnostic, failure_payload)
+            .await
+    }
+
+    /// Records the stream's run as cancelled and ends the step at
+    /// `checkpoint`.
+    async fn break_stream_cancelled<T>(
+        &self,
+        writer: WriterLease,
+        key: &CheckpointKey,
+        checkpoint: StreamCheckpoint,
+    ) -> Result<ControlFlow<StreamStep, T>, StreamStepError> {
+        self.complete_stream_observation(writer, key, StreamObservationStatus::Cancelled)
+            .await
+            .map_err(StreamStepError::Runtime)?;
+        Ok(ControlFlow::Break(StreamStep::Cancelled { checkpoint }))
+    }
+
+    /// Records the stream's run as cancelled after `delivered` deliveries.
+    async fn cancel_run(
+        &self,
+        writer: WriterLease,
+        key: &CheckpointKey,
+        delivered: usize,
+        checkpoint: StreamCheckpoint,
+    ) -> Result<StreamRunOutcome, StreamStepError> {
+        self.complete_stream_observation(writer, key, StreamObservationStatus::Cancelled)
+            .await
+            .map_err(StreamStepError::Runtime)?;
+        Ok(StreamRunOutcome::Cancelled {
+            delivered,
+            checkpoint,
+        })
+    }
+
+    /// Classifies a provider poll or wait failure at `checkpoint`. A failure
+    /// raised by cancellation, or one that races a cancellation request, ends
+    /// the run as cancelled and retains nothing. Any other failure is
+    /// retained for the owner, unless cancellation arrives while it is being
+    /// retained, in which case the retained record is withdrawn again.
+    async fn settle_provider_failure<C: StreamRunControl>(
+        &self,
+        writer: WriterLease,
+        key: &CheckpointKey,
+        checkpoint: &StreamCheckpoint,
+        control: &C,
+        diagnostic: SafeDiagnostic,
+    ) -> Result<ProviderFailureOutcome, StreamStepError> {
+        if control.cancelled() || is_cancellation_diagnostic(diagnostic) {
+            self.complete_stream_observation(writer, key, StreamObservationStatus::Cancelled)
+                .await
+                .map_err(StreamStepError::Runtime)?;
+            return Ok(ProviderFailureOutcome::Cancelled);
+        }
+        self.record_stream_provider_failure(writer, checkpoint, diagnostic)
+            .await
+            .map_err(StreamStepError::Runtime)?;
+        if control.cancelled() {
+            self.clear_stream_provider_failure(writer, key)
+                .await
+                .map_err(StreamStepError::Runtime)?;
+            self.complete_stream_observation(writer, key, StreamObservationStatus::Cancelled)
+                .await
+                .map_err(StreamStepError::Runtime)?;
+            return Ok(ProviderFailureOutcome::Cancelled);
+        }
+        Ok(ProviderFailureOutcome::Retained)
     }
 
     /// Runs delivery transactions until the source exhausts, fails, rejects
@@ -9809,13 +9774,7 @@ impl RuntimeState {
         let mut delivered = 0;
         loop {
             if control.cancelled() {
-                self.complete_stream_observation(writer, key, StreamObservationStatus::Cancelled)
-                    .await
-                    .map_err(StreamStepError::Runtime)?;
-                return Ok(StreamRunOutcome::Cancelled {
-                    delivered,
-                    checkpoint,
-                });
+                return self.cancel_run(writer, key, delivered, checkpoint).await;
             }
             match self
                 .run_stream_once_controlled(writer, key, source, handler, control)
@@ -9832,17 +9791,7 @@ impl RuntimeState {
                 }
                 StreamStep::Waiting => {
                     if control.cancelled() {
-                        self.complete_stream_observation(
-                            writer,
-                            key,
-                            StreamObservationStatus::Cancelled,
-                        )
-                        .await
-                        .map_err(StreamStepError::Runtime)?;
-                        return Ok(StreamRunOutcome::Cancelled {
-                            delivered,
-                            checkpoint,
-                        });
+                        return self.cancel_run(writer, key, delivered, checkpoint).await;
                     }
                     let wait = source.wait(control as &dyn StreamRunControl);
                     let wait_result = tokio::select! {
@@ -9853,39 +9802,18 @@ impl RuntimeState {
                         result = wait => result,
                     };
                     if let Err(diagnostic) = wait_result {
-                        if control.cancelled() || is_cancellation_diagnostic(diagnostic) {
-                            self.complete_stream_observation(
-                                writer,
-                                key,
-                                StreamObservationStatus::Cancelled,
-                            )
-                            .await
-                            .map_err(StreamStepError::Runtime)?;
-                            return Ok(StreamRunOutcome::Cancelled {
+                        return match self
+                            .settle_provider_failure(writer, key, &checkpoint, control, diagnostic)
+                            .await?
+                        {
+                            ProviderFailureOutcome::Cancelled => Ok(StreamRunOutcome::Cancelled {
                                 delivered,
                                 checkpoint,
-                            });
-                        }
-                        self.record_stream_provider_failure(writer, &checkpoint, diagnostic)
-                            .await
-                            .map_err(StreamStepError::Runtime)?;
-                        if control.cancelled() {
-                            self.clear_stream_provider_failure(writer, key)
-                                .await
-                                .map_err(StreamStepError::Runtime)?;
-                            self.complete_stream_observation(
-                                writer,
-                                key,
-                                StreamObservationStatus::Cancelled,
-                            )
-                            .await
-                            .map_err(StreamStepError::Runtime)?;
-                            return Ok(StreamRunOutcome::Cancelled {
-                                delivered,
-                                checkpoint,
-                            });
-                        }
-                        return Err(StreamStepError::Provider(diagnostic));
+                            }),
+                            ProviderFailureOutcome::Retained => {
+                                Err(StreamStepError::Provider(diagnostic))
+                            }
+                        };
                     }
                 }
                 StreamStep::Exhausted => {
