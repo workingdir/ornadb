@@ -1,7 +1,6 @@
 use orna_sys::{
-    DisjunctStormDescription, ExplainError, ExpressionRef, ObjectRef, PlanDetail, PlanNodeKind,
-    QueryPlanDescription, QuerySourceStatistics, SnapshotRef,
-    explain_query_with_disjunct_storm_chain,
+    DisjunctStormDescription, ExplainError, ExplainInputs, ExpressionRef, ObjectRef, PlanDetail,
+    PlanNodeKind, QueryPlanDescription, QuerySourceStatistics, SnapshotRef, explain_query_with,
 };
 
 const FIXTURE: &str = include_str!("fixtures/planner_nested_disjunct_storm_branch_cascades.orna");
@@ -26,7 +25,7 @@ fn explain_storms(
     additional_limits: &[u64],
     has_query_predicate: bool,
 ) -> Result<orna_sys::ExplainedPlan, ExplainError> {
-    explain_query_with_disjunct_storm_chain(
+    explain_query_with(
         &QueryPlanDescription {
             snapshot: SnapshotRef::descriptive("snapshot:nested-disjunct-storm-branch-cascades"),
             source: ObjectRef::descriptive("table:PlannerNestedDisjunctStormBranchCascades"),
@@ -45,8 +44,11 @@ fn explain_storms(
             mutations: Vec::new(),
             materialize_into: None,
         },
-        storms,
-        additional_limits,
+        ExplainInputs {
+            additional_limits,
+            disjunct_storms: Some(storms),
+            ..ExplainInputs::default()
+        },
     )
 }
 

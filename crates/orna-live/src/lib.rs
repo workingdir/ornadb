@@ -2096,6 +2096,9 @@ impl LiveHost {
             ServingOrigin(request.id),
             &subscribe,
         ) {
+            // `revoke` rejects only a session the security layer no longer holds,
+            // and this one was created immediately above; it either closes now or
+            // is already gone, so the serving failure stays the reported cause.
             let _ = self.security.revoke(session_id(request.id));
             return Err(map_serving(error));
         }
@@ -2149,6 +2152,9 @@ impl LiveHost {
             .serving
             .reconnect(request.id, &request.credential.serving)
         {
+            // `revoke` rejects only a session the security layer no longer holds,
+            // and `validate_resume` plus `attach` proved this one exists; the
+            // serving failure stays the reported cause.
             let _ = self.security.revoke(session_id(request.id));
             self.attachments.retain(|_, session| *session != request.id);
             return Err(map_serving(error));
@@ -2349,9 +2355,7 @@ impl LiveHost {
             let lease = match self.writer_lease().await {
                 Ok(lease) => lease,
                 Err(error) => {
-                    if !retryable_failure {
-                        let _ = self.finish_failed_delete(request.id);
-                    }
+                    self.abandon_delete(request.id, retryable_failure);
                     return Err(error);
                 }
             };
@@ -2364,9 +2368,7 @@ impl LiveHost {
             {
                 Ok(()) => Some(lease),
                 Err(error) => {
-                    if !retryable_failure {
-                        let _ = self.finish_failed_delete(request.id);
-                    }
+                    self.abandon_delete(request.id, retryable_failure);
                     return Err(map_runtime(&error));
                 }
             }
@@ -2378,9 +2380,7 @@ impl LiveHost {
             // A failed join remains fail-closed. Do not invoke durable
             // deletion or manufacture success while child termination is
             // unproven.
-            if !retryable_failure {
-                let _ = self.finish_failed_delete(request.id);
-            }
+            self.abandon_delete(request.id, retryable_failure);
             return Err(Error::DeletionFailed);
         }
         if let Some(lease) = deletion_lease {
@@ -2391,9 +2391,7 @@ impl LiveHost {
                 .finish_session_deletion(request.id, lease)
                 .await;
             if let Err(error) = result {
-                if !retryable_failure {
-                    let _ = self.finish_failed_delete(request.id);
-                }
+                self.abandon_delete(request.id, retryable_failure);
                 return Err(map_runtime(&error));
             }
         }
@@ -2554,10 +2552,19 @@ impl LiveHost {
         Ok(())
     }
 
-    fn finish_failed_delete(&mut self, session: [u8; 16]) -> Result<()> {
-        self.serving
-            .credential_deleted(session, false)
-            .map_err(|_| Error::DeletionFailed)
+    /// Marks a failed, non-retryable deletion in the serving layer. A retryable
+    /// failure keeps the reservation for its retry, so it records nothing.
+    ///
+    /// `credential_deleted(session, false)` closes the session and then answers
+    /// `CredentialDeletionFailed`, which is the outcome the caller is already
+    /// returning; the only other rejection is an unknown session, which has no
+    /// serving state left to close. Neither can add information, so the caller's
+    /// own failure stays the one the client acts on.
+    fn abandon_delete(&mut self, session: [u8; 16], retryable_failure: bool) {
+        if retryable_failure {
+            return;
+        }
+        let _ = self.serving.credential_deleted(session, false);
     }
 
     fn finish_delete(&mut self, request: &DeleteRequest<'_>, deleted: bool) -> Result<()> {
@@ -3367,10 +3374,19 @@ impl LiveHost {
         {
             record.terminal = Some(mismatch.clone());
         } else {
-            let _ = self.serving.cancel_request(session, request);
-            self.requests.remove(&(session, request));
+            self.discard_request_record(session, request);
         }
         Ok(mismatch)
+    }
+
+    /// Drops the local record of a request the serving layer would not complete.
+    ///
+    /// `cancel_request` rejects only a terminal or unknown request, which is the
+    /// state that brought the caller here, so its answer says nothing the caller
+    /// does not already know; the local record is dropped either way.
+    fn discard_request_record(&mut self, session: [u8; 16], request: [u8; 16]) {
+        let _ = self.serving.cancel_request(session, request);
+        self.requests.remove(&(session, request));
     }
 
     /// Dispatches one inbound frame to completion in a single call: protocol
@@ -3405,6 +3421,9 @@ impl LiveHost {
             // Only the last local attachment may disconnect that state; an
             // obsolete socket must never disconnect its replacement.
             if !self.attachments.values().any(|owner| *owner == session) {
+                // `disconnect` rejects only a session the serving layer does not
+                // hold, which has no link state left to mark; the attachment
+                // failure stays the reported cause.
                 let _ = self.serving.disconnect(session);
             }
             return Err(map_boundary(error));
@@ -3470,6 +3489,13 @@ impl LiveHost {
                             }
                     )
                 {
+                    // A status or request-cancel answer can come from the local
+                    // record without entering durable admission below, so this
+                    // path completes the takeover barrier itself. The
+                    // prepare/complete split defers to admit_durable_request,
+                    // which recovers before any fresh durable request and is
+                    // the only path that can admit one; a locally replayed
+                    // terminal admits nothing, so it needs no barrier.
                     self.ensure_takeover_recovery().await?;
                 }
                 // Return a known local outcome before checking live handles:
@@ -4859,8 +4885,7 @@ impl LiveHost {
             record.terminal = Some(outcome);
             return Ok(());
         }
-        let _ = self.serving.cancel_request(session, request);
-        self.requests.remove(&(session, request));
+        self.discard_request_record(session, request);
         Ok(())
     }
 

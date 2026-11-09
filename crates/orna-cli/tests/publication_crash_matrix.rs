@@ -54,7 +54,7 @@ async fn commit_capture(
     relation_id: [u8; 16],
     format_context: &orna_value::Format3Context,
 ) {
-    use orna_project::{ProjectLoader, admit_source_row_with_owner_fields};
+    use orna_project::{ProjectLoader, SourceRowRequest, admit_source_row};
 
     // Format 3 keeps rows only in `.orna/store` (ORNA-REPO-004): the row
     // source is the fixture document, never a committed file.
@@ -79,16 +79,16 @@ async fn commit_capture(
     )
     .unwrap();
     let blob_binding = bindings.accept_captured_blob_for_row(&value).unwrap();
-    let admitted = admit_source_row_with_owner_fields(
+    let admitted = admit_source_row(
         &project,
-        logical_path,
-        &row_source,
         &schema,
         format_context,
-        vec![("payload".to_owned(), blob_binding)],
-        vec![],
-        &[],
-        owner_id,
+        SourceRowRequest::new(
+            logical_path,
+            &row_source,
+            vec![("payload".to_owned(), blob_binding)],
+            owner_id,
+        ),
     )
     .unwrap();
     let (source_mutation, source_bindings, resolved_schema) = admitted.into_mutation_and_bindings();

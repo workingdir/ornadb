@@ -15,8 +15,8 @@ use std::{collections::BTreeMap, sync::Arc};
 use orna_conformance::transactional_loaded_project_candidate_validator;
 use orna_evaluator::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
 use orna_project::{
-    KeyComponentText, ObjectIdentityManifest, ObjectKind, ProjectLoader,
-    admit_source_row_with_owner_fields,
+    KeyComponentText, ObjectIdentityManifest, ObjectKind, ProjectLoader, SourceRowRequest,
+    admit_source_row,
 };
 use orna_repository::Repository;
 use orna_runtime::{
@@ -406,16 +406,18 @@ pub async fn commit_source_captures_for_table(
             blob_fields.push(((*field_name).to_owned(), blob_binding));
         }
         let source_row_id = source_row_id_for_ordinal(capture.ordinal);
-        let admitted = admit_source_row_with_owner_fields(
+        let admitted = admit_source_row(
             &project,
-            &logical_path,
-            row_source,
             &schema,
             format_context,
-            blob_fields,
-            vec![],
-            &[key_component],
-            source_row_id,
+            SourceRowRequest {
+                logical_path: &logical_path,
+                source: row_source,
+                blob_bindings: blob_fields,
+                owner_field_values: Vec::new(),
+                key_components: &[key_component],
+                mutation_id: source_row_id,
+            },
         )
         .unwrap_or_else(|error| {
             panic!(
@@ -596,16 +598,18 @@ pub async fn commit_source_replacement_through_save_admission(
         blob_fields.push(((*field_name).to_owned(), blob_binding));
     }
     let source_row_id = source_row_id_for_ordinal(capture.ordinal);
-    let admitted = admit_source_row_with_owner_fields(
+    let admitted = admit_source_row(
         &project,
-        &logical_path,
-        row_source,
         &schema,
         format_context,
-        blob_fields,
-        vec![],
-        &[key_component],
-        source_row_id,
+        SourceRowRequest {
+            logical_path: &logical_path,
+            source: row_source,
+            blob_bindings: blob_fields,
+            owner_field_values: Vec::new(),
+            key_components: &[key_component],
+            mutation_id: source_row_id,
+        },
     )
     .unwrap_or_else(|error| {
         panic!(

@@ -1,12 +1,11 @@
 use std::collections::BTreeMap;
 
 use orna_sys::{
-    ExplainError, ExpressionRef, MutableBranchSnapshot, ObjectRef, PlanDetail, PlanNode,
-    PlanNodeKind, QueryJoinDescription, QueryJoinPairIdentityDescription,
+    ExplainError, ExplainInputs, ExpressionRef, MutableBranchSnapshot, ObjectRef, PlanDetail,
+    PlanNode, PlanNodeKind, QueryJoinDescription, QueryJoinPairIdentityDescription,
     QueryPairedCheckpointSegmentCompactionChainDescription,
     QueryPairedCheckpointSegmentCompactionStepDescription, QueryPartialIndexDescription,
-    QueryPlanDescription, QuerySourceStatistics, SnapshotRef,
-    explain_query_with_partial_indexes_and_paired_checkpoint_segment_compaction_chains,
+    QueryPlanDescription, QuerySourceStatistics, SnapshotRef, explain_query_with,
 };
 
 const FIXTURE: &str =
@@ -169,11 +168,14 @@ fn plan(
     chains: &[QueryPairedCheckpointSegmentCompactionChainDescription],
     pairs: &[QueryJoinPairIdentityDescription],
 ) -> orna_sys::ExplainedPlan {
-    explain_query_with_partial_indexes_and_paired_checkpoint_segment_compaction_chains(
+    explain_query_with(
         &query(generation_a),
-        &indexes(),
-        pairs,
-        chains,
+        ExplainInputs {
+            partial_indexes: &indexes(),
+            join_pair_identities: pairs,
+            checkpoint_compaction_chains: chains,
+            ..ExplainInputs::default()
+        },
     )
     .expect("checkpoint compaction lineage folds into a valid query plan")
 }
@@ -452,11 +454,14 @@ fn checkpoint_compaction_chains_cannot_cross_branch_or_pair_boundaries() {
     let mut wrong_branch = chains("v1", 4);
     wrong_branch[0].branch.generation = 99;
     assert_eq!(
-        explain_query_with_partial_indexes_and_paired_checkpoint_segment_compaction_chains(
+        explain_query_with(
             &query(4),
-            &indexes(),
-            &pair_descriptions,
-            &wrong_branch,
+            ExplainInputs {
+                partial_indexes: &indexes(),
+                join_pair_identities: &pair_descriptions,
+                checkpoint_compaction_chains: &wrong_branch,
+                ..ExplainInputs::default()
+            },
         ),
         Err(ExplainError::InvalidObject),
         "a chain must belong to the mutable branch generation on its exact right input",
@@ -465,11 +470,14 @@ fn checkpoint_compaction_chains_cannot_cross_branch_or_pair_boundaries() {
     let mut malformed_step = chains("v1", 4);
     malformed_step[0].steps[1].left_compaction_identity = None;
     assert_eq!(
-        explain_query_with_partial_indexes_and_paired_checkpoint_segment_compaction_chains(
+        explain_query_with(
             &query(4),
-            &indexes(),
-            &pair_descriptions,
-            &malformed_step,
+            ExplainInputs {
+                partial_indexes: &indexes(),
+                join_pair_identities: &pair_descriptions,
+                checkpoint_compaction_chains: &malformed_step,
+                ..ExplainInputs::default()
+            },
         ),
         Err(ExplainError::InvalidObject),
         "a segment slot cannot lose its compaction identity",
@@ -478,11 +486,14 @@ fn checkpoint_compaction_chains_cannot_cross_branch_or_pair_boundaries() {
     let mut wrong_pair = chains("v1", 4);
     wrong_pair[0].join_pair_identity = object("pair:table:ChildB");
     assert_eq!(
-        explain_query_with_partial_indexes_and_paired_checkpoint_segment_compaction_chains(
+        explain_query_with(
             &query(4),
-            &indexes(),
-            &pair_descriptions,
-            &wrong_pair,
+            ExplainInputs {
+                partial_indexes: &indexes(),
+                join_pair_identities: &pair_descriptions,
+                checkpoint_compaction_chains: &wrong_pair,
+                ..ExplainInputs::default()
+            },
         ),
         Err(ExplainError::InvalidObject),
         "the chain identity resolves by pair and branch, never by nearby planned position",

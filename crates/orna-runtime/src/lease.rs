@@ -49,7 +49,36 @@ impl WriterAuthority {
     }
 }
 
-pub(crate) async fn current_writer_lease_tx(
+/// Decodes a stored writer epoch.
+///
+/// The `writer_lease` and `takeover_recovery_pending` schemas admit only a
+/// positive epoch (`CHECK (epoch > 0)` / `CHECK (owner_epoch > 0)`), so a
+/// stored zero or negative value means the row contradicts the schema and the
+/// store cannot supply the required data: `sys.storage.unavailable`
+/// (`reference/Orna-1.1.0/source/34-system-reference.md:3533`). Every reader
+/// of a stored lease or fence row uses this decoder so that corrupted row has
+/// one code instead of the caller-input validator's `InvalidIdentity`.
+fn decode_stored_epoch(epoch: i64) -> Result<u64, RuntimeError> {
+    if epoch <= 0 {
+        return Err(RuntimeError::StorageUnavailable);
+    }
+    Ok(epoch as u64)
+}
+
+/// Decodes one stored `(owner_id, epoch)` lease or takeover-fence row.
+///
+/// The identity itself is validated by callers that treat a stored zero owner
+/// as an invalid identity; comparison readers keep their existing mismatch
+/// outcome.
+fn decode_stored_writer_lease(owner_id: Vec<u8>, epoch: i64) -> Result<WriterLease, RuntimeError> {
+    Ok(WriterLease {
+        owner_id: fixed(owner_id)?,
+        epoch: decode_stored_epoch(epoch)?,
+    })
+}
+
+/// The current `writer_lease` row, decoded once for every reader.
+async fn current_writer_lease_row_tx(
     connection: &Connection,
 ) -> Result<Option<WriterLease>, RuntimeError> {
     let mut rows = connection
@@ -57,24 +86,30 @@ pub(crate) async fn current_writer_lease_tx(
             "SELECT owner_id, epoch FROM writer_lease WHERE singleton = 1",
             (),
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    else {
+        .await?;
+    let Some(row) = rows.next().await? else {
         return Ok(None);
     };
-    let owner_id = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
-    let epoch = u64::try_from(
-        row.get::<i64>(1)
-            .map_err(|_| RuntimeError::RecoveryInvalid)?,
-    )
-    .map_err(|_| RuntimeError::RecoveryInvalid)?;
-    let lease = WriterLease { owner_id, epoch };
-    validate_writer_lease(lease)?;
-    Ok(Some(lease))
+    Ok(Some(decode_stored_writer_lease(
+        row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
+    )?))
+}
+
+/// The current `writer_lease` row with the identity a bearer may hold.
+///
+/// A stored zero owner is the caller-input identity validator's
+/// `InvalidIdentity`; every other shape is [`decode_stored_writer_lease`].
+pub(crate) async fn current_writer_lease_tx(
+    connection: &Connection,
+) -> Result<Option<WriterLease>, RuntimeError> {
+    let lease = current_writer_lease_row_tx(connection).await?;
+    if let Some(lease) = lease {
+        validate_id(lease.owner_id)?;
+        Ok(Some(lease))
+    } else {
+        Ok(None)
+    }
 }
 
 /// The current writer lease and the runtime owner lock identity it is bound
@@ -88,23 +123,15 @@ async fn bound_writer_lease_tx(
             "SELECT owner_id, epoch, lock_owner_id FROM writer_lease WHERE singleton = 1",
             (),
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    else {
+        .await?;
+    let Some(row) = rows.next().await? else {
         return Ok(None);
     };
-    let owner_id = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
-    let epoch = u64::try_from(
-        row.get::<i64>(1)
-            .map_err(|_| RuntimeError::RecoveryInvalid)?,
-    )
-    .map_err(|_| RuntimeError::RecoveryInvalid)?;
-    let lease = WriterLease { owner_id, epoch };
-    validate_writer_lease(lease)?;
+    let lease = decode_stored_writer_lease(
+        row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
+    )?;
+    validate_id(lease.owner_id)?;
     let lock_id = row
         .get::<Option<Vec<u8>>>(2)
         .map_err(|_| RuntimeError::RecoveryInvalid)?
@@ -183,8 +210,7 @@ impl RuntimeState {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let lease = match bound_writer_lease_tx(&tx).await? {
             None => {
                 tx.execute(
@@ -192,8 +218,7 @@ impl RuntimeState {
                      VALUES (1, ?1, 1, ?2)",
                     params![owner_id.to_vec(), lock_id.map(|id| id.to_vec())],
                 )
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
+                .await?;
                 WriterLease { owner_id, epoch: 1 }
             }
             Some((current, bound_lock)) if current.owner_id == owner_id => {
@@ -204,8 +229,7 @@ impl RuntimeState {
                         "UPDATE writer_lease SET lock_owner_id = ?1 WHERE singleton = 1",
                         params![lock_id.to_vec()],
                     )
-                    .await
-                    .map_err(|_| RuntimeError::StorageUnavailable)?;
+                    .await?;
                 }
                 current
             }
@@ -223,9 +247,7 @@ impl RuntimeState {
                 .await?
             }
         };
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        tx.commit().await?;
         Ok(lease)
     }
 
@@ -239,29 +261,7 @@ impl RuntimeState {
     /// takeover.
     pub async fn current_lease(&self) -> Result<Option<WriterLease>, RuntimeError> {
         self.require_lease_authority()?;
-        let mut rows = self
-            .connection
-            .query(
-                "SELECT owner_id, epoch FROM writer_lease WHERE singleton = 1",
-                (),
-            )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let Some(row) = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        else {
-            return Ok(None);
-        };
-        let owner_id = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
-        let epoch: i64 = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
-        let epoch = u64::try_from(epoch).map_err(|_| RuntimeError::RecoveryInvalid)?;
-        validate_id(owner_id)?;
-        if epoch == 0 {
-            return Err(RuntimeError::RecoveryInvalid);
-        }
-        Ok(Some(WriterLease { owner_id, epoch }))
+        current_writer_lease_tx(&self.connection).await
     }
 
     /// Atomically replaces exactly the expected abandoned writer lease.
@@ -287,8 +287,7 @@ impl RuntimeState {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let lease = Self::replace_writer_lease_tx(
             &transaction,
             abandoned,
@@ -297,10 +296,7 @@ impl RuntimeState {
             TakeoverRecovery::Barrier,
         )
         .await?;
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction.commit().await?;
         Ok(lease)
     }
 
@@ -328,8 +324,7 @@ impl RuntimeState {
                     lock_id.map(|id| id.to_vec()),
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         if changed != 1 {
             return Err(RuntimeError::OwnerLost);
         }
@@ -344,14 +339,8 @@ impl RuntimeState {
                         "SELECT 1 FROM request_ledger WHERE state = ?1 LIMIT 1",
                         params![RequestState::Running.code()],
                     )
-                    .await
-                    .map_err(|_| RuntimeError::StorageUnavailable)?;
-                if running
-                    .next()
-                    .await
-                    .map_err(|_| RuntimeError::StorageUnavailable)?
-                    .is_some()
-                {
+                    .await?;
+                if running.next().await?.is_some() {
                     transaction
                         .execute(
                             "INSERT INTO takeover_recovery_pending (singleton, owner_id, owner_epoch)
@@ -365,20 +354,18 @@ impl RuntimeState {
                             ],
                         )
                         .await
-                        .map_err(|_| RuntimeError::StorageUnavailable)?;
+                        ?;
                 } else {
                     transaction
                         .execute("DELETE FROM takeover_recovery_pending", ())
-                        .await
-                        .map_err(|_| RuntimeError::StorageUnavailable)?;
+                        .await?;
                 }
             }
             TakeoverRecovery::OrphanRunning => {
                 orphan_fenced_running_requests_tx(transaction).await?;
                 transaction
                     .execute("DELETE FROM takeover_recovery_pending", ())
-                    .await
-                    .map_err(|_| RuntimeError::StorageUnavailable)?;
+                    .await?;
             }
         }
         // A retrying delivery can be returned to `Failed` only when the
@@ -387,10 +374,7 @@ impl RuntimeState {
         // committing after this point, but it is not authority to reinterpret
         // malformed attempt state as an interrupted callback.
         validate_recoverable_stream_attempts(transaction).await?;
-        transaction
-            .execute("DELETE FROM stream_lease", ())
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction.execute("DELETE FROM stream_lease", ()).await?;
         transaction
             .execute(
                 "UPDATE stream_control
@@ -398,28 +382,23 @@ impl RuntimeState {
                  WHERE key_id IN (SELECT key_id FROM stream_pause_pending)",
                 params![encode_stream_status(StreamStatus::Paused)],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         transaction
             .execute(
                 "INSERT OR IGNORE INTO stream_control (key_id, status)
                  SELECT key_id, ?1 FROM stream_pause_pending",
                 params![encode_stream_status(StreamStatus::Paused)],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         transaction
             .execute("DELETE FROM stream_pause_pending", ())
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         transaction
             .execute("DELETE FROM stream_retry_claim", ())
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         transaction
             .execute("DELETE FROM stream_replay_claim", ())
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         transaction
             .execute(
                 "UPDATE stream_failure
@@ -430,8 +409,7 @@ impl RuntimeState {
                     encode_status(FailureStatus::Retrying),
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         transaction
             .execute(
                 "UPDATE stream_failure
@@ -442,20 +420,17 @@ impl RuntimeState {
                     encode_status(FailureStatus::Replaying),
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let mut rows = transaction
             .query("SELECT epoch FROM writer_lease WHERE singleton = 1", ())
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let epoch: i64 = rows
             .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .await?
             .ok_or(RuntimeError::RecoveryInvalid)?
             .get(0)
             .map_err(|_| RuntimeError::RecoveryInvalid)?;
-        let epoch = u64::try_from(epoch).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let epoch = decode_stored_epoch(epoch)?;
         Ok(WriterLease {
             owner_id: replacement,
             epoch,
@@ -474,17 +449,13 @@ impl RuntimeState {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         self.require_recovery_owner(&transaction, replacement)
             .await?;
         self.settle_takeover_barrier(&transaction, replacement)
             .await?
             .require_clear()?;
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)
+        transaction.commit().await.map_err(RuntimeError::from)
     }
 
     /// Removes the matching takeover fence only after every Running request
@@ -503,18 +474,15 @@ impl RuntimeState {
                  WHERE singleton = 1",
                 (),
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let Some(row) = fence
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        else {
+            .await?;
+        let Some(row) = fence.next().await? else {
             return Ok(TakeoverBarrier::Clear);
         };
-        let owner = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
-        let epoch: i64 = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
-        if owner != replacement.owner_id || u64::try_from(epoch).ok() != Some(replacement.epoch) {
+        let owner = decode_stored_writer_lease(
+            row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?;
+        if owner != replacement {
             return Err(RuntimeError::RecoveryPending);
         }
         let mut running = transaction
@@ -522,14 +490,8 @@ impl RuntimeState {
                 "SELECT 1 FROM request_ledger WHERE state = ?1 LIMIT 1",
                 params![RequestState::Running.code()],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        if running
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-            .is_some()
-        {
+            .await?;
+        if running.next().await?.is_some() {
             return Ok(TakeoverBarrier::Pending);
         }
         let cleared = transaction
@@ -541,8 +503,7 @@ impl RuntimeState {
                     i64::try_from(replacement.epoch).map_err(|_| RuntimeError::RecoveryInvalid)?,
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         if cleared != 1 {
             return Err(RuntimeError::RecoveryPending);
         }
@@ -608,18 +569,15 @@ impl RuntimeState {
                  WHERE singleton = 1",
                 (),
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let Some(row) = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        else {
+            .await?;
+        let Some(row) = rows.next().await? else {
             return Ok(());
         };
-        let owner = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
-        let epoch: i64 = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
-        if owner != lease.owner_id || u64::try_from(epoch).ok() != Some(lease.epoch) {
+        let owner = decode_stored_writer_lease(
+            row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?;
+        if owner != lease {
             return Err(RuntimeError::RecoveryPending);
         }
         Ok(())
@@ -634,14 +592,8 @@ impl RuntimeState {
                 "SELECT 1 FROM takeover_recovery_pending WHERE singleton = 1",
                 (),
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        if rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-            .is_some()
-        {
+            .await?;
+        if rows.next().await?.is_some() {
             return Err(RuntimeError::RecoveryPending);
         }
         Ok(())
@@ -653,21 +605,10 @@ impl RuntimeState {
         lease: WriterLease,
     ) -> Result<(), RuntimeError> {
         self.require_lease_authority()?;
-        let mut rows = tx
-            .query(
-                "SELECT owner_id, epoch FROM writer_lease WHERE singleton = 1",
-                (),
-            )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let row = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
+        let owner = current_writer_lease_row_tx(tx)
+            .await?
             .ok_or(RuntimeError::OwnerLost)?;
-        let owner = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
-        let epoch: i64 = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
-        if owner != lease.owner_id || u64::try_from(epoch).ok() != Some(lease.epoch) {
+        if owner != lease {
             return Err(RuntimeError::OwnerLost);
         }
         Ok(())

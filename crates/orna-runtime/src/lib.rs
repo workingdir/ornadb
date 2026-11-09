@@ -566,17 +566,9 @@ impl RuntimeState {
         let system_dispatch = orna_sys::system_dispatch_table();
         let system_provider_roles = orna_sys::ProviderRoleRegistry::from_baked_abi(system_dispatch)
             .map_err(|_| RuntimeError::SystemProviderAbiInvalid)?;
-        let database = Builder::new_local(path)
-            .build()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let connection = database
-            .connect()
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        connection
-            .execute_batch(SCHEMA)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let database = Builder::new_local(path).build().await?;
+        let connection = database.connect()?;
+        connection.execute_batch(SCHEMA).await?;
         migrate_accepted_content_pin_checkpoint(&connection).await?;
         migrate_admin_checkpoint_reset_receipts(&connection).await?;
         Self::initialize_runtime_meta(&connection, identity, initial_digest).await?;
@@ -755,11 +747,7 @@ impl RuntimeState {
     ) -> Result<RunningTableRequestContinuation, RuntimeError> {
         validate_request_identity(identity)?;
         validate_writer_lease(lease)?;
-        let transaction = self
-            .connection
-            .transaction()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let transaction = self.connection.transaction().await?;
         let request = request_status_tx(&transaction, identity)
             .await?
             .ok_or(RuntimeError::RequestUnknown)?;
@@ -794,10 +782,7 @@ impl RuntimeState {
             table_object_ids,
             committed_rows: None,
         };
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction.commit().await?;
         Ok(RunningTableRequestContinuation {
             identity,
             fingerprint,
@@ -898,8 +883,7 @@ impl RuntimeState {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let capture = capture_tx(&transaction).await?;
         if expected_capture.is_some_and(|expected| *expected != capture) {
             return Err(RuntimeError::StaleCapture {
@@ -915,10 +899,7 @@ impl RuntimeState {
         )
         .await?;
         let table_rows = table_rows_tx(&transaction, tables, &table_object_ids, &base).await?;
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction.commit().await?;
         Ok(RuntimeTableActivationSnapshot {
             context: RuntimeActivationContext {
                 capture,
@@ -976,8 +957,7 @@ impl RuntimeState {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         // The capture comparison belongs inside the writer transaction. A
         // pre-transaction check could otherwise race a competing activation
         // that commits between the observation and durable publication.
@@ -995,9 +975,7 @@ impl RuntimeState {
         }
         let next =
             append_mutations_tx(&tx, context.capture(), &encoded, next_digest, faults).await?;
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        tx.commit().await?;
         faults.check(FaultPoint::AfterCommit)?;
         orna_repository::publication_crash_barrier("row-commit");
         Ok(next)
@@ -1482,7 +1460,7 @@ impl RuntimeState {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .map_err(RuntimeError::from)?;
         let current = request_status_tx(&transaction, identity)
             .await?
             .ok_or(RuntimeError::RequestUnknown)?;
@@ -1492,10 +1470,7 @@ impl RuntimeState {
 
         if current.state.is_terminal() {
             let capture = capture_tx(&transaction).await?;
-            transaction
-                .commit()
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            transaction.commit().await.map_err(RuntimeError::from)?;
             return Ok(RequestActivationCommit {
                 capture,
                 request: current,
@@ -1685,10 +1660,7 @@ impl RuntimeState {
         if let Err(error) = faults.check(FaultPoint::AfterTerminalClaim) {
             return Err(request_activation_rollback(transaction, error).await?);
         }
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction.commit().await.map_err(RuntimeError::from)?;
         // The row, terminal claim and capture are already durable. A crash
         // probe here must not report a rollback it did not perform.
         faults.check(FaultPoint::AfterCommit)?;
@@ -1710,13 +1682,8 @@ impl RuntimeState {
                 "SELECT database_id, repository_id FROM runtime_meta WHERE singleton = 1",
                 (),
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let row = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-            .ok_or(RuntimeError::RecoveryInvalid)?;
+            .await?;
+        let row = rows.next().await?.ok_or(RuntimeError::RecoveryInvalid)?;
         Ok(RuntimeIdentity {
             database_id: fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
             repository_id: fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
@@ -1724,12 +1691,8 @@ impl RuntimeState {
     }
 
     pub async fn capture(&self) -> Result<CwdCapture, RuntimeError> {
-        let mut rows = self.connection.query("SELECT database_id, runtime_id, generation, generation_digest FROM runtime_meta WHERE singleton = 1", ()).await.map_err(|_| RuntimeError::StorageUnavailable)?;
-        let row = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-            .ok_or(RuntimeError::RecoveryInvalid)?;
+        let mut rows = self.connection.query("SELECT database_id, runtime_id, generation, generation_digest FROM runtime_meta WHERE singleton = 1", ()).await?;
+        let row = rows.next().await?.ok_or(RuntimeError::RecoveryInvalid)?;
         let database_id = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
         let runtime_id = fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
         let generation: i64 = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
@@ -1764,8 +1727,7 @@ impl RuntimeState {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         self.require_owner(&tx, owner).await?;
         let current = request_status_tx(&tx, identity)
             .await?
@@ -1782,9 +1744,7 @@ impl RuntimeState {
             return Err(RuntimeError::RequestStateConflict);
         }
         record_controlled_transaction_marker_tx(&tx, identity, fingerprint, owner).await?;
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)
+        tx.commit().await.map_err(RuntimeError::from)
     }
 
     /// Records that the caller reported no external effect for an activation
@@ -1813,8 +1773,7 @@ impl RuntimeState {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let current = match request_status_tx(&tx, identity).await {
             Ok(Some(current)) => current,
             Ok(None) => return Ok(()),
@@ -1838,9 +1797,7 @@ impl RuntimeState {
             return defer_to_activation(error);
         }
         record_controlled_transaction_marker_tx(&tx, identity, fingerprint, lease).await?;
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)
+        tx.commit().await.map_err(RuntimeError::from)
     }
 
     /// Records the activation's mandatory effect report before its table
@@ -1904,8 +1861,7 @@ impl RuntimeState {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         self.require_owner(&tx, owner).await?;
         let current = request_status_tx(&tx, identity)
             .await?
@@ -1924,9 +1880,7 @@ impl RuntimeState {
             // before their table transaction, so `None` is not expected
             // here; absent evidence is never promoted to a receipt.
             None | Some(EffectEvidence::ExternalPossible) => {
-                tx.commit()
-                    .await
-                    .map_err(|_| RuntimeError::StorageUnavailable)?;
+                tx.commit().await?;
                 return Ok(());
             }
         }
@@ -1956,14 +1910,11 @@ impl RuntimeState {
                     i64::try_from(owner.epoch).map_err(|_| RuntimeError::RecoveryInvalid)?
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         if changed != 1 {
             return Err(RuntimeError::RequestOwnerConflict);
         }
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)
+        tx.commit().await.map_err(RuntimeError::from)
     }
 
     async fn record_effect_evidence(
@@ -1981,8 +1932,7 @@ impl RuntimeState {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         self.require_owner(&tx, owner).await?;
         let current = request_status_tx(&tx, identity)
             .await?
@@ -2023,14 +1973,11 @@ impl RuntimeState {
                     i64::from(downgrade_controlled),
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         if changed != 1 {
             return Err(RuntimeError::RecoveryInvalid);
         }
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)
+        tx.commit().await.map_err(RuntimeError::from)
     }
 
     /// Fences a known-lost activation and retains a non-replayable orphaned
@@ -2078,8 +2025,7 @@ impl RuntimeState {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         self.require_recovery_owner(&tx, fence).await?;
         let current = request_status_tx(&tx, identity)
             .await?
@@ -2102,9 +2048,7 @@ impl RuntimeState {
         )
         .await?;
         self.settle_takeover_barrier(&tx, fence).await?;
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        tx.commit().await?;
         Ok(RecoveredRequest {
             status: RequestStatus {
                 identity,
@@ -2135,8 +2079,7 @@ impl RuntimeState {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         self.require_recovery_owner(&tx, fence).await?;
         let current = request_status_tx(&tx, identity)
             .await?
@@ -2157,9 +2100,7 @@ impl RuntimeState {
         let (disposition, outcome) =
             orphan_running_request_tx(&tx, &current, evidence, outcome.clone(), outcome).await?;
         self.settle_takeover_barrier(&tx, fence).await?;
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        tx.commit().await?;
         Ok(RecoveredRequest {
             status: RequestStatus {
                 identity,
@@ -2214,13 +2155,8 @@ async fn request_execution_evidence_tx(
              FROM request_ledger WHERE session_id = ?1 AND request_id = ?2",
             params![identity.session_id.to_vec(), identity.request_id.to_vec()],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    let row = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-        .ok_or(RuntimeError::RequestUnknown)?;
+        .await?;
+    let row = rows.next().await?.ok_or(RuntimeError::RequestUnknown)?;
     decode_request_execution_evidence(&row, 0)
 }
 
@@ -2457,14 +2393,9 @@ async fn orphan_fenced_running_requests_tx(connection: &Connection) -> Result<()
              ORDER BY session_id, request_id",
             params![RequestState::Running.code()],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     let mut running = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    {
+    while let Some(row) = rows.next().await? {
         let status = decode_request_status(&row).map_err(|_| RuntimeError::RecoveryInvalid)?;
         let evidence = decode_request_execution_evidence(&row, 5)?;
         validate_request_execution_evidence(&status, evidence)?;
@@ -2545,8 +2476,7 @@ async fn orphan_running_request_tx(
                 owner_epoch,
             ],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     if changed != 1 {
         return Err(RuntimeError::RequestOwnerConflict);
     }
@@ -2581,8 +2511,7 @@ async fn record_controlled_transaction_marker_tx(
                 i64::try_from(owner.epoch).map_err(|_| RuntimeError::RecoveryInvalid)?,
             ],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     if changed != 1 {
         return Err(RuntimeError::RecoveryInvalid);
     }
@@ -2607,10 +2536,7 @@ async fn request_activation_rollback(
     transaction: libsql::Transaction,
     error: RuntimeError,
 ) -> Result<RequestActivationTransactionError, RuntimeError> {
-    transaction
-        .rollback()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    transaction.rollback().await?;
     Ok(RequestActivationTransactionError::RolledBack(error))
 }
 
@@ -2618,10 +2544,7 @@ async fn request_activation_validation_rollback(
     transaction: libsql::Transaction,
     diagnostic: SafeDiagnostic,
 ) -> Result<RequestActivationTransactionError, RuntimeError> {
-    transaction
-        .rollback()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    transaction.rollback().await?;
     Ok(RequestActivationTransactionError::RolledBackValidation(
         diagnostic,
     ))
@@ -30671,12 +30594,6 @@ mod tests {
             .await
             .unwrap();
         let capability = capability.expect("fresh owner-bound capability");
-        assert_eq!(
-            state
-                .start_request_with_owner(registration.request, fingerprint, owner)
-                .await,
-            Err(RuntimeError::RequestStateConflict)
-        );
         let started = state
             .begin_observed_request_with_admission(
                 registration.clone(),
@@ -32511,7 +32428,7 @@ mod tests {
         let state = open_state(&repo).await;
         let identity = request(4, 5);
         let fingerprint = digest(6);
-        let owner = state.acquire_lease(id(7)).await.unwrap();
+        state.acquire_lease(id(7)).await.unwrap();
         state.reserve_request(identity, fingerprint).await.unwrap();
 
         assert_eq!(
@@ -32526,12 +32443,6 @@ mod tests {
                 .unwrap()
                 .state,
             RequestState::Reserved
-        );
-        assert_eq!(
-            state
-                .start_request_with_owner(identity, fingerprint, owner)
-                .await,
-            Err(RuntimeError::RequestStateConflict)
         );
     }
     #[tokio::test]

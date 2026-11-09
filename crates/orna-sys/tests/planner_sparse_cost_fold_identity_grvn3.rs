@@ -1,9 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use orna_sys::{
-    ExpressionRef, ObjectRef, PlanDetail, PlanNode, PlanNodeKind, QueryJoinDescription,
-    QueryJoinPairIdentityDescription, QueryPlanDescription, QuerySourceStatistics, SnapshotRef,
-    explain_query_with_join_pair_identities,
+    ExplainInputs, ExpressionRef, ObjectRef, PlanDetail, PlanNode, PlanNodeKind,
+    QueryJoinDescription, QueryJoinPairIdentityDescription, QueryPlanDescription,
+    QuerySourceStatistics, SnapshotRef, explain_query_with,
 };
 
 const FIXTURE: &str = include_str!("fixtures/planner_sparse_cost_fold_identity_grvn3.orna");
@@ -163,8 +163,14 @@ fn plan(
     joins: Vec<QueryJoinDescription>,
     descriptors: &[QueryJoinPairIdentityDescription],
 ) -> orna_sys::ExplainedPlan {
-    explain_query_with_join_pair_identities(&query(joins), descriptors)
-        .expect("described pair identities resolve in a sparse cost cascade")
+    explain_query_with(
+        &query(joins),
+        ExplainInputs {
+            join_pair_identities: descriptors,
+            ..ExplainInputs::default()
+        },
+    )
+    .expect("described pair identities resolve in a sparse cost cascade")
 }
 
 #[test]
