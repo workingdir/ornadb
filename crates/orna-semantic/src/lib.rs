@@ -6281,6 +6281,160 @@ fn check_nominal_type_item(
     }
 }
 
+/// Validates a `From` implementation: source type, the single `fn from(value)`
+/// member and its body's result.
+fn validate_from_implementation(
+    implementation: &orna_syntax::Implementation,
+    arguments: &[TypeExpr],
+    target: &Type,
+    target_shape: Option<&Type>,
+    scope: &Scope,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let Some(source) = arguments
+        .first()
+        .filter(|_| arguments.len() == 1)
+        .and_then(|source| valid_static_type(source, scope))
+    else {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "From implementation source type is not a valid static type",
+        ));
+        return;
+    };
+    if let Type::Named(target_name) = target
+        && scope.refined_types.get(target_name) == Some(&source)
+    {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "overlapping protocol implementations are invalid",
+        ));
+        return;
+    }
+    if let Some(from) = implementation.members.as_slice().first()
+        && implementation.members.len() == 1
+    {
+        let orna_syntax::ImplMember::Function {
+            signature, body, ..
+        } = from
+        else {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "From implementation requires exactly one `fn from(value)` member",
+            ));
+            return;
+        };
+        if signature.name != "from"
+            || !signature.generics.is_empty()
+            || signature.parameters.len() != 1
+        {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "From implementation requires exactly one `fn from(value)` member",
+            ));
+            return;
+        }
+        let parameter = &signature.parameters[0];
+        if parameter
+            .annotation
+            .as_ref()
+            .is_some_and(|annotation| resolved_type_of(annotation, scope) != source)
+        {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "From implementation source parameter is incompatible",
+            ));
+            return;
+        }
+        if signature
+            .result
+            .as_ref()
+            .is_some_and(|result| resolved_type_of(result, scope) != *target)
+        {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "From implementation result is incompatible with its target",
+            ));
+            return;
+        }
+        let mut local = BTreeMap::new();
+        bind_pattern(
+            &parameter.pattern,
+            source.clone(),
+            scope,
+            &mut local,
+            diagnostics,
+        );
+        if matches!(target, Type::Named(name) if scope.nominal_rows.contains_key(name)) {
+            let inferred =
+                infer_from_nominal_target(body, target, target_shape, scope, &local, diagnostics);
+            require_same(target, &inferred.ty, diagnostics);
+        } else {
+            let expected_body = target_shape.unwrap_or(target);
+            let inferred = infer_contextual(body, expected_body, scope, &local, diagnostics);
+            require_same(expected_body, &inferred.ty, diagnostics);
+        }
+        return;
+    }
+    diagnostics.push(diag(
+        DIAG_TYPE,
+        "From implementation requires exactly one `fn from(value)` member",
+    ));
+}
+
+/// The protocol members an implementation must provide, or `None` after
+/// reporting why the protocol identity cannot be resolved.
+fn required_protocol_members<'a>(
+    path: &[String],
+    local_protocols: &'a BTreeMap<String, Vec<ProtocolMember>>,
+    scope: &Scope,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<&'a [ProtocolMember]> {
+    Some(match resolve_local_protocol_name(&path[0], scope) {
+        Some(protocol_name) => {
+            let Some(required_members) = local_protocols.get(&protocol_name) else {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "protocol implementation identity cannot be resolved",
+                ));
+                return None;
+            };
+            required_members.as_slice()
+        }
+        None => match scope.names.get(&path[0]) {
+            Some(symbol) if symbol.kind == SymbolKind::Protocol => {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "imported protocol identity cannot be resolved",
+                ));
+                return None;
+            }
+            Some(_) => {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "protocol implementation identity is not a protocol",
+                ));
+                return None;
+            }
+            None if is_builtin_protocol_without_local_surface(&path[0]) => {
+                // Display and Present are the two presentation protocol names
+                // supplied by the frozen surface without a local member AST.
+                return None;
+            }
+            None => match core_protocol_surface(&path[0]) {
+                Some(surface) => surface,
+                None => {
+                    diagnostics.push(diag(
+                        DIAG_TYPE,
+                        "unresolved protocol implementation identity",
+                    ));
+                    return None;
+                }
+            },
+        },
+    })
+}
+
 /// These presentation protocol names are part of the frozen builtin surface,
 /// but their member AST is not carried in this local semantic scope. They are
 /// therefore retained as the only missing-identity residual.
@@ -6372,101 +6526,14 @@ fn validate_nested_implementation_members(
         return;
     };
     if path.as_slice() == ["From"] {
-        let Some(source) = arguments
-            .first()
-            .filter(|_| arguments.len() == 1)
-            .and_then(|source| valid_static_type(source, scope))
-        else {
-            diagnostics.push(diag(
-                DIAG_TYPE,
-                "From implementation source type is not a valid static type",
-            ));
-            return;
-        };
-        if let Type::Named(target_name) = target
-            && scope.refined_types.get(target_name) == Some(&source)
-        {
-            diagnostics.push(diag(
-                DIAG_TYPE,
-                "overlapping protocol implementations are invalid",
-            ));
-            return;
-        }
-        if let Some(from) = implementation.members.as_slice().first()
-            && implementation.members.len() == 1
-        {
-            let orna_syntax::ImplMember::Function {
-                signature, body, ..
-            } = from
-            else {
-                diagnostics.push(diag(
-                    DIAG_TYPE,
-                    "From implementation requires exactly one `fn from(value)` member",
-                ));
-                return;
-            };
-            if signature.name != "from"
-                || !signature.generics.is_empty()
-                || signature.parameters.len() != 1
-            {
-                diagnostics.push(diag(
-                    DIAG_TYPE,
-                    "From implementation requires exactly one `fn from(value)` member",
-                ));
-                return;
-            }
-            let parameter = &signature.parameters[0];
-            if parameter
-                .annotation
-                .as_ref()
-                .is_some_and(|annotation| resolved_type_of(annotation, scope) != source)
-            {
-                diagnostics.push(diag(
-                    DIAG_TYPE,
-                    "From implementation source parameter is incompatible",
-                ));
-                return;
-            }
-            if signature
-                .result
-                .as_ref()
-                .is_some_and(|result| resolved_type_of(result, scope) != *target)
-            {
-                diagnostics.push(diag(
-                    DIAG_TYPE,
-                    "From implementation result is incompatible with its target",
-                ));
-                return;
-            }
-            let mut local = BTreeMap::new();
-            bind_pattern(
-                &parameter.pattern,
-                source.clone(),
-                scope,
-                &mut local,
-                diagnostics,
-            );
-            if matches!(target, Type::Named(name) if scope.nominal_rows.contains_key(name)) {
-                let inferred = infer_from_nominal_target(
-                    body,
-                    target,
-                    target_shape,
-                    scope,
-                    &local,
-                    diagnostics,
-                );
-                require_same(target, &inferred.ty, diagnostics);
-            } else {
-                let expected_body = target_shape.unwrap_or(target);
-                let inferred = infer_contextual(body, expected_body, scope, &local, diagnostics);
-                require_same(expected_body, &inferred.ty, diagnostics);
-            }
-            return;
-        }
-        diagnostics.push(diag(
-            DIAG_TYPE,
-            "From implementation requires exactly one `fn from(value)` member",
-        ));
+        validate_from_implementation(
+            implementation,
+            arguments,
+            target,
+            target_shape,
+            scope,
+            diagnostics,
+        );
         return;
     }
     if !arguments.is_empty() {
@@ -6490,50 +6557,11 @@ fn validate_nested_implementation_members(
         ));
         return;
     }
-    let required_members = match resolve_local_protocol_name(&path[0], scope) {
-        Some(protocol_name) => {
-            let Some(required_members) = local_protocols.get(&protocol_name) else {
-                diagnostics.push(diag(
-                    DIAG_TYPE,
-                    "protocol implementation identity cannot be resolved",
-                ));
-                return;
-            };
-            required_members.as_slice()
-        }
-        None => match scope.names.get(&path[0]) {
-            Some(symbol) if symbol.kind == SymbolKind::Protocol => {
-                diagnostics.push(diag(
-                    DIAG_TYPE,
-                    "imported protocol identity cannot be resolved",
-                ));
-                return;
-            }
-            Some(_) => {
-                diagnostics.push(diag(
-                    DIAG_TYPE,
-                    "protocol implementation identity is not a protocol",
-                ));
-                return;
-            }
-            None if is_builtin_protocol_without_local_surface(&path[0]) => {
-                // Display and Present are the two presentation protocol names
-                // supplied by the frozen surface without a local member AST.
-                return;
-            }
-            None => match core_protocol_surface(&path[0]) {
-                Some(surface) => surface,
-                None => {
-                    diagnostics.push(diag(
-                        DIAG_TYPE,
-                        "unresolved protocol implementation identity",
-                    ));
-                    return;
-                }
-            },
-        },
+    let Some(required_members) =
+        required_protocol_members(path, local_protocols, scope, diagnostics)
+    else {
+        return;
     };
-
     let mut implemented_names = BTreeSet::new();
     for member in &implementation.members {
         let name = match member {
