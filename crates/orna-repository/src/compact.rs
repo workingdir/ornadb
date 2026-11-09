@@ -330,28 +330,47 @@ pub struct CompactSegment {
     bloom: bool,
 }
 
+/// The encoded fields of one legacy fixture segment, before its generation and
+/// native object ID are allocated.
+#[cfg(any(test, feature = "legacy-fixture-writer"))]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompactSegmentRecord {
+    pub segment_id: Uuid,
+    pub role: CompactSegmentRole,
+    pub schema: [u8; 32],
+    pub encoder_version: String,
+    pub relative_path: ManagedPath,
+    pub bytes: Vec<u8>,
+    pub min_key: Vec<u8>,
+    pub max_key: Vec<u8>,
+    pub row_count: u64,
+    pub columns: Vec<u8>,
+    pub row_group_index: bool,
+    pub bloom: bool,
+}
+
 #[cfg(any(test, feature = "legacy-fixture-writer"))]
 impl CompactSegment {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        segment_id: Uuid,
-        role: CompactSegmentRole,
-        schema: [u8; 32],
-        encoder_version: impl Into<String>,
-        relative_path: ManagedPath,
-        bytes: Vec<u8>,
-        min_key: Vec<u8>,
-        max_key: Vec<u8>,
-        row_count: u64,
-        columns: Vec<u8>,
-        row_group_index: bool,
-        bloom: bool,
-    ) -> Result<Self, RepositoryError> {
+    pub fn new(record: CompactSegmentRecord) -> Result<Self, RepositoryError> {
+        let CompactSegmentRecord {
+            segment_id,
+            role,
+            schema,
+            encoder_version,
+            relative_path,
+            bytes,
+            min_key,
+            max_key,
+            row_count,
+            columns,
+            row_group_index,
+            bloom,
+        } = record;
         let value = Self {
             segment_id,
             role,
             schema,
-            encoder_version: encoder_version.into(),
+            encoder_version,
             relative_path,
             bytes,
             min_key,
@@ -400,6 +419,21 @@ impl CompactSegment {
         )?;
         Ok(())
     }
+}
+
+/// One request to assemble a legacy compact publication plan: the head and
+/// index generation it builds on, the manifest it extends, the runtime
+/// identity its journal records, the segments it adds, and the candidate
+/// commit message.
+#[cfg(any(test, feature = "legacy-fixture-writer"))]
+pub struct CompactPublicationRequest<'a> {
+    pub expected_head: &'a GitCommitRef,
+    pub expected_index: IndexGeneration,
+    pub base: CompactManifest,
+    pub runtime_intent_id: [u8; 16],
+    pub cleanup_watermark: [u8; 32],
+    pub segments: &'a [CompactSegment],
+    pub message: &'a str,
 }
 
 /// The canonical metadata for one immutable compact file.
@@ -1829,33 +1863,37 @@ fn required_physical_leaves(
         }
         let mut field_id_path = Vec::new();
         let mut physical_path = vec![format!("f_{}", field_id.simple())];
-        flatten_physical_type(
+        let mut leaf = PhysicalLeafPath {
             field_id,
-            logical_type,
-            &mut field_id_path,
-            &mut physical_path,
-            0,
-            0,
-            &mut required,
-            role_is_key,
-        )?;
+            field_id_path: &mut field_id_path,
+            physical_path: &mut physical_path,
+            max_def_level: 0,
+            max_rep_level: 0,
+            is_key: role_is_key,
+        };
+        flatten_physical_type(&mut leaf, logical_type, &mut required)?;
     }
     Ok(required)
 }
 
-/// The parameters describe one record; each caller passes them straight through.
-#[allow(clippy::too_many_arguments)]
-fn flatten_physical_type(
+/// One leaf path of the compact physical schema being flattened: the field it
+/// belongs to, the logical and physical path built so far, the repetition and
+/// definition levels the path has accumulated, and whether it is a key.
+struct PhysicalLeafPath<'a> {
     field_id: Uuid,
-    logical_type: &OvbRaw,
-    field_id_path: &mut Vec<String>,
-    physical_path: &mut Vec<String>,
+    field_id_path: &'a mut Vec<String>,
+    physical_path: &'a mut Vec<String>,
     max_def_level: i16,
     max_rep_level: i16,
-    output: &mut Vec<ExpectedPhysicalLeaf>,
     is_key: bool,
+}
+
+fn flatten_physical_type(
+    leaf: &mut PhysicalLeafPath<'_>,
+    logical_type: &OvbRaw,
+    output: &mut Vec<ExpectedPhysicalLeaf>,
 ) -> Result<(), RepositoryError> {
-    if field_id_path.len() > 64 {
+    if leaf.field_id_path.len() > 64 {
         return Err(RepositoryError::InvalidCompactManifest);
     }
     let OvbRaw::Array(node) = logical_type else {
@@ -1870,13 +1908,13 @@ fn flatten_physical_type(
                 return Err(RepositoryError::InvalidCompactManifest);
             }
             output.push(ExpectedPhysicalLeaf {
-                field_id,
-                field_id_path: field_id_path.clone(),
-                physical_path: physical_path.clone(),
+                field_id: leaf.field_id,
+                field_id_path: leaf.field_id_path.clone(),
+                physical_path: leaf.physical_path.clone(),
                 logical_type: logical_type.clone(),
-                is_key,
-                max_def_level,
-                max_rep_level,
+                is_key: leaf.is_key,
+                max_def_level: leaf.max_def_level,
+                max_rep_level: leaf.max_rep_level,
             });
             Ok(())
         }
@@ -1887,41 +1925,37 @@ fn flatten_physical_type(
             // The repeated `list` node contributes one definition level as
             // well as one repetition level, even when the outer list and
             // element are both required.
-            field_id_path.extend(["list".to_owned(), "element".to_owned()]);
-            physical_path.extend(["list".to_owned(), "element".to_owned()]);
-            flatten_physical_type(
-                field_id,
-                &node[1],
-                field_id_path,
-                physical_path,
-                max_def_level + 1,
-                max_rep_level + 1,
-                output,
-                is_key,
-            )?;
-            field_id_path.truncate(field_id_path.len().saturating_sub(2));
-            physical_path.truncate(physical_path.len().saturating_sub(2));
-            Ok(())
+            leaf.field_id_path
+                .extend(["list".to_owned(), "element".to_owned()]);
+            leaf.physical_path
+                .extend(["list".to_owned(), "element".to_owned()]);
+            leaf.max_def_level += 1;
+            leaf.max_rep_level += 1;
+            let result = flatten_physical_type(leaf, &node[1], output);
+            if result.is_ok() {
+                leaf.field_id_path
+                    .truncate(leaf.field_id_path.len().saturating_sub(2));
+                leaf.physical_path
+                    .truncate(leaf.physical_path.len().saturating_sub(2));
+                leaf.max_def_level -= 1;
+                leaf.max_rep_level -= 1;
+            }
+            result
         }
         "2" => {
             if node.len() != 2 {
                 return Err(RepositoryError::InvalidCompactManifest);
             }
-            field_id_path.push("value".to_owned());
-            physical_path.push("value".to_owned());
-            flatten_physical_type(
-                field_id,
-                &node[1],
-                field_id_path,
-                physical_path,
-                max_def_level + 1,
-                max_rep_level,
-                output,
-                is_key,
-            )?;
-            field_id_path.pop();
-            physical_path.pop();
-            Ok(())
+            leaf.field_id_path.push("value".to_owned());
+            leaf.physical_path.push("value".to_owned());
+            leaf.max_def_level += 1;
+            let result = flatten_physical_type(leaf, &node[1], output);
+            if result.is_ok() {
+                leaf.field_id_path.pop();
+                leaf.physical_path.pop();
+                leaf.max_def_level -= 1;
+            }
+            result
         }
         _ => Err(RepositoryError::InvalidCompactManifest),
     }
@@ -3672,17 +3706,19 @@ impl Repository {
     /// tests read its commit directly or adopt it as a committed fixture.
     /// Production builds never contain it (ORNA-UPGRADE-003).
     #[cfg(any(test, feature = "legacy-fixture-writer"))]
-    #[allow(clippy::too_many_arguments)]
     pub fn prepare_compact_publication(
         &self,
-        expected_head: &GitCommitRef,
-        expected_index: IndexGeneration,
-        base: CompactManifest,
-        runtime_intent_id: [u8; 16],
-        cleanup_watermark: [u8; 32],
-        segments: &[CompactSegment],
-        message: &str,
+        request: CompactPublicationRequest<'_>,
     ) -> Result<CompactPublicationPlan, RepositoryError> {
+        let CompactPublicationRequest {
+            expected_head,
+            expected_index,
+            base,
+            runtime_intent_id,
+            cleanup_watermark,
+            segments,
+            message,
+        } = request;
         if runtime_intent_id == [0; 16]
             || segments.is_empty()
             || expected_index.head() != Some(expected_head)
@@ -4972,32 +5008,32 @@ mod tests {
             .unwrap()
             .encode()
             .unwrap();
-        let segment = CompactSegment::new(
+        let segment = CompactSegment::new(CompactSegmentRecord {
             segment_id,
-            CompactSegmentRole::Data,
+            role: CompactSegmentRole::Data,
             schema,
-            "test-encoder-v1",
-            path,
+            encoder_version: "test-encoder-v1".to_owned(),
+            relative_path: path,
             bytes,
-            key_min,
-            key_max,
-            2,
+            min_key: key_min,
+            max_key: key_max,
+            row_count: 2,
             columns,
-            true,
-            false,
-        )
+            row_group_index: true,
+            bloom: false,
+        })
         .unwrap();
         let head = repository.head().unwrap().unwrap();
         let plan = repository
-            .prepare_compact_publication(
-                &head,
-                repository.index_generation().unwrap(),
-                CompactManifest::empty(NESTED_TABLE, schema),
-                [11; 16],
-                [11; 32],
-                &[segment],
-                "publish nested List shape",
-            )
+            .prepare_compact_publication(CompactPublicationRequest {
+                expected_head: &head,
+                expected_index: repository.index_generation().unwrap(),
+                base: CompactManifest::empty(NESTED_TABLE, schema),
+                runtime_intent_id: [11; 16],
+                cleanup_watermark: [11; 32],
+                segments: &[segment],
+                message: "publish nested List shape",
+            })
             .unwrap();
         let manifest = plan.manifest().clone();
         repository
@@ -5459,20 +5495,20 @@ mod tests {
     #[test]
     fn compact_segment_validation_invokes_event_time_bound_validator() {
         let segment_id = Uuid::from_bytes([0, 0, 0, 0, 0, 0, 0x70, 0, 0x80, 0, 0, 0, 0, 0, 0, 1]);
-        let segment = CompactSegment::new(
+        let segment = CompactSegment::new(CompactSegmentRecord {
             segment_id,
-            CompactSegmentRole::Data,
-            [0; 32],
-            "test-encoder-v1",
-            ManagedPath::new("segment.parquet").unwrap(),
-            vec![1],
-            vec![0],
-            vec![1],
-            1,
-            Vec::new(),
-            false,
-            false,
-        )
+            role: CompactSegmentRole::Data,
+            schema: [0; 32],
+            encoder_version: "test-encoder-v1".to_owned(),
+            relative_path: ManagedPath::new("segment.parquet").unwrap(),
+            bytes: vec![1],
+            min_key: vec![0],
+            max_key: vec![1],
+            row_count: 1,
+            columns: Vec::new(),
+            row_group_index: false,
+            bloom: false,
+        })
         .unwrap();
         assert!(
             segment
@@ -5648,32 +5684,32 @@ mod tests {
             .unwrap()
             .encode()
             .unwrap();
-        let segment = CompactSegment::new(
-            BOOL_SEGMENT,
-            CompactSegmentRole::Data,
+        let segment = CompactSegment::new(CompactSegmentRecord {
+            segment_id: BOOL_SEGMENT,
+            role: CompactSegmentRole::Data,
             schema,
-            "test-encoder-v1",
-            path,
+            encoder_version: "test-encoder-v1".to_owned(),
+            relative_path: path,
             bytes,
             min_key,
             max_key,
-            2,
+            row_count: 2,
             columns,
-            true,
-            false,
-        )
+            row_group_index: true,
+            bloom: false,
+        })
         .unwrap();
         let head = repository.head().unwrap().unwrap();
         let plan = repository
-            .prepare_compact_publication(
-                &head,
-                repository.index_generation().unwrap(),
-                CompactManifest::empty(BOOL_TABLE, schema),
-                [2; 16],
-                [3; 32],
-                &[segment],
-                "bool compact publication",
-            )
+            .prepare_compact_publication(CompactPublicationRequest {
+                expected_head: &head,
+                expected_index: repository.index_generation().unwrap(),
+                base: CompactManifest::empty(BOOL_TABLE, schema),
+                runtime_intent_id: [2; 16],
+                cleanup_watermark: [3; 32],
+                segments: &[segment],
+                message: "bool compact publication",
+            })
             .unwrap();
         let manifest = plan.manifest().clone();
         repository
@@ -5779,32 +5815,32 @@ mod tests {
             .unwrap()
             .encode()
             .unwrap();
-        let segment = CompactSegment::new(
-            BOOL_SEGMENT,
-            CompactSegmentRole::Data,
-            source_schema,
-            "test-encoder-v1",
-            path,
+        let segment = CompactSegment::new(CompactSegmentRecord {
+            segment_id: BOOL_SEGMENT,
+            role: CompactSegmentRole::Data,
+            schema: source_schema,
+            encoder_version: "test-encoder-v1".to_owned(),
+            relative_path: path,
             bytes,
             min_key,
             max_key,
-            2,
+            row_count: 2,
             columns,
-            true,
-            false,
-        )
+            row_group_index: true,
+            bloom: false,
+        })
         .unwrap();
         let head = repository.head().unwrap().unwrap();
         let plan = repository
-            .prepare_compact_publication(
-                &head,
-                repository.index_generation().unwrap(),
-                CompactManifest::empty(BOOL_TABLE, target_schema),
-                [4; 16],
-                [5; 32],
-                &[segment],
-                "schema history projection",
-            )
+            .prepare_compact_publication(CompactPublicationRequest {
+                expected_head: &head,
+                expected_index: repository.index_generation().unwrap(),
+                base: CompactManifest::empty(BOOL_TABLE, target_schema),
+                runtime_intent_id: [4; 16],
+                cleanup_watermark: [5; 32],
+                segments: &[segment],
+                message: "schema history projection",
+            })
             .unwrap();
         repository
             .advance_current_ref(&head, plan.candidate())
@@ -5871,20 +5907,20 @@ mod tests {
             .unwrap()
             .encode()
             .unwrap();
-        let segment = CompactSegment::new(
+        let segment = CompactSegment::new(CompactSegmentRecord {
             segment_id,
-            CompactSegmentRole::Data,
+            role: CompactSegmentRole::Data,
             schema,
-            "test-encoder-v1",
-            path,
+            encoder_version: "test-encoder-v1".to_owned(),
+            relative_path: path,
             bytes,
-            key_min,
-            key_max,
-            2,
+            min_key: key_min,
+            max_key: key_max,
+            row_count: 2,
             columns,
-            true,
-            false,
-        )
+            row_group_index: true,
+            bloom: false,
+        })
         .unwrap();
         let head = repository.head().unwrap().unwrap();
         let malformed = {
@@ -5893,27 +5929,27 @@ mod tests {
             malformed
         };
         assert!(matches!(
-            repository.prepare_compact_publication(
-                &head,
-                repository.index_generation().unwrap(),
-                CompactManifest::empty(NESTED_TABLE, schema),
-                [9; 16],
-                [9; 32],
-                &[malformed],
-                "reject nested physical row-count mismatch",
-            ),
+            repository.prepare_compact_publication(CompactPublicationRequest {
+                expected_head: &head,
+                expected_index: repository.index_generation().unwrap(),
+                base: CompactManifest::empty(NESTED_TABLE, schema),
+                runtime_intent_id: [9; 16],
+                cleanup_watermark: [9; 32],
+                segments: &[malformed],
+                message: "reject nested physical row-count mismatch",
+            }),
             Err(RepositoryError::InvalidCompactManifest)
         ));
         let plan = repository
-            .prepare_compact_publication(
-                &head,
-                repository.index_generation().unwrap(),
-                CompactManifest::empty(NESTED_TABLE, schema),
-                [10; 16],
-                [10; 32],
-                &[segment],
-                "publish nested physical columns",
-            )
+            .prepare_compact_publication(CompactPublicationRequest {
+                expected_head: &head,
+                expected_index: repository.index_generation().unwrap(),
+                base: CompactManifest::empty(NESTED_TABLE, schema),
+                runtime_intent_id: [10; 16],
+                cleanup_watermark: [10; 32],
+                segments: &[segment],
+                message: "publish nested physical columns",
+            })
             .unwrap();
         let manifest = plan.manifest().clone();
         repository
@@ -6066,17 +6102,17 @@ mod tests {
         let primitive = OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Int".into())]);
         let levels = |logical_type: OvbRaw| {
             let mut output = Vec::new();
-            flatten_physical_type(
-                NESTED_LIST,
-                &logical_type,
-                &mut Vec::new(),
-                &mut vec![format!("f_{}", NESTED_LIST.simple())],
-                0,
-                0,
-                &mut output,
-                false,
-            )
-            .unwrap();
+            let mut field_id_path = Vec::new();
+            let mut physical_path = vec![format!("f_{}", NESTED_LIST.simple())];
+            let mut leaf = PhysicalLeafPath {
+                field_id: NESTED_LIST,
+                field_id_path: &mut field_id_path,
+                physical_path: &mut physical_path,
+                max_def_level: 0,
+                max_rep_level: 0,
+                is_key: false,
+            };
+            flatten_physical_type(&mut leaf, &logical_type, &mut output).unwrap();
             (output[0].max_def_level, output[0].max_rep_level)
         };
 

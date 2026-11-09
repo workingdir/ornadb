@@ -1097,8 +1097,8 @@ mod tests {
     use bytes::Bytes;
     use orna_foundation::{CanonicalValue, OvbRaw};
     use orna_repository::{
-        CompactManifest, CompactPublicationPlan, CompactSegment, CompactSegmentRole,
-        ManagedFileChange, Uuid,
+        CompactManifest, CompactPublicationPlan, CompactPublicationRequest, CompactSegment,
+        CompactSegmentRecord, CompactSegmentRole, ManagedFileChange, Uuid,
     };
     use parquet::file::{
         metadata::{FileMetaData, KeyValue, ParquetMetaData, ParquetMetaDataWriter},
@@ -1274,32 +1274,32 @@ mod tests {
             &segment_id.to_string()[..2]
         ))
         .unwrap();
-        let segment = CompactSegment::new(
+        let segment = CompactSegment::new(CompactSegmentRecord {
             segment_id,
-            CompactSegmentRole::Data,
+            role: CompactSegmentRole::Data,
             schema,
-            "test-encoder-v1",
-            segment_path,
-            parquet,
-            CanonicalValue::int(1.into()).encode().unwrap(),
-            CanonicalValue::int(1.into()).encode().unwrap(),
-            1,
-            compact_columns(),
-            true,
-            false,
-        )
+            encoder_version: "test-encoder-v1".to_owned(),
+            relative_path: segment_path,
+            bytes: parquet,
+            min_key: CanonicalValue::int(1.into()).encode().unwrap(),
+            max_key: CanonicalValue::int(1.into()).encode().unwrap(),
+            row_count: 1,
+            columns: compact_columns(),
+            row_group_index: true,
+            bloom: false,
+        })
         .unwrap();
         let head = repository.head().unwrap().unwrap();
         repository
-            .prepare_compact_publication(
-                &head,
-                repository.index_generation().unwrap(),
-                CompactManifest::empty(table, schema),
-                freeze.intent_id,
-                freeze.checkpoint.digest,
-                &[segment],
-                "orna: publish compact runtime data",
-            )
+            .prepare_compact_publication(CompactPublicationRequest {
+                expected_head: &head,
+                expected_index: repository.index_generation().unwrap(),
+                base: CompactManifest::empty(table, schema),
+                runtime_intent_id: freeze.intent_id,
+                cleanup_watermark: freeze.checkpoint.digest,
+                segments: &[segment],
+                message: "orna: publish compact runtime data",
+            })
             .unwrap()
     }
 

@@ -37,9 +37,10 @@ use super::legacy_fixture_writer::with_page_checksums;
 use super::{CompactCommittedRow, resolve_legacy_authoritative_rows};
 use crate::hex::hex_encode;
 use crate::{
-    CompactManifest, CompactPublicationPlan, CompactSegment, CompactSegmentRole, GitCommitRef,
-    GitDeclaredObjectSetState, GitObjectKind, GitObjectState, IndexGeneration, ManagedFileChange,
-    ManagedPath, Repository, RepositoryError, RuntimeGeneration, WorktreeState, test_support,
+    CompactManifest, CompactPublicationPlan, CompactPublicationRequest, CompactSegment,
+    CompactSegmentRecord, CompactSegmentRole, GitCommitRef, GitDeclaredObjectSetState,
+    GitObjectKind, GitObjectState, IndexGeneration, ManagedFileChange, ManagedPath, Repository,
+    RepositoryError, RuntimeGeneration, WorktreeState, test_support,
 };
 
 fn git(directory: &Path, arguments: &[&str]) -> String {
@@ -152,20 +153,20 @@ fn compact_segment_with_manifest_columns(
         .unwrap()
         .encode()
         .unwrap();
-    CompactSegment::new(
+    CompactSegment::new(CompactSegmentRecord {
         segment_id,
-        CompactSegmentRole::Data,
-        compact_schema_fingerprint(table),
-        "test-encoder-v1",
-        path,
+        role: CompactSegmentRole::Data,
+        schema: compact_schema_fingerprint(table),
+        encoder_version: "test-encoder-v1".to_owned(),
+        relative_path: path,
         bytes,
-        key.clone(),
-        key,
-        1,
+        min_key: key.clone(),
+        max_key: key,
+        row_count: 1,
         columns,
-        true,
-        false,
-    )
+        row_group_index: true,
+        bloom: false,
+    })
     .unwrap()
 }
 
@@ -251,20 +252,20 @@ fn date_segment(table: Uuid, ordinal: u64, days: &[i32]) -> CompactSegment {
         .unwrap()
         .encode()
         .unwrap();
-    CompactSegment::new(
+    CompactSegment::new(CompactSegmentRecord {
         segment_id,
-        CompactSegmentRole::Data,
-        date_schema_fingerprint(table),
-        "test-encoder-v1",
-        path,
+        role: CompactSegmentRole::Data,
+        schema: date_schema_fingerprint(table),
+        encoder_version: "test-encoder-v1".to_owned(),
+        relative_path: path,
         bytes,
-        bound.clone(),
-        bound,
-        u64::try_from(days.len()).unwrap(),
+        min_key: bound.clone(),
+        max_key: bound,
+        row_count: u64::try_from(days.len()).unwrap(),
         columns,
-        true,
-        false,
-    )
+        row_group_index: true,
+        bloom: false,
+    })
     .unwrap()
 }
 
@@ -667,20 +668,20 @@ fn compact_segment_for_schema(
         .unwrap()
         .encode()
         .unwrap();
-    CompactSegment::new(
+    CompactSegment::new(CompactSegmentRecord {
         segment_id,
         role,
-        schema_fingerprint(schema),
-        "test-encoder-v1",
-        path,
-        compact_primitive_parquet(table, schema, physical_field, type_name, &columns),
-        key.clone(),
-        key,
-        1,
+        schema: schema_fingerprint(schema),
+        encoder_version: "test-encoder-v1".to_owned(),
+        relative_path: path,
+        bytes: compact_primitive_parquet(table, schema, physical_field, type_name, &columns),
+        min_key: key.clone(),
+        max_key: key,
+        row_count: 1,
         columns,
-        true,
-        false,
-    )
+        row_group_index: true,
+        bloom: false,
+    })
     .unwrap()
 }
 
@@ -703,20 +704,20 @@ fn compact_ovb_segment_for_schema(
         &segment_id.to_string()[..2]
     ))
     .unwrap();
-    CompactSegment::new(
+    CompactSegment::new(CompactSegmentRecord {
         segment_id,
         role,
-        schema_fingerprint(schema),
-        "test-encoder-v1",
-        path,
-        compact_ovb_parquet(table, schema, physical_field, &columns, values, annotation),
+        schema: schema_fingerprint(schema),
+        encoder_version: "test-encoder-v1".to_owned(),
+        relative_path: path,
+        bytes: compact_ovb_parquet(table, schema, physical_field, &columns, values, annotation),
         min_key,
         max_key,
-        u64::try_from(values.len()).unwrap(),
+        row_count: u64::try_from(values.len()).unwrap(),
         columns,
-        true,
-        false,
-    )
+        row_group_index: true,
+        bloom: false,
+    })
     .unwrap()
 }
 
@@ -918,13 +919,13 @@ fn compact_key_blob_segment(
         &segment_id.to_string()[..2]
     ))
     .unwrap();
-    CompactSegment::new(
+    CompactSegment::new(CompactSegmentRecord {
         segment_id,
-        CompactSegmentRole::Data,
-        schema_fingerprint(schema),
-        "test-encoder-v1",
-        path,
-        compact_key_blob_parquet(
+        role: CompactSegmentRole::Data,
+        schema: schema_fingerprint(schema),
+        encoder_version: "test-encoder-v1".to_owned(),
+        relative_path: path,
+        bytes: compact_key_blob_parquet(
             table,
             schema,
             key_field,
@@ -934,13 +935,13 @@ fn compact_key_blob_segment(
             blobs,
             blob_annotation,
         ),
-        encoded_int(u64::try_from(*keys.iter().min().unwrap()).unwrap()),
-        encoded_int(u64::try_from(*keys.iter().max().unwrap()).unwrap()),
-        u64::try_from(keys.len()).unwrap(),
+        min_key: encoded_int(u64::try_from(*keys.iter().min().unwrap()).unwrap()),
+        max_key: encoded_int(u64::try_from(*keys.iter().max().unwrap()).unwrap()),
+        row_count: u64::try_from(keys.len()).unwrap(),
         columns,
-        true,
-        false,
-    )
+        row_group_index: true,
+        bloom: false,
+    })
     .unwrap()
 }
 
@@ -957,15 +958,15 @@ fn compact_plan(
         .unwrap()
         .unwrap_or_else(|| CompactManifest::empty(table, compact_schema_fingerprint(table)));
     repository
-        .prepare_compact_publication(
-            &head,
-            repository.index_generation().unwrap(),
+        .prepare_compact_publication(CompactPublicationRequest {
+            expected_head: &head,
+            expected_index: repository.index_generation().unwrap(),
             base,
-            intent,
-            [intent[0]; 32],
+            runtime_intent_id: intent,
+            cleanup_watermark: [intent[0]; 32],
             segments,
-            "orna: publish compact runtime data",
-        )
+            message: "orna: publish compact runtime data",
+        })
         .unwrap()
 }
 
@@ -1747,15 +1748,15 @@ fn compact_publication_accepts_a_valid_date_parquet_fixture() {
     let segment = date_segment(table, 1, &days);
     let head = repo.head().unwrap().unwrap();
     let plan = repo
-        .prepare_compact_publication(
-            &head,
-            repo.index_generation().unwrap(),
-            CompactManifest::empty(table, schema_digest),
-            [68; 16],
-            [69; 32],
-            &[segment],
-            "test: publish date compact segment",
-        )
+        .prepare_compact_publication(CompactPublicationRequest {
+            expected_head: &head,
+            expected_index: repo.index_generation().unwrap(),
+            base: CompactManifest::empty(table, schema_digest),
+            runtime_intent_id: [68; 16],
+            cleanup_watermark: [69; 32],
+            segments: &[segment],
+            message: "test: publish date compact segment",
+        })
         .unwrap();
     let manifest = repo
         .read_compact_manifest(plan.candidate_commit(), table)
@@ -2225,15 +2226,15 @@ fn compact_publication_rejects_schema_identity_and_type_substitution() {
             columns,
         );
         assert!(matches!(
-            repo.prepare_compact_publication(
-                &head,
-                repo.index_generation().unwrap(),
-                CompactManifest::empty(table, schema_fingerprint(&schema)),
-                [ordinal as u8; 16],
-                [ordinal as u8; 32],
-                &[segment],
-                "reject compact schema substitution",
-            ),
+            repo.prepare_compact_publication(CompactPublicationRequest {
+                expected_head: &head,
+                expected_index: repo.index_generation().unwrap(),
+                base: CompactManifest::empty(table, schema_fingerprint(&schema)),
+                runtime_intent_id: [ordinal as u8; 16],
+                cleanup_watermark: [ordinal as u8; 32],
+                segments: &[segment],
+                message: "reject compact schema substitution",
+            }),
             Err(RepositoryError::InvalidCompactManifest)
         ));
     }
@@ -2267,15 +2268,15 @@ fn compact_publication_accepts_immutable_ovb_int_and_bool_key_fallbacks() {
         None,
     );
     assert!(
-        repo.prepare_compact_publication(
-            &head,
-            repo.index_generation().unwrap(),
-            CompactManifest::empty(int_table, schema_fingerprint(&int_schema)),
-            [74; 16],
-            [74; 32],
-            &[int_segment],
-            "accept immutable ovb int fallback",
-        )
+        repo.prepare_compact_publication(CompactPublicationRequest {
+            expected_head: &head,
+            expected_index: repo.index_generation().unwrap(),
+            base: CompactManifest::empty(int_table, schema_fingerprint(&int_schema)),
+            runtime_intent_id: [74; 16],
+            cleanup_watermark: [74; 32],
+            segments: &[int_segment],
+            message: "accept immutable ovb int fallback",
+        })
         .is_ok()
     );
 
@@ -2305,15 +2306,15 @@ fn compact_publication_accepts_immutable_ovb_int_and_bool_key_fallbacks() {
         None,
     );
     assert!(
-        repo.prepare_compact_publication(
-            &head,
-            repo.index_generation().unwrap(),
-            CompactManifest::empty(bool_table, schema_fingerprint(&bool_schema)),
-            [75; 16],
-            [75; 32],
-            &[bool_segment],
-            "accept immutable ovb bool fallback",
-        )
+        repo.prepare_compact_publication(CompactPublicationRequest {
+            expected_head: &head,
+            expected_index: repo.index_generation().unwrap(),
+            base: CompactManifest::empty(bool_table, schema_fingerprint(&bool_schema)),
+            runtime_intent_id: [75; 16],
+            cleanup_watermark: [75; 32],
+            segments: &[bool_segment],
+            message: "accept immutable ovb bool fallback",
+        })
         .is_ok()
     );
 }
@@ -2374,15 +2375,15 @@ fn compact_publication_rejects_immutable_ovb_fallback_mismatches() {
             annotation,
         );
         assert!(matches!(
-            repo.prepare_compact_publication(
-                &head,
-                repo.index_generation().unwrap(),
-                CompactManifest::empty(table, schema_fingerprint(&schema)),
-                [ordinal as u8; 16],
-                [ordinal as u8; 32],
-                &[segment],
-                "reject immutable ovb fallback mismatch",
-            ),
+            repo.prepare_compact_publication(CompactPublicationRequest {
+                expected_head: &head,
+                expected_index: repo.index_generation().unwrap(),
+                base: CompactManifest::empty(table, schema_fingerprint(&schema)),
+                runtime_intent_id: [ordinal as u8; 16],
+                cleanup_watermark: [ordinal as u8; 32],
+                segments: &[segment],
+                message: "reject immutable ovb fallback mismatch",
+            }),
             Err(RepositoryError::InvalidCompactManifest)
         ));
     }
@@ -2408,15 +2409,15 @@ fn compact_publication_rejects_a_schema_owned_by_another_table() {
     let head = repo.head().unwrap().unwrap();
 
     assert!(matches!(
-        repo.prepare_compact_publication(
-            &head,
-            repo.index_generation().unwrap(),
-            CompactManifest::empty(table, schema_fingerprint(&schema)),
-            [70; 16],
-            [70; 32],
-            &[segment],
-            "reject compact foreign-table schema",
-        ),
+        repo.prepare_compact_publication(CompactPublicationRequest {
+            expected_head: &head,
+            expected_index: repo.index_generation().unwrap(),
+            base: CompactManifest::empty(table, schema_fingerprint(&schema)),
+            runtime_intent_id: [70; 16],
+            cleanup_watermark: [70; 32],
+            segments: &[segment],
+            message: "reject compact foreign-table schema",
+        }),
         Err(RepositoryError::InvalidCompactManifest)
     ));
 }
@@ -2479,15 +2480,15 @@ fn compact_publication_requires_complete_unique_known_stored_mappings() {
             columns,
         );
         assert!(matches!(
-            repo.prepare_compact_publication(
-                &head,
-                repo.index_generation().unwrap(),
-                CompactManifest::empty(table, schema_fingerprint(&schema)),
-                [ordinal as u8; 16],
-                [ordinal as u8; 32],
-                &[segment],
-                "reject incomplete compact descriptor",
-            ),
+            repo.prepare_compact_publication(CompactPublicationRequest {
+                expected_head: &head,
+                expected_index: repo.index_generation().unwrap(),
+                base: CompactManifest::empty(table, schema_fingerprint(&schema)),
+                runtime_intent_id: [ordinal as u8; 16],
+                cleanup_watermark: [ordinal as u8; 32],
+                segments: &[segment],
+                message: "reject incomplete compact descriptor",
+            }),
             Err(RepositoryError::InvalidCompactManifest)
         ));
     }
@@ -2513,15 +2514,15 @@ fn compact_publication_excludes_computed_fields_and_deletion_non_keys() {
         compact_columns_for_mapping(key, "Int", "int64"),
     );
     assert!(
-        repo.prepare_compact_publication(
-            &head,
-            repo.index_generation().unwrap(),
-            CompactManifest::empty(table, schema_fingerprint(&computed_schema)),
-            [72; 16],
-            [72; 32],
-            &[accepted],
-            "accept compact computed omission",
-        )
+        repo.prepare_compact_publication(CompactPublicationRequest {
+            expected_head: &head,
+            expected_index: repo.index_generation().unwrap(),
+            base: CompactManifest::empty(table, schema_fingerprint(&computed_schema)),
+            runtime_intent_id: [72; 16],
+            cleanup_watermark: [72; 32],
+            segments: &[accepted],
+            message: "accept compact computed omission",
+        })
         .is_ok()
     );
 
@@ -2538,15 +2539,15 @@ fn compact_publication_excludes_computed_fields_and_deletion_non_keys() {
         compact_columns_for_mapping(stored, "Int", "int64"),
     );
     assert!(matches!(
-        repo.prepare_compact_publication(
-            &head,
-            repo.index_generation().unwrap(),
-            CompactManifest::empty(table, schema_fingerprint(&deletion_schema)),
-            [73; 16],
-            [73; 32],
-            &[deletion],
-            "reject compact deletion stored field",
-        ),
+        repo.prepare_compact_publication(CompactPublicationRequest {
+            expected_head: &head,
+            expected_index: repo.index_generation().unwrap(),
+            base: CompactManifest::empty(table, schema_fingerprint(&deletion_schema)),
+            runtime_intent_id: [73; 16],
+            cleanup_watermark: [73; 32],
+            segments: &[deletion],
+            message: "reject compact deletion stored field",
+        }),
         Err(RepositoryError::InvalidCompactManifest)
     ));
 }
@@ -2565,15 +2566,15 @@ fn compact_publication_rejects_a_descriptor_that_does_not_match_parquet_leaves()
     );
 
     assert!(matches!(
-        repo.prepare_compact_publication(
-            &head,
-            repo.index_generation().unwrap(),
-            CompactManifest::empty(table, compact_schema_fingerprint(table)),
-            [39; 16],
-            [39; 32],
-            &[segment],
-            "orna: publish compact runtime data",
-        ),
+        repo.prepare_compact_publication(CompactPublicationRequest {
+            expected_head: &head,
+            expected_index: repo.index_generation().unwrap(),
+            base: CompactManifest::empty(table, compact_schema_fingerprint(table)),
+            runtime_intent_id: [39; 16],
+            cleanup_watermark: [39; 32],
+            segments: &[segment],
+            message: "orna: publish compact runtime data",
+        }),
         Err(RepositoryError::InvalidCompactManifest)
     ));
     assert_eq!(repo.head().unwrap(), Some(head));
@@ -2969,15 +2970,15 @@ fn legacy_authoritative_read_resolves_key_only_generations_and_deletions_without
         None,
     );
     let first = repo
-        .prepare_compact_publication(
-            &head,
-            repo.index_generation().unwrap(),
-            CompactManifest::empty(table, schema_fingerprint(&schema)),
-            [80; 16],
-            [80; 32],
-            &[data],
-            "publish legacy key-only generation one",
-        )
+        .prepare_compact_publication(CompactPublicationRequest {
+            expected_head: &head,
+            expected_index: repo.index_generation().unwrap(),
+            base: CompactManifest::empty(table, schema_fingerprint(&schema)),
+            runtime_intent_id: [80; 16],
+            cleanup_watermark: [80; 32],
+            segments: &[data],
+            message: "publish legacy key-only generation one",
+        })
         .unwrap();
     adopt_compact_fixture(&repo, &first);
 
@@ -2996,15 +2997,15 @@ fn legacy_authoritative_read_resolves_key_only_generations_and_deletions_without
         None,
     );
     let second = repo
-        .prepare_compact_publication(
-            &head,
-            repo.index_generation().unwrap(),
+        .prepare_compact_publication(CompactPublicationRequest {
+            expected_head: &head,
+            expected_index: repo.index_generation().unwrap(),
             base,
-            [81; 16],
-            [81; 32],
-            &[deletion],
-            "publish legacy key-only deletion",
-        )
+            runtime_intent_id: [81; 16],
+            cleanup_watermark: [81; 32],
+            segments: &[deletion],
+            message: "publish legacy key-only deletion",
+        })
         .unwrap();
     adopt_compact_fixture(&repo, &second);
 
@@ -3056,15 +3057,15 @@ fn legacy_authoritative_read_decodes_unannotated_blob_column_bytes() {
     );
     let head = repo.head().unwrap().unwrap();
     let plan = repo
-        .prepare_compact_publication(
-            &head,
-            repo.index_generation().unwrap(),
-            CompactManifest::empty(table, schema_fingerprint(&schema)),
-            [90; 16],
-            [90; 32],
-            &[body],
-            "publish legacy blob generation one",
-        )
+        .prepare_compact_publication(CompactPublicationRequest {
+            expected_head: &head,
+            expected_index: repo.index_generation().unwrap(),
+            base: CompactManifest::empty(table, schema_fingerprint(&schema)),
+            runtime_intent_id: [90; 16],
+            cleanup_watermark: [90; 32],
+            segments: &[body],
+            message: "publish legacy blob generation one",
+        })
         .unwrap();
     adopt_compact_fixture(&repo, &plan);
 
@@ -3150,15 +3151,15 @@ fn compact_publication_refuses_an_annotated_blob_leaf() {
     let head = repo.head().unwrap().unwrap();
     let before = git_state(&repo, root.path());
     assert!(matches!(
-        repo.prepare_compact_publication(
-            &head,
-            repo.index_generation().unwrap(),
-            CompactManifest::empty(table, schema_fingerprint(&schema)),
-            [100; 16],
-            [100; 32],
-            &[body],
-            "publish annotated legacy blob generation one",
-        ),
+        repo.prepare_compact_publication(CompactPublicationRequest {
+            expected_head: &head,
+            expected_index: repo.index_generation().unwrap(),
+            base: CompactManifest::empty(table, schema_fingerprint(&schema)),
+            runtime_intent_id: [100; 16],
+            cleanup_watermark: [100; 32],
+            segments: &[body],
+            message: "publish annotated legacy blob generation one",
+        }),
         Err(RepositoryError::InvalidCompactManifest)
     ));
     assert_eq!(git_state(&repo, root.path()), before);

@@ -479,6 +479,185 @@ pub(crate) struct NativeGraphIssuance {
     pub(crate) row_snapshot: crate::row_store::RowMapSnapshot,
 }
 
+/// One pinned blob's bounded range read: the graph it walks, the read scope
+/// and object budget it charges, the blob length its leaf spans must add up
+/// to, the interval asked for, and the buffer it writes.
+struct IndexRangeRead<'a> {
+    graph: &'a NativeGraphContext,
+    scope: &'a RepositoryReadScope,
+    objects: &'a mut ObjectBudget,
+    blob_length: u64,
+    requested: &'a Range<u64>,
+    output: &'a mut Vec<u8>,
+}
+
+impl IndexRangeRead<'_> {
+    /// Returns the number of payload chunks read beneath this node.
+    fn read(
+        &mut self,
+        oid: &NativeOid,
+        expected_length: u64,
+        expected_height: Option<u8>,
+        base_offset: u64,
+    ) -> Result<u64, GraphError> {
+        self.scope.check_cancelled()?;
+        let node = self.graph.read_native_node(oid, self.scope, self.objects)?;
+        let NodeData::ByteIndex {
+            height,
+            total_length,
+            entries,
+        } = node
+        else {
+            return Err(GraphError::WrongNodeKind {
+                expected: NodeKind::ByteIndex,
+                actual: node.kind(),
+            });
+        };
+        if total_length != expected_length
+            || expected_height.is_some_and(|expected| expected != height)
+        {
+            return Err(GraphError::InvalidByteIndex);
+        }
+        let mut local = 0u64;
+        let mut chunks_read = 0u64;
+        for entry in entries {
+            let child_start = base_offset
+                .checked_add(local)
+                .ok_or(GraphError::InvalidByteIndex)?;
+            let child_end = child_start
+                .checked_add(entry.span_length)
+                .ok_or(GraphError::InvalidByteIndex)?;
+            local = local
+                .checked_add(entry.span_length)
+                .ok_or(GraphError::InvalidByteIndex)?;
+            let overlap_start = child_start.max(self.requested.start);
+            let overlap_end = child_end.min(self.requested.end);
+            if overlap_start >= overlap_end {
+                continue;
+            }
+            if height == 0 {
+                if !crate::blob_store::span_fits_chunk(entry.span_length)
+                    || (child_end != self.blob_length
+                        && entry.span_length < crate::blob_store::GEAR_MINIMUM as u64)
+                {
+                    return Err(GraphError::InvalidByteIndex);
+                }
+                let reservation = self.scope.reserve_payload(entry.span_length)?;
+                let chunk = self.graph.read_git_object(
+                    NativeObjectKind::Blob,
+                    &entry.target,
+                    crate::blob_store::GEAR_MAXIMUM as u64,
+                    self.scope,
+                    self.objects,
+                )?;
+                if !crate::blob_store::chunk_matches_span(
+                    entry.span_length,
+                    entry.chunk_sha256,
+                    &chunk,
+                ) {
+                    return Err(GraphError::ChunkDigestMismatch);
+                }
+                let from = usize::try_from(overlap_start - child_start)
+                    .map_err(|_| GraphError::InvalidRange)?;
+                let to = usize::try_from(overlap_end - child_start)
+                    .map_err(|_| GraphError::InvalidRange)?;
+                self.output
+                    .extend_from_slice(chunk.get(from..to).ok_or(GraphError::InvalidRange)?);
+                reservation.commit(entry.span_length);
+                chunks_read += 1;
+            } else {
+                chunks_read += self.read(
+                    &entry.target,
+                    entry.span_length,
+                    Some(height - 1),
+                    child_start,
+                )?;
+            }
+        }
+        if local != total_length {
+            return Err(GraphError::InvalidByteIndex);
+        }
+        Ok(chunks_read)
+    }
+}
+
+/// One whole-blob verification walk: the graph it walks, the read scope and
+/// object budget it charges, and the digest and chunk-boundary state every
+/// leaf feeds.
+struct FullIndexWalk<'a> {
+    graph: &'a NativeGraphContext,
+    scope: &'a RepositoryReadScope,
+    objects: &'a mut ObjectBudget,
+    digest: &'a mut crate::blob_store::ContentDigest,
+    chunk_boundaries: &'a mut GearBoundaryVerifier,
+}
+
+impl FullIndexWalk<'_> {
+    fn walk(
+        &mut self,
+        oid: &NativeOid,
+        expected_length: u64,
+        expected_height: Option<u8>,
+    ) -> Result<u8, GraphError> {
+        self.scope.check_cancelled()?;
+        let node = self.graph.read_native_node(oid, self.scope, self.objects)?;
+        let NodeData::ByteIndex {
+            height,
+            total_length,
+            entries,
+        } = node
+        else {
+            return Err(GraphError::WrongNodeKind {
+                expected: NodeKind::ByteIndex,
+                actual: node.kind(),
+            });
+        };
+        if total_length != expected_length
+            || expected_height.is_some_and(|expected| expected != height)
+        {
+            return Err(GraphError::InvalidByteIndex);
+        }
+        let mut sum = 0u64;
+        for entry in entries {
+            self.scope.check_cancelled()?;
+            sum = sum
+                .checked_add(entry.span_length)
+                .ok_or(GraphError::InvalidByteIndex)?;
+            if height == 0 {
+                if !crate::blob_store::span_fits_chunk(entry.span_length) {
+                    return Err(GraphError::InvalidByteIndex);
+                }
+                let reservation = self.scope.reserve_payload(entry.span_length)?;
+                let chunk = self.graph.read_git_object(
+                    NativeObjectKind::Blob,
+                    &entry.target,
+                    crate::blob_store::GEAR_MAXIMUM as u64,
+                    self.scope,
+                    self.objects,
+                )?;
+                if !crate::blob_store::chunk_matches_span(
+                    entry.span_length,
+                    entry.chunk_sha256,
+                    &chunk,
+                ) {
+                    return Err(GraphError::ChunkDigestMismatch);
+                }
+                self.chunk_boundaries.push_chunk(&chunk)?;
+                self.digest
+                    .update(&chunk)
+                    .map_err(|_| GraphError::InvalidLength(u64::MAX))?;
+                reservation.commit(entry.span_length);
+            } else {
+                self.walk(&entry.target, entry.span_length, Some(height - 1))?;
+            }
+        }
+        if sum != total_length {
+            return Err(GraphError::InvalidByteIndex);
+        }
+        Ok(height)
+    }
+}
+
 impl NativeGraphContext {
     pub(crate) fn issue(issuance: NativeGraphIssuance) -> Result<Self, GraphError> {
         let NativeGraphIssuance {
@@ -573,15 +752,14 @@ impl NativeGraphContext {
         // index's chunk digests and boundaries.
         let mut digest = crate::blob_store::ContentDigest::domain_separated(SCHEMA_IDENTITY_DOMAIN);
         let mut chunk_boundaries = GearBoundaryVerifier::new();
-        self.walk_full_index(
-            &byte_root,
-            encoded_length,
-            None,
-            &scope,
-            &mut objects,
-            &mut digest,
-            &mut chunk_boundaries,
-        )?;
+        FullIndexWalk {
+            graph: self,
+            scope: &scope,
+            objects: &mut objects,
+            digest: &mut digest,
+            chunk_boundaries: &mut chunk_boundaries,
+        }
+        .walk(&byte_root, encoded_length, None)?;
         let actual = digest.finish();
         if actual.length() != encoded_length || actual.sha256() != schema_digest {
             return Err(GraphError::ContentIdentityMismatch);
@@ -2820,17 +2998,15 @@ impl NativeGraphContext {
                 .byte_root
                 .as_ref()
                 .ok_or(GraphError::InvalidEmptyBlob)?;
-            chunks_read = self.read_index_range(
-                root,
-                descriptor.identity.length(),
-                None,
-                0,
-                descriptor.identity.length(),
-                &range,
+            chunks_read = IndexRangeRead {
+                graph: self,
                 scope,
-                &mut objects,
-                &mut bytes,
-            )?;
+                objects: &mut objects,
+                blob_length: descriptor.identity.length(),
+                requested: &range,
+                output: &mut bytes,
+            }
+            .read(root, descriptor.identity.length(), None, 0)?;
             if bytes.len() as u64 != requested_len {
                 return Err(GraphError::InvalidByteIndex);
             }
@@ -3429,105 +3605,6 @@ impl NativeGraphContext {
         )
     }
 
-    /// The parameters describe one record; each caller passes them straight through.
-    /// Returns the number of payload chunks read beneath this node.
-    #[allow(clippy::too_many_arguments)]
-    fn read_index_range(
-        &self,
-        oid: &NativeOid,
-        expected_length: u64,
-        expected_height: Option<u8>,
-        base_offset: u64,
-        blob_length: u64,
-        requested: &Range<u64>,
-        scope: &RepositoryReadScope,
-        objects: &mut ObjectBudget,
-        output: &mut Vec<u8>,
-    ) -> Result<u64, GraphError> {
-        scope.check_cancelled()?;
-        let node = self.read_native_node(oid, scope, objects)?;
-        let NodeData::ByteIndex {
-            height,
-            total_length,
-            entries,
-        } = node
-        else {
-            return Err(GraphError::WrongNodeKind {
-                expected: NodeKind::ByteIndex,
-                actual: node.kind(),
-            });
-        };
-        if total_length != expected_length
-            || expected_height.is_some_and(|expected| expected != height)
-        {
-            return Err(GraphError::InvalidByteIndex);
-        }
-        let mut local = 0u64;
-        let mut chunks_read = 0u64;
-        for entry in entries {
-            let child_start = base_offset
-                .checked_add(local)
-                .ok_or(GraphError::InvalidByteIndex)?;
-            let child_end = child_start
-                .checked_add(entry.span_length)
-                .ok_or(GraphError::InvalidByteIndex)?;
-            local = local
-                .checked_add(entry.span_length)
-                .ok_or(GraphError::InvalidByteIndex)?;
-            let overlap_start = child_start.max(requested.start);
-            let overlap_end = child_end.min(requested.end);
-            if overlap_start >= overlap_end {
-                continue;
-            }
-            if height == 0 {
-                if !crate::blob_store::span_fits_chunk(entry.span_length)
-                    || (child_end != blob_length
-                        && entry.span_length < crate::blob_store::GEAR_MINIMUM as u64)
-                {
-                    return Err(GraphError::InvalidByteIndex);
-                }
-                let reservation = scope.reserve_payload(entry.span_length)?;
-                let chunk = self.read_git_object(
-                    NativeObjectKind::Blob,
-                    &entry.target,
-                    crate::blob_store::GEAR_MAXIMUM as u64,
-                    scope,
-                    objects,
-                )?;
-                if !crate::blob_store::chunk_matches_span(
-                    entry.span_length,
-                    entry.chunk_sha256,
-                    &chunk,
-                ) {
-                    return Err(GraphError::ChunkDigestMismatch);
-                }
-                let from = usize::try_from(overlap_start - child_start)
-                    .map_err(|_| GraphError::InvalidRange)?;
-                let to = usize::try_from(overlap_end - child_start)
-                    .map_err(|_| GraphError::InvalidRange)?;
-                output.extend_from_slice(chunk.get(from..to).ok_or(GraphError::InvalidRange)?);
-                reservation.commit(entry.span_length);
-                chunks_read += 1;
-            } else {
-                chunks_read += self.read_index_range(
-                    &entry.target,
-                    entry.span_length,
-                    Some(height - 1),
-                    child_start,
-                    blob_length,
-                    requested,
-                    scope,
-                    objects,
-                    output,
-                )?;
-            }
-        }
-        if local != total_length {
-            return Err(GraphError::InvalidByteIndex);
-        }
-        Ok(chunks_read)
-    }
-
     fn verify_full_blob(
         &self,
         reference: &AdmittedBlobReference,
@@ -3552,15 +3629,14 @@ impl NativeGraphContext {
         let mut digest = crate::blob_store::ContentDigest::new();
         let mut chunk_boundaries = GearBoundaryVerifier::new();
         if let Some(root) = descriptor.byte_root.as_ref() {
-            let height = self.walk_full_index(
-                root,
-                descriptor.identity.length(),
-                None,
+            let height = FullIndexWalk {
+                graph: self,
                 scope,
-                &mut objects,
-                &mut digest,
-                &mut chunk_boundaries,
-            )?;
+                objects: &mut objects,
+                digest: &mut digest,
+                chunk_boundaries: &mut chunk_boundaries,
+            }
+            .walk(root, descriptor.identity.length(), None)?;
             if height > MAX_GRAPH_HEIGHT {
                 return Err(GraphError::HeightExceeded(height));
             }
@@ -3569,84 +3645,6 @@ impl NativeGraphContext {
             return Err(GraphError::ContentIdentityMismatch);
         }
         Ok(objects.oids)
-    }
-
-    /// The parameters describe one record; each caller passes them straight through.
-    #[allow(clippy::too_many_arguments)]
-    fn walk_full_index(
-        &self,
-        oid: &NativeOid,
-        expected_length: u64,
-        expected_height: Option<u8>,
-        scope: &RepositoryReadScope,
-        objects: &mut ObjectBudget,
-        digest: &mut crate::blob_store::ContentDigest,
-        chunk_boundaries: &mut GearBoundaryVerifier,
-    ) -> Result<u8, GraphError> {
-        scope.check_cancelled()?;
-        let node = self.read_native_node(oid, scope, objects)?;
-        let NodeData::ByteIndex {
-            height,
-            total_length,
-            entries,
-        } = node
-        else {
-            return Err(GraphError::WrongNodeKind {
-                expected: NodeKind::ByteIndex,
-                actual: node.kind(),
-            });
-        };
-        if total_length != expected_length
-            || expected_height.is_some_and(|expected| expected != height)
-        {
-            return Err(GraphError::InvalidByteIndex);
-        }
-        let mut sum = 0u64;
-        for entry in entries {
-            scope.check_cancelled()?;
-            sum = sum
-                .checked_add(entry.span_length)
-                .ok_or(GraphError::InvalidByteIndex)?;
-            if height == 0 {
-                if !crate::blob_store::span_fits_chunk(entry.span_length) {
-                    return Err(GraphError::InvalidByteIndex);
-                }
-                let reservation = scope.reserve_payload(entry.span_length)?;
-                let chunk = self.read_git_object(
-                    NativeObjectKind::Blob,
-                    &entry.target,
-                    crate::blob_store::GEAR_MAXIMUM as u64,
-                    scope,
-                    objects,
-                )?;
-                if !crate::blob_store::chunk_matches_span(
-                    entry.span_length,
-                    entry.chunk_sha256,
-                    &chunk,
-                ) {
-                    return Err(GraphError::ChunkDigestMismatch);
-                }
-                chunk_boundaries.push_chunk(&chunk)?;
-                digest
-                    .update(&chunk)
-                    .map_err(|_| GraphError::InvalidLength(u64::MAX))?;
-                reservation.commit(entry.span_length);
-            } else {
-                self.walk_full_index(
-                    &entry.target,
-                    entry.span_length,
-                    Some(height - 1),
-                    scope,
-                    objects,
-                    digest,
-                    chunk_boundaries,
-                )?;
-            }
-        }
-        if sum != total_length {
-            return Err(GraphError::InvalidByteIndex);
-        }
-        Ok(height)
     }
 
     /// How many reads this context has answered from its node cache.

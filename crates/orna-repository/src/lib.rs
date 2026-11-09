@@ -65,7 +65,9 @@ pub use compact::{
     LegacyAuthoritativeRow, LegacyAuthoritativeTable, validate_compact_page_uncompressed_sizes,
 };
 #[cfg(any(test, feature = "legacy-fixture-writer"))]
-pub use compact::{CompactPublicationPlan, CompactSegment};
+pub use compact::{
+    CompactPublicationPlan, CompactPublicationRequest, CompactSegment, CompactSegmentRecord,
+};
 #[cfg(feature = "legacy-fixture-writer")]
 pub use compact::{
     golden_compact_schemas, write_legacy_format1_fixture, write_legacy_format1_golden_fixture,
