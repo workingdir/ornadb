@@ -38,6 +38,7 @@ pub mod format2_ogb;
 pub mod format2_orr;
 pub mod format2_read;
 pub mod format2_rov;
+mod format_context;
 mod hex;
 mod init;
 pub mod migration_copy;
@@ -70,7 +71,7 @@ pub use compact::{
     golden_compact_schemas, write_legacy_format1_fixture, write_legacy_format1_golden_fixture,
 };
 pub use crash_barrier::{publication_crash_barrier, publication_crash_pause_until_released};
-pub use init::format_context::{
+pub use format_context::{
     CaptureCapabilityError, CommittedTableBinding, FINAL_REPOSITORY_FORMAT, FinalFormatCapability,
     FormatContextError, HistoricalFormatContext, LegacyWriteRefused, REPOSITORY_LAYOUT_VERSION,
     RepositoryFormat, RepositoryFormatContext, RepositorySnapshotPin, SchemaRootPin, StoreRootPin,

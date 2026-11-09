@@ -21,7 +21,7 @@ use std::{
 use crate::hex::hex_encode;
 use crate::{
     CommittedTreeEntry, CommittedTreeEntryKind, GitCommitRef, ManagedPath, PrivateCommit,
-    Repository, RepositoryError, init::format_context::STORE_PATH, native_graph::GitHashAlgorithm,
+    Repository, RepositoryError, format_context::STORE_PATH, native_graph::GitHashAlgorithm,
     scrub_git_routing_environment,
 };
 

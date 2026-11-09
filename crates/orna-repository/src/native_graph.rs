@@ -3950,7 +3950,7 @@ impl NativeGraphContext {
         crate::bind_tree_entry_in_index(
             || self.git_command(),
             index,
-            crate::init::format_context::STORE_PATH,
+            crate::format_context::STORE_PATH,
             "040000",
             &store_root.to_hex(),
         )

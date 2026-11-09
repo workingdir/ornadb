@@ -21,7 +21,7 @@ use orna_value::{
     Format3Context, GitHash as ValueGitHash, Raw, SchemaDescriptor, Snapshot as ValueSnapshot,
 };
 
-use super::DatabaseId;
+use crate::DatabaseId;
 
 /// The final repository writer coordinate from the consolidated publication.
 pub const FINAL_REPOSITORY_FORMAT: u8 = 3;

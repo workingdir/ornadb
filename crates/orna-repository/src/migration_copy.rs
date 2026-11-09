@@ -35,11 +35,11 @@ use std::sync::Arc;
 use fs2::FileExt;
 use sha2::{Digest, Sha256};
 
-use crate::hex::hex_encode;
-use crate::init::format_context::{
+use crate::format_context::{
     FORMAT_CONTEXT_MAX_METADATA_BYTES, LEGACY_FORMAT_PATH, RepositoryFormatContext,
     canonical_database_bytes,
 };
+use crate::hex::hex_encode;
 use crate::native_graph::NativeOid;
 use crate::relation_admission::{
     AllocatorWatermarks, RelationAdmissionError, RelationCandidateContent, StagedRelation,
@@ -1654,7 +1654,7 @@ fn candidate_database_id(
     }
     let database = candidate_file(repository, tree, ".orna/database.orna")?
         .ok_or(RepositoryError::InvalidFormatMigration)?;
-    crate::init::format_context::parse_canonical_database(&database)
+    crate::format_context::parse_canonical_database(&database)
         .map_err(|()| RepositoryError::InvalidFormatMigration)
 }
 
@@ -1974,7 +1974,7 @@ fn candidate_message(
         "explicit format {} to {} migration: {} rows take the {} default annotation, {} stream \
          checkpoint identities carried\n\n{}: {}",
         source_format.number(),
-        crate::init::format_context::FINAL_REPOSITORY_FORMAT,
+        crate::format_context::FINAL_REPOSITORY_FORMAT,
         annotation_defaults.entry_count(),
         LEGACY_ANNOTATION_DEFAULT_FORMAT,
         continuity.predecessors().len(),
@@ -1988,7 +1988,7 @@ pub fn migration_marker(source_format: RepositoryFormat) -> String {
     format!(
         "format-{}-to-{}",
         source_format.number(),
-        crate::init::format_context::FINAL_REPOSITORY_FORMAT
+        crate::format_context::FINAL_REPOSITORY_FORMAT
     )
 }
 
@@ -2686,7 +2686,7 @@ fn migration_record(
          payload_inspected: {inspected},\n    continuity_predecessors: {predecessors},\n    \
          stage: \"prepared\",\n}}\n",
         source_format = source_format.number(),
-        target_format = crate::init::format_context::FINAL_REPOSITORY_FORMAT,
+        target_format = crate::format_context::FINAL_REPOSITORY_FORMAT,
         commit = source_commit.as_str(),
         tree = hex_encode(source_tree_identity),
         annotation = LEGACY_ANNOTATION_DEFAULT_FORMAT,

@@ -1836,8 +1836,8 @@ impl Repository {
                 let Some(bytes) = change.bytes() else {
                     return Err(RelationAdmissionError::DatabaseRecordDeleted);
                 };
-                let recorded = crate::init::format_context::parse_canonical_database(bytes)
-                    .map_err(|()| {
+                let recorded =
+                    crate::format_context::parse_canonical_database(bytes).map_err(|()| {
                         RelationAdmissionError::Format(FormatContextError::MetadataInvalid)
                     })?;
                 if recorded != database_id {
