@@ -151,12 +151,8 @@ pub(crate) fn decode_assertion_owner_kind(value: i64) -> Result<AssertionOwnerKi
 }
 
 pub(crate) async fn capture_tx(connection: &Connection) -> Result<CwdCapture, RuntimeError> {
-    let mut rows = connection.query("SELECT database_id, runtime_id, generation, generation_digest FROM runtime_meta WHERE singleton = 1", ()).await.map_err(|_| RuntimeError::StorageUnavailable)?;
-    let row = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-        .ok_or(RuntimeError::RecoveryInvalid)?;
+    let mut rows = connection.query("SELECT database_id, runtime_id, generation, generation_digest FROM runtime_meta WHERE singleton = 1", ()).await?;
+    let row = rows.next().await?.ok_or(RuntimeError::RecoveryInvalid)?;
     let database_id = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
     let runtime_id = fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
     let generation: i64 = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;

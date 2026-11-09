@@ -50,13 +50,8 @@ async fn session_deletion_record(
              FROM session_deletion WHERE session_id = ?1",
             params![session_id.to_vec()],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    else {
+        .await?;
+    let Some(row) = rows.next().await? else {
         return Ok(None);
     };
     let owner_id = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
@@ -103,8 +98,7 @@ impl RuntimeState {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         self.require_owner(&transaction, owner).await?;
         match session_deletion_record(&transaction, session_id).await? {
             Some(record) if record.owner != owner => return Err(RuntimeError::OwnerLost),
@@ -122,14 +116,10 @@ impl RuntimeState {
                             SessionDeletionState::Closing.code(),
                         ],
                     )
-                    .await
-                    .map_err(|_| RuntimeError::StorageUnavailable)?;
+                    .await?;
             }
         }
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)
+        transaction.commit().await.map_err(RuntimeError::from)
     }
 
     /// Finalizes a session deletion only after the writer-owned marker still
@@ -145,8 +135,7 @@ impl RuntimeState {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         self.require_owner(&transaction, owner).await?;
         let Some(record) = session_deletion_record(&transaction, session_id).await? else {
             return Err(RuntimeError::RecoveryInvalid);
@@ -165,21 +154,12 @@ impl RuntimeState {
                     RequestState::Running.code(),
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        if active
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-            .is_some()
-        {
+            .await?;
+        if active.next().await?.is_some() {
             return Err(RuntimeError::SessionWorkActive);
         }
         if record.state == SessionDeletionState::Closed {
-            transaction
-                .commit()
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            transaction.commit().await?;
             return Ok(());
         }
         let changed = transaction
@@ -195,15 +175,11 @@ impl RuntimeState {
                     SessionDeletionState::Closing.code(),
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         if changed != 1 {
             return Err(RuntimeError::RecoveryInvalid);
         }
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)
+        transaction.commit().await.map_err(RuntimeError::from)
     }
 
     pub(crate) async fn validate_session_deletions(&self) -> Result<(), RuntimeError> {
@@ -213,13 +189,8 @@ impl RuntimeState {
                 "SELECT session_id, owner_id, owner_epoch, state FROM session_deletion",
                 (),
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        {
+            .await?;
+        while let Some(row) = rows.next().await? {
             validate_id(fixed(
                 row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
             )?)?;
