@@ -15,7 +15,7 @@ R1. No optional internal dependencies. A crate edge is production or absent;
     capability variation lives in a trait in a lower layer, never in a feature.
 R2. The shipped `orna` binary never links a harness, tool, oracle or archive
     crate: not `orna-conformance`, `orna-traceability`, `orna-lsp` or
-    `orna-core`, and nothing whose role is not `production`.
+    `orna-compat-v1`, and nothing whose role is not `production`.
 R3. A crate name states its layer or its subject, never a metaphor. "core",
     "foundation", "runtime", "storage", "application" and "live" as bare words
     are rejected in review.
@@ -43,7 +43,7 @@ layer 1 until its split because it already depends on `orna-value`.
 | 12 | presentation | orna-protocol, orna-serving, orna-live |
 | 13 | engine | orna-application |
 | 14 | edges | orna-cli, orna-lsp, orna-conformance, orna-traceability, orna-table |
-| 15 | archive | orna-core |
+| 15 | archive | orna-compat-v1 |
 
 `docs/design/layers.toml` is the machine-readable table and the source of truth;
 `python3 -m unittest scripts.test_check_architecture` asserts that this table and

@@ -1459,13 +1459,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "orna-compat-v1"
+version = "1.0.0"
+dependencies = [
+ "base64",
+ "orna-syntax",
+ "orna-value",
+ "proptest",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "uuid",
+]
+
+[[package]]
 name = "orna-conformance"
 version = "1.0.0"
 dependencies = [
  "futures",
  "getrandom 0.3.4",
  "num-bigint 0.4.8",
- "orna-core",
+ "orna-compat-v1",
  "orna-evaluator",
  "orna-foundation",
  "orna-live",
@@ -1488,20 +1502,6 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "tokio",
-]
-
-[[package]]
-name = "orna-core"
-version = "1.0.0"
-dependencies = [
- "base64",
- "orna-syntax",
- "orna-value",
- "proptest",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "uuid",
 ]
 
 [[package]]
