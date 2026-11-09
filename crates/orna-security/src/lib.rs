@@ -6,6 +6,8 @@
 //! No request payload may select a provider or authority.
 
 mod remote_analysis;
+#[cfg(test)]
+mod remote_analysis_tests;
 mod secrets;
 mod session;
 mod sops;
