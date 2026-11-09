@@ -1,4 +1,53 @@
-//! Stable JSON encoding for the Git-backed status command.
+//! The Git-backed status command: how `git` is run against the worktree, and
+//! the stable JSON encoding of its answer.
+
+use std::path::Path;
+use std::process::{Command, Output};
+
+use super::Diagnostic;
+
+/// `git` with the routing variables of any enclosing Git invocation (a hook,
+/// say) removed, so that it answers about the worktree it is pointed at and
+/// nothing else.
+pub(super) fn scrubbed_git() -> Command {
+    let mut git = Command::new("git");
+    for variable in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    ] {
+        git.env_remove(variable);
+    }
+    git
+}
+
+/// [`scrubbed_git`] running in `worktree` (`git -C WORKTREE`).
+pub(super) fn git_in(worktree: &Path) -> Command {
+    let mut git = scrubbed_git();
+    git.arg("-C").arg(worktree);
+    git
+}
+
+/// Runs `command` and returns its output, or the `E2100` refusal whose remedy
+/// is `retry` when `git` cannot run or exits unsuccessfully.
+pub(super) fn git_output(command: &mut Command, retry: &'static str) -> Result<Output, Diagnostic> {
+    let unreadable = || {
+        Diagnostic::target(
+            "E2100",
+            "local Git worktree status could not be read",
+            retry,
+        )
+    };
+    let output = command.output().map_err(|_| unreadable())?;
+    if output.status.success() {
+        Ok(output)
+    } else {
+        Err(unreadable())
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Change<'a> {

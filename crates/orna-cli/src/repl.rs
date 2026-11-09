@@ -264,6 +264,22 @@ impl ReplFailure {
             detail: None,
         }
     }
+
+    /// A failure under `code` whose detail names what is wrong and the
+    /// remedies to apply, without pointing at source: the host raised it, not
+    /// the evaluator.
+    pub(crate) fn located(code: &str, message: impl Into<String>, help: Vec<String>) -> Self {
+        Self {
+            code: code.to_owned(),
+            detail: Some(ReplDetail {
+                code: code.to_owned(),
+                message: message.into(),
+                span: None,
+                notes: Vec::new(),
+                help,
+            }),
+        }
+    }
 }
 
 impl From<String> for ReplFailure {
