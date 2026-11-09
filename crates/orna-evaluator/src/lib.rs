@@ -1901,25 +1901,7 @@ pub fn planner_metadata(
     }
     validate_limits(limits)?;
     let functions = Functions::new();
-    let mut context = Context {
-        limits,
-        steps: 0,
-        calls: 0,
-        functions: &functions,
-        aliases: None,
-        session_functions: None,
-        repl_bindings: false,
-        restrict_function_names: false,
-        reject_unhandled_field_calls: false,
-        effects: None,
-        namespace: None,
-        transfer: None,
-        materializations: Vec::new(),
-        materialization_clock_unavailable: false,
-        reuse: CallReuse::default(),
-        sys_host: None,
-        cancellation: None,
-    };
+    let mut context = Context::new(limits, &functions);
     let mut scope = Scope::from_environment(environment, &mut context)?;
     let value = context.evaluate(&parsed.value, &mut scope, 0)?;
     if context.transfer.is_some() {
@@ -2042,23 +2024,9 @@ fn evaluate_expression_ovb2_with_optional_effects(
         .as_mut()
         .map(|adapter| adapter as &mut dyn EffectHandler);
     let mut context = Context {
-        limits,
-        steps: 0,
-        calls: 0,
-        functions: &functions,
-        aliases: None,
-        session_functions: None,
-        repl_bindings: false,
-        restrict_function_names: false,
-        reject_unhandled_field_calls: false,
         effects,
-        namespace: None,
-        transfer: None,
-        materializations: Vec::new(),
-        materialization_clock_unavailable: false,
-        reuse: CallReuse::default(),
-        sys_host: None,
         cancellation,
+        ..Context::new(limits, &functions)
     };
     let mut scope = Scope::from_ovb2_environment(environment, &mut context)?;
     let value = context.evaluate(&parsed.value, &mut scope, 0)?;
@@ -2156,23 +2124,9 @@ pub fn evaluate_expression_with_functions_and_effects_and_cancellation(
     }
     validate_limits(limits)?;
     let mut context = Context {
-        limits,
-        steps: 0,
-        calls: 0,
-        functions,
-        aliases: None,
-        session_functions: None,
-        repl_bindings: false,
-        restrict_function_names: false,
-        reject_unhandled_field_calls: false,
         effects: Some(effects),
-        namespace: None,
-        transfer: None,
-        materializations: Vec::new(),
-        materialization_clock_unavailable: false,
-        reuse: CallReuse::default(),
-        sys_host: None,
         cancellation,
+        ..Context::new(limits, functions)
     };
     context.items(functions.own_len())?;
     let mut scope = Scope::from_environment(environment, &mut context)?;
@@ -2298,23 +2252,8 @@ fn evaluate_with_functions_and_nominals_and_budget(
 ) -> Result<CanonicalValue, EvaluationError> {
     validate_limits(limits)?;
     let mut context = Context {
-        limits,
         steps: limits.max_steps.saturating_sub(budget.remaining()),
-        calls: 0,
-        functions,
-        aliases: None,
-        session_functions: None,
-        repl_bindings: false,
-        restrict_function_names: false,
-        reject_unhandled_field_calls: false,
-        effects: None,
-        namespace: None,
-        transfer: None,
-        materializations: Vec::new(),
-        materialization_clock_unavailable: false,
-        reuse: CallReuse::default(),
-        sys_host: None,
-        cancellation: None,
+        ..Context::new(limits, functions)
     };
     let result = (|| {
         context.items(functions.own_len())?;
@@ -2343,25 +2282,7 @@ pub fn evaluate_function(
 ) -> Result<CanonicalValue, EvaluationError> {
     validate_limits(limits)?;
     let functions = Functions::new();
-    let mut context = Context {
-        limits,
-        steps: 0,
-        calls: 0,
-        functions: &functions,
-        aliases: None,
-        session_functions: None,
-        repl_bindings: false,
-        restrict_function_names: false,
-        reject_unhandled_field_calls: false,
-        effects: None,
-        namespace: None,
-        transfer: None,
-        materializations: Vec::new(),
-        materialization_clock_unavailable: false,
-        reuse: CallReuse::default(),
-        sys_host: None,
-        cancellation: None,
-    };
+    let mut context = Context::new(limits, &functions);
     let supplied = supplied_arguments(arguments, &NominalDefinitions::new(), &mut context)?;
     let captured = Scope::from_environment(environment, &mut context)?;
     invoke_pure(&mut context, parameters, body, captured, supplied, 0).and_then(Value::canonical)
@@ -2437,23 +2358,9 @@ fn invoke_named_with_host(
 ) -> Result<CanonicalValue, EvaluationError> {
     validate_limits(limits)?;
     let mut context = Context {
-        limits,
-        steps: 0,
-        calls: 0,
-        functions,
-        aliases: None,
-        session_functions: None,
-        repl_bindings: false,
-        restrict_function_names: false,
-        reject_unhandled_field_calls: false,
-        effects: None,
         namespace: function_namespace(name),
-        transfer: None,
-        materializations: Vec::new(),
-        materialization_clock_unavailable: false,
-        reuse: CallReuse::default(),
         sys_host,
-        cancellation: None,
+        ..Context::new(limits, functions)
     };
     context.items(functions.own_len())?;
     let function = functions
@@ -2556,23 +2463,10 @@ fn invoke_named_with_effects_and_reuse(
 ) -> Result<(CanonicalValue, CallReuseStats), EvaluationError> {
     validate_limits(limits)?;
     let mut context = Context {
-        limits,
         steps: limits.max_steps.saturating_sub(budget.remaining()),
-        calls: 0,
-        functions,
-        aliases: None,
-        session_functions: None,
-        repl_bindings: false,
-        restrict_function_names: false,
-        reject_unhandled_field_calls: false,
         effects: Some(effects),
         namespace: function_namespace(name),
-        transfer: None,
-        materializations: Vec::new(),
-        materialization_clock_unavailable: false,
-        cancellation: None,
-        reuse: CallReuse::default(),
-        sys_host: None,
+        ..Context::new(limits, functions)
     };
     let result = (|| {
         context.items(functions.own_len())?;
@@ -2648,23 +2542,10 @@ pub fn invoke_named_with_context_effects(
     };
     let (result, steps) = {
         let mut context = Context {
-            limits,
             steps: limits.max_steps.saturating_sub(budget.remaining()),
-            calls: 0,
-            functions,
-            aliases: None,
-            session_functions: None,
-            repl_bindings: false,
-            restrict_function_names: false,
-            reject_unhandled_field_calls: false,
             effects: Some(&mut profiled_effects),
             namespace: function_namespace(name),
-            transfer: None,
-            materializations: Vec::new(),
-            materialization_clock_unavailable: false,
-            reuse: CallReuse::default(),
-            sys_host: None,
-            cancellation: None,
+            ..Context::new(limits, functions)
         };
         let result = (|| {
             context.items(functions.own_len())?;
@@ -4839,6 +4720,27 @@ type ActivationSysHost<'a> = Option<&'a SysHostAttachment>;
 #[cfg(not(feature = "system-host-bindings"))]
 type ActivationSysHost<'a> = Option<&'a std::convert::Infallible>;
 
+/// How an activation resolves callable names and treats calls it cannot route.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ActivationMode {
+    /// A pure expression or an admitted module activation: source functions
+    /// resolve by their qualified names and an unclaimed field call takes the
+    /// ordinary field-callee path.
+    Module,
+    /// An interactive REPL session. Names resolve only through the session's
+    /// own aliases and admitted bindings, so a spelling nothing admitted is
+    /// unsupported rather than served from captured source, an unclaimed field
+    /// call fails closed, and a nullable statistic returns `T?` as an Option
+    /// value (ORNA-TYPE-001).
+    Repl,
+}
+
+impl ActivationMode {
+    const fn is_repl(self) -> bool {
+        matches!(self, Self::Repl)
+    }
+}
+
 struct Context<'functions, 'effects> {
     limits: Limits,
     steps: u64,
@@ -4848,9 +4750,11 @@ struct Context<'functions, 'effects> {
     functions: &'functions Functions,
     aliases: Option<&'functions BTreeMap<String, String>>,
     session_functions: Option<&'functions BTreeSet<String>>,
+    /// Whether the code now running is session-owned and may read the REPL's
+    /// `$_` and `$?` bindings. It flips while a REPL session calls into an
+    /// admitted module function, which must never observe them.
     repl_bindings: bool,
-    restrict_function_names: bool,
-    reject_unhandled_field_calls: bool,
+    mode: ActivationMode,
     effects: Option<&'effects mut dyn EffectHandler>,
     namespace: Option<String>,
     transfer: Option<Transfer>,
@@ -4859,6 +4763,31 @@ struct Context<'functions, 'effects> {
     cancellation: Option<&'functions CancellationToken>,
     reuse: CallReuse,
     sys_host: ActivationSysHost<'functions>,
+}
+
+impl<'functions, 'effects> Context<'functions, 'effects> {
+    /// A module-mode activation with no effects, aliases or cancellation.
+    /// Callers override only what differs, with struct update syntax.
+    fn new(limits: Limits, functions: &'functions Functions) -> Self {
+        Self {
+            limits,
+            steps: 0,
+            calls: 0,
+            functions,
+            aliases: None,
+            session_functions: None,
+            repl_bindings: false,
+            mode: ActivationMode::Module,
+            effects: None,
+            namespace: None,
+            transfer: None,
+            materializations: Vec::new(),
+            materialization_clock_unavailable: false,
+            cancellation: None,
+            reuse: CallReuse::default(),
+            sys_host: None,
+        }
+    }
 }
 
 impl Context<'_, '_> {
@@ -5015,47 +4944,42 @@ fn stream_elapsed_nanoseconds(later: Instant, earlier: Instant) -> Option<BigInt
     Some(seconds * BigInt::from(1_000_000_000u64) + nanoseconds)
 }
 
-/// these from the plan they are walking.
-/// One relation stage's rows, counters and visitor: the stage callers pass
-#[allow(clippy::too_many_arguments)]
-/// Runs one task callback on a worker thread. The child starts with the
-/// owner's active calls, so recursion through task combinators stays within
-/// `Limits::max_depth`.
+/// The parts of a parent activation that every forked task callback inherits.
+/// A child starts with the owner's active call count, so recursion through task
+/// combinators stays within `Limits::max_depth`.
+#[derive(Clone, Copy)]
+struct TaskEnvironment<'a> {
+    functions: &'a Functions,
+    aliases: Option<&'a BTreeMap<String, String>>,
+    session_functions: Option<&'a BTreeSet<String>>,
+    limits: Limits,
+    mode: ActivationMode,
+    repl_bindings: bool,
+    sys_host: ActivationSysHost<'a>,
+    active_calls: usize,
+}
+
+/// Runs one task callback on a worker thread under `environment`.
 fn invoke_task_callback(
     callback: Value,
-    functions: &Functions,
-    aliases: Option<&BTreeMap<String, String>>,
-    session_functions: Option<&BTreeSet<String>>,
-    limits: Limits,
+    environment: TaskEnvironment<'_>,
     cancellation: CancellationToken,
-    repl_bindings: bool,
-    restrict_function_names: bool,
-    reject_unhandled_field_calls: bool,
-    sys_host: ActivationSysHost<'_>,
-    active_calls: usize,
     mut effects: Option<Box<dyn EffectHandler + Send>>,
     materializations: &MaterializationSink,
 ) -> Result<Value, EvaluationError> {
     let mut context = Context {
-        limits,
-        steps: 0,
-        calls: active_calls,
-        functions,
-        aliases,
-        session_functions,
-        repl_bindings,
-        restrict_function_names,
-        reject_unhandled_field_calls,
+        calls: environment.active_calls,
+        aliases: environment.aliases,
+        session_functions: environment.session_functions,
+        repl_bindings: environment.repl_bindings,
+        mode: environment.mode,
         effects: effects
             .as_deref_mut()
             .map(|handler| handler as &mut dyn EffectHandler),
-        namespace: None,
-        transfer: None,
-        materializations: Vec::new(),
-        materialization_clock_unavailable: false,
         reuse: CallReuse::disabled(),
-        sys_host,
+        sys_host: environment.sys_host,
         cancellation: Some(&cancellation),
+        ..Context::new(environment.limits, environment.functions)
     };
     let result = context.invoke_callable(&callback, Vec::new(), 0);
     materializations
@@ -5065,48 +4989,52 @@ fn invoke_task_callback(
     result
 }
 
-/// One worker-pool run: per-task outcomes, an optional aggregate value and the
-/// materialisation records each task produced.
-type TaskMaterialization = (
-    Vec<Option<Result<Value, EvaluationError>>>,
-    Option<Value>,
-    Vec<Vec<MaterializationRecord>>,
-);
+/// How a worker-pool run reacts when a child finishes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TaskPolicy {
+    /// `parallel`: the first ordinary failure cancels the unfinished siblings.
+    Parallel,
+    /// `race`: the first success cancels the unfinished siblings and wins.
+    Race,
+}
 
-/// Run finite callback lists with a bounded number of owned worker threads.
-/// A first ordinary failure stops admission for `parallel`; a first success
-/// stops admission for `race`. In-flight children observe the shared token,
-#[allow(clippy::too_many_arguments)]
-/// and `thread::scope` joins every worker before the owner returns.
+/// One callback's outcome. `None` means admission stopped before it started.
+type TaskOutcome = Option<Result<Value, EvaluationError>>;
+
+/// What one worker-pool run produced.
+struct TaskRun {
+    /// One slot per callback, in callback order.
+    outcomes: Vec<TaskOutcome>,
+    /// The first successful value; recorded only under [`TaskPolicy::Race`].
+    winner: Option<Value>,
+    /// The materialisation records each callback produced, in callback order.
+    records: Vec<Vec<MaterializationRecord>>,
+}
+
+/// Runs finite callback lists with a bounded number of owned worker threads.
+/// `policy` decides which first result stops admission. In-flight children
+/// observe the shared token, and `thread::scope` joins every worker before the
+/// owner returns.
 fn run_task_callbacks(
     callbacks: &[Value],
-    mut child_effects: Vec<Option<Box<dyn EffectHandler + Send>>>,
-    active_calls: usize,
+    child_effects: Vec<Option<Box<dyn EffectHandler + Send>>>,
     parent: Option<CancellationToken>,
-    functions: &Functions,
-    aliases: Option<&BTreeMap<String, String>>,
-    session_functions: Option<&BTreeSet<String>>,
-    limits: Limits,
-    repl_bindings: bool,
-    restrict_function_names: bool,
-    reject_unhandled_field_calls: bool,
-    sys_host: ActivationSysHost<'_>,
-    cancel_after_failure: bool,
-    cancel_after_success: bool,
-) -> TaskMaterialization {
+    environment: TaskEnvironment<'_>,
+    policy: TaskPolicy,
+) -> TaskRun {
     const MAX_TASK_WORKERS: usize = 32;
     let available = std::thread::available_parallelism().map_or(1, usize::from);
     let worker_count = callbacks.len().clamp(1, available.min(MAX_TASK_WORKERS));
     let next = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let shared_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let child_effects = Arc::new(std::sync::Mutex::new(std::mem::take(&mut child_effects)));
+    let child_effects = Arc::new(std::sync::Mutex::new(child_effects));
 
     let sinks: Arc<Vec<MaterializationSink>> = Arc::new(
         (0..callbacks.len())
             .map(|_| Arc::new(std::sync::Mutex::new(Vec::new())))
             .collect(),
     );
-    let (results, winner) = std::thread::scope(|scope| {
+    let (outcomes, winner) = std::thread::scope(|scope| {
         let (sender, receiver) = std::sync::mpsc::channel();
         for _ in 0..worker_count {
             let sender = sender.clone();
@@ -5136,27 +5064,20 @@ fn run_task_callbacks(
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         invoke_task_callback(
                             callback,
-                            functions,
-                            aliases,
-                            session_functions,
-                            limits,
+                            environment,
                             cancellation,
-                            repl_bindings,
-                            restrict_function_names,
-                            reject_unhandled_field_calls,
-                            sys_host,
-                            active_calls,
                             effects,
                             &sinks[index],
                         )
                     }))
                     .unwrap_or_else(|_| Err(error("ORNA-EVAL-ERROR")));
-                    if (cancel_after_failure
-                        && result
+                    let stops_siblings = match policy {
+                        TaskPolicy::Parallel => result
                             .as_ref()
-                            .is_err_and(|failure| failure.code() != "ORNA-EVAL-CANCELLED"))
-                        || (cancel_after_success && result.is_ok())
-                    {
+                            .is_err_and(|failure| failure.code() != "ORNA-EVAL-CANCELLED"),
+                        TaskPolicy::Race => result.is_ok(),
+                    };
+                    if stops_siblings {
                         shared_cancel.store(true, std::sync::atomic::Ordering::Release);
                     }
                     let _ = sender.send((index, result));
@@ -5164,22 +5085,76 @@ fn run_task_callbacks(
             });
         }
         drop(sender);
-        let mut results = (0..callbacks.len()).map(|_| None).collect::<Vec<_>>();
+        let mut outcomes = (0..callbacks.len()).map(|_| None).collect::<Vec<_>>();
         let mut winner = None;
         while let Ok((index, result)) = receiver.recv() {
-            if cancel_after_success
+            if policy == TaskPolicy::Race
                 && winner.is_none()
                 && let Ok(value) = &result
             {
                 winner = Some(value.clone());
                 shared_cancel.store(true, std::sync::atomic::Ordering::Release);
             }
-            results[index] = Some(result);
+            outcomes[index] = Some(result);
         }
-        (results, winner)
+        (outcomes, winner)
     });
     let records = sinks.iter().map(take_materializations).collect();
-    (results, winner, records)
+    TaskRun {
+        outcomes,
+        winner,
+        records,
+    }
+}
+
+impl<'functions> Context<'functions, '_> {
+    /// What a forked task callback inherits from this activation.
+    fn task_environment(&self) -> TaskEnvironment<'functions> {
+        TaskEnvironment {
+            functions: self.functions,
+            aliases: self.aliases,
+            session_functions: self.session_functions,
+            limits: self.limits,
+            mode: self.mode,
+            repl_bindings: self.repl_bindings,
+            sys_host: self.sys_host,
+            active_calls: self.calls,
+        }
+    }
+
+    /// Forks every callback onto the worker pool and joins them. The parent
+    /// stops reusing call results for the rest of the activation, because the
+    /// children run concurrently with it and may write. Returns each
+    /// callback's outcome and the race winner, and fails with
+    /// `ORNA-EVAL-CANCELLED` when the owner's own cancellation was requested.
+    fn fork_task_callbacks(
+        &mut self,
+        callbacks: &[Value],
+        policy: TaskPolicy,
+    ) -> Result<(Vec<TaskOutcome>, Option<Value>), EvaluationError> {
+        self.check_call_room()?;
+        let parent = self.cancellation.cloned();
+        self.disable_call_reuse_for_fork();
+        let child_effects: Vec<Option<Box<dyn EffectHandler + Send>>> =
+            match self.effects.as_deref_mut() {
+                Some(effects) => (0..callbacks.len())
+                    .map(|index| effects.fork_task_child(index))
+                    .collect(),
+                None => (0..callbacks.len()).map(|_| None).collect(),
+            };
+        let run = run_task_callbacks(
+            callbacks,
+            child_effects,
+            parent.clone(),
+            self.task_environment(),
+            policy,
+        );
+        self.absorb_materializations(run.records)?;
+        if parent.as_ref().is_some_and(CancellationToken::is_requested) {
+            return Err(error("ORNA-EVAL-CANCELLED"));
+        }
+        Ok((run.outcomes, run.winner))
+    }
 }
 
 impl Context<'_, '_> {
@@ -6313,7 +6288,7 @@ impl Context<'_, '_> {
         if scope.0.contains_key(root) {
             return None;
         }
-        if !self.restrict_function_names && self.functions.contains_key(&path) {
+        if !self.mode.is_repl() && self.functions.contains_key(&path) {
             return None;
         }
         if self
@@ -7033,7 +7008,7 @@ impl Context<'_, '_> {
             callee,
             resolved.as_deref(),
             scope,
-            !self.restrict_function_names,
+            !self.mode.is_repl(),
             function_name(callee).is_some_and(|name| self.functions.contains_key(&name)),
             self.functions,
         ) || resolved
@@ -9275,7 +9250,7 @@ impl Context<'_, '_> {
             callee,
             resolved_function.as_deref(),
             scope,
-            !self.restrict_function_names,
+            !self.mode.is_repl(),
             source_export_available,
             captured_timezone_snapshot_matches(self.functions),
             self.functions,
@@ -9346,7 +9321,7 @@ impl Context<'_, '_> {
         let qualified_time = (!scope.0.contains_key("std"))
             .then(|| time_name(callee))
             .flatten();
-        if self.restrict_function_names
+        if self.mode.is_repl()
             && resolved_function.is_none()
             && ((qualified_math.is_some() && native_math.is_none())
                 || (qualified_text.is_some() && native_text.is_none())
@@ -9361,11 +9336,11 @@ impl Context<'_, '_> {
                 && captured_collection_binding_is_native(binding.operation, self.functions)
         });
         let native_asof_join = portable_collection_name(callee) == Some("asof_join")
-            && !self.restrict_function_names
+            && !self.mode.is_repl()
             && !scope.0.contains_key("std")
             && resolved_function.is_none();
         if portable_collection_operation(callee, resolved_function.as_deref()).is_some()
-            && self.restrict_function_names
+            && self.mode.is_repl()
             && resolved_function.is_none()
             && !native_asof_join
             && !native_collection
@@ -9465,7 +9440,7 @@ impl Context<'_, '_> {
                     }
                 }
             }
-            if self.reject_unhandled_field_calls
+            if self.mode.is_repl()
                 && matches!(callee, Expr::Field { .. })
                 && self.resolve_function_name(callee, scope).is_none()
             {
@@ -9582,26 +9557,14 @@ impl Context<'_, '_> {
             self.repl_bindings = previous_repl_bindings;
             return result;
         }
-        let math = native_math.or_else(|| {
-            (!self.restrict_function_names)
-                .then_some(qualified_math)
-                .flatten()
-        });
-        let bits = native_bits.or_else(|| {
-            (!self.restrict_function_names)
-                .then_some(qualified_bits)
-                .flatten()
-        });
-        let text = native_text.or_else(|| {
-            (!self.restrict_function_names)
-                .then_some(qualified_text)
-                .flatten()
-        });
-        let stats = native_stats.or_else(|| {
-            (!self.restrict_function_names)
-                .then_some(qualified_stats)
-                .flatten()
-        });
+        let math =
+            native_math.or_else(|| (!self.mode.is_repl()).then_some(qualified_math).flatten());
+        let bits =
+            native_bits.or_else(|| (!self.mode.is_repl()).then_some(qualified_bits).flatten());
+        let text =
+            native_text.or_else(|| (!self.mode.is_repl()).then_some(qualified_text).flatten());
+        let stats =
+            native_stats.or_else(|| (!self.mode.is_repl()).then_some(qualified_stats).flatten());
         let time = native_time;
         let stream = native_stream.or(root_stream_operation);
         let concurrent = native_concurrent;
@@ -9697,7 +9660,7 @@ impl Context<'_, '_> {
                     | "__rate"
                     | "__integrate"
             );
-            if self.restrict_function_names && nullable {
+            if self.mode.is_repl() && nullable {
                 // ORNA-TYPE-001: `T?` is Option<T>; absence is Option none, not a bare null.
                 Ok(match value {
                     Value::Null => Value::Option(None),
@@ -9741,7 +9704,7 @@ impl Context<'_, '_> {
             .namespace
             .as_deref()
             .is_some_and(|namespace| namespace == "std" || namespace.starts_with("std."));
-        !self.restrict_function_names && !in_standard
+        !self.mode.is_repl() && !in_standard
     }
     /// Resolves an import alias key. The REPL's session aliases apply first. A
     /// bare key is the admitted module's own import and is visible only outside
@@ -11100,49 +11063,19 @@ impl Context<'_, '_> {
                 if callbacks.is_empty() {
                     return Ok(Value::list(Vec::new()));
                 }
-                self.check_call_room()?;
-                let parent = self.cancellation.cloned();
-                let mut child_effects = Vec::with_capacity(callbacks.len());
-                self.disable_call_reuse_for_fork();
-                if let Some(effects) = self.effects.as_deref_mut() {
-                    for index in 0..callbacks.len() {
-                        child_effects.push(effects.fork_task_child(index));
-                    }
-                } else {
-                    child_effects.resize_with(callbacks.len(), || None);
-                }
-                let (results, _, records) = run_task_callbacks(
-                    callbacks,
-                    child_effects,
-                    self.calls,
-                    parent.clone(),
-                    self.functions,
-                    self.aliases,
-                    self.session_functions,
-                    self.limits,
-                    self.repl_bindings,
-                    self.restrict_function_names,
-                    self.reject_unhandled_field_calls,
-                    self.sys_host,
-                    true,
-                    false,
-                );
-                self.absorb_materializations(records)?;
-                if parent.as_ref().is_some_and(CancellationToken::is_requested) {
-                    return Err(error("ORNA-EVAL-CANCELLED"));
-                }
-                let failures = results
+                let (outcomes, _) = self.fork_task_callbacks(callbacks, TaskPolicy::Parallel)?;
+                let failures = outcomes
                     .iter()
-                    .filter_map(|result| result.as_ref()?.as_ref().err())
+                    .filter_map(|outcome| outcome.as_ref()?.as_ref().err())
                     .filter(|failure| failure.code() != "ORNA-EVAL-CANCELLED")
                     .cloned()
                     .collect::<Vec<_>>();
                 if !failures.is_empty() {
                     return Err(aggregate_task_failures(&failures));
                 }
-                let mut output = Vec::with_capacity(results.len());
-                for result in results {
-                    match result {
+                let mut output = Vec::with_capacity(outcomes.len());
+                for outcome in outcomes {
+                    match outcome {
                         Some(Ok(value)) => output.push(value),
                         Some(Err(failure)) => return Err(failure),
                         None => return Err(error("ORNA-EVAL-CANCELLED")),
@@ -11155,44 +11088,14 @@ impl Context<'_, '_> {
                 if callbacks.is_empty() {
                     return Err(error("ORNA-EVAL-VALUE"));
                 }
-                self.check_call_room()?;
-                let parent = self.cancellation.cloned();
-                let mut child_effects = Vec::with_capacity(callbacks.len());
-                self.disable_call_reuse_for_fork();
-                if let Some(effects) = self.effects.as_deref_mut() {
-                    for index in 0..callbacks.len() {
-                        child_effects.push(effects.fork_task_child(index));
-                    }
-                } else {
-                    child_effects.resize_with(callbacks.len(), || None);
-                }
-                let (results, winner, records) = run_task_callbacks(
-                    callbacks,
-                    child_effects,
-                    self.calls,
-                    parent.clone(),
-                    self.functions,
-                    self.aliases,
-                    self.session_functions,
-                    self.limits,
-                    self.repl_bindings,
-                    self.restrict_function_names,
-                    self.reject_unhandled_field_calls,
-                    self.sys_host,
-                    false,
-                    true,
-                );
-                self.absorb_materializations(records)?;
-                if parent.as_ref().is_some_and(CancellationToken::is_requested) {
-                    return Err(error("ORNA-EVAL-CANCELLED"));
-                }
+                let (outcomes, winner) = self.fork_task_callbacks(callbacks, TaskPolicy::Race)?;
                 if let Some(winner) = winner {
                     return Ok(winner);
                 }
-                results
+                outcomes
                     .into_iter()
-                    .find_map(|result| {
-                        result.and_then(|result| match result {
+                    .find_map(|outcome| {
+                        outcome.and_then(|result| match result {
                             Err(failure) if failure.code() != "ORNA-EVAL-CANCELLED" => {
                                 Some(Err(failure))
                             }
@@ -11219,15 +11122,7 @@ impl Context<'_, '_> {
                 let timeout = std::time::Duration::new(seconds, *nanosecond);
                 let shared_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let parent = self.cancellation.cloned();
-                let functions = self.functions;
-                let aliases = self.aliases;
-                let session_functions = self.session_functions;
-                let limits = self.limits;
-                let repl_bindings = self.repl_bindings;
-                let restrict_function_names = self.restrict_function_names;
-                let reject_unhandled_field_calls = self.reject_unhandled_field_calls;
-                let sys_host = self.sys_host;
-                let active_calls = self.calls;
+                let environment = self.task_environment();
                 self.disable_call_reuse_for_fork();
                 let child_effects = self
                     .effects
@@ -11247,16 +11142,8 @@ impl Context<'_, '_> {
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             invoke_task_callback(
                                 callback,
-                                functions,
-                                aliases,
-                                session_functions,
-                                limits,
+                                environment,
                                 cancellation,
-                                repl_bindings,
-                                restrict_function_names,
-                                reject_unhandled_field_calls,
-                                sys_host,
-                                active_calls,
                                 child_effects,
                                 &sink_for_task,
                             )
@@ -17156,25 +17043,7 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
     }
 
     fn test_context<'functions>(functions: &'functions Functions) -> Context<'functions, 'static> {
-        Context {
-            limits: Limits::default(),
-            steps: 0,
-            calls: 0,
-            functions,
-            aliases: None,
-            session_functions: None,
-            repl_bindings: false,
-            restrict_function_names: false,
-            reject_unhandled_field_calls: false,
-            effects: None,
-            namespace: None,
-            transfer: None,
-            materializations: Vec::new(),
-            materialization_clock_unavailable: false,
-            reuse: CallReuse::default(),
-            sys_host: None,
-            cancellation: None,
-        }
+        Context::new(Limits::default(), functions)
     }
 
     #[test]
@@ -18637,25 +18506,7 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
         let parsed = parse_expression(source);
         assert!(parsed.is_ok(), "{source} should parse");
         let functions = Functions::new();
-        let mut context = Context {
-            limits: Limits::default(),
-            steps: 0,
-            calls: 0,
-            functions: &functions,
-            aliases: None,
-            session_functions: None,
-            repl_bindings: false,
-            restrict_function_names: false,
-            reject_unhandled_field_calls: false,
-            effects: None,
-            namespace: None,
-            transfer: None,
-            materializations: Vec::new(),
-            materialization_clock_unavailable: false,
-            reuse: CallReuse::default(),
-            sys_host: None,
-            cancellation: None,
-        };
+        let mut context = Context::new(Limits::default(), &functions);
         let mut scope = Scope(
             BTreeMap::new(),
             BTreeSet::new(),
@@ -18716,23 +18567,8 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
         assert!(parsed.is_ok(), "{source} should parse");
         let functions = Functions::new();
         let mut context = Context {
-            limits: Limits::default(),
-            steps: 0,
-            calls: 0,
-            functions: &functions,
-            aliases: None,
-            session_functions: None,
-            repl_bindings: false,
-            restrict_function_names: false,
-            reject_unhandled_field_calls: false,
             effects: Some(effects),
-            namespace: None,
-            transfer: None,
-            materializations: Vec::new(),
-            materialization_clock_unavailable: false,
-            reuse: CallReuse::default(),
-            sys_host: None,
-            cancellation: None,
+            ..Context::new(Limits::default(), &functions)
         };
         let mut scope = Scope(
             BTreeMap::new(),
@@ -18870,23 +18706,9 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
         assert!(parsed.is_ok(), "{source} should parse");
         let functions = Functions::new();
         let mut context = Context {
-            limits: Limits::default(),
-            steps: 0,
-            calls: 0,
-            functions: &functions,
-            aliases: None,
-            session_functions: None,
-            repl_bindings: false,
-            restrict_function_names: false,
-            reject_unhandled_field_calls: false,
             effects: Some(effects),
-            namespace: None,
-            transfer: None,
-            materializations: Vec::new(),
-            materialization_clock_unavailable: false,
-            reuse: CallReuse::default(),
-            sys_host: None,
             cancellation,
+            ..Context::new(Limits::default(), &functions)
         };
         let mut scope = Scope(
             BTreeMap::new(),
@@ -19019,23 +18841,10 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
         let functions = Functions::new();
         let mut effects = RelationEffects { calls: 0 };
         let mut context = Context {
-            limits: Limits::default(),
-            steps: 0,
-            calls: 0,
-            functions: &functions,
-            aliases: None,
-            session_functions: None,
+            mode: ActivationMode::Repl,
             repl_bindings: true,
-            restrict_function_names: true,
-            reject_unhandled_field_calls: true,
             effects: Some(&mut effects),
-            namespace: None,
-            transfer: None,
-            materializations: Vec::new(),
-            materialization_clock_unavailable: false,
-            reuse: CallReuse::default(),
-            sys_host: None,
-            cancellation: None,
+            ..Context::new(Limits::default(), &functions)
         };
         let mut scope = Scope(
             BTreeMap::new(),
@@ -19058,23 +18867,10 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
         let functions = Functions::new();
         let mut effects = NonAdvancingRelationEffects;
         let mut context = Context {
-            limits: Limits::default(),
-            steps: 0,
-            calls: 0,
-            functions: &functions,
-            aliases: None,
-            session_functions: None,
+            mode: ActivationMode::Repl,
             repl_bindings: true,
-            restrict_function_names: true,
-            reject_unhandled_field_calls: true,
             effects: Some(&mut effects),
-            namespace: None,
-            transfer: None,
-            materializations: Vec::new(),
-            materialization_clock_unavailable: false,
-            reuse: CallReuse::default(),
-            sys_host: None,
-            cancellation: None,
+            ..Context::new(Limits::default(), &functions)
         };
         let plan = RelationPlan::new("Note".into());
         let mut callbacks = 0;
@@ -19528,23 +19324,11 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
         cancellation.request_after_checks(1);
         let mut effects = NonAdvancingRelationEffects;
         let mut context = Context {
-            limits: Limits::default(),
-            steps: 0,
-            calls: 0,
-            functions: &functions,
-            aliases: None,
-            session_functions: None,
+            mode: ActivationMode::Repl,
             repl_bindings: true,
-            restrict_function_names: true,
-            reject_unhandled_field_calls: true,
             effects: Some(&mut effects),
-            namespace: None,
-            transfer: None,
-            materializations: Vec::new(),
-            materialization_clock_unavailable: false,
-            reuse: CallReuse::default(),
-            sys_host: None,
             cancellation: Some(&cancellation),
+            ..Context::new(Limits::default(), &functions)
         };
         let plan = RelationPlan::new("Note".into());
         let mut callbacks = 0;
@@ -19565,23 +19349,11 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
         cancellation.request_after_checks(2);
         let mut effects = NonAdvancingRelationEffects;
         let mut context = Context {
-            limits: Limits::default(),
-            steps: 0,
-            calls: 0,
-            functions: &functions,
-            aliases: None,
-            session_functions: None,
+            mode: ActivationMode::Repl,
             repl_bindings: true,
-            restrict_function_names: true,
-            reject_unhandled_field_calls: true,
             effects: Some(&mut effects),
-            namespace: None,
-            transfer: None,
-            materializations: Vec::new(),
-            materialization_clock_unavailable: false,
-            reuse: CallReuse::default(),
-            sys_host: None,
             cancellation: Some(&cancellation),
+            ..Context::new(Limits::default(), &functions)
         };
         let plan = RelationPlan::new("Note".into());
         let mut callbacks = 0;
@@ -19601,23 +19373,10 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
         let cancellation = CancellationToken::new();
         cancellation.request_after_checks(2);
         let mut context = Context {
-            limits: Limits::default(),
-            steps: 0,
-            calls: 0,
-            functions: &functions,
-            aliases: None,
-            session_functions: None,
+            mode: ActivationMode::Repl,
             repl_bindings: true,
-            restrict_function_names: true,
-            reject_unhandled_field_calls: true,
-            effects: None,
-            namespace: None,
-            transfer: None,
-            materializations: Vec::new(),
-            materialization_clock_unavailable: false,
-            reuse: CallReuse::default(),
-            sys_host: None,
             cancellation: Some(&cancellation),
+            ..Context::new(Limits::default(), &functions)
         };
         let mut callbacks = 0;
         let mut distinct_seen = Vec::new();
@@ -19766,25 +19525,7 @@ mod table_reference_value_tests {
     use super::*;
 
     fn context(functions: &Functions) -> Context<'_, '_> {
-        Context {
-            limits: Limits::default(),
-            steps: 0,
-            calls: 0,
-            functions,
-            aliases: None,
-            session_functions: None,
-            repl_bindings: false,
-            restrict_function_names: false,
-            reject_unhandled_field_calls: false,
-            effects: None,
-            namespace: None,
-            transfer: None,
-            materializations: Vec::new(),
-            materialization_clock_unavailable: false,
-            reuse: CallReuse::default(),
-            sys_host: None,
-            cancellation: None,
-        }
+        Context::new(Limits::default(), functions)
     }
 
     #[test]
@@ -20509,23 +20250,9 @@ mod blob_equality_tests {
         .unwrap();
         let functions = Functions::new();
         let mut context = Context {
-            limits: Limits::default(),
-            steps: 0,
-            calls: 0,
-            functions: &functions,
-            aliases: None,
-            session_functions: None,
+            mode: ActivationMode::Repl,
             repl_bindings: true,
-            restrict_function_names: true,
-            reject_unhandled_field_calls: true,
-            effects: None,
-            namespace: None,
-            transfer: None,
-            materializations: Vec::new(),
-            materialization_clock_unavailable: false,
-            reuse: CallReuse::default(),
-            sys_host: None,
-            cancellation: None,
+            ..Context::new(Limits::default(), &functions)
         };
         match Value::from_context_value(&overflow, &mut context, 0) {
             Err(error) => assert_eq!(error.code(), "ORNA-EVAL-UNSUPPORTED"),
