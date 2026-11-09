@@ -4733,9 +4733,9 @@ struct Scope {
     /// expression produces its relation row shape, while table operations
     /// retain the declared nominal table result.
     table_rows: BTreeMap<String, Type>,
-    auto_key_tables: BTreeSet<String>,
     /// Tables without declared keys use the implicit automatic key and cannot
     /// be explicitly re-keyed by source code.
+    auto_key_tables: BTreeSet<String>,
     /// Local nominal record constructors elaborate to their declared row shape
     /// so field access remains structural inside inferred stream pipelines.
     nominal_rows: BTreeMap<String, Type>,
@@ -4756,8 +4756,9 @@ struct Scope {
     /// are selected from the explicitly resolved export instead of by short
     /// name alone.
     local_nominal_names: BTreeSet<String>,
-    /// closed `Port.from(value)` constructor can check the source value
-    /// without erasing the refined nominal result.
+    /// Local refined types mapped to the type they refine, so the closed
+    /// `Port.from(value)` constructor can check the source value without
+    /// erasing the refined nominal result.
     refined_types: BTreeMap<String, Type>,
     /// Canonical identities of the local, imported and attached nominal types
     /// that implement the core `Currency` protocol (ORNA-MONEY-004). Never
