@@ -4,10 +4,10 @@
 //! module only accepts already typed, snapshot-pinned inputs and turns them
 //! into deterministic, bounded `sys.Plan` and `sys.Dependency` projections.
 
-// Every `explain_*` entry point takes its own combination of chain inputs: the
-// pin pairs, windows, checkpoints, spills and rotation chains that one explain
-// shape folds. The parameter count is the shape's API, and its callers pass the
-// inputs from the plan they were handed, so the list stays positional.
+// The public `explain_query_with_*` entry points keep their published
+// positional parameter lists, and the fold helpers below thread one pair's or
+// chain's coordinates positionally. Both exceed clippy's argument limit; the
+// internal query-description plumbing already goes through `ExplainInputs`.
 #![allow(clippy::too_many_arguments)]
 
 use std::{
@@ -1353,12 +1353,70 @@ impl fmt::Display for ExplainError {
 
 impl std::error::Error for ExplainError {}
 
+/// Every optional input a query explanation can fold. An absent input is
+/// empty (and `disjunct_count` is 1); each public `explain_query_with_*` entry
+/// point fills in only the inputs it accepts.
+#[derive(Clone, Copy)]
+struct ExplainInputs<'a> {
+    disjunct_count: u64,
+    conjunct_count: Option<u64>,
+    conjunct_count_per_disjunct: Option<u64>,
+    nested_input_limits: &'a [u64],
+    nested_branch_limits: &'a [u64],
+    limits_between_disjunct_and_conjunct: &'a [u64],
+    post_expansion_conjunct: Option<&'a ExpressionRef>,
+    additional_limits: &'a [u64],
+    disjunct_storms: &'a [DisjunctStormDescription],
+    disjunct_storm_cascades: &'a [DisjunctStormCascadeDescription],
+    partial_indexes: &'a [QueryPartialIndexDescription],
+    decorrelated_subqueries: &'a [QueryDecorrelatedSubqueryDescription],
+    window_aggregates: &'a [QueryWindowAggregatePushdownDescription],
+    join_pair_identities: &'a [QueryJoinPairIdentityDescription],
+    input_limit_pushdowns: &'a [QueryLimitPushdownDescription],
+    window_spills: &'a [QueryWindowSpillDescription],
+    checkpoint_compaction_chains: &'a [QueryPairedCheckpointSegmentCompactionChainDescription],
+    segment_rotation_chains: &'a [QueryPairedSegmentRotationChainDescription],
+    stream_compaction_chains: &'a [QueryPairedStreamCompactionChainDescription],
+    spill_restore_chains: &'a [QueryPairedCheckpointSpillRestoreChainDescription],
+    stream_rotation_chains: &'a [QueryPairedStreamRotationChainDescription],
+    wal_rotation_chains: &'a [QueryPairedWalRotationChainDescription],
+}
+
+impl Default for ExplainInputs<'_> {
+    fn default() -> Self {
+        Self {
+            disjunct_count: 1,
+            conjunct_count: None,
+            conjunct_count_per_disjunct: None,
+            nested_input_limits: &[],
+            nested_branch_limits: &[],
+            limits_between_disjunct_and_conjunct: &[],
+            post_expansion_conjunct: None,
+            additional_limits: &[],
+            disjunct_storms: &[],
+            disjunct_storm_cascades: &[],
+            partial_indexes: &[],
+            decorrelated_subqueries: &[],
+            window_aggregates: &[],
+            join_pair_identities: &[],
+            input_limit_pushdowns: &[],
+            window_spills: &[],
+            checkpoint_compaction_chains: &[],
+            segment_rotation_chains: &[],
+            stream_compaction_chains: &[],
+            spill_restore_chains: &[],
+            stream_rotation_chains: &[],
+            wal_rotation_chains: &[],
+        }
+    }
+}
+
 /// Plans a resolved query without changing how it is evaluated. A scan remains
 /// the reference fallback; materialization is shown only when explicitly
 /// requested. Statistics are estimates supplied by the snapshot adapter, and
 /// actual fields remain absent because explain does not execute the query.
 pub fn explain_query(query: &QueryPlanDescription) -> Result<ExplainedPlan, ExplainError> {
-    explain_query_with_limit_chain(query, &[])
+    explain_with_inputs(query, &ExplainInputs::default())
 }
 
 /// Explains a query while folding resolver-approved correlated subqueries into
@@ -1370,22 +1428,12 @@ pub fn explain_query_with_decorrelated_subqueries(
     query: &QueryPlanDescription,
     subqueries: &[QueryDecorrelatedSubqueryDescription],
 ) -> Result<ExplainedPlan, ExplainError> {
-    explain_query_core_with_subqueries(
+    explain_with_inputs(
         query,
-        1,
-        None,
-        None,
-        &[],
-        &[],
-        &[],
-        None,
-        &[],
-        &[],
-        &[],
-        &[],
-        subqueries,
-        &[],
-        &[],
+        &ExplainInputs {
+            decorrelated_subqueries: subqueries,
+            ..ExplainInputs::default()
+        },
     )
 }
 
@@ -1397,22 +1445,12 @@ pub fn explain_query_with_join_pair_identities(
     query: &QueryPlanDescription,
     pairs: &[QueryJoinPairIdentityDescription],
 ) -> Result<ExplainedPlan, ExplainError> {
-    explain_query_core_with_subqueries(
+    explain_with_inputs(
         query,
-        1,
-        None,
-        None,
-        &[],
-        &[],
-        &[],
-        None,
-        &[],
-        &[],
-        &[],
-        &[],
-        &[],
-        &[],
-        pairs,
+        &ExplainInputs {
+            join_pair_identities: pairs,
+            ..ExplainInputs::default()
+        },
     )
 }
 
@@ -1427,25 +1465,13 @@ pub fn explain_query_with_join_pair_identities_and_limit_pushdowns(
     pairs: &[QueryJoinPairIdentityDescription],
     limit_pushdowns: &[QueryLimitPushdownDescription],
 ) -> Result<ExplainedPlan, ExplainError> {
-    explain_query_core_with_limit_pushdowns(
+    explain_with_inputs(
         query,
-        1,
-        None,
-        None,
-        &[],
-        &[],
-        &[],
-        None,
-        &[],
-        &[],
-        &[],
-        &[],
-        &[],
-        &[],
-        pairs,
-        limit_pushdowns,
-        &[],
-        &[],
+        &ExplainInputs {
+            join_pair_identities: pairs,
+            input_limit_pushdowns: limit_pushdowns,
+            ..ExplainInputs::default()
+        },
     )
 }
 
@@ -1460,25 +1486,14 @@ pub fn explain_query_with_join_pair_identities_and_limit_window_aggregate_pushdo
     limit_pushdowns: &[QueryLimitPushdownDescription],
     aggregates: &[QueryWindowAggregatePushdownDescription],
 ) -> Result<ExplainedPlan, ExplainError> {
-    explain_query_core_with_limit_pushdowns(
+    explain_with_inputs(
         query,
-        1,
-        None,
-        None,
-        &[],
-        &[],
-        &[],
-        None,
-        &[],
-        &[],
-        &[],
-        &[],
-        &[],
-        aggregates,
-        pairs,
-        limit_pushdowns,
-        &[],
-        &[],
+        &ExplainInputs {
+            window_aggregates: aggregates,
+            join_pair_identities: pairs,
+            input_limit_pushdowns: limit_pushdowns,
+            ..ExplainInputs::default()
+        },
     )
 }
 
@@ -1497,25 +1512,15 @@ pub fn explain_query_with_join_pair_identities_limit_window_aggregate_and_spill_
     aggregates: &[QueryWindowAggregatePushdownDescription],
     spills: &[QueryWindowSpillDescription],
 ) -> Result<ExplainedPlan, ExplainError> {
-    explain_query_core_with_limit_pushdowns(
+    explain_with_inputs(
         query,
-        1,
-        None,
-        None,
-        &[],
-        &[],
-        &[],
-        None,
-        &[],
-        &[],
-        &[],
-        &[],
-        &[],
-        aggregates,
-        pairs,
-        limit_pushdowns,
-        spills,
-        &[],
+        &ExplainInputs {
+            window_aggregates: aggregates,
+            join_pair_identities: pairs,
+            input_limit_pushdowns: limit_pushdowns,
+            window_spills: spills,
+            ..ExplainInputs::default()
+        },
     )
 }
 
@@ -1533,22 +1538,13 @@ pub fn explain_query_with_join_pair_identities_and_window_aggregate_pushdowns(
     pairs: &[QueryJoinPairIdentityDescription],
     aggregates: &[QueryWindowAggregatePushdownDescription],
 ) -> Result<ExplainedPlan, ExplainError> {
-    explain_query_core_with_subqueries(
+    explain_with_inputs(
         query,
-        1,
-        None,
-        None,
-        &[],
-        &[],
-        &[],
-        None,
-        &[],
-        &[],
-        &[],
-        &[],
-        &[],
-        aggregates,
-        pairs,
+        &ExplainInputs {
+            window_aggregates: aggregates,
+            join_pair_identities: pairs,
+            ..ExplainInputs::default()
+        },
     )
 }
 
@@ -1566,25 +1562,14 @@ pub fn explain_query_with_join_pair_identities_window_aggregate_and_spill_pushdo
     aggregates: &[QueryWindowAggregatePushdownDescription],
     spills: &[QueryWindowSpillDescription],
 ) -> Result<ExplainedPlan, ExplainError> {
-    explain_query_core_with_limit_pushdowns(
+    explain_with_inputs(
         query,
-        1,
-        None,
-        None,
-        &[],
-        &[],
-        &[],
-        None,
-        &[],
-        &[],
-        &[],
-        &[],
-        &[],
-        aggregates,
-        pairs,
-        &[],
-        spills,
-        &[],
+        &ExplainInputs {
+            window_aggregates: aggregates,
+            join_pair_identities: pairs,
+            window_spills: spills,
+            ..ExplainInputs::default()
+        },
     )
 }
 
@@ -1600,22 +1585,12 @@ pub fn explain_query_with_window_aggregate_pushdowns(
     query: &QueryPlanDescription,
     aggregates: &[QueryWindowAggregatePushdownDescription],
 ) -> Result<ExplainedPlan, ExplainError> {
-    explain_query_core_with_subqueries(
+    explain_with_inputs(
         query,
-        1,
-        None,
-        None,
-        &[],
-        &[],
-        &[],
-        None,
-        &[],
-        &[],
-        &[],
-        &[],
-        &[],
-        aggregates,
-        &[],
+        &ExplainInputs {
+            window_aggregates: aggregates,
+            ..ExplainInputs::default()
+        },
     )
 }
 
@@ -1628,19 +1603,12 @@ pub fn explain_query_with_partial_indexes(
     query: &QueryPlanDescription,
     indexes: &[QueryPartialIndexDescription],
 ) -> Result<ExplainedPlan, ExplainError> {
-    explain_query_with_predicate_pressure_and_branch_limits_and_storms_with_partial_indexes(
+    explain_with_inputs(
         query,
-        1,
-        None,
-        None,
-        &[],
-        &[],
-        &[],
-        None,
-        &[],
-        &[],
-        &[],
-        indexes,
+        &ExplainInputs {
+            partial_indexes: indexes,
+            ..ExplainInputs::default()
+        },
     )
 }
 
@@ -1652,22 +1620,13 @@ pub fn explain_query_with_partial_indexes_and_join_pair_identities(
     indexes: &[QueryPartialIndexDescription],
     pairs: &[QueryJoinPairIdentityDescription],
 ) -> Result<ExplainedPlan, ExplainError> {
-    explain_query_core_with_subqueries(
+    explain_with_inputs(
         query,
-        1,
-        None,
-        None,
-        &[],
-        &[],
-        &[],
-        None,
-        &[],
-        &[],
-        &[],
-        indexes,
-        &[],
-        &[],
-        pairs,
+        &ExplainInputs {
+            partial_indexes: indexes,
+            join_pair_identities: pairs,
+            ..ExplainInputs::default()
+        },
     )
 }
 
@@ -1683,25 +1642,14 @@ pub fn explain_query_with_partial_indexes_and_paired_checkpoint_segment_compacti
     pairs: &[QueryJoinPairIdentityDescription],
     checkpoint_chains: &[QueryPairedCheckpointSegmentCompactionChainDescription],
 ) -> Result<ExplainedPlan, ExplainError> {
-    explain_query_core_with_limit_pushdowns(
+    explain_with_inputs(
         query,
-        1,
-        None,
-        None,
-        &[],
-        &[],
-        &[],
-        None,
-        &[],
-        &[],
-        &[],
-        indexes,
-        &[],
-        &[],
-        pairs,
-        &[],
-        &[],
-        checkpoint_chains,
+        &ExplainInputs {
+            partial_indexes: indexes,
+            join_pair_identities: pairs,
+            checkpoint_compaction_chains: checkpoint_chains,
+            ..ExplainInputs::default()
+        },
     )
 }
 
@@ -1720,30 +1668,19 @@ pub fn explain_query_with_paired_cost_restoration_and_window_pushdowns(
     stream_rotation_chains: &[QueryPairedStreamRotationChainDescription],
     wal_rotation_chains: &[QueryPairedWalRotationChainDescription],
 ) -> Result<ExplainedPlan, ExplainError> {
-    explain_query_core_with_wal_rotation_chains(
+    explain_with_inputs(
         query,
-        1,
-        None,
-        None,
-        &[],
-        &[],
-        &[],
-        None,
-        &[],
-        &[],
-        &[],
-        &[],
-        &[],
-        window_aggregates,
-        pairs,
-        &[],
-        &[],
-        checkpoint_chains,
-        segment_rotation_chains,
-        stream_compaction_chains,
-        spill_restore_chains,
-        stream_rotation_chains,
-        wal_rotation_chains,
+        &ExplainInputs {
+            window_aggregates,
+            join_pair_identities: pairs,
+            checkpoint_compaction_chains: checkpoint_chains,
+            segment_rotation_chains,
+            stream_compaction_chains,
+            spill_restore_chains,
+            stream_rotation_chains,
+            wal_rotation_chains,
+            ..ExplainInputs::default()
+        },
     )
 }
 
@@ -1764,30 +1701,20 @@ pub fn explain_query_with_paired_cost_restoration_and_window_spill_pushdowns(
     stream_rotation_chains: &[QueryPairedStreamRotationChainDescription],
     wal_rotation_chains: &[QueryPairedWalRotationChainDescription],
 ) -> Result<ExplainedPlan, ExplainError> {
-    explain_query_core_with_wal_rotation_chains(
+    explain_with_inputs(
         query,
-        1,
-        None,
-        None,
-        &[],
-        &[],
-        &[],
-        None,
-        &[],
-        &[],
-        &[],
-        &[],
-        &[],
-        window_aggregates,
-        pairs,
-        &[],
-        window_spills,
-        checkpoint_chains,
-        segment_rotation_chains,
-        stream_compaction_chains,
-        spill_restore_chains,
-        stream_rotation_chains,
-        wal_rotation_chains,
+        &ExplainInputs {
+            window_aggregates,
+            join_pair_identities: pairs,
+            window_spills,
+            checkpoint_compaction_chains: checkpoint_chains,
+            segment_rotation_chains,
+            stream_compaction_chains,
+            spill_restore_chains,
+            stream_rotation_chains,
+            wal_rotation_chains,
+            ..ExplainInputs::default()
+        },
     )
 }
 
@@ -1803,26 +1730,15 @@ pub fn explain_query_with_partial_indexes_and_paired_checkpoint_compaction_and_s
     checkpoint_chains: &[QueryPairedCheckpointSegmentCompactionChainDescription],
     rotation_chains: &[QueryPairedSegmentRotationChainDescription],
 ) -> Result<ExplainedPlan, ExplainError> {
-    explain_query_core_with_segment_rotation_chains(
+    explain_with_inputs(
         query,
-        1,
-        None,
-        None,
-        &[],
-        &[],
-        &[],
-        None,
-        &[],
-        &[],
-        &[],
-        indexes,
-        &[],
-        &[],
-        pairs,
-        &[],
-        &[],
-        checkpoint_chains,
-        rotation_chains,
+        &ExplainInputs {
+            partial_indexes: indexes,
+            join_pair_identities: pairs,
+            checkpoint_compaction_chains: checkpoint_chains,
+            segment_rotation_chains: rotation_chains,
+            ..ExplainInputs::default()
+        },
     )
 }
 
@@ -1838,27 +1754,16 @@ pub fn explain_query_with_partial_indexes_and_paired_checkpoint_rotation_and_str
     rotation_chains: &[QueryPairedSegmentRotationChainDescription],
     stream_compaction_chains: &[QueryPairedStreamCompactionChainDescription],
 ) -> Result<ExplainedPlan, ExplainError> {
-    explain_query_core_with_stream_compaction_chains(
+    explain_with_inputs(
         query,
-        1,
-        None,
-        None,
-        &[],
-        &[],
-        &[],
-        None,
-        &[],
-        &[],
-        &[],
-        indexes,
-        &[],
-        &[],
-        pairs,
-        &[],
-        &[],
-        checkpoint_chains,
-        rotation_chains,
-        stream_compaction_chains,
+        &ExplainInputs {
+            partial_indexes: indexes,
+            join_pair_identities: pairs,
+            checkpoint_compaction_chains: checkpoint_chains,
+            segment_rotation_chains: rotation_chains,
+            stream_compaction_chains,
+            ..ExplainInputs::default()
+        },
     )
 }
 
@@ -1876,28 +1781,17 @@ pub fn explain_query_with_partial_indexes_and_paired_checkpoint_rotation_stream_
     stream_compaction_chains: &[QueryPairedStreamCompactionChainDescription],
     spill_restore_chains: &[QueryPairedCheckpointSpillRestoreChainDescription],
 ) -> Result<ExplainedPlan, ExplainError> {
-    explain_query_core_with_checkpoint_spill_restore_chains(
+    explain_with_inputs(
         query,
-        1,
-        None,
-        None,
-        &[],
-        &[],
-        &[],
-        None,
-        &[],
-        &[],
-        &[],
-        indexes,
-        &[],
-        &[],
-        pairs,
-        &[],
-        &[],
-        checkpoint_chains,
-        rotation_chains,
-        stream_compaction_chains,
-        spill_restore_chains,
+        &ExplainInputs {
+            partial_indexes: indexes,
+            join_pair_identities: pairs,
+            checkpoint_compaction_chains: checkpoint_chains,
+            segment_rotation_chains: rotation_chains,
+            stream_compaction_chains,
+            spill_restore_chains,
+            ..ExplainInputs::default()
+        },
     )
 }
 
@@ -1917,29 +1811,18 @@ pub fn explain_query_with_partial_indexes_and_paired_checkpoint_stream_rotation_
     spill_restore_chains: &[QueryPairedCheckpointSpillRestoreChainDescription],
     stream_rotation_chains: &[QueryPairedStreamRotationChainDescription],
 ) -> Result<ExplainedPlan, ExplainError> {
-    explain_query_core_with_stream_rotation_chains(
+    explain_with_inputs(
         query,
-        1,
-        None,
-        None,
-        &[],
-        &[],
-        &[],
-        None,
-        &[],
-        &[],
-        &[],
-        indexes,
-        &[],
-        &[],
-        pairs,
-        &[],
-        &[],
-        checkpoint_chains,
-        rotation_chains,
-        stream_compaction_chains,
-        spill_restore_chains,
-        stream_rotation_chains,
+        &ExplainInputs {
+            partial_indexes: indexes,
+            join_pair_identities: pairs,
+            checkpoint_compaction_chains: checkpoint_chains,
+            segment_rotation_chains: rotation_chains,
+            stream_compaction_chains,
+            spill_restore_chains,
+            stream_rotation_chains,
+            ..ExplainInputs::default()
+        },
     )
 }
 
@@ -1959,30 +1842,19 @@ pub fn explain_query_with_partial_indexes_and_paired_checkpoint_wal_rotation_cha
     stream_rotation_chains: &[QueryPairedStreamRotationChainDescription],
     wal_rotation_chains: &[QueryPairedWalRotationChainDescription],
 ) -> Result<ExplainedPlan, ExplainError> {
-    explain_query_core_with_wal_rotation_chains(
+    explain_with_inputs(
         query,
-        1,
-        None,
-        None,
-        &[],
-        &[],
-        &[],
-        None,
-        &[],
-        &[],
-        &[],
-        indexes,
-        &[],
-        &[],
-        pairs,
-        &[],
-        &[],
-        checkpoint_chains,
-        rotation_chains,
-        stream_compaction_chains,
-        spill_restore_chains,
-        stream_rotation_chains,
-        wal_rotation_chains,
+        &ExplainInputs {
+            partial_indexes: indexes,
+            join_pair_identities: pairs,
+            checkpoint_compaction_chains: checkpoint_chains,
+            segment_rotation_chains: rotation_chains,
+            stream_compaction_chains,
+            spill_restore_chains,
+            stream_rotation_chains,
+            wal_rotation_chains,
+            ..ExplainInputs::default()
+        },
     )
 }
 
@@ -1995,22 +1867,13 @@ pub fn explain_query_with_partial_indexes_and_decorrelated_subqueries(
     indexes: &[QueryPartialIndexDescription],
     subqueries: &[QueryDecorrelatedSubqueryDescription],
 ) -> Result<ExplainedPlan, ExplainError> {
-    explain_query_core_with_subqueries(
+    explain_with_inputs(
         query,
-        1,
-        None,
-        None,
-        &[],
-        &[],
-        &[],
-        None,
-        &[],
-        &[],
-        &[],
-        indexes,
-        subqueries,
-        &[],
-        &[],
+        &ExplainInputs {
+            partial_indexes: indexes,
+            decorrelated_subqueries: subqueries,
+            ..ExplainInputs::default()
+        },
     )
 }
 
@@ -2025,22 +1888,14 @@ pub fn explain_query_with_partial_indexes_and_decorrelated_subqueries_and_join_p
     subqueries: &[QueryDecorrelatedSubqueryDescription],
     pairs: &[QueryJoinPairIdentityDescription],
 ) -> Result<ExplainedPlan, ExplainError> {
-    explain_query_core_with_subqueries(
+    explain_with_inputs(
         query,
-        1,
-        None,
-        None,
-        &[],
-        &[],
-        &[],
-        None,
-        &[],
-        &[],
-        &[],
-        indexes,
-        subqueries,
-        &[],
-        pairs,
+        &ExplainInputs {
+            partial_indexes: indexes,
+            decorrelated_subqueries: subqueries,
+            join_pair_identities: pairs,
+            ..ExplainInputs::default()
+        },
     )
 }
 
@@ -2053,7 +1908,13 @@ pub fn explain_query_with_limit_chain(
     query: &QueryPlanDescription,
     additional_limits: &[u64],
 ) -> Result<ExplainedPlan, ExplainError> {
-    explain_query_with_disjunct_limit_chain(query, 1, additional_limits)
+    explain_with_inputs(
+        query,
+        &ExplainInputs {
+            additional_limits,
+            ..ExplainInputs::default()
+        },
+    )
 }
 
 /// Explains a predicate expanded into disjunctive branches followed by an
@@ -2071,15 +1932,13 @@ pub fn explain_query_with_disjunct_limit_chain(
     disjunct_count: u64,
     additional_limits: &[u64],
 ) -> Result<ExplainedPlan, ExplainError> {
-    explain_query_with_predicate_pressure(
+    explain_with_inputs(
         query,
-        disjunct_count,
-        None,
-        None,
-        &[],
-        &[],
-        None,
-        additional_limits,
+        &ExplainInputs {
+            disjunct_count,
+            additional_limits,
+            ..ExplainInputs::default()
+        },
     )
 }
 
@@ -2100,15 +1959,14 @@ pub fn explain_query_with_disjunct_conjunct_limit_chain(
     conjunct_count: u64,
     additional_limits: &[u64],
 ) -> Result<ExplainedPlan, ExplainError> {
-    explain_query_with_predicate_pressure(
+    explain_with_inputs(
         query,
-        disjunct_count,
-        Some(conjunct_count),
-        None,
-        &[],
-        &[],
-        None,
-        additional_limits,
+        &ExplainInputs {
+            disjunct_count,
+            conjunct_count: Some(conjunct_count),
+            additional_limits,
+            ..ExplainInputs::default()
+        },
     )
 }
 
@@ -2135,15 +1993,14 @@ pub fn explain_query_with_conjunct_disjunct_limit_chain(
     if disjunct_count.saturating_mul(conjunct_count_per_disjunct) > MAX_PLAN_EXPRESSIONS as u64 {
         return Err(ExplainError::TooManyExpressions);
     }
-    explain_query_with_predicate_pressure(
+    explain_with_inputs(
         query,
-        disjunct_count,
-        None,
-        Some(conjunct_count_per_disjunct),
-        &[],
-        &[],
-        None,
-        additional_limits,
+        &ExplainInputs {
+            disjunct_count,
+            conjunct_count_per_disjunct: Some(conjunct_count_per_disjunct),
+            additional_limits,
+            ..ExplainInputs::default()
+        },
     )
 }
 
@@ -2177,16 +2034,15 @@ pub fn explain_query_with_disjunct_branch_limit_conjunct_cascade(
     if disjunct_count.saturating_mul(conjunct_count_per_disjunct) > MAX_PLAN_EXPRESSIONS as u64 {
         return Err(ExplainError::TooManyExpressions);
     }
-    explain_query_with_predicate_pressure_and_branch_limits(
+    explain_with_inputs(
         query,
-        disjunct_count,
-        None,
-        Some(conjunct_count_per_disjunct),
-        &[],
-        nested_branch_limits,
-        &[],
-        None,
-        additional_limits,
+        &ExplainInputs {
+            disjunct_count,
+            conjunct_count_per_disjunct: Some(conjunct_count_per_disjunct),
+            nested_branch_limits,
+            additional_limits,
+            ..ExplainInputs::default()
+        },
     )
 }
 
@@ -2218,18 +2074,13 @@ pub fn explain_query_with_disjunct_storm_chain(
     }) {
         return Err(ExplainError::InvalidExpression);
     }
-    explain_query_with_predicate_pressure_and_branch_limits_and_storms(
+    explain_with_inputs(
         query,
-        1,
-        None,
-        None,
-        &[],
-        &[],
-        &[],
-        None,
-        additional_limits,
-        storms,
-        &[],
+        &ExplainInputs {
+            additional_limits,
+            disjunct_storms: storms,
+            ..ExplainInputs::default()
+        },
     )
 }
 
@@ -2271,18 +2122,13 @@ pub fn explain_query_with_disjunct_storm_branch_limit_chains(
     if storms.is_empty() || query.predicate.is_some() {
         return Err(ExplainError::InvalidExpression);
     }
-    explain_query_with_predicate_pressure_and_branch_limits_and_storms(
+    explain_with_inputs(
         query,
-        1,
-        None,
-        None,
-        &[],
-        &[],
-        &[],
-        None,
-        additional_limits,
-        &[],
-        storms,
+        &ExplainInputs {
+            additional_limits,
+            disjunct_storm_cascades: storms,
+            ..ExplainInputs::default()
+        },
     )
 }
 
@@ -2304,15 +2150,14 @@ pub fn explain_query_with_input_limit_disjunct_chain(
     if disjunct_count == 0 || query.predicate.is_none() {
         return Err(ExplainError::InvalidExpression);
     }
-    explain_query_with_predicate_pressure(
+    explain_with_inputs(
         query,
-        disjunct_count,
-        None,
-        None,
-        nested_input_limits,
-        &[],
-        None,
-        additional_limits,
+        &ExplainInputs {
+            disjunct_count,
+            nested_input_limits,
+            additional_limits,
+            ..ExplainInputs::default()
+        },
     )
 }
 
@@ -2340,15 +2185,15 @@ pub fn explain_query_with_input_limit_conjunct_disjunct_chain(
     if disjunct_count.saturating_mul(conjunct_count_per_disjunct) > MAX_PLAN_EXPRESSIONS as u64 {
         return Err(ExplainError::TooManyExpressions);
     }
-    explain_query_with_predicate_pressure(
+    explain_with_inputs(
         query,
-        disjunct_count,
-        None,
-        Some(conjunct_count_per_disjunct),
-        nested_input_limits,
-        &[],
-        None,
-        additional_limits,
+        &ExplainInputs {
+            disjunct_count,
+            conjunct_count_per_disjunct: Some(conjunct_count_per_disjunct),
+            nested_input_limits,
+            additional_limits,
+            ..ExplainInputs::default()
+        },
     )
 }
 
@@ -2379,15 +2224,16 @@ pub fn explain_query_with_input_limit_disjunct_conjunct_chain(
     {
         return Err(ExplainError::InvalidExpression);
     }
-    explain_query_with_predicate_pressure(
+    explain_with_inputs(
         query,
-        disjunct_count,
-        Some(conjunct_count),
-        None,
-        nested_input_limits,
-        &[],
-        Some(&conjunct_predicate),
-        additional_limits,
+        &ExplainInputs {
+            disjunct_count,
+            conjunct_count: Some(conjunct_count),
+            nested_input_limits,
+            post_expansion_conjunct: Some(&conjunct_predicate),
+            additional_limits,
+            ..ExplainInputs::default()
+        },
     )
 }
 
@@ -2423,15 +2269,17 @@ pub fn explain_query_with_input_disjunct_limit_conjunct_chain(
     {
         return Err(ExplainError::InvalidExpression);
     }
-    explain_query_with_predicate_pressure(
+    explain_with_inputs(
         query,
-        disjunct_count,
-        Some(conjunct_count),
-        None,
-        nested_input_limits,
-        nested_disjunct_limits,
-        Some(&conjunct_predicate),
-        additional_limits,
+        &ExplainInputs {
+            disjunct_count,
+            conjunct_count: Some(conjunct_count),
+            nested_input_limits,
+            limits_between_disjunct_and_conjunct: nested_disjunct_limits,
+            post_expansion_conjunct: Some(&conjunct_predicate),
+            additional_limits,
+            ..ExplainInputs::default()
+        },
     )
 }
 
@@ -2472,15 +2320,18 @@ pub fn explain_query_with_input_limit_conjunct_disjunct_limit_conjunct_chain(
     if disjunct_count.saturating_mul(conjunct_count_per_disjunct) > MAX_PLAN_EXPRESSIONS as u64 {
         return Err(ExplainError::TooManyExpressions);
     }
-    explain_query_with_predicate_pressure(
+    explain_with_inputs(
         query,
-        disjunct_count,
-        Some(conjunct_count),
-        Some(conjunct_count_per_disjunct),
-        nested_input_limits,
-        nested_disjunct_limits,
-        Some(&conjunct_predicate),
-        additional_limits,
+        &ExplainInputs {
+            disjunct_count,
+            conjunct_count: Some(conjunct_count),
+            conjunct_count_per_disjunct: Some(conjunct_count_per_disjunct),
+            nested_input_limits,
+            limits_between_disjunct_and_conjunct: nested_disjunct_limits,
+            post_expansion_conjunct: Some(&conjunct_predicate),
+            additional_limits,
+            ..ExplainInputs::default()
+        },
     )
 }
 
@@ -2511,64 +2362,16 @@ pub fn explain_query_with_disjunct_limit_conjunct_chain(
     {
         return Err(ExplainError::InvalidExpression);
     }
-    explain_query_with_predicate_pressure(
+    explain_with_inputs(
         query,
-        disjunct_count,
-        Some(conjunct_count),
-        None,
-        &[],
-        nested_limits,
-        Some(&conjunct_predicate),
-        additional_limits,
-    )
-}
-
-fn explain_query_with_predicate_pressure(
-    query: &QueryPlanDescription,
-    disjunct_count: u64,
-    conjunct_count: Option<u64>,
-    conjunct_count_per_disjunct: Option<u64>,
-    nested_input_limits: &[u64],
-    limits_between_disjunct_and_conjunct: &[u64],
-    post_expansion_conjunct: Option<&ExpressionRef>,
-    additional_limits: &[u64],
-) -> Result<ExplainedPlan, ExplainError> {
-    explain_query_with_predicate_pressure_and_branch_limits(
-        query,
-        disjunct_count,
-        conjunct_count,
-        conjunct_count_per_disjunct,
-        nested_input_limits,
-        &[],
-        limits_between_disjunct_and_conjunct,
-        post_expansion_conjunct,
-        additional_limits,
-    )
-}
-
-fn explain_query_with_predicate_pressure_and_branch_limits(
-    query: &QueryPlanDescription,
-    disjunct_count: u64,
-    conjunct_count: Option<u64>,
-    conjunct_count_per_disjunct: Option<u64>,
-    nested_input_limits: &[u64],
-    nested_branch_limits: &[u64],
-    limits_between_disjunct_and_conjunct: &[u64],
-    post_expansion_conjunct: Option<&ExpressionRef>,
-    additional_limits: &[u64],
-) -> Result<ExplainedPlan, ExplainError> {
-    explain_query_with_predicate_pressure_and_branch_limits_and_storms(
-        query,
-        disjunct_count,
-        conjunct_count,
-        conjunct_count_per_disjunct,
-        nested_input_limits,
-        nested_branch_limits,
-        limits_between_disjunct_and_conjunct,
-        post_expansion_conjunct,
-        additional_limits,
-        &[],
-        &[],
+        &ExplainInputs {
+            disjunct_count,
+            conjunct_count: Some(conjunct_count),
+            limits_between_disjunct_and_conjunct: nested_limits,
+            post_expansion_conjunct: Some(&conjunct_predicate),
+            additional_limits,
+            ..ExplainInputs::default()
+        },
     )
 }
 
@@ -2634,318 +2437,11 @@ fn disjunct_storm_cascade_shape_counts(
     }
     Ok((operators, expressions, predicates))
 }
-
-fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
+fn explain_with_inputs(
     query: &QueryPlanDescription,
-    disjunct_count: u64,
-    conjunct_count: Option<u64>,
-    conjunct_count_per_disjunct: Option<u64>,
-    nested_input_limits: &[u64],
-    nested_branch_limits: &[u64],
-    limits_between_disjunct_and_conjunct: &[u64],
-    post_expansion_conjunct: Option<&ExpressionRef>,
-    additional_limits: &[u64],
-    disjunct_storms: &[DisjunctStormDescription],
-    disjunct_storm_cascades: &[DisjunctStormCascadeDescription],
+    inputs: &ExplainInputs<'_>,
 ) -> Result<ExplainedPlan, ExplainError> {
-    explain_query_with_predicate_pressure_and_branch_limits_and_storms_with_partial_indexes(
-        query,
-        disjunct_count,
-        conjunct_count,
-        conjunct_count_per_disjunct,
-        nested_input_limits,
-        nested_branch_limits,
-        limits_between_disjunct_and_conjunct,
-        post_expansion_conjunct,
-        additional_limits,
-        disjunct_storms,
-        disjunct_storm_cascades,
-        &[],
-    )
-}
-
-fn explain_query_with_predicate_pressure_and_branch_limits_and_storms_with_partial_indexes(
-    query: &QueryPlanDescription,
-    disjunct_count: u64,
-    conjunct_count: Option<u64>,
-    conjunct_count_per_disjunct: Option<u64>,
-    nested_input_limits: &[u64],
-    nested_branch_limits: &[u64],
-    limits_between_disjunct_and_conjunct: &[u64],
-    post_expansion_conjunct: Option<&ExpressionRef>,
-    additional_limits: &[u64],
-    disjunct_storms: &[DisjunctStormDescription],
-    disjunct_storm_cascades: &[DisjunctStormCascadeDescription],
-    partial_indexes: &[QueryPartialIndexDescription],
-) -> Result<ExplainedPlan, ExplainError> {
-    explain_query_core_with_subqueries(
-        query,
-        disjunct_count,
-        conjunct_count,
-        conjunct_count_per_disjunct,
-        nested_input_limits,
-        nested_branch_limits,
-        limits_between_disjunct_and_conjunct,
-        post_expansion_conjunct,
-        additional_limits,
-        disjunct_storms,
-        disjunct_storm_cascades,
-        partial_indexes,
-        &[],
-        &[],
-        &[],
-    )
-}
-
-fn explain_query_core_with_subqueries(
-    query: &QueryPlanDescription,
-    disjunct_count: u64,
-    conjunct_count: Option<u64>,
-    conjunct_count_per_disjunct: Option<u64>,
-    nested_input_limits: &[u64],
-    nested_branch_limits: &[u64],
-    limits_between_disjunct_and_conjunct: &[u64],
-    post_expansion_conjunct: Option<&ExpressionRef>,
-    additional_limits: &[u64],
-    disjunct_storms: &[DisjunctStormDescription],
-    disjunct_storm_cascades: &[DisjunctStormCascadeDescription],
-    partial_indexes: &[QueryPartialIndexDescription],
-    decorrelated_subqueries: &[QueryDecorrelatedSubqueryDescription],
-    window_aggregates: &[QueryWindowAggregatePushdownDescription],
-    join_pair_identities: &[QueryJoinPairIdentityDescription],
-) -> Result<ExplainedPlan, ExplainError> {
-    explain_query_core_with_limit_pushdowns(
-        query,
-        disjunct_count,
-        conjunct_count,
-        conjunct_count_per_disjunct,
-        nested_input_limits,
-        nested_branch_limits,
-        limits_between_disjunct_and_conjunct,
-        post_expansion_conjunct,
-        additional_limits,
-        disjunct_storms,
-        disjunct_storm_cascades,
-        partial_indexes,
-        decorrelated_subqueries,
-        window_aggregates,
-        join_pair_identities,
-        &[],
-        &[],
-        &[],
-    )
-}
-
-fn explain_query_core_with_limit_pushdowns(
-    query: &QueryPlanDescription,
-    disjunct_count: u64,
-    conjunct_count: Option<u64>,
-    conjunct_count_per_disjunct: Option<u64>,
-    nested_input_limits: &[u64],
-    nested_branch_limits: &[u64],
-    limits_between_disjunct_and_conjunct: &[u64],
-    post_expansion_conjunct: Option<&ExpressionRef>,
-    additional_limits: &[u64],
-    disjunct_storms: &[DisjunctStormDescription],
-    disjunct_storm_cascades: &[DisjunctStormCascadeDescription],
-    partial_indexes: &[QueryPartialIndexDescription],
-    decorrelated_subqueries: &[QueryDecorrelatedSubqueryDescription],
-    window_aggregates: &[QueryWindowAggregatePushdownDescription],
-    join_pair_identities: &[QueryJoinPairIdentityDescription],
-    input_limit_pushdowns: &[QueryLimitPushdownDescription],
-    window_spills: &[QueryWindowSpillDescription],
-    checkpoint_compaction_chains: &[QueryPairedCheckpointSegmentCompactionChainDescription],
-) -> Result<ExplainedPlan, ExplainError> {
-    explain_query_core_with_segment_rotation_chains(
-        query,
-        disjunct_count,
-        conjunct_count,
-        conjunct_count_per_disjunct,
-        nested_input_limits,
-        nested_branch_limits,
-        limits_between_disjunct_and_conjunct,
-        post_expansion_conjunct,
-        additional_limits,
-        disjunct_storms,
-        disjunct_storm_cascades,
-        partial_indexes,
-        decorrelated_subqueries,
-        window_aggregates,
-        join_pair_identities,
-        input_limit_pushdowns,
-        window_spills,
-        checkpoint_compaction_chains,
-        &[],
-    )
-}
-
-fn explain_query_core_with_segment_rotation_chains(
-    query: &QueryPlanDescription,
-    disjunct_count: u64,
-    conjunct_count: Option<u64>,
-    conjunct_count_per_disjunct: Option<u64>,
-    nested_input_limits: &[u64],
-    nested_branch_limits: &[u64],
-    limits_between_disjunct_and_conjunct: &[u64],
-    post_expansion_conjunct: Option<&ExpressionRef>,
-    additional_limits: &[u64],
-    disjunct_storms: &[DisjunctStormDescription],
-    disjunct_storm_cascades: &[DisjunctStormCascadeDescription],
-    partial_indexes: &[QueryPartialIndexDescription],
-    decorrelated_subqueries: &[QueryDecorrelatedSubqueryDescription],
-    window_aggregates: &[QueryWindowAggregatePushdownDescription],
-    join_pair_identities: &[QueryJoinPairIdentityDescription],
-    input_limit_pushdowns: &[QueryLimitPushdownDescription],
-    window_spills: &[QueryWindowSpillDescription],
-    checkpoint_compaction_chains: &[QueryPairedCheckpointSegmentCompactionChainDescription],
-    segment_rotation_chains: &[QueryPairedSegmentRotationChainDescription],
-) -> Result<ExplainedPlan, ExplainError> {
-    explain_query_core_with_stream_compaction_chains(
-        query,
-        disjunct_count,
-        conjunct_count,
-        conjunct_count_per_disjunct,
-        nested_input_limits,
-        nested_branch_limits,
-        limits_between_disjunct_and_conjunct,
-        post_expansion_conjunct,
-        additional_limits,
-        disjunct_storms,
-        disjunct_storm_cascades,
-        partial_indexes,
-        decorrelated_subqueries,
-        window_aggregates,
-        join_pair_identities,
-        input_limit_pushdowns,
-        window_spills,
-        checkpoint_compaction_chains,
-        segment_rotation_chains,
-        &[],
-    )
-}
-
-fn explain_query_core_with_stream_compaction_chains(
-    query: &QueryPlanDescription,
-    disjunct_count: u64,
-    conjunct_count: Option<u64>,
-    conjunct_count_per_disjunct: Option<u64>,
-    nested_input_limits: &[u64],
-    nested_branch_limits: &[u64],
-    limits_between_disjunct_and_conjunct: &[u64],
-    post_expansion_conjunct: Option<&ExpressionRef>,
-    additional_limits: &[u64],
-    disjunct_storms: &[DisjunctStormDescription],
-    disjunct_storm_cascades: &[DisjunctStormCascadeDescription],
-    partial_indexes: &[QueryPartialIndexDescription],
-    decorrelated_subqueries: &[QueryDecorrelatedSubqueryDescription],
-    window_aggregates: &[QueryWindowAggregatePushdownDescription],
-    join_pair_identities: &[QueryJoinPairIdentityDescription],
-    input_limit_pushdowns: &[QueryLimitPushdownDescription],
-    window_spills: &[QueryWindowSpillDescription],
-    checkpoint_compaction_chains: &[QueryPairedCheckpointSegmentCompactionChainDescription],
-    segment_rotation_chains: &[QueryPairedSegmentRotationChainDescription],
-    stream_compaction_chains: &[QueryPairedStreamCompactionChainDescription],
-) -> Result<ExplainedPlan, ExplainError> {
-    explain_query_core_with_checkpoint_spill_restore_chains(
-        query,
-        disjunct_count,
-        conjunct_count,
-        conjunct_count_per_disjunct,
-        nested_input_limits,
-        nested_branch_limits,
-        limits_between_disjunct_and_conjunct,
-        post_expansion_conjunct,
-        additional_limits,
-        disjunct_storms,
-        disjunct_storm_cascades,
-        partial_indexes,
-        decorrelated_subqueries,
-        window_aggregates,
-        join_pair_identities,
-        input_limit_pushdowns,
-        window_spills,
-        checkpoint_compaction_chains,
-        segment_rotation_chains,
-        stream_compaction_chains,
-        &[],
-    )
-}
-
-fn explain_query_core_with_checkpoint_spill_restore_chains(
-    query: &QueryPlanDescription,
-    disjunct_count: u64,
-    conjunct_count: Option<u64>,
-    conjunct_count_per_disjunct: Option<u64>,
-    nested_input_limits: &[u64],
-    nested_branch_limits: &[u64],
-    limits_between_disjunct_and_conjunct: &[u64],
-    post_expansion_conjunct: Option<&ExpressionRef>,
-    additional_limits: &[u64],
-    disjunct_storms: &[DisjunctStormDescription],
-    disjunct_storm_cascades: &[DisjunctStormCascadeDescription],
-    partial_indexes: &[QueryPartialIndexDescription],
-    decorrelated_subqueries: &[QueryDecorrelatedSubqueryDescription],
-    window_aggregates: &[QueryWindowAggregatePushdownDescription],
-    join_pair_identities: &[QueryJoinPairIdentityDescription],
-    input_limit_pushdowns: &[QueryLimitPushdownDescription],
-    window_spills: &[QueryWindowSpillDescription],
-    checkpoint_compaction_chains: &[QueryPairedCheckpointSegmentCompactionChainDescription],
-    segment_rotation_chains: &[QueryPairedSegmentRotationChainDescription],
-    stream_compaction_chains: &[QueryPairedStreamCompactionChainDescription],
-    spill_restore_chains: &[QueryPairedCheckpointSpillRestoreChainDescription],
-) -> Result<ExplainedPlan, ExplainError> {
-    explain_query_core_with_stream_rotation_chains(
-        query,
-        disjunct_count,
-        conjunct_count,
-        conjunct_count_per_disjunct,
-        nested_input_limits,
-        nested_branch_limits,
-        limits_between_disjunct_and_conjunct,
-        post_expansion_conjunct,
-        additional_limits,
-        disjunct_storms,
-        disjunct_storm_cascades,
-        partial_indexes,
-        decorrelated_subqueries,
-        window_aggregates,
-        join_pair_identities,
-        input_limit_pushdowns,
-        window_spills,
-        checkpoint_compaction_chains,
-        segment_rotation_chains,
-        stream_compaction_chains,
-        spill_restore_chains,
-        &[],
-    )
-}
-
-fn explain_query_core_with_stream_rotation_chains(
-    query: &QueryPlanDescription,
-    disjunct_count: u64,
-    conjunct_count: Option<u64>,
-    conjunct_count_per_disjunct: Option<u64>,
-    nested_input_limits: &[u64],
-    nested_branch_limits: &[u64],
-    limits_between_disjunct_and_conjunct: &[u64],
-    post_expansion_conjunct: Option<&ExpressionRef>,
-    additional_limits: &[u64],
-    disjunct_storms: &[DisjunctStormDescription],
-    disjunct_storm_cascades: &[DisjunctStormCascadeDescription],
-    partial_indexes: &[QueryPartialIndexDescription],
-    decorrelated_subqueries: &[QueryDecorrelatedSubqueryDescription],
-    window_aggregates: &[QueryWindowAggregatePushdownDescription],
-    join_pair_identities: &[QueryJoinPairIdentityDescription],
-    input_limit_pushdowns: &[QueryLimitPushdownDescription],
-    window_spills: &[QueryWindowSpillDescription],
-    checkpoint_compaction_chains: &[QueryPairedCheckpointSegmentCompactionChainDescription],
-    segment_rotation_chains: &[QueryPairedSegmentRotationChainDescription],
-    stream_compaction_chains: &[QueryPairedStreamCompactionChainDescription],
-    spill_restore_chains: &[QueryPairedCheckpointSpillRestoreChainDescription],
-    stream_rotation_chains: &[QueryPairedStreamRotationChainDescription],
-) -> Result<ExplainedPlan, ExplainError> {
-    explain_query_core_with_wal_rotation_chains(
-        query,
+    let ExplainInputs {
         disjunct_count,
         conjunct_count,
         conjunct_count_per_disjunct,
@@ -2967,35 +2463,8 @@ fn explain_query_core_with_stream_rotation_chains(
         stream_compaction_chains,
         spill_restore_chains,
         stream_rotation_chains,
-        &[],
-    )
-}
-
-fn explain_query_core_with_wal_rotation_chains(
-    query: &QueryPlanDescription,
-    disjunct_count: u64,
-    conjunct_count: Option<u64>,
-    conjunct_count_per_disjunct: Option<u64>,
-    nested_input_limits: &[u64],
-    nested_branch_limits: &[u64],
-    limits_between_disjunct_and_conjunct: &[u64],
-    post_expansion_conjunct: Option<&ExpressionRef>,
-    additional_limits: &[u64],
-    disjunct_storms: &[DisjunctStormDescription],
-    disjunct_storm_cascades: &[DisjunctStormCascadeDescription],
-    partial_indexes: &[QueryPartialIndexDescription],
-    decorrelated_subqueries: &[QueryDecorrelatedSubqueryDescription],
-    window_aggregates: &[QueryWindowAggregatePushdownDescription],
-    join_pair_identities: &[QueryJoinPairIdentityDescription],
-    input_limit_pushdowns: &[QueryLimitPushdownDescription],
-    window_spills: &[QueryWindowSpillDescription],
-    checkpoint_compaction_chains: &[QueryPairedCheckpointSegmentCompactionChainDescription],
-    segment_rotation_chains: &[QueryPairedSegmentRotationChainDescription],
-    stream_compaction_chains: &[QueryPairedStreamCompactionChainDescription],
-    spill_restore_chains: &[QueryPairedCheckpointSpillRestoreChainDescription],
-    stream_rotation_chains: &[QueryPairedStreamRotationChainDescription],
-    wal_rotation_chains: &[QueryPairedWalRotationChainDescription],
-) -> Result<ExplainedPlan, ExplainError> {
+        wal_rotation_chains,
+    } = *inputs;
     if query
         .joins
         .len()
