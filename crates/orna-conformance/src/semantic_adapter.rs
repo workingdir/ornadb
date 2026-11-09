@@ -19,13 +19,13 @@ use crate::{
 };
 use num_bigint::{BigInt, Sign};
 use orna_evaluator::{
-    ActivationExplainCatalogue, EffectHandler, Environment, EvaluationError, ExplainCatalogue,
-    Functions, Limits as EvaluatorLimits, NominalDefinition, NominalDefinitions, NominalField,
-    PureFunction as RetainedFunction, RelationPage, StepBudget, SysHostAttachment, SysHostContext,
-    evaluate_expression, evaluate_expression_with_functions, evaluate_with_functions_and_budget,
-    evaluate_with_functions_and_nominals, invoke_named_with_effects_and_budget,
-    invoke_named_with_effects_nominals_and_budget, invoke_named_with_nominals,
-    source_enum_definitions,
+    ActivationEffectReport, ActivationExplainCatalogue, EffectGate, EffectHandler, Environment,
+    EvaluationError, ExplainCatalogue, Functions, Limits as EvaluatorLimits, NominalDefinition,
+    NominalDefinitions, NominalField, PureFunction as RetainedFunction, RelationPage, StepBudget,
+    SysHostAttachment, SysHostContext, evaluate_expression, evaluate_expression_with_functions,
+    evaluate_with_functions_and_budget, evaluate_with_functions_and_nominals,
+    invoke_named_with_effects_and_budget, invoke_named_with_effects_nominals_and_budget,
+    invoke_named_with_nominals, source_enum_definitions,
 };
 use orna_foundation::{
     Diagnostic, DiagnosticSeverity, OvbRaw, SafeText, Value, compare_primary_keys,
@@ -33,16 +33,16 @@ use orna_foundation::{
 use orna_project::{LoadedProject, ProjectLoader, ResolvedTableSchema, admit_format3_row};
 use orna_repository::Repository;
 use orna_runtime::{
-    ActivationEffectReport, CheckpointResetRequest, EffectGate, FaultInjector, FaultPoint,
-    ListStreamSource, NoFault, RequestIdentity, RequestStatus, RunObservationRegistration,
-    RunningTableRequestContinuation, RuntimeError, RuntimeIdentity, RuntimePublicationMetadataRows,
-    RuntimeState, StreamFailurePayload, StreamHandler, StreamHandlerResult, StreamItem,
-    StreamObservationRegistration, StreamRunControl, StreamRunOutcome, StreamSource,
-    StreamSourcePoll, StreamStep, StreamTableCandidateValidator, StreamTableDeliveryError,
-    StreamTableMutationBatch, StreamValidatedTableDeliveryCommit,
-    StreamValidatedTableMutationBatch, TableActivationCandidateValidator, TableActivationError,
-    TableMutation, TableObjectId, TerminalOutcome, ValidatedTableActivationCommit,
-    ValidatedTableRequestActivationCommit, WriterLease,
+    CheckpointResetRequest, FaultInjector, FaultPoint, ListStreamSource, NoFault, RequestIdentity,
+    RequestStatus, RunObservationRegistration, RunningTableRequestContinuation, RuntimeError,
+    RuntimeIdentity, RuntimePublicationMetadataRows, RuntimeState, StreamFailurePayload,
+    StreamHandler, StreamHandlerResult, StreamItem, StreamObservationRegistration,
+    StreamRunControl, StreamRunOutcome, StreamSource, StreamSourcePoll, StreamStep,
+    StreamTableCandidateValidator, StreamTableDeliveryError, StreamTableMutationBatch,
+    StreamValidatedTableDeliveryCommit, StreamValidatedTableMutationBatch,
+    TableActivationCandidateValidator, TableActivationError, TableMutation, TableObjectId,
+    TerminalOutcome, ValidatedTableActivationCommit, ValidatedTableRequestActivationCommit,
+    WriterLease,
 };
 use orna_semantic::{
     AssertionOwner, AssertionPlan, Catalogue, DIAG_AMBIGUOUS, DIAG_IMPORT, EffectSummary,
@@ -7337,13 +7337,11 @@ fn is_standard_source(unit: &SourceUnit) -> bool {
 }
 
 /// Declares the effect set of a semantic activation (REQUEST-1 step 5) through
-/// [`EffectGate::admit`]. A system host attachment may reach effects outside the
+/// [`EffectGate::admit_sys_host`]. A system host attachment may reach effects outside the
 /// table transaction, so the gate reports them possible; a detached activation
 /// performs only Orna table writes and receives the controlled marker.
 fn declared_effect_report(sys_host: Option<&SysHostAttachment>) -> ActivationEffectReport {
-    EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::bound(
-        sys_host, None,
-    ))
+    EffectGate::admit_sys_host(sys_host, None)
 }
 
 fn controlled_table_effects(summary: &EffectSummary) -> bool {

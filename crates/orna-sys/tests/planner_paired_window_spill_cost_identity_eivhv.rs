@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 
 use orna_sys::{
-    ExpressionRef, ObjectRef, PlanDetail, PlanNode, PlanNodeKind, PlanWindowFrameBound,
-    QueryJoinDescription, QueryJoinPairIdentityDescription, QueryPlanDescription,
-    QuerySourceStatistics, QueryWindowAggregatePushdownDescription, QueryWindowSpillDescription,
-    SnapshotRef, explain_query_with_join_pair_identities_window_aggregate_and_spill_pushdowns,
+    ExplainInputs, ExpressionRef, ObjectRef, PlanDetail, PlanNode, PlanNodeKind,
+    PlanWindowFrameBound, QueryJoinDescription, QueryJoinPairIdentityDescription,
+    QueryPlanDescription, QuerySourceStatistics, QueryWindowAggregatePushdownDescription,
+    QueryWindowSpillDescription, SnapshotRef, explain_query_with,
 };
 
 const FIXTURE: &str = include_str!("fixtures/planner_paired_window_spill_cost_identity_eivhv.orna");
@@ -118,11 +118,14 @@ fn plan(first_budget: u64) -> orna_sys::ExplainedPlan {
             7_000,
         ),
     ];
-    explain_query_with_join_pair_identities_window_aggregate_and_spill_pushdowns(
+    explain_query_with(
         &query(),
-        &pairs,
-        &aggregates,
-        &spills,
+        ExplainInputs {
+            window_aggregates: &aggregates,
+            join_pair_identities: &pairs,
+            window_spills: &spills,
+            ..ExplainInputs::default()
+        },
     )
     .expect("exact pair and nested rule spill descriptors produce an explain plan")
 }

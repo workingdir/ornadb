@@ -1,10 +1,9 @@
 use std::collections::BTreeMap;
 
 use orna_sys::{
-    ExpressionRef, ObjectRef, PlanDetail, PlanNode, PlanNodeKind, QueryJoinDescription,
-    QueryJoinPairIdentityDescription, QueryPartialIndexDescription, QueryPlanDescription,
-    QuerySourceStatistics, SnapshotRef,
-    explain_query_with_partial_indexes_and_join_pair_identities,
+    ExplainInputs, ExpressionRef, ObjectRef, PlanDetail, PlanNode, PlanNodeKind,
+    QueryJoinDescription, QueryJoinPairIdentityDescription, QueryPartialIndexDescription,
+    QueryPlanDescription, QuerySourceStatistics, SnapshotRef, explain_query_with,
 };
 
 const FIXTURE: &str = include_str!("fixtures/planner_paired_index_anchor_chain_v1chi.orna");
@@ -100,8 +99,15 @@ fn explain(
     indexes: &[QueryPartialIndexDescription],
     pairs: &[QueryJoinPairIdentityDescription],
 ) -> orna_sys::ExplainedPlan {
-    explain_query_with_partial_indexes_and_join_pair_identities(&query(order), indexes, pairs)
-        .expect("paired index anchor chain is explainable")
+    explain_query_with(
+        &query(order),
+        ExplainInputs {
+            partial_indexes: indexes,
+            join_pair_identities: pairs,
+            ..ExplainInputs::default()
+        },
+    )
+    .expect("paired index anchor chain is explainable")
 }
 
 fn text<'a>(node: &'a PlanNode, key: &str) -> &'a str {

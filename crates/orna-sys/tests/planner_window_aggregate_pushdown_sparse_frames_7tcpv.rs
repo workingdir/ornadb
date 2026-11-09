@@ -1,10 +1,9 @@
 use std::collections::BTreeMap;
 
 use orna_sys::{
-    ExpressionRef, ObjectRef, PlanDetail, PlanNode, PlanNodeKind, PlanWindowFrameBound,
-    QueryJoinDescription, QueryPlanDescription, QuerySourceStatistics,
-    QueryWindowAggregatePushdownDescription, SnapshotRef,
-    explain_query_with_window_aggregate_pushdowns,
+    ExplainInputs, ExpressionRef, ObjectRef, PlanDetail, PlanNode, PlanNodeKind,
+    PlanWindowFrameBound, QueryJoinDescription, QueryPlanDescription, QuerySourceStatistics,
+    QueryWindowAggregatePushdownDescription, SnapshotRef, explain_query_with,
 };
 
 const WINDOW_FIXTURE: &str =
@@ -144,8 +143,14 @@ fn window_aggregate_and_frame_identities_follow_sparse_reordered_inputs() {
             PlanWindowFrameBound::CurrentRow,
         ),
     ];
-    let explained = explain_query_with_window_aggregate_pushdowns(&query(), &aggregates)
-        .expect("resolved window aggregates attach to their exact sources");
+    let explained = explain_query_with(
+        &query(),
+        ExplainInputs {
+            window_aggregates: &aggregates,
+            ..ExplainInputs::default()
+        },
+    )
+    .expect("resolved window aggregates attach to their exact sources");
     let aggregates_by_identity = pushed_aggregates(&explained);
     assert_eq!(aggregates_by_identity.len(), 4);
 
@@ -239,10 +244,22 @@ fn changing_a_window_frame_identity_changes_the_computed_plan_identity() {
         PlanWindowFrameBound::CurrentRow,
         PlanWindowFrameBound::Following(1),
     );
-    let original_plan = explain_query_with_window_aggregate_pushdowns(&query(), &[original])
-        .expect("valid trailing frame plans");
-    let changed_plan = explain_query_with_window_aggregate_pushdowns(&query(), &[changed_frame])
-        .expect("valid forward frame plans");
+    let original_plan = explain_query_with(
+        &query(),
+        ExplainInputs {
+            window_aggregates: &[original],
+            ..ExplainInputs::default()
+        },
+    )
+    .expect("valid trailing frame plans");
+    let changed_plan = explain_query_with(
+        &query(),
+        ExplainInputs {
+            window_aggregates: &[changed_frame],
+            ..ExplainInputs::default()
+        },
+    )
+    .expect("valid forward frame plans");
 
     assert_ne!(
         original_plan.plan().id(),
@@ -263,7 +280,13 @@ fn reversed_window_frame_bounds_are_rejected_before_planning() {
     );
 
     assert!(matches!(
-        explain_query_with_window_aggregate_pushdowns(&query(), &[reversed]),
+        explain_query_with(
+            &query(),
+            ExplainInputs {
+                window_aggregates: &[reversed],
+                ..ExplainInputs::default()
+            },
+        ),
         Err(orna_sys::ExplainError::InvalidExpression)
     ));
 }

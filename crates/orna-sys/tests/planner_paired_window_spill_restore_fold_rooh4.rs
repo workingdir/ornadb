@@ -1,14 +1,13 @@
 use std::collections::BTreeMap;
 
 use orna_sys::{
-    ExpressionRef, MutableBranchSnapshot, ObjectRef, PlanDetail, PlanNode, PlanNodeKind,
-    PlanWindowFrameBound, QueryJoinDescription, QueryJoinPairIdentityDescription,
+    ExplainInputs, ExpressionRef, MutableBranchSnapshot, ObjectRef, PlanDetail, PlanNode,
+    PlanNodeKind, PlanWindowFrameBound, QueryJoinDescription, QueryJoinPairIdentityDescription,
     QueryPairedCheckpointSegmentCompactionChainDescription,
     QueryPairedCheckpointSegmentCompactionStepDescription,
     QueryPairedSegmentRotationChainDescription, QueryPairedSegmentRotationDescription,
     QueryPlanDescription, QuerySourceStatistics, QueryWindowAggregatePushdownDescription,
-    QueryWindowSpillDescription, SnapshotRef,
-    explain_query_with_paired_cost_restoration_and_window_spill_pushdowns,
+    QueryWindowSpillDescription, SnapshotRef, explain_query_with,
 };
 
 const FIXTURE: &str = include_str!("fixtures/planner_paired_window_spill_restore_fold_rooh4.orna");
@@ -196,17 +195,20 @@ fn plan(
         checkpoints.reverse();
         rotations.reverse();
     }
-    explain_query_with_paired_cost_restoration_and_window_spill_pushdowns(
+    explain_query_with(
         &query,
-        &pairs,
-        &windows,
-        &spills,
-        &checkpoints,
-        &rotations,
-        &[],
-        &[],
-        &[],
-        &[],
+        ExplainInputs {
+            window_aggregates: &windows,
+            join_pair_identities: &pairs,
+            window_spills: &spills,
+            checkpoint_compaction_chains: &checkpoints,
+            segment_rotation_chains: &rotations,
+            stream_compaction_chains: &[],
+            spill_restore_chains: &[],
+            stream_rotation_chains: &[],
+            wal_rotation_chains: &[],
+            ..ExplainInputs::default()
+        },
     )
     .expect("paired window, spill, and restore descriptors explain together")
 }

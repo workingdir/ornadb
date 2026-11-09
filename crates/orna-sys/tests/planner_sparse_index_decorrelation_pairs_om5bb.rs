@@ -1,10 +1,9 @@
 use std::collections::BTreeMap;
 
 use orna_sys::{
-    ExpressionRef, ObjectRef, PlanDetail, PlanNode, PlanNodeKind,
+    ExplainInputs, ExpressionRef, ObjectRef, PlanDetail, PlanNode, PlanNodeKind,
     QueryDecorrelatedSubqueryDescription, QueryJoinDescription, QueryPartialIndexDescription,
-    QueryPlanDescription, QuerySourceStatistics, SnapshotRef,
-    explain_query_with_partial_indexes_and_decorrelated_subqueries,
+    QueryPlanDescription, QuerySourceStatistics, SnapshotRef, explain_query_with,
 };
 
 const FIXTURE: &str = include_str!("fixtures/planner_sparse_index_decorrelation_pairs_om5bb.orna");
@@ -150,10 +149,13 @@ fn explain(
     if reverse_catalog {
         candidates.reverse();
     }
-    explain_query_with_partial_indexes_and_decorrelated_subqueries(
+    explain_query_with(
         &query(reverse_joins),
-        &candidates,
-        &subqueries(reverse_subqueries),
+        ExplainInputs {
+            partial_indexes: &candidates,
+            decorrelated_subqueries: &subqueries(reverse_subqueries),
+            ..ExplainInputs::default()
+        },
     )
     .expect("sparse paired decorrelations explain with exact index candidates")
 }
