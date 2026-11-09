@@ -10200,15 +10200,6 @@ impl Context<'_, '_> {
             | I::CoreMax
             | I::CoreEvery
             | I::CoreExists
-            | I::CollectionChunk
-            | I::CollectionFlatten
-            | I::CollectionPartition
-            | I::CollectionZip
-            | I::CollectionZipExact
-            | I::CollectionUnique
-            | I::CollectionPairs
-            | I::CollectionWindow
-            | I::CollectionSplitWhen
             | I::CollectionRank
             | I::CollectionGroupBy
             | I::CollectionBucketBy
@@ -10225,12 +10216,21 @@ impl Context<'_, '_> {
             | I::CollectionWindowRateIntegrate
             | I::CollectionWindowDerivative
             | I::CollectionWindowIntegrate => self.collection(name, values, depth),
-            I::MathIncrement
+            I::CollectionChunk
+            | I::CollectionFlatten
+            | I::CollectionPartition
+            | I::CollectionZip
+            | I::CollectionZipExact
+            | I::CollectionUnique
+            | I::CollectionPairs
+            | I::CollectionWindow
+            | I::CollectionSplitWhen
+            | I::MathIncrement
             | I::MathDecrement
             | I::MathIsZero
             | I::MathMin
             | I::MathMax
-            | I::MathClamp => self.math(name, values),
+            | I::MathClamp => Err(error("ORNA-EVAL-UNSUPPORTED")),
             I::TextTrim
             | I::TextSplit
             | I::TextJoin
@@ -10565,30 +10565,6 @@ impl Context<'_, '_> {
             return Ok(result);
         }
         Err(error("ORNA-EVAL-NO-MATCH"))
-    }
-    fn math(&self, name: &str, values: Vec<Value>) -> Result<Value, EvaluationError> {
-        match (name, values.as_slice()) {
-            ("increment", [value]) => self.apply_binary("+", value.clone(), one_like(value)?),
-            ("decrement", [value]) => self.apply_binary("-", value.clone(), one_like(value)?),
-            ("is_zero", [Value::Int(value)]) => Ok(Value::Bool(value.is_zero())),
-            ("is_zero", [Value::Decimal(value)]) => Ok(Value::Bool(value.coefficient.is_zero())),
-            ("is_zero", [Value::Float(value)]) => Ok(Value::Bool(f64::from_bits(*value) == 0.0)),
-            ("min", [a, b]) => ordered(a, b, true),
-            ("max", [a, b]) => ordered(a, b, false),
-            ("clamp", [value, low, high]) => {
-                if compare_values(low, high)? == std::cmp::Ordering::Greater {
-                    return Err(error("ORNA-EVAL-VALUE"));
-                }
-                if compare_values(value, low)? == std::cmp::Ordering::Less {
-                    Ok(low.clone())
-                } else if compare_values(value, high)? == std::cmp::Ordering::Greater {
-                    Ok(high.clone())
-                } else {
-                    Ok(value.clone())
-                }
-            }
-            _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
-        }
     }
     fn bits(&self, name: &str, values: Vec<Value>) -> Result<Value, EvaluationError> {
         let name = name.strip_prefix("__").unwrap_or(name);
@@ -12528,13 +12504,7 @@ impl Context<'_, '_> {
             ("bucket_by" | "__bucket_by", [Value::List(rows), period, zone]) => {
                 self.collection_bucket_by(rows, period, zone)
             }
-            ("chunk", [Value::List(values), Value::Int(size)]) => {
-                self.collection_chunk(values, size)
-            }
-            ("flatten", [Value::List(values)]) => self.collection_flatten(values),
-            ("distinct", [Value::List(values)]) | ("unique", [Value::List(values)]) => {
-                self.distinct(values)
-            }
+            ("distinct", [Value::List(values)]) => self.distinct(values),
             ("union", [Value::List(left), Value::List(right)]) => self.union(left, right),
             ("count", [Value::List(values)]) => self.count(values),
             ("first", [Value::List(values)]) => self.first(values),
@@ -12552,41 +12522,10 @@ impl Context<'_, '_> {
                 self.flat_map(values, transform, depth)
             }
             ("sort_by", [Value::List(values), key]) => self.sort_by(values, key, depth),
-            ("rank", [Value::List(values), key]) => self.rank(values, key, depth),
             ("filter", [Value::List(values), predicate]) => self.filter(values, predicate, depth),
-            ("partition", [Value::List(values), predicate]) => {
-                self.partition(values, predicate, depth)
-            }
-            ("split_when", [Value::List(values), predicate]) => {
-                self.split_when(values, predicate, depth)
-            }
             ("group_by", [Value::List(values), key]) => self.group_by(values, key, depth),
             ("asof_join", [Value::List(left), Value::List(right), time, by]) => {
                 self.asof_join(left, right, time, by, depth)
-            }
-            ("zip", [Value::List(left), Value::List(right)]) => self.zipped(left, right, false),
-            ("zip_exact", [Value::List(left), Value::List(right)]) => {
-                self.zipped(left, right, true)
-            }
-            ("pairs", [Value::List(values)]) => {
-                self.items(values.len())?;
-                for _ in values {
-                    self.step()?;
-                }
-                let mut pairs = Vec::new();
-                for pair in values.windows(2) {
-                    self.step()?;
-                    self.items(pair.len())?;
-                    pairs.push(Value::Tuple(pair.to_vec()));
-                    self.items(pairs.len())?;
-                }
-                Ok(Value::list(pairs))
-            }
-            ("window", [Value::List(values), Value::Int(size)]) => {
-                self.windows(values, size, &BigInt::from(1))
-            }
-            ("window", [Value::List(values), Value::Int(size), Value::Int(step)]) => {
-                self.windows(values, size, step)
             }
             ("__strictly_ordered_time_series", [Value::List(points)]) => {
                 self.strictly_ordered_time_series(points)
@@ -12636,50 +12575,11 @@ impl Context<'_, '_> {
         Ok(Value::list(groups))
     }
 
-    fn collection_chunk(&mut self, values: &List, size: &BigInt) -> Result<Value, EvaluationError> {
-        self.items(values.len())?;
-        let size = self.positive_collection_size(size)?;
-        for _ in values {
-            self.step()?;
-        }
-        let mut chunks = Vec::new();
-        for chunk in values.chunks(size) {
-            self.items(chunk.len())?;
-            self.step()?;
-            chunks.push(Value::list(chunk.to_vec()));
-            self.items(chunks.len())?;
-        }
-        Ok(Value::list(chunks))
-    }
-
-    fn collection_flatten(&mut self, values: &List) -> Result<Value, EvaluationError> {
-        self.items(values.len())?;
-        let mut flattened = Vec::new();
-        for value in values {
-            self.step()?;
-            let Value::List(inner) = value else {
-                return Err(error("ORNA-EVAL-TYPE"));
-            };
-            self.items(inner.len())?;
-            for value in inner {
-                self.step()?;
-                flattened.push(value.clone());
-                self.items(flattened.len())?;
-            }
-        }
-        Ok(Value::list(flattened))
-    }
-
     /// Rejects a known collection spelling whose argument shape does not fit,
     /// keeping the type error distinct from the unsupported fallback.
     fn collection_shape_error(name: &str, values: &[Value]) -> Result<Value, EvaluationError> {
         match (name, values) {
-            ("chunk", [_, _])
-            | (
-                "flatten" | "distinct" | "unique" | "pairs" | "count" | "first" | "last" | "min"
-                | "max" | "sum",
-                [_],
-            )
+            ("distinct" | "count" | "first" | "last" | "min" | "max" | "sum", [_])
             | ("one", [_] | [_, _])
             | ("every" | "exists", [_, _])
             | ("count", [_, _])
@@ -12688,15 +12588,11 @@ impl Context<'_, '_> {
             | ("drop", [_, _])
             | ("map", [_, _])
             | ("flat_map", [_, _])
-            | ("sort_by" | "rank", [_, _])
+            | ("sort_by", [_, _])
             | ("filter", [_, _])
-            | ("partition", [_, _])
-            | ("split_when", [_, _])
             | ("group_by", [_, _])
             | ("asof_join", [_, _, _, _])
-            | ("__bucket_by", [_, _, _])
-            | ("zip" | "zip_exact", [_, _])
-            | ("window", [_, _] | [_, _, _]) => Err(error("ORNA-EVAL-TYPE")),
+            | ("__bucket_by", [_, _, _]) => Err(error("ORNA-EVAL-TYPE")),
             ("__strictly_ordered_time_series", [_]) => Err(error("ORNA-EVAL-TYPE")),
             (
                 "__window_rate"
@@ -14135,67 +14031,6 @@ impl Context<'_, '_> {
         }
         Ok(Value::list(filtered))
     }
-    fn partition(
-        &mut self,
-        values: &[Value],
-        predicate: &Value,
-        depth: usize,
-    ) -> Result<Value, EvaluationError> {
-        self.items(values.len())?;
-        self.items(2)?;
-        let mut matching = Vec::new();
-        let mut remaining = Vec::new();
-        for value in values {
-            // Invoke once, in input order, so a lawful callback's observable
-            // behavior is never duplicated by classification.
-            self.step()?;
-            match self.invoke_predicate(predicate, value.clone(), depth + 1)? {
-                Value::Bool(true) => {
-                    matching.push(value.clone());
-                    self.items(matching.len())?;
-                }
-                Value::Bool(false) => {
-                    remaining.push(value.clone());
-                    self.items(remaining.len())?;
-                }
-                _ => return Err(error("ORNA-EVAL-TYPE")),
-            }
-        }
-        Ok(Value::Tuple(vec![
-            Value::list(matching),
-            Value::list(remaining),
-        ]))
-    }
-    fn split_when(
-        &mut self,
-        values: &[Value],
-        predicate: &Value,
-        depth: usize,
-    ) -> Result<Value, EvaluationError> {
-        self.items(values.len())?;
-        let mut groups = Vec::new();
-        let mut current = Vec::new();
-        for value in values {
-            // Invoke once, in input order. A true boundary starts the next
-            // group, except at the beginning where no empty group is lawful.
-            self.step()?;
-            match self.invoke_predicate(predicate, value.clone(), depth + 1)? {
-                Value::Bool(true) if !current.is_empty() => {
-                    groups.push(Value::list(std::mem::take(&mut current)));
-                    self.items(groups.len())?;
-                }
-                Value::Bool(_) => {}
-                _ => return Err(error("ORNA-EVAL-TYPE")),
-            }
-            current.push(value.clone());
-            self.items(current.len())?;
-        }
-        if !current.is_empty() {
-            groups.push(Value::list(current));
-            self.items(groups.len())?;
-        }
-        Ok(Value::list(groups))
-    }
     fn group_by(
         &mut self,
         values: &[Value],
@@ -14443,57 +14278,6 @@ impl Context<'_, '_> {
             return Err(error("ORNA-EVAL-VALUE"));
         }
         Ok(value.to_usize().unwrap_or(usize::MAX))
-    }
-    fn zipped(
-        &mut self,
-        left: &[Value],
-        right: &[Value],
-        exact: bool,
-    ) -> Result<Value, EvaluationError> {
-        self.items(left.len())?;
-        self.items(right.len())?;
-        if exact && left.len() != right.len() {
-            return Err(error("ORNA-EVAL-VALUE"));
-        }
-        let mut pairs = Vec::new();
-        for (left, right) in left.iter().zip(right) {
-            self.items(2)?;
-            self.step()?;
-            pairs.push(Value::Tuple(vec![left.clone(), right.clone()]));
-            self.items(pairs.len())?;
-        }
-        Ok(Value::list(pairs))
-    }
-    fn windows(
-        &mut self,
-        values: &[Value],
-        size: &BigInt,
-        step: &BigInt,
-    ) -> Result<Value, EvaluationError> {
-        self.items(values.len())?;
-        let size = self.positive_collection_size(size)?;
-        let step = self.positive_collection_size(step)?;
-        if size > values.len() {
-            return Ok(Value::list(Vec::new()));
-        }
-        for _ in values {
-            self.step()?;
-        }
-        let last_start = values.len() - size;
-        let mut start = 0;
-        let mut windows = Vec::new();
-        while start <= last_start {
-            let window = &values[start..start + size];
-            self.items(window.len())?;
-            self.step()?;
-            windows.push(Value::list(window.to_vec()));
-            self.items(windows.len())?;
-            let Some(next) = start.checked_add(step) else {
-                break;
-            };
-            start = next;
-        }
-        Ok(Value::list(windows))
     }
     fn strictly_ordered_time_series(&mut self, points: &[Value]) -> Result<Value, EvaluationError> {
         self.items(points.len())?;
@@ -16408,14 +16192,6 @@ fn is_static_effect_path(callee: &Expr, scope: &Scope) -> bool {
                 .is_some_and(|root| scope.4.contains(root) || !scope.0.contains_key(root))
 }
 
-fn one_like(value: &Value) -> Result<Value, EvaluationError> {
-    match value {
-        Value::Int(_) => Ok(Value::Int(1.into())),
-        Value::Decimal(_) => DecimalValue::new(1.into(), 0.into()).map(Value::Decimal),
-        Value::Float(_) => Ok(Value::Float(1.0f64.to_bits())),
-        _ => Err(error("ORNA-EVAL-TYPE")),
-    }
-}
 fn raw_option_value(value: Option<&Value>) -> Result<Raw, EvaluationError> {
     let parts = match value {
         Some(value) => vec![Raw::Int(1.into()), value.raw()?],
@@ -16777,27 +16553,6 @@ fn compare_group_keys(left: &Value, right: &Value) -> Result<std::cmp::Ordering,
             Ok(left.len().cmp(&right.len()))
         }
         _ => Err(error("ORNA-EVAL-TYPE")),
-    }
-}
-fn ordered(left: &Value, right: &Value, min: bool) -> Result<Value, EvaluationError> {
-    if let (Value::Float(a), Value::Float(b)) = (left, right) {
-        // ORNA-FLOAT-007: canonical NaN if either input is NaN; `min` prefers -0.0
-        // and `max` prefers +0.0 among zeros, otherwise numeric order decides.
-        let values = [*a, *b];
-        let bits = if min {
-            float_min(&values)
-        } else {
-            float_max(&values)
-        };
-        return bits
-            .map(Value::Float)
-            .ok_or_else(|| error("ORNA-EVAL-VALUE"));
-    }
-    let ordering = compare_values(left, right)?;
-    if (ordering.is_le()) == min {
-        Ok(left.clone())
-    } else {
-        Ok(right.clone())
     }
 }
 /// One Int or Decimal as an `f64`, through its canonical text.
