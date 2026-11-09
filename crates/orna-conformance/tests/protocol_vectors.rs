@@ -1,19 +1,7 @@
 use orna_protocol::{Envelope, Limits};
 
 fn decode_hex(value: &str) -> Vec<u8> {
-    assert_eq!(value.len() % 2, 0, "hex vector has odd length");
-    value
-        .as_bytes()
-        .chunks_exact(2)
-        .map(|pair| {
-            let digit = |byte| match byte {
-                b'0'..=b'9' => byte - b'0',
-                b'a'..=b'f' => byte - b'a' + 10,
-                _ => panic!("invalid lowercase hexadecimal byte {byte:?}"),
-            };
-            digit(pair[0]) * 16 + digit(pair[1])
-        })
-        .collect()
+    orna_base::hex_decode(value).expect("canonical lowercase hexadecimal vector")
 }
 
 #[test]

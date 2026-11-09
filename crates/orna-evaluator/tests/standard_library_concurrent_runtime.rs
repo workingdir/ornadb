@@ -1,6 +1,6 @@
 use orna_evaluator::SysHostBindingRegistry;
-use orna_foundation::CanonicalValue;
 use orna_sys::ClockProvider;
+use orna_value::CanonicalValue;
 use orna_value::Raw;
 use std::time::{Duration, Instant};
 

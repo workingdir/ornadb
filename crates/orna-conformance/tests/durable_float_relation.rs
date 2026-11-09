@@ -1,8 +1,8 @@
 use orna_conformance::{DurableTransactionalEvaluator, SourceUnit, StageOutcome};
 use orna_evaluator::Limits;
-use orna_foundation::Value;
 use orna_repository::Repository;
 use orna_runtime::{RuntimeIdentity, RuntimeState};
+use orna_value::Value;
 use std::path::Path;
 use std::{fs, process::Command as ProcessCommand};
 use tempfile::TempDir;

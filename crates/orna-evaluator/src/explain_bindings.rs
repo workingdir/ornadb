@@ -21,13 +21,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 
-use orna_foundation::{
-    CanonicalSnapshot, CanonicalValue, FunctionRef, OvbRaw, RowRef, SYS_FUNCTION_TABLE_ID,
-    SafeText, Snapshot, SystemReferenceError, TypedRowRef, snapshot_reference,
-};
 use orna_sys::{
     ExplainError, FunctionPlanDescription, ObjectRef, Plan, QueryPlanDescription, SnapshotRef,
     SysFailureCode, explain_function, explain_query,
+};
+use orna_value::{
+    CanonicalSnapshot, CanonicalValue, FunctionRef, OvbRaw, RowRef, SYS_FUNCTION_TABLE_ID,
+    SafeText, Snapshot, SystemReferenceError, TypedRowRef, snapshot_reference,
 };
 
 use crate::relation::{RelationPlan, RelationStage};

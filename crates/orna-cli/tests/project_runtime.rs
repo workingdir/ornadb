@@ -4,12 +4,12 @@ use std::{
     process::{Command, Output, Stdio},
 };
 
-use orna_foundation::{CanonicalValue, OvbRaw, Value};
 use orna_repository::{Repository, inspect_metadata};
 use orna_runtime::{
     CheckpointKey, Component, ConsumerIdentity, Mutation, NoFault, RuntimeIdentity, RuntimeState,
 };
 use orna_value::Raw;
+use orna_value::{CanonicalValue, OvbRaw, Value};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 

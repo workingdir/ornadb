@@ -1,11 +1,11 @@
 use std::{collections::HashSet, fs, path::Path, process::Command};
 
 use num_bigint::BigInt;
-use orna_foundation::{GitHash, Snapshot};
 use orna_repository::Repository;
 use orna_runtime::{
     HistoricalSnapshot, NoFault, RuntimeError, RuntimeIdentity, RuntimeState, TableMutation,
 };
+use orna_value::{GitHash, Snapshot};
 use tempfile::TempDir;
 
 fn git(directory: &Path, arguments: &[&str]) {

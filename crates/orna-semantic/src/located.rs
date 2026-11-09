@@ -13,8 +13,8 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ops::Range;
 
-use orna_foundation::Diagnostic;
 use orna_syntax::SyntaxSpan;
+use orna_value::Diagnostic;
 
 use crate::{Analysis, Catalogue, ModuleInput, Namespace};
 

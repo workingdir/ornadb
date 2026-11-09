@@ -455,13 +455,12 @@ fn refuse_retired_writer_journal(
 mod tests {
     use super::*;
     use crate::LoosePath;
-    use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
     use bytes::Bytes;
-    use orna_foundation::{CanonicalValue, OvbRaw};
     use orna_repository::{
         CompactManifest, CompactPublicationPlan, CompactPublicationRequest, CompactSegment,
         CompactSegmentRecord, CompactSegmentRole, ManagedFileChange, Uuid,
     };
+    use orna_value::{CanonicalValue, OvbRaw};
     use parquet::file::{
         metadata::{FileMetaData, KeyValue, ParquetMetaData, ParquetMetaDataWriter},
         reader::{FileReader, SerializedFileReader},
@@ -529,10 +528,10 @@ mod tests {
         .unwrap()
     }
 
-    fn compact_schema() -> orna_foundation::SchemaDescriptor {
+    fn compact_schema() -> orna_value::SchemaDescriptor {
         let table = Uuid::from_u128(1);
         let field_id = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0001);
-        orna_foundation::SchemaDescriptor::new(OvbRaw::Map(vec![
+        orna_value::SchemaDescriptor::new(OvbRaw::Map(vec![
             (OvbRaw::Int(0.into()), OvbRaw::Int(1.into())),
             (
                 OvbRaw::Int(1.into()),
@@ -560,7 +559,7 @@ mod tests {
         .unwrap()
     }
 
-    fn compact_schema_fingerprint(schema: &orna_foundation::SchemaDescriptor) -> [u8; 32] {
+    fn compact_schema_fingerprint(schema: &orna_value::SchemaDescriptor) -> [u8; 32] {
         let bytes = schema.encode().unwrap();
         let mut digest = Sha256::new();
         digest.update(b"orna.schema.v1\0");
@@ -569,10 +568,7 @@ mod tests {
     }
 
     fn compact_schema_hex(schema: [u8; 32]) -> String {
-        schema
-            .into_iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect()
+        orna_base::hex(&schema)
     }
 
     fn compact_runtime_parquet() -> (Vec<u8>, [u8; 32]) {
@@ -594,10 +590,13 @@ mod tests {
                     "orna.schema.sha256".into(),
                     Some(compact_schema_hex(fingerprint)),
                 ),
-                KeyValue::new("orna.schema.ovb".into(), Some(BASE64.encode(schema_ovb))),
+                KeyValue::new(
+                    "orna.schema.ovb".into(),
+                    Some(orna_base::base64_encode(schema_ovb)),
+                ),
                 KeyValue::new(
                     "orna.columns.ovb".into(),
-                    Some(BASE64.encode(compact_columns())),
+                    Some(orna_base::base64_encode(compact_columns())),
                 ),
                 KeyValue::new("orna.encoder".into(), Some("test-encoder-v1".into())),
             ]),

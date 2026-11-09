@@ -7,7 +7,6 @@ use orna_conformance::{
     Scenario, SemanticAdapter, SourceUnit, StageOutcome, TransactionalEvaluator,
 };
 use orna_evaluator::Limits;
-use orna_foundation::{Diagnostic, OvbRaw, Value};
 use orna_repository::Repository;
 use orna_runtime::{
     NoFault, RequestIdentity, RequestState, RunObservationStatus, RuntimeIdentity, RuntimeState,
@@ -15,6 +14,7 @@ use orna_runtime::{
 };
 use orna_semantic::{Catalogue, ModuleInput, Namespace, Type, analyze_with_catalogue};
 use orna_stream::{DiagnosticClass, DiagnosticCode};
+use orna_value::{Diagnostic, OvbRaw, Value};
 use sha2::Digest;
 use std::{
     collections::BTreeMap,

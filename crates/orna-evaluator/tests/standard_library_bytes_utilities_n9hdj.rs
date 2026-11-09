@@ -1,7 +1,7 @@
 use orna_evaluator::Limits;
-use orna_foundation::CanonicalValue;
 use orna_project_repl::AdmittedReplSession;
 use orna_semantic::{Catalogue, StandardDependencyProfile};
+use orna_value::CanonicalValue;
 use orna_value::Raw;
 
 const MODULES: [&str; 3] = ["std/collection.orna", "std/bits.orna", "std/bytes.orna"];

@@ -79,16 +79,16 @@ impl RemoteAnalysisProvenance {
 
         let mut identity = format!(
             "git:{};module:{}:{}",
-            hex(&snapshot),
+            orna_base::hex(&snapshot),
             application.logical_path(),
-            hex(&digest)
+            orna_base::hex(&digest)
         );
         match project.standard_profile() {
             Some(profile) => {
                 identity.push_str(";std:");
                 identity.push_str(profile.snapshot());
                 for (logical_path, digest) in profile.module_digests() {
-                    let _ = write!(identity, ";{logical_path}:{}", hex(digest));
+                    let _ = write!(identity, ";{logical_path}:{}", orna_base::hex(digest));
                 }
             }
             None => identity.push_str(";std:none"),
@@ -152,12 +152,4 @@ impl RemoteAnalysisGate {
         );
         RecordedRemoteAnalysis::record(&request, reproducibility)
     }
-}
-
-fn hex(bytes: &[u8]) -> String {
-    let mut text = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        let _ = write!(text, "{byte:02x}");
-    }
-    text
 }

@@ -4,11 +4,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use num_bigint::BigInt;
 use num_traits::{One, ToPrimitive};
-use orna_foundation::Diagnostic;
 use orna_syntax::{
     Declaration, Expr, Item, LiteralKind, Pattern, SyntaxTree, TypeExpr, TypeMember,
     TypeRepresentation, UnitDefinition, Visibility,
 };
+use orna_value::Diagnostic;
 use unicode_casefold::UnicodeCaseFold;
 use unicode_normalization::{UnicodeNormalization, is_nfc};
 

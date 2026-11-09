@@ -1,6 +1,6 @@
 //! Application-facing browser profile adapter over the shared evaluator.
 
-use orna_foundation::CanonicalValue;
+use orna_value::CanonicalValue;
 
 use crate::ApplicationError;
 

@@ -2,11 +2,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use orna_foundation::Diagnostic;
 use orna_syntax::{
     ControlKind, Declaration, Expr, FieldInitializer, Item, Pattern, Statement, SyntaxTree,
     TypeMember, TypeRepresentation, UseTail,
 };
+use orna_value::Diagnostic;
 
 use super::*;
 

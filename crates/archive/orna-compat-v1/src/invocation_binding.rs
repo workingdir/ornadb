@@ -41,8 +41,6 @@
 
 use std::{collections::HashSet, error::Error, fmt};
 
-use base64::{Engine as _, engine::general_purpose::STANDARD};
-
 use crate::{
     ObjectId, ParameterId, TypeId,
     catalogue::{FunctionDefinition, ParameterDefinition, QualifiedSemanticName},
@@ -327,8 +325,7 @@ pub fn convert_cli_string(
             "false" => Ok(RuntimeValue::Boolean(false)),
             _ => Err(InvocationConversionError::InvalidBoolean),
         },
-        ResolvedType::Scalar(StandardScalar::BinaryLargeObject) => STANDARD
-            .decode(input)
+        ResolvedType::Scalar(StandardScalar::BinaryLargeObject) => orna_base::base64_decode(input)
             .map(RuntimeValue::Bytes)
             .map_err(|_| InvocationConversionError::InvalidBase64),
         ResolvedType::Scalar(StandardScalar::Uuid) => {

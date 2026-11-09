@@ -28,10 +28,6 @@ use std::{
 };
 
 use orna_evaluator::ActivationEffectReport;
-use orna_foundation::{
-    CanonicalSnapshot, CanonicalValue, Diagnostic as FoundationDiagnostic, DiagnosticSeverity,
-    OvbRaw, SafeText, Value,
-};
 use orna_protocol::{
     Envelope, Limits as ProtocolLimits, Message, RequestState, ResultBody, ResultStatus,
     TargetKind, canonical_request_fingerprint,
@@ -51,6 +47,10 @@ use orna_security::{
 use orna_serving::{Error as ServingError, Origin as ServingOrigin, Serving};
 use orna_stream::{DiagnosticClass, DiagnosticCode, SafeDiagnostic};
 use orna_sys_id::SysFailureCode;
+use orna_value::{
+    CanonicalSnapshot, CanonicalValue, Diagnostic as FoundationDiagnostic, DiagnosticSeverity,
+    OvbRaw, SafeText, Value,
+};
 
 pub const SUBPROTOCOL: &str = "orna.present.v1";
 
@@ -8401,17 +8401,10 @@ fn parse_uuid(value: &str) -> Option<[u8; 16]> {
     let mut out = [0; 16];
     let mut chars = value.bytes().filter(|byte| *byte != b'-');
     for target in &mut out {
-        *target = (hex(chars.next()?)? << 4) | hex(chars.next()?)?;
+        *target =
+            (orna_base::hex_digit(chars.next()?)? << 4) | orna_base::hex_digit(chars.next()?)?;
     }
     chars.next().is_none().then_some(out)
-}
-const fn hex(value: u8) -> Option<u8> {
-    match value {
-        b'0'..=b'9' => Some(value - b'0'),
-        b'a'..=b'f' => Some(value - b'a' + 10),
-        b'A'..=b'F' => Some(value - b'A' + 10),
-        _ => None,
-    }
 }
 fn uuid(value: [u8; 16]) -> String {
     let mut out = String::with_capacity(36);
@@ -8599,11 +8592,11 @@ impl<'a> JsonObjectParser<'a> {
             b'r' => value.push('\r'),
             b't' => value.push('\t'),
             b'u' => {
-                let high = self.hex_quad()?;
+                let high = self.unicode_quad()?;
                 if (0xd800..=0xdbff).contains(&high) {
                     self.expect(b'\\')?;
                     self.expect(b'u')?;
-                    let low = self.hex_quad()?;
+                    let low = self.unicode_quad()?;
                     if !(0xdc00..=0xdfff).contains(&low) {
                         return None;
                     }
@@ -8621,12 +8614,12 @@ impl<'a> JsonObjectParser<'a> {
         Some(())
     }
 
-    fn hex_quad(&mut self) -> Option<u16> {
+    fn unicode_quad(&mut self) -> Option<u16> {
         let mut value = 0_u16;
         for _ in 0..4 {
             value = value
                 .checked_mul(16)?
-                .checked_add(u16::from(hex(self.next()?)?))?;
+                .checked_add(u16::from(orna_base::hex_digit(self.next()?)?))?;
             self.advance();
         }
         Some(value)
@@ -8695,61 +8688,18 @@ fn session_response(
         body: body.into_bytes(),
     }
 }
-const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 fn encode_token(token: [u8; 32]) -> String {
-    let mut out = String::with_capacity(43);
-    for chunk in token.chunks(3) {
-        out.push(B64[(chunk[0] >> 2) as usize] as char);
-        out.push(
-            B64[(((chunk[0] & 3) << 4) | (chunk.get(1).copied().unwrap_or(0) >> 4)) as usize]
-                as char,
-        );
-        if chunk.len() > 1 {
-            out.push(
-                B64[(((chunk[1] & 15) << 2) | (chunk.get(2).copied().unwrap_or(0) >> 6)) as usize]
-                    as char,
-            );
-        }
-        if chunk.len() > 2 {
-            out.push(B64[(chunk[2] & 63) as usize] as char);
-        }
-    }
-    out
+    orna_base::base64_encode_url(token)
 }
 fn decode_token(value: &str) -> Option<[u8; 32]> {
     (value.len() == 43)
-        .then(|| decode_base64url(value))
+        .then(|| orna_base::base64_decode_url(value).ok())
         .flatten()
         .and_then(|bytes| bytes.try_into().ok())
 }
 fn decode_base64(value: &str) -> Option<Vec<u8>> {
-    orna_value::base64_decode(value).ok()
+    orna_base::base64_decode(value).ok()
 }
-#[allow(clippy::cast_possible_truncation)]
-fn decode_base64url(value: &str) -> Option<Vec<u8>> {
-    let mut bits = 0u32;
-    let mut count = 0;
-    let mut out = Vec::new();
-    for byte in value.bytes() {
-        let digit = match byte {
-            b'A'..=b'Z' => byte - b'A',
-            b'a'..=b'z' => byte - b'a' + 26,
-            b'0'..=b'9' => byte - b'0' + 52,
-            b'-' => 62,
-            b'_' => 63,
-            _ => return None,
-        };
-        bits = (bits << 6) | u32::from(digit);
-        count += 6;
-        while count >= 8 {
-            count -= 8;
-            out.push((bits >> count) as u8);
-            bits &= (1 << count) - 1;
-        }
-    }
-    (count == 0 || bits == 0).then_some(out)
-}
-
 pub struct WebSocketState {
     attachment: [u8; 16],
     fragment: Option<(u8, Vec<u8>)>,
@@ -9026,11 +8976,9 @@ fn sha1(input: &[u8]) -> [u8; 20] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orna_foundation::{
-        Diagnostic as FoundationDiagnostic, DiagnosticSeverity, SafeText, Value,
-    };
     use orna_repository::Repository;
     use orna_runtime::{FaultPoint, NoFault, RuntimeIdentity};
+    use orna_value::{Diagnostic as FoundationDiagnostic, DiagnosticSeverity, SafeText, Value};
     use std::{
         fs,
         process::Command,

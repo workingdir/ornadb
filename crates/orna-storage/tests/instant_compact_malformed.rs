@@ -1,10 +1,9 @@
 use std::sync::Arc;
 
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use bytes::Bytes;
-use orna_foundation::{CanonicalValue, OvbRaw, SchemaDescriptor};
 use orna_repository::Uuid;
 use orna_storage::{CompactOvbProfile, CompactParquetError, CompactParquetKeySource};
+use orna_value::{CanonicalValue, OvbRaw, SchemaDescriptor};
 use parquet::{
     basic::{Compression, Encoding},
     data_type::Int64Type,
@@ -65,9 +64,7 @@ fn descriptor(encoding: &str, parameters: Vec<OvbRaw>) -> OvbRaw {
     ])
 }
 
-fn hex_digest(bytes: [u8; 32]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
+use orna_base::hex as hex_digest;
 
 fn metadata(profile: &CompactOvbProfile, column_descriptor: OvbRaw) -> Vec<KeyValue> {
     let columns = CanonicalValue::new(OvbRaw::Array(vec![column_descriptor]))
@@ -79,13 +76,16 @@ fn metadata(profile: &CompactOvbProfile, column_descriptor: OvbRaw) -> Vec<KeyVa
         KeyValue::new("orna.table".into(), Some(TABLE.to_string())),
         KeyValue::new(
             "orna.schema.sha256".into(),
-            Some(hex_digest(profile.schema_fingerprint())),
+            Some(hex_digest(&profile.schema_fingerprint())),
         ),
         KeyValue::new(
             "orna.schema.ovb".into(),
-            Some(BASE64.encode(profile.schema().encode().unwrap())),
+            Some(orna_base::base64_encode(profile.schema().encode().unwrap())),
         ),
-        KeyValue::new("orna.columns.ovb".into(), Some(BASE64.encode(columns))),
+        KeyValue::new(
+            "orna.columns.ovb".into(),
+            Some(orna_base::base64_encode(columns)),
+        ),
         KeyValue::new(
             "orna.encoder".into(),
             Some("instant-malformed-proof-v1".into()),

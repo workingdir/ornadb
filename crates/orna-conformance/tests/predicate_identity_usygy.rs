@@ -1,8 +1,8 @@
 use orna_conformance::{SourceUnit, StageOutcome, TransactionalEvaluator};
 use orna_evaluator::Limits;
-use orna_foundation::Value;
 use orna_semantic::{Catalogue, ModuleInput, analyze_with_catalogue};
 use orna_value::Raw;
+use orna_value::Value;
 
 fn fixture_source(source: &str) -> SourceUnit {
     SourceUnit {

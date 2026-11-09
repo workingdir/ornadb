@@ -11,7 +11,7 @@
 //! bounds itself from the typed row values.
 //!
 //! Shared with production and therefore NOT independent: the canonical OVB
-//! encoder (`orna_foundation::CanonicalValue`), the base64 helper, the
+//! encoder (`orna_value::CanonicalValue`), the base64 helper, the
 //! date-key mapping (`compact_date_value`) and the Parquet page-checksum helper
 //! (`legacy_fixture_writer::with_page_checksums`). The record text shapes follow
 //! the record grammar the production reader admits, because that grammar is
@@ -88,7 +88,7 @@
 
 use std::{fs, path::Path, process::Command, sync::Arc};
 
-use orna_foundation::{CanonicalValue, OvbRaw, SchemaDescriptor};
+use orna_value::{CanonicalValue, OvbRaw, SchemaDescriptor};
 use parquet::{
     basic::{Compression, Encoding},
     data_type::{ByteArray, ByteArrayType, Int32Type, Int64Type},

@@ -10,9 +10,9 @@ use std::{
 };
 
 use orna_evaluator::SysHostBindingRegistry;
-use orna_foundation::{CanonicalValue, OvbRaw};
 use orna_sys::{EnvironmentProvider, FilesystemProvider, HttpProvider};
 use orna_value::Raw;
+use orna_value::{CanonicalValue, OvbRaw};
 
 fn text_value(value: &str) -> CanonicalValue {
     CanonicalValue::new(Raw::Text(value.to_owned())).unwrap()

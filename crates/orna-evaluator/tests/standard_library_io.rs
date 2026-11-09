@@ -2,8 +2,8 @@
 mod pinned_io_std;
 
 use orna_evaluator::Limits;
-use orna_foundation::CanonicalValue;
 use orna_project_repl::AdmittedReplSession;
+use orna_value::CanonicalValue;
 use orna_value::Raw;
 
 fn bool_value(value: bool) -> CanonicalValue {

@@ -1,8 +1,8 @@
 use num_bigint::BigInt;
 use orna_value::{Decimal, Money, Raw, Value};
 
-fn hex_bytes(input: &str) -> Vec<u8> {
-    hex::decode(input).expect("valid test vector hex")
+fn decode_bytes(input: &str) -> Vec<u8> {
+    orna_base::hex_decode(input).expect("canonical hexadecimal")
 }
 
 fn decimal_raw(coefficient: i64, exponent10: i64) -> Raw {
@@ -48,7 +48,7 @@ fn money_tag_60007_canonical_vectors_round_trip() {
     for (raw, expected_hex) in vectors {
         let value = Value::new(raw).expect("valid canonical Money value");
         let encoded = value.encode().expect("Money encoding succeeds");
-        assert_eq!(encoded, hex_bytes(expected_hex));
+        assert_eq!(encoded, decode_bytes(expected_hex));
         let money = Money::decode(&encoded).expect("typed Money decoding succeeds");
         assert_eq!(money.value(), &value);
         assert_eq!(
@@ -153,17 +153,18 @@ fn rejects_malformed_money_outer_and_nested_payloads() {
             orna_value::Error::InvalidValue,
         ),
     ] {
-        assert_money_decode_rejects(&hex_bytes(encoded), expected);
+        assert_money_decode_rejects(&decode_bytes(encoded), expected);
     }
 }
 
 #[test]
 fn rejects_noncanonical_money_decimal_and_tag_forms() {
-    let decimal_alias = hex_bytes("d9ea6782d9ea608219303422d8255001010101010101010101010101010101");
+    let decimal_alias =
+        decode_bytes("d9ea6782d9ea608219303422d8255001010101010101010101010101010101");
     assert_money_decode_rejects(&decimal_alias, orna_value::Error::NonCanonical);
 
     let wide_tag =
-        hex_bytes("db000000000000ea6782d9ea60820121d8255001010101010101010101010101010101");
+        decode_bytes("db000000000000ea6782d9ea60820121d8255001010101010101010101010101010101");
     assert_money_decode_rejects(&wide_tag, orna_value::Error::NonCanonical);
 }
 
@@ -199,13 +200,15 @@ fn rejects_decimal_and_money_exponents_beyond_exact_limit() {
         );
     }
 
-    let positive = hex_bytes("d9ea6782d9ea6082011a000f4241d8255001010101010101010101010101010101");
+    let positive =
+        decode_bytes("d9ea6782d9ea6082011a000f4241d8255001010101010101010101010101010101");
     assert_eq!(
         Money::decode(&positive),
         Err(orna_value::Error::DecimalLimit)
     );
 
-    let negative = hex_bytes("d9ea6782d9ea6082013a000f4240d8255001010101010101010101010101010101");
+    let negative =
+        decode_bytes("d9ea6782d9ea6082013a000f4240d8255001010101010101010101010101010101");
     assert_eq!(
         Money::decode(&negative),
         Err(orna_value::Error::DecimalLimit)

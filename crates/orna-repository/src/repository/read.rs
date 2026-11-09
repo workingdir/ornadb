@@ -17,13 +17,13 @@ impl Repository {
     /// never creates or hydrates Git objects.
     pub fn resolve_committed_oid(
         &self,
-        algorithm: orna_foundation::GitHash,
+        algorithm: orna_value::GitHash,
         oid: &[u8],
     ) -> Result<GitCommitRef, RepositoryError> {
         let native_length = self.native_object_id_length()?;
         let (expected_algorithm, expected_bytes) = match native_length {
-            40 => (orna_foundation::GitHash::Sha1, 20),
-            64 => (orna_foundation::GitHash::Sha256, 32),
+            40 => (orna_value::GitHash::Sha1, 20),
+            64 => (orna_value::GitHash::Sha256, 32),
             _ => return Err(RepositoryError::UnsupportedObjectFormat),
         };
         if algorithm != expected_algorithm || oid.len() != expected_bytes {

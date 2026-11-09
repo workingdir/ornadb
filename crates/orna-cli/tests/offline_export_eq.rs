@@ -57,11 +57,4 @@ fn republished_fixture_export_has_an_equal_manifest_and_a_changed_row_does_not()
     );
 }
 
-fn hex(bytes: &[u8; 32]) -> String {
-    use std::fmt::Write as _;
-    let mut out = String::with_capacity(64);
-    for byte in bytes {
-        write!(out, "{byte:02x}").expect("writing to a String cannot fail");
-    }
-    out
-}
+use orna_base::hex;

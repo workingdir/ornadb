@@ -3,8 +3,8 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
-use orna_foundation::Diagnostic;
 use orna_syntax::{Expr, Pattern, TypeExpr};
+use orna_value::Diagnostic;
 
 use super::*;
 

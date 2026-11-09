@@ -1,20 +1,15 @@
 use orna_conformance::{SourceUnit, StageOutcome, TransactionalEvaluator};
 use orna_evaluator::Limits;
-use orna_foundation::Value;
 use orna_semantic::{
     Catalogue, DIAG_ASSERTION_ONE_TABLE, DIAG_ASSERTION_SCOPE, ModuleInput, analyze,
     analyze_with_catalogue,
 };
+use orna_value::Value;
 
 const RUNTIME_FIXTURE: &str =
     include_str!("fixtures/assert-evidence-batch-two/runtime-boundaries.orna");
 
-fn execute(
-    entry: &str,
-) -> (
-    StageOutcome<orna_foundation::Diagnostic>,
-    TransactionalEvaluator,
-) {
+fn execute(entry: &str) -> (StageOutcome<orna_value::Diagnostic>, TransactionalEvaluator) {
     let mut runtime = TransactionalEvaluator::new(entry, Limits::default());
     let unit = SourceUnit {
         fixture_id: format!("assert-evidence-batch-two-{entry}"),

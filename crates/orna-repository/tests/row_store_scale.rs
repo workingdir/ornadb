@@ -9,8 +9,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use orna_foundation::{OvbRaw as Raw, SchemaDescriptor};
 use orna_repository::{KeyRange, Repository, RowIndexMutation, TypedKey};
+use orna_value::{OvbRaw as Raw, SchemaDescriptor};
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -124,27 +124,18 @@ impl Oid {
         assert_eq!(value.len(), 40);
         let mut bytes = [0; 20];
         for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
-            bytes[index] = (hex_nibble(pair[0]) << 4) | hex_nibble(pair[1]);
+            bytes[index] = (nibble(pair[0]) << 4) | nibble(pair[1]);
         }
         Self(bytes)
     }
 
-    fn hex(self) -> String {
-        let mut output = String::with_capacity(40);
-        for byte in self.0 {
-            use std::fmt::Write as _;
-            write!(&mut output, "{byte:02x}").expect("write OID hex");
-        }
-        output
+    fn oid_text(self) -> String {
+        orna_base::hex(&self.0)
     }
 }
 
-fn hex_nibble(byte: u8) -> u8 {
-    match byte {
-        b'0'..=b'9' => byte - b'0',
-        b'a'..=b'f' => byte - b'a' + 10,
-        _ => panic!("invalid lowercase OID hex"),
-    }
+fn nibble(byte: u8) -> u8 {
+    orna_base::hex_digit(byte).expect("invalid lowercase OID hex")
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -212,7 +203,7 @@ impl GraphFixture {
                             panic!("non-tree Git object in directory entry")
                         }
                     },
-                    name: edge.oid.hex(),
+                    name: edge.oid.oid_text(),
                     oid: edge.oid,
                 })
                 .collect();
@@ -250,7 +241,7 @@ impl GraphFixture {
         let refs_path = path.join("refs");
         fs::create_dir_all(&refs_path).expect("create native refs tree");
         for edge in &node.edges {
-            let child = refs_path.join(edge.oid.hex());
+            let child = refs_path.join(edge.oid.oid_text());
             match edge.kind {
                 ObjectKind::Tree => self.materialize_node(edge.oid, &child),
                 ObjectKind::Blob => {
@@ -1106,7 +1097,7 @@ fn build_fixture(row_count: u64, fault: Fault) -> Fixture {
     let committed_store = git_text(root.path(), &["rev-parse", "HEAD:.orna/store"]);
     assert_eq!(
         committed_store,
-        store_root.hex(),
+        store_root.oid_text(),
         "Git tree hash matches fixture graph"
     );
     git(root.path(), &["config", "uploadpack.allowFilter", "true"]);
@@ -1162,7 +1153,7 @@ fn bootstrap_partial_clone(fixture: &Fixture, repository_path: &Path) {
     );
     git(repository_path, &["cat-file", "blob", "HEAD:main.orna"]);
     for oid in &fixture.bootstrap_blob_oids {
-        let object = oid.hex();
+        let object = oid.oid_text();
         git(repository_path, &["cat-file", "blob", &object]);
     }
 }
@@ -1180,8 +1171,8 @@ fn hydrate_index_window(repository_path: &Path, objects: impl Iterator<Item = cr
     let mut hydrated = 0u64;
     for object in objects {
         session
-            .request(&object.hex())
-            .unwrap_or_else(|error| panic!("hydrate {}: {error}", object.hex()));
+            .request(&object.oid_text())
+            .unwrap_or_else(|error| panic!("hydrate {}: {error}", object.oid_text()));
         hydrated += 1;
     }
     HYDRATION_FETCHES.fetch_add(hydrated, Ordering::Relaxed);

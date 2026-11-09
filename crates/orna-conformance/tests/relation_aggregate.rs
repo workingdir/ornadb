@@ -4,7 +4,7 @@ use orna_conformance::{
     BoundedEvaluator, RuntimeEvaluator, SourceUnit, StageOutcome, TransactionalEvaluator,
 };
 use orna_evaluator::Limits;
-use orna_foundation::{OvbRaw, Value};
+use orna_value::{OvbRaw, Value};
 
 fn source(fixture_id: &str, source_id: &str, source: &str) -> SourceUnit {
     SourceUnit {

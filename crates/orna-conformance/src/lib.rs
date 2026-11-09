@@ -8,11 +8,11 @@
 use futures::executor::block_on;
 use num_bigint::BigInt;
 use orna_evaluator::Environment;
-use orna_foundation::{OvbRaw, Value as CanonicalValue};
 use orna_repository::Repository;
 use orna_runtime::{RuntimeIdentity, RuntimeState};
 use orna_stream::{Checkpoint, CheckpointKey, Component, ConsumerIdentity};
 use orna_syntax::{Declaration, Expr, Pattern, TableMember, TypeExpr, parse_module};
+use orna_value::{OvbRaw, Value as CanonicalValue};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -46,8 +46,8 @@ pub use vector_suites::{VectorSuiteEvidence, run_vector_suites};
 /// Existing generic adapters remain source-compatible during migration, but
 /// callers must use this helper rather than introduce a second harness shape.
 pub fn shared_diagnostic_outcome(
-    diagnostic: orna_foundation::Diagnostic,
-) -> StageOutcome<orna_foundation::Diagnostic> {
+    diagnostic: orna_value::Diagnostic,
+) -> StageOutcome<orna_value::Diagnostic> {
     StageOutcome::Failed(diagnostic)
 }
 
@@ -1134,10 +1134,7 @@ fn create_reference_runtime_repository() -> Result<(PathBuf, Repository), String
     Ok((root, repository))
 }
 
-fn expect_pass(
-    outcome: StageOutcome<orna_foundation::Diagnostic>,
-    entry: &str,
-) -> Result<(), String> {
+fn expect_pass(outcome: StageOutcome<orna_value::Diagnostic>, entry: &str) -> Result<(), String> {
     match outcome {
         StageOutcome::Passed => Ok(()),
         StageOutcome::Failed(_) => Err(format!("reference invocation failed: {entry}")),

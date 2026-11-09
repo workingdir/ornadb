@@ -8,7 +8,6 @@ use std::{
 };
 
 use fs2::FileExt;
-use orna_foundation::{GitHash, OvbRaw, SchemaDescriptor};
 use orna_repository::{
     CheckoutTarget, CommittedTreeEntryKind, CompactManifest, GitDeclaredObjectSetState,
     GitObjectKind, GitObjectState, GitRepositoryMode, IndexGeneration, LegacyAnnotationCandidate,
@@ -18,6 +17,7 @@ use orna_repository::{
     RepositoryError, RequiredInternalRef, RuntimeGeneration, StreamCheckpointIdentityPredecessor,
     WorktreeState,
 };
+use orna_value::{GitHash, OvbRaw, SchemaDescriptor};
 
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
@@ -5029,9 +5029,7 @@ fn recovery_preserves_post_ref_external_conflict_and_can_resume() {
     assert_eq!(repo.read_publication_journal().unwrap(), None);
 }
 
-fn hex_digest(digest: &[u8]) -> String {
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
-}
+use orna_base::hex as hex_digest;
 
 #[test]
 fn legacy_format_migration_uses_pub3_journal_and_preserves_user_state() {

@@ -3,8 +3,8 @@ use orna_evaluator::{
     EffectHandler, Environment, EvaluationError, Functions, Limits, PureFunction, RelationPage,
     StepBudget, invoke_named_with_effects,
 };
-use orna_foundation::{CanonicalValue, OvbRaw, RowRef};
 use orna_syntax::parse_expression;
+use orna_value::{CanonicalValue, OvbRaw, RowRef};
 use orna_value::{Raw, Snapshot};
 
 fn integer(value: i64) -> Raw {
@@ -88,7 +88,7 @@ impl EffectHandler for ProjectionEffects {
             Some([1]) => 1,
             _ => {
                 return Err(EvaluationError::redacted(
-                    orna_foundation::SafeText::new("ORNA-EVAL-VALUE").unwrap(),
+                    orna_value::SafeText::new("ORNA-EVAL-VALUE").unwrap(),
                 ));
             }
         };

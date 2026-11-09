@@ -12,7 +12,7 @@ use std::{
 
 use libsql::{TransactionBehavior, params};
 use num_bigint::BigInt;
-use orna_foundation::{
+use orna_value::{
     CwdCapture, FunctionRef, InvocationArgumentRef, InvocationRef, RunRef, SnapshotRef, TypeRef,
     function_reference, invocation_argument_reference, invocation_reference, object_reference,
     snapshot_reference, type_reference, validate_function_reference,

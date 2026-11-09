@@ -9,9 +9,9 @@ use std::{
     process::{Command, Output},
 };
 
-use orna_foundation::{OvbRaw, Value};
 use orna_repository::Repository;
 use orna_runtime::RuntimeState;
+use orna_value::{OvbRaw, Value};
 use tempfile::TempDir;
 
 #[path = "support/format3.rs"]

@@ -557,7 +557,7 @@ fn version_two_nested_record_value_digest_is_order_independent() {
         let origins = record_value_origins_for(&catalogue);
         let digest =
             catalogue_digest_with_context(&context, &catalogue, &[], &[], &origins, &[]).unwrap();
-        (digest, hex(digest))
+        (digest, digest_hex(digest))
     };
     let (forward, forward_hex) = build(false);
     let (reversed, _) = build(true);
@@ -1396,47 +1396,45 @@ fn origins() -> Vec<DefinitionOrigin> {
     ]
 }
 
-fn hex(digest: Sha256Digest) -> String {
-    digest
-        .to_bytes()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+fn digest_hex(digest: Sha256Digest) -> String {
+    orna_base::hex(&digest.to_bytes())
 }
 
 #[test]
 fn direct_hashes_have_stable_version_one_goldens() {
     assert_eq!(
-        hex(source_unit_content_digest("hello").unwrap()),
+        digest_hex(source_unit_content_digest("hello").unwrap()),
         "d9f0c06003693e2e6be338bba922af77ef8f73d11192efd9d3cdd3eaccf17f9b"
     );
     assert_eq!(
-        hex(artifact_payload_digest(b"a\0b").unwrap()),
+        digest_hex(artifact_payload_digest(b"a\0b").unwrap()),
         "c8b32ae8adc4ca209b47c569aa6c66a98de66b6d9cecad8f5e58ad098c942a0d"
     );
     assert_eq!(
-        hex(function_declaration_digest(b"FUNCTION crm.lookup").unwrap()),
+        digest_hex(function_declaration_digest(b"FUNCTION crm.lookup").unwrap()),
         "9492455bf7b62ddbe4ee91ceef6ca5ea7114d47636ec7224724aa72219fd90f7"
     );
     let empty_bundle = source_bundle_digest(&[]).unwrap();
     assert_eq!(
-        hex(empty_bundle),
+        digest_hex(empty_bundle),
         "965513f9c104e3c3fca13b46dcd382a64041a063d35ff0a316149bf5a4bfd641"
     );
     assert_eq!(
-        hex(source_revision_record_digest(
-            SourceBundleId::from_bytes(id::<42>()),
-            None,
-            empty_bundle,
-        )
-        .unwrap()),
+        digest_hex(
+            source_revision_record_digest(
+                SourceBundleId::from_bytes(id::<42>()),
+                None,
+                empty_bundle,
+            )
+            .unwrap()
+        ),
         "af56d821e5fa3ce3cccd67b0a46050435bb4da70c0f516297f6cc3cecb934729"
     );
     let empty_catalogue =
         CatalogueSnapshot::new(CatalogueRevisionId::from_bytes(id::<43>()), vec![], vec![])
             .unwrap();
     assert_eq!(
-        hex(catalogue_digest(&empty_catalogue, &[], &[], &[], &[]).unwrap()),
+        digest_hex(catalogue_digest(&empty_catalogue, &[], &[], &[], &[]).unwrap()),
         "02dc700934a603ff73b56e1f63e8051a103922aa267cbf1e984ed3cf7964160b"
     );
 }
@@ -1982,7 +1980,7 @@ fn standard_library_digest_has_a_stable_order_independent_version_one_golden() {
     let digest = standard_library_digest(&standard).unwrap();
 
     assert_eq!(
-        hex(digest),
+        digest_hex(digest),
         "2f5c79f487506075cf189852aa4197eb8aa7ed4470e391a6a8ca119175c02261"
     );
     assert_eq!(standard_library_digest(&reversed).unwrap(), digest);
@@ -2000,7 +1998,7 @@ fn executable_standard_library_digest_uses_the_v2_contract() {
     let digest = standard_library_digest(&standard).unwrap();
 
     assert_eq!(
-        hex(digest),
+        digest_hex(digest),
         "e7525fa634825d8981b423829d18ce84c59c52783bc6f919dd008979929b35a2"
     );
     assert_eq!(
@@ -2228,11 +2226,11 @@ fn version_two_function_and_catalogue_hashes_have_stable_goldens() {
     .unwrap();
 
     assert_eq!(
-        hex(semantic),
+        digest_hex(semantic),
         "8ce90cad1ae586523eb512e59e3f651b13ff641d19fb5a39b02be96d684fbc8e"
     );
     assert_eq!(
-        hex(catalogue_hash),
+        digest_hex(catalogue_hash),
         "26afbfeff3ef374e040859c061c43220f8d87255a7fdaba51c209b28859a4d23"
     );
 
@@ -3017,7 +3015,7 @@ fn source_bundle_hash_is_order_independent_but_binds_unit_identity() {
     let reversed = source_bundle_digest(&[second.clone(), first.clone()]).unwrap();
     assert_eq!(forward, reversed);
     assert_eq!(
-        hex(forward),
+        digest_hex(forward),
         "93ea9176309da4a0f0cbba83ae488909da109a054a1a4d8a13528c64e7c935be"
     );
 
@@ -3059,7 +3057,7 @@ fn source_revision_hash_verifies_retained_aggregate_hash() {
     .unwrap();
     let revision_hash = source_revision_digest(&revision).unwrap();
     assert_eq!(
-        hex(revision_hash),
+        digest_hex(revision_hash),
         "9f5d7a0e8c949c255d5217371afc1d57caf23ac7e17ab411b8df0eef81bc7776"
     );
 
@@ -3101,11 +3099,11 @@ fn semantic_and_catalogue_hashes_are_order_independent() {
     )
     .unwrap();
     assert_eq!(
-        hex(semantic),
+        digest_hex(semantic),
         "f9e9cd170e5e37de3399fc80e1164bf3d51697dd3ec6a1c242976c3a21aa9f49"
     );
     assert_eq!(
-        hex(catalogue_hash),
+        digest_hex(catalogue_hash),
         "83f35f7e18618aa8608ac8cc58e35256bde1e9eb9c9ea56b82c7a5c3a83181f3"
     );
 
@@ -3160,11 +3158,11 @@ fn write_reference_hashes_have_stable_tags_and_owner_qualified_targets() {
     )
     .unwrap();
     assert_eq!(
-        hex(semantic),
+        digest_hex(semantic),
         "e634a9f3e1b93ebb33cd4022c3521b1c241533924f3c628021138183b227cdae"
     );
     assert_eq!(
-        hex(catalogue_hash),
+        digest_hex(catalogue_hash),
         "249e26f6a1cf9f4ff6bfa0d253bb8c317aab3424ada0ddd52de23cbd061da0a9"
     );
 }

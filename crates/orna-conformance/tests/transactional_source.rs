@@ -1,8 +1,8 @@
 use orna_conformance::{SourceUnit, StageOutcome, TransactionalEvaluator};
 use orna_evaluator::Limits;
-use orna_foundation::Value;
 use orna_semantic::{Catalogue, ModuleInput, analyze_with_catalogue};
 use orna_value::Raw;
+use orna_value::Value;
 
 fn source(parent_body: &str) -> SourceUnit {
     SourceUnit {
@@ -140,8 +140,7 @@ fn parsed_repeated_primary_key_declaration_is_rejected_before_transaction_admiss
         ),
         "{outcome:?}"
     );
-    let key =
-        Value::new(orna_foundation::OvbRaw::Text("north".into())).expect("canonical primary key");
+    let key = Value::new(orna_value::OvbRaw::Text("north".into())).expect("canonical primary key");
     assert_eq!(runtime.committed_row("Reading", &key), None);
 }
 
@@ -159,9 +158,9 @@ fn parsed_update_patches_only_stored_fields() {
         .expect("updated row");
     assert!(matches!(
         row.raw(),
-        orna_foundation::OvbRaw::Map(fields)
-            if fields.iter().any(|(key, value)| key == &orna_foundation::OvbRaw::Text("text".into())
-                && value == &orna_foundation::OvbRaw::Text("changed".into()))
+        orna_value::OvbRaw::Map(fields)
+            if fields.iter().any(|(key, value)| key == &orna_value::OvbRaw::Text("text".into())
+                && value == &orna_value::OvbRaw::Text("changed".into()))
     ));
 }
 
@@ -179,9 +178,9 @@ fn parsed_upsert_patches_existing_rows_and_inserts_absent_rows() {
         .expect("updated row");
     assert!(matches!(
         updated.raw(),
-        orna_foundation::OvbRaw::Map(fields)
-            if fields.iter().any(|(key, value)| key == &orna_foundation::OvbRaw::Text("text".into())
-                && value == &orna_foundation::OvbRaw::Text("updated".into()))
+        orna_value::OvbRaw::Map(fields)
+            if fields.iter().any(|(key, value)| key == &orna_value::OvbRaw::Text("text".into())
+                && value == &orna_value::OvbRaw::Text("updated".into()))
     ));
     assert!(
         runtime
@@ -663,14 +662,14 @@ fn parsed_composite_rekey_moves_every_key_component_in_declaration_order() {
     });
     assert!(matches!(outcome, StageOutcome::Passed));
 
-    let north = Value::new(orna_foundation::OvbRaw::Array(vec![
-        orna_foundation::OvbRaw::Text("north".into()),
-        orna_foundation::OvbRaw::Text("pencil".into()),
+    let north = Value::new(orna_value::OvbRaw::Array(vec![
+        orna_value::OvbRaw::Text("north".into()),
+        orna_value::OvbRaw::Text("pencil".into()),
     ]))
     .expect("canonical composite key");
-    let south = Value::new(orna_foundation::OvbRaw::Array(vec![
-        orna_foundation::OvbRaw::Text("south".into()),
-        orna_foundation::OvbRaw::Text("pencil".into()),
+    let south = Value::new(orna_value::OvbRaw::Array(vec![
+        orna_value::OvbRaw::Text("south".into()),
+        orna_value::OvbRaw::Text("pencil".into()),
     ]))
     .expect("canonical composite key");
     assert_eq!(runtime.committed_row("Stock", &north), None);
@@ -679,13 +678,13 @@ fn parsed_composite_rekey_moves_every_key_component_in_declaration_order() {
         .expect("rekeyed composite row");
     assert!(matches!(
         row.raw(),
-        orna_foundation::OvbRaw::Map(fields)
-            if fields.iter().any(|(key, value)| key == &orna_foundation::OvbRaw::Text("location".into())
-                && value == &orna_foundation::OvbRaw::Text("south".into()))
-                && fields.iter().any(|(key, value)| key == &orna_foundation::OvbRaw::Text("sku".into())
-                    && value == &orna_foundation::OvbRaw::Text("pencil".into()))
-                && fields.iter().any(|(key, value)| key == &orna_foundation::OvbRaw::Text("quantity".into())
-                    && value == &orna_foundation::OvbRaw::Int(12.into()))
+        orna_value::OvbRaw::Map(fields)
+            if fields.iter().any(|(key, value)| key == &orna_value::OvbRaw::Text("location".into())
+                && value == &orna_value::OvbRaw::Text("south".into()))
+                && fields.iter().any(|(key, value)| key == &orna_value::OvbRaw::Text("sku".into())
+                    && value == &orna_value::OvbRaw::Text("pencil".into()))
+                && fields.iter().any(|(key, value)| key == &orna_value::OvbRaw::Text("quantity".into())
+                    && value == &orna_value::OvbRaw::Int(12.into()))
     ));
 }
 
@@ -703,9 +702,9 @@ fn parsed_composite_rekey_rejects_a_non_tuple_target_key_without_publication() {
         outcome,
         StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-S021-TYPE"
     ));
-    let north = Value::new(orna_foundation::OvbRaw::Array(vec![
-        orna_foundation::OvbRaw::Text("north".into()),
-        orna_foundation::OvbRaw::Text("pencil".into()),
+    let north = Value::new(orna_value::OvbRaw::Array(vec![
+        orna_value::OvbRaw::Text("north".into()),
+        orna_value::OvbRaw::Text("pencil".into()),
     ]))
     .expect("canonical composite key");
     assert_eq!(runtime.committed_row("Stock", &north), None);
@@ -993,8 +992,7 @@ fn every_factory_short_circuits_on_first_false_canonical_row() {
         assert_eq!(
             runtime.committed_row(
                 "Entry",
-                &Value::new(orna_foundation::OvbRaw::Text(id.into()))
-                    .expect("canonical string key"),
+                &Value::new(orna_value::OvbRaw::Text(id.into())).expect("canonical string key"),
             ),
             None,
             "failed every predicate published row {id}"
@@ -2261,9 +2259,9 @@ fn decimal_composite_key_source(parent_body: &str) -> SourceUnit {
 fn decimal_composite_key(coefficient: i64, exponent: i64, label: &str) -> Value {
     let decimal =
         Value::decimal(coefficient.into(), exponent.into()).expect("canonical Decimal key");
-    Value::new(orna_foundation::OvbRaw::Array(vec![
+    Value::new(orna_value::OvbRaw::Array(vec![
         decimal.raw().clone(),
-        orna_foundation::OvbRaw::Text(label.into()),
+        orna_value::OvbRaw::Text(label.into()),
     ]))
     .expect("canonical composite Decimal+Str key")
 }
@@ -2624,10 +2622,10 @@ fn parsed_decimal_primary_key_update_selects_scale_insensitive_source_and_mutate
         .expect("updated Decimal-key row");
     assert!(matches!(
         row.raw(),
-        orna_foundation::OvbRaw::Map(fields)
+        orna_value::OvbRaw::Map(fields)
             if fields.iter().any(|(field, value)| field
-                == &orna_foundation::OvbRaw::Text("label".into())
-                && value == &orna_foundation::OvbRaw::Text("after".into()))
+                == &orna_value::OvbRaw::Text("label".into())
+                && value == &orna_value::OvbRaw::Text("after".into()))
     ));
 }
 
@@ -2772,10 +2770,10 @@ fn parsed_decimal_primary_key_upsert_selects_existing_row_across_scales() {
         .expect("scale-insensitive Decimal upsert row");
     assert!(matches!(
         row.raw(),
-        orna_foundation::OvbRaw::Map(fields)
+        orna_value::OvbRaw::Map(fields)
             if fields.iter().any(|(field, value)| field
-                == &orna_foundation::OvbRaw::Text("label".into())
-                && value == &orna_foundation::OvbRaw::Text("after".into()))
+                == &orna_value::OvbRaw::Text("label".into())
+                && value == &orna_value::OvbRaw::Text("after".into()))
     ));
 }
 
@@ -2798,13 +2796,13 @@ fn parsed_decimal_primary_key_upsert_preserves_omitted_non_key_fields() {
         .expect("patched Decimal primary-key row");
     assert!(matches!(
         row.raw(),
-        orna_foundation::OvbRaw::Map(fields)
+        orna_value::OvbRaw::Map(fields)
             if fields.iter().any(|(field, value)| field
-                == &orna_foundation::OvbRaw::Text("label".into())
-                && value == &orna_foundation::OvbRaw::Text("after".into()))
+                == &orna_value::OvbRaw::Text("label".into())
+                && value == &orna_value::OvbRaw::Text("after".into()))
                 && fields.iter().any(|(field, value)| field
-                    == &orna_foundation::OvbRaw::Text("note".into())
-                    && value == &orna_foundation::OvbRaw::Text("preserve me".into()))
+                    == &orna_value::OvbRaw::Text("note".into())
+                    && value == &orna_value::OvbRaw::Text("preserve me".into()))
     ));
 }
 
@@ -2826,10 +2824,10 @@ fn parsed_decimal_primary_key_upsert_inserts_an_absent_key() {
         .expect("absent Decimal key was inserted");
     assert!(matches!(
         row.raw(),
-        orna_foundation::OvbRaw::Map(fields)
+        orna_value::OvbRaw::Map(fields)
             if fields.iter().any(|(field, value)| field
-                == &orna_foundation::OvbRaw::Text("label".into())
-                && value == &orna_foundation::OvbRaw::Text("inserted".into()))
+                == &orna_value::OvbRaw::Text("label".into())
+                && value == &orna_value::OvbRaw::Text("inserted".into()))
     ));
 }
 

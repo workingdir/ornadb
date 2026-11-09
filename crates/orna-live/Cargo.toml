@@ -17,10 +17,10 @@ first-party-effect-trust = []
 
 [dependencies]
 orna-sys-id = { path = "../orna-sys-id" }
+orna-base = { path = "../orna-base" }
 futures = "0.3.31"
 getrandom = "0.3.4"
 orna-evaluator = { path = "../orna-evaluator" }
-orna-foundation = { path = "../orna-foundation" }
 orna-protocol = { path = "../orna-protocol" }
 orna-runtime = { path = "../orna-runtime" }
 orna-security = { path = "../orna-security" }

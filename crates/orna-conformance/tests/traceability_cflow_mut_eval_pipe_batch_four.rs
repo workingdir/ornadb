@@ -5,9 +5,9 @@
 
 use orna_conformance::{SourceUnit, StageOutcome, TransactionalEvaluator};
 use orna_evaluator::{Environment, Limits, evaluate_expression};
-use orna_foundation::{Diagnostic, Value};
 use orna_semantic::{DIAG_TYPE, ModuleInput, analyze};
 use orna_syntax::parse_module;
+use orna_value::{Diagnostic, Value};
 
 fn run_fixture(
     fixture_id: &str,

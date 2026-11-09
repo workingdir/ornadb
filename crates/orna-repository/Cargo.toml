@@ -16,7 +16,7 @@ bytes = "1.10.1"
 fs2 = "0.4.3"
 libc = "0.2.180"
 num-bigint = "0.4.6"
-orna-foundation = { path = "../orna-foundation" }
+orna-base = { path = "../orna-base" }
 orna-value = { path = "../orna-value" }
 orna-syntax = { path = "../orna-syntax" }
 parquet = { version = "59.3.0", default-features = false, features = ["crc", "zstd"] }

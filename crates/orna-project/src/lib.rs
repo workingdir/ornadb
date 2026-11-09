@@ -2341,7 +2341,7 @@ fn validate_repository_paths(root: &Path, limits: ProjectLimits) -> Result<(), P
                 .file_name()
                 .into_string()
                 .map_err(|_| ProjectLoadError::UnsafePath)?;
-            if orna_foundation::is_git_metadata_component(name.as_bytes()) {
+            if orna_base::is_git_metadata_component(name.as_bytes()) {
                 continue;
             }
             if !portable_component(&name) {
@@ -2776,7 +2776,7 @@ fn discover_worktree_rows(
             let path = entry.path();
             if directory == root
                 && path.file_name().is_some_and(|name| {
-                    orna_foundation::is_git_metadata_component(name.as_encoded_bytes())
+                    orna_base::is_git_metadata_component(name.as_encoded_bytes())
                 })
             {
                 continue;

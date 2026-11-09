@@ -1,6 +1,6 @@
 use orna_evaluator::Limits;
-use orna_foundation::{OvbRaw, Value};
 use orna_project_repl::AdmittedReplSession;
+use orna_value::{OvbRaw, Value};
 
 const RUNTIME_FAILURE: &str = include_str!("fixtures/repl-admission/runtime-failure.orna");
 const REJECTED_FUNCTION: &str = include_str!("fixtures/repl-admission/rejected-function.orna");

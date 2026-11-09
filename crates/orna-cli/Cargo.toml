@@ -24,11 +24,11 @@ missing_errors_doc = "allow"
 
 [dependencies]
 sha2 = "0.10"
+orna-base = { path = "../orna-base" }
 orna-application = { path = "../orna-application" }
 orna-conformance = { path = "../orna-conformance" }
 orna-evaluator = { path = "../orna-evaluator" }
 orna-project-repl = { path = "../orna-project-repl" }
-orna-foundation = { path = "../orna-foundation" }
 orna-live = { path = "../orna-live" }
 orna-protocol = { path = "../orna-protocol" }
 orna-project = { path = "../orna-project" }

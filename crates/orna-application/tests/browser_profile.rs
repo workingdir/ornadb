@@ -1,5 +1,5 @@
 use orna_application::execute_browser_profile;
-use orna_foundation::{CanonicalValue, OvbRaw};
+use orna_value::{CanonicalValue, OvbRaw};
 
 const HOST_BINDINGS: &str = include_str!("../src/browser-profile-host.mjs");
 

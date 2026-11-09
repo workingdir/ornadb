@@ -1,7 +1,6 @@
 use futures::executor::block_on;
 use orna_application::{ApplicationAuthority, ApplicationLiveAdapter};
 use orna_evaluator::Limits as EvaluatorLimits;
-use orna_foundation::{CanonicalValue, OvbRaw};
 use orna_live::{LiveApplication, LiveApplicationWorkSupervisor, LiveEvalResponse};
 use orna_protocol::{Envelope, Message, PresentationContext, ResultStatus};
 use orna_repository::Repository;
@@ -11,6 +10,7 @@ use orna_runtime::{
     TerminalOutcome, WriterLease,
 };
 use orna_semantic::Catalogue;
+use orna_value::{CanonicalValue, OvbRaw};
 use std::{
     fs,
     path::PathBuf,

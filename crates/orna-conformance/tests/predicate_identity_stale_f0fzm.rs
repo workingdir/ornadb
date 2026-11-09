@@ -1,7 +1,7 @@
 use orna_conformance::{SourceUnit, StageOutcome, TransactionalEvaluator};
 use orna_evaluator::Limits;
-use orna_foundation::Value;
 use orna_semantic::{Catalogue, ModuleInput, analyze_with_catalogue};
+use orna_value::Value;
 
 #[test]
 fn paired_depth_continuations_reject_a_stale_parent_identity() {

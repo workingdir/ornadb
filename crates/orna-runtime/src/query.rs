@@ -3,7 +3,7 @@
 use std::time::SystemTime;
 
 use libsql::{Connection, TransactionBehavior, params};
-use orna_foundation::{
+use orna_value::{
     FunctionRef, ObjectRef, OvbRaw, RowRef, SnapshotRef, object_reference, snapshot_reference,
 };
 
@@ -16,7 +16,7 @@ use crate::invocation::InvocationObservationStatus;
 use crate::lease::{WriterLease, validate_writer_lease};
 use crate::observation::observation_instant;
 use crate::{RuntimeState, opaque_reference_key, row_reference_raw};
-use orna_foundation::CwdCapture;
+use orna_value::CwdCapture;
 
 /// Stable relation identities for system rows whose typed Foundation aliases
 /// are not yet defined by this implementation's reference layer.

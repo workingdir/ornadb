@@ -40,10 +40,6 @@ const RELEASE_VECTOR_FILES: [(&str, &[u8], &str); 6] = [
     ),
 ];
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
 fn suite<'a>(suites: &'a [VectorSuiteEvidence], name: &str) -> &'a VectorSuiteEvidence {
     suites
         .iter()
@@ -59,7 +55,11 @@ fn vendored_vector_files_match_the_release() {
         "every harness vector suite is pinned"
     );
     for (name, bytes, release_sha256) in RELEASE_VECTOR_FILES {
-        assert_eq!(hex(&Sha256::digest(bytes)), release_sha256, "{name}");
+        assert_eq!(
+            orna_base::hex(&Sha256::digest(bytes)),
+            release_sha256,
+            "{name}"
+        );
     }
 }
 

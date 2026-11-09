@@ -2045,7 +2045,7 @@ fn clear_checkout(root: &Path) -> Result<(), RepositoryError> {
     let entries = fs::read_dir(root).map_err(|_| RepositoryError::LocalStateUnavailable)?;
     for entry in entries {
         let entry = entry.map_err(|_| RepositoryError::LocalStateUnavailable)?;
-        if orna_foundation::is_git_metadata_component(entry.file_name().as_encoded_bytes()) {
+        if orna_base::is_git_metadata_component(entry.file_name().as_encoded_bytes()) {
             continue;
         }
         let path = entry.path();
@@ -2223,7 +2223,7 @@ fn copy_working_tree(source_root: &Path, destination_root: &Path) -> Result<(), 
     for entry in entries {
         let entry = entry.map_err(|_| RepositoryError::LocalStateUnavailable)?;
         let name = entry.file_name();
-        if orna_foundation::is_git_metadata_component(name.as_encoded_bytes()) {
+        if orna_base::is_git_metadata_component(name.as_encoded_bytes()) {
             continue;
         }
         copy_entry(&entry.path(), &destination_root.join(&name))?;
@@ -2510,7 +2510,7 @@ fn hash_working_tree(
             }
             continue;
         }
-        if orna_foundation::is_git_metadata_component(name.as_encoded_bytes()) {
+        if orna_base::is_git_metadata_component(name.as_encoded_bytes()) {
             continue;
         }
         let child = relative.join(name);

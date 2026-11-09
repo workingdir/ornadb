@@ -6,7 +6,6 @@ use orna_conformance::{
     StageOutcome, SyntaxAdapter, TransactionalEvaluator, run_reference_project_runtime_adapter,
 };
 use orna_evaluator::Limits as EvaluatorLimits;
-use orna_foundation::{Diagnostic, DiagnosticSeverity, SafeText, Value};
 use orna_project_repl::AdmittedReplSession;
 use orna_protocol::{
     DatabaseContext, Envelope, Limits as ProtocolLimits, Message, PresentationContext,
@@ -17,6 +16,7 @@ use orna_runtime::{RequestIdentity, RequestState, RuntimeError, RuntimeIdentity,
 use orna_security::OpaqueCredential;
 use orna_semantic::{ModuleInput, analyze};
 use orna_serving::{Limits as ServingLimits, Origin, Patch, RetainedPin, Serving};
+use orna_value::{Diagnostic, DiagnosticSeverity, SafeText, Value};
 use std::collections::BTreeMap;
 use std::{
     fs,
@@ -54,7 +54,7 @@ impl Default for CompositeEvaluator {
 }
 
 impl RuntimeEvaluator for CompositeEvaluator {
-    fn evaluate(&mut self, unit: &SourceUnit) -> StageOutcome<orna_foundation::Diagnostic> {
+    fn evaluate(&mut self, unit: &SourceUnit) -> StageOutcome<orna_value::Diagnostic> {
         self.transactional
             .execute_duplicate_key_fixture(unit)
             .unwrap_or_else(|| self.bounded.evaluate(unit))
@@ -63,25 +63,25 @@ impl RuntimeEvaluator for CompositeEvaluator {
     fn evaluate_project(
         &mut self,
         project: &orna_conformance::ProjectUnit,
-    ) -> StageOutcome<orna_foundation::Diagnostic> {
+    ) -> StageOutcome<orna_value::Diagnostic> {
         self.bounded.evaluate_project(project)
     }
 
-    fn validate_row(&mut self, unit: &SourceUnit) -> StageOutcome<orna_foundation::Diagnostic> {
+    fn validate_row(&mut self, unit: &SourceUnit) -> StageOutcome<orna_value::Diagnostic> {
         validate_unsafe_row_key_repeat(unit).unwrap_or_else(|| self.bounded.validate_row(unit))
     }
 
     fn validate_rows(
         &mut self,
         project: &orna_conformance::ProjectUnit,
-    ) -> StageOutcome<orna_foundation::Diagnostic> {
+    ) -> StageOutcome<orna_value::Diagnostic> {
         self.bounded.validate_rows(project)
     }
 
     fn preflight_row_validation(
         &mut self,
         project: &orna_conformance::ProjectUnit,
-    ) -> StageOutcome<orna_foundation::Diagnostic> {
+    ) -> StageOutcome<orna_value::Diagnostic> {
         self.bounded.preflight_row_validation(project)
     }
 
@@ -89,11 +89,11 @@ impl RuntimeEvaluator for CompositeEvaluator {
         &mut self,
         project: &orna_conformance::ProjectUnit,
         analysis: &orna_semantic::Analysis,
-    ) -> StageOutcome<orna_foundation::Diagnostic> {
+    ) -> StageOutcome<orna_value::Diagnostic> {
         self.bounded.validate_resolved_rows(project, analysis)
     }
 
-    fn run_scenario(&mut self, scenario: &Scenario) -> StageOutcome<orna_foundation::Diagnostic> {
+    fn run_scenario(&mut self, scenario: &Scenario) -> StageOutcome<orna_value::Diagnostic> {
         if repl_preview_contract(scenario) {
             return run_repl_preview_scenario();
         }

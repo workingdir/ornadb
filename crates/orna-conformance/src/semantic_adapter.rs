@@ -27,9 +27,6 @@ use orna_evaluator::{
     invoke_named_with_effects_and_budget, invoke_named_with_effects_nominals_and_budget,
     invoke_named_with_nominals, source_enum_definitions,
 };
-use orna_foundation::{
-    Diagnostic, DiagnosticSeverity, OvbRaw, SafeText, Value, compare_primary_keys,
-};
 use orna_project::{LoadedProject, ProjectLoader, ResolvedTableSchema, admit_format3_row};
 use orna_repository::Repository;
 use orna_runtime::{
@@ -66,6 +63,7 @@ use orna_sys::{
 };
 use orna_sys_id::SysRelation;
 use orna_table::{ActivationError, DatabaseActivation, DatabaseRuntime, TableError};
+use orna_value::{Diagnostic, DiagnosticSeverity, OvbRaw, SafeText, Value, compare_primary_keys};
 use sha2::{Digest, Sha256};
 use std::{
     cmp::Ordering,
@@ -10654,7 +10652,7 @@ mod transaction_admission_tests {
     use crate::{ProjectEnvironment, ProjectExpectations, ProjectUnit};
     use num_bigint::BigInt;
     use orna_evaluator::{EffectHandler, Limits, StepBudget};
-    use orna_foundation::{OvbRaw, Value};
+    use orna_value::{OvbRaw, Value};
     use std::collections::BTreeMap;
 
     #[test]
@@ -11473,13 +11471,13 @@ mod bounded_tests {
     use crate::{ProjectEnvironment, ProjectExpectations, ProjectUnit};
     use num_bigint::BigInt;
     use orna_evaluator::{Environment, Limits, evaluate_expression_with_functions};
-    use orna_foundation::Value;
     use orna_sys::{
         AdmissionError, AdmissionRequest, ArgumentMap, FunctionDescriptor, FunctionId,
         FunctionIdentity, InvocationContext, InvocationMode, InvocationState, InvocationStatus,
         RetainedInvocationResult, RevisionId, RuntimeId, RuntimeSupervisor, SnapshotId,
         TransactionMode, TypeId, TypeWitness,
     };
+    use orna_value::Value;
     use std::time::Duration;
 
     fn source_descriptor() -> FunctionDescriptor {
@@ -11776,7 +11774,6 @@ mod durable_tests {
     };
     use crate::{ProjectEnvironment, ProjectExpectations, ProjectUnit};
     use orna_evaluator::Limits;
-    use orna_foundation::{OvbRaw, Value};
     use orna_repository::Repository;
     use orna_runtime::{
         FaultInjector, FaultPoint, NoFault, RecoveryDisposition, RequestIdentity, RequestOwner,
@@ -11785,6 +11782,7 @@ mod durable_tests {
     };
     use orna_stream::{AssertionOwnerKind, DiagnosticClass, DiagnosticCode, SafeDiagnostic};
     use orna_syntax::{Expr, parse_expression, parse_module};
+    use orna_value::{OvbRaw, Value};
     use std::{
         collections::BTreeMap,
         path::Path,
@@ -11970,14 +11968,14 @@ mod durable_tests {
             .await
             .expect("reopened runtime");
         let key = Value::int(7.into()).encode().expect("encoded key");
-        let expected = Value::new(orna_foundation::OvbRaw::Map(vec![
+        let expected = Value::new(orna_value::OvbRaw::Map(vec![
             (
-                orna_foundation::OvbRaw::Text("id".into()),
-                orna_foundation::OvbRaw::Int(7.into()),
+                orna_value::OvbRaw::Text("id".into()),
+                orna_value::OvbRaw::Int(7.into()),
             ),
             (
-                orna_foundation::OvbRaw::Text("text".into()),
-                orna_foundation::OvbRaw::Text("first".into()),
+                orna_value::OvbRaw::Text("text".into()),
+                orna_value::OvbRaw::Text("first".into()),
             ),
         ]))
         .expect("canonical row")
@@ -12012,11 +12010,11 @@ mod durable_tests {
         let row = Value::decode(&row).expect("canonical durable row");
         assert!(matches!(
             row.raw(),
-            orna_foundation::OvbRaw::Map(fields)
+            orna_value::OvbRaw::Map(fields)
                 if fields.iter().any(|(key, value)| key
-                    == &orna_foundation::OvbRaw::Text("text".into())
+                    == &orna_value::OvbRaw::Text("text".into())
                     && value
-                        == &orna_foundation::OvbRaw::Text("changed".into()))
+                        == &orna_value::OvbRaw::Text("changed".into()))
         ));
     }
     #[tokio::test]
@@ -13002,9 +13000,9 @@ mod durable_tests {
         let state = RuntimeState::open(&repository, identity, [54; 32])
             .await
             .expect("reopened runtime");
-        let north = Value::new(orna_foundation::OvbRaw::Array(vec![
-            orna_foundation::OvbRaw::Text("north".into()),
-            orna_foundation::OvbRaw::Text("pencil".into()),
+        let north = Value::new(orna_value::OvbRaw::Array(vec![
+            orna_value::OvbRaw::Text("north".into()),
+            orna_value::OvbRaw::Text("pencil".into()),
         ]))
         .unwrap()
         .encode()
@@ -13571,7 +13569,6 @@ mod list_stream_tests {
     };
     use crate::{ProjectEnvironment, ProjectExpectations, ProjectUnit};
     use orna_evaluator::Limits;
-    use orna_foundation::{OvbRaw, Value};
     use orna_repository::Repository;
     use orna_runtime::{
         ListStreamSource, RuntimeIdentity, RuntimeState, StreamHandler, StreamHandlerResult,
@@ -13581,6 +13578,7 @@ mod list_stream_tests {
         AsyncCheckpointBackend, CheckpointKey, Component, ConsumerIdentity, DeliveryIdentity,
         FailureIdentity, Position,
     };
+    use orna_value::{OvbRaw, Value};
     use std::{path::Path, process::Command};
     use tempfile::TempDir;
 

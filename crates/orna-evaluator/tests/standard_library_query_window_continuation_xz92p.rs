@@ -1,6 +1,6 @@
 use orna_evaluator::Limits;
-use orna_foundation::CanonicalValue;
 use orna_project_repl::AdmittedReplSession;
+use orna_value::CanonicalValue;
 use orna_value::{Raw, Value};
 
 fn optional_int(value: i64) -> Raw {

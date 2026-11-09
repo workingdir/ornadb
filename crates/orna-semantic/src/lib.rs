@@ -13,13 +13,13 @@ use std::rc::Rc;
 
 use num_bigint::BigInt;
 use num_traits::{One, Signed, Zero};
-use orna_foundation::{Diagnostic, SafeText};
 use orna_syntax::{
     AssignmentOperator, AssignmentTarget, ControlKind, Declaration, DimensionExpr, Expr,
     FieldInitializer, Item, LambdaParameter, LiteralKind, Pattern, ProtocolMember, Statement,
     StringSegment, SyntaxSpan, SyntaxTree, TypeExpr, TypeMember, TypeRepresentation,
     UnitDefinition, UseTail, parse_module_with_file,
 };
+use orna_value::{Diagnostic, SafeText};
 use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
 

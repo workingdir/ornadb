@@ -1,7 +1,7 @@
 use orna_evaluator::{
     Environment, Functions, Limits, PureFunction, evaluate_expression_with_functions,
 };
-use orna_foundation::CanonicalValue;
+use orna_value::CanonicalValue;
 use orna_value::Raw;
 
 fn pinned_functions() -> Functions {

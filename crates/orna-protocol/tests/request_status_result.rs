@@ -1,5 +1,5 @@
-use orna_foundation::CanonicalValue;
 use orna_protocol::{Envelope, Error, Limits, Message, RequestState, ResultBody, ResultStatus};
+use orna_value::CanonicalValue;
 use std::collections::BTreeMap;
 
 fn result_body() -> ResultBody {

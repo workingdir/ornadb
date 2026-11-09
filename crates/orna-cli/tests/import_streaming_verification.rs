@@ -78,14 +78,7 @@ fn run_import(arguments: &[&str]) -> Output {
 /// The bundle payload file for one fixture, named by the hex of its SHA-256
 /// exactly as `write_offline_copy` named it.
 /// Lowercase hex of a digest, as the bundle's media names spell it.
-fn hex_encode(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        write!(out, "{byte:02x}").expect("writing to a String cannot fail");
-    }
-    out
-}
+use orna_base::hex as hex_encode;
 
 fn payload_path(bundle: &Path, file: &str) -> PathBuf {
     let bytes = std::fs::read(Path::new(MEDIA_FIXTURES).join(file)).unwrap();

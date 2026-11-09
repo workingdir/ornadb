@@ -9,8 +9,8 @@ use std::{collections::BTreeMap, fmt};
 
 use num_bigint::{BigInt, Sign};
 use num_traits::ToPrimitive;
-pub use orna_foundation::CanonicalSnapshot;
-use orna_foundation::{CanonicalValue, OvbRaw};
+pub use orna_value::CanonicalSnapshot;
+use orna_value::{CanonicalValue, OvbRaw};
 use sha2::{Digest, Sha256};
 
 pub const PROFILE: &str = "orna.present.v1";
@@ -1573,7 +1573,7 @@ impl Diagnostic {
     fn decode(node: &Node) -> Result<Self> {
         let bytes = encode_node(node)?;
         let diagnostic =
-            orna_foundation::Diagnostic::decode_ovb(&bytes).map_err(|_| Error::InvalidValue)?;
+            orna_value::Diagnostic::decode_ovb(&bytes).map_err(|_| Error::InvalidValue)?;
         // Only the fixed, payload-free read-only diagnostic is safe to disclose.
         // The wire redacted bit is never sufficient authority; all other
         // diagnostics are redacted fail-closed at this boundary.

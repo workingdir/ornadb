@@ -24,12 +24,13 @@ R3. A crate name states its layer or its subject, never a metaphor. "core",
 
 A same-layer edge is legal only when the source crate's `allowed` list in
 `docs/design/layers.toml` names it; a lower-layer edge needs no entry. Layer 0
-(primitives) is empty until `orna-base` exists; `orna-foundation` is parked at
-layer 1 until its split because it already depends on `orna-value`.
+is `orna-base`, the primitives crate; the former `orna-foundation` was absorbed
+into `orna-base` and `orna-value` in stage 03.
 
 | layer | name | crates |
 |---|---|---|
-| 1 | value | orna-value, orna-foundation, orna-sys-model |
+| 0 | primitives | orna-base |
+| 1 | value | orna-value, orna-sys-model |
 | 2 | syntax | orna-syntax, orna-intrinsics, orna-sys-codegen |
 | 3 | identity | orna-sys-id, orna-standard-sources, orna-sys-macros |
 | 4 | analysis | orna-semantic |

@@ -2,11 +2,11 @@
   "max_uncited": 473,
   "scanned_crates": [
     "orna-application",
+    "orna-base",
     "orna-cli",
     "orna-conformance",
     "orna-evaluator",
     "orna-evolution",
-    "orna-foundation",
     "orna-intrinsics",
     "orna-live",
     "orna-lsp",

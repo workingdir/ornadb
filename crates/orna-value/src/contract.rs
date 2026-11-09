@@ -1,17 +1,18 @@
-//! Shared, lossless Orna 1.0 foundation contracts.
+//! The portable 1.0 contract types: `sys` row references, spans, diagnostics,
+//! and the repository identity adapter seam.
 //!
-//! Canonical payload ownership remains in `orna-value`. This crate owns the
-//! portable `sys` references, spans, diagnostics, and repository adapter seam.
+//! These types were the body of `orna-foundation`. Canonical payload ownership
+//! stays in the value seams; this module owns only the portable references,
+//! source coordinates, redacted diagnostics and the identity contracts that
+//! Git and the durable state share.
 
 use std::{collections::BTreeMap, fmt, marker::PhantomData, sync::Mutex};
 
+use crate::{
+    Error as ValueError, Raw as OvbRaw, SchemaDescriptor, Snapshot, Value, canonical_uuid_text,
+};
 use num_bigint::{BigInt, Sign};
 use serde::{Serialize, Serializer, ser::SerializeStruct};
-
-pub use orna_value::{
-    Error as ValueError, GitHash, OVB_VERSION, Raw as OvbRaw, SchemaDescriptor, Snapshot, Value,
-    canonical_uuid_text, compare_primary_keys, parse_canonical_uuid_text,
-};
 
 /// Canonical values, closed descriptors and snapshot encodings are owned by
 /// OVB-1. Neither `CanonicalSnapshot` nor `CanonicalValue` is a sys row ref.
@@ -46,41 +47,41 @@ impl RowRef {
         table_id: [u8; 16],
         key: OvbRaw,
         snapshot: CanonicalSnapshot,
-    ) -> Result<Self, FoundationError> {
+    ) -> Result<Self, ContractError> {
         let reference = Self {
             database_id,
             table_id,
             key,
             snapshot,
         };
-        Value::new(reference.raw()?).map_err(FoundationError::Value)?;
+        Value::new(reference.raw()?).map_err(ContractError::Value)?;
         Ok(reference)
     }
-    pub fn encode(&self) -> Result<Vec<u8>, FoundationError> {
+    pub fn encode(&self) -> Result<Vec<u8>, ContractError> {
         Value::new(self.raw()?)
-            .map_err(FoundationError::Value)?
+            .map_err(ContractError::Value)?
             .encode()
-            .map_err(FoundationError::Value)
+            .map_err(ContractError::Value)
     }
 
     /// Canonical OVB-1 value of this reference, for embedding in a row.
-    pub fn to_canonical(&self) -> Result<CanonicalValue, FoundationError> {
-        Value::new(self.raw()?).map_err(FoundationError::Value)
+    pub fn to_canonical(&self) -> Result<CanonicalValue, ContractError> {
+        Value::new(self.raw()?).map_err(ContractError::Value)
     }
 
     /// Decodes a canonical, snapshot-pinned row reference from OVB-1 bytes.
     /// Strict snapshot decoding preserves the exact captured CWD generation;
     /// it never substitutes a later current-CWD pin.
-    pub fn decode(bytes: &[u8]) -> Result<Self, FoundationError> {
-        let value = Value::decode(bytes).map_err(FoundationError::Value)?;
+    pub fn decode(bytes: &[u8]) -> Result<Self, ContractError> {
+        let value = Value::decode(bytes).map_err(ContractError::Value)?;
         row_ref_from_raw(value.raw())
     }
 
-    fn raw(&self) -> Result<OvbRaw, FoundationError> {
+    pub(crate) fn raw(&self) -> Result<OvbRaw, ContractError> {
         // RowRef fields are public for compatibility. Revalidate the nested
         // pin before encoding so malformed generation identities cannot enter
         // storage through a directly constructed Snapshot enum variant.
-        Snapshot::decode(&self.snapshot.raw()).map_err(FoundationError::Value)?;
+        Snapshot::decode(&self.snapshot.raw()).map_err(ContractError::Value)?;
         Ok(OvbRaw::Tag(
             60010,
             Box::new(OvbRaw::Array(vec![
@@ -214,73 +215,10 @@ pub type FailureRef = TypedRowRef<FailureKind>;
 /// materialization exists or grants reuse, invalidation, or storage authority.
 pub type MaterializationRef = TypedRowRef<MaterializationKind>;
 
-pub mod object_reference;
-pub use object_reference::{
+pub use crate::object_reference::{
     SYS_OBJECT_TABLE_ID, object_reference, validate_object_reference,
     validate_object_reference_for_id,
 };
-
-/// Reports whether one path component names Git's administration entry: the
-/// `.git` directory or a linked worktree's `.git` file. It matches the names
-/// `git fsck` reports as `hasDotgit`, so a repository stays safe to check out
-/// on Windows and macOS. Git's `is_ntfs_dotgit` rule applies to the name and
-/// to each part after a `\`: `.git` or the 8.3 alias `git~1` in any ASCII
-/// case, then only dots or spaces up to the end or a `:` stream suffix. Git's
-/// `is_hfs_dotgit` rule applies to the whole name: exactly `.git` in any ASCII
-/// case once the HFS+ ignorable code points (U+200C..U+200F, U+202A..U+202E,
-/// U+206A..U+206F, U+FEFF) are removed.
-///
-/// Ordinary names such as `.gitignore`, `.github`, `.gitmodules`, `foo.git`,
-/// `git~2`, and `git-notes.md` do not match. Case folding is ASCII-only, as in
-/// Git, so `.gıt` (U+0131) and `.GİT` (U+0130) stay ordinary names: Git 2.53
-/// accepts both. Whether an NTFS `$UpCase` table folds either into ASCII is
-/// unverified on a Windows volume. `.git:x`, `.git.`, and `a\.git` are
-/// ordinary names on Linux but are refused here, as Git's default
-/// `core.protectNTFS` refuses them. A name that is not UTF-8 is compared as
-/// bytes and never meets the HFS+ rule, so `.git\xFF` stays an ordinary name
-/// although `git fsck` flags it. This is a refusal predicate for Git metadata
-/// names only, not a complete Windows or macOS path validator.
-#[must_use]
-pub fn is_git_metadata_component(name: &[u8]) -> bool {
-    name.split(|byte| *byte == b'\\').any(is_ntfs_git_name) || is_hfs_git_name(name)
-}
-
-/// Git's `is_ntfs_dotgit` for one `\`-free part of a name.
-fn is_ntfs_git_name(part: &[u8]) -> bool {
-    let stem = part.split(|byte| *byte == b':').next().unwrap_or_default();
-    let mut end = stem.len();
-    while end > 0 && matches!(stem[end - 1], b'.' | b' ') {
-        end -= 1;
-    }
-    let base = &stem[..end];
-    base.eq_ignore_ascii_case(b".git") || base.eq_ignore_ascii_case(b"git~1")
-}
-
-/// Git's `is_hfs_dotgit`: exactly `.git` once HFS+ ignorables are removed.
-fn is_hfs_git_name(name: &[u8]) -> bool {
-    let Ok(text) = std::str::from_utf8(name) else {
-        return false;
-    };
-    let mut visible = text
-        .chars()
-        .filter(|character| !is_hfs_ignorable(*character))
-        .map(|character| character.to_ascii_lowercase());
-    ".git"
-        .chars()
-        .all(|expected| visible.next() == Some(expected))
-        && visible.next().is_none()
-}
-
-/// Code points that macOS HFS+ ignores when comparing names.
-fn is_hfs_ignorable(character: char) -> bool {
-    matches!(
-        character,
-        '\u{200C}'..='\u{200F}'
-            | '\u{202A}'..='\u{202E}'
-            | '\u{206A}'..='\u{206F}'
-            | '\u{FEFF}'
-    )
-}
 
 /// Checks only that a row reference is pinned to the supplied CWD context,
 /// then attaches a noninterchangeable marker. It intentionally does not
@@ -802,7 +740,7 @@ fn catalogue_reference<Kind>(
     object: ObjectRef,
 ) -> Result<TypedRowRef<Kind>, SystemReferenceError> {
     let object = object.into_row_ref();
-    object_reference::validate_object_reference_shape(&object)?;
+    crate::object_reference::validate_object_reference_shape(&object)?;
     ensure_snapshot_database(object.database_id, &object.snapshot)?;
     Ok(TypedRowRef::from_row_ref(RowRef {
         database_id: object.database_id,
@@ -820,7 +758,7 @@ fn validate_catalogue_reference<Kind>(
     validate_coordinates(&reference, capture, expected_table)?;
     let object =
         row_ref_from_raw(&reference.key).map_err(|_| SystemReferenceError::InvalidObjectKey)?;
-    object_reference::validate_object_reference(object, capture)
+    crate::object_reference::validate_object_reference(object, capture)
         .map_err(|_| SystemReferenceError::InvalidObjectKey)?;
     Ok(TypedRowRef::from_row_ref(reference))
 }
@@ -841,7 +779,7 @@ fn snapshot_id(snapshot: &CanonicalSnapshot) -> Result<[u8; 32], SystemReference
             Ok(*id)
         }
         CanonicalSnapshot::Commit { .. } => {
-            orna_value::domain_digest("orna.snapshot.v1", &snapshot.raw())
+            crate::domain_digest("orna.snapshot.v1", &snapshot.raw())
                 .map_err(|_| SystemReferenceError::InvalidSnapshotKey)
         }
     }
@@ -975,7 +913,7 @@ pub struct SourceSpan {
     pub end_column: BigInt,
 }
 impl SourceSpan {
-    pub fn new(file: FileRef, extent: SourceSpanExtent) -> Result<Self, FoundationError> {
+    pub fn new(file: FileRef, extent: SourceSpanExtent) -> Result<Self, ContractError> {
         let SourceSpanExtent {
             start_byte,
             end_byte,
@@ -995,7 +933,7 @@ impl SourceSpan {
             .iter()
             .any(|n| n <= &BigInt::from(0))
         {
-            return Err(FoundationError::InvalidSourceSpan);
+            return Err(ContractError::InvalidSourceSpan);
         }
         Ok(Self {
             file,
@@ -1016,13 +954,13 @@ impl SourceSpan {
         source: &str,
         start_byte: usize,
         end_byte: usize,
-    ) -> Result<Self, FoundationError> {
+    ) -> Result<Self, ContractError> {
         if start_byte > end_byte
             || end_byte > source.len()
             || !source.is_char_boundary(start_byte)
             || !source.is_char_boundary(end_byte)
         {
-            return Err(FoundationError::InvalidSourceSpan);
+            return Err(ContractError::InvalidSourceSpan);
         }
         let coordinate = |offset: usize| {
             let prior = &source[..offset];
@@ -1076,21 +1014,21 @@ impl fmt::Debug for DiagnosticLabel {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SysValue(CanonicalValue);
 impl SysValue {
-    pub fn decode(bytes: &[u8]) -> Result<Self, FoundationError> {
-        Self::from_value(Value::decode(bytes).map_err(FoundationError::Value)?)
+    pub fn decode(bytes: &[u8]) -> Result<Self, ContractError> {
+        Self::from_value(Value::decode(bytes).map_err(ContractError::Value)?)
     }
-    pub fn from_value(value: CanonicalValue) -> Result<Self, FoundationError> {
+    pub fn from_value(value: CanonicalValue) -> Result<Self, ContractError> {
         if matches!(value.raw(), OvbRaw::Tag(60026, _)) {
             Ok(Self(value))
         } else {
-            Err(FoundationError::ExpectedSysValue)
+            Err(ContractError::ExpectedSysValue)
         }
     }
     pub fn as_value(&self) -> &CanonicalValue {
         &self.0
     }
-    pub fn encode(&self) -> Result<Vec<u8>, FoundationError> {
-        self.0.encode().map_err(FoundationError::Value)
+    pub fn encode(&self) -> Result<Vec<u8>, ContractError> {
+        self.0.encode().map_err(ContractError::Value)
     }
 }
 /// Exact note/help/warning/error/fatal severity required by the portable
@@ -1110,12 +1048,12 @@ pub enum DiagnosticSeverity {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SafeText(String);
 impl SafeText {
-    pub fn new(value: impl Into<String>) -> Result<Self, FoundationError> {
+    pub fn new(value: impl Into<String>) -> Result<Self, ContractError> {
         let value = value.into();
         if value.chars().any(|character| {
             character == '\0' || character.is_control() && character != '\n' && character != '\t'
         }) {
-            return Err(FoundationError::UnsafeDiagnosticText);
+            return Err(ContractError::UnsafeDiagnosticText);
         }
         Ok(Self(value))
     }
@@ -1136,14 +1074,14 @@ impl DiagnosticSeverity {
             Self::Fatal => 4,
         }
     }
-    fn parse(value: u64) -> Result<Self, FoundationError> {
+    fn parse(value: u64) -> Result<Self, ContractError> {
         match value {
             0 => Ok(Self::Note),
             1 => Ok(Self::Help),
             2 => Ok(Self::Warning),
             3 => Ok(Self::Error),
             4 => Ok(Self::Fatal),
-            _ => Err(FoundationError::InvalidDiagnosticEncoding),
+            _ => Err(ContractError::InvalidDiagnosticEncoding),
         }
     }
 }
@@ -1203,13 +1141,13 @@ impl DiagnosticSpan {
         file_path: impl Into<String>,
         start_byte: BigInt,
         end_byte: BigInt,
-    ) -> Result<Self, FoundationError> {
+    ) -> Result<Self, ContractError> {
         let file_path = file_path.into();
         if !is_safe_diagnostic_path(&file_path)
             || start_byte.sign() == Sign::Minus
             || end_byte < start_byte
         {
-            return Err(FoundationError::InvalidDiagnosticSpan);
+            return Err(ContractError::InvalidDiagnosticSpan);
         }
         Ok(Self {
             snapshot,
@@ -1229,13 +1167,13 @@ impl DiagnosticSpan {
     fn is_redacted(&self) -> bool {
         self.file_path == "<redacted>"
     }
-    fn from_raw(raw: &OvbRaw) -> Result<Self, FoundationError> {
+    fn from_raw(raw: &OvbRaw) -> Result<Self, ContractError> {
         let values = array(raw)?;
         if values.len() != 4 {
-            return Err(FoundationError::InvalidDiagnosticEncoding);
+            return Err(ContractError::InvalidDiagnosticEncoding);
         }
         Self::new(
-            Snapshot::decode(&values[0]).map_err(FoundationError::Value)?,
+            Snapshot::decode(&values[0]).map_err(ContractError::Value)?,
             text(&values[1])?,
             integer(&values[2])?,
             integer(&values[3])?,
@@ -1303,9 +1241,9 @@ impl Diagnostic {
         code: SafeText,
         severity: DiagnosticSeverity,
         message: SafeText,
-    ) -> Result<Self, FoundationError> {
+    ) -> Result<Self, ContractError> {
         if code.as_str().is_empty() {
-            return Err(FoundationError::InvalidDiagnostic);
+            return Err(ContractError::InvalidDiagnostic);
         }
         Ok(Self {
             code,
@@ -1403,15 +1341,14 @@ impl Diagnostic {
     pub fn causes(&self) -> &[Diagnostic] {
         &self.causes
     }
-    pub fn encode_ovb(&self) -> Result<Vec<u8>, FoundationError> {
+    pub fn encode_ovb(&self) -> Result<Vec<u8>, ContractError> {
         Value::new(self.boundary_projection().raw()?)
-            .map_err(FoundationError::Value)?
+            .map_err(ContractError::Value)?
             .encode()
-            .map_err(FoundationError::Value)
+            .map_err(ContractError::Value)
     }
-    pub fn decode_ovb(bytes: &[u8]) -> Result<Self, FoundationError> {
-        let diagnostic =
-            Self::from_raw(Value::decode(bytes).map_err(FoundationError::Value)?.raw())?;
+    pub fn decode_ovb(bytes: &[u8]) -> Result<Self, ContractError> {
+        let diagnostic = Self::from_raw(Value::decode(bytes).map_err(ContractError::Value)?.raw())?;
         // The wire redacted bit is an untrusted producer claim, not a
         // disclosure grant. Generic decoding therefore redacts every payload.
         Ok(diagnostic.redacted())
@@ -1429,7 +1366,7 @@ impl Diagnostic {
     /// determines which successful snapshot remains current. Each serialized
     /// call installs one complete decoded snapshot, so aliases from earlier
     /// snapshots carry forward only when the replacement wire encodes them.
-    pub fn reload_ovb(&mut self, bytes: &[u8]) -> Result<(), FoundationError> {
+    pub fn reload_ovb(&mut self, bytes: &[u8]) -> Result<(), ContractError> {
         let replacement = Self::decode_ovb(bytes)?;
         // Replace through Clone::clone_from so reused nested vectors are
         // rebound slot by slot without changing their serialized order. The
@@ -1437,17 +1374,17 @@ impl Diagnostic {
         self.clone_from(&replacement);
         Ok(())
     }
-    fn validate_redaction_consistency(&self) -> Result<(), FoundationError> {
+    fn validate_redaction_consistency(&self) -> Result<(), ContractError> {
         // The explicit span marker is itself a redaction claim. Do not let a
         // producer retain that marker while asserting that the enclosing
         // diagnostic is unredacted: consumers use the boolean to determine
         // whether the record crossed a protected boundary.
         if !self.redacted && self.spans.iter().any(DiagnosticSpan::is_redacted) {
-            return Err(FoundationError::InvalidDiagnostic);
+            return Err(ContractError::InvalidDiagnostic);
         }
         Ok(())
     }
-    fn raw(&self) -> Result<OvbRaw, FoundationError> {
+    fn raw(&self) -> Result<OvbRaw, ContractError> {
         self.validate_redaction_consistency()?;
         let mut fields = vec![
             (0, OvbRaw::Text(self.code.as_str().into())),
@@ -1490,13 +1427,13 @@ impl Diagnostic {
             )),
         ))
     }
-    fn from_raw(raw: &OvbRaw) -> Result<Self, FoundationError> {
+    fn from_raw(raw: &OvbRaw) -> Result<Self, ContractError> {
         let OvbRaw::Tag(60011, body) = raw else {
-            return Err(FoundationError::InvalidDiagnosticEncoding);
+            return Err(ContractError::InvalidDiagnosticEncoding);
         };
         let fields = integer_fields(body)?;
         if fields.keys().any(|key| *key > 7) {
-            return Err(FoundationError::InvalidDiagnosticEncoding);
+            return Err(ContractError::InvalidDiagnosticEncoding);
         }
         let diagnostic = Self {
             code: SafeText::new(text(required(&fields, 0)?)?)?,
@@ -1521,7 +1458,7 @@ impl Diagnostic {
         };
         diagnostic
             .validate_redaction_consistency()
-            .map_err(|_| FoundationError::InvalidDiagnosticEncoding)?;
+            .map_err(|_| ContractError::InvalidDiagnosticEncoding)?;
         Ok(diagnostic)
     }
 }
@@ -1581,7 +1518,7 @@ impl Serialize for SerializableDiagnosticSpan<'_> {
             .and_then(|value| value.encode())
             .map_err(serde::ser::Error::custom)?;
         let mut state = serializer.serialize_struct("DiagnosticSpan", 4)?;
-        state.serialize_field("snapshot", &hex(&snapshot))?;
+        state.serialize_field("snapshot", &orna_base::hex(&snapshot))?;
         state.serialize_field("file-path", &span.file_path)?;
         state.serialize_field("start-byte", &span.start_byte.to_string())?;
         state.serialize_field("end-byte", &span.end_byte.to_string())?;
@@ -1597,15 +1534,6 @@ fn diagnostic_severity_name(severity: DiagnosticSeverity) -> &'static str {
         DiagnosticSeverity::Error => "error",
         DiagnosticSeverity::Fatal => "fatal",
     }
-}
-fn hex(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut text = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        text.push(DIGITS[usize::from(byte >> 4)] as char);
-        text.push(DIGITS[usize::from(byte & 0x0f)] as char);
-    }
-    text
 }
 fn uuid_text(value: [u8; 16]) -> String {
     canonical_uuid_text(value)
@@ -1641,7 +1569,7 @@ impl CwdCapture {
     pub fn new(
         snapshot: CanonicalSnapshot,
         generation_digest: [u8; 32],
-    ) -> Result<Self, FoundationError> {
+    ) -> Result<Self, ContractError> {
         let Snapshot::Cwd {
             database,
             runtime,
@@ -1649,13 +1577,13 @@ impl CwdCapture {
             id,
         } = snapshot
         else {
-            return Err(FoundationError::ExpectedCwdSnapshot);
+            return Err(ContractError::ExpectedCwdSnapshot);
         };
         if canonical_cwd_id(database, runtime, generation.clone())
-            .map_err(|_| FoundationError::ExpectedCwdSnapshot)?
+            .map_err(|_| ContractError::ExpectedCwdSnapshot)?
             != id
         {
-            return Err(FoundationError::ExpectedCwdSnapshot);
+            return Err(ContractError::ExpectedCwdSnapshot);
         }
         Ok(Self {
             database,
@@ -1745,9 +1673,9 @@ pub trait RepositoryGenerationAdapter {
         next: &CwdCapture,
     ) -> Result<CwdCas, Self::Error>;
 }
-pub fn require_cwd_repository(profile: RepositoryProfile) -> Result<(), FoundationError> {
+pub fn require_cwd_repository(profile: RepositoryProfile) -> Result<(), ContractError> {
     if profile.bare {
-        Err(FoundationError::BareRepositoryHasNoCwd)
+        Err(ContractError::BareRepositoryHasNoCwd)
     } else {
         Ok(())
     }
@@ -1821,7 +1749,7 @@ impl RepositoryGenerationAdapter for InMemoryRepositoryAdapter {
 }
 
 #[derive(Debug)]
-pub enum FoundationError {
+pub enum ContractError {
     Value(ValueError),
     InvalidSourceSpan,
     InvalidDiagnosticSpan,
@@ -1833,7 +1761,7 @@ pub enum FoundationError {
     UnsafeDiagnosticText,
     InvalidSystemReferenceEncoding,
 }
-impl fmt::Display for FoundationError {
+impl fmt::Display for ContractError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Value(error) => write!(f, "canonical value error: {error}"),
@@ -1851,24 +1779,24 @@ impl fmt::Display for FoundationError {
         }
     }
 }
-impl std::error::Error for FoundationError {}
+impl std::error::Error for ContractError {}
 
 fn uuid(value: [u8; 16]) -> OvbRaw {
     OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(value.to_vec())))
 }
-fn row_ref_from_raw(raw: &OvbRaw) -> Result<RowRef, FoundationError> {
+fn row_ref_from_raw(raw: &OvbRaw) -> Result<RowRef, ContractError> {
     let OvbRaw::Tag(60010, body) = raw else {
-        return Err(FoundationError::InvalidSystemReferenceEncoding);
+        return Err(ContractError::InvalidSystemReferenceEncoding);
     };
     let fields = array(body)?;
     let [database_id, table_id, key, snapshot] = fields.as_slice() else {
-        return Err(FoundationError::InvalidSystemReferenceEncoding);
+        return Err(ContractError::InvalidSystemReferenceEncoding);
     };
     RowRef::new(
         uuid_bytes(database_id)?,
         uuid_bytes(table_id)?,
         key.clone(),
-        Snapshot::decode(snapshot).map_err(FoundationError::Value)?,
+        Snapshot::decode(snapshot).map_err(ContractError::Value)?,
     )
 }
 fn row_ref_raw(reference: &RowRef) -> OvbRaw {
@@ -1895,59 +1823,59 @@ fn is_opaque_id_key(raw: &OvbRaw) -> bool {
 fn is_nonnegative_u64_integer(raw: &OvbRaw) -> bool {
     matches!(raw, OvbRaw::Int(value) if value.sign() != Sign::Minus && value <= &BigInt::from(u64::MAX))
 }
-fn array(raw: &OvbRaw) -> Result<&Vec<OvbRaw>, FoundationError> {
+fn array(raw: &OvbRaw) -> Result<&Vec<OvbRaw>, ContractError> {
     if let OvbRaw::Array(values) = raw {
         Ok(values)
     } else {
-        Err(FoundationError::InvalidDiagnosticEncoding)
+        Err(ContractError::InvalidDiagnosticEncoding)
     }
 }
-fn text(raw: &OvbRaw) -> Result<String, FoundationError> {
+fn text(raw: &OvbRaw) -> Result<String, ContractError> {
     if let OvbRaw::Text(value) = raw {
         Ok(value.clone())
     } else {
-        Err(FoundationError::InvalidDiagnosticEncoding)
+        Err(ContractError::InvalidDiagnosticEncoding)
     }
 }
-fn integer(raw: &OvbRaw) -> Result<BigInt, FoundationError> {
+fn integer(raw: &OvbRaw) -> Result<BigInt, ContractError> {
     if let OvbRaw::Int(value) = raw {
         Ok(value.clone())
     } else {
-        Err(FoundationError::InvalidDiagnosticEncoding)
+        Err(ContractError::InvalidDiagnosticEncoding)
     }
 }
-fn natural(raw: &OvbRaw) -> Result<u64, FoundationError> {
+fn natural(raw: &OvbRaw) -> Result<u64, ContractError> {
     integer(raw)?
         .try_into()
-        .map_err(|_| FoundationError::InvalidDiagnosticEncoding)
+        .map_err(|_| ContractError::InvalidDiagnosticEncoding)
 }
-fn boolean(raw: &OvbRaw) -> Result<bool, FoundationError> {
+fn boolean(raw: &OvbRaw) -> Result<bool, ContractError> {
     if let OvbRaw::Bool(value) = raw {
         Ok(*value)
     } else {
-        Err(FoundationError::InvalidDiagnosticEncoding)
+        Err(ContractError::InvalidDiagnosticEncoding)
     }
 }
-fn uuid_bytes(raw: &OvbRaw) -> Result<[u8; 16], FoundationError> {
+fn uuid_bytes(raw: &OvbRaw) -> Result<[u8; 16], ContractError> {
     let OvbRaw::Tag(37, value) = raw else {
-        return Err(FoundationError::InvalidDiagnosticEncoding);
+        return Err(ContractError::InvalidDiagnosticEncoding);
     };
     let OvbRaw::Bytes(bytes) = value.as_ref() else {
-        return Err(FoundationError::InvalidDiagnosticEncoding);
+        return Err(ContractError::InvalidDiagnosticEncoding);
     };
     bytes
         .as_slice()
         .try_into()
-        .map_err(|_| FoundationError::InvalidDiagnosticEncoding)
+        .map_err(|_| ContractError::InvalidDiagnosticEncoding)
 }
-fn integer_fields(raw: &OvbRaw) -> Result<BTreeMap<u64, &OvbRaw>, FoundationError> {
+fn integer_fields(raw: &OvbRaw) -> Result<BTreeMap<u64, &OvbRaw>, ContractError> {
     let OvbRaw::Map(entries) = raw else {
-        return Err(FoundationError::InvalidDiagnosticEncoding);
+        return Err(ContractError::InvalidDiagnosticEncoding);
     };
     let mut fields = BTreeMap::new();
     for (key, value) in entries {
         if fields.insert(natural(key)?, value).is_some() {
-            return Err(FoundationError::InvalidDiagnosticEncoding);
+            return Err(ContractError::InvalidDiagnosticEncoding);
         }
     }
     Ok(fields)
@@ -1955,22 +1883,23 @@ fn integer_fields(raw: &OvbRaw) -> Result<BTreeMap<u64, &OvbRaw>, FoundationErro
 fn required<'a>(
     fields: &'a BTreeMap<u64, &'a OvbRaw>,
     key: u64,
-) -> Result<&'a OvbRaw, FoundationError> {
+) -> Result<&'a OvbRaw, ContractError> {
     fields
         .get(&key)
         .copied()
-        .ok_or(FoundationError::InvalidDiagnosticEncoding)
+        .ok_or(ContractError::InvalidDiagnosticEncoding)
 }
 fn array_field<'a>(
     fields: &'a BTreeMap<u64, &'a OvbRaw>,
     key: u64,
-) -> Result<&'a Vec<OvbRaw>, FoundationError> {
+) -> Result<&'a Vec<OvbRaw>, ContractError> {
     array(required(fields, key)?)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::GitHash;
     fn commit() -> CanonicalSnapshot {
         Snapshot::Commit {
             database: [7; 16],
@@ -2023,7 +1952,7 @@ mod tests {
     fn bare_repository_is_rejected_before_cwd_capture() {
         assert!(matches!(
             require_cwd_repository(RepositoryProfile { bare: true }),
-            Err(FoundationError::BareRepositoryHasNoCwd)
+            Err(ContractError::BareRepositoryHasNoCwd)
         ));
     }
     #[test]
@@ -2114,7 +2043,7 @@ mod tests {
 
         assert!(matches!(
             CwdCapture::new(forged.clone(), [4; 32]),
-            Err(FoundationError::ExpectedCwdSnapshot)
+            Err(ContractError::ExpectedCwdSnapshot)
         ));
         assert_eq!(
             snapshot_reference([1; 16], forged),
@@ -2212,7 +2141,7 @@ mod tests {
         assert_eq!(
             committed_reference.as_row_ref().key,
             OvbRaw::Bytes(
-                orna_value::domain_digest("orna.snapshot.v1", &committed.raw())
+                crate::domain_digest("orna.snapshot.v1", &committed.raw())
                     .unwrap()
                     .to_vec()
             )
@@ -2392,86 +2321,5 @@ mod tests {
         // The audit representation admits arbitrary precision coordinates as
         // decimal text; tag-60011 remains independently verified above.
         assert!(serde_json::to_vec(&diagnostic).unwrap().starts_with(b"{"));
-    }
-}
-
-#[cfg(test)]
-mod git_metadata_component_tests {
-    use super::is_git_metadata_component;
-
-    // Both lists follow what `git fsck --strict` (Git 2.53) reports as
-    // `hasDotgit` for a tree entry with that name.
-    #[test]
-    fn refuses_git_administration_names_in_every_spelling() {
-        for refused in [
-            ".git",
-            ".GIT",
-            ".Git",
-            ".gIt",
-            ".git.",
-            ".git..",
-            ".git ",
-            ".GIT. ",
-            "git~1",
-            "GIT~1",
-            "git~1.",
-            ".git:",
-            ".git:x",
-            ".git::$INDEX_ALLOCATION",
-            ".git\\config",
-            "a\\.git",
-            "a\\git~1.",
-            "x\\.GIT:y",
-            "a:b\\.git",
-            ".g\u{200C}it",
-            ".\u{FEFF}git",
-            ".gi\u{202E}t",
-            ".git\u{206F}",
-        ] {
-            assert!(
-                is_git_metadata_component(refused.as_bytes()),
-                "{refused:?} must be refused as git metadata"
-            );
-        }
-    }
-
-    #[test]
-    fn accepts_ordinary_names_that_only_resemble_git_metadata() {
-        for accepted in [
-            ".gitignore",
-            ".github",
-            "foo.git",
-            ".gitmodules",
-            "git-notes.md",
-            "git",
-            "git~2",
-            "digit",
-            "..",
-            ".",
-            "",
-            "gitx.",
-            "a.git.b",
-            "foo.git\\x",
-            "a\\.github",
-            ".gıt",
-            ".GİT",
-            "gıt~1",
-            ".g\u{200B}it",
-            ".g\u{200C}it.",
-            "git~\u{200C}1",
-            "a\\.g\u{200C}it",
-        ] {
-            assert!(
-                !is_git_metadata_component(accepted.as_bytes()),
-                "{accepted:?} must stay an ordinary name"
-            );
-        }
-    }
-
-    #[test]
-    fn non_utf8_names_compare_bytes_only() {
-        assert!(is_git_metadata_component(b".GIT"));
-        assert!(is_git_metadata_component(b"\xFF\\.git"));
-        assert!(!is_git_metadata_component(b".git\xFF"));
     }
 }

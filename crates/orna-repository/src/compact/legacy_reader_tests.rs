@@ -16,7 +16,7 @@ use std::{
     sync::Arc,
 };
 
-use orna_foundation::{CanonicalValue, OvbRaw, SchemaDescriptor};
+use orna_value::{CanonicalValue, OvbRaw, SchemaDescriptor};
 use parquet::{
     basic::{Compression, Encoding},
     column::reader::ColumnReader,

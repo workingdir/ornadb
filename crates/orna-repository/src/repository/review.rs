@@ -5,7 +5,7 @@ impl Repository {
     /// format observations supplied by the durable runtime and this repository.
     pub fn review_current_candidate(
         &self,
-        capture: &orna_foundation::CwdCapture,
+        capture: &orna_value::CwdCapture,
     ) -> Result<ReviewedCandidateReview, RepositoryError> {
         let digits = capture.generation().to_u64_digits().1;
         if digits.len() > 1 {

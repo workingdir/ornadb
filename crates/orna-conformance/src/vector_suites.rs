@@ -148,18 +148,8 @@ impl CaseRun {
 }
 
 /// Decodes lowercase hexadecimal, the only spelling the vector files use.
-fn hex_bytes(text: &str) -> Option<Vec<u8>> {
-    if !text.len().is_multiple_of(2)
-        || !text
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return None;
-    }
-    (0..text.len())
-        .step_by(2)
-        .map(|at| u8::from_str_radix(&text[at..at + 2], 16).ok())
-        .collect()
+fn decode_hex(text: &str) -> Option<Vec<u8>> {
+    orna_base::hex_decode(text).ok()
 }
 
 fn strings(value: &Value) -> Option<Vec<String>> {
@@ -181,7 +171,7 @@ fn value_vectors(vectors: &Value) -> CaseRun {
     for (index, case) in cases.iter().enumerate() {
         let name = format!("[{index}] {}", case["name"].as_str().unwrap_or("<unnamed>"));
         let (Some(bytes), Some(expected)) = (
-            case["hex"].as_str().and_then(hex_bytes),
+            case["hex"].as_str().and_then(decode_hex),
             case["canonical_roundtrip"].as_bool(),
         ) else {
             run.malformed(&name);
@@ -206,7 +196,7 @@ fn snapshot_vectors(vectors: &Value) -> CaseRun {
         return run;
     };
     for (name, hex) in cases {
-        let Some(bytes) = hex.as_str().and_then(hex_bytes) else {
+        let Some(bytes) = hex.as_str().and_then(decode_hex) else {
             run.malformed(name);
             continue;
         };
@@ -235,7 +225,7 @@ fn protocol_vectors(vectors: &Value) -> CaseRun {
     };
     for (index, case) in cases.iter().enumerate() {
         let name = format!("[{index}] {}", case["name"].as_str().unwrap_or("<unnamed>"));
-        let Some(bytes) = case["hex"].as_str().and_then(hex_bytes) else {
+        let Some(bytes) = case["hex"].as_str().and_then(decode_hex) else {
             run.malformed(&name);
             continue;
         };

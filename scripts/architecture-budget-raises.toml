@@ -278,12 +278,6 @@ reason = "pure module split of orna-semantic lib.rs: this section moved to its o
 bead = "ornadb-rkn8m"
 
 [[raise]]
-path = "crates/orna-semantic/src/collection_calls.rs"
-new_limit = 1245
-reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
-bead = "ornadb-rkn8m"
-
-[[raise]]
 path = "crates/orna-semantic/src/flow.rs"
 new_limit = 1234
 reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
@@ -346,12 +340,6 @@ bead = "ornadb-rkn8m"
 [[raise]]
 path = "crates/orna-semantic/src/calls.rs::pipeline_collection_stage"
 new_limit = 267
-reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
-bead = "ornadb-rkn8m"
-
-[[raise]]
-path = "crates/orna-semantic/src/calls.rs::pipeline_relation_intrinsic_stage"
-new_limit = 131
 reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
 bead = "ornadb-rkn8m"
 
@@ -613,3 +601,9 @@ path = "crates/orna-semantic/src/intrinsics.rs::infer_intrinsic"
 new_limit = 347
 reason = "stage S3's generic binder: argument naming/arity, pipeline insertion, container-overload selection and the contextual-lambda rule in one routine; further splitting is follow-up work on the bead"
 bead = "ornadb-yuzot.3"
+
+[[raise]]
+path = "crates/orna-value/src/contract.rs"
+new_limit = 2325
+reason = "stage 03 moves the portable 1.0 contract module whole from orna-foundation/src/lib.rs (recorded 2411 lines) into orna-value; splitting it into reference and diagnostic seams is later debt"
+bead = "ornadb-7603h.3"

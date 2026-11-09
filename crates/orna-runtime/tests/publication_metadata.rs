@@ -45,7 +45,7 @@ fn mutation(id: u8, payload: &[u8]) -> Mutation {
 fn projected_int(
     function_name: &str,
     parameter_name: &str,
-    row: orna_foundation::CanonicalValue,
+    row: orna_value::CanonicalValue,
 ) -> u64 {
     match projected_value(function_name, parameter_name, row).raw() {
         Raw::Int(value) => u64::try_from(value.clone()).expect("non-negative projection"),
@@ -56,8 +56,8 @@ fn projected_int(
 fn projected_value(
     function_name: &str,
     parameter_name: &str,
-    row: orna_foundation::CanonicalValue,
-) -> orna_foundation::CanonicalValue {
+    row: orna_value::CanonicalValue,
+) -> orna_value::CanonicalValue {
     let parsed = parse_module(PUBLICATION_METADATA_SOURCE);
     assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
     let declaration = parsed

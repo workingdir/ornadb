@@ -201,12 +201,8 @@ impl<'a> Cursor<'a> {
 mod tests {
     use super::*;
 
-    fn hex(text: &str) -> Vec<u8> {
-        assert!(text.len().is_multiple_of(2), "odd hex length");
-        (0..text.len())
-            .step_by(2)
-            .map(|i| u8::from_str_radix(&text[i..i + 2], 16).expect("hex digit"))
-            .collect()
+    fn decode_bytes(text: &str) -> Vec<u8> {
+        orna_base::hex_decode(text).expect("canonical hexadecimal")
     }
 
     // Golden `stored_reference_cbor` values copied byte-for-byte from
@@ -239,14 +235,14 @@ mod tests {
     #[test]
     fn decodes_draft_golden_rov2_vectors_byte_for_byte() {
         for (name, encoded, length) in GOLDEN {
-            let bytes = hex(encoded);
+            let bytes = decode_bytes(encoded);
             let decoded = decode_rov2_blob(&bytes)
                 .unwrap_or_else(|err| panic!("{name}: decode failed: {err}"));
             // Bytes 0..4 are tag 60100 + array(2) + bstr(32) header "d9eac4 82 5820"
             // i.e. 6 bytes = 12 hex digits; the digest follows as 64 hex digits.
             assert_eq!(
                 decoded.content_sha256.to_vec(),
-                hex(&encoded[12..76]),
+                decode_bytes(&encoded[12..76]),
                 "{name} digest"
             );
             assert_eq!(decoded.total_length, *length, "{name} length");
@@ -306,7 +302,7 @@ mod tests {
 
     #[test]
     fn rejects_malformed_storage_references() {
-        let golden = hex(GOLDEN[1].1);
+        let golden = decode_bytes(GOLDEN[1].1);
 
         // Tag 60101 instead of 60100 (0xEAC5).
         let mut wrong_tag = golden.clone();
@@ -340,7 +336,7 @@ mod tests {
         ));
 
         // 31-byte digest string.
-        let mut short = hex("d9eac48258");
+        let mut short = decode_bytes("d9eac48258");
         short.push(0x1f);
         short.extend_from_slice(&[0u8; 31]);
         short.push(0x00);
@@ -350,7 +346,7 @@ mod tests {
         ));
 
         // Length 2^63 is one past the admitted maximum.
-        let mut too_long = hex(&format!("d9eac4825820{}", "00".repeat(32)));
+        let mut too_long = decode_bytes(&format!("d9eac4825820{}", "00".repeat(32)));
         too_long.extend_from_slice(&[0x1b, 0x80, 0, 0, 0, 0, 0, 0, 0]);
         assert!(matches!(
             decode_rov2_blob(&too_long),

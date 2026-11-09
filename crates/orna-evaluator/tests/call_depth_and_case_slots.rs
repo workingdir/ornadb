@@ -12,8 +12,8 @@
 use orna_evaluator::{
     Environment, Functions, Limits, PureFunction, evaluate_expression, evaluate_with_functions,
 };
-use orna_foundation::CanonicalValue;
 use orna_project_repl::AdmittedReplSession;
+use orna_value::CanonicalValue;
 use orna_value::{Raw, Value};
 
 const RECURSIVE_MODULE: &str = "

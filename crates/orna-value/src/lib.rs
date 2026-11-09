@@ -59,6 +59,11 @@ mod cbor;
 pub(crate) use cbor::*;
 mod validation;
 
+mod contract;
+pub use contract::*;
+pub mod object_reference;
+pub use raw::Raw as OvbRaw;
+
 // The inline test modules exercise the seams directly, so they need the std
 // types the seam modules import for themselves.
 #[cfg(test)]

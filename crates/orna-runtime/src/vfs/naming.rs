@@ -247,7 +247,7 @@ fn percent_byte(byte: u8) -> String {
 /// case with any extension.
 pub(super) fn is_reserved_component(text: &str) -> bool {
     if matches!(text, "." | ".." | ".orna" | VFS_ROW_DOCUMENT)
-        || orna_foundation::is_git_metadata_component(text.as_bytes())
+        || orna_base::is_git_metadata_component(text.as_bytes())
     {
         return true;
     }

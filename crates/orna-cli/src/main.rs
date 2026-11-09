@@ -69,7 +69,6 @@ use orna_conformance::{
     transactional_loaded_project_candidate_validator,
 };
 use orna_evaluator::{Environment, Limits, SysHostBindingRegistry};
-use orna_foundation::{CanonicalValue, OvbRaw, Value};
 use orna_project_repl::{AdmittedReplSession, ReplError};
 use orna_runtime::{
     FaultInjector, NoFault, PinnedCommittedRows, QueryObservationRegistration,
@@ -81,6 +80,7 @@ use orna_runtime::{
 use orna_sys::{
     EnvironmentProvider, FilesystemProvider, RuntimeMode, StdSnapshotPin, SysHostContext,
 };
+use orna_value::{CanonicalValue, OvbRaw, Value};
 use sha2::{Digest, Sha256};
 
 static CLI_REQUEST_NONCE: AtomicU64 = AtomicU64::new(1);
@@ -527,7 +527,7 @@ fn explain_diagnostic(code: &str) -> Result<String, Diagnostic> {
     ))
 }
 
-fn cancellation_diagnostic(diagnostic: &orna_foundation::Diagnostic) -> Diagnostic {
+fn cancellation_diagnostic(diagnostic: &orna_value::Diagnostic) -> Diagnostic {
     let code = match diagnostic.code() {
         "ORNA-LIST-STREAM-CANCELLED" => "ORNA-LIST-STREAM-CANCELLED",
         _ => "E2200",
@@ -1778,7 +1778,7 @@ fn report_project_outcome(
     root_entry: &str,
     arguments: &Environment,
     color_enabled: bool,
-    outcome: StageOutcome<orna_foundation::Diagnostic>,
+    outcome: StageOutcome<orna_value::Diagnostic>,
 ) -> Result<(), Diagnostic> {
     // Project transaction admission does not run stream roots; those route to
     // the explicit finite-list stream seam. The adapter reports that skip as a
@@ -1873,7 +1873,7 @@ fn run_project_stream_invocation_with_project(
 /// Publishes a runtime failure under its catalogued Orna code, with the
 /// catalogue title and help. Uncatalogued evaluator codes return `None` so each
 /// caller keeps its own fallback; no unpublished code is promoted.
-fn published_runtime_failure(diagnostic: &orna_foundation::Diagnostic) -> Option<Diagnostic> {
+fn published_runtime_failure(diagnostic: &orna_value::Diagnostic) -> Option<Diagnostic> {
     let documentation = diagnostic_documentation(diagnostic.code())?;
     Some(Diagnostic {
         code: documentation.code,
@@ -1900,14 +1900,14 @@ fn runtime_failure_detail(error: &orna_runtime::RuntimeError) -> String {
 
 /// Renders the evaluator failure code with the codes of its nested causes.
 /// Messages and spans stay redacted at the evaluator boundary.
-fn failure_detail(diagnostic: &orna_foundation::Diagnostic) -> String {
+fn failure_detail(diagnostic: &orna_value::Diagnostic) -> String {
     let causes = diagnostic.causes();
     if causes.is_empty() {
         return format!("failure code: {}", diagnostic.code());
     }
     let codes = causes
         .iter()
-        .map(orna_foundation::Diagnostic::code)
+        .map(orna_value::Diagnostic::code)
         .collect::<Vec<_>>()
         .join(", ");
     format!("failure code: {} (causes: {codes})", diagnostic.code())
@@ -1929,7 +1929,7 @@ fn durable_invocation_failed(error: &orna_runtime::RuntimeError) -> Diagnostic {
 
 /// Maps a stream delivery the runtime rolled back to `E2200`, carrying the
 /// evaluator failure code and its nested cause codes in the `--debug` detail.
-fn stream_delivery_failed(diagnostic: &orna_foundation::Diagnostic) -> Diagnostic {
+fn stream_delivery_failed(diagnostic: &orna_value::Diagnostic) -> Diagnostic {
     let mut delivery = Diagnostic::target(
         "E2200",
         "durable project stream delivery failed",
@@ -3888,7 +3888,7 @@ fn table_activation_cause(error: &TableActivationError) -> String {
 }
 
 /// The validator-build outcome's cause, for the unsettled detail.
-fn stage_outcome_cause(outcome: &StageOutcome<orna_foundation::Diagnostic>) -> String {
+fn stage_outcome_cause(outcome: &StageOutcome<orna_value::Diagnostic>) -> String {
     match outcome {
         StageOutcome::Failed(diagnostic) | StageOutcome::Cancelled(diagnostic) => {
             format!("{}: {}", diagnostic.code(), diagnostic.message())

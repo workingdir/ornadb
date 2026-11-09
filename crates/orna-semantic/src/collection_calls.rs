@@ -3,8 +3,8 @@
 
 use std::collections::BTreeMap;
 
-use orna_foundation::Diagnostic;
 use orna_syntax::Expr;
+use orna_value::Diagnostic;
 
 use super::*;
 

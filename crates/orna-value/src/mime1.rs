@@ -169,7 +169,7 @@ mod tests {
 
     fn pinned(text: &str, sha256: &str) -> serde_json::Value {
         assert_eq!(
-            hex::encode(Sha256::digest(text.as_bytes())),
+            orna_base::hex(Sha256::digest(text.as_bytes()).as_slice()),
             sha256,
             "the pinned reference copy no longer matches the release"
         );

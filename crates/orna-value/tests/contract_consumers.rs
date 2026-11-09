@@ -3,7 +3,9 @@
 //! parser, or Git representation.
 
 use orna_conformance::StageOutcome;
-use orna_foundation::{
+use orna_repository::Repository;
+use orna_syntax::parse_expression_with_file;
+use orna_value::{
     CanonicalSnapshot, CwdCapture, Diagnostic, FileRef, InvocationStatus, OvbRaw, RowRef,
     SYS_INVOCATION_ARGUMENT_TABLE_ID, SYS_INVOCATION_TABLE_ID, SYS_RUN_TABLE_ID,
     SYS_STREAM_TABLE_ID, SourceSpan, SystemReferenceError, canonical_uuid_text,
@@ -11,13 +13,11 @@ use orna_foundation::{
     validate_invocation_argument_reference, validate_invocation_reference, validate_run_reference,
     validate_stream_reference,
 };
-use orna_repository::Repository;
-use orna_syntax::parse_expression_with_file;
 
 fn snapshot() -> CanonicalSnapshot {
     CanonicalSnapshot::Commit {
         database: [1; 16],
-        algorithm: orna_foundation::GitHash::Sha256,
+        algorithm: orna_value::GitHash::Sha256,
         oid: vec![2; 32],
     }
 }

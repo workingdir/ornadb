@@ -23,11 +23,10 @@ multiple-versions = "deny"
 wildcards = "allow"
 
 # The one hex implementation lives in orna-base; every other crate must not
-# re-implement or re-depend on it. Until stage 03 moves orna-value's identity
-# codecs, orna-value is the only permitted user.
+# re-implement or re-depend on it.
 [[bans.deny]]
 crate = "hex"
-wrappers = ["orna-value"]
+wrappers = ["orna-base"]
 use-instead = "orna-base::hex"
 
 # The embedded database is below the state layer only. Stage 09 renames
@@ -36,10 +35,24 @@ use-instead = "orna-base::hex"
 crate = "libsql"
 wrappers = ["orna-cli", "orna-runtime"]
 
-# base64 is not banned yet: orna-compat-v1 and orna-storage depend on it directly, and
-# reqwest/hyper-util depend on it transitively, so a wrapper list would have to
-# name external crates. Stage 03 moves the workspace implementations to
-# orna-base; the ban is added there once the external route is the only one.
+# The one Base64 implementation lives in orna-base. cargo-deny bans a crate
+# for every direct parent that is not a wrapper, so the external crates that
+# legitimately use base64 internally (the HTTP stack, libsql and parquet) are
+# named here; no workspace crate other than orna-base may name it.
+[[bans.deny]]
+crate = "base64"
+wrappers = [
+    "orna-base",
+    "base64ct",
+    "hyper-util",
+    "libsql",
+    "parquet",
+    "reqwest",
+    "rustls",
+    "rustls-webpki",
+    "tower-http",
+]
+use-instead = "orna-base::base64"
 
 [[bans.skip]]
 name = "bitflags"

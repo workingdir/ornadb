@@ -81,11 +81,4 @@ fn offline_export_of_an_orna_fixture_is_stable_under_mtime_changes() {
     assert_eq!(opened.rows()[0].sha256, first_row.sha256);
 }
 
-fn hex_digest(bytes: &[u8; 32]) -> String {
-    use std::fmt::Write as _;
-    let mut out = String::with_capacity(64);
-    for byte in bytes {
-        write!(out, "{byte:02x}").expect("writing to a String cannot fail");
-    }
-    out
-}
+use orna_base::hex as hex_digest;

@@ -23,7 +23,7 @@ use crate::format2_ogb::{
 };
 use crate::format2_orr::{Orr2BlobField, Orr2DecodeError, decode_orr2_blob_field};
 use crate::format2_rov::{Rov2Blob, Rov2DecodeError, decode_rov2_blob};
-use crate::hex::{hex_decode, hex_encode};
+use crate::hex::{decode_text, hex_encode};
 use crate::object_reader::{ObjectKind, ObjectReader, TreeEntry, TreeEntryMode};
 use crate::{FormatContextError, RepositoryFormat};
 use crate::{GitCommitRef, Repository, RepositoryError};
@@ -294,7 +294,7 @@ impl OgbObjects for PinnedObjects<'_> {
 fn ogb_entry(entry: &TreeEntry) -> Result<OgbTreeEntry, OgbError> {
     let name = std::str::from_utf8(entry.name())
         .map_err(|_| OgbError::Malformed("entry name is not UTF-8"))?;
-    let oid = hex_decode(entry.oid()).ok_or(OgbError::Malformed("entry object id"))?;
+    let oid = decode_text(entry.oid()).ok_or(OgbError::Malformed("entry object id"))?;
     Ok(OgbTreeEntry {
         name: name.to_owned(),
         mode: raw_mode(entry.mode()).to_owned(),

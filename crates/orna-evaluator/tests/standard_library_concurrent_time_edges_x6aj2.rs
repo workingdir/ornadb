@@ -1,8 +1,8 @@
 use orna_evaluator::{Limits, SysHostBindingRegistry};
-use orna_foundation::CanonicalValue;
 use orna_project_repl::AdmittedReplSession;
 use orna_semantic::StandardDependencyProfile;
 use orna_sys::ClockProvider;
+use orna_value::CanonicalValue;
 use orna_value::Raw;
 use std::time::Duration;
 

@@ -1,12 +1,12 @@
 use std::{fs, path::Path, process::Command};
 
 use num_bigint::BigInt;
-use orna_foundation::{
+use orna_repository::Repository;
+use orna_syntax::parse_module;
+use orna_value::{
     CanonicalSnapshot, CwdCapture, GitHash, RowRef, SystemReferenceError, snapshot_reference,
     validate_snapshot_reference,
 };
-use orna_repository::Repository;
-use orna_syntax::parse_module;
 use tempfile::TempDir;
 
 const SNAPSHOT_SOURCE: &str = include_str!("fixtures/snapshot-round-trip.orna");
@@ -47,16 +47,8 @@ fn repository() -> (TempDir, Repository) {
     (directory, repository)
 }
 
-fn hex_bytes(value: &str) -> Vec<u8> {
-    assert_eq!(value.len() % 2, 0);
-    value
-        .as_bytes()
-        .chunks_exact(2)
-        .map(|pair| {
-            let digits = std::str::from_utf8(pair).unwrap();
-            u8::from_str_radix(digits, 16).unwrap()
-        })
-        .collect()
+fn decode_bytes(value: &str) -> Vec<u8> {
+    orna_base::hex_decode(value).expect("canonical hexadecimal")
 }
 
 #[test]
@@ -74,7 +66,7 @@ fn snapshot_and_cwd_reference_round_trip_keep_the_captured_generation() {
     let committed = CanonicalSnapshot::Commit {
         database,
         algorithm: GitHash::Sha1,
-        oid: hex_bytes(head.as_str()),
+        oid: decode_bytes(head.as_str()),
     };
     assert_eq!(
         CanonicalSnapshot::decode_bytes(&committed.encode().unwrap()).unwrap(),
@@ -129,5 +121,5 @@ fn snapshot_encoders_reject_forged_generation_identities() {
     *id = [0xa5; 32];
 
     assert!(forged.encode().is_err());
-    assert!(RowRef::new([1; 16], [4; 16], orna_foundation::OvbRaw::Null, forged).is_err());
+    assert!(RowRef::new([1; 16], [4; 16], orna_value::OvbRaw::Null, forged).is_err());
 }

@@ -103,12 +103,7 @@ pub fn is_release_obligation(id: &str) -> bool {
     id.starts_with("FINAL-") || id.starts_with("V110-")
 }
 
-pub fn hex(bytes: &[u8]) -> String {
-    bytes.iter().fold(String::new(), |mut text, byte| {
-        let _ = write!(text, "{byte:02x}");
-        text
-    })
-}
+pub use orna_base::hex;
 
 /// Why a scenario step did not hold, with the product output that shows it.
 /// `Unmet` is a product claim that a then-clause or gap probe checks and finds

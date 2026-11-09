@@ -3,11 +3,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use num_traits::{Signed, Zero};
-use orna_foundation::Diagnostic;
 use orna_syntax::{
     AssignmentOperator, AssignmentTarget, ControlKind, Expr, LambdaParameter, LiteralKind, Pattern,
     Statement, SyntaxSpan, TypeExpr,
 };
+use orna_value::Diagnostic;
 
 use super::*;
 

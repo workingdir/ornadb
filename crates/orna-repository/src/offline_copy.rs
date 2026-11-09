@@ -21,7 +21,7 @@ use std::{
 
 use sha2::{Digest, Sha256};
 
-use crate::hex::{hex_decode, hex_encode};
+use crate::hex::{decode_text, hex_encode};
 
 const INDEX_FILE: &str = "index.tsv";
 const MEDIA_DIR: &str = "media";
@@ -248,7 +248,7 @@ impl OfflineCopy {
             match fields.as_slice() {
                 ["row", key, media_type, suffix, length, sha256, has_payload] => {
                     rows.push(OfflineRowMetadata {
-                        key: hex_decode(key).ok_or(OfflineCopyError::InvalidBundle("row key"))?,
+                        key: decode_text(key).ok_or(OfflineCopyError::InvalidBundle("row key"))?,
                         media_type: (*media_type).to_owned(),
                         suffix: (*suffix != "-").then(|| (*suffix).to_owned()),
                         length: length
@@ -724,7 +724,7 @@ fn verify_payload_stream(
 }
 
 fn unhex_digest(text: &str) -> Option<[u8; 32]> {
-    hex_decode(text)?.try_into().ok()
+    decode_text(text)?.try_into().ok()
 }
 
 #[cfg(test)]

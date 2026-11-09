@@ -1,22 +1,9 @@
 //! Byte and text codecs the verbs share: lowercase hex and percent decoding.
+//!
+//! The hexadecimal codec is `orna-base`'s; this module re-exports it under the
+//! crate-local names the verbs already use.
 
-/// Lowercase hex of `bytes`.
-pub(crate) fn hex(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        output.push(char::from(DIGITS[usize::from(byte >> 4)]));
-        output.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
-    }
-    output
-}
-
-/// The value of one ASCII hex digit of either case.
-pub(crate) fn hex_digit(byte: u8) -> Option<u8> {
-    char::from(byte)
-        .to_digit(16)
-        .and_then(|digit| u8::try_from(digit).ok())
-}
+pub(crate) use orna_base::{hex, hex_digit};
 
 /// Decodes the `%XX` escapes of `value` and, for a form field
 /// (`plus_as_space`), the `+` that stands for a space. `None` for a malformed
@@ -40,23 +27,7 @@ pub(crate) fn percent_decode(value: &str, plus_as_space: bool) -> Option<String>
 
 #[cfg(test)]
 mod tests {
-    use super::{hex, hex_digit, percent_decode};
-
-    #[test]
-    fn hex_is_lowercase_and_zero_padded() {
-        assert_eq!(hex(&[]), "");
-        assert_eq!(hex(&[0x00, 0x0f, 0xa0, 0xff]), "000fa0ff");
-    }
-
-    #[test]
-    fn hex_digit_accepts_either_case_and_nothing_else() {
-        for (byte, value) in [(b'0', 0), (b'9', 9), (b'a', 10), (b'F', 15), (b'f', 15)] {
-            assert_eq!(hex_digit(byte), Some(value), "{}", char::from(byte));
-        }
-        for byte in [b'g', b'G', b' ', b'%', 0xc3, 0xff] {
-            assert_eq!(hex_digit(byte), None, "{byte:#x}");
-        }
-    }
+    use super::percent_decode;
 
     #[test]
     fn percent_decode_resolves_escapes_of_either_case() {

@@ -1,8 +1,8 @@
 use orna_evaluator::{Limits, SysHostBindingRegistry};
-use orna_foundation::{CanonicalValue, OvbRaw};
 use orna_project_repl::AdmittedReplSession;
 use orna_sys::{EnvironmentProvider, FilesystemProvider};
 use orna_value::Raw;
+use orna_value::{CanonicalValue, OvbRaw};
 
 fn bool_value(value: bool) -> CanonicalValue {
     CanonicalValue::new(Raw::Bool(value)).unwrap()

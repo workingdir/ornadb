@@ -4,7 +4,6 @@ use orna_application::{
     ApplicationLiveAdapter, AsyncApplicationEffectDispatcher,
 };
 use orna_evaluator::{Environment, Limits};
-use orna_foundation::{CanonicalValue, OvbRaw};
 use orna_live::{
     LiveAdminEffectDispatcher, LiveApplication, LiveApplicationWorkSupervisor, LiveEvalResponse,
 };
@@ -17,6 +16,7 @@ use orna_runtime::{
 use orna_runtime::{RuntimeIdentity, RuntimeState};
 use orna_semantic::Catalogue;
 use orna_sys_id::SysFailureCode;
+use orna_value::{CanonicalValue, OvbRaw};
 use std::{
     fs,
     path::PathBuf,

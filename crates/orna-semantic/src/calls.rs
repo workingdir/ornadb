@@ -2,8 +2,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use orna_foundation::{Diagnostic, SafeText};
 use orna_syntax::{Expr, LiteralKind, Pattern, TypeExpr};
+use orna_value::{Diagnostic, SafeText};
 
 use super::*;
 

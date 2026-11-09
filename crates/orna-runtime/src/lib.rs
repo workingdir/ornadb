@@ -38,7 +38,6 @@ use ed25519_dalek::SigningKey;
 use libsql::{Builder, Connection, TransactionBehavior, params};
 use num_bigint::BigInt;
 use orna_evaluator::{ActivationEffectReport, ControlledEffectToken};
-use orna_foundation::{CanonicalSnapshot, CwdCapture, OvbRaw, RowRef, Snapshot};
 use orna_repository::{
     CwdGeneration, ProtectedContentPin, ProtectedContentTransfer, Repository, RepositoryError,
 };
@@ -47,6 +46,7 @@ pub use orna_stream::{
     AsyncCheckpointBackend, Checkpoint as StreamCheckpoint, CheckpointKey, CheckpointPrecondition,
     Component, ConsumerIdentity, FailureStatus, Position, StreamFailurePayload,
 };
+use orna_value::{CanonicalSnapshot, CwdCapture, OvbRaw, RowRef, Snapshot};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -2693,11 +2693,6 @@ mod tests {
     use ed25519_dalek::Signer;
     use libsql::{Builder, Connection, TransactionBehavior, params};
     use num_bigint::BigInt;
-    use orna_foundation::{
-        AssertionRef, CanonicalValue, CwdCapture, ExpressionRef, FailureRef, ObjectRef, OvbRaw,
-        RowRef, SYS_CHECKPOINT_TABLE_ID, SYS_FAILURE_TABLE_ID, SYS_RUN_TABLE_ID, SafeText,
-        Snapshot, SourceSpan, Value, failure_reference, invocation_reference, snapshot_reference,
-    };
     use orna_repository::{
         CompactRuntimeReceipt, CwdGeneration, GitCommitRef, GitHashAlgorithm, NativeOid,
         ProtectedContentTransfer, Repository,
@@ -2710,6 +2705,11 @@ mod tests {
         DeliveryIdentity, DeliveryLease, DiagnosticClass, DiagnosticCode, FailureIdentity,
         FailureRecord, FailureStatus, LeasePurpose, Position, RejectReason, ReplayGrant,
         SafeAssertionWitness, SafeDiagnostic, StreamFailurePayload, StreamState, StreamStatus,
+    };
+    use orna_value::{
+        AssertionRef, CanonicalValue, CwdCapture, ExpressionRef, FailureRef, ObjectRef, OvbRaw,
+        RowRef, SYS_CHECKPOINT_TABLE_ID, SYS_FAILURE_TABLE_ID, SYS_RUN_TABLE_ID, SafeText,
+        Snapshot, SourceSpan, Value, failure_reference, invocation_reference, snapshot_reference,
     };
     use sha2::{Digest, Sha256};
     use std::fs;
@@ -3329,7 +3329,7 @@ mod tests {
         let database_uuid = "00000000-0000-4000-8000-000000000001";
         let database =
             format!("{{\n    repository_format: 3,\n    database_id: \"{database_uuid}\",\n}}\n");
-        let schema_descriptor = orna_foundation::SchemaDescriptor::new(OvbRaw::Map(vec![
+        let schema_descriptor = orna_value::SchemaDescriptor::new(OvbRaw::Map(vec![
             (OvbRaw::Int(0.into()), OvbRaw::Int(1.into())),
             (
                 OvbRaw::Int(1.into()),
@@ -16531,7 +16531,7 @@ mod tests {
         let reference = |key: &str| {
             RowRef::new(id(1), id(9), OvbRaw::Text(key.into()), snapshot.clone()).unwrap()
         };
-        let file = orna_foundation::FileRef::from_row_ref(reference("file"));
+        let file = orna_value::FileRef::from_row_ref(reference("file"));
         AssertionDiagnosticDetail::table_or_cross_table_false(
             AssertionRef::from_row_ref(reference("assertion")),
             ObjectRef::from_row_ref(reference("owner")),
@@ -16539,7 +16539,7 @@ mod tests {
             ExpressionRef::from_row_ref(reference("predicate")),
             SourceSpan::new(
                 file,
-                orna_foundation::SourceSpanExtent {
+                orna_value::SourceSpanExtent {
                     start_byte: 4.into(),
                     end_byte: 9.into(),
                     start_line: 1.into(),

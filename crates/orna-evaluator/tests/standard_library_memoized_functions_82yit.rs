@@ -2,8 +2,8 @@ use orna_evaluator::{
     Environment, Functions, Limits, NominalDefinitions, PureFunction,
     evaluate_with_functions_and_nominals,
 };
-use orna_foundation::CanonicalValue;
 use orna_syntax::{Declaration, parse_expression, parse_module};
+use orna_value::CanonicalValue;
 use orna_value::Raw;
 
 const MEMO_MODULES: [&str; 3] = ["std/collection.orna", "std/map.orna", "std/memo.orna"];

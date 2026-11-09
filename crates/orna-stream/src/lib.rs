@@ -11,7 +11,7 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 
-use orna_foundation::{AssertionRef, ExpressionRef, ObjectRef, SafeText, SourceSpan};
+use orna_value::{AssertionRef, ExpressionRef, ObjectRef, SafeText, SourceSpan};
 
 /// A non-empty, separator-free typed identity component.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -1447,7 +1447,7 @@ impl CheckpointBackend for InMemoryCheckpointBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orna_foundation::FileRef;
+    use orna_value::FileRef;
     use std::future::Future;
     use std::pin::Pin;
     use std::task::{Context, Poll};
@@ -1731,15 +1731,15 @@ mod tests {
         assert!(!printed.contains("secret"));
     }
 
-    fn diagnostic_snapshot() -> orna_foundation::Snapshot {
-        orna_foundation::Snapshot::cwd([3; 16], [4; 16], 5.into()).unwrap()
+    fn diagnostic_snapshot() -> orna_value::Snapshot {
+        orna_value::Snapshot::cwd([3; 16], [4; 16], 5.into()).unwrap()
     }
 
-    fn diagnostic_row(key: &str) -> orna_foundation::RowRef {
-        orna_foundation::RowRef::new(
+    fn diagnostic_row(key: &str) -> orna_value::RowRef {
+        orna_value::RowRef::new(
             [3; 16],
             [6; 16],
-            orna_foundation::OvbRaw::Text(key.into()),
+            orna_value::OvbRaw::Text(key.into()),
             diagnostic_snapshot(),
         )
         .unwrap()
@@ -1756,7 +1756,7 @@ mod tests {
         let predicate = ExpressionRef::from_row_ref(diagnostic_row("predicate"));
         let source_span = SourceSpan::new(
             diagnostic_file(),
-            orna_foundation::SourceSpanExtent {
+            orna_value::SourceSpanExtent {
                 start_byte: 24.into(),
                 end_byte: 53.into(),
                 start_line: 2.into(),
@@ -1808,7 +1808,7 @@ mod tests {
             ExpressionRef::from_row_ref(diagnostic_row("predicate")),
             SourceSpan::new(
                 diagnostic_file(),
-                orna_foundation::SourceSpanExtent {
+                orna_value::SourceSpanExtent {
                     start_byte: 1.into(),
                     end_byte: 2.into(),
                     start_line: 1.into(),

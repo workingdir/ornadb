@@ -1,7 +1,6 @@
 use orna_evaluator::{
     Limits, SysHostBindingRegistry, reference_standard_profile, reference_standard_sources,
 };
-use orna_foundation::{CanonicalValue, OvbRaw};
 use orna_project_repl::AdmittedReplSession;
 use orna_semantic::{Catalogue, StandardDependencyProfile};
 use orna_syntax::{Declaration, Pattern, TypeExpr, parse_module};
@@ -10,6 +9,7 @@ use orna_sys::{
     system_host_operation_registry,
 };
 use orna_value::Raw;
+use orna_value::{CanonicalValue, OvbRaw};
 use std::{
     collections::BTreeMap,
     env,
@@ -345,9 +345,7 @@ fn typed_sys_process_and_clock_bindings_execute_allowlisted_native_providers() {
     );
     assert_eq!(
         sleep_result,
-        Ok(Some(
-            CanonicalValue::new(orna_foundation::OvbRaw::Null).unwrap()
-        ))
+        Ok(Some(CanonicalValue::new(orna_value::OvbRaw::Null).unwrap()))
     );
     assert!(sleep_started.elapsed() >= Duration::from_secs(1));
 }

@@ -8,7 +8,7 @@
 
 use std::fmt::Write as _;
 
-use orna_foundation::OvbRaw;
+use orna_value::OvbRaw;
 use orna_value::{ContextValue, ROV3_BLOB_TAG};
 
 /// A rendered page and the action identifiers its activate buttons submit to.
@@ -375,7 +375,7 @@ pub(crate) fn push_escaped(text: &str, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orna_foundation::CanonicalValue;
+    use orna_value::CanonicalValue;
     use orna_value::{
         AvailabilityState, BlobResolver, ContentReference, Format3Context, Format3Quota, GitHash,
         NativeOid, OwnerLifetime, Snapshot, ValueFormat,

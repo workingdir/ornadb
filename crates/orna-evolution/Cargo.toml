@@ -7,7 +7,7 @@ license.workspace = true
 description = "Bounded, fail-closed Orna 1.0 schema-evolution planning"
 
 [dependencies]
-orna-foundation = { path = "../orna-foundation" }
+orna-value = { path = "../orna-value" }
 
 [dev-dependencies]
 serde_json = "1"

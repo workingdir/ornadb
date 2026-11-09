@@ -1,5 +1,5 @@
-use orna_foundation::{CanonicalSnapshot, FileRef, OvbRaw, RowRef};
 use orna_syntax::{ParseContext, SourceDocumentId, SyntaxAdmissionError, SyntaxSpan, admit_span};
+use orna_value::{CanonicalSnapshot, FileRef, OvbRaw, RowRef};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 const UNICODE_SOURCE: &str = include_str!("fixtures/admission-unicode.orna");
@@ -7,7 +7,7 @@ const UNICODE_SOURCE: &str = include_str!("fixtures/admission-unicode.orna");
 fn pinned() -> ParseContext {
     let snapshot = CanonicalSnapshot::Commit {
         database: [1; 16],
-        algorithm: orna_foundation::GitHash::Sha256,
+        algorithm: orna_value::GitHash::Sha256,
         oid: vec![2; 32],
     };
     let file = FileRef::from_row_ref(

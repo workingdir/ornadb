@@ -29,8 +29,8 @@ the unit tests assert the two agree.
 
 | layer | name | crates |
 |---|---|---|
-| 0 | primitives | (empty until orna-base) |
-| 1 | value | orna-value, orna-foundation, orna-sys-model |
+| 0 | primitives | orna-base |
+| 1 | value | orna-value, orna-sys-model |
 | 2 | syntax | orna-syntax, orna-intrinsics, orna-sys-codegen |
 | 3 | identity | orna-sys-id, orna-standard-sources, orna-sys-macros |
 | 4 | analysis | orna-semantic |
@@ -46,10 +46,11 @@ the unit tests assert the two agree.
 | 14 | edges | orna-cli, orna-lsp, orna-conformance, orna-traceability, orna-table |
 | 15 | archive | orna-compat-v1 |
 
-The numbers are the target architecture's. `orna-foundation` is parked at layer 1
-until its split because it already depends on `orna-value`; layer 0 is empty until
-`orna-base` exists. The target names replace the current ones as the split stages
-land; a rename changes the `name` in `layers.toml` in the same PR.
+The numbers are the target architecture's. Stage 03 created the layer-0
+`orna-base` primitives and absorbed the former `orna-foundation` into
+`orna-base` and `orna-value`; the target names replace the current ones as the
+remaining split stages land, and a rename changes the `name` in `layers.toml`
+in the same PR.
 
 `orna-compat-v1` is layer 15, the archived 1.0.0 compatibility reference model:
 nothing may depend on it and it is `publish = false`. It lives under
@@ -59,7 +60,7 @@ compatibility and traceability tests.
 
 ### Same-layer edges that are recorded today
 
-`orna-foundation -> orna-value`, `orna-sys -> orna-security`,
+`orna-sys -> orna-security`,
 `orna-project-repl -> orna-project`, `orna-serving -> orna-protocol`,
 `orna-live -> orna-protocol`, `orna-live -> orna-serving`,
 `orna-cli -> orna-conformance`, `orna-conformance -> orna-table`,
@@ -209,11 +210,10 @@ by the stage that fixes it. A stale entry is printed as a warning.
 | V9 | `orna-lsp`: production in-degree 0, role not tool | the LSP is its own binary |
 | V10 | `orna-traceability`: production in-degree 0, role not tool | moves under `tools/` with no production dependent |
 | V11 | `orna-sys-id`: production in-degree 0, no adopter yet | stage 06 (`orna-sys` and `orna-eval` adopt it) |
-| W1 | `orna-foundation`: no cohesive subject, 16 production dependents | stage 03 (`orna-base`) |
 
-The IDs are stable labels; V5 was fixed by the evaluator refactor and V8 by
-stage 02 (the `orna-compat-v1` archive), and both entries are deleted, so the
-list has gaps.
+The IDs are stable labels; V5 was fixed by the evaluator refactor, V8 by stage 02
+(the `orna-compat-v1` archive) and W1 by stage 03 (`orna-base`), and those
+entries are deleted, so the list has gaps.
 
 ### External dependency policy
 

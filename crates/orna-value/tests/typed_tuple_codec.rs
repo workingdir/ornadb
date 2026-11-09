@@ -1,14 +1,14 @@
 use orna_value::{Error, Raw, Value, decode_typed, encode_typed};
 
-fn hex_bytes(input: &str) -> Vec<u8> {
-    hex::decode(input).expect("valid test vector hex")
+fn decode_bytes(input: &str) -> Vec<u8> {
+    orna_base::hex_decode(input).expect("canonical hexadecimal")
 }
 
 #[test]
 fn unit_tuple_uses_the_canonical_unit_tag_and_round_trips() {
     let encoded = encode_typed(&()).expect("typed unit encoding succeeds");
 
-    assert_eq!(encoded, hex_bytes("d9ea6e80"));
+    assert_eq!(encoded, decode_bytes("d9ea6e80"));
     assert_eq!(decode_typed::<()>(&encoded), Ok(()));
     assert_eq!(
         Value::decode(&encoded).expect("unit bytes decode"),
@@ -21,7 +21,7 @@ fn nonzero_tuple_preserves_component_order_in_canonical_bytes() {
     let value = (7_i64, String::from("ordered"), false);
     let encoded = encode_typed(&value).expect("typed tuple encoding succeeds");
 
-    assert_eq!(encoded, hex_bytes("d9ea6f8307676f726465726564f4"));
+    assert_eq!(encoded, decode_bytes("d9ea6f8307676f726465726564f4"));
     assert_eq!(decode_typed::<(i64, String, bool)>(&encoded), Ok(value));
 }
 
@@ -32,7 +32,7 @@ fn nested_tuples_round_trip_recursively_with_stable_bytes() {
 
     assert_eq!(
         encoded,
-        hex_bytes("d9ea6f8201d9ea6f82666e6573746564d9ea6f82f521")
+        decode_bytes("d9ea6f8201d9ea6f82666e6573746564d9ea6f82f521")
     );
     assert_eq!(
         decode_typed::<(i64, (String, (bool, i64)))>(&encoded),
@@ -42,7 +42,7 @@ fn nested_tuples_round_trip_recursively_with_stable_bytes() {
 
 #[test]
 fn nested_tuple_element_mismatch_reports_the_precise_type_path() {
-    let encoded = hex_bytes("d9ea6f8201d9ea6f82666e6573746564d9ea6f820021");
+    let encoded = decode_bytes("d9ea6f8201d9ea6f82666e6573746564d9ea6f820021");
     let error = decode_typed::<(i64, (String, (bool, i64)))>(&encoded)
         .expect_err("an Int cannot decode as the nested Bool element");
 
@@ -69,7 +69,7 @@ fn tuple_composes_existing_option_and_scalar_codecs_without_aliasing_payloads() 
 
     assert_eq!(
         encoded,
-        hex_bytes("d9ea6f83d9ea6d8201182ad9ea6d8100667363616c6172")
+        decode_bytes("d9ea6f83d9ea6d8201182ad9ea6d8100667363616c6172")
     );
     assert_eq!(
         decode_typed::<(Option<i64>, Option<i64>, String)>(&encoded),
@@ -79,7 +79,7 @@ fn tuple_composes_existing_option_and_scalar_codecs_without_aliasing_payloads() 
 
 #[test]
 fn raw_and_value_views_round_trip_the_same_tuple_bytes() {
-    let encoded = hex_bytes("d9ea6f8201f5");
+    let encoded = decode_bytes("d9ea6f8201f5");
     let value = Value::decode(&encoded).expect("canonical tuple bytes decode as Value");
     let raw = decode_typed::<Raw>(&encoded).expect("canonical tuple bytes decode as Raw");
 

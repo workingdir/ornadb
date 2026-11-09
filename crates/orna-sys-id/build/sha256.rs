@@ -159,17 +159,8 @@ pub fn digest(bytes: &[u8]) -> [u8; 32] {
     out
 }
 
-/// Renders a digest as 64 lowercase hexadecimal characters.
-#[must_use]
-pub fn hex(digest: &[u8; 32]) -> String {
-    let mut text = String::with_capacity(64);
-    for byte in digest {
-        use std::fmt::Write as _;
-        write!(text, "{byte:02x}").expect("writing to a String cannot fail");
-    }
-    text
-}
-
+/// Renders a digest as lowercase hexadecimal through the shared codec.
+pub use orna_base::hex;
 #[cfg(test)]
 mod tests {
     use super::{digest, hex};

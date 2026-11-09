@@ -7,7 +7,6 @@ license.workspace = true
 description = "Read-only first semantic slice for the frozen Orna 1.0 AST"
 
 [dependencies]
-orna-foundation = { path = "../orna-foundation" }
 orna-intrinsics = { path = "../orna-intrinsics" }
 orna-value = { path = "../orna-value" }
 orna-syntax = { path = "../orna-syntax" }

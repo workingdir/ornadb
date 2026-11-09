@@ -1,6 +1,6 @@
 //! Diagnostic codes and the notes that classify them.
 
-use orna_foundation::Diagnostic;
+use orna_value::Diagnostic;
 
 pub const DIAG_BAD_PATH: &str = "ORNA-S001-PATH";
 pub const DIAG_NAMESPACE: &str = "ORNA-S002-NAMESPACE";

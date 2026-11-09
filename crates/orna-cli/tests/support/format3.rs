@@ -32,15 +32,7 @@ use orna_value::{
 use orna_project::ObjectIdentityManifest;
 use orna_semantic::{ModuleInput, analyze};
 
-pub fn hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        output.push(HEX[(byte >> 4) as usize] as char);
-        output.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    output
-}
+pub use orna_base::hex;
 
 /// The identity `orna publish` derives for a repository: the metadata's
 /// database id, a rotated-and-salted repository id, and both concatenated as
@@ -820,17 +812,6 @@ pub fn native_fixture_node(path: &Path, data: &[u8], dependencies: &[(&str, &str
         envelope.extend([format!("40000 tree {refs_oid}\trefs\n")]);
     }
     git_tree(path, &envelope)
-}
-
-/// Lowercase hex of a byte slice.
-pub fn hex_encode(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(DIGITS[usize::from(byte >> 4)] as char);
-        out.push(DIGITS[usize::from(byte & 0x0f)] as char);
-    }
-    out
 }
 
 pub fn append_cbor_head(output: &mut Vec<u8>, major: u8, value: usize) {

@@ -140,14 +140,7 @@ fn offline_copy_retrieves_row_with_unrecognised_media_type() {
     assert_eq!(copy.hydrate(b"opaque").unwrap(), payload);
 }
 
-fn hex(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        write!(out, "{byte:02x}").expect("writing to a String cannot fail");
-    }
-    out
-}
+use orna_base::hex;
 
 #[test]
 fn offline_import_plan_restores_every_verified_row_or_rejects_the_bundle() {

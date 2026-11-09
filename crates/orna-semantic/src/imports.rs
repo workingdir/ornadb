@@ -4,11 +4,11 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
-use orna_foundation::Diagnostic;
 use orna_syntax::{
     Declaration, Item, ProtocolMember, SyntaxTree, TypeExpr, TypeMember, TypeRepresentation,
     UseTail,
 };
+use orna_value::Diagnostic;
 
 use super::*;
 

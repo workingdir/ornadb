@@ -9,13 +9,12 @@
 
 use std::{cmp::Ordering, collections::BTreeMap, error::Error, fmt};
 
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use bytes::Bytes;
-use orna_foundation::{CanonicalValue, OvbRaw, SchemaDescriptor, compare_primary_keys};
 use orna_repository::{
     CompactManifest, CompactManifestEntry, CompactSegmentRole, GitCommitRef, Repository,
     RepositoryError, Uuid, validate_compact_page_uncompressed_sizes,
 };
+use orna_value::{CanonicalValue, OvbRaw, SchemaDescriptor, compare_primary_keys};
 use parquet::{
     basic::{
         ColumnOrder, Compression, ConvertedType, Encoding, LogicalType, SortOrder, TimeUnit, Type,
@@ -506,7 +505,7 @@ fn stored_float_column_index(
         .flatten()
         .find(|item| item.key == "orna.columns.ovb")
         .and_then(|item| item.value.as_deref())
-        .and_then(|value| BASE64.decode(value).ok())
+        .and_then(|value| orna_base::base64_decode(value).ok())
         .ok_or(CompactParquetError::InvalidMetadata)?;
     let descriptors =
         CanonicalValue::decode(&columns).map_err(|_| CompactParquetError::InvalidMetadata)?;
@@ -880,15 +879,14 @@ fn validate_file_metadata(
     let Some(schema_hash) = values.get("orna.schema.sha256").and_then(|value| *value) else {
         return Err(CompactParquetError::InvalidMetadata);
     };
-    if schema_hash != hex_digest(profile.schema_fingerprint()) {
+    if schema_hash != digest_hex(profile.schema_fingerprint()) {
         return Err(CompactParquetError::InvalidMetadata);
     }
     let Some(schema_ovb) = values.get("orna.schema.ovb").and_then(|value| *value) else {
         return Err(CompactParquetError::InvalidMetadata);
     };
-    let schema_ovb = BASE64
-        .decode(schema_ovb)
-        .map_err(|_| CompactParquetError::InvalidMetadata)?;
+    let schema_ovb =
+        orna_base::base64_decode(schema_ovb).map_err(|_| CompactParquetError::InvalidMetadata)?;
     let descriptor =
         SchemaDescriptor::decode(&schema_ovb).map_err(|_| CompactParquetError::InvalidMetadata)?;
     if descriptor.raw() != profile.schema().raw()
@@ -902,7 +900,7 @@ fn validate_file_metadata(
     let Some(columns) = values.get("orna.columns.ovb").and_then(|value| *value) else {
         return Err(CompactParquetError::InvalidMetadata);
     };
-    if BASE64.decode(columns).is_err() {
+    if orna_base::base64_decode(columns).is_err() {
         return Err(CompactParquetError::InvalidMetadata);
     }
     Ok(())
@@ -925,7 +923,7 @@ fn key_columns(
         .flatten()
         .find(|item| item.key == "orna.columns.ovb")
         .and_then(|item| item.value.as_deref())
-        .and_then(|value| BASE64.decode(value).ok())
+        .and_then(|value| orna_base::base64_decode(value).ok())
         .ok_or(CompactParquetError::InvalidMetadata)?;
     let descriptors =
         CanonicalValue::decode(&columns).map_err(|_| CompactParquetError::InvalidMetadata)?;
@@ -1976,24 +1974,19 @@ fn read_str_column(
     .collect()
 }
 
-fn hex_digest(bytes: [u8; 32]) -> String {
-    let mut value = String::with_capacity(64);
-    for byte in bytes {
-        value.push(char::from(b"0123456789abcdef"[(byte >> 4) as usize]));
-        value.push(char::from(b"0123456789abcdef"[(byte & 0x0f) as usize]));
-    }
-    value
+fn digest_hex(bytes: [u8; 32]) -> String {
+    orna_base::hex(&bytes)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::compact::CompactLogicalKeyError;
-    use orna_foundation::SchemaDescriptor;
     use orna_repository::{
         COMPACT_MAX_UNCOMPRESSED_PAGE_BYTES, CompactManifest, CompactPublicationRequest,
         CompactSegment, CompactSegmentRecord, CompactSegmentRole, ManagedFileChange, ManagedPath,
     };
+    use orna_value::SchemaDescriptor;
     use parquet::{
         basic::{Compression, Encoding},
         data_type::{BoolType, ByteArray, ByteArrayType, DoubleType, Int32Type, Int64Type},
@@ -2234,13 +2227,16 @@ mod tests {
             KeyValue::new("orna.table".into(), Some(TABLE.to_string())),
             KeyValue::new(
                 "orna.schema.sha256".into(),
-                Some(hex_digest(profile.schema_fingerprint())),
+                Some(digest_hex(profile.schema_fingerprint())),
             ),
             KeyValue::new(
                 "orna.schema.ovb".into(),
-                Some(BASE64.encode(profile.schema().encode().unwrap())),
+                Some(orna_base::base64_encode(profile.schema().encode().unwrap())),
             ),
-            KeyValue::new("orna.columns.ovb".into(), Some(BASE64.encode(columns))),
+            KeyValue::new(
+                "orna.columns.ovb".into(),
+                Some(orna_base::base64_encode(columns)),
+            ),
             KeyValue::new("orna.encoder".into(), Some("test-encoder-v1".into())),
         ];
         let properties = Arc::new(
@@ -2410,13 +2406,16 @@ mod tests {
             KeyValue::new("orna.table".into(), Some(TABLE.to_string())),
             KeyValue::new(
                 "orna.schema.sha256".into(),
-                Some(hex_digest(profile.schema_fingerprint())),
+                Some(digest_hex(profile.schema_fingerprint())),
             ),
             KeyValue::new(
                 "orna.schema.ovb".into(),
-                Some(BASE64.encode(profile.schema().encode().unwrap())),
+                Some(orna_base::base64_encode(profile.schema().encode().unwrap())),
             ),
-            KeyValue::new("orna.columns.ovb".into(), Some(BASE64.encode(columns))),
+            KeyValue::new(
+                "orna.columns.ovb".into(),
+                Some(orna_base::base64_encode(columns)),
+            ),
             KeyValue::new("orna.encoder".into(), Some("test-encoder-v1".into())),
         ];
         let properties = Arc::new(
@@ -2740,26 +2739,24 @@ mod tests {
                 KeyValue::new("orna.table".into(), Some(TABLE.to_string())),
                 KeyValue::new(
                     "orna.schema.sha256".into(),
-                    Some(hex_digest(profile.schema_fingerprint())),
+                    Some(digest_hex(profile.schema_fingerprint())),
                 ),
                 KeyValue::new(
                     "orna.schema.ovb".into(),
-                    Some(BASE64.encode(profile.schema().encode().unwrap())),
+                    Some(orna_base::base64_encode(profile.schema().encode().unwrap())),
                 ),
                 KeyValue::new(
                     "orna.columns.ovb".into(),
-                    Some(
-                        BASE64.encode(
-                            CanonicalValue::new(OvbRaw::Array(vec![descriptor_with_encoding(
-                                KEY_A,
-                                date_type(),
-                                "date",
-                            )]))
-                            .unwrap()
-                            .encode()
-                            .unwrap(),
-                        ),
-                    ),
+                    Some(orna_base::base64_encode(
+                        CanonicalValue::new(OvbRaw::Array(vec![descriptor_with_encoding(
+                            KEY_A,
+                            date_type(),
+                            "date",
+                        )]))
+                        .unwrap()
+                        .encode()
+                        .unwrap(),
+                    )),
                 ),
                 KeyValue::new("orna.encoder".into(), Some("test-encoder-v1".into())),
             ]),
@@ -2893,7 +2890,7 @@ mod tests {
             profile,
             Some(KeyValue::new(
                 "orna.schema.ovb".into(),
-                Some(BASE64.encode(schema_ovb)),
+                Some(orna_base::base64_encode(schema_ovb)),
             )),
         )
     }
@@ -2923,7 +2920,7 @@ mod tests {
             KeyValue::new("orna.table".into(), Some(TABLE.to_string())),
             KeyValue::new(
                 "orna.schema.sha256".into(),
-                Some(hex_digest(profile.schema_fingerprint())),
+                Some(digest_hex(profile.schema_fingerprint())),
             ),
         ];
         if let Some(schema_metadata) = schema_metadata {
@@ -2931,7 +2928,7 @@ mod tests {
         }
         metadata.push(KeyValue::new(
             "orna.columns.ovb".into(),
-            Some(BASE64.encode(columns)),
+            Some(orna_base::base64_encode(columns)),
         ));
         metadata.push(KeyValue::new(
             "orna.encoder".into(),
@@ -2989,26 +2986,24 @@ mod tests {
                 KeyValue::new("orna.table".into(), Some(TABLE.to_string())),
                 KeyValue::new(
                     "orna.schema.sha256".into(),
-                    Some(hex_digest(profile.schema_fingerprint())),
+                    Some(digest_hex(profile.schema_fingerprint())),
                 ),
                 KeyValue::new(
                     "orna.schema.ovb".into(),
-                    Some(BASE64.encode(profile.schema().encode().unwrap())),
+                    Some(orna_base::base64_encode(profile.schema().encode().unwrap())),
                 ),
                 KeyValue::new(
                     "orna.columns.ovb".into(),
-                    Some(
-                        BASE64.encode(
-                            CanonicalValue::new(OvbRaw::Array(vec![descriptor_with_encoding(
-                                KEY_A,
-                                str_type(),
-                                "utf8",
-                            )]))
-                            .unwrap()
-                            .encode()
-                            .unwrap(),
-                        ),
-                    ),
+                    Some(orna_base::base64_encode(
+                        CanonicalValue::new(OvbRaw::Array(vec![descriptor_with_encoding(
+                            KEY_A,
+                            str_type(),
+                            "utf8",
+                        )]))
+                        .unwrap()
+                        .encode()
+                        .unwrap(),
+                    )),
                 ),
                 KeyValue::new("orna.encoder".into(), Some("test-encoder-v1".into())),
             ]),
@@ -3666,7 +3661,7 @@ mod tests {
             &[1, 2],
             Some(KeyValue::new(
                 "orna.schema.ovb".into(),
-                Some(BASE64.encode(profile.schema().encode().unwrap())),
+                Some(orna_base::base64_encode(profile.schema().encode().unwrap())),
             )),
         );
         let columns = CanonicalValue::new(OvbRaw::Array(vec![descriptor(KEY_A, int_type())]))
@@ -3885,7 +3880,7 @@ mod tests {
             &profile,
             Some(KeyValue::new(
                 "orna.schema.ovb".into(),
-                Some(BASE64.encode([0xff])),
+                Some(orna_base::base64_encode([0xff])),
             )),
         ));
 
@@ -3897,7 +3892,7 @@ mod tests {
             &profile,
             Some(KeyValue::new(
                 "orna.schema.ovb".into(),
-                Some(BASE64.encode(noncanonical)),
+                Some(orna_base::base64_encode(noncanonical)),
             )),
         ));
     }

@@ -6,10 +6,10 @@ use crate::table_store::{Mutation, TableMutation, validate_table_name};
 use crate::{RuntimeState, process_owner_id};
 use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
 use libsql::{Connection, TransactionBehavior, params};
-use orna_foundation::{CanonicalValue, OvbRaw};
 use orna_repository::{
     CompactPublicationPending, CompactRuntimeReceipt, Repository, RepositoryError,
 };
+use orna_value::{CanonicalValue, OvbRaw};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::io::Write;

@@ -4,8 +4,8 @@ use orna_value::{
     DecodeError, Error, OvbCodec, Raw, Result, Value, decode, decode_typed, encode, encode_typed,
 };
 
-fn hex_bytes(input: &str) -> Vec<u8> {
-    hex::decode(input).expect("valid test vector hex")
+fn decode_bytes(input: &str) -> Vec<u8> {
+    orna_base::hex_decode(input).expect("canonical hexadecimal")
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -61,7 +61,7 @@ fn map_keys_are_sorted_by_complete_encoded_key_bytes() {
     // then -1. The expected map makes the complete-byte ordering observable.
     assert_eq!(
         encode_typed(&value).expect("map encoding succeeds"),
-        hex_bytes(
+        decode_bytes(
             "a400647a65726f18186b7477656e74792d666f75721901006c74776f2d666976652d73697820686e65676174697665"
         )
     );
@@ -106,7 +106,7 @@ fn malformed_duplicate_unordered_and_noncanonical_maps_are_rejected_at_map_path(
         ("unordered", "a220010002", Error::DuplicateOrUnorderedMapKey),
         ("noncanonical", "a1180001", Error::NonCanonical),
     ] {
-        let error = match decode_typed::<BTreeMap<i64, i64>>(&hex_bytes(encoded)) {
+        let error = match decode_typed::<BTreeMap<i64, i64>>(&decode_bytes(encoded)) {
             Ok(_) => panic!("{name} map unexpectedly decoded"),
             Err(error) => error,
         };
@@ -117,7 +117,7 @@ fn malformed_duplicate_unordered_and_noncanonical_maps_are_rejected_at_map_path(
 
 #[test]
 fn key_and_value_type_failures_keep_stable_map_index_paths() {
-    let key_error = decode_typed::<BTreeMap<i64, i64>>(&hex_bytes("a1f501"))
+    let key_error = decode_typed::<BTreeMap<i64, i64>>(&decode_bytes("a1f501"))
         .expect_err("Bool key must not decode as Int");
     assert_eq!(
         key_error.path(),
@@ -126,7 +126,7 @@ fn key_and_value_type_failures_keep_stable_map_index_paths() {
     assert_eq!(key_error.type_path(), "Map.0.Key");
     assert_eq!(key_error.error(), &Error::InvalidValue);
 
-    let value_error = decode_typed::<BTreeMap<i64, i64>>(&hex_bytes("a100f5"))
+    let value_error = decode_typed::<BTreeMap<i64, i64>>(&decode_bytes("a100f5"))
         .expect_err("Bool value must not decode as Int");
     assert_eq!(
         value_error.path(),

@@ -66,7 +66,7 @@ fn lexical_filter_shadow_is_not_hijacked_by_relation_intrinsic() {
         StageOutcome::Failed(_)
     ));
     assert_eq!(
-        runtime.committed_row("Note", &orna_foundation::Value::int(1.into())),
+        runtime.committed_row("Note", &orna_value::Value::int(1.into())),
         None
     );
 }

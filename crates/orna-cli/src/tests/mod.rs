@@ -950,16 +950,16 @@ fn durable_invocation_failure_without_public_code_carries_display_text() {
 
 #[test]
 fn failure_detail_formats_attached_cause_codes() {
-    let severity = orna_foundation::DiagnosticSeverity::Error;
-    let message = || orna_foundation::SafeText::new("redacted").expect("safe text");
-    let cause = orna_foundation::Diagnostic::new(
-        orna_foundation::SafeText::new("ORNA-EVAL-DIVIDE-BY-ZERO").expect("safe code"),
+    let severity = orna_value::DiagnosticSeverity::Error;
+    let message = || orna_value::SafeText::new("redacted").expect("safe text");
+    let cause = orna_value::Diagnostic::new(
+        orna_value::SafeText::new("ORNA-EVAL-DIVIDE-BY-ZERO").expect("safe code"),
         severity,
         message(),
     )
     .expect("cause diagnostic");
-    let failure = orna_foundation::Diagnostic::new(
-        orna_foundation::SafeText::new("ORNA-EVAL-SURFACE").expect("safe code"),
+    let failure = orna_value::Diagnostic::new(
+        orna_value::SafeText::new("ORNA-EVAL-SURFACE").expect("safe code"),
         severity,
         message(),
     )
@@ -1427,10 +1427,10 @@ fn stream_failure_diagnostic_describes_delivery_scoped_rollback() {
 
 #[test]
 fn cancellation_mapping_retains_safe_identity_and_cancelled_exit() {
-    let diagnostic = orna_foundation::Diagnostic::new(
-        orna_foundation::SafeText::new("ORNA-LIST-STREAM-CANCELLED").unwrap(),
-        orna_foundation::DiagnosticSeverity::Error,
-        orna_foundation::SafeText::redacted(),
+    let diagnostic = orna_value::Diagnostic::new(
+        orna_value::SafeText::new("ORNA-LIST-STREAM-CANCELLED").unwrap(),
+        orna_value::DiagnosticSeverity::Error,
+        orna_value::SafeText::redacted(),
     )
     .unwrap();
     let mapped = cancellation_diagnostic(&diagnostic);
