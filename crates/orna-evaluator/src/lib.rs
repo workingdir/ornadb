@@ -1071,23 +1071,29 @@ fn local_intrinsic(name: &str) -> Option<orna_intrinsics::IntrinsicId> {
 /// the spelling's module path must name a catalogue module, the leaf (the
 /// public export or the private implementation leaf) must be registered, the
 /// entry must be native rather than `SourceOnly`, and its pins must cover the
-/// current standard pin. A declaration that fails any clause is ordinary
-/// source and runs its Orna body.
+/// current standard pin. A descriptor that records a private marker leaf is
+/// native through that leaf only. A declaration that fails any clause is
+/// ordinary source and runs its Orna body.
 fn module_intrinsic(name: &str) -> Option<orna_intrinsics::IntrinsicId> {
     let (module_path, leaf) = name.rsplit_once('.')?;
     let module = orna_intrinsics::Module::from_path(module_path)?;
     let intrinsic = orna_intrinsics::lookup(module, leaf)?;
+    if intrinsic.dispatch == orna_intrinsics::Dispatch::SourceOnly
+        || !intrinsic.pins.contains(orna_intrinsics::CURRENT_STD_PIN)
+    {
+        return None;
+    }
     // A descriptor that records a private marker leaf is native through that
     // leaf alone: its public export stays the captured Orna wrapper, which is
     // where the operation's arguments are named and defaulted (ORNA-LIB-001).
     // `std.money` proves the distinction: its wrappers are the only spellings
-    // that carry the generic amount parameter.
+    // that carry the generic amount parameter, and the money arm is keyed by
+    // `__quantize`/`__allocate`/`__format`. The descriptor already records
+    // which spelling the registry binds, so no module list is needed here.
     if intrinsic.leaf.is_some_and(|marker| marker != leaf) {
         return None;
     }
-    (intrinsic.dispatch != orna_intrinsics::Dispatch::SourceOnly
-        && intrinsic.pins.contains(orna_intrinsics::CURRENT_STD_PIN))
-    .then_some(intrinsic.id)
+    Some(intrinsic.id)
 }
 
 fn legacy_intrinsic(name: &str) -> Option<orna_intrinsics::IntrinsicId> {
