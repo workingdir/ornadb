@@ -3,8 +3,7 @@ use std::path::Path;
 use orna_sys::system_api_schema_json;
 use serde_json::Value;
 
-#[path = "../build_support.rs"]
-mod build_support;
+use orna_sys_codegen::build_support;
 
 const SOURCE_SCHEMA: &str = include_str!("../src/system_api_schema.json");
 

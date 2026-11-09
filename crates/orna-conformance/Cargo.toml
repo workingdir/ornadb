@@ -19,6 +19,7 @@ orna-foundation = { path = "../orna-foundation" }
 orna-protocol = { path = "../orna-protocol" }
 orna-project = { path = "../orna-project" }
 orna-repository = { path = "../orna-repository" }
+orna-security = { path = "../orna-security" }
 orna-semantic = { path = "../orna-semantic" }
 orna-syntax = { path = "../orna-syntax" }
 orna-runtime = { path = "../orna-runtime" }
@@ -36,7 +37,6 @@ sha2 = "0.10"
 [dev-dependencies]
 orna-live = { path = "../orna-live" }
 orna-compat-v1 = { path = "../archive/orna-compat-v1" }
-orna-security = { path = "../orna-security" }
 orna-serving = { path = "../orna-serving" }
 tempfile = "3.23.0"
 tokio = { version = "1.48.0", features = [

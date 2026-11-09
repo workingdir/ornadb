@@ -8,15 +8,7 @@ use orna_sys::{
     system_host_operation_registry_json, system_host_operation_registry_schema_json,
 };
 
-#[path = "../src/abi_version.rs"]
-mod abi_version;
-#[path = "../src/host_registry_model.rs"]
-#[allow(dead_code)]
-mod host_registry_model;
-
-#[path = "../build_host.rs"]
-#[allow(dead_code)]
-mod build_host;
+use orna_sys_codegen::build_host;
 
 #[test]
 fn embedded_host_registry_matches_deterministic_annotated_method_projection() {

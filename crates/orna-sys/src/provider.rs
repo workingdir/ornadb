@@ -16,6 +16,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Deserialize;
 
 use crate::{AbiVersion, SystemEffect, TypedValue};
+use orna_sys_model::signature::{
+    matching_delimiter as matching, split_top_level as split_signature,
+};
 
 const GENERATED_PROVIDER_ABI: &str =
     include_str!(concat!(env!("OUT_DIR"), "/system_provider_abi.json"));
@@ -1235,61 +1238,7 @@ fn parse_type(source: &str) -> Result<AbiType, ProviderAbiError> {
 }
 
 fn split_top_level(source: &str, delimiter: char) -> Result<Vec<&str>, ProviderAbiError> {
-    let mut result = Vec::new();
-    let mut start = 0;
-    let mut angles = 0usize;
-    let mut squares = 0usize;
-    for (index, character) in source.char_indices() {
-        match character {
-            '<' => {
-                angles = angles
-                    .checked_add(1)
-                    .ok_or(ProviderAbiError::InvalidSignature)?
-            }
-            '>' => {
-                angles = angles
-                    .checked_sub(1)
-                    .ok_or(ProviderAbiError::InvalidSignature)?
-            }
-            '[' => {
-                squares = squares
-                    .checked_add(1)
-                    .ok_or(ProviderAbiError::InvalidSignature)?
-            }
-            ']' => {
-                squares = squares
-                    .checked_sub(1)
-                    .ok_or(ProviderAbiError::InvalidSignature)?
-            }
-            value if value == delimiter && angles == 0 && squares == 0 => {
-                result.push(source[start..index].trim());
-                start = index + character.len_utf8();
-            }
-            _ => {}
-        }
-    }
-    if angles != 0 || squares != 0 {
-        return Err(ProviderAbiError::InvalidSignature);
-    }
-    if !source[start..].trim().is_empty() {
-        result.push(source[start..].trim());
-    }
-    Ok(result)
-}
-
-fn matching(source: &str, start: usize, open: char, close: char) -> Option<usize> {
-    let mut depth = 0usize;
-    for (offset, character) in source[start..].char_indices() {
-        if character == open {
-            depth = depth.checked_add(1)?;
-        } else if character == close {
-            depth = depth.checked_sub(1)?;
-            if depth == 0 {
-                return Some(start + offset);
-            }
-        }
-    }
-    None
+    split_signature(source, delimiter).map_err(|_| ProviderAbiError::InvalidSignature)
 }
 
 #[cfg(test)]

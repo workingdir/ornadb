@@ -30,8 +30,8 @@ the unit tests assert the two agree.
 | layer | name | crates |
 |---|---|---|
 | 0 | primitives | (empty until orna-base) |
-| 1 | value | orna-value, orna-foundation |
-| 2 | syntax | orna-syntax, orna-intrinsics |
+| 1 | value | orna-value, orna-foundation, orna-sys-model |
+| 2 | syntax | orna-syntax, orna-intrinsics, orna-sys-codegen |
 | 3 | identity | orna-sys-id, orna-standard-sources, orna-sys-macros |
 | 4 | analysis | orna-semantic |
 | 5 | evaluation | orna-evaluator |

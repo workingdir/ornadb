@@ -143,4 +143,23 @@ impl SystemHostOperationRegistry {
         declarations.sort_by(|left, right| left.operation.cmp(&right.operation));
         Ok(declarations)
     }
+
+    /// Decodes one serialized host-operation registry produced by the build.
+    ///
+    /// # Errors
+    ///
+    /// Returns the deserialization failure, or a custom error when the decoded
+    /// operation or role names are duplicated.
+    pub fn from_json(source: &str) -> Result<Self, serde_json::Error> {
+        #[derive(Deserialize)]
+        struct RawHostRegistry {
+            abi_version: AbiVersion,
+            operations: Vec<HostOperationDescriptor>,
+            roles: Vec<HostProviderRole>,
+        }
+
+        let raw: RawHostRegistry = serde_json::from_str(source)?;
+        Self::from_parts(raw.abi_version, raw.operations, raw.roles)
+            .map_err(<serde_json::Error as serde::de::Error>::custom)
+    }
 }
