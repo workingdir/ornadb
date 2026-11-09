@@ -103,6 +103,32 @@ impl Module {
             Module::Money => "std.money",
         }
     }
+
+    /// Resolves a pinned module path back to its catalogue module.
+    pub fn from_path(path: &str) -> Option<Module> {
+        [
+            Module::Core,
+            Module::Collection,
+            Module::Query,
+            Module::Math,
+            Module::Text,
+            Module::Bits,
+            Module::Stream,
+            Module::Concurrent,
+            Module::Ui,
+            Module::Stats,
+            Module::Time,
+            Module::Hash,
+            Module::Random,
+            Module::Base64,
+            Module::Json,
+            Module::OrnaCodec,
+            Module::OvbCodec,
+            Module::Money,
+        ]
+        .into_iter()
+        .find(|module| module.path() == path)
+    }
 }
 
 /// One native operation's complete descriptor.
@@ -122,6 +148,26 @@ pub struct Intrinsic {
     pub note: &'static str,
     /// Pins in which this binding is active (spec 9:11, ORNA-LIB-001).
     pub pins: PinRange,
+}
+
+impl Intrinsic {
+    /// Whether this descriptor binds the pinned declaration spelled `name`.
+    ///
+    /// A descriptor that records a private marker leaf is native through that
+    /// leaf alone; its public export stays the captured Orna wrapper, which is
+    /// where the operation's arguments are named and defaulted (ORNA-LIB-001).
+    /// A [`Justification::SourceExpressible`] descriptor without a leaf names
+    /// the wrapper itself, so the captured source body stays authoritative and
+    /// the Rust arm serves unresolved spellings and historical pins. Every
+    /// other descriptor binds the spelling it names. Callers apply the pin and
+    /// dispatch clauses (`dispatch != SourceOnly`, `pins.contains(pin)`).
+    #[must_use]
+    pub fn binds_declaration(&self, name: &str) -> bool {
+        match self.leaf {
+            Some(marker) => marker == name,
+            None => self.justification != Justification::SourceExpressible,
+        }
+    }
 }
 
 /// One spelling exported by a second module under an existing identity.

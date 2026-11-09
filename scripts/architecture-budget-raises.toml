@@ -212,6 +212,12 @@ reason = "pure split: inline test modules moved to sibling files; the parent fil
 bead = "ornadb-qwog6"
 
 [[raise]]
+path = "crates/orna-evaluator/src/lib.rs::dispatch"
+new_limit = 153
+reason = "S2 replaces the per-kind native string tables with one match on IntrinsicId; the arms are scheduled to move beside their handlers as the catalogue grows"
+bead = "ornadb-yuzot.2"
+
+[[raise]]
 path = "crates/orna-sys-codegen/src/build_support.rs"
 new_limit = 2702
 reason = "PR #9777 moves the sys API collector out of orna-sys/build_support.rs into the codegen crate without changing its bodies"
