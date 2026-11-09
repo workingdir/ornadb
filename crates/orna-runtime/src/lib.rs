@@ -79,6 +79,7 @@ mod invocation;
 mod lease;
 mod observation;
 mod publication;
+mod publication_writer;
 mod query;
 mod recovery;
 mod repository_identity;
@@ -137,9 +138,10 @@ pub use publication::{
     Checkpoint, PublicationCommitId, PublicationEquivalenceWitness, PublicationFreeze,
     PublicationFreezeMutation, PublicationMutationState, PublicationRowEncoding,
     PublicationRowMutation, PublicationRowMutationBatch, PublicationRowOperation,
-    PublicationTableIdentity, PublicationValueEncoding, PublicationWriter,
-    RuntimePublicationMetadata, RuntimePublicationMetadataRows, RuntimePublicationPolicy,
+    PublicationTableIdentity, PublicationValueEncoding, RuntimePublicationMetadata,
+    RuntimePublicationMetadataRows, RuntimePublicationPolicy,
 };
+pub use publication_writer::PublicationWriter;
 pub use request::{
     MAX_TERMINAL_OUTCOME_BYTES, RecoveredRequest, RecoveryDisposition, RequestAdmissionCapability,
     RequestIdentity, RequestOwner, RequestState, RequestStatus, TerminalOutcome,
@@ -207,7 +209,7 @@ pub struct RuntimeState {
     vfs_repository_cache: vfs::VfsRepositoryCache,
     /// The runtime root this database belongs to. A publication lease taken
     /// for another worktree never authorises this state (PUB-3 step 7).
-    runtime_root: PathBuf,
+    pub(crate) runtime_root: PathBuf,
 }
 
 enum RequestActivationTransactionError {
@@ -4183,6 +4185,32 @@ mod tests {
         );
     }
 
+    /// Publishes the pending mutation of an accepted VFS save through the
+    /// worktree publication writer, leaving the checkpoint consumed.
+    async fn publish_saved_generation(
+        state: &RuntimeState,
+        repo: &orna_repository::Repository,
+        intent: [u8; 16],
+    ) {
+        let checkpoint = state
+            .latest_checkpoint()
+            .await
+            .unwrap()
+            .expect("the save publishes its checkpoint");
+        let freeze = state
+            .publication_writer(repo)
+            .unwrap()
+            .freeze(intent, &checkpoint)
+            .await
+            .unwrap();
+        state
+            .publication_writer(repo)
+            .unwrap()
+            .complete_publication(&freeze, &PublicationCommitId::new(vec![b'a'; 40]).unwrap())
+            .await
+            .unwrap();
+    }
+
     /// ORNA-VFS-008: publication prunes the pending mutation record. An exact
     /// replay of an already-accepted candidate after publication must not
     /// advance the durable generation or re-admit the mutation. This asserts
@@ -4253,23 +4281,7 @@ mod tests {
         ));
 
         // Publication consumes the pending mutation record of the accepted save.
-        let checkpoint = state
-            .latest_checkpoint()
-            .await
-            .unwrap()
-            .expect("the save publishes its checkpoint");
-        let freeze = state
-            .publication_writer(&repo)
-            .unwrap()
-            .freeze(id(9), &checkpoint)
-            .await
-            .unwrap();
-        state
-            .publication_writer(&repo)
-            .unwrap()
-            .complete_publication(&freeze, &PublicationCommitId::new(vec![b'a'; 40]).unwrap())
-            .await
-            .unwrap();
+        publish_saved_generation(&state, &repo, id(9)).await;
         assert!(state.pending().await.unwrap().is_empty());
 
         // The replay of the identical candidate arrives after publication.
@@ -4383,23 +4395,7 @@ mod tests {
         ));
 
         // Publication consumes the pending mutation record of the accepted save.
-        let checkpoint = state
-            .latest_checkpoint()
-            .await
-            .unwrap()
-            .expect("the save publishes its checkpoint");
-        let freeze = state
-            .publication_writer(&repo)
-            .unwrap()
-            .freeze(id(9), &checkpoint)
-            .await
-            .unwrap();
-        state
-            .publication_writer(&repo)
-            .unwrap()
-            .complete_publication(&freeze, &PublicationCommitId::new(vec![b'a'; 40]).unwrap())
-            .await
-            .unwrap();
+        publish_saved_generation(&state, &repo, id(9)).await;
         assert!(state.pending().await.unwrap().is_empty());
 
         // The replay of the identical candidate arrives after publication.
