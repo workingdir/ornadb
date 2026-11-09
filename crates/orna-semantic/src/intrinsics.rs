@@ -610,11 +610,13 @@ pub(crate) fn infer_intrinsic(
     if let Some(Type::List(element) | Type::Relation(element)) = &row {
         bind_type(SigType::Param(0), element, &mut subst, container);
     }
-    if let Some(row) = &row
-        && !stats
-        && !matches!(row, Type::List(_) | Type::Relation(_) | Type::Error)
-    {
-        diagnostics.push(diag(DIAG_TYPE, finiteness_message(id, intrinsic.name)));
+    if !stats {
+        let missing_container = row
+            .as_ref()
+            .is_none_or(|row| !matches!(row, Type::List(_) | Type::Relation(_) | Type::Error));
+        if missing_container {
+            diagnostics.push(diag(DIAG_TYPE, finiteness_message(id, intrinsic.name)));
+        }
     }
 
     // Infer every remaining argument once, in written order. Callbacks are
@@ -629,9 +631,18 @@ pub(crate) fn infer_intrinsic(
         if callback {
             continue;
         }
-        // A malformed call does not invent diagnostics for an unbound lambda;
-        // the shape diagnostic already reports it.
-        if malformed && matches!(argument.value, Expr::Lambda { .. }) {
+        // The finite-list mapper path skipped unbound lambdas in a malformed
+        // call; the predicate path inferred them and reported their shape.
+        if malformed
+            && matches!(
+                id,
+                IntrinsicId::CoreFilter
+                    | IntrinsicId::CoreMap
+                    | IntrinsicId::CoreFlatMap
+                    | IntrinsicId::CoreSortBy
+            )
+            && matches!(argument.value, Expr::Lambda { .. })
+        {
             continue;
         }
         let value = infer(&argument.value, scope, local, diagnostics);
@@ -871,9 +882,6 @@ fn check_value_parameter(
     let prefix = relation_prefix(container);
     match id {
         IntrinsicId::CoreTake | IntrinsicId::CoreDrop if slot == 1 => {
-            if matches!(actual, Type::Error) {
-                return;
-            }
             let integer_range = pipeline
                 && matches!(actual, Type::Range(element) if element.as_ref() == &Type::Int);
             if *actual != Type::Int && !integer_range {
@@ -972,7 +980,7 @@ fn check_intrinsic_constraints(
             }
         }
         IntrinsicId::CoreSum => {
-            if !matches!(element, Type::Error) && !is_sum_element_type(&element) {
+            if !is_sum_element_type(&element) {
                 if is_absolute_affine(&element) {
                     diagnostics.push(diag(
                         DIAG_ABSOLUTE_QUANTITY_SUM,
@@ -995,7 +1003,7 @@ fn check_intrinsic_constraints(
             }
         }
         IntrinsicId::CoreMin | IntrinsicId::CoreMax => {
-            if !matches!(element, Type::Error) && !is_sort_key_type(&element) {
+            if !is_sort_key_type(&element) {
                 diagnostics.push(diag(
                     DIAG_TYPE,
                     match container {
