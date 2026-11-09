@@ -9188,6 +9188,17 @@ impl Repository {
         Ok(CoordinationLock { file })
     }
 
+    /// Acquires the worktree publication lock as a typed lease (PUB-3 step 2
+    /// and step 7).
+    ///
+    /// Publication-state writes below the CLI require this lease, so callers
+    /// cannot freeze or complete a publication without joining the worktree's
+    /// publication boundary. A held lock is reported as `RepositoryBusy` once
+    /// the bounded wait elapses; it never blocks indefinitely.
+    pub fn acquire_publication_lease(&self) -> Result<PublicationLease, RepositoryError> {
+        self.acquire_coordination_lock_for_publication()
+    }
+
     /// Acquires the coordination lock for publication, waiting at most
     /// `COORDINATION_LOCK_WAIT`. A publisher that loses a race queues briefly
     /// behind the winner and then fails its compare-and-set (ORNA-PUB-009).
@@ -9195,11 +9206,12 @@ impl Repository {
     /// `RepositoryBusy` once the bound elapses; it never blocks indefinitely.
     fn acquire_coordination_lock_for_publication(
         &self,
-    ) -> Result<CoordinationLock, RepositoryError> {
+    ) -> Result<PublicationLease, RepositoryError> {
         let file = self.open_coordination_lock_file()?;
         let deadline = std::time::Instant::now() + self.coordination_lock_wait;
-        Ok(CoordinationLock {
+        Ok(PublicationLease {
             file: lock_before_deadline(file, deadline, |file| file.try_lock_exclusive())?,
+            runtime_root: self.runtime.root().to_path_buf(),
         })
     }
 
@@ -9704,6 +9716,32 @@ struct CoordinationLock {
 }
 
 impl Drop for CoordinationLock {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
+
+/// The held worktree publication lock (PUB-3 step 2 and step 7).
+///
+/// The lock is an advisory `flock` on the worktree's coordination file. The
+/// kernel owns it: a killed publisher cannot leave it held, so an abandoned
+/// publisher cannot keep writing publication state (ORNA-TURSO-006). The lease
+/// is the coordination primitive cooperating Orna worktree mutators and
+/// publishers share (ORNA-TURSO-005), and it names the runtime root it covers
+/// so a lease taken in one worktree cannot authorise writes in another.
+pub struct PublicationLease {
+    file: fs::File,
+    runtime_root: PathBuf,
+}
+
+impl PublicationLease {
+    /// The runtime root whose publication lock this lease holds.
+    pub fn runtime_root(&self) -> &Path {
+        &self.runtime_root
+    }
+}
+
+impl Drop for PublicationLease {
     fn drop(&mut self) {
         let _ = self.file.unlock();
     }

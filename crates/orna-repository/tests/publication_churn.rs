@@ -90,13 +90,19 @@ fn media_bindings(
 }
 
 /// Freezes every row admitted since the last publication.
-async fn freeze_admitted(state: &RuntimeState, intent: [u8; 16]) -> PublicationFreeze {
+async fn freeze_admitted(
+    repository: &Repository,
+    state: &RuntimeState,
+    intent: [u8; 16],
+) -> PublicationFreeze {
     let checkpoint = state
         .latest_checkpoint()
         .await
         .expect("read latest checkpoint")
         .expect("admitted rows leave a checkpoint");
     state
+        .publication_writer(repository)
+        .expect("publication lease")
         .freeze(intent, &checkpoint)
         .await
         .expect("freeze admitted row prefix")
@@ -135,7 +141,7 @@ async fn publish_pending(
     state: &RuntimeState,
     intent: [u8; 16],
 ) -> PublicationChurn {
-    let freeze = freeze_admitted(state, intent).await;
+    let freeze = freeze_admitted(repository, state, intent).await;
     let mut coordinator = prepare_publication(repository, state, &freeze)
         .await
         .expect("storage writer prepares publication")
@@ -357,7 +363,7 @@ async fn publication_reports_a_corrupt_row_index_root_as_malformed() {
     );
     replace_with_same_kind_sibling(seeded.directory.path(), &root);
 
-    let freeze = freeze_admitted(&seeded.state, [0x93; 16]).await;
+    let freeze = freeze_admitted(&seeded.repository, &seeded.state, [0x93; 16]).await;
     let error = prepare_publication(&seeded.repository, &seeded.state, &freeze)
         .await
         .expect_err("a corrupt row index root refuses the publication");
@@ -396,7 +402,7 @@ async fn publication_reports_a_missing_row_index_root_as_unavailable() {
         "the row index root is absent from the store, loose and packed"
     );
 
-    let freeze = freeze_admitted(&seeded.state, [0x94; 16]).await;
+    let freeze = freeze_admitted(&seeded.repository, &seeded.state, [0x94; 16]).await;
     let error = RuntimePublicationCoordinator::prepare_allow_noop(
         &seeded.repository,
         &seeded.state,
