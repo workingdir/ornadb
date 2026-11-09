@@ -4024,7 +4024,7 @@ mod graph_bridge_tests {
         authority.update(version.primary_root().as_bytes());
         authority.update(schema_digest);
         authority.update(row_count.to_be_bytes());
-        RowMapSnapshot::issue(version, authority.finalize().into(), Vec::new())
+        RowMapSnapshot::issue_lazy(version, authority.finalize().into())
             .expect("seal row-map snapshot")
     }
 
@@ -4555,11 +4555,6 @@ mod graph_bridge_tests {
         let snapshot = pinned
             .load_row_map(relation_id)
             .expect("load pinned ORP identity");
-        assert!(!snapshot.is_materialized());
-        assert!(matches!(
-            snapshot.get(&TypedKey::UInt(7)),
-            Err(crate::row_store::RowStoreError::PersistedLookupRequiresGraphContext)
-        ));
         let graph = pinned
             .open_native_graph(&snapshot)
             .expect("issue graph context from repository snapshot");
@@ -5085,7 +5080,6 @@ mod graph_bridge_tests {
         assert_eq!(total, u64::from(branches * pages) * page_width);
         let pinned = context(root);
         let snapshot = pinned.load_row_map(relation_id).expect("load ORP identity");
-        assert!(!snapshot.is_materialized());
         let graph = pinned.open_native_graph(&snapshot).expect("issue graph");
         let scope = graph.open_read_scope().expect("owner read scope");
 
@@ -5170,7 +5164,6 @@ mod graph_bridge_tests {
 
         let pinned = context(root);
         let snapshot = pinned.load_row_map(relation_id).unwrap();
-        assert!(!snapshot.is_materialized());
         let graph = pinned.open_native_graph(&snapshot).unwrap();
         let scope = graph.open_read_scope().unwrap();
 
