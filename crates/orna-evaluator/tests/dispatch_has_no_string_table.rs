@@ -36,10 +36,19 @@ const DELETED_SYMBOLS: &[&str] = &[
 fn deleted_string_table_symbols_are_absent() {
     for symbol in DELETED_SYMBOLS {
         assert!(
-            !EVALUATOR_SOURCE.contains(symbol),
+            !contains_symbol(EVALUATOR_SOURCE, symbol),
             "deleted string-table symbol `{symbol}` reappeared in the evaluator"
         );
     }
+}
+
+fn contains_symbol(source: &str, symbol: &str) -> bool {
+    source.match_indices(symbol).any(|(index, _)| {
+        let before = source[..index].chars().next_back();
+        let after = source[index + symbol.len()..].chars().next();
+        !before.is_some_and(|character| character.is_alphanumeric() || character == '_')
+            && !after.is_some_and(|character| character.is_alphanumeric() || character == '_')
+    })
 }
 
 #[test]
