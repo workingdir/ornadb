@@ -1392,7 +1392,17 @@ impl SecurityAuditDecision {
     pub const fn user_state_operation(&self) -> Option<UserStateAuditOperation> {
         match self.0 {
             SecurityAuditDecisionShape::UserStateAllowed { operation, .. } => Some(operation),
-            _ => None,
+            SecurityAuditDecisionShape::AuthenticationAllowed { .. }
+            | SecurityAuditDecisionShape::AuthenticationDenied { .. }
+            | SecurityAuditDecisionShape::ExecuteAllowed { .. }
+            | SecurityAuditDecisionShape::ExecuteDenied { .. }
+            | SecurityAuditDecisionShape::CapabilityAllowed { .. }
+            | SecurityAuditDecisionShape::CapabilityDenied { .. }
+            | SecurityAuditDecisionShape::InspectAllowed { .. }
+            | SecurityAuditDecisionShape::InspectDenied { .. }
+            | SecurityAuditDecisionShape::SecurityAdminAllowed { .. }
+            | SecurityAuditDecisionShape::SecurityAdminDenied { .. }
+            | SecurityAuditDecisionShape::SourceApplyAllowed { .. } => None,
         }
     }
 
@@ -1402,7 +1412,17 @@ impl SecurityAuditDecision {
             SecurityAuditDecisionShape::UserStateAllowed { root_function, .. } => {
                 Some(root_function)
             }
-            _ => None,
+            SecurityAuditDecisionShape::AuthenticationAllowed { .. }
+            | SecurityAuditDecisionShape::AuthenticationDenied { .. }
+            | SecurityAuditDecisionShape::ExecuteAllowed { .. }
+            | SecurityAuditDecisionShape::ExecuteDenied { .. }
+            | SecurityAuditDecisionShape::CapabilityAllowed { .. }
+            | SecurityAuditDecisionShape::CapabilityDenied { .. }
+            | SecurityAuditDecisionShape::InspectAllowed { .. }
+            | SecurityAuditDecisionShape::InspectDenied { .. }
+            | SecurityAuditDecisionShape::SecurityAdminAllowed { .. }
+            | SecurityAuditDecisionShape::SecurityAdminDenied { .. }
+            | SecurityAuditDecisionShape::SourceApplyAllowed { .. } => None,
         }
     }
 
@@ -1410,7 +1430,17 @@ impl SecurityAuditDecision {
     pub const fn user_state_cell_count(&self) -> Option<u64> {
         match self.0 {
             SecurityAuditDecisionShape::UserStateAllowed { cell_count, .. } => Some(cell_count),
-            _ => None,
+            SecurityAuditDecisionShape::AuthenticationAllowed { .. }
+            | SecurityAuditDecisionShape::AuthenticationDenied { .. }
+            | SecurityAuditDecisionShape::ExecuteAllowed { .. }
+            | SecurityAuditDecisionShape::ExecuteDenied { .. }
+            | SecurityAuditDecisionShape::CapabilityAllowed { .. }
+            | SecurityAuditDecisionShape::CapabilityDenied { .. }
+            | SecurityAuditDecisionShape::InspectAllowed { .. }
+            | SecurityAuditDecisionShape::InspectDenied { .. }
+            | SecurityAuditDecisionShape::SecurityAdminAllowed { .. }
+            | SecurityAuditDecisionShape::SecurityAdminDenied { .. }
+            | SecurityAuditDecisionShape::SourceApplyAllowed { .. } => None,
         }
     }
 
@@ -1418,7 +1448,17 @@ impl SecurityAuditDecision {
     pub const fn inspect_requested(&self) -> Option<InspectPrivilege> {
         match self.0 {
             SecurityAuditDecisionShape::InspectAllowed { requested, .. } => Some(requested),
-            _ => None,
+            SecurityAuditDecisionShape::AuthenticationAllowed { .. }
+            | SecurityAuditDecisionShape::AuthenticationDenied { .. }
+            | SecurityAuditDecisionShape::ExecuteAllowed { .. }
+            | SecurityAuditDecisionShape::ExecuteDenied { .. }
+            | SecurityAuditDecisionShape::CapabilityAllowed { .. }
+            | SecurityAuditDecisionShape::CapabilityDenied { .. }
+            | SecurityAuditDecisionShape::UserStateAllowed { .. }
+            | SecurityAuditDecisionShape::InspectDenied { .. }
+            | SecurityAuditDecisionShape::SecurityAdminAllowed { .. }
+            | SecurityAuditDecisionShape::SecurityAdminDenied { .. }
+            | SecurityAuditDecisionShape::SourceApplyAllowed { .. } => None,
         }
     }
 
@@ -1426,7 +1466,17 @@ impl SecurityAuditDecision {
     pub const fn inspect_epoch_scope(&self) -> Option<InspectEpochScope> {
         match self.0 {
             SecurityAuditDecisionShape::InspectAllowed { epoch_scope, .. } => Some(epoch_scope),
-            _ => None,
+            SecurityAuditDecisionShape::AuthenticationAllowed { .. }
+            | SecurityAuditDecisionShape::AuthenticationDenied { .. }
+            | SecurityAuditDecisionShape::ExecuteAllowed { .. }
+            | SecurityAuditDecisionShape::ExecuteDenied { .. }
+            | SecurityAuditDecisionShape::CapabilityAllowed { .. }
+            | SecurityAuditDecisionShape::CapabilityDenied { .. }
+            | SecurityAuditDecisionShape::UserStateAllowed { .. }
+            | SecurityAuditDecisionShape::InspectDenied { .. }
+            | SecurityAuditDecisionShape::SecurityAdminAllowed { .. }
+            | SecurityAuditDecisionShape::SecurityAdminDenied { .. }
+            | SecurityAuditDecisionShape::SourceApplyAllowed { .. } => None,
         }
     }
 
@@ -1435,7 +1485,17 @@ impl SecurityAuditDecision {
     pub const fn inspect_denial(&self) -> Option<InspectDenial> {
         match self.0 {
             SecurityAuditDecisionShape::InspectDenied { reason, .. } => Some(reason),
-            _ => None,
+            SecurityAuditDecisionShape::AuthenticationAllowed { .. }
+            | SecurityAuditDecisionShape::AuthenticationDenied { .. }
+            | SecurityAuditDecisionShape::ExecuteAllowed { .. }
+            | SecurityAuditDecisionShape::ExecuteDenied { .. }
+            | SecurityAuditDecisionShape::CapabilityAllowed { .. }
+            | SecurityAuditDecisionShape::CapabilityDenied { .. }
+            | SecurityAuditDecisionShape::UserStateAllowed { .. }
+            | SecurityAuditDecisionShape::InspectAllowed { .. }
+            | SecurityAuditDecisionShape::SecurityAdminAllowed { .. }
+            | SecurityAuditDecisionShape::SecurityAdminDenied { .. }
+            | SecurityAuditDecisionShape::SourceApplyAllowed { .. } => None,
         }
     }
 
@@ -1444,7 +1504,16 @@ impl SecurityAuditDecision {
         match self.0 {
             SecurityAuditDecisionShape::SecurityAdminAllowed { operation, .. }
             | SecurityAuditDecisionShape::SecurityAdminDenied { operation, .. } => Some(operation),
-            _ => None,
+            SecurityAuditDecisionShape::AuthenticationAllowed { .. }
+            | SecurityAuditDecisionShape::AuthenticationDenied { .. }
+            | SecurityAuditDecisionShape::ExecuteAllowed { .. }
+            | SecurityAuditDecisionShape::ExecuteDenied { .. }
+            | SecurityAuditDecisionShape::CapabilityAllowed { .. }
+            | SecurityAuditDecisionShape::CapabilityDenied { .. }
+            | SecurityAuditDecisionShape::UserStateAllowed { .. }
+            | SecurityAuditDecisionShape::InspectAllowed { .. }
+            | SecurityAuditDecisionShape::InspectDenied { .. }
+            | SecurityAuditDecisionShape::SourceApplyAllowed { .. } => None,
         }
     }
 
@@ -1453,7 +1522,17 @@ impl SecurityAuditDecision {
     pub const fn source_apply_candidate(&self) -> Option<RevisionPair> {
         match self.0 {
             SecurityAuditDecisionShape::SourceApplyAllowed { candidate, .. } => Some(candidate),
-            _ => None,
+            SecurityAuditDecisionShape::AuthenticationAllowed { .. }
+            | SecurityAuditDecisionShape::AuthenticationDenied { .. }
+            | SecurityAuditDecisionShape::ExecuteAllowed { .. }
+            | SecurityAuditDecisionShape::ExecuteDenied { .. }
+            | SecurityAuditDecisionShape::CapabilityAllowed { .. }
+            | SecurityAuditDecisionShape::CapabilityDenied { .. }
+            | SecurityAuditDecisionShape::UserStateAllowed { .. }
+            | SecurityAuditDecisionShape::InspectAllowed { .. }
+            | SecurityAuditDecisionShape::InspectDenied { .. }
+            | SecurityAuditDecisionShape::SecurityAdminAllowed { .. }
+            | SecurityAuditDecisionShape::SecurityAdminDenied { .. } => None,
         }
     }
 
@@ -1463,7 +1542,16 @@ impl SecurityAuditDecision {
         match self.0 {
             SecurityAuditDecisionShape::SecurityAdminAllowed { target, .. }
             | SecurityAuditDecisionShape::SecurityAdminDenied { target, .. } => Some(target),
-            _ => None,
+            SecurityAuditDecisionShape::AuthenticationAllowed { .. }
+            | SecurityAuditDecisionShape::AuthenticationDenied { .. }
+            | SecurityAuditDecisionShape::ExecuteAllowed { .. }
+            | SecurityAuditDecisionShape::ExecuteDenied { .. }
+            | SecurityAuditDecisionShape::CapabilityAllowed { .. }
+            | SecurityAuditDecisionShape::CapabilityDenied { .. }
+            | SecurityAuditDecisionShape::UserStateAllowed { .. }
+            | SecurityAuditDecisionShape::InspectAllowed { .. }
+            | SecurityAuditDecisionShape::InspectDenied { .. }
+            | SecurityAuditDecisionShape::SourceApplyAllowed { .. } => None,
         }
     }
 
@@ -1472,7 +1560,17 @@ impl SecurityAuditDecision {
     pub const fn security_admin_denial(&self) -> Option<PrivilegeDenial> {
         match self.0 {
             SecurityAuditDecisionShape::SecurityAdminDenied { reason, .. } => Some(reason),
-            _ => None,
+            SecurityAuditDecisionShape::AuthenticationAllowed { .. }
+            | SecurityAuditDecisionShape::AuthenticationDenied { .. }
+            | SecurityAuditDecisionShape::ExecuteAllowed { .. }
+            | SecurityAuditDecisionShape::ExecuteDenied { .. }
+            | SecurityAuditDecisionShape::CapabilityAllowed { .. }
+            | SecurityAuditDecisionShape::CapabilityDenied { .. }
+            | SecurityAuditDecisionShape::UserStateAllowed { .. }
+            | SecurityAuditDecisionShape::InspectAllowed { .. }
+            | SecurityAuditDecisionShape::InspectDenied { .. }
+            | SecurityAuditDecisionShape::SecurityAdminAllowed { .. }
+            | SecurityAuditDecisionShape::SourceApplyAllowed { .. } => None,
         }
     }
 
@@ -1567,7 +1665,17 @@ impl SecurityAuditDecision {
                 effective_principal,
                 ..
             } => Some(effective_principal),
-            _ => None,
+            SecurityAuditDecisionShape::AuthenticationAllowed { .. }
+            | SecurityAuditDecisionShape::AuthenticationDenied { .. }
+            | SecurityAuditDecisionShape::ExecuteDenied { .. }
+            | SecurityAuditDecisionShape::CapabilityAllowed { .. }
+            | SecurityAuditDecisionShape::CapabilityDenied { .. }
+            | SecurityAuditDecisionShape::UserStateAllowed { .. }
+            | SecurityAuditDecisionShape::InspectAllowed { .. }
+            | SecurityAuditDecisionShape::InspectDenied { .. }
+            | SecurityAuditDecisionShape::SecurityAdminAllowed { .. }
+            | SecurityAuditDecisionShape::SecurityAdminDenied { .. }
+            | SecurityAuditDecisionShape::SourceApplyAllowed { .. } => None,
         }
     }
 
@@ -1578,7 +1686,17 @@ impl SecurityAuditDecision {
                 authorising_principal,
                 ..
             } => Some(authorising_principal),
-            _ => None,
+            SecurityAuditDecisionShape::AuthenticationAllowed { .. }
+            | SecurityAuditDecisionShape::AuthenticationDenied { .. }
+            | SecurityAuditDecisionShape::ExecuteDenied { .. }
+            | SecurityAuditDecisionShape::CapabilityAllowed { .. }
+            | SecurityAuditDecisionShape::CapabilityDenied { .. }
+            | SecurityAuditDecisionShape::UserStateAllowed { .. }
+            | SecurityAuditDecisionShape::InspectAllowed { .. }
+            | SecurityAuditDecisionShape::InspectDenied { .. }
+            | SecurityAuditDecisionShape::SecurityAdminAllowed { .. }
+            | SecurityAuditDecisionShape::SecurityAdminDenied { .. }
+            | SecurityAuditDecisionShape::SourceApplyAllowed { .. } => None,
         }
     }
 
@@ -1589,7 +1707,14 @@ impl SecurityAuditDecision {
             | SecurityAuditDecisionShape::ExecuteDenied { target, .. }
             | SecurityAuditDecisionShape::CapabilityAllowed { target, .. }
             | SecurityAuditDecisionShape::CapabilityDenied { target, .. } => Some(target),
-            _ => None,
+            SecurityAuditDecisionShape::AuthenticationAllowed { .. }
+            | SecurityAuditDecisionShape::AuthenticationDenied { .. }
+            | SecurityAuditDecisionShape::UserStateAllowed { .. }
+            | SecurityAuditDecisionShape::InspectAllowed { .. }
+            | SecurityAuditDecisionShape::InspectDenied { .. }
+            | SecurityAuditDecisionShape::SecurityAdminAllowed { .. }
+            | SecurityAuditDecisionShape::SecurityAdminDenied { .. }
+            | SecurityAuditDecisionShape::SourceApplyAllowed { .. } => None,
         }
     }
 
@@ -1601,7 +1726,16 @@ impl SecurityAuditDecision {
         match &self.0 {
             SecurityAuditDecisionShape::CapabilityAllowed { capability, .. }
             | SecurityAuditDecisionShape::CapabilityDenied { capability, .. } => Some(capability),
-            _ => None,
+            SecurityAuditDecisionShape::AuthenticationAllowed { .. }
+            | SecurityAuditDecisionShape::AuthenticationDenied { .. }
+            | SecurityAuditDecisionShape::ExecuteAllowed { .. }
+            | SecurityAuditDecisionShape::ExecuteDenied { .. }
+            | SecurityAuditDecisionShape::UserStateAllowed { .. }
+            | SecurityAuditDecisionShape::InspectAllowed { .. }
+            | SecurityAuditDecisionShape::InspectDenied { .. }
+            | SecurityAuditDecisionShape::SecurityAdminAllowed { .. }
+            | SecurityAuditDecisionShape::SecurityAdminDenied { .. }
+            | SecurityAuditDecisionShape::SourceApplyAllowed { .. } => None,
         }
     }
 
@@ -1625,7 +1759,13 @@ impl SecurityAuditDecision {
             SecurityAuditDecisionShape::SecurityAdminDenied { reason, .. } => {
                 Some(SecurityAuditDenial::SecurityAdmin(*reason))
             }
-            _ => None,
+            SecurityAuditDecisionShape::AuthenticationAllowed { .. }
+            | SecurityAuditDecisionShape::ExecuteAllowed { .. }
+            | SecurityAuditDecisionShape::CapabilityAllowed { .. }
+            | SecurityAuditDecisionShape::UserStateAllowed { .. }
+            | SecurityAuditDecisionShape::InspectAllowed { .. }
+            | SecurityAuditDecisionShape::SecurityAdminAllowed { .. }
+            | SecurityAuditDecisionShape::SourceApplyAllowed { .. } => None,
         }
     }
 }
