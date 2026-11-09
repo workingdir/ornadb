@@ -24,6 +24,8 @@ use unicode_normalization::UnicodeNormalization;
 mod blob_role;
 pub use blob_role::{BlobRole, MediaFamily};
 mod mime1;
+mod tags;
+pub use tags::*;
 
 #[cfg(test)]
 #[path = "format3_context_tests.rs"]
@@ -224,7 +226,7 @@ impl Value {
             return Err(Error::InvalidValue);
         }
         Self::new(Raw::Tag(
-            60021,
+            STORED_TABLE_REFERENCE_TAG,
             Box::new(Raw::Array(vec![
                 uuid_raw(database_id),
                 uuid_raw(table_id),
@@ -282,13 +284,13 @@ impl Value {
             x[0] = Raw::Int(1.into());
             x.push(v.0);
         }
-        Self::new(tag(60013, Raw::Array(x)))
+        Self::new(tag(OPTION_TAG, Raw::Array(x)))
     }
     pub fn unit() -> Self {
-        Self(tag(60014, Raw::Array(vec![])))
+        Self(tag(UNIT_TAG, Raw::Array(vec![])))
     }
     pub fn uuid(bytes: [u8; 16]) -> Self {
-        Self(tag(37, Raw::Bytes(bytes.to_vec())))
+        Self(tag(UUID_TAG, Raw::Bytes(bytes.to_vec())))
     }
     pub fn protected() -> Self {
         Self(Raw::Tag(0, Box::new(Raw::Null)))
@@ -331,25 +333,6 @@ impl ValueFormat {
 pub const OVB2_VERSION: &str = "OVB-2";
 pub const ROV3_VERSION: &str = "ROV-3";
 pub const SOV3_VERSION: &str = "SOV-3";
-pub const OVB2_BLOB_TAG: u64 = 60_110;
-pub const ROV3_BLOB_TAG: u64 = 60_111;
-pub const SOV3_BLOB_TAG: u64 = 60_112;
-pub const ROV3_OVERFLOW_TAG: u64 = 60_113;
-
-/// Whether a CBOR tag may appear in format-3 native node data.
-///
-/// Store format 3 admits registered tags only: the bignums 2 and 3, UUID tag
-/// 37, the portable value tags 60000..=60025 and the profile tags
-/// 60110..=60113 (`profiles/store-format-3.md` §2, `tools/final_model.py`).
-/// Where a profile tag may appear (for example, 60111 and 60113 only in ROV-3
-/// rows) is checked by the reader that interprets the node.
-pub const fn is_format3_node_tag(number: u64) -> bool {
-    matches!(
-        number,
-        2 | 3 | 37 | 60_000..=60_025 | OVB2_BLOB_TAG..=ROV3_OVERFLOW_TAG
-    )
-}
-
 const MAX_BLOB_LENGTH: u64 = 1_u64 << 63;
 const MAX_BLOB_READ: u64 = 8 * 1024 * 1024;
 
@@ -2670,7 +2653,7 @@ pub fn compare_primary_keys(left: &Value, right: &Value) -> Result<Ordering> {
 
 fn primary_key_components(raw: &Raw) -> Result<Vec<&Raw>> {
     match raw {
-        Raw::Tag(60015, payload) => {
+        Raw::Tag(TUPLE_TAG, payload) => {
             let values = array(payload)?;
             if values.is_empty() {
                 return Err(Error::InvalidValue);
@@ -2689,14 +2672,14 @@ fn is_primary_key_component(raw: &Raw) -> bool {
         Raw::Bool(_)
             | Raw::Int(_)
             | Raw::Text(_)
-            | Raw::Tag(37, _)
-            | Raw::Tag(60000, _)
-            | Raw::Tag(60001, _)
-            | Raw::Tag(60002, _)
-            | Raw::Tag(60008, _)
-            | Raw::Tag(60010, _)
-            | Raw::Tag(60015, _)
-            | Raw::Tag(60021, _)
+            | Raw::Tag(UUID_TAG, _)
+            | Raw::Tag(DECIMAL_TAG, _)
+            | Raw::Tag(DATE_TAG, _)
+            | Raw::Tag(INSTANT_TAG, _)
+            | Raw::Tag(ENUM_TAG, _)
+            | Raw::Tag(PINNED_ROW_REFERENCE_TAG, _)
+            | Raw::Tag(TUPLE_TAG, _)
+            | Raw::Tag(STORED_TABLE_REFERENCE_TAG, _)
     )
 }
 
@@ -2712,11 +2695,11 @@ fn is_primary_key_component(raw: &Raw) -> bool {
 fn is_permitted_key(raw: &Raw) -> bool {
     match raw {
         Raw::Bool(_) | Raw::Int(_) | Raw::Text(_) => true,
-        Raw::Tag(37 | 60000 | 60001 | 60002, _) => true,
-        Raw::Tag(60014, payload) => {
+        Raw::Tag(UUID_TAG | DECIMAL_TAG | DATE_TAG | INSTANT_TAG, _) => true,
+        Raw::Tag(UNIT_TAG, payload) => {
             matches!(payload.as_ref(), Raw::Array(values) if values.is_empty())
         }
-        Raw::Tag(60008, payload) => matches!(
+        Raw::Tag(ENUM_TAG, payload) => matches!(
             payload.as_ref(),
             Raw::Array(values) if matches!(
                 values.as_slice(),
@@ -2724,11 +2707,11 @@ fn is_permitted_key(raw: &Raw) -> bool {
                     if uuid_array(type_id).is_ok() && uuid_array(variant_id).is_ok()
             )
         ),
-        Raw::Tag(60015, payload) => matches!(
+        Raw::Tag(TUPLE_TAG, payload) => matches!(
             payload.as_ref(),
             Raw::Array(values) if !values.is_empty() && values.iter().all(is_permitted_key)
         ),
-        Raw::Tag(60021, payload) => matches!(
+        Raw::Tag(STORED_TABLE_REFERENCE_TAG, payload) => matches!(
             payload.as_ref(),
             Raw::Array(values) if matches!(
                 values.as_slice(),
@@ -2747,10 +2730,10 @@ fn compare_key_component(left: &Raw, right: &Raw) -> Result<Ordering> {
         (Raw::Bool(left), Raw::Bool(right)) => left.cmp(right),
         (Raw::Int(left), Raw::Int(right)) => left.cmp(right),
         (Raw::Text(left), Raw::Text(right)) => left.cmp(right),
-        (Raw::Tag(37, left), Raw::Tag(37, right)) => bytes(left)?.cmp(bytes(right)?),
-        (Raw::Tag(60000, _), Raw::Tag(60000, _)) => compare_decimal_raw(left, right)?,
-        (Raw::Tag(60001, left), Raw::Tag(60001, right)) => text(left)?.cmp(text(right)?),
-        (Raw::Tag(60002, left), Raw::Tag(60002, right)) => {
+        (Raw::Tag(UUID_TAG, left), Raw::Tag(UUID_TAG, right)) => bytes(left)?.cmp(bytes(right)?),
+        (Raw::Tag(DECIMAL_TAG, _), Raw::Tag(DECIMAL_TAG, _)) => compare_decimal_raw(left, right)?,
+        (Raw::Tag(DATE_TAG, left), Raw::Tag(DATE_TAG, right)) => text(left)?.cmp(text(right)?),
+        (Raw::Tag(INSTANT_TAG, left), Raw::Tag(INSTANT_TAG, right)) => {
             let left = array(left)?;
             let right = array(right)?;
             let [Raw::Int(left_seconds), Raw::Int(left_nanos)] = left.as_slice() else {
@@ -2763,7 +2746,7 @@ fn compare_key_component(left: &Raw, right: &Raw) -> Result<Ordering> {
                 .cmp(right_seconds)
                 .then(left_nanos.cmp(right_nanos))
         }
-        (Raw::Tag(60008, left), Raw::Tag(60008, right)) => {
+        (Raw::Tag(ENUM_TAG, left), Raw::Tag(ENUM_TAG, right)) => {
             let left = array(left)?;
             let right = array(right)?;
             let [left_type, left_variant, Raw::Null] = left.as_slice() else {
@@ -2776,7 +2759,7 @@ fn compare_key_component(left: &Raw, right: &Raw) -> Result<Ordering> {
                 .cmp(&uuid_array(right_type)?)
                 .then(uuid_array(left_variant)?.cmp(&uuid_array(right_variant)?))
         }
-        (Raw::Tag(60010, left), Raw::Tag(60010, right)) => {
+        (Raw::Tag(PINNED_ROW_REFERENCE_TAG, left), Raw::Tag(PINNED_ROW_REFERENCE_TAG, right)) => {
             let left = array(left)?;
             let right = array(right)?;
             let [left_db, left_table, left_key, left_snapshot] = left.as_slice() else {
@@ -2793,16 +2776,19 @@ fn compare_key_component(left: &Raw, right: &Raw) -> Result<Ordering> {
         }
         // Unit (60014) is the sole key of a keyless table (29-formats.md:37):
         // one possible value, so two Units compare Equal.
-        (Raw::Tag(60014, left), Raw::Tag(60014, right)) => {
+        (Raw::Tag(UNIT_TAG, left), Raw::Tag(UNIT_TAG, right)) => {
             if !array(left)?.is_empty() || !array(right)?.is_empty() {
                 return Err(Error::InvalidValue);
             }
             Ordering::Equal
         }
-        (Raw::Tag(60015, left), Raw::Tag(60015, right)) => {
+        (Raw::Tag(TUPLE_TAG, left), Raw::Tag(TUPLE_TAG, right)) => {
             compare_key_components(array(left)?, array(right)?)?
         }
-        (Raw::Tag(60021, left), Raw::Tag(60021, right)) => {
+        (
+            Raw::Tag(STORED_TABLE_REFERENCE_TAG, left),
+            Raw::Tag(STORED_TABLE_REFERENCE_TAG, right),
+        ) => {
             let left = array(left)?;
             let right = array(right)?;
             let [left_db, left_table, left_key] = left.as_slice() else {
@@ -2853,12 +2839,12 @@ fn compare_raw_order(left: &Raw, right: &Raw) -> Result<Ordering> {
             Ok(left.len().cmp(&right.len()))
         }
         (Raw::Tag(left_tag, left), Raw::Tag(right_tag, right)) if left_tag == right_tag => {
-            match left_tag {
-                60000 => compare_decimal_raw(
+            match *left_tag {
+                DECIMAL_TAG => compare_decimal_raw(
                     &Raw::Tag(*left_tag, left.clone()),
                     &Raw::Tag(*right_tag, right.clone()),
                 ),
-                60015 => compare_key_components(array(left)?, array(right)?),
+                TUPLE_TAG => compare_key_components(array(left)?, array(right)?),
                 _ => compare_raw_order(left, right),
             }
         }
@@ -3207,7 +3193,7 @@ impl OvbCodec for [u8; 16] {
         path: &mut Vec<String>,
     ) -> std::result::Result<Self, DecodeError> {
         match value.raw() {
-            Raw::Tag(37, payload) => match payload.as_ref() {
+            Raw::Tag(UUID_TAG, payload) => match payload.as_ref() {
                 Raw::Bytes(bytes) if bytes.len() == 16 => {
                     let mut uuid = [0_u8; 16];
                     uuid.copy_from_slice(bytes);
@@ -3309,7 +3295,7 @@ impl<T: OvbCodec> OvbCodec for Option<T> {
         value: &Value,
         path: &mut Vec<String>,
     ) -> std::result::Result<Self, DecodeError> {
-        let Raw::Tag(60013, payload) = value.raw() else {
+        let Raw::Tag(OPTION_TAG, payload) = value.raw() else {
             return Err(decode_type_mismatch(path));
         };
         let Raw::Array(payload) = payload.as_ref() else {
@@ -3380,7 +3366,7 @@ impl<T: OvbCodec> OvbCodec for RangeValue<T> {
         let lower = self.lower.encode_value()?;
         let upper = self.upper.encode_value()?;
         Value::new(tag(
-            60019,
+            RANGE_TAG,
             Raw::Array(vec![lower.0, upper.0, Raw::Bool(self.upper_inclusive)]),
         ))
     }
@@ -3389,7 +3375,7 @@ impl<T: OvbCodec> OvbCodec for RangeValue<T> {
         value: &Value,
         path: &mut Vec<String>,
     ) -> std::result::Result<Self, DecodeError> {
-        let Raw::Tag(60019, payload) = value.raw() else {
+        let Raw::Tag(RANGE_TAG, payload) = value.raw() else {
             return Err(decode_type_mismatch(path));
         };
         let Raw::Array(fields) = payload.as_ref() else {
@@ -3424,7 +3410,7 @@ fn tuple_components<'a>(
     value: &'a Value,
     path: &[String],
 ) -> std::result::Result<&'a [Raw], DecodeError> {
-    let Raw::Tag(60015, payload) = value.raw() else {
+    let Raw::Tag(TUPLE_TAG, payload) = value.raw() else {
         return Err(decode_type_mismatch(path));
     };
     let Raw::Array(components) = payload.as_ref() else {
@@ -3461,7 +3447,7 @@ impl OvbCodec for () {
         value: &Value,
         path: &mut Vec<String>,
     ) -> std::result::Result<Self, DecodeError> {
-        let Raw::Tag(60014, payload) = value.raw() else {
+        let Raw::Tag(UNIT_TAG, payload) = value.raw() else {
             return Err(decode_type_mismatch(path));
         };
         let Raw::Array(components) = payload.as_ref() else {
@@ -3487,7 +3473,7 @@ macro_rules! impl_tuple_codec {
                     let components = vec![
                         $(self.$index.encode_value()?.0,)+
                     ];
-                    Value::new(tag(60015, Raw::Array(components)))
+                    Value::new(tag(TUPLE_TAG, Raw::Array(components)))
                 }
 
                 fn decode_value(
@@ -3561,7 +3547,7 @@ impl ErrorValue {
         });
 
         let raw = tag(
-            60016,
+            ERROR_TAG,
             Raw::Map(vec![
                 (Raw::Int(0.into()), Raw::Text(code.into())),
                 (Raw::Int(1.into()), Raw::Text(message.into())),
@@ -3578,7 +3564,7 @@ impl ErrorValue {
     /// Views a validated OVB value as a typed Error value.
     pub fn from_value(value: Value) -> Result<Self> {
         match value.raw() {
-            Raw::Tag(60016, inner) => {
+            Raw::Tag(ERROR_TAG, inner) => {
                 validate_error(inner, 0)?;
                 Ok(Self(value))
             }
@@ -3663,7 +3649,7 @@ impl ErrorValue {
     }
 
     fn inner(&self) -> &Raw {
-        let Raw::Tag(60016, inner) = self.0.raw() else {
+        let Raw::Tag(ERROR_TAG, inner) = self.0.raw() else {
             unreachable!("ErrorValue invariant was violated")
         };
         inner
@@ -3674,7 +3660,12 @@ fn redact_trace_values(raw: &Raw, depth: usize, hide_wrappers: bool) -> Result<R
     if depth > MAX_DEPTH {
         return Err(Error::Limit);
     }
-    if hide_wrappers && matches!(raw, Raw::Tag(0 | 60011 | 60012 | 60026, _)) {
+    if hide_wrappers
+        && matches!(
+            raw,
+            Raw::Tag(0 | DIAGNOSTIC_TAG | PRESENT_NODE_TAG | SYS_VALUE_BOX_TAG, _)
+        )
+    {
         // ORNA-SECRET-002 requires these values to stay opaque in traces. The
         // generic OVB layer has no per-field disclosure classifier, so replace
         // the entire wrapper with ordinary text instead of forging a typed
@@ -3682,7 +3673,7 @@ fn redact_trace_values(raw: &Raw, depth: usize, hide_wrappers: bool) -> Result<R
         return Ok(Raw::Text("<redacted>".into()));
     }
     Ok(match raw {
-        Raw::Tag(60016, _) => {
+        Raw::Tag(ERROR_TAG, _) => {
             ErrorValue::from_value(Value::new(raw.clone())?)?
                 .redacted_for_trace()
                 .0
@@ -3733,14 +3724,17 @@ fn raw_debug_value(raw: &Raw, depth: usize, errors_redacted: bool) -> Result<Raw
     if depth > MAX_DEPTH {
         return Err(Error::Limit);
     }
-    if matches!(raw, Raw::Tag(0 | 60011 | 60012 | 60026, _)) {
+    if matches!(
+        raw,
+        Raw::Tag(0 | DIAGNOSTIC_TAG | PRESENT_NODE_TAG | SYS_VALUE_BOX_TAG, _)
+    ) {
         // Debug has no disclosure grant. Protected markers can carry plaintext
         // before wire validation, and generic Diagnostic, Present, and sys.Value
         // wrappers have no field classifier here, so hide their whole payload.
         // The closed wrappers are redacted as a pragmatic fail-closed projection.
         return Ok(RawDebugValue::Text("<redacted>".into()));
     }
-    if !errors_redacted && matches!(raw, Raw::Tag(60016, _)) {
+    if !errors_redacted && matches!(raw, Raw::Tag(ERROR_TAG, _)) {
         let safe = redact_trace_values(raw, depth, true)?;
         return raw_debug_value(&safe, depth, true);
     }
@@ -3914,7 +3908,7 @@ impl Decimal {
     }
     fn raw(&self) -> Raw {
         tag(
-            60000,
+            DECIMAL_TAG,
             Raw::Array(vec![
                 Raw::Int(self.coefficient.clone()),
                 Raw::Int(self.exponent10.clone()),
@@ -3922,7 +3916,7 @@ impl Decimal {
         )
     }
     fn from_raw(raw: &Raw) -> Result<Self> {
-        let Raw::Tag(60000, inner) = raw else {
+        let Raw::Tag(DECIMAL_TAG, inner) = raw else {
             return Err(Error::InvalidTag);
         };
         let fields = array(inner)?;
@@ -4043,7 +4037,7 @@ pub struct Money {
 impl Money {
     pub fn new(amount: Decimal, currency: [u8; 16]) -> Result<Self> {
         let value = Value::new(tag(
-            60007,
+            MONEY_TAG,
             Raw::Array(vec![amount.raw(), uuid_raw(currency)]),
         ))?;
         Ok(Self {
@@ -4054,7 +4048,7 @@ impl Money {
     }
 
     pub fn from_value(value: Value) -> Result<Self> {
-        let Raw::Tag(60007, inner) = value.raw() else {
+        let Raw::Tag(MONEY_TAG, inner) = value.raw() else {
             return Err(Error::InvalidTag);
         };
         let fields = array(inner)?;
@@ -4275,7 +4269,7 @@ impl Snapshot {
     }
 }
 fn uuid_raw(bytes: [u8; 16]) -> Raw {
-    tag(37, Raw::Bytes(bytes.to_vec()))
+    tag(UUID_TAG, Raw::Bytes(bytes.to_vec()))
 }
 
 /// Returns the lowercase, hyphenated canonical text form of an OVB UUID.
@@ -4409,7 +4403,7 @@ fn hex_digit(byte: Option<u8>) -> Option<u8> {
 }
 
 fn uuid_array(r: &Raw) -> Result<[u8; 16]> {
-    let Raw::Tag(37, v) = r else {
+    let Raw::Tag(UUID_TAG, v) = r else {
         return Err(Error::InvalidValue);
     };
     let b = bytes(v)?;
@@ -4644,7 +4638,7 @@ fn validate_schema_stored_row(
 
 fn validate_reference_database(value: &Raw, database_id: [u8; 16]) -> Result<()> {
     match value {
-        Raw::Tag(60021, payload) => {
+        Raw::Tag(STORED_TABLE_REFERENCE_TAG, payload) => {
             let fields = array(payload)?;
             if fields.len() != 3 || uuid_array(&fields[0])? != database_id {
                 return Err(Error::InvalidValue);
@@ -4759,15 +4753,15 @@ fn validate_stored_value_as_type(value: &Raw, ty: &Raw, definitions: &[Raw]) -> 
         3 => {
             let types = array(node.get(1).ok_or(Error::InvalidSchema)?)?;
             if types.is_empty() {
-                let Raw::Tag(60014, unit) = value else {
+                let Raw::Tag(UNIT_TAG, unit) = value else {
                     return Err(Error::InvalidValue);
                 };
-                return validate_tag(60014, unit);
+                return validate_tag(UNIT_TAG, unit);
             }
-            let Raw::Tag(60015, tuple) = value else {
+            let Raw::Tag(TUPLE_TAG, tuple) = value else {
                 return Err(Error::InvalidValue);
             };
-            validate_tag(60015, tuple)?;
+            validate_tag(TUPLE_TAG, tuple)?;
             let values = array(tuple)?;
             if values.len() != types.len() {
                 return Err(Error::InvalidValue);
@@ -4789,10 +4783,10 @@ fn validate_stored_value_as_type(value: &Raw, ty: &Raw, definitions: &[Raw]) -> 
         ),
         6 => validate_table_reference_value(value, node, definitions),
         7 => {
-            let Raw::Tag(60006, quantity) = value else {
+            let Raw::Tag(QUANTITY_TAG, quantity) = value else {
                 return Err(Error::InvalidValue);
             };
-            validate_tag(60006, quantity)?;
+            validate_tag(QUANTITY_TAG, quantity)?;
             let quantity = array(quantity)?;
             if quantity[1] != node[2] {
                 return Err(Error::InvalidValue);
@@ -4801,24 +4795,24 @@ fn validate_stored_value_as_type(value: &Raw, ty: &Raw, definitions: &[Raw]) -> 
         }
         8 => {
             let currency = uuid_array(node.get(1).ok_or(Error::InvalidSchema)?)?;
-            let Raw::Tag(60007, money) = value else {
+            let Raw::Tag(MONEY_TAG, money) = value else {
                 return Err(Error::InvalidValue);
             };
-            validate_tag(60007, money)?;
+            validate_tag(MONEY_TAG, money)?;
             let money = array(money)?;
             if uuid_array(&money[1])? != currency {
                 return Err(Error::InvalidValue);
             }
-            let Raw::Tag(60000, decimal) = &money[0] else {
+            let Raw::Tag(DECIMAL_TAG, decimal) = &money[0] else {
                 return Err(Error::InvalidValue);
             };
-            validate_tag(60000, decimal)
+            validate_tag(DECIMAL_TAG, decimal)
         }
         9 => {
-            let Raw::Tag(60019, range) = value else {
+            let Raw::Tag(RANGE_TAG, range) = value else {
                 return Err(Error::InvalidValue);
             };
-            validate_tag(60019, range)?;
+            validate_tag(RANGE_TAG, range)?;
             let endpoints = array(range)?;
             validate_stored_option(&endpoints[0], &node[1], definitions)?;
             validate_stored_option(&endpoints[1], &node[1], definitions)
@@ -4828,10 +4822,10 @@ fn validate_stored_value_as_type(value: &Raw, ty: &Raw, definitions: &[Raw]) -> 
 }
 
 fn validate_stored_option(value: &Raw, ty: &Raw, definitions: &[Raw]) -> Result<()> {
-    let Raw::Tag(60013, option) = value else {
+    let Raw::Tag(OPTION_TAG, option) = value else {
         return Err(Error::InvalidValue);
     };
-    validate_tag(60013, option)?;
+    validate_tag(OPTION_TAG, option)?;
     match array(option)?.as_slice() {
         [Raw::Int(index)] if index.is_zero() => Ok(()),
         [Raw::Int(index), value] if *index == BigInt::from(1) => {
@@ -4842,7 +4836,7 @@ fn validate_stored_option(value: &Raw, ty: &Raw, definitions: &[Raw]) -> Result<
 }
 
 fn validate_anonymous_record(value: &Raw, fields: &[Raw], definitions: &[Raw]) -> Result<()> {
-    let Raw::Tag(60009, record) = value else {
+    let Raw::Tag(RECORD_TAG, record) = value else {
         return Err(Error::InvalidValue);
     };
     let record = array(record)?;
@@ -4905,7 +4899,7 @@ fn valid_stored_blob_reference(payload: &Raw) -> bool {
 }
 
 fn validate_table_reference_value(value: &Raw, node: &[Raw], definitions: &[Raw]) -> Result<()> {
-    let Raw::Tag(60021, reference) = value else {
+    let Raw::Tag(STORED_TABLE_REFERENCE_TAG, reference) = value else {
         return Err(Error::InvalidValue);
     };
     let reference = array(reference)?;
@@ -4918,7 +4912,7 @@ fn validate_table_reference_value(value: &Raw, node: &[Raw], definitions: &[Raw]
     let key_types = array(node.get(3).ok_or(Error::InvalidSchema)?)?;
     match key_types.as_slice() {
         [] => {
-            if !matches!(&reference[2], Raw::Tag(60014, unit) if array(unit).is_ok_and(|items| items.is_empty()))
+            if !matches!(&reference[2], Raw::Tag(UNIT_TAG, unit) if array(unit).is_ok_and(|items| items.is_empty()))
             {
                 return Err(Error::InvalidValue);
             }
@@ -4926,7 +4920,7 @@ fn validate_table_reference_value(value: &Raw, node: &[Raw], definitions: &[Raw]
         [ty] => validate_stored_value_as_type(&reference[2], ty, definitions)?,
         types => {
             let values = match &reference[2] {
-                Raw::Tag(60015, values) => array(values)?,
+                Raw::Tag(TUPLE_TAG, values) => array(values)?,
                 _ => return Err(Error::InvalidValue),
             };
             if values.len() != types.len() {
@@ -4959,7 +4953,7 @@ fn validate_nominal_stored_value(value: &Raw, id: [u8; 16], definitions: &[Raw])
         // A refined nominal value is tag 60020 `[type_object_id, base_value]`
         // (29-formats.md); the base value has the definition's base type.
         2 => {
-            let Raw::Tag(60020, payload) = value else {
+            let Raw::Tag(REFINED_NOMINAL_TAG, payload) = value else {
                 return Err(Error::InvalidValue);
             };
             let refined = array(payload)?;
@@ -4982,7 +4976,7 @@ fn validate_record_fields(
     fields: &[Raw],
     definitions: &[Raw],
 ) -> Result<()> {
-    let Raw::Tag(60009, payload) = value else {
+    let Raw::Tag(RECORD_TAG, payload) = value else {
         return Err(Error::InvalidValue);
     };
     let record = array(payload)?;
@@ -5010,7 +5004,7 @@ fn validate_enum_fields(
     variants: &[Raw],
     definitions: &[Raw],
 ) -> Result<()> {
-    let Raw::Tag(60008, payload) = value else {
+    let Raw::Tag(ENUM_TAG, payload) = value else {
         return Err(Error::InvalidValue);
     };
     let encoded = array(payload)?;
@@ -5437,12 +5431,12 @@ fn validate_raw(v: &Raw, depth: usize) -> Result<()> {
 }
 fn validate_tag(n: u64, v: &Raw) -> Result<()> {
     match n {
-        37 => {
+        UUID_TAG => {
             if bytes(v)?.len() != 16 {
                 return Err(Error::InvalidTag);
             }
         }
-        60000 => {
+        DECIMAL_TAG => {
             let a = array(v)?;
             if a.len() != 2 {
                 return Err(Error::InvalidTag);
@@ -5453,14 +5447,14 @@ fn validate_tag(n: u64, v: &Raw) -> Result<()> {
                 return Err(Error::NonCanonical);
             }
         }
-        60001 => {
+        DATE_TAG => {
             validate_date(text(v)?)?;
         }
-        60003 => {
+        LOCAL_DATE_TIME_TAG => {
             let s = text(v)?;
             validate_local_date_time(s)?;
         }
-        60004 => {
+        TIME_ZONE_TAG => {
             let s = text(v)?;
             if s.is_empty()
                 || s.as_bytes()
@@ -5470,48 +5464,50 @@ fn validate_tag(n: u64, v: &Raw) -> Result<()> {
                 return Err(Error::InvalidTag);
             }
         }
-        60002 | 60005 => {
+        INSTANT_TAG | DURATION_TAG => {
             let a = array(v)?;
             if a.len() != 2 || !matches!(a[0], Raw::Int(_)) || int_u64(&a[1])? >= 1_000_000_000 {
                 return Err(Error::InvalidTag);
             }
         }
-        60006 => {
+        QUANTITY_TAG => {
             let a = array(v)?;
-            if a.len() != 2 || !matches!(a[0], Raw::Int(_) | Raw::Float(_) | Raw::Tag(60000, _)) {
+            if a.len() != 2
+                || !matches!(a[0], Raw::Int(_) | Raw::Float(_) | Raw::Tag(DECIMAL_TAG, _))
+            {
                 return Err(Error::InvalidTag);
             }
             uuid_array(&a[1])?;
         }
-        60007 => {
+        MONEY_TAG => {
             let a = array(v)?;
-            if a.len() != 2 || !matches!(a[0], Raw::Tag(60000, _)) {
+            if a.len() != 2 || !matches!(a[0], Raw::Tag(DECIMAL_TAG, _)) {
                 return Err(Error::InvalidTag);
             }
             uuid_array(&a[1])?;
         }
-        60008 => {
+        ENUM_TAG => {
             let a = array(v)?;
             if a.len() != 3 {
                 return Err(Error::InvalidTag);
             }
             uuid_array(&a[0])?;
             uuid_array(&a[1])?;
-            if !matches!(a[2], Raw::Null | Raw::Tag(60009, _)) {
+            if !matches!(a[2], Raw::Null | Raw::Tag(RECORD_TAG, _)) {
                 return Err(Error::InvalidTag);
             }
         }
-        60009 => {
+        RECORD_TAG => {
             let a = array(v)?;
             if a.len() != 2 {
                 return Err(Error::InvalidTag);
             }
-            if !matches!(a[0], Raw::Null | Raw::Tag(37, _)) {
+            if !matches!(a[0], Raw::Null | Raw::Tag(UUID_TAG, _)) {
                 return Err(Error::InvalidTag);
             }
             validate_fields(&a[1])?;
         }
-        60010 => {
+        PINNED_ROW_REFERENCE_TAG => {
             let a = array(v)?;
             if a.len() != 4 {
                 return Err(Error::InvalidTag);
@@ -5520,7 +5516,7 @@ fn validate_tag(n: u64, v: &Raw) -> Result<()> {
             uuid_array(&a[1])?;
             Snapshot::decode(&a[3])?;
         }
-        60013 => {
+        OPTION_TAG => {
             let a = array(v)?;
             match a.as_slice() {
                 [Raw::Int(x)] if x.is_zero() => {}
@@ -5528,17 +5524,19 @@ fn validate_tag(n: u64, v: &Raw) -> Result<()> {
                 _ => return Err(Error::InvalidTag),
             }
         }
-        60015 => {
+        TUPLE_TAG => {
             if array(v)?.is_empty() {
                 return Err(Error::NonCanonical);
             }
         }
-        60018 => {
+        ZONED_DATE_TIME_TAG => {
             let a = array(v)?;
             if a.len() != 3 {
                 return Err(Error::InvalidTag);
             }
-            if !matches!(a[0], Raw::Tag(60002, _)) || !matches!(a[1], Raw::Tag(60004, _)) {
+            if !matches!(a[0], Raw::Tag(INSTANT_TAG, _))
+                || !matches!(a[1], Raw::Tag(TIME_ZONE_TAG, _))
+            {
                 return Err(Error::InvalidTag);
             }
             let offset = integer(&a[2])?;
@@ -5549,24 +5547,24 @@ fn validate_tag(n: u64, v: &Raw) -> Result<()> {
                 return Err(Error::InvalidTag);
             }
         }
-        60019 => {
+        RANGE_TAG => {
             let a = array(v)?;
             if a.len() != 3
-                || !matches!(a[0], Raw::Tag(60013, _))
-                || !matches!(a[1], Raw::Tag(60013, _))
+                || !matches!(a[0], Raw::Tag(OPTION_TAG, _))
+                || !matches!(a[1], Raw::Tag(OPTION_TAG, _))
                 || !matches!(a[2], Raw::Bool(_))
             {
                 return Err(Error::InvalidTag);
             }
         }
-        60020 => {
+        REFINED_NOMINAL_TAG => {
             let a = array(v)?;
             if a.len() != 2 {
                 return Err(Error::InvalidTag);
             }
             uuid_array(&a[0])?;
         }
-        60021 => {
+        STORED_TABLE_REFERENCE_TAG => {
             let a = array(v)?;
             if a.len() != 3 {
                 return Err(Error::InvalidTag);
@@ -5579,7 +5577,7 @@ fn validate_tag(n: u64, v: &Raw) -> Result<()> {
                 return Err(Error::InvalidTag);
             }
         }
-        60022 => {
+        LIVE_HANDLE_TAG => {
             let a = array(v)?;
             if a.len() != 4 || !matches!(a[3], Raw::Bool(false)) {
                 return Err(Error::InvalidTag);
@@ -5587,7 +5585,7 @@ fn validate_tag(n: u64, v: &Raw) -> Result<()> {
             uuid_array(&a[0])?;
             uuid_array(&a[1])?;
         }
-        60023 => {
+        OPAQUE_SYSTEM_ID_TAG => {
             let a = array(v)?;
             if a.len() != 2 {
                 return Err(Error::InvalidTag);
@@ -5624,7 +5622,7 @@ fn validate_tag(n: u64, v: &Raw) -> Result<()> {
                 _ => return Err(Error::InvalidTag),
             }
         }
-        60024 => {
+        PATH_TAG => {
             let a = array(v)?;
             if a.len() != 2 {
                 return Err(Error::InvalidTag);
@@ -5643,13 +5641,13 @@ fn validate_tag(n: u64, v: &Raw) -> Result<()> {
                 return Err(Error::InvalidTag);
             }
         }
-        60025 => {
+        DIGEST_TAG => {
             let a = array(v)?;
             if a.len() != 2 || text(&a[0])? != "sha256" || bytes(&a[1])?.len() != 32 {
                 return Err(Error::InvalidTag);
             }
         }
-        60026 => {
+        SYS_VALUE_BOX_TAG => {
             let a = array(v)?;
             if a.len() != 2 {
                 return Err(Error::InvalidTag);
@@ -5657,7 +5655,7 @@ fn validate_tag(n: u64, v: &Raw) -> Result<()> {
             validate_type(&a[0])?;
             validate_value_as_type(&a[1], &a[0])?;
         }
-        60027 => {
+        RELATION_TAG => {
             let a = array(v)?;
             if a.len() != 2 {
                 return Err(Error::InvalidTag);
@@ -5678,15 +5676,15 @@ fn validate_tag(n: u64, v: &Raw) -> Result<()> {
                 }
             }
         }
-        60011 => validate_diagnostic(v, 0)?,
-        60012 => validate_present(v, 0)?,
-        60016 => validate_error(v, 0)?,
-        60014 => {
+        DIAGNOSTIC_TAG => validate_diagnostic(v, 0)?,
+        PRESENT_NODE_TAG => validate_present(v, 0)?,
+        ERROR_TAG => validate_error(v, 0)?,
+        UNIT_TAG => {
             if !array(v)?.is_empty() {
                 return Err(Error::InvalidTag);
             }
         }
-        60017 => {
+        TIME_OF_DAY_TAG => {
             if int_u64(v)? >= 86_400_000_000_000 {
                 return Err(Error::InvalidTag);
             }
@@ -5743,7 +5741,7 @@ fn validate_diagnostic(v: &Raw, depth: usize) -> Result<()> {
         text(note)?;
     }
     for cause in array(fields[&5])? {
-        if let Raw::Tag(60011, inner) = cause {
+        if let Raw::Tag(DIAGNOSTIC_TAG, inner) = cause {
             validate_diagnostic(inner, depth + 1)?;
         } else {
             return Err(Error::InvalidTag);
@@ -5788,7 +5786,7 @@ fn validate_error(v: &Raw, depth: usize) -> Result<()> {
     text(fields[&0])?;
     text(fields[&1])?;
     for cause in array(fields[&2])? {
-        if let Raw::Tag(60016, inner) = cause {
+        if let Raw::Tag(ERROR_TAG, inner) = cause {
             validate_error(inner, depth + 1)?;
         } else {
             return Err(Error::InvalidTag);
@@ -5808,13 +5806,13 @@ fn validate_present(v: &Raw, depth: usize) -> Result<()> {
     if a.len() != 4 {
         return Err(Error::InvalidTag);
     }
-    if !matches!(a[0], Raw::Text(_) | Raw::Tag(37, _)) {
+    if !matches!(a[0], Raw::Text(_) | Raw::Tag(UUID_TAG, _)) {
         return Err(Error::InvalidTag);
     }
     if !matches!(a[1], Raw::Null) {
         let key = array(&a[1])?;
         match key.as_slice() {
-            [Raw::Int(kind), Raw::Text(_) | Raw::Tag(37, _)] if *kind == BigInt::from(0) => {}
+            [Raw::Int(kind), Raw::Text(_) | Raw::Tag(UUID_TAG, _)] if *kind == BigInt::from(0) => {}
             [Raw::Int(kind), table, _] if *kind == BigInt::from(1) => {
                 let _ = uuid_array(table)?;
             }
@@ -5823,14 +5821,14 @@ fn validate_present(v: &Raw, depth: usize) -> Result<()> {
         }
     }
     for (key, value) in map(&a[2])? {
-        if !matches!(key, Raw::Text(_) | Raw::Tag(37, _)) {
+        if !matches!(key, Raw::Text(_) | Raw::Tag(UUID_TAG, _)) {
             return Err(Error::InvalidTag);
         }
         validate_raw(value, depth + 1)?;
     }
     let mut keys = BTreeSet::new();
     for child in array(&a[3])? {
-        let Raw::Tag(60012, node) = child else {
+        let Raw::Tag(PRESENT_NODE_TAG, node) = child else {
             return Err(Error::InvalidTag);
         };
         validate_present(node, depth + 1)?;
@@ -5871,7 +5869,7 @@ fn validate_fields(v: &Raw) -> Result<()> {
         }
         match &p[0] {
             Raw::Text(name) if name.nfc().eq(name.chars()) => {}
-            Raw::Tag(37, _) => {
+            Raw::Tag(UUID_TAG, _) => {
                 uuid_array(&p[0])?;
             }
             _ => return Err(Error::InvalidTag),
@@ -5893,7 +5891,7 @@ mod field_key_tests {
     fn records_reject_noncanonical_field_key_kinds_and_accept_text_or_uuid() {
         let record = |key: Raw| {
             tag(
-                60009,
+                RECORD_TAG,
                 Raw::Array(vec![
                     Raw::Null,
                     Raw::Array(vec![Raw::Array(vec![key, Raw::Int(1.into())])]),
@@ -6569,18 +6567,18 @@ fn validate_value_as_type(value: &Raw, ty: &Raw) -> Result<()> {
             "Bool" if matches!(value, Raw::Bool(_)) => Ok(()),
             "Int" if matches!(value, Raw::Int(_)) => Ok(()),
             "Float" if matches!(value, Raw::Float(_)) => Ok(()),
-            "Decimal" if matches!(value, Raw::Tag(60000, _)) => Ok(()),
+            "Decimal" if matches!(value, Raw::Tag(DECIMAL_TAG, _)) => Ok(()),
             "Str" if matches!(value, Raw::Text(_)) => Ok(()),
             "Blob" if matches!(value, Raw::Bytes(_)) => Ok(()),
-            "Uuid" if matches!(value, Raw::Tag(37, _)) => Ok(()),
-            "Unit" if matches!(value, Raw::Tag(60014, _)) => Ok(()),
-            "Date" if matches!(value, Raw::Tag(60001, _)) => Ok(()),
-            "Instant" if matches!(value, Raw::Tag(60002, _)) => Ok(()),
-            "LocalDateTime" if matches!(value, Raw::Tag(60003, _)) => Ok(()),
-            "TimeOfDay" if matches!(value, Raw::Tag(60017, _)) => Ok(()),
-            "Duration" if matches!(value, Raw::Tag(60005, _)) => Ok(()),
-            "TimeZone" if matches!(value, Raw::Tag(60004, _)) => Ok(()),
-            "ZonedDateTime" if matches!(value, Raw::Tag(60018, _)) => Ok(()),
+            "Uuid" if matches!(value, Raw::Tag(UUID_TAG, _)) => Ok(()),
+            "Unit" if matches!(value, Raw::Tag(UNIT_TAG, _)) => Ok(()),
+            "Date" if matches!(value, Raw::Tag(DATE_TAG, _)) => Ok(()),
+            "Instant" if matches!(value, Raw::Tag(INSTANT_TAG, _)) => Ok(()),
+            "LocalDateTime" if matches!(value, Raw::Tag(LOCAL_DATE_TIME_TAG, _)) => Ok(()),
+            "TimeOfDay" if matches!(value, Raw::Tag(TIME_OF_DAY_TAG, _)) => Ok(()),
+            "Duration" if matches!(value, Raw::Tag(DURATION_TAG, _)) => Ok(()),
+            "TimeZone" if matches!(value, Raw::Tag(TIME_ZONE_TAG, _)) => Ok(()),
+            "ZonedDateTime" if matches!(value, Raw::Tag(ZONED_DATE_TIME_TAG, _)) => Ok(()),
             _ => Err(Error::InvalidValue),
         },
         1 => {
@@ -6590,7 +6588,7 @@ fn validate_value_as_type(value: &Raw, ty: &Raw) -> Result<()> {
             Ok(())
         }
         2 => {
-            let Raw::Tag(60013, option) = value else {
+            let Raw::Tag(OPTION_TAG, option) = value else {
                 return Err(Error::InvalidValue);
             };
             let option = array(option)?;
@@ -6602,13 +6600,13 @@ fn validate_value_as_type(value: &Raw, ty: &Raw) -> Result<()> {
         3 => {
             let types = array(&node[1])?;
             if types.is_empty() {
-                return if matches!(value, Raw::Tag(60014, _)) {
+                return if matches!(value, Raw::Tag(UNIT_TAG, _)) {
                     Ok(())
                 } else {
                     Err(Error::InvalidValue)
                 };
             }
-            let Raw::Tag(60015, tuple) = value else {
+            let Raw::Tag(TUPLE_TAG, tuple) = value else {
                 return Err(Error::InvalidValue);
             };
             let tuple = array(tuple)?;
@@ -6622,7 +6620,7 @@ fn validate_value_as_type(value: &Raw, ty: &Raw) -> Result<()> {
         }
         4 => {
             let fields = array(&node[1])?;
-            let Raw::Tag(60009, record) = value else {
+            let Raw::Tag(RECORD_TAG, record) = value else {
                 return Err(Error::InvalidValue);
             };
             let record = array(record)?;
@@ -6647,7 +6645,7 @@ fn validate_value_as_type(value: &Raw, ty: &Raw) -> Result<()> {
             Ok(())
         }
         7 => {
-            let Raw::Tag(60006, quantity) = value else {
+            let Raw::Tag(QUANTITY_TAG, quantity) = value else {
                 return Err(Error::InvalidValue);
             };
             let quantity = array(quantity)?;
@@ -6658,11 +6656,11 @@ fn validate_value_as_type(value: &Raw, ty: &Raw) -> Result<()> {
         }
         8 => {
             uuid_array(&node[1])?;
-            let Raw::Tag(60007, money) = value else {
+            let Raw::Tag(MONEY_TAG, money) = value else {
                 return Err(Error::InvalidValue);
             };
             let money = array(money)?;
-            if money.len() != 2 || !matches!(money[0], Raw::Tag(60000, _)) {
+            if money.len() != 2 || !matches!(money[0], Raw::Tag(DECIMAL_TAG, _)) {
                 return Err(Error::InvalidValue);
             };
             if uuid_array(&money[1])? != uuid_array(&node[1])? {
@@ -6671,12 +6669,12 @@ fn validate_value_as_type(value: &Raw, ty: &Raw) -> Result<()> {
             Ok(())
         }
         9 => {
-            let Raw::Tag(60019, range) = value else {
+            let Raw::Tag(RANGE_TAG, range) = value else {
                 return Err(Error::InvalidValue);
             };
             let range = array(range)?;
             for endpoint in &range[..2] {
-                let Raw::Tag(60013, option) = endpoint else {
+                let Raw::Tag(OPTION_TAG, option) = endpoint else {
                     return Err(Error::InvalidValue);
                 };
                 let option = array(option)?;
@@ -6860,7 +6858,7 @@ mod tests {
         let key = encode_raw(&Raw::Int(7.into())).unwrap();
         let quantity = |unit_id| {
             Raw::Tag(
-                60006,
+                QUANTITY_TAG,
                 Box::new(Raw::Array(vec![
                     Raw::Float(1.0_f64.to_bits()),
                     uuid_raw(unit_id),
@@ -6923,7 +6921,7 @@ mod tests {
         let option_schema =
             SchemaDescriptor::new(schema_for_type(schema_type(2, blob_type), vec![])).unwrap();
         let option_fields = encode_canonical_storage_value(&Raw::Array(vec![Raw::Tag(
-            60013,
+            OPTION_TAG,
             Box::new(Raw::Array(vec![
                 Raw::Int(1.into()),
                 stored_blob_reference("image/png", Raw::Null),
@@ -6937,7 +6935,7 @@ mod tests {
         );
 
         let malformed_none = encode_canonical_storage_value(&Raw::Array(vec![Raw::Tag(
-            60013,
+            OPTION_TAG,
             Box::new(Raw::Array(vec![Raw::Int(0.into()), Raw::Null])),
         )]))
         .unwrap();
@@ -6958,13 +6956,13 @@ mod tests {
         let key = encode_raw(&Raw::Int(7.into())).unwrap();
         let valid_instant = || {
             Raw::Tag(
-                60002,
+                INSTANT_TAG,
                 Box::new(Raw::Array(vec![Raw::Int(0.into()), Raw::Int(0.into())])),
             )
         };
-        let valid_zone = || Raw::Tag(60004, Box::new(Raw::Text("UTC".into())));
+        let valid_zone = || Raw::Tag(TIME_ZONE_TAG, Box::new(Raw::Text("UTC".into())));
         let valid_value = Raw::Tag(
-            60018,
+            ZONED_DATE_TIME_TAG,
             Box::new(Raw::Array(vec![
                 valid_instant(),
                 valid_zone(),
@@ -6980,18 +6978,18 @@ mod tests {
 
         let malformed_values = [
             Raw::Tag(
-                60018,
+                ZONED_DATE_TIME_TAG,
                 Box::new(Raw::Array(vec![
-                    Raw::Tag(60002, Box::new(Raw::Int(0.into()))),
+                    Raw::Tag(INSTANT_TAG, Box::new(Raw::Int(0.into()))),
                     valid_zone(),
                     Raw::Int(0.into()),
                 ])),
             ),
             Raw::Tag(
-                60018,
+                ZONED_DATE_TIME_TAG,
                 Box::new(Raw::Array(vec![
                     valid_instant(),
-                    Raw::Tag(60004, Box::new(Raw::Int(0.into()))),
+                    Raw::Tag(TIME_ZONE_TAG, Box::new(Raw::Int(0.into()))),
                     Raw::Int(0.into()),
                 ])),
             ),
@@ -7054,7 +7052,7 @@ mod tests {
 
     #[test]
     fn date_codec_rejects_year_zero_and_accepts_declared_bounds() {
-        let date = |text: &str| Value::new(tag(60001, Raw::Text(text.to_owned())));
+        let date = |text: &str| Value::new(tag(DATE_TAG, Raw::Text(text.to_owned())));
 
         assert_eq!(date("0000-01-01"), Err(Error::InvalidTag));
         assert!(date("0001-01-01").is_ok());
@@ -7065,7 +7063,7 @@ mod tests {
     fn repo_paths_reject_backslashes_without_restricting_host_paths() {
         let path = |flavour: &str, value: &str| {
             Value::new(tag(
-                60024,
+                PATH_TAG,
                 Raw::Array(vec![
                     Raw::Text(flavour.to_owned()),
                     Raw::Text(value.to_owned()),
@@ -7146,7 +7144,7 @@ mod tests {
     fn invocation_handle_requires_canonical_runtime_uuid() {
         let handle = |runtime| {
             Value::new(tag(
-                60022,
+                LIVE_HANDLE_TAG,
                 Raw::Array(vec![
                     uuid_raw([1; 16]),
                     runtime,
@@ -7160,12 +7158,13 @@ mod tests {
         assert!(handle(Raw::Text("runtime".into())).is_err());
         assert!(handle(Raw::Int(2.into())).is_err());
         assert!(handle(uuid_raw([0; 16])).is_ok());
-        assert!(handle(tag(37, Raw::Bytes(vec![2; 15]))).is_err());
+        assert!(handle(tag(UUID_TAG, Raw::Bytes(vec![2; 15]))).is_err());
     }
     #[test]
     fn sys_revision_id_is_a_closed_32_byte_portable_identifier() {
-        let revision_id =
-            |name: Raw, representation: Raw| tag(60023, Raw::Array(vec![name, representation]));
+        let revision_id = |name: Raw, representation: Raw| {
+            tag(OPAQUE_SYSTEM_ID_TAG, Raw::Array(vec![name, representation]))
+        };
         let valid = revision_id(Raw::Text("sys.RevisionId".into()), Raw::Bytes(vec![7; 32]));
         let canonical = |raw: Raw| {
             let value = Value::new(raw).expect("valid system value was rejected");
@@ -7180,7 +7179,7 @@ mod tests {
                 uuid_raw([7; 16]),
             )),
             canonical(tag(
-                60025,
+                DIGEST_TAG,
                 Raw::Array(vec![Raw::Text("sha256".into()), Raw::Bytes(vec![7; 32])]),
             )),
             canonical(valid.clone()),
@@ -7203,12 +7202,15 @@ mod tests {
             revision_id(
                 Raw::Text("sys.RevisionId".into()),
                 tag(
-                    60025,
+                    DIGEST_TAG,
                     Raw::Array(vec![Raw::Text("sha256".into()), Raw::Bytes(vec![7; 32])]),
                 ),
             ),
-            tag(60023, Raw::Text("sys.RevisionId".into())),
-            tag(60023, Raw::Array(vec![Raw::Text("sys.RevisionId".into())])),
+            tag(OPAQUE_SYSTEM_ID_TAG, Raw::Text("sys.RevisionId".into())),
+            tag(
+                OPAQUE_SYSTEM_ID_TAG,
+                Raw::Array(vec![Raw::Text("sys.RevisionId".into())]),
+            ),
             revision_id(
                 Raw::Bytes(b"sys.RevisionId".to_vec()),
                 Raw::Bytes(vec![7; 32]),
@@ -7439,9 +7441,9 @@ mod tests {
             Value::float_bits(0x7ff8_0000_0000_0001).raw(),
             &Raw::Float(CANONICAL_NAN_BITS)
         );
-        assert!(Value::new(tag(60011, Raw::Map(vec![]))).is_err());
-        assert!(Value::new(tag(60016, Raw::Map(vec![]))).is_err());
-        assert!(Value::new(tag(60012, Raw::Array(vec![]))).is_err());
+        assert!(Value::new(tag(DIAGNOSTIC_TAG, Raw::Map(vec![]))).is_err());
+        assert!(Value::new(tag(ERROR_TAG, Raw::Map(vec![]))).is_err());
+        assert!(Value::new(tag(PRESENT_NODE_TAG, Raw::Array(vec![]))).is_err());
     }
 
     #[test]
@@ -7449,7 +7451,7 @@ mod tests {
         let fixture = include_str!("../tests/fixtures/secret-surface.orna").trim();
         let snapshot = Snapshot::cwd([1; 16], [2; 16], 0.into()).unwrap();
         let row_reference = tag(
-            60010,
+            PINNED_ROW_REFERENCE_TAG,
             Raw::Array(vec![
                 uuid_raw([3; 16]),
                 uuid_raw([4; 16]),
@@ -7489,7 +7491,7 @@ mod tests {
     fn raw_debug_redacts_diagnostic_present_and_sys_value_payloads() {
         let fixture = include_str!("../tests/fixtures/secret-surface.orna").trim();
         let diagnostic = tag(
-            60011,
+            DIAGNOSTIC_TAG,
             Raw::Map(vec![
                 (Raw::Int(0.into()), Raw::Text("ORNA-E-TEST".into())),
                 (Raw::Int(1.into()), Raw::Int(3.into())),
@@ -7504,7 +7506,7 @@ mod tests {
             ]),
         );
         let present = tag(
-            60012,
+            PRESENT_NODE_TAG,
             Raw::Array(vec![
                 Raw::Text("value".into()),
                 Raw::Null,
@@ -7516,7 +7518,7 @@ mod tests {
             ]),
         );
         let sys_value = tag(
-            60026,
+            SYS_VALUE_BOX_TAG,
             Raw::Array(vec![
                 Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Str".into())]),
                 Raw::Text(fixture.into()),
@@ -7535,7 +7537,7 @@ mod tests {
     fn generic_trace_projection_hides_nested_wrappers_and_protected_map_keys() {
         let fixture = include_str!("../tests/fixtures/secret-surface.orna").trim();
         let diagnostic = tag(
-            60011,
+            DIAGNOSTIC_TAG,
             Raw::Map(vec![
                 (Raw::Int(0.into()), Raw::Text("ORNA-E-TEST".into())),
                 (Raw::Int(1.into()), Raw::Int(3.into())),
@@ -7550,7 +7552,7 @@ mod tests {
             ]),
         );
         let present = tag(
-            60012,
+            PRESENT_NODE_TAG,
             Raw::Array(vec![
                 Raw::Text("value".into()),
                 Raw::Null,
@@ -7562,7 +7564,7 @@ mod tests {
             ]),
         );
         let sys_value = tag(
-            60026,
+            SYS_VALUE_BOX_TAG,
             Raw::Array(vec![
                 Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Str".into())]),
                 Raw::Text(fixture.into()),
@@ -7597,7 +7599,7 @@ mod tests {
     #[test]
     fn quantity_requires_a_numeric_amount() {
         let raw = tag(
-            60006,
+            QUANTITY_TAG,
             Raw::Array(vec![Raw::Text("not-a-number".into()), uuid_raw([7; 16])]),
         );
         assert_eq!(Value::new(raw.clone()), Err(Error::InvalidTag));
@@ -7695,7 +7697,7 @@ mod tests {
     #[test]
     fn error_value_preserves_malformed_rejection() {
         let malformed = tag(
-            60016,
+            ERROR_TAG,
             Raw::Map(vec![
                 (Raw::Int(0.into()), Raw::Text("ORNA-E-TEST".into())),
                 (Raw::Int(1.into()), Raw::Text("safe".into())),
@@ -7718,7 +7720,7 @@ mod tests {
 
     fn diagnostic_with_path(path: &str) -> Raw {
         tag(
-            60011,
+            DIAGNOSTIC_TAG,
             Raw::Map(vec![
                 (Raw::Int(0.into()), Raw::Text("ORNA-E-TEST".into())),
                 (Raw::Int(1.into()), Raw::Int(3.into())),
@@ -7775,22 +7777,25 @@ mod tests {
         let other = [8u8; 16];
         let type_node = Raw::Array(vec![Raw::Int(8.into()), uuid_raw(currency)]);
         let amount = tag(
-            60000,
+            DECIMAL_TAG,
             Raw::Array(vec![Raw::Int(1.into()), Raw::Int(0.into())]),
         );
         let valid = tag(
-            60026,
+            SYS_VALUE_BOX_TAG,
             Raw::Array(vec![
                 type_node.clone(),
-                tag(60007, Raw::Array(vec![amount.clone(), uuid_raw(currency)])),
+                tag(
+                    MONEY_TAG,
+                    Raw::Array(vec![amount.clone(), uuid_raw(currency)]),
+                ),
             ]),
         );
         assert!(Value::new(valid).is_ok());
         let invalid = tag(
-            60026,
+            SYS_VALUE_BOX_TAG,
             Raw::Array(vec![
                 type_node,
-                tag(60007, Raw::Array(vec![amount, uuid_raw(other)])),
+                tag(MONEY_TAG, Raw::Array(vec![amount, uuid_raw(other)])),
             ]),
         );
         assert!(Value::new(invalid).is_err());
@@ -8491,8 +8496,8 @@ mod logical_primary_key_order_tests {
         );
         assert_eq!(
             compare_primary_keys(
-                &value(Raw::Tag(60001, Box::new(Raw::Text("2024-01-01".into())))),
-                &value(Raw::Tag(60001, Box::new(Raw::Text("2024-02-01".into())))),
+                &value(Raw::Tag(DATE_TAG, Box::new(Raw::Text("2024-01-01".into())))),
+                &value(Raw::Tag(DATE_TAG, Box::new(Raw::Text("2024-02-01".into())))),
             )
             .unwrap(),
             Ordering::Less
@@ -8500,11 +8505,11 @@ mod logical_primary_key_order_tests {
         assert_eq!(
             compare_primary_keys(
                 &value(Raw::Tag(
-                    60002,
+                    INSTANT_TAG,
                     Box::new(Raw::Array(vec![Raw::Int(7.into()), Raw::Int(99.into())])),
                 )),
                 &value(Raw::Tag(
-                    60002,
+                    INSTANT_TAG,
                     Box::new(Raw::Array(vec![Raw::Int(8.into()), Raw::Int(0.into())])),
                 )),
             )
@@ -8521,7 +8526,7 @@ mod logical_primary_key_order_tests {
     fn compares_payload_free_enums_references_and_tuples_recursively() {
         let enum_key = |variant| {
             value(Raw::Tag(
-                60008,
+                ENUM_TAG,
                 Box::new(Raw::Array(vec![
                     uuid_value(1),
                     uuid_value(variant),
@@ -8536,7 +8541,7 @@ mod logical_primary_key_order_tests {
 
         let reference_key = |key: i64| {
             value(Raw::Tag(
-                60021,
+                STORED_TABLE_REFERENCE_TAG,
                 Box::new(Raw::Array(vec![
                     uuid_value(4),
                     uuid_value(5),
@@ -8551,7 +8556,7 @@ mod logical_primary_key_order_tests {
 
         let tuple = |first: i64, second: &str| {
             value(Raw::Tag(
-                60015,
+                TUPLE_TAG,
                 Box::new(Raw::Array(vec![
                     Raw::Int(first.into()),
                     Raw::Text(second.into()),
@@ -8572,16 +8577,16 @@ mod logical_primary_key_order_tests {
         );
         assert!(compare_primary_keys(&Value::unit(), &Value::unit()).is_err());
         let malformed_enum = value(Raw::Tag(
-            60008,
+            ENUM_TAG,
             Box::new(Raw::Array(vec![uuid_value(1), uuid_value(2), Raw::Null])),
         ));
         let payload_enum = value(Raw::Tag(
-            60008,
+            ENUM_TAG,
             Box::new(Raw::Array(vec![
                 uuid_value(1),
                 uuid_value(2),
                 Raw::Tag(
-                    60009,
+                    RECORD_TAG,
                     Box::new(Raw::Array(vec![Raw::Null, Raw::Array(vec![])])),
                 ),
             ])),
@@ -8885,7 +8890,7 @@ mod anonymous_record_order_tests {
 
     fn record(entries: Vec<(&str, Raw)>) -> Raw {
         Raw::Tag(
-            60009,
+            RECORD_TAG,
             Box::new(Raw::Array(vec![
                 Raw::Null,
                 Raw::Array(
