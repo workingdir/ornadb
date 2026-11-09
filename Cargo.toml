@@ -11,6 +11,7 @@ members = [
     "crates/orna-live",
     "crates/orna-protocol",
     "crates/orna-project",
+    "crates/orna-project-repl",
     "crates/orna-repository",
     "crates/orna-runtime",
     "crates/orna-table",

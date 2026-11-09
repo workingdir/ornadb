@@ -1,8 +1,8 @@
 //! Focused successful and failing inference evidence on checked-in sources.
 
-use orna_conformance::AdmittedReplSession;
 use orna_evaluator::Limits;
 use orna_foundation::Value;
+use orna_project_repl::AdmittedReplSession;
 use orna_semantic::{Catalogue, ModuleInput, Type, analyze_with_catalogue};
 
 const INFER_SUCCESS: &str = include_str!("fixtures/traceability-infer-success.orna");

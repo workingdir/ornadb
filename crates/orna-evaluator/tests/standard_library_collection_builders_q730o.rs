@@ -1,7 +1,6 @@
-use orna_evaluator::{
-    AdmittedReplSession, Limits, reference_standard_profile, reference_standard_sources,
-};
+use orna_evaluator::{Limits, reference_standard_profile, reference_standard_sources};
 use orna_foundation::CanonicalValue;
+use orna_project_repl::AdmittedReplSession;
 use orna_semantic::{Catalogue, StandardDependencyProfile};
 use orna_value::Raw;
 use std::thread;
