@@ -159,6 +159,9 @@ e279a7bfc9c04cf067704ccc6adfdda5b4bf8a958d7f9f1db63065377a7c18ce  crates/orna-cl
 edebe27ffe38efc1c684f09ac77b659027e8dce9c3445004059112d2519adee1  crates/orna-cli/tests/fixtures/iterator-contracts.orna
 fca574faa6a1e60824a2099b023b7da5efa2bb1fa9c40a14a13681d93211e5ab  crates/orna-cli/tests/fixtures/legacy-bare-module-state.sqlite3
 092852be93fa4cbea616c1168b707d6bc07c6bbf6dd3d492dd22cd0b643000b8  crates/orna-cli/tests/fixtures/legacy-bare-module.bundle
+cfbc158205c0f5702785621fe47a9d2cecfe286f0057f1258a738cfb2c664bc3  crates/orna-cli/tests/fixtures/legacy-format1-1.0.0-golden.bundle
+3a0c3980e62e03077928fa1c5021c3d182c178191f46fbd2363d763d765754b0  crates/orna-cli/tests/fixtures/legacy-format1-1.0.0-golden.generator.rs.txt
+fb98c41680804e308acbe182a28af6605549d622d366fe5cd8e5bee74640740c  crates/orna-cli/tests/fixtures/legacy-format1-1.0.0-golden.provenance.txt
 34396705a4854d6152fd20f39ce8e622b6f5f7a91f37f13ed6df3929c9da579e  crates/orna-cli/tests/fixtures/legacy-format1.bundle
 9b8b42ba916e205d5058f28fb1bfa4549eb7c42a662a1b26be2fbd50d19940ae  crates/orna-cli/tests/fixtures/legacy-golden-main.orna
 c33fac35c1b2547442e34771d7b9e3f653a050faf969967a39ebf4ecc1589759  crates/orna-cli/tests/fixtures/legacy-loose-contact-alice-smith.orna

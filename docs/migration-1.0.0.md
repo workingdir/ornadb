@@ -235,6 +235,22 @@ Provenance: the fixture is produced by the test encoder (`encoder_version`
 mapping and Parquet page-checksum helper with production. It is NOT an
 independent 1.0.0 golden repository.
 
+A second fixture is the real writer artifact:
+`crates/orna-cli/tests/fixtures/legacy-format1-1.0.0-golden.bundle`, with
+`legacy-format1-1.0.0-golden.provenance.txt` beside it. It was written by the
+production repository code at `adb70ba2f` (the last commit before the metadata
+writer switched to format 3), through
+`Repository::prepare_compact_publication` and
+`publish_compact_repository_boundary`, and contains Int, Str and Date compact
+tables. `committed_1_0_0_writer_golden_decodes_min_max_key_bounds` reads it,
+asserts the decoded keys and key bounds, and requires the reader to refuse a
+clone whose shard or manifest bound was rewritten. Its Parquet payloads use the
+same 1.0-era `test-encoder-v1` encoding because that commit range has no
+production Parquet writer, its three tables are key-only, and its `policy.orna`
+record is a fixture-chosen minimal shape: draft `23-storage.md` ORNA-STORAGE-007
+requires the record but the 1.0-era boundary does not write it and the draft
+does not fix its shape.
+
 Members (Gate F, `implementation/ACCEPTANCE.md:61-68`):
 
 - `.orna/format.orna`, exactly
@@ -297,17 +313,22 @@ Open gaps (not proven by this fixture):
   `.git/orna` state, no defined in-bundle form). ORNA-UPGRADE-008 fail-closed
   behaviour for Blob-containing persistent-consumer arguments is NOT asserted
   by any test.
-- Key-bound encoding: manifest and shard `min_key`/`max_key` hold the OVB-1
-  canonical encoding of the typed key value (Int, Str or Date), written as hex
-  text. The reader (`compact.rs`, `decode_hex` then `CanonicalValue::decode`)
-  accepts only this hex form. The 1.0.0 spec types these fields as `sys.Value`
-  (`source/34-system-reference.md` lines 2242-2243; OVB-1 envelope per
-  `source/29-formats.md` line 48), and `source/23-storage.md:214,216` says key
-  values use the table key schema. The spec does not pin a text-literal form,
-  so typed literals (`min_key: 42`, `min_key: "abc"`) are not what the reader
-  accepts. This is an unresolved reader/spec ambiguity recorded for follow-up,
-  not changed in this slice. Str bounds are OVB text bytes, not hex of raw UTF-8.
-- Byte-compatibility with 1.0.0 golden output: not verified.
+- Key-bound encoding: observed in the 1.0-era writer golden. `manifest.orna`
+  and the shard entries carry `min_key`/`max_key` as hex text of the OVB-1
+  canonical key bytes, and those bytes decode as key values of the table key
+  schema (`Int`, `Str` or `Date`). Shard bounds are the logical extrema over
+  entries: negative `Int` `-2` and `Str` `alpha` are the minima even though
+  their canonical bytes sort after `-1` and `beta`. The reader (`decode_hex`
+  then `CanonicalValue::decode`, `compare_primary_keys`) uses the same order
+  and refuses a rewritten bound. The 1.0-era production publication boundary
+  (`adb70ba2f`) produced this form, so ORNA-UPGRADE-002's original-decoder rule
+  fixes hex text for those historical commits even though
+  `source/23-storage.md:214,216` does not spell out a text-literal form.
+- Byte-compatibility with a released 1.0.0 binary: not verified; no 1.0.0
+  release was published. The writer golden covers the format metadata, commit
+  graph, manifest, shards, bounds and digests. Its Parquet payloads use the
+  1.0-era test encoder and its compact tables are key-only, so stored-value
+  columns remain a limitation of the golden rather than of the reader.
 
 ## Idempotent carry, deterministic staging and the migration kill matrix (bead 5il1.397)
 
