@@ -29,9 +29,9 @@ layer 1 until its split because it already depends on `orna-value`.
 
 | layer | name | crates |
 |---|---|---|
-| 1 | value | orna-value, orna-foundation |
-| 2 | syntax | orna-syntax |
-| 3 | identity | orna-standard-sources, orna-sys-macros |
+| 1 | value | orna-value, orna-foundation, orna-sys-model |
+| 2 | syntax | orna-syntax, orna-sys-codegen |
+| 3 | identity | orna-standard-sources, orna-sys-macros, orna-sys-id |
 | 4 | analysis | orna-semantic |
 | 5 | evaluation | orna-evaluator |
 | 6 | hosts (I/O) | orna-sys, orna-security |
