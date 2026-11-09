@@ -27,6 +27,8 @@ use fs2::FileExt;
 use sha2::{Digest, Sha256};
 pub use uuid::Uuid;
 
+use crate::hex::hex_encode;
+
 pub mod allocator;
 mod blob_store;
 mod compact;
@@ -36,6 +38,8 @@ pub mod format2_ogb;
 pub mod format2_orr;
 pub mod format2_read;
 pub mod format2_rov;
+mod format_context;
+mod hex;
 mod init;
 pub mod migration_copy;
 mod mount;
@@ -67,7 +71,7 @@ pub use compact::{
     golden_compact_schemas, write_legacy_format1_fixture, write_legacy_format1_golden_fixture,
 };
 pub use crash_barrier::{publication_crash_barrier, publication_crash_pause_until_released};
-pub use init::format_context::{
+pub use format_context::{
     CaptureCapabilityError, CommittedTableBinding, FINAL_REPOSITORY_FORMAT, FinalFormatCapability,
     FormatContextError, HistoricalFormatContext, LegacyWriteRefused, REPOSITORY_LAYOUT_VERSION,
     RepositoryFormat, RepositoryFormatContext, RepositorySnapshotPin, SchemaRootPin, StoreRootPin,
@@ -83,8 +87,8 @@ pub use native_graph::{
     AdmittedBlobReference, AdmittedRowField, AdmittedRowFields, CapturedBlobCandidate,
     GitHashAlgorithm, GraphError, IndexMaintenance, NativeGraphContext, NativeObjectKind,
     NativeOid, OrpBlobBinding, OrpGraphCandidate, ProtectedBlobMetadata, ProtectedContentPin,
-    ProtectedContentTransfer, Pub3ReleaseReceipt, RangeVerification, RepositoryCaptureCapability,
-    RepositoryReadScope, RowIndexMutation, VerifiedBlobRange,
+    ProtectedContentTransfer, RangeVerification, RepositoryCaptureCapability, RepositoryReadScope,
+    RowIndexMutation, VerifiedBlobRange,
 };
 pub use orna_value::BlobMetadata;
 pub use publication_transaction::{
@@ -576,17 +580,58 @@ impl PublicationMaterializationPhase {
     }
 }
 
+/// One managed path's recorded progress through its quarantine-and-install
+/// sequence. Every phase past `Clean` names the quarantine file that holds the
+/// displaced bytes, so a phase and its quarantine cannot disagree.
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct PublicationMaterialization {
-    phase: PublicationMaterializationPhase,
-    quarantine: Option<String>,
+enum PublicationMaterialization {
+    Clean,
+    QuarantinePrepared(String),
+    Quarantined(String),
+    Installed(String),
 }
 
 impl PublicationMaterialization {
-    const fn clean() -> Self {
-        Self {
-            phase: PublicationMaterializationPhase::Clean,
-            quarantine: None,
+    /// The state `phase` records. A `Clean` path has no quarantine and every
+    /// other phase has one; any other pairing is a corrupt journal.
+    fn from_parts(
+        phase: PublicationMaterializationPhase,
+        quarantine: Option<String>,
+    ) -> Result<Self, RepositoryError> {
+        match (phase, quarantine) {
+            (PublicationMaterializationPhase::Clean, None) => Ok(Self::Clean),
+            (PublicationMaterializationPhase::QuarantinePrepared, Some(name)) => {
+                Ok(Self::QuarantinePrepared(name))
+            }
+            (PublicationMaterializationPhase::Quarantined, Some(name)) => {
+                Ok(Self::Quarantined(name))
+            }
+            (PublicationMaterializationPhase::Installed, Some(name)) => Ok(Self::Installed(name)),
+            (PublicationMaterializationPhase::Clean, Some(_))
+            | (
+                PublicationMaterializationPhase::QuarantinePrepared
+                | PublicationMaterializationPhase::Quarantined
+                | PublicationMaterializationPhase::Installed,
+                None,
+            ) => Err(RepositoryError::InvalidPublicationJournal),
+        }
+    }
+
+    fn phase(&self) -> PublicationMaterializationPhase {
+        match self {
+            Self::Clean => PublicationMaterializationPhase::Clean,
+            Self::QuarantinePrepared(_) => PublicationMaterializationPhase::QuarantinePrepared,
+            Self::Quarantined(_) => PublicationMaterializationPhase::Quarantined,
+            Self::Installed(_) => PublicationMaterializationPhase::Installed,
+        }
+    }
+
+    fn quarantine(&self) -> Option<&str> {
+        match self {
+            Self::Clean => None,
+            Self::QuarantinePrepared(name) | Self::Quarantined(name) | Self::Installed(name) => {
+                Some(name)
+            }
         }
     }
 }
@@ -642,7 +687,7 @@ impl PublicationJournalEntry {
             path,
             expected,
             next,
-            materialization: PublicationMaterialization::clean(),
+            materialization: PublicationMaterialization::Clean,
         }
     }
 
@@ -1188,7 +1233,6 @@ pub struct PublicationJournal {
     entries: Vec<PublicationJournalEntry>,
     stage: PublicationJournalStage,
     wire_version: u8,
-    binding_version: u8,
 }
 
 impl PublicationJournal {
@@ -1253,7 +1297,6 @@ impl PublicationJournal {
             entries,
             stage: PublicationJournalStage::Prepared,
             wire_version: 5,
-            binding_version: 5,
         })
     }
 
@@ -1305,7 +1348,6 @@ impl PublicationJournal {
         }
         self.store_root = Some(IndexTreeRef(store_root));
         self.wire_version = self.wire_version.max(8);
-        self.binding_version = self.binding_version.max(8);
         Ok(self)
     }
 
@@ -1328,7 +1370,6 @@ impl PublicationJournal {
         }
         self.logical_rekeys = logical_rekeys;
         self.wire_version = self.wire_version.max(9);
-        self.binding_version = self.binding_version.max(9);
         Ok(self)
     }
 
@@ -1351,7 +1392,6 @@ impl PublicationJournal {
         }
         self.migration_continuity = Some(continuity);
         self.wire_version = self.wire_version.max(6);
-        self.binding_version = self.binding_version.max(6);
         Ok(self)
     }
 
@@ -1383,7 +1423,6 @@ impl PublicationJournal {
         }
         self.migration_annotation_defaults = Some(defaults);
         self.wire_version = self.wire_version.max(7);
-        self.binding_version = self.binding_version.max(7);
         Ok(self)
     }
 
@@ -1406,7 +1445,6 @@ impl PublicationJournal {
             .migration_annotation_defaults
             .ok_or(RepositoryError::InvalidFormatMigration)?;
         if self.wire_version != 7
-            || self.binding_version != 7
             || !self.is_resumable_migration_stage()
             || self.compact_manifest.is_some()
             || self.migration_continuity.is_none()
@@ -1562,8 +1600,8 @@ impl PublicationJournal {
             put_string(&mut bytes, path)?;
             put_optional_bytes(&mut bytes, entry.expected.as_deref())?;
             put_optional_bytes(&mut bytes, entry.next.as_deref())?;
-            bytes.push(entry.materialization.phase.code());
-            put_optional_string(&mut bytes, entry.materialization.quarantine.as_deref())?;
+            bytes.push(entry.materialization.phase().code());
+            put_optional_string(&mut bytes, entry.materialization.quarantine())?;
         }
         if bytes.len() > MAX_JOURNAL_BYTES {
             return Err(RepositoryError::InvalidPublicationJournal);
@@ -1574,9 +1612,8 @@ impl PublicationJournal {
     fn lock_binding(&self) -> Result<[u8; 32], RepositoryError> {
         let mut stable = self.clone();
         stable.stage = PublicationJournalStage::Prepared;
-        stable.wire_version = stable.binding_version;
         for entry in &mut stable.entries {
-            entry.materialization = PublicationMaterialization::clean();
+            entry.materialization = PublicationMaterialization::Clean;
         }
         Ok(Sha256::digest(stable.encode()?).into())
     }
@@ -1687,14 +1724,8 @@ impl PublicationJournal {
             }
             let phase = PublicationMaterializationPhase::from_code(take_byte(bytes, &mut cursor)?)?;
             let quarantine = take_optional_string(bytes, &mut cursor)?;
-            if (phase == PublicationMaterializationPhase::Clean) == quarantine.is_some()
-                || phase != PublicationMaterializationPhase::Clean && quarantine.is_none()
-            {
-                return Err(RepositoryError::InvalidPublicationJournal);
-            }
-            let materialization = PublicationMaterialization { phase, quarantine };
             let mut entry = PublicationJournalEntry::new(path, expected, next);
-            entry.materialization = materialization;
+            entry.materialization = PublicationMaterialization::from_parts(phase, quarantine)?;
             entries.push(entry);
         }
         if cursor != bytes.len() {
@@ -1713,12 +1744,10 @@ impl PublicationJournal {
             entries,
             stage,
             wire_version: version,
-            binding_version: version,
         };
         for (index, entry) in journal.entries.iter().enumerate() {
-            if entry.materialization.phase != PublicationMaterializationPhase::Clean
-                && entry.materialization.quarantine.as_deref()
-                    != Some(journal.quarantine_name(index)?.as_str())
+            if let Some(name) = entry.materialization.quarantine()
+                && name != journal.quarantine_name(index)?
             {
                 return Err(RepositoryError::InvalidPublicationJournal);
             }
@@ -1729,43 +1758,35 @@ impl PublicationJournal {
     fn quarantine_name(&self, index: usize) -> Result<String, RepositoryError> {
         let mut stable = self.clone();
         stable.stage = PublicationJournalStage::Prepared;
-        stable.wire_version = stable.binding_version;
         for entry in &mut stable.entries {
-            entry.materialization = PublicationMaterialization::clean();
+            entry.materialization = PublicationMaterialization::Clean;
         }
         let mut digest = Sha256::new();
         digest.update(stable.encode()?);
         digest.update(index.to_le_bytes());
-        let digest = digest.finalize();
-        let suffix = digest
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
-        Ok(format!(".orna-quarantine-journal-{suffix}"))
+        Ok(format!(
+            ".orna-quarantine-journal-{}",
+            hex_encode(&digest.finalize())
+        ))
     }
 
+    /// Records that `index` reached `phase`. A phase past `Clean` carries the
+    /// quarantine name derived from this journal's binding, the only name
+    /// decode accepts.
     fn set_materialization(
         &mut self,
         index: usize,
         phase: PublicationMaterializationPhase,
-        quarantine: Option<String>,
     ) -> Result<(), RepositoryError> {
-        let expected_quarantine = self.quarantine_name(index)?;
-        if (phase == PublicationMaterializationPhase::Clean && quarantine.is_some())
-            || (phase != PublicationMaterializationPhase::Clean && quarantine.is_none())
-        {
-            return Err(RepositoryError::InvalidPublicationJournal);
-        }
-        if phase != PublicationMaterializationPhase::Clean
-            && quarantine.as_deref() != Some(expected_quarantine.as_str())
-        {
-            return Err(RepositoryError::InvalidPublicationJournal);
-        }
+        let quarantine = (phase != PublicationMaterializationPhase::Clean)
+            .then(|| self.quarantine_name(index))
+            .transpose()?;
+        let materialization = PublicationMaterialization::from_parts(phase, quarantine)?;
         let entry = self
             .entries
             .get_mut(index)
             .ok_or(RepositoryError::InvalidPublicationJournal)?;
-        entry.materialization = PublicationMaterialization { phase, quarantine };
+        entry.materialization = materialization;
         Ok(())
     }
 }
@@ -2044,22 +2065,82 @@ struct CheckoutRecoveryJournal {
     runtime: RuntimeGeneration,
     force_token: CheckoutPlanToken,
     discard_paths: Vec<ManagedPath>,
-    phase: CheckoutRecoveryPhase,
-    before: Option<CwdGeneration>,
-    discarded: Option<CwdGeneration>,
-    after: Option<CwdGeneration>,
+    state: CheckoutRecoveryState,
 }
 
-/// Durable Git-visible boundaries of one force-discard transition.
+/// Durable Git-visible boundaries of one force-discard transition, each with
+/// the CWD generations observed up to it.
 ///
 /// Each state is written only after the preceding Git operation has reached a
 /// fully observable CWD generation. Recovery therefore either recognizes an
 /// exact recorded generation or stops without applying a broad reset.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CheckoutRecoveryPhase {
-    Prepared,
-    Discarded,
-    Applied,
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum CheckoutRecoveryState {
+    /// A version-1 record: the intent without any CWD generation. It cannot be
+    /// written any more, and recovery keeps its historical no-mutation
+    /// behavior.
+    PreparedWithoutGeneration,
+    Prepared {
+        before: CwdGeneration,
+    },
+    Discarded {
+        before: CwdGeneration,
+        discarded: CwdGeneration,
+    },
+    Applied {
+        before: CwdGeneration,
+        discarded: CwdGeneration,
+        after: CwdGeneration,
+    },
+}
+
+impl CheckoutRecoveryState {
+    /// Ensures every journalled generation belongs to the transition it
+    /// claims to record. Recovery must not treat independently decodable CWD
+    /// snapshots as interchangeable: the discard boundary retains the old
+    /// attachment, while the applied boundary must carry the selected target
+    /// attachment. This is deliberately checked before recovery can clear a
+    /// journal or invoke Git.
+    fn validate(&self, target: &CheckoutTarget) -> Result<(), RepositoryError> {
+        let valid = match self {
+            Self::PreparedWithoutGeneration | Self::Prepared { .. } => true,
+            Self::Discarded { before, discarded } => {
+                discarded.head == before.head && discarded.branch == before.branch
+            }
+            Self::Applied {
+                before,
+                discarded,
+                after,
+            } => {
+                discarded.head == before.head
+                    && discarded.branch == before.branch
+                    && after.head.as_ref() == Some(target.commit())
+                    && after.branch.as_deref() == target.branch_name()
+            }
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(RepositoryError::InvalidCheckoutJournal)
+        }
+    }
+}
+
+/// What restart recovery does with a retained force-discard record once it
+/// has compared the record with the current CWD.
+enum CheckoutRecoveryStep {
+    /// A version-1 record: prove the intent is still current and release it.
+    ReleaseLegacyIntent,
+    /// Nothing was switched and the CWD is the recorded one: prove the
+    /// original preflight still holds and release the record.
+    ReleasePrepared,
+    /// The recorded transition finished and the CWD is the recorded result.
+    ReleaseApplied,
+    /// The scoped discard is recorded and current: select the target.
+    SelectTarget,
+    /// Git selected the target but the process stopped before journalling the
+    /// result; the observed generation proves it is the recorded transition.
+    AdoptSelection(CwdGeneration),
 }
 
 impl CheckoutRecoveryJournal {
@@ -2069,10 +2150,19 @@ impl CheckoutRecoveryJournal {
             runtime: discard.preflight.cwd.runtime,
             force_token: discard.force_token,
             discard_paths: discard.discard_paths.clone(),
-            phase: CheckoutRecoveryPhase::Prepared,
-            before: Some(discard.preflight.cwd.clone()),
-            discarded: None,
-            after: None,
+            state: CheckoutRecoveryState::Prepared {
+                before: discard.preflight.cwd.clone(),
+            },
+        }
+    }
+
+    /// The CWD recorded before the discard, absent only in a version-1 record.
+    fn before(&self) -> Option<&CwdGeneration> {
+        match &self.state {
+            CheckoutRecoveryState::PreparedWithoutGeneration => None,
+            CheckoutRecoveryState::Prepared { before }
+            | CheckoutRecoveryState::Discarded { before, .. }
+            | CheckoutRecoveryState::Applied { before, .. } => Some(before),
         }
     }
 
@@ -2081,57 +2171,34 @@ impl CheckoutRecoveryJournal {
             && self.runtime == discard.preflight.cwd.runtime
             && self.force_token == discard.force_token
             && self.discard_paths == discard.discard_paths
-            && self.before.as_ref() == Some(&discard.preflight.cwd)
+            && self.before() == Some(&discard.preflight.cwd)
     }
 
-    fn record_discarded(&mut self, cwd: CwdGeneration) -> Result<(), RepositoryError> {
-        if self.phase != CheckoutRecoveryPhase::Prepared || self.discarded.is_some() {
+    fn record_discarded(&mut self, discarded: CwdGeneration) -> Result<(), RepositoryError> {
+        let CheckoutRecoveryState::Prepared { before } = &self.state else {
             return Err(RepositoryError::InvalidCheckoutJournal);
-        }
-        self.phase = CheckoutRecoveryPhase::Discarded;
-        self.discarded = Some(cwd);
+        };
+        let next = CheckoutRecoveryState::Discarded {
+            before: before.clone(),
+            discarded,
+        };
+        next.validate(&self.target)?;
+        self.state = next;
         Ok(())
     }
 
-    fn record_applied(&mut self, cwd: CwdGeneration) -> Result<(), RepositoryError> {
-        if self.phase != CheckoutRecoveryPhase::Discarded || self.after.is_some() {
+    fn record_applied(&mut self, after: CwdGeneration) -> Result<(), RepositoryError> {
+        let CheckoutRecoveryState::Discarded { before, discarded } = &self.state else {
             return Err(RepositoryError::InvalidCheckoutJournal);
-        }
-        self.phase = CheckoutRecoveryPhase::Applied;
-        self.after = Some(cwd);
+        };
+        let next = CheckoutRecoveryState::Applied {
+            before: before.clone(),
+            discarded: discarded.clone(),
+            after,
+        };
+        next.validate(&self.target)?;
+        self.state = next;
         Ok(())
-    }
-
-    /// Ensures every journalled generation belongs to the transition it
-    /// claims to record. Recovery must not treat independently decodable CWD
-    /// snapshots as interchangeable: the discard boundary retains the old
-    /// attachment, while the applied boundary must carry the selected target
-    /// attachment. This is deliberately checked before recovery can clear a
-    /// journal or invoke Git.
-    fn validate_generation_transition(&self) -> Result<(), RepositoryError> {
-        match (
-            self.phase,
-            self.before.as_ref(),
-            self.discarded.as_ref(),
-            self.after.as_ref(),
-        ) {
-            (CheckoutRecoveryPhase::Prepared, None, None, None) => Ok(()),
-            (CheckoutRecoveryPhase::Prepared, Some(_), None, None) => Ok(()),
-            (CheckoutRecoveryPhase::Discarded, Some(before), Some(discarded), None)
-                if discarded.head == before.head && discarded.branch == before.branch =>
-            {
-                Ok(())
-            }
-            (CheckoutRecoveryPhase::Applied, Some(before), Some(discarded), Some(after))
-                if discarded.head == before.head
-                    && discarded.branch == before.branch
-                    && after.head.as_ref() == Some(self.target.commit())
-                    && after.branch.as_deref() == self.target.branch_name() =>
-            {
-                Ok(())
-            }
-            _ => Err(RepositoryError::InvalidCheckoutJournal),
-        }
     }
 
     fn encode(&self) -> Result<Vec<u8>, RepositoryError> {
@@ -2160,20 +2227,25 @@ impl CheckoutRecoveryJournal {
                     .ok_or(RepositoryError::InvalidCheckoutJournal)?,
             )?;
         }
-        bytes.push(match self.phase {
-            CheckoutRecoveryPhase::Prepared => 1,
-            CheckoutRecoveryPhase::Discarded => 2,
-            CheckoutRecoveryPhase::Applied => 3,
-        });
-        encode_checkout_cwd(
-            &mut bytes,
-            self.before
-                .as_ref()
-                .ok_or(RepositoryError::InvalidCheckoutJournal)?,
-        )?;
-        encode_optional_checkout_cwd(&mut bytes, self.discarded.as_ref())?;
-        encode_optional_checkout_cwd(&mut bytes, self.after.as_ref())?;
-        self.validate_generation_transition()?;
+        let (phase, before, discarded, after) = match &self.state {
+            CheckoutRecoveryState::PreparedWithoutGeneration => {
+                return Err(RepositoryError::InvalidCheckoutJournal);
+            }
+            CheckoutRecoveryState::Prepared { before } => (1, before, None, None),
+            CheckoutRecoveryState::Discarded { before, discarded } => {
+                (2, before, Some(discarded), None)
+            }
+            CheckoutRecoveryState::Applied {
+                before,
+                discarded,
+                after,
+            } => (3, before, Some(discarded), Some(after)),
+        };
+        bytes.push(phase);
+        encode_checkout_cwd(&mut bytes, before)?;
+        encode_optional_checkout_cwd(&mut bytes, discarded)?;
+        encode_optional_checkout_cwd(&mut bytes, after)?;
+        self.state.validate(&self.target)?;
         if bytes.len() > MAX_JOURNAL_BYTES {
             return Err(RepositoryError::InvalidCheckoutJournal);
         }
@@ -2235,47 +2307,43 @@ impl CheckoutRecoveryJournal {
                 runtime,
                 force_token,
                 discard_paths,
-                phase: CheckoutRecoveryPhase::Prepared,
-                before: None,
-                discarded: None,
-                after: None,
+                state: CheckoutRecoveryState::PreparedWithoutGeneration,
             });
         }
         let phase = match take_byte(bytes, &mut cursor)? {
-            1 => CheckoutRecoveryPhase::Prepared,
-            2 => CheckoutRecoveryPhase::Discarded,
-            3 => CheckoutRecoveryPhase::Applied,
+            phase @ 1..=3 => phase,
             _ => return Err(RepositoryError::InvalidCheckoutJournal),
         };
-        let before = Some(decode_checkout_cwd(
-            bytes,
-            &mut cursor,
-            object_id_length,
-            version >= 3,
-        )?);
+        let before = decode_checkout_cwd(bytes, &mut cursor, object_id_length, version >= 3)?;
         let discarded =
             decode_optional_checkout_cwd(bytes, &mut cursor, object_id_length, version >= 3)?;
         let after =
             decode_optional_checkout_cwd(bytes, &mut cursor, object_id_length, version >= 3)?;
         if cursor != bytes.len()
-            || before.as_ref().is_none_or(|cwd| cwd.runtime != runtime)
+            || before.runtime != runtime
             || discarded.as_ref().is_some_and(|cwd| cwd.runtime != runtime)
             || after.as_ref().is_some_and(|cwd| cwd.runtime != runtime)
         {
             return Err(RepositoryError::InvalidCheckoutJournal);
         }
-        let journal = Self {
+        let state = match (phase, discarded, after) {
+            (1, None, None) => CheckoutRecoveryState::Prepared { before },
+            (2, Some(discarded), None) => CheckoutRecoveryState::Discarded { before, discarded },
+            (3, Some(discarded), Some(after)) => CheckoutRecoveryState::Applied {
+                before,
+                discarded,
+                after,
+            },
+            _ => return Err(RepositoryError::InvalidCheckoutJournal),
+        };
+        state.validate(&target)?;
+        Ok(Self {
             target,
             runtime,
             force_token,
             discard_paths,
-            phase,
-            before,
-            discarded,
-            after,
-        };
-        journal.validate_generation_transition()?;
-        Ok(journal)
+            state,
+        })
     }
 }
 
@@ -2906,8 +2974,6 @@ impl Repository {
         &self,
         max_commits: usize,
     ) -> Result<Vec<CommittedLogEntry>, RepositoryError> {
-        const MAX_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
-
         if max_commits == 0 || self.head()?.is_none() {
             return Ok(Vec::new());
         }
@@ -2918,30 +2984,8 @@ impl Repository {
             .args(["log", "-z"])
             .arg(format!("--max-count={max_commits}"))
             .arg("--format=format:%H%x00%cI%x00%an%x00%s%x00")
-            .arg("HEAD")
-            .stdout(Stdio::piped());
-        let mut child = command
-            .spawn()
-            .map_err(|_| RepositoryError::GitUnavailable)?;
-        let mut output = Vec::new();
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or(RepositoryError::GitOperationFailed)?;
-        let read_result = stdout
-            .take((MAX_OUTPUT_BYTES + 1) as u64)
-            .read_to_end(&mut output);
-        if read_result.is_err() || output.len() > MAX_OUTPUT_BYTES {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(RepositoryError::GitOperationFailed);
-        }
-        let status = child
-            .wait()
-            .map_err(|_| RepositoryError::GitOperationFailed)?;
-        if !status.success() {
-            return Err(RepositoryError::GitOperationFailed);
-        }
+            .arg("HEAD");
+        let output = run_bounded_listing(command)?;
 
         let object_id_length = self.native_object_id_length()?;
         let mut fields = output.split(|byte| *byte == 0);
@@ -2984,8 +3028,6 @@ impl Repository {
         start: &str,
         max_commits: usize,
     ) -> Result<Vec<CommittedRevisionSnapshot>, RepositoryError> {
-        const MAX_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
-
         if max_commits > MAX_COMMITTED_REVISION_WALK {
             return Err(RepositoryError::SourceTreeLimit);
         }
@@ -2995,37 +3037,13 @@ impl Repository {
 
         let object_id_length = self.native_object_id_length()?;
         let mut command = self.command();
-        command
-            .env("GIT_NO_LAZY_FETCH", "1")
-            .args([
-                "log",
-                &format!("--max-count={max_commits}"),
-                "--format=%H %T%x09%ct%x09%an <%ae>%x09%(trailers:key=Orna-Migration,valueonly)",
-                start,
-            ])
-            .stdout(Stdio::piped());
-        let mut child = command
-            .spawn()
-            .map_err(|_| RepositoryError::GitUnavailable)?;
-        let mut output = Vec::new();
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or(RepositoryError::GitOperationFailed)?;
-        let read_result = stdout
-            .take((MAX_OUTPUT_BYTES + 1) as u64)
-            .read_to_end(&mut output);
-        if read_result.is_err() || output.len() > MAX_OUTPUT_BYTES {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(RepositoryError::GitOperationFailed);
-        }
-        let status = child
-            .wait()
-            .map_err(|_| RepositoryError::GitOperationFailed)?;
-        if !status.success() {
-            return Err(RepositoryError::GitOperationFailed);
-        }
+        command.env("GIT_NO_LAZY_FETCH", "1").args([
+            "log",
+            &format!("--max-count={max_commits}"),
+            "--format=%H %T%x09%ct%x09%an <%ae>%x09%(trailers:key=Orna-Migration,valueonly)",
+            start,
+        ]);
+        let output = run_bounded_listing(command)?;
         let text = std::str::from_utf8(&output).map_err(|_| RepositoryError::GitOperationFailed)?;
         let mut snapshots = Vec::new();
         for line in text.lines() {
@@ -3099,8 +3117,6 @@ impl Repository {
         &self,
         max_branches: usize,
     ) -> Result<Vec<CommittedBranch>, RepositoryError> {
-        const MAX_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
-
         if max_branches == 0 {
             return Ok(Vec::new());
         }
@@ -3111,30 +3127,8 @@ impl Repository {
             .args(["for-each-ref", "--count"])
             .arg(max_branches.to_string())
             .arg("--format=%(refname:strip=2)%00%(objectname)")
-            .arg("refs/heads")
-            .stdout(Stdio::piped());
-        let mut child = command
-            .spawn()
-            .map_err(|_| RepositoryError::GitUnavailable)?;
-        let mut output = Vec::new();
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or(RepositoryError::GitOperationFailed)?;
-        let read_result = stdout
-            .take((MAX_OUTPUT_BYTES + 1) as u64)
-            .read_to_end(&mut output);
-        if read_result.is_err() || output.len() > MAX_OUTPUT_BYTES {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(RepositoryError::GitOperationFailed);
-        }
-        let status = child
-            .wait()
-            .map_err(|_| RepositoryError::GitOperationFailed)?;
-        if !status.success() {
-            return Err(RepositoryError::GitOperationFailed);
-        }
+            .arg("refs/heads");
+        let output = run_bounded_listing(command)?;
 
         let object_id_length = self.native_object_id_length()?;
         let mut branches = Vec::new();
@@ -3258,109 +3252,59 @@ impl Repository {
         self.objects().check_expansion(expected_head.as_str(), "")?;
         self.reject_final_loose_path_collisions(expected_head, changes)?;
 
-        self.runtime.ensure_exists()?;
-        fs::create_dir_all(self.runtime.locks())
-            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
-        let index = self.runtime.locks().join(format!(
-            "private-index-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_err(|_| RepositoryError::LocalStateUnavailable)?
-                .as_nanos()
-        ));
-        fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&index)
-            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
-        fs::remove_file(&index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        let index = self.private_index()?;
+        let mut read_tree = self.command();
+        read_tree
+            .env("GIT_INDEX_FILE", index.path())
+            .args(["read-tree", expected_head.as_str()]);
+        self.run(read_tree)?;
 
-        let result = (|| {
-            let mut read_tree = self.command();
-            read_tree
-                .env("GIT_INDEX_FILE", &index)
-                .args(["read-tree", expected_head.as_str()]);
-            self.run(read_tree)?;
-
-            for change in changes {
-                if let Some(bytes) = change.bytes() {
-                    let object = self.hash_object(bytes)?;
-                    let cacheinfo = format!(
-                        "100644,{object},{}",
-                        change
-                            .path
-                            .as_path()
-                            .to_str()
-                            .ok_or(RepositoryError::UnsafeManagedPath)?
-                    );
-                    let mut update = self.command();
-                    update.env("GIT_INDEX_FILE", &index).args([
-                        "update-index",
-                        "--add",
-                        "--cacheinfo",
-                        &cacheinfo,
-                    ]);
-                    self.run(update)?;
-                } else {
-                    let mut update = self.command();
-                    update
-                        .env("GIT_INDEX_FILE", &index)
-                        .args(["update-index", "--force-remove", "--"])
-                        .arg(change.path.as_path());
-                    self.run(update)?;
-                }
+        for change in changes {
+            if let Some(bytes) = change.bytes() {
+                let object = self.hash_object(bytes)?;
+                let cacheinfo = format!(
+                    "100644,{object},{}",
+                    change
+                        .path
+                        .as_path()
+                        .to_str()
+                        .ok_or(RepositoryError::UnsafeManagedPath)?
+                );
+                let mut update = self.command();
+                update.env("GIT_INDEX_FILE", index.path()).args([
+                    "update-index",
+                    "--add",
+                    "--cacheinfo",
+                    &cacheinfo,
+                ]);
+                self.run(update)?;
+            } else {
+                let mut update = self.command();
+                update
+                    .env("GIT_INDEX_FILE", index.path())
+                    .args(["update-index", "--force-remove", "--"])
+                    .arg(change.path.as_path());
+                self.run(update)?;
             }
-            match store_projection {
-                None => {}
-                Some(StoreBinding::Validated { graph, root }) => {
-                    graph
-                        .pin_store_subtree_in_index(&index, root)
-                        .map_err(RepositoryError::Graph)?;
-                }
-                Some(StoreBinding::Decoded(root)) => {
-                    bind_tree_entry_in_index(
-                        || self.command(),
-                        &index,
-                        STORE_PATH,
-                        "040000",
-                        &root.to_hex(),
-                    )?;
-                }
+        }
+        match store_projection {
+            None => {}
+            Some(StoreBinding::Validated { graph, root }) => {
+                graph
+                    .pin_store_subtree_in_index(index.path(), root)
+                    .map_err(RepositoryError::Graph)?;
             }
-
-            let mut write_tree = self.command();
-            write_tree
-                .env("GIT_INDEX_FILE", &index)
-                .args(["write-tree"]);
-            let tree =
-                self.index_tree_from_native_oid(trim_output(&self.run(write_tree)?.stdout))?;
-
-            let mut commit_tree = self.command();
-            commit_tree.args([
-                "commit-tree",
-                tree.as_str(),
-                "-p",
-                expected_head.as_str(),
-                "-m",
-            ]);
-            if let Some(timestamp) = commit_time {
-                // One offset for both identities keeps the object independent
-                // of the host's time zone as well as its clock.
-                let date = format!("@{timestamp} +0000");
-                commit_tree.env("GIT_AUTHOR_DATE", &date);
-                commit_tree.env("GIT_COMMITTER_DATE", &date);
+            Some(StoreBinding::Decoded(root)) => {
+                bind_tree_entry_in_index(
+                    || self.command(),
+                    index.path(),
+                    STORE_PATH,
+                    "040000",
+                    &root.to_hex(),
+                )?;
             }
-            commit_tree.arg(message);
-            let commit =
-                self.snapshot_from_native_oid(trim_output(&self.run(commit_tree)?.stdout))?;
-            if self.head()?.as_ref() != Some(expected_head) {
-                return Err(RepositoryError::StaleHead);
-            }
-            Ok(PrivateCommit { tree, commit })
-        })();
-        let _ = fs::remove_file(&index);
-        result
+        }
+        self.commit_private_index(index.path(), expected_head, message, commit_time)
     }
 
     /// Builds one publication candidate `N = H + P` from the captured base and
@@ -3402,59 +3346,79 @@ impl Repository {
                 actual: store_root.as_bytes().len(),
             }));
         }
+        let index = self.private_index()?;
+        let mut read_tree = self.command();
+        read_tree
+            .env("GIT_INDEX_FILE", index.path())
+            .args(["read-tree", expected_head.as_str()]);
+        self.run(read_tree)?;
+
+        // The store root must be a real decodable OGS-1 tree, so a raw
+        // object ID cannot be planted at the store position.
+        graph
+            .pin_store_subtree_in_index(index.path(), store_root)
+            .map_err(RepositoryError::Graph)?;
+        self.commit_private_index(index.path(), expected_head, message, None)
+    }
+
+    /// A fresh private index path under the runtime locks directory, for
+    /// building a candidate commit without touching the ordinary index. Git
+    /// creates the file itself; the returned guard removes it.
+    fn private_index(&self) -> Result<StagedFile, RepositoryError> {
         self.runtime.ensure_exists()?;
         fs::create_dir_all(self.runtime.locks())
             .map_err(|_| RepositoryError::LocalStateUnavailable)?;
-        let index = self.runtime.locks().join(format!(
+        let path = self.runtime.locks().join(format!(
             "private-index-{}-{}",
             std::process::id(),
             Uuid::new_v4()
         ));
+        // `create_new` proves the name is unused before Git claims it.
         fs::OpenOptions::new()
             .create_new(true)
             .write(true)
-            .open(&index)
+            .open(&path)
             .map_err(|_| RepositoryError::LocalStateUnavailable)?;
-        fs::remove_file(&index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        fs::remove_file(&path).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        Ok(StagedFile::reserve(path))
+    }
 
-        let result = (|| {
-            let mut read_tree = self.command();
-            read_tree
-                .env("GIT_INDEX_FILE", &index)
-                .args(["read-tree", expected_head.as_str()]);
-            self.run(read_tree)?;
+    /// Writes the private `index` as a tree and commits it as a child of
+    /// `expected_head`. `commit_time` pins the time of both identities when
+    /// the object must be reproducible. The commit is refused if `HEAD` moved
+    /// while it was built.
+    fn commit_private_index(
+        &self,
+        index: &Path,
+        expected_head: &GitCommitRef,
+        message: &str,
+        commit_time: Option<i64>,
+    ) -> Result<PrivateCommit, RepositoryError> {
+        let mut write_tree = self.command();
+        write_tree.env("GIT_INDEX_FILE", index).args(["write-tree"]);
+        let tree = self.index_tree_from_native_oid(trim_output(&self.run(write_tree)?.stdout))?;
 
-            // The store root must be a real decodable OGS-1 tree, so a raw
-            // object ID cannot be planted at the store position.
-            graph
-                .pin_store_subtree_in_index(&index, store_root)
-                .map_err(RepositoryError::Graph)?;
-
-            let mut write_tree = self.command();
-            write_tree
-                .env("GIT_INDEX_FILE", &index)
-                .args(["write-tree"]);
-            let tree =
-                self.index_tree_from_native_oid(trim_output(&self.run(write_tree)?.stdout))?;
-
-            let mut commit_tree = self.command();
-            commit_tree.args([
-                "commit-tree",
-                tree.as_str(),
-                "-p",
-                expected_head.as_str(),
-                "-m",
-            ]);
-            commit_tree.arg(message);
-            let commit =
-                self.snapshot_from_native_oid(trim_output(&self.run(commit_tree)?.stdout))?;
-            if self.head()?.as_ref() != Some(expected_head) {
-                return Err(RepositoryError::StaleHead);
-            }
-            Ok(PrivateCommit { tree, commit })
-        })();
-        let _ = fs::remove_file(&index);
-        result
+        let mut commit_tree = self.command();
+        commit_tree.args([
+            "commit-tree",
+            tree.as_str(),
+            "-p",
+            expected_head.as_str(),
+            "-m",
+        ]);
+        if let Some(timestamp) = commit_time {
+            // One offset for both identities keeps the object independent
+            // of the host's time zone as well as its clock.
+            let date = format!("@{timestamp} +0000");
+            commit_tree.env("GIT_AUTHOR_DATE", &date);
+            commit_tree.env("GIT_COMMITTER_DATE", &date);
+        }
+        commit_tree.arg(message);
+        let commit = self.snapshot_from_native_oid(trim_output(&self.run(commit_tree)?.stdout))?;
+        if self.head()?.as_ref() != Some(expected_head) {
+            return Err(RepositoryError::StaleHead);
+        }
+        Ok(PrivateCommit { tree, commit })
     }
 
     /// Advances the symbolic current branch to a previously built private
@@ -3711,65 +3675,62 @@ impl Repository {
             return Err(RepositoryError::UnsafeManagedPath);
         }
 
-        let candidate_index = index
-            .parent()
-            .ok_or(RepositoryError::LocalStateUnavailable)?
-            .join(format!("index-candidate-{}", Uuid::new_v4()));
-        write_new_index_candidate(&candidate_index, base_index)?;
-        let result = (|| {
-            for path in paths {
-                let encoded = path
-                    .as_path()
-                    .to_str()
-                    .ok_or(RepositoryError::UnsafeManagedPath)?;
-                match self.candidate_tree_entry(candidate, path)? {
-                    Some((mode, object)) => bind_tree_entry_in_index(
-                        || self.command(),
-                        &candidate_index,
-                        encoded,
-                        &mode,
-                        &object,
-                    )?,
-                    None => {
-                        let mut update = self.command();
-                        update
-                            .env("GIT_INDEX_FILE", &candidate_index)
-                            .args(["update-index", "--force-remove", "--"])
-                            .arg(path.as_path());
-                        self.run(update)?;
-                    }
+        let candidate_index = StagedFile::create(
+            index
+                .parent()
+                .ok_or(RepositoryError::LocalStateUnavailable)?
+                .join(format!("index-candidate-{}", Uuid::new_v4())),
+            base_index,
+        )?;
+        for path in paths {
+            let encoded = path
+                .as_path()
+                .to_str()
+                .ok_or(RepositoryError::UnsafeManagedPath)?;
+            match self.candidate_tree_entry(candidate, path)? {
+                Some((mode, object)) => bind_tree_entry_in_index(
+                    || self.command(),
+                    candidate_index.path(),
+                    encoded,
+                    &mode,
+                    &object,
+                )?,
+                None => {
+                    let mut update = self.command();
+                    update
+                        .env("GIT_INDEX_FILE", candidate_index.path())
+                        .args(["update-index", "--force-remove", "--"])
+                        .arg(path.as_path());
+                    self.run(update)?;
                 }
             }
-            // Reconcile store leaves before atomically installing the candidate index.
-            self.reconcile_store_worktree_transition(expected_index, candidate, true)?;
-            // Gate D boundary: the store worktree has been rewritten but the
-            // candidate index is not yet installed (ORNA-PUB-005/PUB-016).
-            crate::publication_crash_barrier("store-worktree");
-            self.configure_store_tree_skip_worktree(&candidate_index)?;
-            fs::File::open(&candidate_index)
-                .and_then(|file| file.sync_all())
-                .map_err(|_| RepositoryError::LocalStateUnavailable)?;
-            let current_index =
-                fs::read(&index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
-            if current_index != base_index || self.head()?.as_ref() != Some(candidate.commit()) {
-                return Err(RepositoryError::StaleHead);
-            }
-            fs::rename(&candidate_index, &index)
-                .map_err(|_| RepositoryError::LocalStateUnavailable)?;
-            fs::File::open(
-                index
-                    .parent()
-                    .ok_or(RepositoryError::LocalStateUnavailable)?,
-            )
-            .and_then(|directory| directory.sync_all())
+        }
+        // Reconcile store leaves before atomically installing the candidate index.
+        self.reconcile_store_worktree_transition(expected_index, candidate, true)?;
+        // Gate D boundary: the store worktree has been rewritten but the
+        // candidate index is not yet installed (ORNA-PUB-005/PUB-016).
+        crate::publication_crash_barrier("store-worktree");
+        self.configure_store_tree_skip_worktree(candidate_index.path())?;
+        fs::File::open(candidate_index.path())
+            .and_then(|file| file.sync_all())
             .map_err(|_| RepositoryError::LocalStateUnavailable)?;
-            Ok(IndexGeneration {
-                head: self.head()?,
-                tree: self.index_tree_from_file(&index)?,
-            })
-        })();
-        let _ = fs::remove_file(&candidate_index);
-        result
+        let current_index = fs::read(&index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        if current_index != base_index || self.head()?.as_ref() != Some(candidate.commit()) {
+            return Err(RepositoryError::StaleHead);
+        }
+        fs::rename(candidate_index.path(), &index)
+            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        fs::File::open(
+            index
+                .parent()
+                .ok_or(RepositoryError::LocalStateUnavailable)?,
+        )
+        .and_then(|directory| directory.sync_all())
+        .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        Ok(IndexGeneration {
+            head: self.head()?,
+            tree: self.index_tree_from_file(&index)?,
+        })
     }
 
     /// OGS envelope metadata stays materialized, but OGB-2 raw chunks remain
@@ -3885,54 +3846,51 @@ impl Repository {
         let parent = index
             .parent()
             .ok_or(RepositoryError::LocalStateUnavailable)?;
-        let candidate_index = parent.join(format!(".orna-index-recovery-{}", Uuid::new_v4()));
-        let result = (|| {
-            write_new_index_candidate(&candidate_index, &base_index)?;
-            let mut update = self.command();
-            update
-                .env("GIT_INDEX_FILE", &candidate_index)
-                .args([
-                    "update-index",
-                    if skip {
-                        "--skip-worktree"
-                    } else {
-                        "--no-skip-worktree"
-                    },
-                    "-z",
-                    "--stdin",
-                ])
-                .stdin(Stdio::piped());
-            let mut child = update
-                .spawn()
-                .map_err(|_| RepositoryError::GitUnavailable)?;
-            child
-                .stdin
-                .take()
-                .ok_or(RepositoryError::LocalStateUnavailable)?
-                .write_all(&encoded_paths)
-                .map_err(|_| RepositoryError::GitOperationFailed)?;
-            let output = child
-                .wait_with_output()
-                .map_err(|_| RepositoryError::GitUnavailable)?;
-            if !output.status.success() {
-                return Err(RepositoryError::GitOperationFailed);
-            }
-            fs::File::open(&candidate_index)
-                .and_then(|file| file.sync_all())
-                .map_err(|_| RepositoryError::LocalStateUnavailable)?;
-            let current_index =
-                fs::read(&index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
-            if current_index != base_index || self.head()?.as_ref() != Some(journal.new_head()) {
-                return Err(RepositoryError::StaleHead);
-            }
-            fs::rename(&candidate_index, &index)
-                .map_err(|_| RepositoryError::LocalStateUnavailable)?;
-            fs::File::open(parent)
-                .and_then(|directory| directory.sync_all())
-                .map_err(|_| RepositoryError::LocalStateUnavailable)
-        })();
-        let _ = fs::remove_file(&candidate_index);
-        result
+        let candidate_index = StagedFile::create(
+            parent.join(format!(".orna-index-recovery-{}", Uuid::new_v4())),
+            &base_index,
+        )?;
+        let mut update = self.command();
+        update
+            .env("GIT_INDEX_FILE", candidate_index.path())
+            .args([
+                "update-index",
+                if skip {
+                    "--skip-worktree"
+                } else {
+                    "--no-skip-worktree"
+                },
+                "-z",
+                "--stdin",
+            ])
+            .stdin(Stdio::piped());
+        let mut child = update
+            .spawn()
+            .map_err(|_| RepositoryError::GitUnavailable)?;
+        child
+            .stdin
+            .take()
+            .ok_or(RepositoryError::LocalStateUnavailable)?
+            .write_all(&encoded_paths)
+            .map_err(|_| RepositoryError::GitOperationFailed)?;
+        let output = child
+            .wait_with_output()
+            .map_err(|_| RepositoryError::GitUnavailable)?;
+        if !output.status.success() {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+        fs::File::open(candidate_index.path())
+            .and_then(|file| file.sync_all())
+            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        let current_index = fs::read(&index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        if current_index != base_index || self.head()?.as_ref() != Some(journal.new_head()) {
+            return Err(RepositoryError::StaleHead);
+        }
+        fs::rename(candidate_index.path(), &index)
+            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|_| RepositoryError::LocalStateUnavailable)
     }
     /// Enumerates regular blobs in a committed native-store tree.
     /// Tree entries are validated before they can affect the worktree.
@@ -5909,7 +5867,7 @@ impl Repository {
         let quarantine = parent.join(&quarantine_name);
         let quarantine_bytes = self.read_managed_file(&quarantine)?;
         let current = self.read_managed_file(&target)?;
-        let phase = entry.materialization().phase;
+        let phase = entry.materialization().phase();
 
         if phase == PublicationMaterializationPhase::Clean {
             if quarantine_bytes.is_some() {
@@ -5921,11 +5879,8 @@ impl Repository {
             if current.as_deref() != entry.expected() {
                 return Err(Self::managed_content_conflict(journal, &entry));
             }
-            journal.set_materialization(
-                index,
-                PublicationMaterializationPhase::QuarantinePrepared,
-                Some(quarantine_name.clone()),
-            )?;
+            journal
+                .set_materialization(index, PublicationMaterializationPhase::QuarantinePrepared)?;
             self.write_publication_journal_locked(journal)?;
         } else if let Some(bytes) = quarantine_bytes.as_deref() {
             if Some(bytes) != entry.expected() {
@@ -5939,7 +5894,7 @@ impl Repository {
                     entry.expected(),
                     entry.next(),
                 )?;
-                journal.set_materialization(index, PublicationMaterializationPhase::Clean, None)?;
+                journal.set_materialization(index, PublicationMaterializationPhase::Clean)?;
                 self.write_publication_journal_locked(journal)?;
                 return Ok(());
             }
@@ -5952,11 +5907,7 @@ impl Repository {
                 {
                     return Err(Self::managed_content_conflict(journal, &entry));
                 }
-                journal.set_materialization(
-                    index,
-                    PublicationMaterializationPhase::Installed,
-                    Some(quarantine_name.clone()),
-                )?;
+                journal.set_materialization(index, PublicationMaterializationPhase::Installed)?;
                 self.write_publication_journal_locked(journal)?;
             } else {
                 self.materialize_managed_file_impl_with_quarantine_locked(
@@ -5972,11 +5923,7 @@ impl Repository {
                 {
                     return Err(Self::managed_content_conflict(journal, &entry));
                 }
-                journal.set_materialization(
-                    index,
-                    PublicationMaterializationPhase::Installed,
-                    Some(quarantine_name.clone()),
-                )?;
+                journal.set_materialization(index, PublicationMaterializationPhase::Installed)?;
                 self.write_publication_journal_locked(journal)?;
             }
             self.remove_verified_quarantine(
@@ -5986,11 +5933,11 @@ impl Repository {
                 entry.expected(),
                 entry.next(),
             )?;
-            journal.set_materialization(index, PublicationMaterializationPhase::Clean, None)?;
+            journal.set_materialization(index, PublicationMaterializationPhase::Clean)?;
             self.write_publication_journal_locked(journal)?;
             return Ok(());
         } else if current.as_deref() == entry.next() {
-            journal.set_materialization(index, PublicationMaterializationPhase::Clean, None)?;
+            journal.set_materialization(index, PublicationMaterializationPhase::Clean)?;
             self.write_publication_journal_locked(journal)?;
             return Ok(());
         } else if phase != PublicationMaterializationPhase::QuarantinePrepared
@@ -6000,7 +5947,7 @@ impl Repository {
         }
 
         let mut after_boundary = |phase| {
-            journal.set_materialization(index, phase, Some(quarantine_name.clone()))?;
+            journal.set_materialization(index, phase)?;
             self.write_publication_journal_locked(journal)
         };
         self.materialize_managed_file_impl_with_quarantine_locked(
@@ -6011,7 +5958,7 @@ impl Repository {
             None,
             Some(&mut after_boundary),
         )?;
-        journal.set_materialization(index, PublicationMaterializationPhase::Clean, None)?;
+        journal.set_materialization(index, PublicationMaterializationPhase::Clean)?;
         self.write_publication_journal_locked(journal)
     }
 
@@ -7199,16 +7146,13 @@ impl Repository {
         let mut journal = match self.read_checkout_recovery_journal_locked()? {
             Some(journal)
                 if journal.matches_validated(discard)
-                    && journal.phase == CheckoutRecoveryPhase::Prepared =>
+                    && matches!(journal.state, CheckoutRecoveryState::Prepared { .. }) =>
             {
                 journal
             }
             Some(_) | None => return Err(RepositoryError::CheckoutRecoveryRequired),
         };
         self.verify_validated_checkout_discard_locked(discard)?;
-        if journal.before.as_ref() != Some(&discard.preflight.cwd) {
-            return Err(RepositoryError::CheckoutRecoveryRequired);
-        }
 
         self.restore_checkout_discard_paths(discard)?;
         journal.record_discarded(self.cwd_generation_locked(discard.preflight.cwd.runtime)?)?;
@@ -7293,56 +7237,73 @@ impl Repository {
         let Some(mut journal) = self.read_checkout_recovery_journal_locked()? else {
             return Ok(());
         };
-        if let Some(before) = journal.before.as_ref() {
-            let current = self.cwd_generation_locked(journal.runtime)?;
-            return match journal.phase {
-                CheckoutRecoveryPhase::Prepared if &current == before => {
-                    self.verify_prepared_checkout_journal_locked(&journal, true)?;
-                    self.clear_checkout_recovery_journal_locked()
+        let step = match &journal.state {
+            // Version-one journals did not contain enough state to recognize a
+            // post-mutation CWD. Retain their historical no-mutation recovery
+            // behavior rather than assuming a destructive transition completed.
+            CheckoutRecoveryState::PreparedWithoutGeneration => {
+                CheckoutRecoveryStep::ReleaseLegacyIntent
+            }
+            CheckoutRecoveryState::Prepared { before } => {
+                if &self.cwd_generation_locked(journal.runtime)? != before {
+                    return Err(RepositoryError::CheckoutRecoveryRequired);
                 }
-                CheckoutRecoveryPhase::Applied if journal.after.as_ref() == Some(&current) => {
-                    self.clear_checkout_recovery_journal_locked()
-                }
-                CheckoutRecoveryPhase::Discarded
-                    if journal.discarded.as_ref() == Some(&current) =>
+                CheckoutRecoveryStep::ReleasePrepared
+            }
+            CheckoutRecoveryState::Discarded { discarded, .. } => {
+                let current = self.cwd_generation_locked(journal.runtime)?;
+                if &current == discarded {
+                    CheckoutRecoveryStep::SelectTarget
+                } else if current.head.as_ref() == Some(journal.target.commit())
+                    && current.branch.as_deref() == journal.target.branch_name()
                 {
-                    // The target may be a movable branch. Re-resolve it while
-                    // the recovery lock is held before switching: otherwise a
-                    // branch update between discard and restart could make
-                    // recovery mutate HEAD/worktree to a different commit
-                    // than the one the force witness authorized.
-                    self.verify_prepared_checkout_journal_locked(&journal, false)?;
-                    self.switch_checkout_target(&journal.target)?;
-                    let after = self.cwd_generation_locked(journal.runtime)?;
-                    if after.head.as_ref() != Some(journal.target.commit())
-                        || after.branch.as_deref() != journal.target.branch_name()
-                    {
-                        return Err(RepositoryError::GitOperationFailed);
-                    }
-                    journal.record_applied(after)?;
-                    self.write_checkout_recovery_journal_locked(&journal)?;
-                    self.clear_checkout_recovery_journal_locked()
+                    // A process may stop after Git has selected the target but
+                    // before that observable CWD generation is journalled. The
+                    // target attachment proves this is the recorded transition,
+                    // while retaining the observed index and worktree state
+                    // avoids any broad reset over later local changes.
+                    CheckoutRecoveryStep::AdoptSelection(current)
+                } else {
+                    return Err(RepositoryError::CheckoutRecoveryRequired);
                 }
-                // A process may stop after Git has selected the target but
-                // before that observable CWD generation is journalled. The
-                // target attachment proves this is the recorded transition,
-                // while retaining the observed index and worktree state
-                // avoids any broad reset over later local changes.
-                CheckoutRecoveryPhase::Discarded
-                    if current.head.as_ref() == Some(journal.target.commit())
-                        && current.branch.as_deref() == journal.target.branch_name() =>
+            }
+            CheckoutRecoveryState::Applied { after, .. } => {
+                if &self.cwd_generation_locked(journal.runtime)? != after {
+                    return Err(RepositoryError::CheckoutRecoveryRequired);
+                }
+                CheckoutRecoveryStep::ReleaseApplied
+            }
+        };
+        match step {
+            CheckoutRecoveryStep::ReleaseLegacyIntent => {
+                self.verify_prepared_checkout_journal_locked(&journal, false)?;
+            }
+            CheckoutRecoveryStep::ReleasePrepared => {
+                self.verify_prepared_checkout_journal_locked(&journal, true)?;
+            }
+            CheckoutRecoveryStep::ReleaseApplied => {}
+            CheckoutRecoveryStep::SelectTarget => {
+                // The target may be a movable branch. Re-resolve it while
+                // the recovery lock is held before switching: otherwise a
+                // branch update between discard and restart could make
+                // recovery mutate HEAD/worktree to a different commit
+                // than the one the force witness authorized.
+                self.verify_prepared_checkout_journal_locked(&journal, false)?;
+                self.switch_checkout_target(&journal.target)?;
+                let after = self.cwd_generation_locked(journal.runtime)?;
+                if after.head.as_ref() != Some(journal.target.commit())
+                    || after.branch.as_deref() != journal.target.branch_name()
                 {
-                    journal.record_applied(current)?;
-                    self.write_checkout_recovery_journal_locked(&journal)?;
-                    self.clear_checkout_recovery_journal_locked()
+                    return Err(RepositoryError::GitOperationFailed);
                 }
-                _ => Err(RepositoryError::CheckoutRecoveryRequired),
-            };
+                journal.record_applied(after)?;
+                self.write_checkout_recovery_journal_locked(&journal)?;
+            }
+            CheckoutRecoveryStep::AdoptSelection(current) => {
+                journal.record_applied(current)?;
+                self.write_checkout_recovery_journal_locked(&journal)?;
+            }
         }
-        // Version-one journals did not contain enough state to recognize a
-        // post-mutation CWD. Retain their historical no-mutation recovery
-        // behavior rather than assuming a destructive transition completed.
-        self.verify_prepared_checkout_journal_locked(&journal, false)?;
         self.clear_checkout_recovery_journal_locked()
     }
 
@@ -9513,18 +9474,20 @@ impl Repository {
                 actual: captured,
             });
         }
-        let candidate = index
-            .parent()
-            .ok_or(RepositoryError::LocalStateUnavailable)?
-            .join(format!("index-candidate-{}", Uuid::new_v4()));
-        write_new_index_candidate(&candidate, &base_index)?;
+        let candidate = StagedFile::create(
+            index
+                .parent()
+                .ok_or(RepositoryError::LocalStateUnavailable)?
+                .join(format!("index-candidate-{}", Uuid::new_v4())),
+            &base_index,
+        )?;
         let permissions = fs::metadata(&index)
             .map_err(|_| RepositoryError::LocalStateUnavailable)?
             .permissions();
-        fs::set_permissions(&candidate, permissions)
+        fs::set_permissions(candidate.path(), permissions)
             .map_err(|_| RepositoryError::LocalStateUnavailable)?;
         let mut command = self.command();
-        command.env("GIT_INDEX_FILE", &candidate);
+        command.env("GIT_INDEX_FILE", candidate.path());
         match operation {
             ManagedIndexOperation::Add | ManagedIndexOperation::AddContents(_) => {
                 command.arg("add");
@@ -9537,37 +9500,24 @@ impl Repository {
         for path in paths {
             command.arg(path.as_path());
         }
-        if let Err(error) = self.run(command) {
-            let _ = fs::remove_file(&candidate);
-            return Err(error);
-        }
-        if let ManagedIndexOperation::AddContents(contents) = operation
-            && let Err(error) = self.prepare_index_contents(&candidate, &paths[0], contents)
-        {
-            let _ = fs::remove_file(&candidate);
-            return Err(error);
+        self.run(command)?;
+        if let ManagedIndexOperation::AddContents(contents) = operation {
+            self.prepare_index_contents(candidate.path(), &paths[0], contents)?;
         }
         if let Some(hook) = before_install.as_mut() {
             hook();
         }
-        fs::File::open(&candidate)
+        fs::File::open(candidate.path())
             .and_then(|file| file.sync_all())
             .map_err(|_| RepositoryError::LocalStateUnavailable)?;
 
         // Git itself serializes normal index writers through this pathname.
         // The candidate is prepared off-index; only an unchanged observed index
         // is atomically replaced while this lock exists.
-        let git_lock = match GitIndexLock::acquire(index.with_extension("lock")) {
-            Ok(lock) => lock,
-            Err(error) => {
-                let _ = fs::remove_file(&candidate);
-                return Err(error);
-            }
-        };
+        let git_lock = GitIndexLock::acquire(index.with_extension("lock"))?;
         let current_index = fs::read(&index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
         let current_head = self.head()?;
         if current_index != base_index || current_head != expected.head {
-            let _ = fs::remove_file(&candidate);
             drop(git_lock);
             let actual = self.index_generation()?;
             return Err(RepositoryError::StaleIndex {
@@ -9575,19 +9525,11 @@ impl Repository {
                 actual,
             });
         }
-        let contents_match = match operation {
-            ManagedIndexOperation::AddContents(contents) => paths
-                .first()
-                .ok_or(RepositoryError::NoManagedPaths)
-                .and_then(|path| self.ensure_managed_contents_match(path, contents)),
-            _ => Ok(()),
-        };
-        if let Err(error) = contents_match {
-            let _ = fs::remove_file(&candidate);
-            drop(git_lock);
-            return Err(error);
+        if let ManagedIndexOperation::AddContents(contents) = operation {
+            let path = paths.first().ok_or(RepositoryError::NoManagedPaths)?;
+            self.ensure_managed_contents_match(path, contents)?;
         }
-        fs::rename(&candidate, &index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        fs::rename(candidate.path(), &index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
         fs::File::open(
             index
                 .parent()
@@ -9930,17 +9872,49 @@ fn persist_runtime_owner_state(
         .map_err(|_| RepositoryError::LocalStateUnavailable)
 }
 
-/// Writes a brand-new index candidate. `create_new` refuses any existing file
-/// or symlink at the path, so a candidate is never written through a link or
-/// over an attacker-prepared name.
-fn write_new_index_candidate(path: &Path, bytes: &[u8]) -> Result<(), RepositoryError> {
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .map_err(|_| RepositoryError::LocalStateUnavailable)?;
-    file.write_all(bytes)
-        .map_err(|_| RepositoryError::LocalStateUnavailable)
+/// A file staged next to the one it will replace: an index candidate, or the
+/// private index a candidate commit is built from. Dropping it removes the
+/// file, so every early return leaves nothing behind; a successful rename has
+/// already moved the file away, which makes the removal a no-op.
+struct StagedFile {
+    path: PathBuf,
+}
+
+impl StagedFile {
+    /// Claims `path` for a file another process creates, such as the index Git
+    /// builds. Nothing is written here.
+    fn reserve(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    /// Writes `bytes` to a brand-new file. `create_new` refuses any existing
+    /// file or symlink at the path, so a candidate is never written through a
+    /// link or over an attacker-prepared name, and the guard exists only once
+    /// the file is ours to remove.
+    fn create(path: PathBuf, bytes: &[u8]) -> Result<Self, RepositoryError> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        let staged = Self { path };
+        file.write_all(bytes)
+            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        Ok(staged)
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for StagedFile {
+    fn drop(&mut self) {
+        // Best effort by design: the file is already gone after a successful
+        // rename, and a failed removal must not mask the error that ended the
+        // operation.
+        let _ = fs::remove_file(&self.path);
+    }
 }
 
 /// A process-lifetime local runtime owner lock.
@@ -10510,10 +10484,7 @@ impl GitIndexLock {
 
     #[cfg(target_os = "linux")]
     fn hex_digest(bytes: &[u8]) -> String {
-        Sha256::digest(bytes)
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect()
+        hex_encode(&Sha256::digest(bytes))
     }
 
     #[cfg(target_os = "linux")]
@@ -10954,6 +10925,41 @@ fn take_optional_bytes(
     *cursor = end;
     Ok(Some(value))
 }
+/// Most output a bounded Git listing (history, branches) may produce.
+const MAX_LISTING_BYTES: usize = 4 * 1024 * 1024;
+
+/// Runs `command` and returns its stdout, refusing anything past
+/// `MAX_LISTING_BYTES`. The child is killed once the bound is crossed, so a
+/// runaway listing cannot make this process buffer without limit.
+fn run_bounded_listing(mut command: Command) -> Result<Vec<u8>, RepositoryError> {
+    command.stdout(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|_| RepositoryError::GitUnavailable)?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or(RepositoryError::GitOperationFailed)?;
+    let mut output = Vec::new();
+    let read = stdout
+        .take(MAX_LISTING_BYTES as u64 + 1)
+        .read_to_end(&mut output);
+    if read.is_err() || output.len() > MAX_LISTING_BYTES {
+        // The child may already have exited, so a failed kill is not an
+        // error; the wait reaps it either way.
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(RepositoryError::GitOperationFailed);
+    }
+    let status = child
+        .wait()
+        .map_err(|_| RepositoryError::GitOperationFailed)?;
+    if !status.success() {
+        return Err(RepositoryError::GitOperationFailed);
+    }
+    Ok(output)
+}
+
 fn run_command(mut command: Command) -> Result<Output, RepositoryError> {
     let output = command
         .output()
@@ -11766,6 +11772,109 @@ mod tests {
         assert!(super::CheckoutRecoveryJournal::decode(&hostile, 40).is_err());
     }
 
+    /// The force-discard record advances Prepared, Discarded, Applied one
+    /// boundary at a time. No step can be skipped or repeated, and a boundary
+    /// is refused when its generation does not belong to the transition.
+    #[test]
+    fn checkout_journal_records_each_boundary_once_and_in_order() {
+        use super::{
+            CheckoutPlanToken, CheckoutRecoveryJournal, CheckoutRecoveryState, CheckoutTarget,
+            CwdGeneration, IndexGeneration, WorktreeState,
+        };
+
+        let cwd = |head: char, branch: &str| {
+            let head = GitCommitRef(head.to_string().repeat(40));
+            CwdGeneration {
+                head: Some(head.clone()),
+                branch: Some(branch.to_owned()),
+                index: IndexGeneration {
+                    head: Some(head),
+                    tree: None,
+                },
+                worktree: WorktreeState(Vec::new(), [0; 32]),
+                runtime: RuntimeGeneration::new(7),
+            }
+        };
+        let mut journal = CheckoutRecoveryJournal {
+            target: CheckoutTarget::Branch {
+                name: "main".to_owned(),
+                commit: GitCommitRef("b".repeat(40)),
+            },
+            runtime: RuntimeGeneration::new(7),
+            force_token: CheckoutPlanToken([9; 32]),
+            discard_paths: vec![ManagedPath::new("generated/row.orna").unwrap()],
+            state: CheckoutRecoveryState::Prepared {
+                before: cwd('a', "old"),
+            },
+        };
+        let prepared = journal.clone();
+
+        assert!(matches!(
+            journal.record_applied(cwd('b', "main")),
+            Err(RepositoryError::InvalidCheckoutJournal)
+        ));
+        assert!(matches!(
+            journal.record_discarded(cwd('c', "old")),
+            Err(RepositoryError::InvalidCheckoutJournal)
+        ));
+        assert!(matches!(
+            journal.record_discarded(cwd('a', "other")),
+            Err(RepositoryError::InvalidCheckoutJournal)
+        ));
+        assert_eq!(
+            journal, prepared,
+            "a refused boundary leaves the record as it was"
+        );
+
+        journal.record_discarded(cwd('a', "old")).unwrap();
+        assert!(matches!(
+            journal.record_discarded(cwd('a', "old")),
+            Err(RepositoryError::InvalidCheckoutJournal)
+        ));
+        assert!(matches!(
+            journal.record_applied(cwd('a', "old")),
+            Err(RepositoryError::InvalidCheckoutJournal)
+        ));
+        journal.record_applied(cwd('b', "main")).unwrap();
+        assert!(matches!(
+            journal.state,
+            CheckoutRecoveryState::Applied { .. }
+        ));
+        assert!(matches!(
+            journal.record_applied(cwd('b', "main")),
+            Err(RepositoryError::InvalidCheckoutJournal)
+        ));
+
+        let encoded = journal.encode().unwrap();
+        assert_eq!(
+            CheckoutRecoveryJournal::decode(&encoded, 40).unwrap(),
+            journal
+        );
+    }
+
+    /// A version-1 record has no CWD generation to write back, so it can be
+    /// read for recovery but never encoded again.
+    #[test]
+    fn checkout_journal_v1_record_is_read_only() {
+        let mut bytes = super::CHECKOUT_JOURNAL_MAGIC.to_vec();
+        bytes.push(1);
+        bytes.extend_from_slice(&7_u64.to_be_bytes());
+        bytes.push(2);
+        super::put_string(&mut bytes, &"a".repeat(40)).unwrap();
+        bytes.extend_from_slice(&[9; 32]);
+        bytes.extend_from_slice(&1_u32.to_le_bytes());
+        super::put_string(&mut bytes, "generated/row.orna").unwrap();
+        let journal = super::CheckoutRecoveryJournal::decode(&bytes, 40).unwrap();
+        assert_eq!(
+            journal.state,
+            super::CheckoutRecoveryState::PreparedWithoutGeneration
+        );
+        assert!(matches!(
+            journal.encode(),
+            Err(RepositoryError::InvalidCheckoutJournal)
+        ));
+    }
+
     #[test]
     fn publication_object_present_fails_closed_on_git_error() {
         let root = tempfile::TempDir::new().unwrap();
@@ -12060,10 +12169,33 @@ mod tests {
         fs::write(&candidate, b"attacker-owned").unwrap();
 
         assert!(matches!(
-            super::write_new_index_candidate(&candidate, b"index-bytes"),
+            super::StagedFile::create(candidate.clone(), b"index-bytes"),
             Err(RepositoryError::LocalStateUnavailable)
         ));
         assert_eq!(fs::read(&candidate).unwrap(), b"attacker-owned");
+    }
+
+    #[test]
+    fn staged_file_is_removed_on_drop_and_left_alone_once_installed() {
+        let root = tempfile::tempdir().unwrap();
+        let candidate = root.path().join("index-candidate-staged");
+        let staged = super::StagedFile::create(candidate.clone(), b"index-bytes").unwrap();
+        assert_eq!(fs::read(&candidate).unwrap(), b"index-bytes");
+        drop(staged);
+        assert!(
+            !candidate.exists(),
+            "dropping the guard removes the candidate"
+        );
+
+        let staged = super::StagedFile::create(candidate.clone(), b"index-bytes").unwrap();
+        let live = root.path().join("index");
+        fs::rename(staged.path(), &live).unwrap();
+        drop(staged);
+        assert_eq!(
+            fs::read(&live).unwrap(),
+            b"index-bytes",
+            "a candidate that was installed is not touched by the guard"
+        );
     }
 
     #[test]
@@ -13614,15 +13746,11 @@ mod tests {
         .unwrap();
         let conflict_name = conflict.quarantine_name(0).unwrap();
         conflict
-            .set_materialization(
-                0,
-                PublicationMaterializationPhase::QuarantinePrepared,
-                Some(conflict_name.clone()),
-            )
+            .set_materialization(0, PublicationMaterializationPhase::QuarantinePrepared)
             .unwrap();
         repository.write_publication_journal(&conflict).unwrap();
         let mut after_boundary = |phase| {
-            conflict.set_materialization(0, phase, Some(conflict_name.clone()))?;
+            conflict.set_materialization(0, phase)?;
             repository.write_publication_journal_locked(&conflict)?;
             if phase == PublicationMaterializationPhase::Quarantined {
                 fs::write(&conflict_target, b"external").unwrap();
@@ -13645,7 +13773,7 @@ mod tests {
         assert_eq!(fs::read(&conflict_target).unwrap(), b"external");
         let persisted = repository.read_publication_journal().unwrap().unwrap();
         assert_eq!(
-            persisted.entries()[0].materialization().phase,
+            persisted.entries()[0].materialization().phase(),
             PublicationMaterializationPhase::Quarantined
         );
 
@@ -13667,11 +13795,7 @@ mod tests {
         let delete_quarantine = delete_target.parent().unwrap().join(&delete_name);
         fs::write(&delete_quarantine, b"to-delete").unwrap();
         deletion
-            .set_materialization(
-                0,
-                PublicationMaterializationPhase::Installed,
-                Some(delete_name),
-            )
+            .set_materialization(0, PublicationMaterializationPhase::Installed)
             .unwrap();
         repository.write_publication_journal(&deletion).unwrap();
         let mut recovered = repository.read_publication_journal().unwrap().unwrap();
@@ -13681,7 +13805,7 @@ mod tests {
         assert!(!delete_target.exists());
         assert!(!delete_quarantine.exists());
         assert_eq!(
-            recovered.entries()[0].materialization().phase,
+            recovered.entries()[0].materialization().phase(),
             PublicationMaterializationPhase::Clean
         );
     }
@@ -13775,7 +13899,7 @@ mod tests {
         assert_eq!(fs::read(&target).unwrap(), b"foreign");
         let persisted = repository.read_publication_journal().unwrap().unwrap();
         assert_eq!(
-            persisted.entries()[0].materialization().phase,
+            persisted.entries()[0].materialization().phase(),
             PublicationMaterializationPhase::Clean
         );
     }
@@ -13791,11 +13915,7 @@ mod tests {
             managed_guard_journal(&repository, &path, Some(b"expected"), Some(b"next"), 33);
         let name = journal.quarantine_name(0).unwrap();
         journal
-            .set_materialization(
-                0,
-                PublicationMaterializationPhase::QuarantinePrepared,
-                Some(name.clone()),
-            )
+            .set_materialization(0, PublicationMaterializationPhase::QuarantinePrepared)
             .unwrap();
         let parent = root.path().join("generated");
         let quarantine = parent.join(&name);
@@ -13821,9 +13941,8 @@ mod tests {
         let path = ManagedPath::new("generated/row.orna").unwrap();
         let mut journal =
             managed_guard_journal(&repository, &path, Some(b"expected"), Some(b"next"), 34);
-        let name = journal.quarantine_name(0).unwrap();
         journal
-            .set_materialization(0, PublicationMaterializationPhase::Installed, Some(name))
+            .set_materialization(0, PublicationMaterializationPhase::Installed)
             .unwrap();
         let target = root.path().join(path.as_path());
         fs::create_dir_all(target.parent().unwrap()).unwrap();
@@ -13837,7 +13956,7 @@ mod tests {
         assert_eq!(fs::read(&target).unwrap(), b"expected");
         let persisted = repository.read_publication_journal().unwrap().unwrap();
         assert_eq!(
-            persisted.entries()[0].materialization().phase,
+            persisted.entries()[0].materialization().phase(),
             PublicationMaterializationPhase::Installed
         );
     }
@@ -14905,17 +15024,7 @@ mod tests {
         fs::create_dir_all(quarantine.parent().unwrap()).unwrap();
         fs::write(&quarantine, b"captured").unwrap();
         journal
-            .set_materialization(
-                0,
-                PublicationMaterializationPhase::Quarantined,
-                Some(
-                    quarantine
-                        .file_name()
-                        .unwrap()
-                        .to_string_lossy()
-                        .into_owned(),
-                ),
-            )
+            .set_materialization(0, PublicationMaterializationPhase::Quarantined)
             .unwrap();
         repository.write_publication_journal(&journal).unwrap();
         let mut recovered = repository.read_publication_journal().unwrap().unwrap();
@@ -14929,7 +15038,7 @@ mod tests {
         );
         assert!(!quarantine.exists());
         assert_eq!(
-            recovered.entries()[0].materialization().phase,
+            recovered.entries()[0].materialization().phase(),
             PublicationMaterializationPhase::Clean
         );
         assert_eq!(
@@ -14939,7 +15048,7 @@ mod tests {
                 .unwrap()
                 .entries()[0]
                 .materialization()
-                .phase,
+                .phase(),
             PublicationMaterializationPhase::Clean
         );
     }
@@ -15875,6 +15984,33 @@ mod tests {
             .materialize_managed_file(&path, Some(b"editor"), None)
             .unwrap();
         assert!(!target.exists());
+    }
+
+    /// A journal entry is `Clean` with no quarantine or past `Clean` with one;
+    /// the other pairings are not states the recovery protocol can be in.
+    #[test]
+    fn materialization_phase_and_quarantine_must_agree() {
+        use super::PublicationMaterialization;
+        use PublicationMaterializationPhase::{Clean, Installed, QuarantinePrepared, Quarantined};
+
+        assert_eq!(
+            PublicationMaterialization::from_parts(Clean, None).unwrap(),
+            PublicationMaterialization::Clean
+        );
+        assert!(matches!(
+            PublicationMaterialization::from_parts(Clean, Some("q".to_owned())),
+            Err(RepositoryError::InvalidPublicationJournal)
+        ));
+        for phase in [QuarantinePrepared, Quarantined, Installed] {
+            assert!(matches!(
+                PublicationMaterialization::from_parts(phase, None),
+                Err(RepositoryError::InvalidPublicationJournal)
+            ));
+            let state =
+                PublicationMaterialization::from_parts(phase, Some("q".to_owned())).unwrap();
+            assert_eq!(state.phase(), phase);
+            assert_eq!(state.quarantine(), Some("q"));
+        }
     }
 }
 
