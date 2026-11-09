@@ -18,9 +18,9 @@ pub struct CancellationToken {
     /// Once this token has observed a request, the observation cannot be
     /// undone by an owner resetting the source flag.
     observed: Arc<AtomicBool>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "cancellation-test-hooks"))]
     checks: Arc<std::sync::atomic::AtomicU64>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "cancellation-test-hooks"))]
     request_after: Arc<std::sync::atomic::AtomicU64>,
 }
 
@@ -40,9 +40,9 @@ impl CancellationToken {
             requested,
             parent: None,
             observed: Arc::new(AtomicBool::new(false)),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "cancellation-test-hooks"))]
             checks: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "cancellation-test-hooks"))]
             request_after: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
@@ -52,9 +52,9 @@ impl CancellationToken {
             requested,
             parent: parent.map(Arc::new),
             observed: Arc::new(AtomicBool::new(false)),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "cancellation-test-hooks"))]
             checks: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "cancellation-test-hooks"))]
             request_after: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
@@ -80,8 +80,11 @@ impl CancellationToken {
     }
 
     /// Fails with the non-recoverable evaluator cancellation diagnostic.
-    pub(crate) fn check(&self) -> Result<(), EvaluationError> {
-        #[cfg(test)]
+    ///
+    /// Unstable host seam for `orna-project-repl`; not a supported API.
+    #[doc(hidden)]
+    pub fn check(&self) -> Result<(), EvaluationError> {
+        #[cfg(any(test, feature = "cancellation-test-hooks"))]
         {
             let checks = self.checks.fetch_add(1, Ordering::Relaxed) + 1;
             let request_after = self.request_after.load(Ordering::Relaxed);
@@ -94,8 +97,10 @@ impl CancellationToken {
             .ok_or_else(|| error("ORNA-EVAL-CANCELLED"))
     }
 
-    #[cfg(test)]
-    pub(crate) fn request_after_checks(&self, checks: u64) {
+    #[cfg(any(test, feature = "cancellation-test-hooks"))]
+    #[doc(hidden)]
+    /// Unstable test seam: cancels after the given number of `check` calls.
+    pub fn request_after_checks(&self, checks: u64) {
         self.request_after.store(checks, Ordering::Relaxed);
     }
 }

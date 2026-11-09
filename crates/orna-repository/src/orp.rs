@@ -22,6 +22,7 @@ use std::collections::BTreeSet;
 use sha2::{Digest, Sha256};
 
 use crate::{
+    cbor::head_len,
     native_graph::{
         GraphError, MAX_GRAPH_HEIGHT, MAX_REFS, NODE_DATA_LIMIT, NativeOid, NodeData,
         OrderedBranchEntry, OrderedLeafEntry, leaf_value_dependencies,
@@ -40,21 +41,6 @@ pub(crate) fn boundary_anchor(height: u8, token: &[u8]) -> bool {
     digest[31] & ((1 << ORP_ANCHOR_BITS) - 1) == 0
 }
 
-/// Length of the shortest definite CBOR head for `argument`.
-pub(crate) const fn cbor_head_len(argument: u64) -> usize {
-    if argument < 24 {
-        1
-    } else if argument <= 0xff {
-        2
-    } else if argument <= 0xffff {
-        3
-    } else if argument <= 0xffff_ffff {
-        5
-    } else {
-        9
-    }
-}
-
 /// Encoded bytes of a leaf node `[1, 1, domain, entries]` before the head of
 /// its entry array.
 pub(crate) fn leaf_header_len(domain: &[u8]) -> usize {
@@ -64,7 +50,7 @@ pub(crate) fn leaf_header_len(domain: &[u8]) -> usize {
 /// Encoded bytes of a branch node `[1, 2, domain, height, entries]` before
 /// the head of its entry array.
 pub(crate) fn branch_header_len(domain: &[u8], height: u8) -> usize {
-    3 + domain.len() + cbor_head_len(u64::from(height))
+    3 + domain.len() + head_len(u64::from(height))
 }
 
 /// The encoded bytes and the native refs one leaf entry adds to its page:
@@ -84,11 +70,8 @@ pub(crate) fn leaf_entry_cost(
 /// `[inclusive_max_key, child_oid, row_count]` adds to its page.
 pub(crate) fn branch_entry_cost(entry: &OrderedBranchEntry) -> (usize, Vec<NativeOid>) {
     let oid = entry.child.as_bytes().len();
-    let size = 1
-        + entry.inclusive_max_key.len()
-        + cbor_head_len(oid as u64)
-        + oid
-        + cbor_head_len(entry.row_count);
+    let size =
+        1 + entry.inclusive_max_key.len() + head_len(oid as u64) + oid + head_len(entry.row_count);
     (size, vec![entry.child.clone()])
 }
 
@@ -140,7 +123,7 @@ impl<E: PageEntry> Partition<E> {
 
     fn node_len(&self, entries: usize, entry_bytes: usize) -> usize {
         self.header
-            .saturating_add(cbor_head_len(entries as u64))
+            .saturating_add(head_len(entries as u64))
             .saturating_add(entry_bytes)
     }
 

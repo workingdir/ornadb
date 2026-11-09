@@ -63,12 +63,13 @@ use orna_application::{
     ReplEvaluationFailure, ReplTransactionScope, StagedActivation,
 };
 use orna_conformance::{
-    AdmittedReplSession, BoundedEvaluator, DurableTransactionalEvaluator, ProjectEnvironment,
-    ProjectExpectations, ProjectUnit, ReplError, RuntimeEvaluator, SourceUnit, StageOutcome,
-    project_declares_assertions, transactional_loaded_project_candidate_validator,
+    BoundedEvaluator, DurableTransactionalEvaluator, ProjectEnvironment, ProjectExpectations,
+    ProjectUnit, RuntimeEvaluator, SourceUnit, StageOutcome, project_declares_assertions,
+    transactional_loaded_project_candidate_validator,
 };
 use orna_evaluator::{Environment, Limits, SysHostBindingRegistry};
 use orna_foundation::{CanonicalValue, OvbRaw, Value};
+use orna_project_repl::{AdmittedReplSession, ReplError};
 use orna_runtime::{
     FaultInjector, NoFault, PinnedCommittedRows, QueryObservationRegistration,
     RequestAdmissionCapability, RequestIdentity, RuntimeError, RuntimeIdentity,
@@ -3465,9 +3466,9 @@ fn run_repl_input(
         return session.submit(source).map_err(repl::ReplFailure::from);
     };
     let (Some(repository), Some(transactions)) = (repository, transactions) else {
-        return Err(repl::ReplFailure::from(orna_evaluator::effect_rejection(
-            staged.effects(),
-        )));
+        return Err(repl::ReplFailure::from(
+            orna_project_repl::effect_rejection(staged.effects()),
+        ));
     };
     let (current_commit, _) = repository
         .open_pinned_format_context_with_commit("HEAD")

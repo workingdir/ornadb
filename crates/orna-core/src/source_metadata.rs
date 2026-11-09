@@ -2,6 +2,7 @@
 
 use crate::{
     FunctionId, FunctionRevisionId, SourceUnitId, TypeId,
+    byte_reader::{Reader, TruncatedError},
     revision::{DefinitionReferenceTarget, Sha256Digest},
 };
 
@@ -188,12 +189,12 @@ impl SourceFunctionMetadata {
 
     /// Decodes and validates one metadata payload.
     pub fn decode(bytes: &[u8]) -> Result<Self, SourceMetadataError> {
-        let mut reader = Reader { bytes, offset: 0 };
-        let magic = reader.magic()?;
+        let mut reader = MetadataReader::new(bytes);
+        let magic = read_magic(&mut reader)?;
         let signature = magic == SIGNATURE_MAGIC;
         let function = FunctionId::from_bytes(reader.array()?);
         let function_revision = FunctionRevisionId::from_bytes(reader.array()?);
-        let function_name = reader.string()?;
+        let function_name = read_string(&mut reader)?;
         let source_unit = SourceUnitId::from_bytes(reader.array()?);
         let byte_start = reader.u32()?;
         let byte_end = reader.u32()?;
@@ -209,17 +210,17 @@ impl SourceFunctionMetadata {
         } else {
             (SourceBodyKind::Unknown, None)
         };
-        let parameter_count = reader.count(MAX_PARAMETERS)?;
+        let parameter_count = read_count(&mut reader, MAX_PARAMETERS)?;
         let mut parameters = Vec::with_capacity(parameter_count);
         for _ in 0..parameter_count {
             parameters.push(SourceParameterMetadata::decode_from(&mut reader)?);
         }
-        let reference_count = reader.count(MAX_REFERENCES)?;
+        let reference_count = read_count(&mut reader, MAX_REFERENCES)?;
         let mut references = Vec::with_capacity(reference_count);
         for _ in 0..reference_count {
             references.push(SourceReferenceMetadata::decode_from(&mut reader)?);
         }
-        if reader.offset != bytes.len() {
+        if reader.position() != bytes.len() {
             return Err(SourceMetadataError::TrailingBytes);
         }
         Self::new_with_signature(
@@ -291,7 +292,7 @@ impl SourceReturnMetadata {
         }
     }
 
-    fn decode_from(reader: &mut Reader<'_>) -> Result<Self, SourceMetadataError> {
+    fn decode_from(reader: &mut MetadataReader<'_>) -> Result<Self, SourceMetadataError> {
         let tag = reader.u8()?;
         let type_id = TypeId::from_bytes(reader.array()?);
         match tag {
@@ -343,10 +344,10 @@ impl SourceParameterMetadata {
         output.extend_from_slice(&self.ordinal.to_be_bytes());
         output.extend_from_slice(&self.resolved_type.to_bytes());
     }
-    fn decode_from(reader: &mut Reader<'_>) -> Result<Self, SourceMetadataError> {
+    fn decode_from(reader: &mut MetadataReader<'_>) -> Result<Self, SourceMetadataError> {
         Ok(Self::new(
             crate::ParameterId::from_bytes(reader.array()?),
-            reader.string()?,
+            read_string(reader)?,
             reader.u32()?,
             TypeId::from_bytes(reader.array()?),
         ))
@@ -410,11 +411,11 @@ impl SourceReferenceMetadata {
         output.extend_from_slice(&self.byte_start.to_be_bytes());
         output.extend_from_slice(&self.byte_end.to_be_bytes());
     }
-    fn decode_from(reader: &mut Reader<'_>) -> Result<Self, SourceMetadataError> {
+    fn decode_from(reader: &mut MetadataReader<'_>) -> Result<Self, SourceMetadataError> {
         Ok(Self::new(
             reader.u32()?,
             decode_target(reader)?,
-            reader.string()?,
+            read_string(reader)?,
             SourceUnitId::from_bytes(reader.array()?),
             reader.u32()?,
             reader.u32()?,
@@ -482,7 +483,7 @@ fn encode_target(output: &mut Vec<u8>, target: DefinitionReferenceTarget) {
 }
 
 fn decode_target(
-    reader: &mut Reader<'_>,
+    reader: &mut MetadataReader<'_>,
 ) -> Result<DefinitionReferenceTarget, SourceMetadataError> {
     match reader.u8()? {
         1 => Ok(DefinitionReferenceTarget::ObjectType(TypeId::from_bytes(
@@ -509,60 +510,44 @@ fn decode_target(
     }
 }
 
-struct Reader<'a> {
-    bytes: &'a [u8],
-    offset: usize,
+impl TruncatedError for SourceMetadataError {
+    fn truncated() -> Self {
+        Self::Truncated
+    }
 }
 
-impl Reader<'_> {
-    fn magic(&mut self) -> Result<&[u8], SourceMetadataError> {
-        if self.bytes.get(..SIGNATURE_MAGIC.len()) == Some(SIGNATURE_MAGIC) {
-            self.offset = SIGNATURE_MAGIC.len();
-            return Ok(SIGNATURE_MAGIC);
-        }
-        if self.bytes.get(..MAGIC.len()) == Some(MAGIC) {
-            self.offset = MAGIC.len();
-            return Ok(MAGIC);
-        }
-        Err(SourceMetadataError::InvalidMagic)
-    }
+type MetadataReader<'a> = Reader<'a, SourceMetadataError>;
 
-    fn take(&mut self, length: usize) -> Result<&[u8], SourceMetadataError> {
-        let end = self
-            .offset
-            .checked_add(length)
-            .ok_or(SourceMetadataError::Truncated)?;
-        let output = self
-            .bytes
-            .get(self.offset..end)
-            .ok_or(SourceMetadataError::Truncated)?;
-        self.offset = end;
-        Ok(output)
-    }
-    fn array<const N: usize>(&mut self) -> Result<[u8; N], SourceMetadataError> {
-        self.take(N)?
-            .try_into()
-            .map_err(|_| SourceMetadataError::Truncated)
-    }
-    fn u8(&mut self) -> Result<u8, SourceMetadataError> {
-        Ok(u8::from_be_bytes(self.array()?))
-    }
-    fn u32(&mut self) -> Result<u32, SourceMetadataError> {
-        Ok(u32::from_be_bytes(self.array()?))
-    }
-    fn count(&mut self, maximum: usize) -> Result<usize, SourceMetadataError> {
-        let count = self.u32()? as usize;
-        if count > maximum {
-            Err(SourceMetadataError::CollectionTooLarge)
-        } else {
-            Ok(count)
+/// Takes the payload magic, accepting the signature form first so that a
+/// signature payload is never read as a plain one.
+fn read_magic<'a>(reader: &mut MetadataReader<'a>) -> Result<&'static [u8], SourceMetadataError> {
+    for magic in [SIGNATURE_MAGIC, MAGIC] {
+        if reader.rest().starts_with(magic) {
+            reader.take(magic.len())?;
+            return Ok(magic);
         }
     }
-    fn string(&mut self) -> Result<String, SourceMetadataError> {
-        let length = self.u32()? as usize;
-        let bytes = self.take(length)?;
-        String::from_utf8(bytes.to_vec()).map_err(|_| SourceMetadataError::InvalidString)
+    Err(SourceMetadataError::InvalidMagic)
+}
+
+/// Reads a `u32` element count that must not exceed `maximum`.
+fn read_count(
+    reader: &mut MetadataReader<'_>,
+    maximum: usize,
+) -> Result<usize, SourceMetadataError> {
+    let count = reader.length()?;
+    if count > maximum {
+        Err(SourceMetadataError::CollectionTooLarge)
+    } else {
+        Ok(count)
     }
+}
+
+/// Reads a `u32` length followed by that many UTF-8 bytes.
+fn read_string(reader: &mut MetadataReader<'_>) -> Result<String, SourceMetadataError> {
+    let length = reader.length()?;
+    let bytes = reader.take(length)?;
+    String::from_utf8(bytes.to_vec()).map_err(|_| SourceMetadataError::InvalidString)
 }
 
 #[cfg(test)]

@@ -1,8 +1,9 @@
 #[path = "support/pinned_io_std.rs"]
 mod pinned_io_std;
 
-use orna_evaluator::{AdmittedReplSession, Limits, SysHostBindingRegistry};
+use orna_evaluator::{Limits, SysHostBindingRegistry};
 use orna_foundation::CanonicalValue;
+use orna_project_repl::AdmittedReplSession;
 use orna_sys::{EnvironmentProvider, FilesystemProvider};
 use orna_value::Raw;
 

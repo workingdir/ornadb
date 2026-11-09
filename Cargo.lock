@@ -1411,6 +1411,7 @@ dependencies = [
  "orna-foundation",
  "orna-live",
  "orna-project",
+ "orna-project-repl",
  "orna-protocol",
  "orna-repository",
  "orna-runtime",
@@ -1437,6 +1438,7 @@ dependencies = [
  "orna-foundation",
  "orna-live",
  "orna-project",
+ "orna-project-repl",
  "orna-protocol",
  "orna-repository",
  "orna-runtime",
@@ -1468,6 +1470,7 @@ dependencies = [
  "orna-foundation",
  "orna-live",
  "orna-project",
+ "orna-project-repl",
  "orna-protocol",
  "orna-repository",
  "orna-runtime",
@@ -1513,6 +1516,7 @@ dependencies = [
  "num-traits",
  "orna-foundation",
  "orna-project",
+ "orna-project-repl",
  "orna-repository",
  "orna-runtime",
  "orna-semantic",
@@ -1599,6 +1603,21 @@ dependencies = [
  "orna-value",
  "tempfile",
  "unicode-normalization",
+]
+
+[[package]]
+name = "orna-project-repl"
+version = "1.0.0"
+dependencies = [
+ "orna-evaluator",
+ "orna-foundation",
+ "orna-project",
+ "orna-repository",
+ "orna-semantic",
+ "orna-syntax",
+ "orna-value",
+ "sha2 0.10.9",
+ "tempfile",
 ]
 
 [[package]]

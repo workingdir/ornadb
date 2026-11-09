@@ -4,7 +4,8 @@
 
 use orna_repository::{Repository, inspect_legacy_source_metadata, inspect_metadata_for_runtime};
 
-use crate::{RuntimeError, RuntimeIdentity};
+use crate::RuntimeIdentity;
+use crate::error::RuntimeError;
 
 /// Derives the runtime identity and initial digest from the repository's
 /// stored database identity. Fails closed when the metadata is unavailable.

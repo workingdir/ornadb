@@ -1,9 +1,10 @@
 use orna_evaluator::{
-    AdmittedReplSession, Environment, Functions, Limits, NominalDefinition, NominalDefinitions,
-    NominalField, PureFunction, evaluate_expression, evaluate_expression_with_functions,
+    Environment, Functions, Limits, NominalDefinition, NominalDefinitions, NominalField,
+    PureFunction, evaluate_expression, evaluate_expression_with_functions,
     evaluate_with_functions_and_nominals,
 };
 use orna_foundation::CanonicalValue;
+use orna_project_repl::AdmittedReplSession;
 use orna_value::Raw;
 
 fn bool_value(value: bool) -> CanonicalValue {
