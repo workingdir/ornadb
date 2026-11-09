@@ -47,7 +47,7 @@ pub use spool::{
     EditDraftError, default_draft_quota,
 };
 
-use draft::{retain_rejected_draft, stale_baseline_diagnostic};
+use draft::{FsyncMemo, retain_rejected_draft, stale_baseline_diagnostic};
 use save::{VfsSaveAdmissionError, capture_vfs_blob_replacement};
 
 /// One repository-wide invalidation clock shared by projections in a VFS
@@ -303,10 +303,7 @@ impl VfsRepositoryCache {
 
     fn managed_file_for_image<S>(&self, image: Arc<VfsFileSnapshot<S>>) -> Arc<ManagedFile<S>> {
         Arc::new(ManagedFile {
-            state: Mutex::new(ManagedFileState {
-                image,
-                unlinked: false,
-            }),
+            state: Mutex::new(ManagedFileState::Live { image }),
             operation: Mutex::new(()),
             cache_epoch: self.epoch.clone(),
             draft_storage: self.draft_storage.clone(),
@@ -601,11 +598,46 @@ pub enum FsyncOutcome<S> {
     Unchanged(SnapshotReadHandle<S>),
 }
 
-struct ManagedFileState<S> {
-    image: Arc<VfsFileSnapshot<S>>,
-    /// Set by an accepted unlink. Once set, no new open or replacement can
-    /// observe or change this destination; existing handles keep their pins.
-    unlinked: bool,
+/// Whether a managed destination still names a live row file.
+pub(super) enum ManagedFileState<S> {
+    /// The destination is linked. New opens and replacements observe this
+    /// image, and an accepted replacement advances it.
+    Live { image: Arc<VfsFileSnapshot<S>> },
+    /// An accepted unlink removed the destination. Existing handles keep the
+    /// image they captured, and a destination-level read still serves it, but
+    /// no new open, stat or replacement observes it.
+    Unlinked { image: Arc<VfsFileSnapshot<S>> },
+}
+
+impl<S> ManagedFileState<S> {
+    /// The last accepted image, readable even after an unlink.
+    fn image(&self) -> &Arc<VfsFileSnapshot<S>> {
+        match self {
+            Self::Live { image } | Self::Unlinked { image } => image,
+        }
+    }
+
+    /// The image a new open observes, or `None` once the destination is gone.
+    fn live_image(&self) -> Option<&Arc<VfsFileSnapshot<S>>> {
+        match self {
+            Self::Live { image } => Some(image),
+            Self::Unlinked { .. } => None,
+        }
+    }
+
+    fn is_unlinked(&self) -> bool {
+        matches!(self, Self::Unlinked { .. })
+    }
+
+    /// Retires the destination while keeping its last image readable for
+    /// handles that already hold it. A second unlink changes nothing.
+    fn mark_unlinked(&mut self) {
+        if let Self::Live { image } = self {
+            *self = Self::Unlinked {
+                image: Arc::clone(image),
+            };
+        }
+    }
 }
 
 /// Stat of one managed destination's accepted image, from [`ManagedFile::stat`].
@@ -667,14 +699,16 @@ pub struct ManagedFile<S> {
 
 impl<S> ManagedFile<S> {
     pub async fn open_read(&self) -> SnapshotReadHandle<S> {
-        SnapshotReadHandle::open(Arc::clone(&self.state.lock().await.image))
+        SnapshotReadHandle::open(Arc::clone(self.state.lock().await.image()))
     }
 
     /// Opens the destination as it currently exists. Returns `None` after an
     /// accepted unlink, so a new open can never see the removed file's bytes.
     pub async fn open_current(&self) -> Option<SnapshotReadHandle<S>> {
         let state = self.state.lock().await;
-        (!state.unlinked).then(|| SnapshotReadHandle::open(Arc::clone(&state.image)))
+        state
+            .live_image()
+            .map(|image| SnapshotReadHandle::open(Arc::clone(image)))
     }
 
     /// Returns the repository-wide invalidation generation.
@@ -689,10 +723,8 @@ impl<S> ManagedFile<S> {
     pub async fn stat(&self) -> Option<ManagedFileStat<S>> {
         let (size, pin) = {
             let state = self.state.lock().await;
-            if state.unlinked {
-                return None;
-            }
-            (state.image.len(), state.image.pin().clone_pin())
+            let image = state.live_image()?;
+            (image.len(), image.pin().clone_pin())
         };
         Some(ManagedFileStat {
             size,
@@ -707,7 +739,7 @@ impl<S> ManagedFile<S> {
         self: &Arc<Self>,
         max_file_bytes: usize,
     ) -> TemporarySave<S> {
-        let baseline = Arc::clone(&self.state.lock().await.image);
+        let baseline = Arc::clone(self.state.lock().await.image());
         let draft = Arc::new(EditDraft::open(
             Arc::clone(&baseline),
             max_file_bytes,
@@ -725,8 +757,7 @@ impl<S> ManagedFile<S> {
             operation: Mutex::new(()),
             state: Mutex::new(TemporarySaveState {
                 draft,
-                synced_revision: None,
-                applied: None,
+                sync: ScratchSync::Unsaved,
             }),
         }
     }
@@ -741,7 +772,7 @@ impl<S> ManagedFile<S> {
         self: &Arc<Self>,
         max_file_bytes: usize,
     ) -> TemporarySave<S> {
-        let baseline = Arc::clone(&self.state.lock().await.image);
+        let baseline = Arc::clone(self.state.lock().await.image());
         TemporarySave {
             target: Arc::clone(self),
             baseline: Arc::clone(&baseline),
@@ -752,8 +783,7 @@ impl<S> ManagedFile<S> {
                     max_file_bytes,
                     self.draft_storage.clone(),
                 )),
-                synced_revision: None,
-                applied: None,
+                sync: ScratchSync::Unsaved,
             }),
         }
     }
@@ -779,13 +809,13 @@ impl<S> ManagedFile<S> {
         let mut destination = self.state.lock().await;
         let _scratch_operation = scratch.operation.lock().await;
         let mut scratch_state = scratch.state.lock().await;
-        if let Some((generation, handle)) = &scratch_state.applied {
+        if let ScratchSync::Applied { generation, handle } = &scratch_state.sync {
             return Ok(TemporaryRenameOutcome::Applied {
                 generation: *generation,
                 handle: handle.clone(),
             });
         }
-        if destination.unlinked || !Arc::ptr_eq(&destination.image, &scratch.baseline) {
+        if destination.is_unlinked() || !Arc::ptr_eq(destination.image(), &scratch.baseline) {
             let diagnostic = stale_baseline_diagnostic();
             let mut draft = scratch_state.draft.state.lock().await;
             let revision = draft.revision;
@@ -815,10 +845,15 @@ impl<S> ManagedFile<S> {
                         generation: next_generation,
                     },
                 ));
-                destination.image = Arc::clone(&image);
+                *destination = ManagedFileState::Live {
+                    image: Arc::clone(&image),
+                };
                 *cache_generation = next_generation;
                 let handle = SnapshotReadHandle::open(image);
-                scratch_state.applied = Some((next_generation, handle.clone()));
+                scratch_state.sync = ScratchSync::Applied {
+                    generation: next_generation,
+                    handle: handle.clone(),
+                };
                 Ok(TemporaryRenameOutcome::Applied {
                     generation: next_generation,
                     handle,
@@ -831,7 +866,7 @@ impl<S> ManagedFile<S> {
     /// Opens a private EDIT-1 draft over this destination's current image. The
     /// draft commits only through [`ManagedFile::commit_draft_with`].
     pub async fn open_draft(self: &Arc<Self>, max_file_bytes: usize) -> EditDraft<S> {
-        let baseline = Arc::clone(&self.state.lock().await.image);
+        let baseline = Arc::clone(self.state.lock().await.image());
         EditDraft::open(baseline, max_file_bytes, self.draft_storage.clone())
     }
 
@@ -851,7 +886,7 @@ impl<S> ManagedFile<S> {
         self: &Arc<Self>,
         max_file_bytes: usize,
     ) -> EditReadBaseline<S> {
-        let image = Arc::clone(&self.state.lock().await.image);
+        let image = Arc::clone(self.state.lock().await.image());
         EditReadBaseline {
             image: Arc::clone(&image),
             draft: EditDraft::open(image, max_file_bytes, self.draft_storage.clone()),
@@ -887,7 +922,7 @@ impl<S> ManagedFile<S> {
         let _operation = self.operation.lock().await;
         let mut destination = self.state.lock().await;
         let reads_baseline =
-            !destination.unlinked && Arc::ptr_eq(&destination.image, &baseline.image) && {
+            !destination.is_unlinked() && Arc::ptr_eq(destination.image(), &baseline.image) && {
                 let draft_state = baseline.draft.state.lock().await;
                 Arc::ptr_eq(&draft_state.baseline, &baseline.image)
             };
@@ -916,7 +951,9 @@ impl<S> ManagedFile<S> {
                     },
                 ));
                 baseline.draft.rebase_accepted(Arc::clone(&image)).await;
-                destination.image = Arc::clone(&image);
+                *destination = ManagedFileState::Live {
+                    image: Arc::clone(&image),
+                };
                 *cache_generation = next_generation;
                 Ok(TemporaryRenameOutcome::Applied {
                     generation: next_generation,
@@ -947,7 +984,8 @@ impl<S> ManagedFile<S> {
         let (based_on_current, revision) = {
             let draft_state = draft.state.lock().await;
             (
-                !destination.unlinked && Arc::ptr_eq(&destination.image, &draft_state.baseline),
+                !destination.is_unlinked()
+                    && Arc::ptr_eq(destination.image(), &draft_state.baseline),
                 draft_state.revision,
             )
         };
@@ -983,7 +1021,9 @@ impl<S> ManagedFile<S> {
                     },
                 ));
                 draft.rebase_accepted(Arc::clone(&image)).await;
-                destination.image = Arc::clone(&image);
+                *destination = ManagedFileState::Live {
+                    image: Arc::clone(&image),
+                };
                 *cache_generation = next_generation;
                 Ok(TemporaryRenameOutcome::Applied {
                     generation: next_generation,
@@ -1009,7 +1049,7 @@ impl<S> ManagedFile<S> {
     {
         let _operation = self.operation.lock().await;
         let mut destination = self.state.lock().await;
-        if destination.unlinked {
+        if destination.is_unlinked() {
             return Ok(UnlinkOutcome::AlreadyUnlinked);
         }
         let mut cache_generation = self.cache_epoch.generation.lock().await;
@@ -1017,7 +1057,7 @@ impl<S> ManagedFile<S> {
             .checked_add(1)
             .ok_or(TemporaryRenameError::GenerationExhausted)?;
         let candidate = ActivationCandidate {
-            baseline: destination.image.pin.clone_pin(),
+            baseline: destination.image().pin.clone_pin(),
             revision: 0,
             replacement: Arc::from(&[][..]),
             removal: true,
@@ -1027,7 +1067,7 @@ impl<S> ManagedFile<S> {
             .map_err(TemporaryRenameError::Activation)?
         {
             ActivationDecision::Accepted(_) => {
-                destination.unlinked = true;
+                destination.mark_unlinked();
                 *cache_generation = next_generation;
                 Ok(UnlinkOutcome::Applied {
                     generation: next_generation,
@@ -1048,8 +1088,27 @@ pub enum UnlinkOutcome {
 
 struct TemporarySaveState<S> {
     draft: Arc<EditDraft<S>>,
-    synced_revision: Option<u64>,
-    applied: Option<(u64, SnapshotReadHandle<S>)>,
+    sync: ScratchSync<S>,
+}
+
+/// How far a temporary file's scratch sequence has advanced.
+pub(super) enum ScratchSync<S> {
+    /// No scratch sequence has been persisted yet.
+    Unsaved,
+    /// `fsync` persisted one draft revision as scratch.
+    Synced { revision: u64 },
+    /// A rename admitted the scratch file. Later writes are refused, and a
+    /// repeated save returns this recorded outcome.
+    Applied {
+        generation: u64,
+        handle: SnapshotReadHandle<S>,
+    },
+}
+
+impl<S> TemporarySaveState<S> {
+    fn is_applied(&self) -> bool {
+        matches!(&self.sync, ScratchSync::Applied { .. })
+    }
 }
 
 /// A temp-file save tied to the managed destination that admitted its
@@ -1066,7 +1125,7 @@ impl<S> TemporarySave<S> {
     pub async fn write_at(&self, offset: u64, bytes: &[u8]) -> Result<(), EditDraftError> {
         let _operation = self.operation.lock().await;
         let state = self.state.lock().await;
-        if state.applied.is_some() {
+        if state.is_applied() {
             return Err(EditDraftError::AlreadyApplied);
         }
         state.draft.write_at(offset, bytes).await
@@ -1075,7 +1134,7 @@ impl<S> TemporarySave<S> {
     pub async fn truncate(&self, length: u64) -> Result<(), EditDraftError> {
         let _operation = self.operation.lock().await;
         let state = self.state.lock().await;
-        if state.applied.is_some() {
+        if state.is_applied() {
             return Err(EditDraftError::AlreadyApplied);
         }
         state.draft.truncate(length).await
@@ -1124,12 +1183,14 @@ impl<S> TemporarySave<S> {
         let _operation = self.operation.lock().await;
         let (revision, snapshot) = {
             let state = self.state.lock().await;
-            if let Some((revision, _)) = &state.applied {
-                return Ok(*revision);
-            }
+            let synced = match &state.sync {
+                ScratchSync::Applied { generation, .. } => return Ok(*generation),
+                ScratchSync::Synced { revision } => Some(*revision),
+                ScratchSync::Unsaved => None,
+            };
             let draft = state.draft.state.lock().await;
             let revision = draft.revision;
-            if state.synced_revision == Some(revision) {
+            if synced == Some(revision) {
                 return Ok(revision);
             }
             let snapshot = draft.candidate_snapshot().map_err(FsyncFailure::Backing)?;
@@ -1138,7 +1199,7 @@ impl<S> TemporarySave<S> {
         persist(revision, snapshot)
             .await
             .map_err(FsyncFailure::Activation)?;
-        self.state.lock().await.synced_revision = Some(revision);
+        self.state.lock().await.sync = ScratchSync::Synced { revision };
         Ok(revision)
     }
 }
@@ -1817,7 +1878,7 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
         if draft_state.candidate.is_none() {
             return Err(VfsSaveError::NoCandidate);
         }
-        if destination.unlinked || !Arc::ptr_eq(&destination.image, &draft_state.baseline) {
+        if destination.is_unlinked() || !Arc::ptr_eq(destination.image(), &draft_state.baseline) {
             let diagnostic = stale_baseline_diagnostic();
             let generation = *self.cache_epoch.generation.lock().await;
             let revision = draft_state.revision;
@@ -1833,16 +1894,22 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
         // Repeated callbacks for one sequence return the recorded outcome; a
         // later write begins a new candidate based on accepted state, so one
         // revision is never admitted twice (VFS-008).
-        if let Some((rejected, diagnostic)) = draft_state.last_rejection
-            && rejected == revision
+        if let FsyncMemo::Rejected {
+            revision: rejected,
+            diagnostic,
+        } = &draft_state.memo
+            && *rejected == revision
         {
             let generation = *self.cache_epoch.generation.lock().await;
             return Err(VfsSaveError::Rejected {
                 generation,
-                diagnostic,
+                diagnostic: *diagnostic,
             });
         }
-        if let Some((accepted_revision, image)) = &draft_state.last_accepted
+        if let FsyncMemo::Accepted {
+            revision: accepted_revision,
+            image,
+        } = &draft_state.memo
             && *accepted_revision == revision
         {
             let generation = *self.cache_epoch.generation.lock().await;
@@ -1865,7 +1932,7 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
         let admission = VfsSaveAdmission::<S>::begin(runtime, save, faults)
             .await
             .map_err(VfsSaveError::Activation)?;
-        // A repeated accepted rename is served from `scratch_state.applied`
+        // A repeated accepted rename is served from `scratch_state.sync`
         // above. Matching replacement bytes alone cannot prove that another
         // writer committed this save; baseline mismatches therefore fail closed.
         let admitted_row = admission
@@ -1964,11 +2031,15 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
                 },
             ));
             draft_state.drop_candidate();
-            draft_state.last_rejection = None;
             draft_state.retained_invalid = None;
             draft_state.baseline = Arc::clone(&image);
-            draft_state.last_accepted = Some((revision, Arc::clone(&image)));
-            destination.image = Arc::clone(&image);
+            draft_state.memo = FsyncMemo::Accepted {
+                revision,
+                image: Arc::clone(&image),
+            };
+            *destination = ManagedFileState::Live {
+                image: Arc::clone(&image),
+            };
             *cache_generation = next_generation;
             Ok(TemporaryRenameOutcome::Applied {
                 generation: next_generation,
@@ -2044,7 +2115,7 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
         let _scratch_operation = scratch.operation.lock().await;
         let draft = {
             let scratch_state = scratch.state.lock().await;
-            if let Some((generation, handle)) = &scratch_state.applied {
+            if let ScratchSync::Applied { generation, handle } = &scratch_state.sync {
                 return Ok(TemporaryRenameOutcome::Applied {
                     generation: *generation,
                     handle: handle.clone(),
@@ -2057,7 +2128,10 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
             .commit_durable_save(&draft, runtime, save, admit, faults)
             .await?;
         if let TemporaryRenameOutcome::Applied { generation, handle } = &outcome {
-            scratch.state.lock().await.applied = Some((*generation, handle.clone()));
+            scratch.state.lock().await.sync = ScratchSync::Applied {
+                generation: *generation,
+                handle: handle.clone(),
+            };
         }
         Ok(outcome)
     }

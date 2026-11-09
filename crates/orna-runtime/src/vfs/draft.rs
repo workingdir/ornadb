@@ -71,13 +71,34 @@ impl<S> RetainedInvalidDraft<S> {
     }
 }
 
+/// The latest terminal outcome recorded for one draft revision.
+///
+/// A draft has at most one current rejection or acceptance. Accepting a
+/// revision clears the rejection it supersedes, and rejecting a later revision
+/// makes the earlier acceptance unreachable: a draft with a candidate can
+/// never serve its accepted image (ORNA-VFS-008).
+pub(super) enum FsyncMemo<S> {
+    /// No activation outcome has been recorded since the draft last changed.
+    None,
+    /// Activation refused this revision with a stable diagnostic. Repeating
+    /// `fsync` returns it without calling the activation boundary again.
+    Rejected {
+        revision: u64,
+        diagnostic: SafeDiagnostic,
+    },
+    /// Activation accepted this revision and published this image.
+    Accepted {
+        revision: u64,
+        image: Arc<VfsFileSnapshot<S>>,
+    },
+}
+
 pub(super) struct DraftState<S> {
     pub(super) quota: Arc<DraftQuota>,
     pub(super) baseline: Arc<VfsFileSnapshot<S>>,
     pub(super) candidate: Option<DraftSpool>,
     pub(super) revision: u64,
-    pub(super) last_rejection: Option<(u64, SafeDiagnostic)>,
-    pub(super) last_accepted: Option<(u64, Arc<VfsFileSnapshot<S>>)>,
+    pub(super) memo: FsyncMemo<S>,
     pub(super) retained_invalid: Option<RetainedRejection<S>>,
 }
 
@@ -87,11 +108,36 @@ pub(super) struct DraftState<S> {
 /// The retained copy is charged to the draft quota for as long as it is held
 /// (profiles/vfs-1.md: rejected candidates are quota accounted).
 pub(super) struct RetainedRejection<S> {
-    charge: QuotaCharge,
-    /// True while `draft` aliases the candidate spool's file; the candidate then
-    /// holds the charge until a change moves it here (`unalias_retained`).
-    live: bool,
+    backing: RetentionBacking,
     draft: RetainedInvalidDraft<S>,
+}
+
+/// How a retained rejected candidate holds its quota charge.
+pub(super) enum RetentionBacking {
+    /// The retained view aliases the live candidate spool's file, so the spool
+    /// holds the charge until the candidate changes and the bytes move here.
+    SharesCandidateSpool,
+    /// The retained view owns its bytes; the charge is a drop guard that
+    /// releases them when the retained copy goes away.
+    Owned { _charge: QuotaCharge },
+}
+
+impl RetentionBacking {
+    /// Moves a replaced candidate spool's charge into this backing.
+    ///
+    /// Only an aliasing backing takes it: an owned backing does not reference
+    /// those bytes, so the spool's charge must be released with the spool at
+    /// the moment it drops rather than delayed until the retained copy does.
+    fn absorb_candidate_spool(&mut self, quota: &Arc<DraftQuota>, spool: &mut QuotaCharge) {
+        match self {
+            Self::SharesCandidateSpool => {
+                let mut owned = QuotaCharge::empty(quota);
+                owned.absorb(spool);
+                *self = Self::Owned { _charge: owned };
+            }
+            Self::Owned { .. } => {}
+        }
+    }
 }
 
 impl<S> DraftState<S> {
@@ -171,7 +217,10 @@ impl<S> DraftState<S> {
         diagnostic: SafeDiagnostic,
     ) -> Result<(), EditDraftError> {
         self.retain_draft(revision, diagnostic)?;
-        self.last_rejection = Some((revision, diagnostic));
+        self.memo = FsyncMemo::Rejected {
+            revision,
+            diagnostic,
+        };
         Ok(())
     }
 
@@ -204,16 +253,16 @@ impl<S> DraftState<S> {
             return Ok(());
         }
         let replacement = Arc::new(self.candidate_snapshot()?);
-        let live = self.candidate.is_some();
-        let charge = if live {
-            QuotaCharge::empty(&self.quota)
+        let backing = if self.candidate.is_some() {
+            RetentionBacking::SharesCandidateSpool
         } else {
-            QuotaCharge::reserve(&self.quota, replacement.len())?
+            RetentionBacking::Owned {
+                _charge: QuotaCharge::reserve(&self.quota, replacement.len())?,
+            }
         };
         let id = *Uuid::new_v4().as_bytes();
         self.retained_invalid = Some(RetainedRejection {
-            charge,
-            live,
+            backing,
             draft: RetainedInvalidDraft {
                 id,
                 baseline: self.baseline.pin.clone(),
@@ -227,9 +276,9 @@ impl<S> DraftState<S> {
 
     /// Whether the retained copy aliases the live candidate's spool file.
     fn retained_is_live(&self) -> bool {
-        self.retained_invalid
-            .as_ref()
-            .is_some_and(|retained| retained.live)
+        self.retained_invalid.as_ref().is_some_and(|retained| {
+            matches!(&retained.backing, RetentionBacking::SharesCandidateSpool)
+        })
     }
 
     /// Moves the retained copy off the candidate spool before the spool changes.
@@ -243,8 +292,9 @@ impl<S> DraftState<S> {
             .replace(copy)
             .ok_or(EditDraftError::BackingIo)?;
         if let Some(retained) = self.retained_invalid.as_mut() {
-            retained.charge.absorb(&mut previous.charge);
-            retained.live = false;
+            retained
+                .backing
+                .absorb_candidate_spool(&self.quota, &mut previous.charge);
         }
         Ok(())
     }
@@ -254,10 +304,10 @@ impl<S> DraftState<S> {
     pub(super) fn drop_candidate(&mut self) {
         if let Some(mut spool) = self.candidate.take()
             && let Some(retained) = self.retained_invalid.as_mut()
-            && retained.live
         {
-            retained.charge.absorb(&mut spool.charge);
-            retained.live = false;
+            retained
+                .backing
+                .absorb_candidate_spool(&self.quota, &mut spool.charge);
         }
     }
 }
@@ -324,8 +374,7 @@ impl<S> EditDraft<S> {
                 baseline: image,
                 candidate: None,
                 revision: 0,
-                last_rejection: None,
-                last_accepted: None,
+                memo: FsyncMemo::None,
                 retained_invalid: None,
             }),
             operation: Mutex::new(()),
@@ -484,7 +533,7 @@ impl<S> EditDraft<S> {
         let _operation = self.operation.lock().await;
         let mut state = self.state.lock().await;
         if state.candidate.is_none() {
-            if let Some((revision, image)) = &state.last_accepted
+            if let FsyncMemo::Accepted { revision, image } = &state.memo
                 && *revision == state.revision
             {
                 return Ok(FsyncOutcome::Accepted(SnapshotReadHandle::open(
@@ -495,10 +544,13 @@ impl<S> EditDraft<S> {
                 Arc::clone(&state.baseline),
             )));
         }
-        if let Some((revision, diagnostic)) = state.last_rejection
-            && revision == state.revision
+        if let FsyncMemo::Rejected {
+            revision,
+            diagnostic,
+        } = &state.memo
+            && *revision == state.revision
         {
-            return Ok(FsyncOutcome::Rejected(diagnostic));
+            return Ok(FsyncOutcome::Rejected(*diagnostic));
         }
 
         let revision = state.revision;
@@ -517,8 +569,10 @@ impl<S> EditDraft<S> {
                 let image = Arc::new(VfsFileSnapshot::new(pin, bytes));
                 state.drop_candidate();
                 state.baseline = Arc::clone(&image);
-                state.last_rejection = None;
-                state.last_accepted = Some((revision, Arc::clone(&image)));
+                state.memo = FsyncMemo::Accepted {
+                    revision,
+                    image: Arc::clone(&image),
+                };
                 Ok(FsyncOutcome::Accepted(SnapshotReadHandle::open(image)))
             }
             ActivationDecision::Rejected(diagnostic) => {

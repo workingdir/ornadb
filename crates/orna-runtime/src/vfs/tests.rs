@@ -1,4 +1,3 @@
-
 use super::spool::{CandidateSource, DRAFT_SPOOL_DIRECTORY};
 use super::*;
 use crate::{
@@ -1093,10 +1092,7 @@ async fn stat_reports_accepted_size_pin_and_generation_and_hides_unlinked() {
     let image = fixture_image();
     let expected_len = image.len();
     let managed = ManagedFile {
-        state: Mutex::new(ManagedFileState {
-            image,
-            unlinked: false,
-        }),
+        state: Mutex::new(ManagedFileState::Live { image }),
         operation: Mutex::new(()),
         cache_epoch: SharedCacheEpoch::default(),
         draft_storage: DraftStorage::with_default_quota(),
@@ -1107,7 +1103,7 @@ async fn stat_reports_accepted_size_pin_and_generation_and_hides_unlinked() {
     assert_eq!(*stat.pin().snapshot(), 7);
     assert_eq!(stat.generation(), 0);
 
-    managed.state.lock().await.unlinked = true;
+    managed.state.lock().await.mark_unlinked();
     assert!(managed.stat().await.is_none());
 }
 
