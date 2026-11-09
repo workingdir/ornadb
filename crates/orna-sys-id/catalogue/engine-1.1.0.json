@@ -534,6 +534,33 @@
     "sys.dependencies.object_unavailable",
     "sys.dependencies.unknown_endpoint",
     "sys.failure.not_declared",
+    "sys.host.clock.cancelled",
+    "sys.host.clock.denied",
+    "sys.host.environment.denied",
+    "sys.host.environment.invalid_name",
+    "sys.host.environment.unavailable",
+    "sys.host.environment.unset",
+    "sys.host.filesystem.already_exists",
+    "sys.host.filesystem.denied",
+    "sys.host.filesystem.invalid_request",
+    "sys.host.filesystem.invalid_utf8",
+    "sys.host.filesystem.not_directory",
+    "sys.host.filesystem.not_file",
+    "sys.host.filesystem.not_found",
+    "sys.host.filesystem.output_limit",
+    "sys.host.filesystem.unavailable",
+    "sys.host.http.body_limit",
+    "sys.host.http.cancelled",
+    "sys.host.http.denied",
+    "sys.host.http.header_limit",
+    "sys.host.http.invalid_request",
+    "sys.host.http.timeout",
+    "sys.host.http.unavailable",
+    "sys.host.process.denied",
+    "sys.host.process.invalid_request",
+    "sys.host.process.output_limit",
+    "sys.host.process.timeout",
+    "sys.host.process.unavailable",
     "sys.invoke.cancelled",
     "sys.invoke.malformed_completion",
     "sys.invoke.orphaned",
@@ -564,5 +591,119 @@
     "sys.test.replace_blob",
     "sys.test.second",
     "sys.vendor.future_code"
+  ],
+  "host_providers": [
+    "orna.sys.host.clock.v1",
+    "orna.sys.host.environment.v1",
+    "orna.sys.host.filesystem.v1",
+    "orna.sys.host.http.v1",
+    "orna.sys.host.process.v1"
+  ],
+  "host_operations": [
+    {
+      "name": "std.concurrent.sleep",
+      "role": "host.std.concurrent.clock@1.0",
+      "provider": "orna.sys.host.clock.v1"
+    },
+    {
+      "name": "std.io.environment.get",
+      "role": "host.std.io.environment@1.0",
+      "provider": "orna.sys.host.environment.v1"
+    },
+    {
+      "name": "std.io.environment.require",
+      "role": "host.std.io.environment@1.0",
+      "provider": "orna.sys.host.environment.v1"
+    },
+    {
+      "name": "std.io.fs.append_text",
+      "role": "host.std.io.fs.write@1.0",
+      "provider": "orna.sys.host.filesystem.v1"
+    },
+    {
+      "name": "std.io.fs.copy_file",
+      "role": "host.std.io.fs.write@1.0",
+      "provider": "orna.sys.host.filesystem.v1"
+    },
+    {
+      "name": "std.io.fs.create_dir",
+      "role": "host.std.io.fs.write@1.0",
+      "provider": "orna.sys.host.filesystem.v1"
+    },
+    {
+      "name": "std.io.fs.exists",
+      "role": "host.std.io.fs.read@1.0",
+      "provider": "orna.sys.host.filesystem.v1"
+    },
+    {
+      "name": "std.io.fs.is_directory",
+      "role": "host.std.io.fs.read@1.0",
+      "provider": "orna.sys.host.filesystem.v1"
+    },
+    {
+      "name": "std.io.fs.list",
+      "role": "host.std.io.fs.read@1.0",
+      "provider": "orna.sys.host.filesystem.v1"
+    },
+    {
+      "name": "std.io.fs.metadata",
+      "role": "host.std.io.fs.read@1.0",
+      "provider": "orna.sys.host.filesystem.v1"
+    },
+    {
+      "name": "std.io.fs.move_file",
+      "role": "host.std.io.fs.write@1.0",
+      "provider": "orna.sys.host.filesystem.v1"
+    },
+    {
+      "name": "std.io.fs.read_text",
+      "role": "host.std.io.fs.read@1.0",
+      "provider": "orna.sys.host.filesystem.v1"
+    },
+    {
+      "name": "std.io.fs.remove_file",
+      "role": "host.std.io.fs.write@1.0",
+      "provider": "orna.sys.host.filesystem.v1"
+    },
+    {
+      "name": "std.io.fs.symlink_metadata",
+      "role": "host.std.io.fs.read@1.0",
+      "provider": "orna.sys.host.filesystem.v1"
+    },
+    {
+      "name": "std.io.fs.write_text",
+      "role": "host.std.io.fs.write@1.0",
+      "provider": "orna.sys.host.filesystem.v1"
+    },
+    {
+      "name": "std.io.process.run",
+      "role": "host.std.io.process@1.0",
+      "provider": "orna.sys.host.process.v1"
+    },
+    {
+      "name": "std.net.http.cancel",
+      "role": "host.std.net.http@1.0",
+      "provider": "orna.sys.host.http.v1"
+    },
+    {
+      "name": "std.net.http.send",
+      "role": "host.std.net.http@1.0",
+      "provider": "orna.sys.host.http.v1"
+    },
+    {
+      "name": "std.net.http.start",
+      "role": "host.std.net.http@1.0",
+      "provider": "orna.sys.host.http.v1"
+    },
+    {
+      "name": "std.net.http.wait",
+      "role": "host.std.net.http@1.0",
+      "provider": "orna.sys.host.http.v1"
+    },
+    {
+      "name": "sys.blob.capture_file",
+      "role": "host.sys.blob.capture@1.0",
+      "provider": "orna.sys.host.filesystem.v1"
+    }
   ]
 }

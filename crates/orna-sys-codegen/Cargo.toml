@@ -12,3 +12,6 @@ quote = "1.0.45"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["preserve_order"] }
 syn = { version = "2.0.119", features = ["full", "visit"] }
+
+[build-dependencies]
+orna-sys-id = { path = "../orna-sys-id" }

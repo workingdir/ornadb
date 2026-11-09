@@ -1409,6 +1409,7 @@ dependencies = [
  "orna-application",
  "orna-evaluator",
  "orna-foundation",
+ "orna-intrinsics",
  "orna-live",
  "orna-project",
  "orna-project-repl",
@@ -1515,6 +1516,7 @@ dependencies = [
  "num-integer",
  "num-traits",
  "orna-foundation",
+ "orna-intrinsics",
  "orna-project",
  "orna-project-repl",
  "orna-repository",
@@ -1787,6 +1789,7 @@ dependencies = [
 name = "orna-sys-codegen"
 version = "1.1.0"
 dependencies = [
+ "orna-sys-id",
  "orna-sys-model",
  "quote",
  "serde",

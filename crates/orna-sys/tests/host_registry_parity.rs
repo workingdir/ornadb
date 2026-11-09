@@ -230,9 +230,9 @@ fn generated_host_binding_artifacts_are_registry_backed_and_parse_as_orna_module
     }
     assert_eq!(parsed_operations.len(), registry.operations().count());
     assert!(
-        registry
-            .operations()
-            .all(|operation| parsed_operations.iter().any(|name| name == &operation.name)),
+        registry.operations().all(|operation| parsed_operations
+            .iter()
+            .any(|name| name == operation.name.label())),
         "every typed native operation has one parsed emitted declaration"
     );
 }
@@ -638,7 +638,7 @@ fn native_provider_error_taxonomies_match_the_generated_operation_vocabularies()
     for (provider, codes) in taxonomies {
         let operations = registry
             .operations()
-            .filter(|operation| operation.provider == provider)
+            .filter(|operation| operation.provider.name() == provider)
             .collect::<Vec<_>>();
         assert!(
             !operations.is_empty(),
@@ -646,7 +646,7 @@ fn native_provider_error_taxonomies_match_the_generated_operation_vocabularies()
         );
         let registered_codes = operations
             .iter()
-            .flat_map(|operation| operation.failures.iter().map(String::as_str))
+            .flat_map(|operation| operation.failures.iter().map(|failure| failure.as_str()))
             .collect::<std::collections::BTreeSet<_>>();
         let native_codes = codes
             .iter()

@@ -224,8 +224,25 @@ impl FilesystemProvider {
     /// The source must fit both `max_bytes` and the provider limit; a
     /// `max_bytes` above the provider limit is not itself a failure, because
     /// the contract bounds the source and the captured Blob, not the request.
+    ///
+    /// # Preconditions
+    ///
+    /// root is explicitly allowlisted by the host and held for the provider lifetime
+    ///
+    /// path is relative and contains no parent traversal or symbolic-link component
+    ///
+    /// target is a regular file whose identity, size and modification time remain stable during capture
+    ///
+    /// the source and captured Blob fit within max_bytes and the provider limit
     #[sys_host_operation(
-        r###"{"name":"sys.blob.capture_file","version":{"major":1,"minor":0},"signature":"fn sys.blob.capture_file(root: Str, path: Str, max_bytes: Int): Blob","effects":["invoke"],"preconditions":["root is explicitly allowlisted by the host and held for the provider lifetime","path is relative and contains no parent traversal or symbolic-link component","target is a regular file whose identity, size and modification time remain stable during capture","the source and captured Blob fit within max_bytes and the provider limit"],"failures":["sys.blob.source_denied","sys.blob.bounds","sys.blob.limit","sys.blob.source_changed"],"role":"host.sys.blob.capture@1.0","provider":"orna.sys.host.filesystem.v1","implementation":"capture_file"}"###
+        function = SysFunction::BlobCaptureFile,
+        operation = HostOperation::SysBlobCaptureFile,
+        effects = [SysEffectKind::Invoke],
+        failures = [SysFailureCode::BlobSourceDenied, SysFailureCode::BlobBounds, SysFailureCode::BlobLimit, SysFailureCode::BlobSourceChanged],
+        role = "host.sys.blob.capture@1.0",
+        provider = HostProvider::Filesystem,
+        signature = "fn sys.blob.capture_file(root: Str, path: Str, max_bytes: Int): Blob",
+        implementation = "capture_file"
     )]
     pub fn capture_file(
         &self,
@@ -258,16 +275,50 @@ impl FilesystemProvider {
         })
     }
 
+    ///
+    /// # Preconditions
+    ///
+    /// root is explicitly allowlisted by the host and held for the provider lifetime
+    ///
+    /// path is relative and each component resolves beneath the held root without parent traversal, symbolic links or .git metadata
+    ///
+    /// target is a regular file
+    ///
+    /// file contents are valid UTF-8 and within the provider byte limit
     #[sys_host_operation(
-        r###"{"name":"std.io.fs.read_text","version":{"major":1,"minor":0},"signature":"fn std.io.fs.read_text(root: Str, path: Str): Str","effects":["read"],"preconditions":["root is explicitly allowlisted by the host and held for the provider lifetime","path is relative and each component resolves beneath the held root without parent traversal, symbolic links or .git metadata","target is a regular file","file contents are valid UTF-8 and within the provider byte limit"],"failures":["sys.host.filesystem.denied","sys.host.filesystem.invalid_request","sys.host.filesystem.not_found","sys.host.filesystem.not_file","sys.host.filesystem.not_directory","sys.host.filesystem.invalid_utf8","sys.host.filesystem.output_limit","sys.host.filesystem.unavailable"],"role":"host.std.io.fs.read@1.0","provider":"orna.sys.host.filesystem.v1","implementation":"read_text"}"###
+        operation = HostOperation::StdIoFsReadText,
+        effects = [SysEffectKind::Read],
+        failures = [SysFailureCode::HostFilesystemDenied, SysFailureCode::HostFilesystemInvalidRequest, SysFailureCode::HostFilesystemNotFound, SysFailureCode::HostFilesystemNotFile, SysFailureCode::HostFilesystemNotDirectory, SysFailureCode::HostFilesystemInvalidUtf8, SysFailureCode::HostFilesystemOutputLimit, SysFailureCode::HostFilesystemUnavailable],
+        role = "host.std.io.fs.read@1.0",
+        provider = HostProvider::Filesystem,
+        signature = "fn std.io.fs.read_text(root: Str, path: Str): Str",
+        implementation = "read_text"
     )]
     pub fn read_text(&self, root: &str, path: &str) -> Result<String, FilesystemProviderError> {
         let root = self.authorized_root(root)?;
         beneath::read_text(root, RootedPath::parse(path)?, self.max_text_bytes)
     }
 
+    ///
+    /// # Preconditions
+    ///
+    /// root is explicitly allowlisted by the host and held for the provider lifetime
+    ///
+    /// path is relative and each component resolves beneath the held root without parent traversal, symbolic links or .git metadata
+    ///
+    /// parent directory exists
+    ///
+    /// contents are within the provider byte limit
+    ///
+    /// overwrite is true only for an existing regular file
     #[sys_host_operation(
-        r###"{"name":"std.io.fs.write_text","version":{"major":1,"minor":0},"signature":"fn std.io.fs.write_text(root: Str, path: Str, contents: Str, overwrite: Bool): Unit","effects":["invoke"],"preconditions":["root is explicitly allowlisted by the host and held for the provider lifetime","path is relative and each component resolves beneath the held root without parent traversal, symbolic links or .git metadata","parent directory exists","contents are within the provider byte limit","overwrite is true only for an existing regular file"],"failures":["sys.host.filesystem.denied","sys.host.filesystem.invalid_request","sys.host.filesystem.not_found","sys.host.filesystem.already_exists","sys.host.filesystem.not_file","sys.host.filesystem.not_directory","sys.host.filesystem.output_limit","sys.host.filesystem.unavailable"],"role":"host.std.io.fs.write@1.0","provider":"orna.sys.host.filesystem.v1","implementation":"write_text"}"###
+        operation = HostOperation::StdIoFsWriteText,
+        effects = [SysEffectKind::Invoke],
+        failures = [SysFailureCode::HostFilesystemDenied, SysFailureCode::HostFilesystemInvalidRequest, SysFailureCode::HostFilesystemNotFound, SysFailureCode::HostFilesystemAlreadyExists, SysFailureCode::HostFilesystemNotFile, SysFailureCode::HostFilesystemNotDirectory, SysFailureCode::HostFilesystemOutputLimit, SysFailureCode::HostFilesystemUnavailable],
+        role = "host.std.io.fs.write@1.0",
+        provider = HostProvider::Filesystem,
+        signature = "fn std.io.fs.write_text(root: Str, path: Str, contents: Str, overwrite: Bool): Unit",
+        implementation = "write_text"
     )]
     pub fn write_text(
         &self,
@@ -283,8 +334,24 @@ impl FilesystemProvider {
         beneath::write_text(root, RootedPath::parse(path)?, contents, overwrite)
     }
 
+    ///
+    /// # Preconditions
+    ///
+    /// root is explicitly allowlisted by the host and held for the provider lifetime
+    ///
+    /// path is relative and each component resolves beneath the held root without parent traversal, symbolic links or .git metadata
+    ///
+    /// parent directory exists
+    ///
+    /// resulting file is within the provider byte limit
     #[sys_host_operation(
-        r###"{"name":"std.io.fs.append_text","version":{"major":1,"minor":0},"signature":"fn std.io.fs.append_text(root: Str, path: Str, contents: Str): Unit","effects":["invoke"],"preconditions":["root is explicitly allowlisted by the host and held for the provider lifetime","path is relative and each component resolves beneath the held root without parent traversal, symbolic links or .git metadata","parent directory exists","resulting file is within the provider byte limit"],"failures":["sys.host.filesystem.denied","sys.host.filesystem.invalid_request","sys.host.filesystem.not_found","sys.host.filesystem.not_file","sys.host.filesystem.not_directory","sys.host.filesystem.output_limit","sys.host.filesystem.unavailable"],"role":"host.std.io.fs.write@1.0","provider":"orna.sys.host.filesystem.v1","implementation":"append_text"}"###
+        operation = HostOperation::StdIoFsAppendText,
+        effects = [SysEffectKind::Invoke],
+        failures = [SysFailureCode::HostFilesystemDenied, SysFailureCode::HostFilesystemInvalidRequest, SysFailureCode::HostFilesystemNotFound, SysFailureCode::HostFilesystemNotFile, SysFailureCode::HostFilesystemNotDirectory, SysFailureCode::HostFilesystemOutputLimit, SysFailureCode::HostFilesystemUnavailable],
+        role = "host.std.io.fs.write@1.0",
+        provider = HostProvider::Filesystem,
+        signature = "fn std.io.fs.append_text(root: Str, path: Str, contents: Str): Unit",
+        implementation = "append_text"
     )]
     pub fn append_text(
         &self,
@@ -306,16 +373,40 @@ impl FilesystemProvider {
 
     /// Reports whether `path` names an entry. Nothing below a missing
     /// directory, or below an entry that is not a directory, exists.
+    ///
+    /// # Preconditions
+    ///
+    /// root is explicitly allowlisted by the host and held for the provider lifetime
+    ///
+    /// path is relative and each component resolves beneath the held root without parent traversal, symbolic links or .git metadata
     #[sys_host_operation(
-        r###"{"name":"std.io.fs.exists","version":{"major":1,"minor":0},"signature":"fn std.io.fs.exists(root: Str, path: Str): Bool","effects":["read"],"preconditions":["root is explicitly allowlisted by the host and held for the provider lifetime","path is relative and each component resolves beneath the held root without parent traversal, symbolic links or .git metadata"],"failures":["sys.host.filesystem.denied","sys.host.filesystem.invalid_request","sys.host.filesystem.unavailable"],"role":"host.std.io.fs.read@1.0","provider":"orna.sys.host.filesystem.v1","implementation":"exists"}"###
+        operation = HostOperation::StdIoFsExists,
+        effects = [SysEffectKind::Read],
+        failures = [SysFailureCode::HostFilesystemDenied, SysFailureCode::HostFilesystemInvalidRequest, SysFailureCode::HostFilesystemUnavailable],
+        role = "host.std.io.fs.read@1.0",
+        provider = HostProvider::Filesystem,
+        signature = "fn std.io.fs.exists(root: Str, path: Str): Bool",
+        implementation = "exists"
     )]
     pub fn exists(&self, root: &str, path: &str) -> Result<bool, FilesystemProviderError> {
         let root = self.authorized_root(root)?;
         beneath::exists(root, RootedPath::parse(path)?)
     }
 
+    ///
+    /// # Preconditions
+    ///
+    /// root is explicitly allowlisted by the host and held for the provider lifetime
+    ///
+    /// path is relative and each component resolves beneath the held root without parent traversal, symbolic links or .git metadata
     #[sys_host_operation(
-        r###"{"name":"std.io.fs.is_directory","version":{"major":1,"minor":0},"signature":"fn std.io.fs.is_directory(root: Str, path: Str): Bool","effects":["read"],"preconditions":["root is explicitly allowlisted by the host and held for the provider lifetime","path is relative and each component resolves beneath the held root without parent traversal, symbolic links or .git metadata"],"failures":["sys.host.filesystem.denied","sys.host.filesystem.invalid_request","sys.host.filesystem.unavailable"],"role":"host.std.io.fs.read@1.0","provider":"orna.sys.host.filesystem.v1","implementation":"is_directory"}"###
+        operation = HostOperation::StdIoFsIsDirectory,
+        effects = [SysEffectKind::Read],
+        failures = [SysFailureCode::HostFilesystemDenied, SysFailureCode::HostFilesystemInvalidRequest, SysFailureCode::HostFilesystemUnavailable],
+        role = "host.std.io.fs.read@1.0",
+        provider = HostProvider::Filesystem,
+        signature = "fn std.io.fs.is_directory(root: Str, path: Str): Bool",
+        implementation = "is_directory"
     )]
     pub fn is_directory(&self, root: &str, path: &str) -> Result<bool, FilesystemProviderError> {
         let root = self.authorized_root(root)?;
@@ -323,8 +414,22 @@ impl FilesystemProvider {
     }
 
     /// Lists a directory's entry names in sorted order, omitting Git metadata.
+    ///
+    /// # Preconditions
+    ///
+    /// root is explicitly allowlisted by the host and held for the provider lifetime
+    ///
+    /// path is relative and each component resolves to a directory beneath the held root without parent traversal, symbolic links or .git metadata
+    ///
+    /// all child names other than .git metadata are Unicode and within the provider entry limit
     #[sys_host_operation(
-        r###"{"name":"std.io.fs.list","version":{"major":1,"minor":0},"signature":"fn std.io.fs.list(root: Str, path: Str): [Str]","effects":["read"],"preconditions":["root is explicitly allowlisted by the host and held for the provider lifetime","path is relative and each component resolves to a directory beneath the held root without parent traversal, symbolic links or .git metadata","all child names other than .git metadata are Unicode and within the provider entry limit"],"failures":["sys.host.filesystem.denied","sys.host.filesystem.invalid_request","sys.host.filesystem.not_found","sys.host.filesystem.not_directory","sys.host.filesystem.output_limit","sys.host.filesystem.unavailable"],"role":"host.std.io.fs.read@1.0","provider":"orna.sys.host.filesystem.v1","implementation":"list"}"###
+        operation = HostOperation::StdIoFsList,
+        effects = [SysEffectKind::Read],
+        failures = [SysFailureCode::HostFilesystemDenied, SysFailureCode::HostFilesystemInvalidRequest, SysFailureCode::HostFilesystemNotFound, SysFailureCode::HostFilesystemNotDirectory, SysFailureCode::HostFilesystemOutputLimit, SysFailureCode::HostFilesystemUnavailable],
+        role = "host.std.io.fs.read@1.0",
+        provider = HostProvider::Filesystem,
+        signature = "fn std.io.fs.list(root: Str, path: Str): [Str]",
+        implementation = "list"
     )]
     pub fn list(&self, root: &str, path: &str) -> Result<Vec<String>, FilesystemProviderError> {
         let root = self.authorized_root(root)?;
@@ -333,8 +438,20 @@ impl FilesystemProvider {
 
     /// Reports the entry `path` names. A symbolic link is refused rather than
     /// followed; `symlink_metadata` describes the link itself.
+    ///
+    /// # Preconditions
+    ///
+    /// root is explicitly allowlisted by the host and held for the provider lifetime
+    ///
+    /// path is relative and each component resolves beneath the held root without parent traversal, symbolic links or .git metadata
     #[sys_host_operation(
-        r###"{"name":"std.io.fs.metadata","version":{"major":1,"minor":0},"signature":"fn std.io.fs.metadata(root: Str, path: Str): (Str, Int?, Instant?, Instant?)","effects":["read"],"preconditions":["root is explicitly allowlisted by the host and held for the provider lifetime","path is relative and each component resolves beneath the held root without parent traversal, symbolic links or .git metadata"],"failures":["sys.host.filesystem.denied","sys.host.filesystem.invalid_request","sys.host.filesystem.not_found","sys.host.filesystem.not_directory","sys.host.filesystem.unavailable"],"role":"host.std.io.fs.read@1.0","provider":"orna.sys.host.filesystem.v1","implementation":"metadata"}"###
+        operation = HostOperation::StdIoFsMetadata,
+        effects = [SysEffectKind::Read],
+        failures = [SysFailureCode::HostFilesystemDenied, SysFailureCode::HostFilesystemInvalidRequest, SysFailureCode::HostFilesystemNotFound, SysFailureCode::HostFilesystemNotDirectory, SysFailureCode::HostFilesystemUnavailable],
+        role = "host.std.io.fs.read@1.0",
+        provider = HostProvider::Filesystem,
+        signature = "fn std.io.fs.metadata(root: Str, path: Str): (Str, Int?, Instant?, Instant?)",
+        implementation = "metadata"
     )]
     pub fn metadata(
         &self,
@@ -351,8 +468,22 @@ impl FilesystemProvider {
 
     /// Reports the entry `path` names, describing a final symbolic link itself
     /// without following it.
+    ///
+    /// # Preconditions
+    ///
+    /// root is explicitly allowlisted by the host and held for the provider lifetime
+    ///
+    /// path is relative, names no .git metadata, and its parent components resolve beneath the held root without parent traversal or symbolic links
+    ///
+    /// final symbolic link is reported without following it
     #[sys_host_operation(
-        r###"{"name":"std.io.fs.symlink_metadata","version":{"major":1,"minor":0},"signature":"fn std.io.fs.symlink_metadata(root: Str, path: Str): (Str, Int?, Instant?, Instant?)","effects":["read"],"preconditions":["root is explicitly allowlisted by the host and held for the provider lifetime","path is relative, names no .git metadata, and its parent components resolve beneath the held root without parent traversal or symbolic links","final symbolic link is reported without following it"],"failures":["sys.host.filesystem.denied","sys.host.filesystem.invalid_request","sys.host.filesystem.not_found","sys.host.filesystem.not_directory","sys.host.filesystem.unavailable"],"role":"host.std.io.fs.read@1.0","provider":"orna.sys.host.filesystem.v1","implementation":"symlink_metadata"}"###
+        operation = HostOperation::StdIoFsSymlinkMetadata,
+        effects = [SysEffectKind::Read],
+        failures = [SysFailureCode::HostFilesystemDenied, SysFailureCode::HostFilesystemInvalidRequest, SysFailureCode::HostFilesystemNotFound, SysFailureCode::HostFilesystemNotDirectory, SysFailureCode::HostFilesystemUnavailable],
+        role = "host.std.io.fs.read@1.0",
+        provider = HostProvider::Filesystem,
+        signature = "fn std.io.fs.symlink_metadata(root: Str, path: Str): (Str, Int?, Instant?, Instant?)",
+        implementation = "symlink_metadata"
     )]
     pub fn symlink_metadata(
         &self,
@@ -367,8 +498,24 @@ impl FilesystemProvider {
     /// Creates the directory `path` names. With `parents`, missing ancestors
     /// are created too; an existing directory at `path` itself is accepted only
     /// with `exist_ok`.
+    ///
+    /// # Preconditions
+    ///
+    /// root is explicitly allowlisted by the host and held for the provider lifetime
+    ///
+    /// path is relative and each component resolves beneath the held root without parent traversal, symbolic links or .git metadata
+    ///
+    /// parent directory exists unless parents is true
+    ///
+    /// existing directory is accepted only when exist_ok is true
     #[sys_host_operation(
-        r###"{"name":"std.io.fs.create_dir","version":{"major":1,"minor":0},"signature":"fn std.io.fs.create_dir(root: Str, path: Str, parents: Bool, exist_ok: Bool): Unit","effects":["invoke"],"preconditions":["root is explicitly allowlisted by the host and held for the provider lifetime","path is relative and each component resolves beneath the held root without parent traversal, symbolic links or .git metadata","parent directory exists unless parents is true","existing directory is accepted only when exist_ok is true"],"failures":["sys.host.filesystem.denied","sys.host.filesystem.invalid_request","sys.host.filesystem.not_found","sys.host.filesystem.already_exists","sys.host.filesystem.not_directory","sys.host.filesystem.unavailable"],"role":"host.std.io.fs.write@1.0","provider":"orna.sys.host.filesystem.v1","implementation":"create_dir"}"###
+        operation = HostOperation::StdIoFsCreateDir,
+        effects = [SysEffectKind::Invoke],
+        failures = [SysFailureCode::HostFilesystemDenied, SysFailureCode::HostFilesystemInvalidRequest, SysFailureCode::HostFilesystemNotFound, SysFailureCode::HostFilesystemAlreadyExists, SysFailureCode::HostFilesystemNotDirectory, SysFailureCode::HostFilesystemUnavailable],
+        role = "host.std.io.fs.write@1.0",
+        provider = HostProvider::Filesystem,
+        signature = "fn std.io.fs.create_dir(root: Str, path: Str, parents: Bool, exist_ok: Bool): Unit",
+        implementation = "create_dir"
     )]
     pub fn create_dir(
         &self,
@@ -381,8 +528,22 @@ impl FilesystemProvider {
         beneath::create_dir(root, RootedPath::parse(path)?, parents, exist_ok)
     }
 
+    ///
+    /// # Preconditions
+    ///
+    /// root is explicitly allowlisted by the host and held for the provider lifetime
+    ///
+    /// path is relative and each component resolves beneath the held root without parent traversal, symbolic links or .git metadata
+    ///
+    /// target is not a directory
     #[sys_host_operation(
-        r###"{"name":"std.io.fs.remove_file","version":{"major":1,"minor":0},"signature":"fn std.io.fs.remove_file(root: Str, path: Str): Unit","effects":["invoke"],"preconditions":["root is explicitly allowlisted by the host and held for the provider lifetime","path is relative and each component resolves beneath the held root without parent traversal, symbolic links or .git metadata","target is not a directory"],"failures":["sys.host.filesystem.denied","sys.host.filesystem.invalid_request","sys.host.filesystem.not_found","sys.host.filesystem.not_file","sys.host.filesystem.not_directory","sys.host.filesystem.unavailable"],"role":"host.std.io.fs.write@1.0","provider":"orna.sys.host.filesystem.v1","implementation":"remove_file"}"###
+        operation = HostOperation::StdIoFsRemoveFile,
+        effects = [SysEffectKind::Invoke],
+        failures = [SysFailureCode::HostFilesystemDenied, SysFailureCode::HostFilesystemInvalidRequest, SysFailureCode::HostFilesystemNotFound, SysFailureCode::HostFilesystemNotFile, SysFailureCode::HostFilesystemNotDirectory, SysFailureCode::HostFilesystemUnavailable],
+        role = "host.std.io.fs.write@1.0",
+        provider = HostProvider::Filesystem,
+        signature = "fn std.io.fs.remove_file(root: Str, path: Str): Unit",
+        implementation = "remove_file"
     )]
     pub fn remove_file(&self, root: &str, path: &str) -> Result<(), FilesystemProviderError> {
         let root = self.authorized_root(root)?;
@@ -391,8 +552,24 @@ impl FilesystemProvider {
 
     /// Copies one regular file's bytes and permission bits. Copying a file
     /// onto another name for the same file leaves it unchanged.
+    ///
+    /// # Preconditions
+    ///
+    /// root is explicitly allowlisted by the host and held for the provider lifetime
+    ///
+    /// source and destination are relative and each component resolves beneath the held root without parent traversal, symbolic links or .git metadata
+    ///
+    /// source is a regular file within the provider byte limit
+    ///
+    /// overwrite is true only for an existing regular-file destination
     #[sys_host_operation(
-        r###"{"name":"std.io.fs.copy_file","version":{"major":1,"minor":0},"signature":"fn std.io.fs.copy_file(root: Str, source_path: Str, destination_path: Str, overwrite: Bool): Unit","effects":["invoke"],"preconditions":["root is explicitly allowlisted by the host and held for the provider lifetime","source and destination are relative and each component resolves beneath the held root without parent traversal, symbolic links or .git metadata","source is a regular file within the provider byte limit","overwrite is true only for an existing regular-file destination"],"failures":["sys.host.filesystem.denied","sys.host.filesystem.invalid_request","sys.host.filesystem.not_found","sys.host.filesystem.already_exists","sys.host.filesystem.not_file","sys.host.filesystem.not_directory","sys.host.filesystem.output_limit","sys.host.filesystem.unavailable"],"role":"host.std.io.fs.write@1.0","provider":"orna.sys.host.filesystem.v1","implementation":"copy_file"}"###
+        operation = HostOperation::StdIoFsCopyFile,
+        effects = [SysEffectKind::Invoke],
+        failures = [SysFailureCode::HostFilesystemDenied, SysFailureCode::HostFilesystemInvalidRequest, SysFailureCode::HostFilesystemNotFound, SysFailureCode::HostFilesystemAlreadyExists, SysFailureCode::HostFilesystemNotFile, SysFailureCode::HostFilesystemNotDirectory, SysFailureCode::HostFilesystemOutputLimit, SysFailureCode::HostFilesystemUnavailable],
+        role = "host.std.io.fs.write@1.0",
+        provider = HostProvider::Filesystem,
+        signature = "fn std.io.fs.copy_file(root: Str, source_path: Str, destination_path: Str, overwrite: Bool): Unit",
+        implementation = "copy_file"
     )]
     pub fn copy_file(
         &self,
@@ -409,8 +586,24 @@ impl FilesystemProvider {
 
     /// Renames one regular file. Without `overwrite` the destination name is
     /// never replaced, even by a file created concurrently.
+    ///
+    /// # Preconditions
+    ///
+    /// root is explicitly allowlisted by the host and held for the provider lifetime
+    ///
+    /// source and destination are relative and each component resolves beneath the held root without parent traversal, symbolic links or .git metadata
+    ///
+    /// source is a regular file
+    ///
+    /// overwrite is true only for an existing regular-file destination
     #[sys_host_operation(
-        r###"{"name":"std.io.fs.move_file","version":{"major":1,"minor":0},"signature":"fn std.io.fs.move_file(root: Str, source_path: Str, destination_path: Str, overwrite: Bool): Unit","effects":["invoke"],"preconditions":["root is explicitly allowlisted by the host and held for the provider lifetime","source and destination are relative and each component resolves beneath the held root without parent traversal, symbolic links or .git metadata","source is a regular file","overwrite is true only for an existing regular-file destination"],"failures":["sys.host.filesystem.denied","sys.host.filesystem.invalid_request","sys.host.filesystem.not_found","sys.host.filesystem.already_exists","sys.host.filesystem.not_file","sys.host.filesystem.not_directory","sys.host.filesystem.unavailable"],"role":"host.std.io.fs.write@1.0","provider":"orna.sys.host.filesystem.v1","implementation":"move_file"}"###
+        operation = HostOperation::StdIoFsMoveFile,
+        effects = [SysEffectKind::Invoke],
+        failures = [SysFailureCode::HostFilesystemDenied, SysFailureCode::HostFilesystemInvalidRequest, SysFailureCode::HostFilesystemNotFound, SysFailureCode::HostFilesystemAlreadyExists, SysFailureCode::HostFilesystemNotFile, SysFailureCode::HostFilesystemNotDirectory, SysFailureCode::HostFilesystemUnavailable],
+        role = "host.std.io.fs.write@1.0",
+        provider = HostProvider::Filesystem,
+        signature = "fn std.io.fs.move_file(root: Str, source_path: Str, destination_path: Str, overwrite: Bool): Unit",
+        implementation = "move_file"
     )]
     pub fn move_file(
         &self,

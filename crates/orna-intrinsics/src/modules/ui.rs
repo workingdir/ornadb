@@ -47,6 +47,7 @@ pub(crate) const UI: &[Intrinsic] = &[Intrinsic {
             },
         ],
         result: SigType::Ui,
+        arities: &[],
     },
     effect: Effect::Pure,
     dispatch: Dispatch::Native,

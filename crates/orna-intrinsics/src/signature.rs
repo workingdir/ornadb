@@ -119,6 +119,9 @@ pub struct Signature {
     pub type_params: &'static [&'static str],
     pub params: &'static [Param],
     pub result: SigType,
+    /// Accepted total value counts after the pipeline input. Empty means the
+    /// required/default prefix of `params` decides.
+    pub arities: &'static [usize],
 }
 
 impl Signature {

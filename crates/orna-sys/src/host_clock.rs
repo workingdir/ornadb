@@ -32,8 +32,21 @@ impl ClockProvider {
         Self { maximum_sleep }
     }
 
+    /// Waits for the requested duration.
+    ///
+    /// # Preconditions
+    ///
+    /// the host explicitly installed a clock provider
+    ///
+    /// duration is nonnegative and no greater than the configured maximum
     #[sys_host_operation(
-        r###"{"name":"std.concurrent.sleep","version":{"major":1,"minor":0},"signature":"fn std.concurrent.sleep(duration: Duration): Null","effects":["invoke"],"preconditions":["the host explicitly installed a clock provider","duration is nonnegative and no greater than the configured maximum"],"failures":["sys.host.clock.denied","sys.host.clock.cancelled"],"role":"host.std.concurrent.clock@1.0","provider":"orna.sys.host.clock.v1","implementation":"sleep"}"###
+        operation = HostOperation::StdConcurrentSleep,
+        effects = [SysEffectKind::Invoke],
+        failures = [SysFailureCode::HostClockDenied, SysFailureCode::HostClockCancelled],
+        role = "host.std.concurrent.clock@1.0",
+        provider = HostProvider::Clock,
+        signature = "fn std.concurrent.sleep(duration: Duration): Null",
+        implementation = "sleep"
     )]
     pub fn sleep(&self, duration: Duration) -> Result<(), ClockProviderError> {
         self.sleep_with_cancellation(duration, || false)

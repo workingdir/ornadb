@@ -30,6 +30,7 @@ serde = "1.0"
 serde_json = { version = "1.0.151", features = ["arbitrary_precision", "raw_value"] }
 stacker = "0.1.25"
 orna-foundation = { path = "../orna-foundation" }
+orna-intrinsics = { path = "../orna-intrinsics" }
 orna-repository = { path = "../orna-repository", optional = true }
 orna-standard-sources = { path = "../orna-standard-sources" }
 orna-semantic = { path = "../orna-semantic" }

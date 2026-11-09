@@ -119,8 +119,24 @@ impl HttpProvider {
         Ok(())
     }
 
+    ///
+    /// # Preconditions
+    ///
+    /// origin is explicitly allowlisted by the host
+    ///
+    /// only http and https are accepted
+    ///
+    /// redirects and ambient proxy settings are disabled
+    ///
+    /// timeout and response byte limits are within provider limits
     #[sys_host_operation(
-        r###"{"name":"std.net.http.send","version":{"major":1,"minor":0},"signature":"fn std.net.http.send(method: Str, url: Str, headers: [(Str, Str)], request_body: Blob?, timeout: Duration?, max_header_bytes: Int, max_body_bytes: Int): (Int, [(Str, Str)], Blob)","effects":["invoke"],"preconditions":["origin is explicitly allowlisted by the host","only http and https are accepted","redirects and ambient proxy settings are disabled","timeout and response byte limits are within provider limits"],"failures":["sys.host.http.denied","sys.host.http.invalid_request","sys.host.http.header_limit","sys.host.http.body_limit","sys.host.http.timeout","sys.host.http.unavailable"],"role":"host.std.net.http@1.0","provider":"orna.sys.host.http.v1","implementation":"send"}"###
+        operation = HostOperation::StdNetHttpSend,
+        effects = [SysEffectKind::Invoke],
+        failures = [SysFailureCode::HostHttpDenied, SysFailureCode::HostHttpInvalidRequest, SysFailureCode::HostHttpHeaderLimit, SysFailureCode::HostHttpBodyLimit, SysFailureCode::HostHttpTimeout, SysFailureCode::HostHttpUnavailable],
+        role = "host.std.net.http@1.0",
+        provider = HostProvider::Http,
+        signature = "fn std.net.http.send(method: Str, url: Str, headers: [(Str, Str)], request_body: Blob?, timeout: Duration?, max_header_bytes: Int, max_body_bytes: Int): (Int, [(Str, Str)], Blob)",
+        implementation = "send"
     )]
     /// The parameter list is the registry-declared operation signature above;
     /// it mirrors the `#[sys_host_operation]` attribute field for field.
@@ -210,8 +226,18 @@ impl HttpProvider {
         })
     }
 
+    ///
+    /// # Preconditions
+    ///
+    /// the host HTTP provider can allocate a request handle
     #[sys_host_operation(
-        r###"{"name":"std.net.http.start","version":{"major":1,"minor":0},"signature":"fn std.net.http.start(method: Str, url: Str, headers: [(Str, Str)], request_body: Blob?, timeout: Duration?, max_header_bytes: Int, max_body_bytes: Int): Uuid","effects":["invoke"],"preconditions":["the host HTTP provider can allocate a request handle"],"failures":["sys.host.http.unavailable"],"role":"host.std.net.http@1.0","provider":"orna.sys.host.http.v1","implementation":"start"}"###
+        operation = HostOperation::StdNetHttpStart,
+        effects = [SysEffectKind::Invoke],
+        failures = [SysFailureCode::HostHttpUnavailable],
+        role = "host.std.net.http@1.0",
+        provider = HostProvider::Http,
+        signature = "fn std.net.http.start(method: Str, url: Str, headers: [(Str, Str)], request_body: Blob?, timeout: Duration?, max_header_bytes: Int, max_body_bytes: Int): Uuid",
+        implementation = "start"
     )]
     /// The parameter list is the registry-declared operation signature above;
     /// it mirrors the `#[sys_host_operation]` attribute field for field.
@@ -284,8 +310,22 @@ impl HttpProvider {
         Ok(*handle.as_bytes())
     }
 
+    ///
+    /// # Preconditions
+    ///
+    /// handle was created by this provider instance
+    ///
+    /// response header and body limits from start are enforced
+    ///
+    /// wait timeout does not cancel the request
     #[sys_host_operation(
-        r###"{"name":"std.net.http.wait","version":{"major":1,"minor":0},"signature":"fn std.net.http.wait(handle: Uuid, timeout: Duration?): (Int, [(Str, Str)], Blob)","effects":["invoke"],"preconditions":["handle was created by this provider instance","response header and body limits from start are enforced","wait timeout does not cancel the request"],"failures":["sys.host.http.denied","sys.host.http.invalid_request","sys.host.http.header_limit","sys.host.http.body_limit","sys.host.http.timeout","sys.host.http.cancelled","sys.host.http.unavailable"],"role":"host.std.net.http@1.0","provider":"orna.sys.host.http.v1","implementation":"wait"}"###
+        operation = HostOperation::StdNetHttpWait,
+        effects = [SysEffectKind::Invoke],
+        failures = [SysFailureCode::HostHttpDenied, SysFailureCode::HostHttpInvalidRequest, SysFailureCode::HostHttpHeaderLimit, SysFailureCode::HostHttpBodyLimit, SysFailureCode::HostHttpTimeout, SysFailureCode::HostHttpCancelled, SysFailureCode::HostHttpUnavailable],
+        role = "host.std.net.http@1.0",
+        provider = HostProvider::Http,
+        signature = "fn std.net.http.wait(handle: Uuid, timeout: Duration?): (Int, [(Str, Str)], Blob)",
+        implementation = "wait"
     )]
     pub fn wait(
         &self,
@@ -335,8 +375,18 @@ impl HttpProvider {
         }
     }
 
+    ///
+    /// # Preconditions
+    ///
+    /// handle was created by this provider instance
     #[sys_host_operation(
-        r###"{"name":"std.net.http.cancel","version":{"major":1,"minor":0},"signature":"fn std.net.http.cancel(handle: Uuid): Bool","effects":["invoke"],"preconditions":["handle was created by this provider instance"],"failures":["sys.host.http.denied","sys.host.http.unavailable"],"role":"host.std.net.http@1.0","provider":"orna.sys.host.http.v1","implementation":"cancel"}"###
+        operation = HostOperation::StdNetHttpCancel,
+        effects = [SysEffectKind::Invoke],
+        failures = [SysFailureCode::HostHttpDenied, SysFailureCode::HostHttpUnavailable],
+        role = "host.std.net.http@1.0",
+        provider = HostProvider::Http,
+        signature = "fn std.net.http.cancel(handle: Uuid): Bool",
+        implementation = "cancel"
     )]
     pub fn cancel(&self, handle: HostHttpHandle) -> Result<bool, HttpProviderError> {
         let handle = uuid::Uuid::from_bytes(handle);

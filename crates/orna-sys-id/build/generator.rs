@@ -28,7 +28,7 @@ pub const SYS_API_1_1_SHA256: &str =
 /// The engine inventory is derived once and then frozen: its `FunctionId` bytes are
 /// durable catalogue state, so an edit must be deliberate.
 pub const ENGINE_1_1_0_SHA256: &str =
-    "a0c5625c122b9e4c08d62c2c3eef3f3a09e1bbcd785e2c66a873a3c8ef10d254";
+    "2d411975805e9a7fc3c8ec9edb0b02327903bdc89df5be22a34f5d358bbb2487";
 
 /// The catalogue counts fixed by `api/sys.json` `counts`.
 pub const SYS_FUNCTION_COUNT: usize = 82;
@@ -44,22 +44,29 @@ pub const SYS_REMOVED_NAME_COUNT: usize = 4;
 
 /// Engine names that the 1.1.0 specification does not contain.
 ///
-/// The inventory is the 88 spec-absent three-segment names measured in
-/// `docs/design/sys-identity.md` section 1.2: 29 functions, 4 types, 2 retired 1.0.0
-/// functions, 34 failure codes and 19 test-fixture names.
+/// The inventory is the spec-absent engine vocabulary measured in
+/// `docs/design/sys-identity.md` section 1.2 plus the host ABI: 29 functions,
+/// 4 types, 2 retired 1.0.0 functions, 61 failure codes and 19 test-fixture names.
+/// Host-operation identities are counted separately because one of them is also a
+/// portable callable.
 pub const ENGINE_SEALED_FUNCTION_COUNT: usize = 27;
 pub const ENGINE_ONLY_FUNCTION_COUNT: usize = 2;
 pub const ENGINE_ONLY_TYPE_COUNT: usize = 4;
 pub const ENGINE_RETIRED_FUNCTION_COUNT: usize = 2;
-pub const ENGINE_FAILURE_CODE_COUNT: usize = 34;
+pub const ENGINE_FAILURE_CODE_COUNT: usize = 61;
 pub const ENGINE_TEST_FIXTURE_NAME_COUNT: usize = 19;
-pub const ENGINE_NAME_COUNT: usize = 88;
+pub const ENGINE_NAME_COUNT: usize = 115;
+
+/// Host-operation identities and providers declared by this engine.
+pub const HOST_OPERATION_COUNT: usize = 21;
+pub const HOST_PROVIDER_COUNT: usize = 5;
 
 /// The generated files, keyed by their file name below `OUT_DIR`.
 #[derive(Debug)]
 pub struct Generated {
     pub functions: String,
     pub codes: String,
+    pub hosts: String,
     pub relations: String,
     pub removed: String,
     pub tables: String,
@@ -68,10 +75,11 @@ pub struct Generated {
 impl Generated {
     /// The generated files in a stable order.
     #[must_use]
-    pub fn files(&self) -> [(&'static str, &str); 5] {
+    pub fn files(&self) -> [(&'static str, &str); 6] {
         [
             ("functions.rs", &self.functions),
             ("codes.rs", &self.codes),
+            ("hosts.rs", &self.hosts),
             ("relations.rs", &self.relations),
             ("removed.rs", &self.removed),
             ("tables.rs", &self.tables),
@@ -126,6 +134,7 @@ pub fn generate_unchecked(sys_json: &str, engine_json: &str) -> Result<Generated
     Ok(Generated {
         functions: render_functions(&catalogue),
         codes: render_codes(&catalogue, &engine),
+        hosts: render_hosts(&engine),
         relations: render_relations(&catalogue, &engine),
         removed: render_removed(&catalogue),
         tables: render_tables(&catalogue, &engine),
@@ -324,6 +333,19 @@ fn variant_from_name(name: &str) -> Result<String> {
     }
     if variant.is_empty() {
         return Err(GenError::new(format!("member `{name}` has no name")));
+    }
+    Ok(variant)
+}
+
+fn variant_from_host_name(name: &str) -> Result<String> {
+    let mut variant = String::new();
+    for segment in name.split('.') {
+        variant.push_str(&pascal(segment));
+    }
+    if variant.is_empty() {
+        return Err(GenError::new(format!(
+            "host operation `{name}` has no name"
+        )));
     }
     Ok(variant)
 }
@@ -1221,6 +1243,15 @@ struct RetiredFunctionModel {
 }
 
 #[derive(Debug)]
+struct HostOperationModel {
+    name: String,
+    variant: String,
+    role: String,
+    provider: String,
+    provider_variant: String,
+}
+
+#[derive(Debug)]
 struct Engine {
     sealed: Vec<EngineFunctionModel>,
     only: Vec<EngineFunctionModel>,
@@ -1228,6 +1259,8 @@ struct Engine {
     retired: Vec<RetiredFunctionModel>,
     failure_codes: Vec<String>,
     test_fixture_names: Vec<String>,
+    host_providers: Vec<(String, String)>,
+    host_operations: Vec<HostOperationModel>,
 }
 
 impl Engine {
@@ -1421,9 +1454,9 @@ impl Engine {
         {
             let context = format!("failure_codes[{index}]");
             let code = string(value, &context)?.to_owned();
-            if code.split('.').count() != 3 {
+            if code.split('.').count() < 3 {
                 return Err(GenError::new(format!(
-                    "engine failure code `{code}` must have three segments"
+                    "engine failure code `{code}` must have at least three segments"
                 )));
             }
             if failure_codes.contains(&code) {
@@ -1464,6 +1497,122 @@ impl Engine {
             )));
         }
 
+        let mut host_providers = Vec::new();
+        let mut provider_variants = BTreeSet::new();
+        for (index, value) in array(
+            member(root, "host_providers", "engine catalogue")?,
+            "host_providers",
+        )?
+        .iter()
+        .enumerate()
+        {
+            let context = format!("host_providers[{index}]");
+            let name = string(value, &context)?.to_owned();
+            if host_providers.iter().any(|(known, _)| known == &name) {
+                return Err(GenError::new(format!(
+                    "host provider `{name}` appears twice"
+                )));
+            }
+            let short = name
+                .strip_prefix("orna.sys.host.")
+                .and_then(|name| name.strip_suffix(".v1"))
+                .ok_or_else(|| {
+                    GenError::new(format!(
+                        "host provider `{name}` must be `orna.sys.host.<name>.v1`"
+                    ))
+                })?;
+            if short.is_empty()
+                || !short
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+            {
+                return Err(GenError::new(format!(
+                    "host provider `{name}` has an invalid short name"
+                )));
+            }
+            let variant = pascal(short);
+            if !provider_variants.insert(variant.clone()) {
+                return Err(GenError::new(format!(
+                    "host provider `{name}` collides on variant `{variant}`"
+                )));
+            }
+            host_providers.push((name, variant));
+        }
+        if host_providers.len() != HOST_PROVIDER_COUNT {
+            return Err(GenError::new(format!(
+                "engine catalogue has {} host providers, expected {HOST_PROVIDER_COUNT}",
+                host_providers.len()
+            )));
+        }
+
+        let mut host_operations = Vec::new();
+        let mut operation_variants = BTreeSet::new();
+        for (index, value) in array(
+            member(root, "host_operations", "engine catalogue")?,
+            "host_operations",
+        )?
+        .iter()
+        .enumerate()
+        {
+            let context = format!("host_operations[{index}]");
+            let entry = object(value, &context)?;
+            reject_unknown_fields(entry, &["name", "role", "provider"], &context)?;
+            let name = string(member(entry, "name", &context)?, &context)?.to_owned();
+            if host_operations
+                .iter()
+                .any(|operation: &HostOperationModel| operation.name == name)
+            {
+                return Err(GenError::new(format!(
+                    "host operation `{name}` appears twice"
+                )));
+            }
+            let variant = variant_from_host_name(&name)?;
+            if !operation_variants.insert(variant.clone()) {
+                return Err(GenError::new(format!(
+                    "host operation `{name}` collides on variant `{variant}`"
+                )));
+            }
+            let role = string(member(entry, "role", &context)?, &context)?.to_owned();
+            if !role.contains('@') || !role.starts_with("host.") {
+                return Err(GenError::new(format!(
+                    "host operation `{name}` role `{role}` must be a versioned host role"
+                )));
+            }
+            let provider = string(member(entry, "provider", &context)?, &context)?.to_owned();
+            let provider_variant = host_providers
+                .iter()
+                .find(|(candidate, _)| candidate == &provider)
+                .map(|(_, variant)| variant.clone())
+                .ok_or_else(|| {
+                    GenError::new(format!(
+                        "host operation `{name}` names undeclared provider `{provider}`"
+                    ))
+                })?;
+            host_operations.push(HostOperationModel {
+                name,
+                variant,
+                role,
+                provider,
+                provider_variant,
+            });
+        }
+        if host_operations.len() != HOST_OPERATION_COUNT {
+            return Err(GenError::new(format!(
+                "engine catalogue has {} host operations, expected {HOST_OPERATION_COUNT}",
+                host_operations.len()
+            )));
+        }
+        for (provider, _) in &host_providers {
+            if !host_operations
+                .iter()
+                .any(|operation| &operation.provider == provider)
+            {
+                return Err(GenError::new(format!(
+                    "host provider `{provider}` has no operations"
+                )));
+            }
+        }
+
         let all_names: BTreeSet<&String> = names
             .iter()
             .chain(retired.iter().map(|entry| &entry.name))
@@ -1501,6 +1650,8 @@ impl Engine {
             retired,
             failure_codes,
             test_fixture_names,
+            host_providers,
+            host_operations,
         })
     }
 
@@ -1702,6 +1853,55 @@ fn render_functions(catalogue: &Catalogue) -> String {
     writeln!(out, "    #[must_use]").unwrap();
     writeln!(out, "    pub const fn index(self) -> usize {{").unwrap();
     writeln!(out, "        self as usize").unwrap();
+    writeln!(out, "    }}").unwrap();
+    out.push('\n');
+
+    writeln!(
+        out,
+        "    /// The generated Rust variant identifier, for typed declarations."
+    )
+    .unwrap();
+    writeln!(out, "    #[must_use]").unwrap();
+    writeln!(
+        out,
+        "    pub const fn variant_name(self) -> &'static str {{"
+    )
+    .unwrap();
+    writeln!(out, "        match self {{").unwrap();
+    for function in &catalogue.functions {
+        writeln!(
+            out,
+            "            Self::{} => \"{}\",",
+            function.variant, function.variant
+        )
+        .unwrap();
+    }
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    out.push('\n');
+
+    writeln!(
+        out,
+        "    /// Resolves a generated variant identifier used by a typed declaration."
+    )
+    .unwrap();
+    writeln!(out, "    #[must_use]").unwrap();
+    writeln!(
+        out,
+        "    pub fn from_variant_name(name: &str) -> Option<Self> {{"
+    )
+    .unwrap();
+    writeln!(out, "        match name {{").unwrap();
+    for function in &catalogue.functions {
+        writeln!(
+            out,
+            "            \"{}\" => Some(Self::{}),",
+            function.variant, function.variant
+        )
+        .unwrap();
+    }
+    writeln!(out, "            _ => None,").unwrap();
+    writeln!(out, "        }}").unwrap();
     writeln!(out, "    }}").unwrap();
     out.push('\n');
 
@@ -2038,6 +2238,55 @@ fn render_codes(catalogue: &Catalogue, engine: &Engine) -> String {
     writeln!(out, "    }}").unwrap();
     out.push('\n');
 
+    writeln!(
+        out,
+        "    /// The generated Rust variant identifier, for typed declarations."
+    )
+    .unwrap();
+    writeln!(out, "    #[must_use]").unwrap();
+    writeln!(
+        out,
+        "    pub const fn variant_name(self) -> &'static str {{"
+    )
+    .unwrap();
+    writeln!(out, "        match self {{").unwrap();
+    for code in &all_codes {
+        writeln!(
+            out,
+            "            Self::{} => \"{}\",",
+            code.variant, code.variant
+        )
+        .unwrap();
+    }
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    out.push('\n');
+
+    writeln!(
+        out,
+        "    /// Resolves a generated variant identifier used by a typed declaration."
+    )
+    .unwrap();
+    writeln!(out, "    #[must_use]").unwrap();
+    writeln!(
+        out,
+        "    pub fn from_variant_name(name: &str) -> Option<Self> {{"
+    )
+    .unwrap();
+    writeln!(out, "        match name {{").unwrap();
+    for code in &all_codes {
+        writeln!(
+            out,
+            "            \"{}\" => Some(Self::{}),",
+            code.variant, code.variant
+        )
+        .unwrap();
+    }
+    writeln!(out, "            _ => None,").unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    out.push('\n');
+
     writeln!(out, "    /// The exact wire and storage bytes.").unwrap();
     writeln!(out, "    #[must_use]").unwrap();
     writeln!(out, "    pub const fn as_str(self) -> &'static str {{").unwrap();
@@ -2181,6 +2430,315 @@ fn render_codes(catalogue: &Catalogue, engine: &Engine) -> String {
     )
     .unwrap();
     writeln!(out, "    }}").unwrap();
+    writeln!(out, "}}").unwrap();
+    out.push('\n');
+    writeln!(out, "impl PartialEq<&str> for SysFailureCode {{").unwrap();
+    writeln!(out, "    fn eq(&self, other: &&str) -> bool {{").unwrap();
+    writeln!(out, "        self.as_str() == *other").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out, "}}").unwrap();
+    out
+}
+
+fn render_hosts(engine: &Engine) -> String {
+    let mut out = String::new();
+    out.push_str(HEADER);
+    writeln!(
+        out,
+        "// Generated engine host-operation identity for the Orna 1.1.0 host ABI."
+    )
+    .unwrap();
+    out.push('\n');
+    writeln!(out, "use core::{{fmt, ops::Deref}};").unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "use crate::Origin;").unwrap();
+    out.push('\n');
+
+    writeln!(
+        out,
+        "#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]"
+    )
+    .unwrap();
+    writeln!(out, "pub enum HostProvider {{").unwrap();
+    for (_, variant) in &engine.host_providers {
+        writeln!(out, "    {variant},").unwrap();
+    }
+    writeln!(out, "}}").unwrap();
+    out.push('\n');
+    writeln!(
+        out,
+        "pub const HOST_PROVIDER_COUNT: usize = {HOST_PROVIDER_COUNT};"
+    )
+    .unwrap();
+    out.push('\n');
+    writeln!(out, "impl HostProvider {{").unwrap();
+    writeln!(
+        out,
+        "    pub const ALL: [HostProvider; HOST_PROVIDER_COUNT] = ["
+    )
+    .unwrap();
+    for (_, variant) in &engine.host_providers {
+        writeln!(out, "        HostProvider::{variant},").unwrap();
+    }
+    writeln!(out, "    ];").unwrap();
+    out.push('\n');
+    writeln!(out, "    #[must_use]").unwrap();
+    writeln!(out, "    pub const fn name(self) -> &'static str {{").unwrap();
+    writeln!(out, "        match self {{").unwrap();
+    for (name, variant) in &engine.host_providers {
+        writeln!(out, "            Self::{variant} => \"{name}\",").unwrap();
+    }
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    out.push('\n');
+    writeln!(out, "    #[must_use]").unwrap();
+    writeln!(out, "    pub fn parse(name: &str) -> Option<Self> {{").unwrap();
+    writeln!(out, "        match name {{").unwrap();
+    for (name, variant) in &engine.host_providers {
+        writeln!(out, "            \"{name}\" => Some(Self::{variant}),").unwrap();
+    }
+    writeln!(out, "            _ => None,").unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    out.push('\n');
+    writeln!(out, "    #[must_use]").unwrap();
+    writeln!(
+        out,
+        "    pub const fn variant_name(self) -> &'static str {{"
+    )
+    .unwrap();
+    writeln!(out, "        match self {{").unwrap();
+    for (_, variant) in &engine.host_providers {
+        writeln!(out, "            Self::{variant} => \"{variant}\",").unwrap();
+    }
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    out.push('\n');
+    writeln!(out, "    #[must_use]").unwrap();
+    writeln!(
+        out,
+        "    pub fn from_variant_name(name: &str) -> Option<Self> {{"
+    )
+    .unwrap();
+    writeln!(out, "        match name {{").unwrap();
+    for (_, variant) in &engine.host_providers {
+        writeln!(out, "            \"{variant}\" => Some(Self::{variant}),").unwrap();
+    }
+    writeln!(out, "            _ => None,").unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out, "}}").unwrap();
+    out.push('\n');
+    writeln!(out, "impl fmt::Display for HostProvider {{").unwrap();
+    writeln!(
+        out,
+        "    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {{"
+    )
+    .unwrap();
+    writeln!(out, "        formatter.write_str(self.name())").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out, "}}").unwrap();
+    out.push('\n');
+    writeln!(out, "impl PartialEq<&str> for HostProvider {{").unwrap();
+    writeln!(out, "    fn eq(&self, other: &&str) -> bool {{").unwrap();
+    writeln!(out, "        self.name() == *other").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out, "}}").unwrap();
+    out.push('\n');
+
+    writeln!(
+        out,
+        "#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]"
+    )
+    .unwrap();
+    writeln!(out, "pub enum HostOperation {{").unwrap();
+    for operation in &engine.host_operations {
+        writeln!(out, "    {},", operation.variant).unwrap();
+    }
+    writeln!(out, "}}").unwrap();
+    out.push('\n');
+    writeln!(
+        out,
+        "pub const HOST_OPERATION_COUNT: usize = {HOST_OPERATION_COUNT};"
+    )
+    .unwrap();
+    out.push('\n');
+    writeln!(out, "#[derive(Clone, Copy, Debug, Eq, PartialEq)]").unwrap();
+    writeln!(out, "pub struct HostOperationDescriptor {{").unwrap();
+    writeln!(out, "    pub operation: HostOperation,").unwrap();
+    writeln!(out, "    pub label: &'static str,").unwrap();
+    writeln!(out, "    pub role: &'static str,").unwrap();
+    writeln!(out, "    pub provider: HostProvider,").unwrap();
+    writeln!(out, "}}").unwrap();
+    out.push('\n');
+    writeln!(out, "impl HostOperation {{").unwrap();
+    writeln!(
+        out,
+        "    pub const ALL: [HostOperation; HOST_OPERATION_COUNT] = ["
+    )
+    .unwrap();
+    for operation in &engine.host_operations {
+        writeln!(out, "        HostOperation::{},", operation.variant).unwrap();
+    }
+    writeln!(out, "    ];").unwrap();
+    out.push('\n');
+    writeln!(out, "    #[must_use]").unwrap();
+    writeln!(out, "    pub const fn index(self) -> usize {{").unwrap();
+    writeln!(out, "        self as usize").unwrap();
+    writeln!(out, "    }}").unwrap();
+    out.push('\n');
+    writeln!(out, "    #[must_use]").unwrap();
+    writeln!(out, "    pub const fn label(self) -> &'static str {{").unwrap();
+    writeln!(out, "        match self {{").unwrap();
+    for operation in &engine.host_operations {
+        writeln!(
+            out,
+            "            Self::{} => \"{}\",",
+            operation.variant, operation.name
+        )
+        .unwrap();
+    }
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    out.push('\n');
+    writeln!(out, "    #[must_use]").unwrap();
+    writeln!(out, "    pub const fn as_str(self) -> &'static str {{").unwrap();
+    writeln!(out, "        self.label()").unwrap();
+    writeln!(out, "    }}").unwrap();
+    out.push('\n');
+    writeln!(out, "    #[must_use]").unwrap();
+    writeln!(
+        out,
+        "    pub const fn variant_name(self) -> &'static str {{"
+    )
+    .unwrap();
+    writeln!(out, "        match self {{").unwrap();
+    for operation in &engine.host_operations {
+        writeln!(
+            out,
+            "            Self::{} => \"{}\",",
+            operation.variant, operation.variant
+        )
+        .unwrap();
+    }
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    out.push('\n');
+    writeln!(out, "    #[must_use]").unwrap();
+    writeln!(
+        out,
+        "    pub fn from_variant_name(name: &str) -> Option<Self> {{"
+    )
+    .unwrap();
+    writeln!(out, "        match name {{").unwrap();
+    for operation in &engine.host_operations {
+        writeln!(
+            out,
+            "            \"{}\" => Some(Self::{}),",
+            operation.variant, operation.variant
+        )
+        .unwrap();
+    }
+    writeln!(out, "            _ => None,").unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    out.push('\n');
+    writeln!(out, "    #[must_use]").unwrap();
+    writeln!(out, "    pub fn from_label(label: &str) -> Option<Self> {{").unwrap();
+    writeln!(out, "        match label {{").unwrap();
+    for operation in &engine.host_operations {
+        writeln!(
+            out,
+            "            \"{}\" => Some(Self::{}),",
+            operation.name, operation.variant
+        )
+        .unwrap();
+    }
+    writeln!(out, "            _ => None,").unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    out.push('\n');
+    writeln!(out, "    #[must_use]").unwrap();
+    writeln!(
+        out,
+        "    pub fn descriptor(self) -> &'static HostOperationDescriptor {{"
+    )
+    .unwrap();
+    writeln!(out, "        host_operation_descriptor(self)").unwrap();
+    writeln!(out, "    }}").unwrap();
+    out.push('\n');
+    writeln!(out, "    #[must_use]").unwrap();
+    writeln!(out, "    pub fn provider(self) -> HostProvider {{").unwrap();
+    writeln!(out, "        self.descriptor().provider").unwrap();
+    writeln!(out, "    }}").unwrap();
+    out.push('\n');
+    writeln!(out, "    #[must_use]").unwrap();
+    writeln!(out, "    pub fn role(self) -> &'static str {{").unwrap();
+    writeln!(out, "        self.descriptor().role").unwrap();
+    writeln!(out, "    }}").unwrap();
+    out.push('\n');
+    writeln!(out, "    #[must_use]").unwrap();
+    writeln!(out, "    pub const fn origin(self) -> Origin {{").unwrap();
+    writeln!(out, "        Origin::Engine").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out, "}}").unwrap();
+    out.push('\n');
+    writeln!(out, "impl Deref for HostOperation {{").unwrap();
+    writeln!(out, "    type Target = str;").unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "    fn deref(&self) -> &Self::Target {{").unwrap();
+    writeln!(out, "        self.label()").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out, "}}").unwrap();
+    out.push('\n');
+    writeln!(out, "impl fmt::Display for HostOperation {{").unwrap();
+    writeln!(
+        out,
+        "    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {{"
+    )
+    .unwrap();
+    writeln!(out, "        formatter.write_str(self.label())").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out, "}}").unwrap();
+    out.push('\n');
+    writeln!(out, "impl PartialEq<&str> for HostOperation {{").unwrap();
+    writeln!(out, "    fn eq(&self, other: &&str) -> bool {{").unwrap();
+    writeln!(out, "        self.label() == *other").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out, "}}").unwrap();
+    out.push('\n');
+    writeln!(
+        out,
+        "pub static HOST_OPERATION_DESCRIPTORS: [HostOperationDescriptor; HOST_OPERATION_COUNT] = ["
+    )
+    .unwrap();
+    for operation in &engine.host_operations {
+        writeln!(out, "    HostOperationDescriptor {{").unwrap();
+        writeln!(
+            out,
+            "        operation: HostOperation::{},",
+            operation.variant
+        )
+        .unwrap();
+        writeln!(out, "        label: \"{}\",", operation.name).unwrap();
+        writeln!(out, "        role: \"{}\",", operation.role).unwrap();
+        writeln!(
+            out,
+            "        provider: HostProvider::{},",
+            operation.provider_variant
+        )
+        .unwrap();
+        writeln!(out, "    }},").unwrap();
+    }
+    writeln!(out, "];").unwrap();
+    out.push('\n');
+    writeln!(out, "#[must_use]").unwrap();
+    writeln!(
+        out,
+        "pub fn host_operation_descriptor(operation: HostOperation) -> &'static HostOperationDescriptor {{"
+    )
+    .unwrap();
+    writeln!(out, "    &HOST_OPERATION_DESCRIPTORS[operation.index()]").unwrap();
     writeln!(out, "}}").unwrap();
     out
 }

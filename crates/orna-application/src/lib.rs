@@ -302,6 +302,7 @@ impl ApplicationAuthority {
             .catalogue
             .with_standard_sources(profile, sources.clone())?;
         let mut functions = BTreeMap::<String, PureFunction>::new();
+        let mut intrinsics = BTreeMap::<String, orna_intrinsics::IntrinsicId>::new();
         let mut public = BTreeSet::new();
         let mut non_function = BTreeSet::new();
         let mut module_imports = Vec::<(String, Vec<Item>)>::new();
@@ -330,6 +331,25 @@ impl ApplicationAuthority {
                         let key = format!("{namespace}.{}", signature.name);
                         if functions.contains_key(&key) {
                             return Err(StandardCatalogueError::DuplicateDeclaration);
+                        }
+                        let lookup_name =
+                            if let Some(submodule) = namespace.strip_prefix("std.time.") {
+                                format!("{submodule}.{}", signature.name)
+                            } else {
+                                signature.name.clone()
+                            };
+                        let module = orna_intrinsics::Module::from_path(&namespace).or_else(|| {
+                            namespace
+                                .starts_with("std.time.duration.")
+                                .then_some(orna_intrinsics::Module::Time)
+                        });
+                        if let Some(intrinsic) =
+                            module.and_then(|module| orna_intrinsics::lookup(module, &lookup_name))
+                            && intrinsic.dispatch != orna_intrinsics::Dispatch::SourceOnly
+                            && intrinsic.binds_declaration(&lookup_name)
+                            && intrinsic.pins.contains(orna_intrinsics::CURRENT_STD_PIN)
+                        {
+                            intrinsics.insert(key.clone(), intrinsic.id);
                         }
                         if is_public {
                             public.insert(key.clone());
@@ -380,7 +400,7 @@ impl ApplicationAuthority {
                 aliases.insert(module_function_alias_key(namespace, &alias), target);
             }
         }
-        self.standard_functions = Arc::new(StandardLayer::new(functions, aliases));
+        self.standard_functions = Arc::new(StandardLayer::new(functions, aliases, intrinsics));
         self.standard_public = public;
         self.standard_non_function = non_function;
         self.standard_preludes = preludes;

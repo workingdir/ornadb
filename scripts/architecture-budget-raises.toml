@@ -212,6 +212,12 @@ reason = "pure split: inline test modules moved to sibling files; the parent fil
 bead = "ornadb-qwog6"
 
 [[raise]]
+path = "crates/orna-evaluator/src/lib.rs::dispatch"
+new_limit = 153
+reason = "S2 replaces the per-kind native string tables with one match on IntrinsicId; the arms are scheduled to move beside their handlers as the catalogue grows"
+bead = "ornadb-yuzot.2"
+
+[[raise]]
 path = "crates/orna-sys-codegen/src/build_support.rs"
 new_limit = 2702
 reason = "PR #9777 moves the sys API collector out of orna-sys/build_support.rs into the codegen crate without changing its bodies"
@@ -619,3 +625,15 @@ path = "crates/orna-repository/src/repository/review.rs::commit_reviewed_candida
 new_limit = 181
 reason = "pure split of orna-repository lib.rs along its seams: this method moved here unchanged"
 bead = "ornadb-kdfff"
+
+[[raise]]
+path = "crates/orna-sys/src/host_filesystem.rs"
+new_limit = 2600
+reason = "stage S2 replaces the embedded JSON payloads with typed declaration attributes and # Preconditions doc prose; the facts are unchanged"
+bead = "ornadb-ouxeq.3"
+
+[[raise]]
+path = "crates/orna-sys-codegen/src/build_host.rs"
+new_limit = 1350
+reason = "stage S2 adds the typed declaration parser, doc-comment precondition extraction and generated-vocabulary resolution"
+bead = "ornadb-ouxeq.3"
