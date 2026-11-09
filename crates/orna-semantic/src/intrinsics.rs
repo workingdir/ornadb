@@ -607,8 +607,8 @@ pub(crate) fn infer_intrinsic(
         .as_ref()
         .and_then(Container::of)
         .unwrap_or(Container::List);
-    if let Some(Type::List(element) | Type::Relation(element)) = &row {
-        bind_type(SigType::Param(0), element, &mut subst, container);
+    if let Some(row) = &row {
+        bind_type(params[0].ty, row, &mut subst, container);
     }
     if !stats {
         let missing_container = row
@@ -839,7 +839,6 @@ pub(crate) fn infer_intrinsic(
     let ty = if stats {
         infer_statistics_result(
             id,
-            &subst,
             &slots,
             &values,
             input.as_ref(),
@@ -1105,8 +1104,22 @@ fn check_intrinsic_constraints(
                 }
             }
         }
-        IntrinsicId::CollectionBucketBy => {
+        IntrinsicId::CollectionBucketBy if container == Container::Relation => {
             check_bucket_by(&element, slots, values, arguments, invalid, diagnostics);
+        }
+        IntrinsicId::CollectionBucketBy => {
+            // The finite-list overload only constrains the row shape; the
+            // zone/period contract belongs to the relation overload, which is
+            // where the pinned source documents calendar bucketing.
+            let instant = element == Type::Instant
+                || matches!(&element, Type::Record(fields) if fields.get("time") == Some(&Type::Instant));
+            if !matches!(element, Type::Error) && !instant {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "bucket_by requires Instant values or rows with an Instant time field",
+                ));
+                *invalid = true;
+            }
         }
         _ => {}
     }
@@ -1168,7 +1181,6 @@ fn check_bucket_by(
 #[allow(clippy::too_many_arguments)]
 fn infer_statistics_result(
     id: IntrinsicId,
-    subst: &[Option<Type>],
     slots: &[Option<usize>],
     values: &[Option<Inferred>],
     input: Option<&Inferred>,
@@ -1176,7 +1188,6 @@ fn infer_statistics_result(
     invalid: &mut bool,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Type {
-    let element = subst.first().and_then(Clone::clone).unwrap_or(Type::Error);
     let parameters = orna_intrinsics::by_id(id).signature.params;
     let names = parameters
         .iter()
@@ -1197,6 +1208,14 @@ fn infer_statistics_result(
             bound[slot] = Some(value);
         }
     }
+    let element = bound
+        .first()
+        .and_then(Option::as_ref)
+        .map(|value| match &value.ty {
+            Type::List(element) | Type::Relation(element) => element.as_ref().clone(),
+            _ => Type::Error,
+        })
+        .unwrap_or(Type::Error);
     statistics_outcome(
         StatisticsOutcome {
             operation: statistics_operation_name(id),
