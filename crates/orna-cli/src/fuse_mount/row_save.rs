@@ -293,8 +293,8 @@ impl DocumentCommitError {
     /// `sys.vfs.*` code where one exists (ORNA-VFS-009).
     pub(crate) fn cause(&self) -> &'static str {
         match self {
-            Self::Stale => "sys.vfs.stale_edit",
-            Self::Rejected(_) => "sys.vfs.invalid_document",
+            Self::Stale => orna_sys_id::SysFailureCode::VfsStaleEdit.as_str(),
+            Self::Rejected(_) => orna_sys_id::SysFailureCode::VfsInvalidDocument.as_str(),
             Self::Quota(_) => "draft quota exhausted",
             Self::Unretained { cause, .. } => cause,
             Self::NoCandidate | Self::Failed(_) => "backing I/O failure",

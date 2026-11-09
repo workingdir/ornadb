@@ -1550,7 +1550,7 @@ impl WorkspaceFilesystem {
             .retained_drafts
             .retain(
                 &record.identity.logical_path,
-                "sys.vfs.stale_edit",
+                SysFailureCode::VfsStaleEdit.as_str(),
                 candidate.len,
                 &mut QuotaCharge::empty(&writer.retained_drafts.quota),
                 &mut |offset, length| {

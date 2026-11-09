@@ -1419,6 +1419,7 @@ dependencies = [
  "orna-security",
  "orna-semantic",
  "orna-syntax",
+ "orna-sys-id",
  "orna-value",
  "sha2 0.10.9",
  "tempfile",
@@ -1450,6 +1451,7 @@ dependencies = [
  "orna-stream",
  "orna-syntax",
  "orna-sys",
+ "orna-sys-id",
  "orna-value",
  "parquet",
  "rustix 0.38.44",
@@ -1496,6 +1498,7 @@ dependencies = [
  "orna-stream",
  "orna-syntax",
  "orna-sys",
+ "orna-sys-id",
  "orna-table",
  "orna-value",
  "serde",
@@ -1576,6 +1579,7 @@ dependencies = [
  "orna-security",
  "orna-serving",
  "orna-stream",
+ "orna-sys-id",
  "orna-value",
 ]
 

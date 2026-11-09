@@ -20,8 +20,8 @@ use super::{
 
 /// Refusal causes recorded with a retained source candidate (ORNA-VFS-009). The
 /// `sys.vfs.*` names follow the document causes in `DocumentCommitError::cause`.
-const SOURCE_INVALID: &str = "sys.vfs.invalid_document";
-const SOURCE_STALE: &str = "sys.vfs.stale_edit";
+const SOURCE_INVALID: &str = orna_sys_id::SysFailureCode::VfsInvalidDocument.as_str();
+const SOURCE_STALE: &str = orna_sys_id::SysFailureCode::VfsStaleEdit.as_str();
 const SOURCE_UNSYNCED: &str = "unsynced";
 
 /// Bound on candidate and baseline bytes across every source draft (EDQUOT).
