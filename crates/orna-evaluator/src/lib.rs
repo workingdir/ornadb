@@ -13907,39 +13907,7 @@ impl Context<'_, '_> {
                 .iter()
                 .all(|value| matches!(value, Value::Money { .. }))
         {
-            let currency = match &values[0] {
-                Value::Money { currency, .. } => *currency,
-                _ => unreachable!("non-empty all-Money list has a first Money"),
-            };
-            let mut candidate = None;
-            for value in values {
-                self.step()?;
-                let Value::Money {
-                    currency: value_currency,
-                    ..
-                } = value
-                else {
-                    unreachable!("all-Money list was checked above");
-                };
-                if *value_currency != currency {
-                    return Err(error("ORNA-EVAL-UNSUPPORTED"));
-                }
-                let replace = match candidate.as_ref() {
-                    None => true,
-                    Some(current) => {
-                        let ordering = compare_values(value, current)?;
-                        if name == "min" {
-                            ordering.is_lt()
-                        } else {
-                            ordering.is_gt()
-                        }
-                    }
-                };
-                if replace {
-                    candidate = Some(value.clone());
-                }
-            }
-            return Ok(candidate.map_or(Value::Null, |value| Value::Option(Some(Box::new(value)))));
+            return self.extreme_money(name, values);
         }
         let temporal_kind = values.first().and_then(range_endpoint_kind);
         if matches!(temporal_kind, Some("Date" | "Instant" | "Duration"))
@@ -13992,6 +13960,43 @@ impl Context<'_, '_> {
         }
         Ok(candidate.map_or(Value::Null, |value| Value::Option(Some(Box::new(value)))))
     }
+    /// Money extremes require one shared currency; a mixed list is unsupported.
+    fn extreme_money(&mut self, name: &str, values: &[Value]) -> Result<Value, EvaluationError> {
+        let currency = match &values[0] {
+            Value::Money { currency, .. } => *currency,
+            _ => unreachable!("non-empty all-Money list has a first Money"),
+        };
+        let mut candidate = None;
+        for value in values {
+            self.step()?;
+            let Value::Money {
+                currency: value_currency,
+                ..
+            } = value
+            else {
+                unreachable!("all-Money list was checked above");
+            };
+            if *value_currency != currency {
+                return Err(error("ORNA-EVAL-UNSUPPORTED"));
+            }
+            let replace = match candidate.as_ref() {
+                None => true,
+                Some(current) => {
+                    let ordering = compare_values(value, current)?;
+                    if name == "min" {
+                        ordering.is_lt()
+                    } else {
+                        ordering.is_gt()
+                    }
+                }
+            };
+            if replace {
+                candidate = Some(value.clone());
+            }
+        }
+        Ok(candidate.map_or(Value::Null, |value| Value::Option(Some(Box::new(value)))))
+    }
+
     fn first(&self, values: &[Value]) -> Result<Value, EvaluationError> {
         Ok(values
             .first()
