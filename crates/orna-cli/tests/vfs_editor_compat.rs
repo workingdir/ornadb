@@ -208,24 +208,38 @@ async fn editor_saves_reject_aforeign_writer_lease() {
     );
 }
 
+/// Each real-editor save prints one line with this prefix and its JSON settings; `gate_evidence.py run`
+/// copies the lines into the evidence record as `editor_saves`.
+const EDITOR_SAVE_LINE: &str = "ORNA-EDITOR-SAVE ";
+const EMACS_SAVE_SETTINGS: &str = "(setq file-precious-flag t write-region-inhibit-fsync nil make-backup-files nil auto-save-default nil create-lockfiles nil)";
+const EMACS_REPLACE: &str = "(progn (goto-char (point-min)) (search-forward \"Vim in-place\") (replace-match \"Emacs temp rename\") (save-buffer))";
+
+fn record_editor_save(editor: &str, mode: &str, argv: &[&str]) {
+    println!(
+        "{EDITOR_SAVE_LINE}{}",
+        serde_json::json!({ "editor": editor, "mode": mode, "argv": argv })
+    );
+}
+
 fn save_with_vim_in_place(path: &Path) {
-    let output = Command::new("vi")
-        .args([
-            "-Es",
-            "-u",
-            "NONE",
-            "-n",
-            "-i",
-            "NONE",
-            "-c",
-            "set backupcopy=yes nobackup nowritebackup noswapfile fsync",
-            "-c",
-            "%s/Original/Vim in-place/",
-            "-c",
-            "write",
-            "-c",
-            "quit",
-        ])
+    let argv = [
+        "-Es",
+        "-u",
+        "NONE",
+        "-n",
+        "-i",
+        "NONE",
+        "-c",
+        "set backupcopy=yes nobackup nowritebackup noswapfile fsync",
+        "-c",
+        "%s/Original/Vim in-place/",
+        "-c",
+        "write",
+        "-c",
+        "quit",
+    ];
+    let output = Command::new("vim")
+        .args(argv)
         .arg(path)
         .output()
         .expect("start the real Vim editor");
@@ -236,22 +250,16 @@ fn save_with_vim_in_place(path: &Path) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
+    record_editor_save("vim", "in-place", &argv);
 }
 
 fn save_with_emacs_temp_rename(path: &Path) {
+    let before = ["--batch", "-Q", "--eval", EMACS_SAVE_SETTINGS, "--visit"];
+    let after = ["--eval", EMACS_REPLACE];
     let output = Command::new("emacs")
-        .args([
-            "--batch",
-            "-Q",
-            "--eval",
-            "(setq file-precious-flag t write-region-inhibit-fsync nil make-backup-files nil auto-save-default nil create-lockfiles nil)",
-            "--visit",
-        ])
+        .args(before)
         .arg(path)
-        .args([
-            "--eval",
-            "(progn (goto-char (point-min)) (search-forward \"Vim in-place\") (replace-match \"Emacs temp rename\") (save-buffer))",
-        ])
+        .args(after)
         .output()
         .expect("start the real Emacs editor");
     assert!(
@@ -261,6 +269,7 @@ fn save_with_emacs_temp_rename(path: &Path) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
+    record_editor_save("emacs", "temp-rename", &[&before[..], &after[..]].concat());
 }
 
 #[tokio::test]

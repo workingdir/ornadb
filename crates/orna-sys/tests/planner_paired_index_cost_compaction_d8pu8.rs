@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 
 use orna_sys::{
-    ExpressionRef, ObjectRef, PlanDetail, PlanNode, PlanNodeKind,
+    ExplainInputs, ExpressionRef, ObjectRef, PlanDetail, PlanNode, PlanNodeKind,
     QueryDecorrelatedSubqueryDescription, QueryJoinDescription, QueryJoinPairIdentityDescription,
     QueryPartialIndexDescription, QueryPlanDescription, QuerySourceStatistics, SnapshotRef,
-    explain_query_with_partial_indexes_and_decorrelated_subqueries_and_join_pair_identities,
+    explain_query_with,
 };
 
 const FIXTURE: &str = include_str!("fixtures/planner_paired_index_cost_compaction_d8pu8.orna");
@@ -131,11 +131,14 @@ fn explain(
         candidates.reverse();
         pair_descriptions.reverse();
     }
-    explain_query_with_partial_indexes_and_decorrelated_subqueries_and_join_pair_identities(
+    explain_query_with(
         &query(reverse_known_inputs),
-        &candidates,
-        &subqueries(),
-        &pair_descriptions,
+        ExplainInputs {
+            partial_indexes: &candidates,
+            decorrelated_subqueries: &subqueries(),
+            join_pair_identities: &pair_descriptions,
+            ..ExplainInputs::default()
+        },
     )
     .expect("paired routes compact through sparse planned cost order")
 }

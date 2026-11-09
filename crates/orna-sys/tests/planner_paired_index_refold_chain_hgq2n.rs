@@ -1,10 +1,9 @@
 use std::collections::BTreeMap;
 
 use orna_sys::{
-    ExpressionRef, ObjectRef, PlanDetail, PlanNode, PlanNodeKind, QueryJoinDescription,
-    QueryJoinPairIdentityDescription, QueryPartialIndexDescription, QueryPlanDescription,
-    QuerySourceStatistics, SnapshotRef,
-    explain_query_with_partial_indexes_and_join_pair_identities,
+    ExplainInputs, ExpressionRef, ObjectRef, PlanDetail, PlanNode, PlanNodeKind,
+    QueryJoinDescription, QueryJoinPairIdentityDescription, QueryPartialIndexDescription,
+    QueryPlanDescription, QuerySourceStatistics, SnapshotRef, explain_query_with,
 };
 
 const FIXTURE: &str = include_str!("fixtures/planner_paired_index_refold_chain_hgq2n.orna");
@@ -117,10 +116,13 @@ fn explain(
     candidates: &[QueryPartialIndexDescription],
     descriptions: &[QueryJoinPairIdentityDescription],
 ) -> orna_sys::ExplainedPlan {
-    explain_query_with_partial_indexes_and_join_pair_identities(
+    explain_query_with(
         &query(order),
-        candidates,
-        descriptions,
+        ExplainInputs {
+            partial_indexes: candidates,
+            join_pair_identities: descriptions,
+            ..ExplainInputs::default()
+        },
     )
     .expect("paired index identities refold across sparse cost ordering")
 }

@@ -1,6 +1,6 @@
 use orna_sys::{
-    ExplainError, ExpressionRef, ObjectRef, PlanDetail, PlanNodeKind, QueryPlanDescription,
-    QuerySourceStatistics, SnapshotRef, explain_query_with_input_disjunct_limit_conjunct_chain,
+    ExplainError, ExplainInputs, ExpressionRef, ObjectRef, PlanDetail, PlanNodeKind,
+    QueryPlanDescription, QuerySourceStatistics, SnapshotRef, explain_query_with,
 };
 
 const FIXTURE: &str = include_str!("fixtures/planner_nested_input_disjunct_limits_conjunct.orna");
@@ -13,7 +13,7 @@ fn explain_nested_input_disjunct_limits_conjunct(
     conjunct_count: u64,
     additional_limits: &[u64],
 ) -> Result<orna_sys::ExplainedPlan, ExplainError> {
-    explain_query_with_input_disjunct_limit_conjunct_chain(
+    explain_query_with(
         &QueryPlanDescription {
             snapshot: SnapshotRef::descriptive("snapshot:nested-input-disjunct-limits-conjunct"),
             source: ObjectRef::descriptive("table:PlannerNestedInputDisjunctLimitsConjunct"),
@@ -31,12 +31,15 @@ fn explain_nested_input_disjunct_limits_conjunct(
             mutations: Vec::new(),
             materialize_into: None,
         },
-        disjunct_count,
-        nested_input_limits,
-        nested_disjunct_limits,
-        ExpressionRef::descriptive("expr:third-and-fourth"),
-        conjunct_count,
-        additional_limits,
+        ExplainInputs {
+            disjunct_count,
+            conjunct_count: Some(conjunct_count),
+            nested_input_limits: Some(nested_input_limits),
+            limits_between_disjunct_and_conjunct: Some(nested_disjunct_limits),
+            post_expansion_conjunct: Some(&ExpressionRef::descriptive("expr:third-and-fourth")),
+            additional_limits,
+            ..ExplainInputs::default()
+        },
     )
 }
 

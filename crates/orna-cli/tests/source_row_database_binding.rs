@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
 use orna_project::{
-    KeyComponentText, ProjectLoadError, ProjectLoader, admit_source_row,
-    admit_source_row_with_owner_fields,
+    KeyComponentText, ProjectLoadError, ProjectLoader, SourceRowRequest, admit_source_row,
 };
 use orna_repository::{GitCommitRef, TypedKey};
 use orna_runtime::vfs::project_key_component;
@@ -89,12 +88,9 @@ fn same_commit_context_from_another_database_cannot_admit_source_row() {
     let matching_context = format3_context_for_database(&commit, *schema.database_id());
     let accepted = admit_source_row(
         &project,
-        "media/picture.orna",
-        row_source,
         &schema,
         &matching_context,
-        Vec::new(),
-        [0x76; 16],
+        SourceRowRequest::new("media/picture.orna", row_source, Vec::new(), [0x76; 16]),
     );
     let accepted = accepted.expect("matching repository context should admit the full tuple");
     assert_eq!(accepted.resolved_schema(), &schema);
@@ -116,12 +112,9 @@ fn same_commit_context_from_another_database_cannot_admit_source_row() {
 
     let result = admit_source_row(
         &project,
-        "media/picture.orna",
-        row_source,
         &schema,
         &foreign_context,
-        Vec::new(),
-        [0x77; 16],
+        SourceRowRequest::new("media/picture.orna", row_source, Vec::new(), [0x77; 16]),
     );
     assert!(matches!(result, Err(ProjectLoadError::InvalidSourceRow)));
 }
@@ -149,23 +142,17 @@ fn legacy_key_path_spelling_is_refused_and_vfs_spelling_admits() {
     // projection `%20` is admitted (profiles/vfs-1.md:44-50).
     let legacy = admit_source_row(
         &project,
-        "media/~20.orna",
-        row_source,
         &schema,
         &context,
-        Vec::new(),
-        [0x78; 16],
+        SourceRowRequest::new("media/~20.orna", row_source, Vec::new(), [0x78; 16]),
     );
     assert!(matches!(legacy, Err(ProjectLoadError::InvalidSourceRow)));
 
     let vfs = admit_source_row(
         &project,
-        "media/%20.orna",
-        row_source,
         &schema,
         &context,
-        Vec::new(),
-        [0x79; 16],
+        SourceRowRequest::new("media/%20.orna", row_source, Vec::new(), [0x79; 16]),
     );
     assert!(vfs.is_ok(), "the VFS-1 spelling of a space admits");
 }
@@ -201,29 +188,33 @@ fn long_key_alias_admits_only_a_pair_whose_text_is_its_encoding_text() {
         canonical_encoding: encoding.clone(),
     };
 
-    let forged = admit_source_row_with_owner_fields(
+    let forged = admit_source_row(
         &project,
-        &logical_path,
-        row_source,
         &schema,
         &context,
-        Vec::new(),
-        Vec::new(),
-        &[pair("forged".to_owned())],
-        [0x7a; 16],
+        SourceRowRequest {
+            logical_path: &logical_path,
+            source: row_source,
+            blob_bindings: Vec::new(),
+            owner_field_values: Vec::new(),
+            key_components: &[pair("forged".to_owned())],
+            mutation_id: [0x7a; 16],
+        },
     );
     assert!(matches!(forged, Err(ProjectLoadError::InvalidSourceRow)));
 
-    let admitted = admit_source_row_with_owner_fields(
+    let admitted = admit_source_row(
         &project,
-        &logical_path,
-        row_source,
         &schema,
         &context,
-        Vec::new(),
-        Vec::new(),
-        &[pair(key)],
-        [0x7b; 16],
+        SourceRowRequest {
+            logical_path: &logical_path,
+            source: row_source,
+            blob_bindings: Vec::new(),
+            owner_field_values: Vec::new(),
+            key_components: &[pair(key)],
+            mutation_id: [0x7b; 16],
+        },
     );
     assert!(
         admitted.is_ok(),
@@ -253,12 +244,9 @@ fn nested_record_row_with_declaration_order_differing_from_key_order_is_admitted
     let row_source = "{ meta: { label: \"x\", rank: 1, }, }\n";
     let accepted = admit_source_row(
         &project,
-        "Music/london.orna",
-        row_source,
         &schema,
         &context,
-        Vec::new(),
-        [0x78; 16],
+        SourceRowRequest::new("Music/london.orna", row_source, Vec::new(), [0x78; 16]),
     );
     assert!(
         accepted.is_ok(),

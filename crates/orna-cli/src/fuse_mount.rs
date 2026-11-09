@@ -23,7 +23,7 @@ use orna_conformance::transactional_loaded_project_candidate_validator;
 use orna_evaluator::Limits as EvaluatorLimits;
 use orna_project::{
     KeyComponentText, ObjectIdentityManifest, ObjectKind, ProjectLoader, ResolvedTableSchema,
-    StoredSchema, admit_source_row_with_owner_fields,
+    SourceRowRequest, StoredSchema, admit_source_row,
 };
 use orna_repository::schema_evolution::admit_row_under_descriptor;
 use orna_repository::{
@@ -1820,16 +1820,18 @@ impl MountWriter {
                 orna_runtime::RuntimeError::InvalidTableMutation,
             )
         })?;
-        let admitted = admit_source_row_with_owner_fields(
+        let admitted = admit_source_row(
             &self.project,
-            &row.logical_path,
-            &source,
             &row.source.schema,
             &row.source.value_context,
-            blob_bindings,
-            Vec::new(),
-            &row.key_components,
-            mutation_id,
+            SourceRowRequest {
+                logical_path: &row.logical_path,
+                source: &source,
+                blob_bindings,
+                owner_field_values: Vec::new(),
+                key_components: &row.key_components,
+                mutation_id,
+            },
         )
         .map_err(|error| {
             eprintln!("mounted row source admission failed: {error:?}");
