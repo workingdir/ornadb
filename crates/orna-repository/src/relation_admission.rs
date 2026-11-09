@@ -44,10 +44,11 @@ use crate::{
     allocator::AllocatorError,
     bind_tree_entry_in_index,
     blob_store::{ContentIdentity, GearChunker},
+    hex::{hex_decode, hex_encode},
     native_graph::{
         ByteIndexEntry, GitHashAlgorithm, GraphError, IndexMaintenance, MAX_GRAPH_HEIGHT, MAX_REFS,
         NativeGraphContext, NativeNodeEnvelope, NativeObjectKind, NativeOid, NodeData,
-        RowIndexMutation, StoreRelationEntry, hex_decode, hex_encode, sync_object_files,
+        RowIndexMutation, StoreRelationEntry, sync_object_files,
     },
     overflow::{OverflowStore, OverflowWriter},
     row_store::{

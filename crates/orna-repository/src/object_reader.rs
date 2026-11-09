@@ -18,6 +18,7 @@ use std::{
     sync::{Mutex, MutexGuard, OnceLock},
 };
 
+use crate::hex::hex_encode;
 use crate::{
     CommittedTreeEntry, CommittedTreeEntryKind, GitCommitRef, ManagedPath, PrivateCommit,
     Repository, RepositoryError, init::format_context::STORE_PATH, native_graph::GitHashAlgorithm,
@@ -327,7 +328,7 @@ impl ObjectReader {
             entries.push(TreeEntry {
                 mode,
                 name: name.to_vec(),
-                oid: hex(object),
+                oid: hex_encode(object),
             });
         })?;
         Ok(entries)
@@ -461,7 +462,7 @@ impl ObjectReader {
                 found = Some(TreeEntry {
                     mode,
                     name: entry_name.to_vec(),
-                    oid: hex(object),
+                    oid: hex_encode(object),
                 });
             }
         })?;
@@ -699,16 +700,6 @@ fn parse_recorded_mode(field: &[u8]) -> Result<u32, RepositoryError> {
         b'0'..=b'7' => Ok((mode << 3) | u32::from(digit - b'0')),
         _ => Err(RepositoryError::GitOperationFailed),
     })
-}
-
-fn hex(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        output.push(char::from(DIGITS[usize::from(byte >> 4)]));
-        output.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
-    }
-    output
 }
 
 impl Repository {

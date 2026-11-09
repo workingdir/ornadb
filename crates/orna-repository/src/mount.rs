@@ -21,6 +21,7 @@ use std::{
 
 use sha2::{Digest, Sha256};
 
+use crate::hex::hex_encode;
 use crate::{HistoricalFormatContext, Repository, RuntimePaths};
 
 /// Domain separation for one attached view's identity within one repository
@@ -97,15 +98,6 @@ impl std::fmt::Display for MountError {
     }
 }
 
-fn hex(bytes: &[u8]) -> String {
-    let mut text = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        text.push(char::from_digit(u32::from(byte >> 4), 16).unwrap_or('0'));
-        text.push(char::from_digit(u32::from(byte & 0x0f), 16).unwrap_or('0'));
-    }
-    text
-}
-
 fn mount_registry_owner_id(paths: &RuntimePaths, create: bool) -> Result<[u8; 16], MountError> {
     let path = paths.root().join(MOUNT_REGISTRY_OWNER_ID_FILE);
     match fs::symlink_metadata(&path) {
@@ -131,7 +123,7 @@ fn mount_registry_owner_id(paths: &RuntimePaths, create: bool) -> Result<[u8; 16
             }
             let staging = paths.root().join(format!(
                 ".{MOUNT_REGISTRY_OWNER_ID_FILE}-{}.tmp",
-                hex(&owner_id)
+                hex_encode(&owner_id)
             ));
             let mut file = fs::OpenOptions::new()
                 .write(true)
@@ -139,7 +131,7 @@ fn mount_registry_owner_id(paths: &RuntimePaths, create: bool) -> Result<[u8; 16
                 .open(&staging)
                 .map_err(|_| MountError::HostFilesystem)?;
             if file
-                .write_all(hex(&owner_id).as_bytes())
+                .write_all(hex_encode(&owner_id).as_bytes())
                 .and_then(|()| file.sync_all())
                 .is_err()
             {
@@ -396,9 +388,9 @@ read_only {}
 ",
             self.mountpoint.display(),
             self.selector,
-            hex(self.context.snapshot_id()),
-            hex(&self.view_id),
-            hex(&self.owner_id),
+            hex_encode(self.context.snapshot_id()),
+            hex_encode(&self.view_id),
+            hex_encode(&self.owner_id),
             self.pin_oid_hex.as_str(),
             self.context.repository_format_number(),
             self.context.is_legacy_format(),
@@ -516,7 +508,7 @@ impl std::fmt::Debug for MountView {
         formatter
             .debug_struct("MountView")
             .field("mountpoint", &self.mountpoint)
-            .field("snapshot", &hex(self.context.snapshot_id()))
+            .field("snapshot", &hex_encode(self.context.snapshot_id()))
             .field("format", &self.context.repository_format_number())
             .field("legacy", &self.context.is_legacy_format())
             .finish()
@@ -568,12 +560,12 @@ impl MountStatus {
 
     /// Hex rendering of the view identity, for stable JSON output.
     pub fn view_hex(&self) -> String {
-        hex(&self.view)
+        hex_encode(&self.view)
     }
 
     /// Hex rendering of the snapshot identity, for stable JSON output.
     pub fn snapshot_hex(&self) -> String {
-        hex(&self.snapshot)
+        hex_encode(&self.snapshot)
     }
 }
 
@@ -731,12 +723,15 @@ impl MountRowBaselines {
         digest.update((key.len() as u64).to_le_bytes());
         digest.update(key);
         mount_baseline_dir(self.repository.runtime_paths(), &self.view_id)
-            .join(hex(&digest.finalize()))
+            .join(hex_encode(&digest.finalize()))
     }
 }
 
 fn mount_baseline_dir(paths: &RuntimePaths, view_id: &[u8; 32]) -> PathBuf {
-    paths.root().join("mount-baselines").join(hex(view_id))
+    paths
+        .root()
+        .join("mount-baselines")
+        .join(hex_encode(view_id))
 }
 
 fn mount_record_path(paths: &RuntimePaths, mountpoint: &Path) -> PathBuf {
@@ -745,7 +740,7 @@ fn mount_record_path(paths: &RuntimePaths, mountpoint: &Path) -> PathBuf {
     digest.update(b"record\0");
     digest.update(mountpoint.as_os_str().as_encoded_bytes());
     let name: [u8; 32] = digest.finalize().into();
-    mount_registry_dir(paths).join(format!("mount-{}.orna", hex(&name)))
+    mount_registry_dir(paths).join(format!("mount-{}.orna", hex_encode(&name)))
 }
 
 fn validate_mount_record_location(

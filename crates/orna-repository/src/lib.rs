@@ -27,6 +27,8 @@ use fs2::FileExt;
 use sha2::{Digest, Sha256};
 pub use uuid::Uuid;
 
+use crate::hex::hex_encode;
+
 pub mod allocator;
 mod blob_store;
 mod compact;
@@ -36,6 +38,7 @@ pub mod format2_ogb;
 pub mod format2_orr;
 pub mod format2_read;
 pub mod format2_rov;
+mod hex;
 mod init;
 pub mod migration_copy;
 mod mount;
@@ -1736,12 +1739,10 @@ impl PublicationJournal {
         let mut digest = Sha256::new();
         digest.update(stable.encode()?);
         digest.update(index.to_le_bytes());
-        let digest = digest.finalize();
-        let suffix = digest
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
-        Ok(format!(".orna-quarantine-journal-{suffix}"))
+        Ok(format!(
+            ".orna-quarantine-journal-{}",
+            hex_encode(&digest.finalize())
+        ))
     }
 
     fn set_materialization(
@@ -10510,10 +10511,7 @@ impl GitIndexLock {
 
     #[cfg(target_os = "linux")]
     fn hex_digest(bytes: &[u8]) -> String {
-        Sha256::digest(bytes)
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect()
+        hex_encode(&Sha256::digest(bytes))
     }
 
     #[cfg(target_os = "linux")]

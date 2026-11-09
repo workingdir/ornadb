@@ -7,6 +7,7 @@
 
 use std::fmt::Write;
 
+use crate::hex::hex_encode;
 use crate::{ProtectedContentPin, ProtectedContentTransfer};
 
 /// Describes one protected pin, including the publication descriptor it
@@ -21,10 +22,10 @@ pub fn describe_transfer(transfer: &ProtectedContentTransfer) -> String {
     let identity = transfer.content_identity();
     let mut out = String::new();
     // Writing into a String cannot fail.
-    let _ = writeln!(out, "pin {}", hex(transfer.pin_id()));
-    let _ = writeln!(out, "  repository {}", hex(transfer.repository_id()));
-    let _ = writeln!(out, "  database {}", hex(transfer.database_id()));
-    let _ = writeln!(out, "  owner {}", hex(transfer.owner_id()));
+    let _ = writeln!(out, "pin {}", hex_encode(transfer.pin_id()));
+    let _ = writeln!(out, "  repository {}", hex_encode(transfer.repository_id()));
+    let _ = writeln!(out, "  database {}", hex_encode(transfer.database_id()));
+    let _ = writeln!(out, "  owner {}", hex_encode(transfer.owner_id()));
     let _ = writeln!(
         out,
         "  descriptor {:?} {}",
@@ -32,7 +33,7 @@ pub fn describe_transfer(transfer: &ProtectedContentTransfer) -> String {
         transfer.descriptor_oid().to_hex()
     );
     let _ = writeln!(out, "  content length {}", identity.length());
-    let _ = writeln!(out, "  content sha256 {}", hex(&identity.sha256()));
+    let _ = writeln!(out, "  content sha256 {}", hex_encode(&identity.sha256()));
     out
 }
 
@@ -57,14 +58,14 @@ pub fn describe_transfer_json(transfer: &ProtectedContentTransfer) -> String {
     let identity = transfer.content_identity();
     format!(
         "{{\"pin_id\":\"{}\",\"repository_id\":\"{}\",\"database_id\":\"{}\",\"owner_id\":\"{}\",\"descriptor\":{{\"algorithm\":\"{:?}\",\"oid\":\"{}\"}},\"content\":{{\"length\":{},\"sha256\":\"{}\"}}}}",
-        hex(transfer.pin_id()),
-        hex(transfer.repository_id()),
-        hex(transfer.database_id()),
-        hex(transfer.owner_id()),
+        hex_encode(transfer.pin_id()),
+        hex_encode(transfer.repository_id()),
+        hex_encode(transfer.database_id()),
+        hex_encode(transfer.owner_id()),
         transfer.descriptor_oid().algorithm(),
         transfer.descriptor_oid().to_hex(),
         identity.length(),
-        hex(&identity.sha256()),
+        hex_encode(&identity.sha256()),
     )
 }
 
@@ -91,14 +92,14 @@ pub fn describe_transfer_csv(transfer: &ProtectedContentTransfer) -> String {
     let identity = transfer.content_identity();
     format!(
         "{},{},{},{},{:?},{},{},{}",
-        hex(transfer.pin_id()),
-        hex(transfer.repository_id()),
-        hex(transfer.database_id()),
-        hex(transfer.owner_id()),
+        hex_encode(transfer.pin_id()),
+        hex_encode(transfer.repository_id()),
+        hex_encode(transfer.database_id()),
+        hex_encode(transfer.owner_id()),
         transfer.descriptor_oid().algorithm(),
         transfer.descriptor_oid().to_hex(),
         identity.length(),
-        hex(&identity.sha256()),
+        hex_encode(&identity.sha256()),
     )
 }
 
@@ -132,14 +133,14 @@ pub fn describe_transfer_tsv(transfer: &ProtectedContentTransfer) -> String {
     let identity = transfer.content_identity();
     format!(
         "{}\t{}\t{}\t{}\t{:?}\t{}\t{}\t{}",
-        hex(transfer.pin_id()),
-        hex(transfer.repository_id()),
-        hex(transfer.database_id()),
-        hex(transfer.owner_id()),
+        hex_encode(transfer.pin_id()),
+        hex_encode(transfer.repository_id()),
+        hex_encode(transfer.database_id()),
+        hex_encode(transfer.owner_id()),
         transfer.descriptor_oid().algorithm(),
         transfer.descriptor_oid().to_hex(),
         identity.length(),
-        hex(&identity.sha256()),
+        hex_encode(&identity.sha256()),
     )
 }
 
@@ -154,14 +155,4 @@ pub fn describe_pins_tsv<'a>(pins: impl IntoIterator<Item = &'a ProtectedContent
         out.push('\n');
     }
     out
-}
-
-fn hex(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        output.push(DIGITS[(byte >> 4) as usize] as char);
-        output.push(DIGITS[(byte & 0x0f) as usize] as char);
-    }
-    output
 }
