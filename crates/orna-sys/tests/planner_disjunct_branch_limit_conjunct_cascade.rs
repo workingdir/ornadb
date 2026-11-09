@@ -1,6 +1,6 @@
 use orna_sys::{
-    ExplainError, ExpressionRef, ObjectRef, PlanDetail, PlanNodeKind, QueryPlanDescription,
-    QuerySourceStatistics, SnapshotRef, explain_query_with_disjunct_branch_limit_conjunct_cascade,
+    ExplainError, ExplainInputs, ExpressionRef, ObjectRef, PlanDetail, PlanNodeKind,
+    QueryPlanDescription, QuerySourceStatistics, SnapshotRef, explain_query_with,
 };
 
 const FIXTURE: &str = include_str!("fixtures/planner_disjunct_branch_limit_conjunct_cascade.orna");
@@ -13,7 +13,7 @@ fn explain_branch_limit_conjunct_cascade(
     additional_limits: &[u64],
     has_predicate: bool,
 ) -> Result<orna_sys::ExplainedPlan, ExplainError> {
-    explain_query_with_disjunct_branch_limit_conjunct_cascade(
+    explain_query_with(
         &QueryPlanDescription {
             snapshot: SnapshotRef::descriptive("snapshot:disjunct-branch-limit-conjunct-cascade"),
             source: ObjectRef::descriptive("table:PlannerDisjunctBranchLimitConjunctCascade"),
@@ -32,10 +32,13 @@ fn explain_branch_limit_conjunct_cascade(
             mutations: Vec::new(),
             materialize_into: None,
         },
-        disjunct_count,
-        nested_branch_limits,
-        conjunct_count_per_disjunct,
-        additional_limits,
+        ExplainInputs {
+            disjunct_count,
+            conjunct_count_per_disjunct: Some(conjunct_count_per_disjunct),
+            nested_branch_limits: Some(nested_branch_limits),
+            additional_limits,
+            ..ExplainInputs::default()
+        },
     )
 }
 

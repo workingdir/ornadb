@@ -1,11 +1,10 @@
 use std::collections::BTreeMap;
 
 use orna_sys::{
-    ExplainError, ExpressionRef, ObjectRef, PlanDetail, PlanNode, PlanNodeKind,
+    ExplainError, ExplainInputs, ExpressionRef, ObjectRef, PlanDetail, PlanNode, PlanNodeKind,
     PlanWindowFrameBound, QueryJoinDescription, QueryJoinPairIdentityDescription,
     QueryPlanDescription, QuerySourceStatistics, QueryWindowAggregatePushdownDescription,
-    QueryWindowSpillDescription, SnapshotRef,
-    explain_query_with_join_pair_identities_window_aggregate_and_spill_pushdowns,
+    QueryWindowSpillDescription, SnapshotRef, explain_query_with,
 };
 
 const FIXTURE: &str = include_str!("fixtures/planner_paired_window_spill_anchor_fold_nvweq.orna");
@@ -225,11 +224,14 @@ fn plan(
     aggregate_descriptors: &[QueryWindowAggregatePushdownDescription],
     spill_descriptors: &[QueryWindowSpillDescription],
 ) -> orna_sys::ExplainedPlan {
-    explain_query_with_join_pair_identities_window_aggregate_and_spill_pushdowns(
+    explain_query_with(
         &query(anchor, order),
-        descriptors,
-        aggregate_descriptors,
-        spill_descriptors,
+        ExplainInputs {
+            window_aggregates: aggregate_descriptors,
+            join_pair_identities: descriptors,
+            window_spills: spill_descriptors,
+            ..ExplainInputs::default()
+        },
     )
     .expect("exact join pairs and source window spill estimates produce a plan")
 }
@@ -511,11 +513,14 @@ fn paired_window_spill_folds_report_computed_io_across_sparse_anchor_reordering(
     let mut mispaired_spills = spills.clone();
     mispaired_spills[0].join_pair_identity = object("pair:Middle");
     assert!(matches!(
-        explain_query_with_join_pair_identities_window_aggregate_and_spill_pushdowns(
+        explain_query_with(
             &query("table:AnchorLeft", declarations),
-            &pairs("table:AnchorLeft", declarations),
-            &aggregate_descriptors,
-            &mispaired_spills,
+            ExplainInputs {
+                window_aggregates: &aggregate_descriptors,
+                join_pair_identities: &pairs("table:AnchorLeft", declarations),
+                window_spills: &mispaired_spills,
+                ..ExplainInputs::default()
+            },
         ),
         Err(ExplainError::InvalidObject)
     ));

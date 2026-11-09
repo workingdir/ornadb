@@ -8,11 +8,11 @@
 
 use num_bigint::BigInt;
 use orna_evaluator::{
-    AdmittedReplSession, EffectHandler, Environment, EvaluationError, Functions, Limits,
-    NominalDefinitions, Ovb2EffectHandler, PureFunction, RelationPage, ReplError, ReplSession,
-    StagedReplActivation, StandardLayer, StepBudget, SysHostAttachment, SysHostBindingRegistry,
-    SysHostContext, invoke_named, invoke_named_with_effects, invoke_named_with_sys_host_context,
-    module_function_alias_key, reference_standard_profile, reference_standard_sources,
+    EffectHandler, Environment, EvaluationError, Functions, Limits, NominalDefinitions,
+    Ovb2EffectHandler, PureFunction, RelationPage, ReplSession, StandardLayer, StepBudget,
+    SysHostAttachment, SysHostBindingRegistry, SysHostContext, invoke_named,
+    invoke_named_with_effects, invoke_named_with_sys_host_context, module_function_alias_key,
+    reference_standard_profile, reference_standard_sources,
 };
 use orna_foundation::{CanonicalSnapshot, CanonicalValue, OvbRaw, SafeText};
 use orna_live::{
@@ -23,6 +23,7 @@ use orna_project::{
     AdmittedSourceRow, CommittedReadLimits, LoadedProject, ProjectLimits, ResolvedTableSchema,
     admitted_table_schemas,
 };
+use orna_project_repl::{AdmittedReplSession, ReplError, RepositoryScope, StagedReplActivation};
 use orna_protocol::{
     Envelope, Message, PresentIdentity, PresentKind, PresentNode, PresentPropertyKey, ResultStatus,
 };
@@ -54,7 +55,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{Arc, Mutex},
-    time::UNIX_EPOCH,
+    time::{SystemTime, UNIX_EPOCH},
 };
 /// Applies explicit remote-analysis consent and records the source/snapshot disclosure boundary.
 /// This method only authorizes/records; integrations must call a remote provider only when
@@ -918,12 +919,9 @@ impl ApplicationAuthority {
         });
         digest.update(context.capture().generation_digest());
         put_bytes(&mut digest, &snapshot_bytes);
-        let elapsed = context
-            .activation_time()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default();
-        digest.update(elapsed.as_secs().to_be_bytes());
-        digest.update(elapsed.subsec_nanos().to_be_bytes());
+        let (seconds, nanos) = digest_time_encoding(context.activation_time())?;
+        digest.update(seconds.to_be_bytes());
+        digest.update(nanos.to_be_bytes());
         for mutation in mutations {
             digest.update(mutation.id());
             put_bytes(&mut digest, mutation.table().as_bytes());
@@ -2734,10 +2732,7 @@ fn runtime_effect_call_count(expression: &Expr) -> usize {
                 .iter()
                 .map(runtime_effect_statement_count)
                 .sum::<usize>()
-                + tail
-                    .as_deref()
-                    .map(runtime_effect_call_count)
-                    .unwrap_or_default()
+                + tail.as_deref().map_or(0, runtime_effect_call_count)
         }
         Expr::Control {
             condition,
@@ -2746,29 +2741,16 @@ fn runtime_effect_call_count(expression: &Expr) -> usize {
             alternate,
             ..
         } => {
-            condition
-                .as_deref()
-                .map(runtime_effect_call_count)
-                .unwrap_or_default()
-                + body
-                    .as_deref()
-                    .map(runtime_effect_call_count)
-                    .unwrap_or_default()
+            condition.as_deref().map_or(0, runtime_effect_call_count)
+                + body.as_deref().map_or(0, runtime_effect_call_count)
                 + arms.iter().map(runtime_effect_arm_count).sum::<usize>()
-                + alternate
-                    .as_deref()
-                    .map(runtime_effect_call_count)
-                    .unwrap_or_default()
+                + alternate.as_deref().map_or(0, runtime_effect_call_count)
         }
     }
 }
 
 fn runtime_effect_arm_count(arm: &CaseArm) -> usize {
-    arm.guard
-        .as_ref()
-        .map(runtime_effect_call_count)
-        .unwrap_or_default()
-        + runtime_effect_call_count(&arm.body)
+    arm.guard.as_ref().map_or(0, runtime_effect_call_count) + runtime_effect_call_count(&arm.body)
 }
 
 fn runtime_effect_statement_count(statement: &Statement) -> usize {
@@ -2778,10 +2760,9 @@ fn runtime_effect_statement_count(statement: &Statement) -> usize {
         | Statement::Expression { value, .. }
         | Statement::Control { value, .. }
         | Statement::Assignment { value, .. } => runtime_effect_call_count(value),
-        Statement::Return { value, .. } | Statement::Break { value, .. } => value
-            .as_ref()
-            .map(runtime_effect_call_count)
-            .unwrap_or_default(),
+        Statement::Return { value, .. } | Statement::Break { value, .. } => {
+            value.as_ref().map_or(0, runtime_effect_call_count)
+        }
         Statement::Continue { .. } => 0,
     }
 }
@@ -3500,8 +3481,9 @@ impl ApplicationLiveAdapter {
     fn new_repl_session(&self) -> Result<AdmittedReplSession, LiveError> {
         let session = self.new_unscoped_repl_session()?;
         Ok(match self.runtime_identity {
-            Some((database, repository)) => session
-                .with_repository_scope(orna_evaluator::RepositoryScope::new(database, repository)),
+            Some((database, repository)) => {
+                session.with_repository_scope(RepositoryScope::new(database, repository))
+            }
             None => session,
         })
     }
@@ -3632,6 +3614,213 @@ impl ApplicationLiveAdapter {
                 column,
             }),
         );
+    }
+
+    /// Publishes the REPL state of one rejected input and returns the failure for
+    /// the transport layer. Every submit path records the failure in the REPL's
+    /// private `$?` binding, so the candidate is published as it stands.
+    fn publish_repl_failure(
+        &self,
+        session: [u8; 16],
+        repl: AdmittedReplSession,
+        source: &str,
+        code: &str,
+    ) -> LiveError {
+        self.publish_repl_candidate(session, repl);
+        self.record_run_failure(session, source, code);
+        LiveError::from(ApplicationError::Evaluation(code.to_owned()))
+    }
+
+    /// Rejects a REPL input the evaluator refused before running it: submitting
+    /// the input records the failure status in `$?` without running effectful
+    /// input, and the resulting session state is then published.
+    fn fail_repl_input(
+        &self,
+        session: [u8; 16],
+        mut repl: AdmittedReplSession,
+        source: &str,
+        code: &str,
+    ) -> LiveError {
+        let _ = repl.submit(source);
+        self.publish_repl_failure(session, repl, source, code)
+    }
+
+    /// Submits one Eval input to the session REPL, publishing the successor REPL
+    /// state and recording the run. Inputs that stage table mutations return a
+    /// transaction instead of a pure response.
+    async fn eval_repl_with_transaction(
+        &mut self,
+        session: [u8; 16],
+        request: [u8; 16],
+        message: &Message,
+        context: Option<&RuntimeActivationContext>,
+    ) -> std::result::Result<LiveEvalResponse, LiveError> {
+        let Message::Eval { source, .. } = message else {
+            return Err(LiveError::ApplicationRejected);
+        };
+        let mut repl = self.repl_candidate(session)?;
+        let staged = match repl.stage_activation(source) {
+            Ok(staged) => staged,
+            Err(error) if error.code() == "ORNA-REPL-EFFECT" => {
+                match self.submit_repl_input(&mut repl, source) {
+                    Ok(value) => {
+                        let value = value.unwrap_or_else(CanonicalValue::unit);
+                        self.publish_repl_candidate(session, repl);
+                        self.record_run_success(session, value.clone());
+                        let envelope =
+                            self.success_envelope(request, eval_fingerprint(message)?, value)?;
+                        return Ok(LiveEvalResponse::pure(envelope));
+                    }
+                    Err(error) => {
+                        let code = error.code().to_owned();
+                        return Err(self.publish_repl_failure(session, repl, source, &code));
+                    }
+                }
+            }
+            Err(error) => {
+                let code = error.code().to_owned();
+                return Err(self.fail_repl_input(session, repl, source, &code));
+            }
+        };
+        let mut handler =
+            SourceMutationEffectHandler::new(self.repl_table_schemas().map_err(LiveError::from)?);
+        // The REPL serves `sys.explain` from the activation's pinned CWD
+        // snapshot (ORNA-SYS-008), as the module activation does. A pure
+        // evaluation has no activation context, so no catalogue is pinned
+        // and explain reports the coordinate unavailable.
+        if let Some(context) = context {
+            handler.explain_catalogue = Some(
+                orna_evaluator::ActivationExplainCatalogue::new(
+                    context.capture().snapshot(),
+                    handler.tables.keys().map(String::as_str),
+                )
+                .map_err(|_| LiveError::ApplicationRejected)?,
+            );
+        }
+        let (value, successor) = match repl.evaluate_staged_with_effects(staged, &mut handler) {
+            Ok(result) => result,
+            Err(error) => {
+                let code = error.code().to_owned();
+                return Err(self.fail_repl_input(session, repl, source, &code));
+            }
+        };
+        let effects = handler.effect_report();
+        let mutations = handler.into_mutations().map_err(LiveError::from)?;
+        let value = value.unwrap_or_else(CanonicalValue::unit);
+        let envelope = self.success_envelope(request, eval_fingerprint(message)?, value)?;
+        if mutations.is_empty() {
+            self.publish_repl_candidate(session, successor);
+            let Message::Result {
+                value: Some(value), ..
+            } = &envelope.message
+            else {
+                return Err(LiveError::ApplicationRejected);
+            };
+            self.record_run_success(session, value.clone());
+            return Ok(LiveEvalResponse::pure(envelope));
+        }
+        let Some(context) = context else {
+            self.record_run_failure(session, source, "ORNA-REPL-RUNTIME");
+            return Err(LiveError::ApplicationRejected);
+        };
+        let activation = self.authority.stage_source_mutations(
+            context.clone(),
+            mutations,
+            Some(RequestIdentity {
+                session_id: session,
+                request_id: request,
+            }),
+            effects,
+        )?;
+        let identity = RequestIdentity {
+            session_id: session,
+            request_id: request,
+        };
+        let sessions = Arc::clone(&self.sessions);
+        let run_events = Arc::clone(&self.run_events);
+        let event_value = match &envelope.message {
+            Message::Result {
+                value: Some(value), ..
+            } => value.clone(),
+            _ => return Err(LiveError::ApplicationRejected),
+        };
+        let transaction = LiveEvalTransaction::new(
+            activation.mutations().to_vec(),
+            activation.next_digest(),
+            activation.effects(),
+            Arc::new(NoFault),
+        )
+        .for_request(identity)
+        .after_commit(move || {
+            sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(session, ApplicationReplSession { repl: successor });
+            record_session_run_event(
+                &run_events,
+                session,
+                SessionRunOutcome::Success { value: event_value },
+            );
+        });
+        Ok(LiveEvalResponse::transaction(envelope, transaction))
+    }
+
+    /// Evaluates one Eval message as the host-selected application module and
+    /// returns its response, or the transaction its staged tables need.
+    async fn eval_module_with_transaction(
+        &mut self,
+        session: [u8; 16],
+        request: [u8; 16],
+        message: &Message,
+        context: Option<&RuntimeActivationContext>,
+    ) -> std::result::Result<LiveEvalResponse, LiveError> {
+        let admitted = self.evaluate_eval_message(message)?;
+        let staged = self
+            .authority
+            .evaluate_staged(&admitted, &Environment::new())?;
+        let envelope =
+            self.success_envelope(request, eval_fingerprint(message)?, staged.value().clone())?;
+        if staged.mutations().is_empty() {
+            self.record_run_success(session, staged.value().clone());
+            return Ok(LiveEvalResponse::pure(envelope));
+        }
+        // Fail closed: admitted source effects require an authoritative
+        // staging context captured by the host before evaluation.
+        let Some(context) = context else {
+            let Message::Eval { source, .. } = message else {
+                return Err(LiveError::ApplicationRejected);
+            };
+            self.record_run_failure(session, source, "ORNA-REPL-RUNTIME");
+            return Err(LiveError::ApplicationRejected);
+        };
+        let activation = staged.stage_for_request(
+            &self.authority,
+            context,
+            RequestIdentity {
+                session_id: session,
+                request_id: request,
+            },
+        )?;
+        let run_events = Arc::clone(&self.run_events);
+        let event_value = staged.value().clone();
+        let transaction = LiveEvalTransaction::new(
+            activation.mutations().to_vec(),
+            activation.next_digest(),
+            activation.effects(),
+            Arc::new(NoFault),
+        )
+        .for_request(RequestIdentity {
+            session_id: session,
+            request_id: request,
+        })
+        .after_commit(move || {
+            record_session_run_event(
+                &run_events,
+                session,
+                SessionRunOutcome::Success { value: event_value },
+            );
+        });
+        Ok(LiveEvalResponse::transaction(envelope, transaction))
     }
 
     fn run_events_present(&self, session: [u8; 16]) -> Result<PresentNode, LiveError> {
@@ -3917,6 +4106,8 @@ impl LiveApplication for ApplicationLiveAdapter {
         self.success_envelope(request, eval_fingerprint(message)?, value)
     }
 
+    /// Runs one Eval message through the session REPL or the admitted module,
+    /// whichever this host selected, and returns its response.
     fn eval_with_transaction<'a>(
         &'a mut self,
         session: [u8; 16],
@@ -3927,174 +4118,12 @@ impl LiveApplication for ApplicationLiveAdapter {
     ) -> Pin<Box<dyn Future<Output = std::result::Result<LiveEvalResponse, LiveError>> + 'a>> {
         Box::pin(async move {
             if self.eval_module.is_none() {
-                let Message::Eval { source, .. } = message else {
-                    return Err(LiveError::ApplicationRejected);
-                };
-                let mut repl = self.repl_candidate(session)?;
-                let staged = match repl.stage_activation(source) {
-                    Ok(staged) => staged,
-                    Err(error) if error.code() == "ORNA-REPL-EFFECT" => match self
-                        .submit_repl_input(&mut repl, source)
-                    {
-                        Ok(value) => {
-                            let value = value.unwrap_or_else(CanonicalValue::unit);
-                            self.publish_repl_candidate(session, repl);
-                            self.record_run_success(session, value.clone());
-                            let envelope =
-                                self.success_envelope(request, eval_fingerprint(message)?, value)?;
-                            return Ok(LiveEvalResponse::pure(envelope));
-                        }
-                        Err(error) => {
-                            let code = error.code().to_owned();
-                            self.publish_repl_candidate(session, repl);
-                            self.record_run_failure(session, source, &code);
-                            return Err(LiveError::from(ApplicationError::Evaluation(code)));
-                        }
-                    },
-                    Err(error) => {
-                        let code = error.code().to_owned();
-                        // submit() records the failure status in the REPL's
-                        // private `$?` binding without running effectful input.
-                        let _ = repl.submit(source);
-                        self.publish_repl_candidate(session, repl);
-                        self.record_run_failure(session, source, &code);
-                        return Err(LiveError::from(ApplicationError::Evaluation(code)));
-                    }
-                };
-                let mut handler = SourceMutationEffectHandler::new(
-                    self.repl_table_schemas().map_err(LiveError::from)?,
-                );
-                // The REPL serves `sys.explain` from the activation's pinned CWD
-                // snapshot (ORNA-SYS-008), as the module activation does. A pure
-                // evaluation has no activation context, so no catalogue is pinned
-                // and explain reports the coordinate unavailable.
-                if let Some(context) = context {
-                    handler.explain_catalogue = Some(
-                        orna_evaluator::ActivationExplainCatalogue::new(
-                            context.capture().snapshot(),
-                            handler.tables.keys().map(String::as_str),
-                        )
-                        .map_err(|_| LiveError::ApplicationRejected)?,
-                    );
-                }
-                let (value, successor) =
-                    match repl.evaluate_staged_with_effects(staged, &mut handler) {
-                        Ok(result) => result,
-                        Err(error) => {
-                            let code = error.code().to_owned();
-                            let _ = repl.submit(source);
-                            self.publish_repl_candidate(session, repl);
-                            self.record_run_failure(session, source, &code);
-                            return Err(LiveError::from(ApplicationError::Evaluation(code)));
-                        }
-                    };
-                let effects = handler.effect_report();
-                let mutations = handler.into_mutations().map_err(LiveError::from)?;
-                let value = value.unwrap_or_else(CanonicalValue::unit);
-                let envelope = self.success_envelope(request, eval_fingerprint(message)?, value)?;
-                if mutations.is_empty() {
-                    self.publish_repl_candidate(session, successor);
-                    let Message::Result {
-                        value: Some(value), ..
-                    } = &envelope.message
-                    else {
-                        return Err(LiveError::ApplicationRejected);
-                    };
-                    self.record_run_success(session, value.clone());
-                    return Ok(LiveEvalResponse::pure(envelope));
-                }
-                let Some(context) = context else {
-                    self.record_run_failure(session, source, "ORNA-REPL-RUNTIME");
-                    return Err(LiveError::ApplicationRejected);
-                };
-                let activation = self.authority.stage_source_mutations(
-                    context.clone(),
-                    mutations,
-                    Some(RequestIdentity {
-                        session_id: session,
-                        request_id: request,
-                    }),
-                    effects,
-                )?;
-                let identity = RequestIdentity {
-                    session_id: session,
-                    request_id: request,
-                };
-                let sessions = Arc::clone(&self.sessions);
-                let run_events = Arc::clone(&self.run_events);
-                let event_value = match &envelope.message {
-                    Message::Result {
-                        value: Some(value), ..
-                    } => value.clone(),
-                    _ => return Err(LiveError::ApplicationRejected),
-                };
-                let transaction = LiveEvalTransaction::new(
-                    activation.mutations().to_vec(),
-                    activation.next_digest(),
-                    activation.effects(),
-                    Arc::new(NoFault),
-                )
-                .for_request(identity)
-                .after_commit(move || {
-                    sessions
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .insert(session, ApplicationReplSession { repl: successor });
-                    record_session_run_event(
-                        &run_events,
-                        session,
-                        SessionRunOutcome::Success { value: event_value },
-                    );
-                });
-                return Ok(LiveEvalResponse::transaction(envelope, transaction));
+                return self
+                    .eval_repl_with_transaction(session, request, message, context)
+                    .await;
             }
-            let admitted = self.evaluate_eval_message(message)?;
-            let staged = self
-                .authority
-                .evaluate_staged(&admitted, &Environment::new())?;
-            let envelope =
-                self.success_envelope(request, eval_fingerprint(message)?, staged.value().clone())?;
-            if staged.mutations().is_empty() {
-                self.record_run_success(session, staged.value().clone());
-                return Ok(LiveEvalResponse::pure(envelope));
-            }
-            // Fail closed: admitted source effects require an authoritative
-            // staging context captured by the host before evaluation.
-            let Some(context) = context else {
-                let Message::Eval { source, .. } = message else {
-                    return Err(LiveError::ApplicationRejected);
-                };
-                self.record_run_failure(session, source, "ORNA-REPL-RUNTIME");
-                return Err(LiveError::ApplicationRejected);
-            };
-            let activation = staged.stage_for_request(
-                &self.authority,
-                context,
-                RequestIdentity {
-                    session_id: session,
-                    request_id: request,
-                },
-            )?;
-            let run_events = Arc::clone(&self.run_events);
-            let event_value = staged.value().clone();
-            let transaction = LiveEvalTransaction::new(
-                activation.mutations().to_vec(),
-                activation.next_digest(),
-                activation.effects(),
-                Arc::new(NoFault),
-            )
-            .for_request(RequestIdentity {
-                session_id: session,
-                request_id: request,
-            })
-            .after_commit(move || {
-                record_session_run_event(
-                    &run_events,
-                    session,
-                    SessionRunOutcome::Success { value: event_value },
-                );
-            });
-            Ok(LiveEvalResponse::transaction(envelope, transaction))
+            self.eval_module_with_transaction(session, request, message, context)
+                .await
         })
     }
 
@@ -4440,9 +4469,39 @@ fn put_bytes(digest: &mut Sha256, bytes: &[u8]) {
     digest.update(bytes);
 }
 
+/// Encodes the captured activation time as the whole seconds and nanoseconds
+/// since the Unix epoch that the canonical digest absorbs. A time before the
+/// epoch has no elapsed encoding, and substituting zero would make it digest
+/// exactly like an activation at the epoch itself.
+fn digest_time_encoding(activation_time: SystemTime) -> Result<(u64, u32), ApplicationError> {
+    let elapsed = activation_time
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| ApplicationError::DigestEncoding)?;
+    Ok((elapsed.as_secs(), elapsed.subsec_nanos()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    // The activation time is digest input: a time before the Unix epoch has no
+    // elapsed encoding, and substituting the epoch would make two distinct
+    // activations digest identically.
+    fn a_pre_epoch_activation_time_is_not_digestible() {
+        let before_epoch = UNIX_EPOCH
+            .checked_sub(std::time::Duration::from_secs(1))
+            .expect("the epoch has a second before it");
+        assert_eq!(
+            digest_time_encoding(before_epoch),
+            Err(ApplicationError::DigestEncoding)
+        );
+        assert_eq!(
+            digest_time_encoding(UNIX_EPOCH),
+            Ok((0, 0)),
+            "the epoch itself still encodes as zero elapsed time"
+        );
+    }
 
     #[test]
     // Specified: Orna-1.1.0 sys.Table; the grouped handle lists admitted tables.

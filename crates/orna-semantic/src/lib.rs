@@ -25,6 +25,7 @@ use sha2::{Digest, Sha256};
 use unicode_casefold::UnicodeCaseFold;
 use unicode_normalization::{UnicodeNormalization, is_nfc};
 
+mod diagnostics;
 mod effects;
 mod located;
 mod repl;
@@ -50,94 +51,7 @@ pub use semantic_payload::{
 
 pub use repl::{NameHints, ReplAdmission, ReplCommitError, ReplContext};
 
-pub const DIAG_BAD_PATH: &str = "ORNA-S001-PATH";
-pub const DIAG_NAMESPACE: &str = "ORNA-S002-NAMESPACE";
-pub const DIAG_RESERVED: &str = "ORNA-S003-RESERVED";
-pub const DIAG_IMPORT: &str = "ORNA-S010-IMPORT";
-pub const DIAG_AMBIGUOUS: &str = "ORNA-S011-AMBIGUOUS";
-pub const DIAG_UNRESOLVED: &str = "ORNA-S012-UNRESOLVED";
-/// Note prefix carrying the identifier of an `ORNA-S012-UNRESOLVED` diagnostic.
-pub const UNRESOLVED_NAME_NOTE: &str = "unresolved name: ";
-
-/// Returns the unresolved identifier recorded on an unresolved-name diagnostic.
-pub fn unresolved_name(diagnostic: &Diagnostic) -> Option<&str> {
-    diagnostic
-        .notes()
-        .iter()
-        .find_map(|note| note.as_str().strip_prefix(UNRESOLVED_NAME_NOTE))
-}
-
-/// Note prefix carrying `module.member` for an unresolved module member.
-pub const UNRESOLVED_MEMBER_NOTE: &str = "unresolved member: ";
-
-/// Returns the `(module, member)` pair recorded on an unresolved module member diagnostic.
-pub fn unresolved_member(diagnostic: &Diagnostic) -> Option<(&str, &str)> {
-    diagnostic
-        .notes()
-        .iter()
-        .find_map(|note| note.as_str().strip_prefix(UNRESOLVED_MEMBER_NOTE))
-        .and_then(|path| path.rsplit_once('.'))
-}
-
-pub const DIAG_DUPLICATE: &str = "ORNA-S013-DUPLICATE";
-pub const DIAG_ANNOTATION: &str = "ORNA-S020-ANNOTATION";
-pub const DIAG_TYPE: &str = "ORNA-S021-TYPE";
-pub const DIAG_UNSUPPORTED: &str = "ORNA-S022-UNSUPPORTED";
-pub const DIAG_ASSERTION: &str = "ORNA-A091-004";
-pub const DIAG_ASSERTION_ONE_TABLE: &str = "ORNA-A091-003";
-pub const DIAG_ASSERTION_SCOPE: &str = "ORNA-A091-012";
-pub const DIAG_ASSERTION_EFFECT: &str = "ORNA-A091-007";
-pub const DIAG_LEGACY_SYS_RUNTIME: &str = "ORNA100-E-SYS-RUNTIME";
-pub const DIAG_LEGACY_TRYFROM: &str = "ORNA091-E-TRYFROM";
-pub const DIAG_LEGACY_RESULT: &str = "ORNA091-E-RESULT";
-/// Published typecheck classifications for construction fields
-/// (`tests/invalid-metadata.json`: wrong-field-type, missing-required-field
-/// and unknown-field). Enum payload construction emits them at the source.
-pub const DIAG_FIELD_TYPE: &str = "E2001";
-pub const DIAG_MISSING_FIELD: &str = "E2002";
-pub const DIAG_UNKNOWN_FIELD: &str = "E2003";
-pub const DIAG_ASSERTION_OWNER_PIPE: &str = "ORNA-A091-002";
-/// Spec diagnostic codes (`33-diagnostics.md`) emitted directly at the rule
-/// that detects the violation; the message text never selects the code.
-pub const DIAG_RESERVED_SYS: &str = "E1008";
-pub const DIAG_RESERVED_STD: &str = "E1009";
-pub const DIAG_PRIMARY_KEY_IMMUTABLE: &str = "E3002";
-pub const DIAG_PRIMARY_KEY_FLOAT: &str = "E3003";
-pub const DIAG_PRIMARY_KEY_RANGE: &str = "E3010";
-pub const DIAG_COMPUTED_INSERT: &str = "E3010";
-pub const DIAG_COMPUTED_DIRECT_WRITE: &str = "E3011";
-pub const DIAG_COMPUTED_NONDETERMINISTIC: &str = "E3012";
-pub const DIAG_AUTOMATIC_KEY_REKEY: &str = "E3013";
-pub const DIAG_RELATION_EQUALITY_AMBIGUOUS: &str = "E4107";
-pub const DIAG_TIME_ENERGY_ADD: &str = "E5001";
-pub const DIAG_AFFINE_TEMPERATURE_ADD: &str = "E5002";
-pub const DIAG_ABSOLUTE_QUANTITY_SUM: &str = "E5003";
-pub const DIAG_CURRENCY_MISMATCH: &str = "E5003";
-pub const DIAG_MONEY_FROM_FLOAT: &str = "E5004";
-pub const DIAG_MONEY_BINARY_FLOAT: &str = "E5103";
-pub const DIAG_CALENDAR_BUCKET_ZONE: &str = "E6001";
-pub const DIAG_SYS_COMMIT_READ_ONLY: &str = "E7001";
-pub const DIAG_SECRET_DISPLAY: &str = "E7002";
-pub const DIAG_DISPLAY_READ_ONLY: &str = "E7201";
-pub const DIAG_CROSS_DATABASE_WRITE: &str = "E9001";
-pub const DIAG_AMBIGUOUS_DURABLE_CONSUMER: &str = "E9101";
-pub const DIAG_DURABLE_CONSUMER_SOURCE_ROOTS: &str = "E9102";
-pub const DIAG_CURRENCY_SYMBOL: &str = "ORNA091-E-CURRENCY-SYMBOL";
-pub const DIAG_CONVERSION_CHAIN: &str = "ORNA091-E-CONVERSION-CHAIN";
-pub const DIAG_SYS_ADMIN_METHOD: &str = "ORNA100-E-SYS-ADMIN-METHOD";
-pub const DIAG_SYS_STORAGE_CALL: &str = "ORNA100-E-SYS-STORAGE-CALL";
-pub const DIAG_TABLE_FIELD_TYPE: &str = "E2001";
-pub const DIAG_MISSING_REQUIRED_FIELD: &str = "E2002";
-pub const DIAG_TABLE_UNKNOWN_FIELD: &str = "E2003";
-/// Published typecheck classification for an operand whose static type does
-/// not fit its operator (the spec's "expected X, found Y" type mismatch).
-pub const DIAG_TYPE_MISMATCH: &str = "E2001";
-/// Published classification for adding or subtracting quantities whose
-/// reduced dimensions differ (ORNA-UNIT-004).
-pub const DIAG_INCOMPATIBLE_DIMENSIONS: &str = "E5001";
-/// Portable failure code for a required `sys` member that has no linked
-/// production provider (ORNA-SYS-008, `api/sys.json` `failure_codes`).
-pub const DIAG_SYS_VERSION_INCOMPATIBLE: &str = "sys.version.incompatible";
+pub use diagnostics::*;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModuleInput {
@@ -618,6 +532,11 @@ pub struct ModuleHeader {
 pub struct Catalogue {
     modules: BTreeMap<Namespace, ModuleHeader>,
     attached_symbols: BTreeMap<String, Symbol>,
+    /// Aliases of attached databases supplied by the caller. An attached
+    /// database keeps its own transaction log, so a write through its alias
+    /// cannot be atomic with the current database (ORNA-ATTACH-002,
+    /// source/08-relations.md:131).
+    attached_databases: BTreeSet<String>,
     /// Declarations retained by an authority for whole-program historical
     /// evaluation.  These are deliberately separate from `modules`: current
     /// declarations must never become historical definitions merely because
@@ -636,6 +555,15 @@ pub struct Catalogue {
 impl Catalogue {
     pub fn empty() -> Self {
         Self::default()
+    }
+
+    /// Declares `alias` as an attached database. A write to a table reached
+    /// through the alias cannot be atomic with the current database because
+    /// the attached database keeps its own transaction log, so such a write is
+    /// rejected at type check (ORNA-ATTACH-002, source/08-relations.md:131).
+    pub fn with_attached_database(mut self, alias: impl Into<String>) -> Self {
+        self.attached_databases.insert(alias.into());
+        self
     }
 
     /// Returns the pinned standard dependency provenance retained by this
@@ -1166,6 +1094,7 @@ impl Catalogue {
         Self {
             modules,
             attached_symbols: BTreeMap::new(),
+            attached_databases: BTreeSet::new(),
             historical_modules: BTreeMap::new(),
             standard_dependency_profile: None,
             source_units: BTreeMap::new(),
@@ -1485,23 +1414,28 @@ impl Catalogue {
             Namespace(vec!["work".into()]),
             fixture_module(Namespace(vec!["work".into()]), [], true),
         );
-        catalogue.with_unit_support(&[
-            (
-                Namespace(vec!["fixture".into(), "units".into()]),
-                FIXTURE_UNIT_SUPPORT,
-                true,
-            ),
-            (
-                Namespace(vec!["std".into(), "units".into(), "si".into()]),
-                "pub unit kWh : Energy = 3.6e6.J;",
-                false,
-            ),
-            (
-                Namespace(vec!["work".into(), "units".into()]),
-                "pub unit kWh : Energy = 3.6e6.J;",
-                false,
-            ),
-        ])
+        catalogue
+            .with_unit_support(&[
+                (
+                    Namespace(vec!["fixture".into(), "units".into()]),
+                    FIXTURE_UNIT_SUPPORT,
+                    true,
+                ),
+                (
+                    Namespace(vec!["std".into(), "units".into(), "si".into()]),
+                    "pub unit kWh : Energy = 3.6e6.J;",
+                    false,
+                ),
+                (
+                    Namespace(vec!["work".into(), "units".into()]),
+                    "pub unit kWh : Energy = 3.6e6.J;",
+                    false,
+                ),
+            ])
+            // `examples/invalid/cross-database-write.orna` writes through this
+            // alias; `work` is a pinned database attached alongside the fixture
+            // database (ORNA-ATTACH-002).
+            .with_attached_database("work")
     }
 }
 
@@ -2967,6 +2901,7 @@ fn analyze_recording_origins(
         &mut result.modules,
         &catalogue.historical_modules,
         &catalogue.attached_symbols,
+        &catalogue.attached_databases,
         &mut dependency_summaries,
         &units,
     );
@@ -2988,11 +2923,14 @@ fn analyze_recording_origins(
             namespace,
             tree,
             header,
-            &result.modules,
-            &catalogue.historical_modules,
-            &catalogue.attached_symbols,
-            &dependency_summaries,
-            &units,
+            ImportInputs {
+                modules: &result.modules,
+                historical_modules: &catalogue.historical_modules,
+                attached_symbols: &catalogue.attached_symbols,
+                attached_databases: &catalogue.attached_databases,
+                dependency_summaries: &dependency_summaries,
+                units: &units,
+            },
             &mut scratch,
         );
         let spellings = secret_identity_spellings(namespace, tree, &scope, &result.modules);
@@ -3014,11 +2952,14 @@ fn analyze_recording_origins(
             namespace,
             tree,
             &header,
-            &result.modules,
-            &catalogue.historical_modules,
-            &catalogue.attached_symbols,
-            &dependency_summaries,
-            &units,
+            ImportInputs {
+                modules: &result.modules,
+                historical_modules: &catalogue.historical_modules,
+                attached_symbols: &catalogue.attached_symbols,
+                attached_databases: &catalogue.attached_databases,
+                dependency_summaries: &dependency_summaries,
+                units: &units,
+            },
             &mut result.diagnostics,
         );
         scope.current_namespace = Some(namespace.clone());
@@ -3570,6 +3511,7 @@ fn stabilize_function_summaries(
     modules: &mut BTreeMap<Namespace, ModuleHeader>,
     historical_modules: &BTreeMap<Namespace, ModuleHeader>,
     attached_symbols: &BTreeMap<String, Symbol>,
+    attached_databases: &BTreeSet<String>,
     dependency_summaries: &mut BTreeMap<Namespace, BTreeMap<String, BTreeSet<String>>>,
     units: &UnitEnvironment,
 ) {
@@ -3590,11 +3532,14 @@ fn stabilize_function_summaries(
                 namespace,
                 tree,
                 &header,
-                modules,
-                historical_modules,
-                attached_symbols,
-                dependency_summaries,
-                units,
+                ImportInputs {
+                    modules,
+                    historical_modules,
+                    attached_symbols,
+                    attached_databases,
+                    dependency_summaries,
+                    units,
+                },
                 &mut discarded,
             );
             let mut symbols = header.symbols;
@@ -4729,13 +4674,17 @@ struct Scope {
     /// Authority-backed declarations available only through a historical
     /// database snapshot. Current modules are never implicitly projected.
     historical_modules: BTreeMap<Namespace, ModuleHeader>,
+    /// Aliases of databases attached alongside the current one. Their
+    /// independent transaction logs rule out atomic writes through them
+    /// (ORNA-ATTACH-002, source/08-relations.md:131).
+    attached_databases: BTreeSet<String>,
     /// Local table rows are separate from public table identities: a table
     /// expression produces its relation row shape, while table operations
     /// retain the declared nominal table result.
     table_rows: BTreeMap<String, Type>,
-    auto_key_tables: BTreeSet<String>,
     /// Tables without declared keys use the implicit automatic key and cannot
     /// be explicitly re-keyed by source code.
+    auto_key_tables: BTreeSet<String>,
     /// Local nominal record constructors elaborate to their declared row shape
     /// so field access remains structural inside inferred stream pipelines.
     nominal_rows: BTreeMap<String, Type>,
@@ -4756,8 +4705,9 @@ struct Scope {
     /// are selected from the explicitly resolved export instead of by short
     /// name alone.
     local_nominal_names: BTreeSet<String>,
-    /// closed `Port.from(value)` constructor can check the source value
-    /// without erasing the refined nominal result.
+    /// Local refined types mapped to the type they refine, so the closed
+    /// `Port.from(value)` constructor can check the source value without
+    /// erasing the refined nominal result.
     refined_types: BTreeMap<String, Type>,
     /// Canonical identities of the local, imported and attached nominal types
     /// that implement the core `Currency` protocol (ORNA-MONEY-004). Never
@@ -4811,6 +4761,18 @@ struct UnitEnvironment {
     dimensions: Rc<BTreeMap<SourceDimensionIdentity, DimensionBasis>>,
 }
 
+/// The module graph and catalogue projections one module scope resolves
+/// against. They are views of one analysis input, so they travel together
+/// instead of as a positional list beside the per-module arguments.
+struct ImportInputs<'a> {
+    modules: &'a BTreeMap<Namespace, ModuleHeader>,
+    historical_modules: &'a BTreeMap<Namespace, ModuleHeader>,
+    attached_symbols: &'a BTreeMap<String, Symbol>,
+    attached_databases: &'a BTreeSet<String>,
+    dependency_summaries: &'a BTreeMap<Namespace, BTreeMap<String, BTreeSet<String>>>,
+    units: &'a UnitEnvironment,
+}
+
 fn resolve_imports(
     namespace: &Namespace,
     tree: &SyntaxTree,
@@ -4824,41 +4786,69 @@ fn resolve_imports(
         namespace,
         tree,
         header,
-        modules,
-        historical_modules,
-        attached_symbols,
-        &BTreeMap::new(),
-        &UnitEnvironment::default(),
+        ImportInputs {
+            modules,
+            historical_modules,
+            attached_symbols,
+            attached_databases: &BTreeSet::new(),
+            dependency_summaries: &BTreeMap::new(),
+            units: &UnitEnvironment::default(),
+        },
         diagnostics,
     )
 }
-/// The module graph, historical modules, attached symbols and dependency
-/// summaries are four views of one analysis input, and the two callers pass
-/// them straight from the scope they hold.
-#[allow(clippy::too_many_arguments)]
 fn resolve_imports_with_dependencies(
     namespace: &Namespace,
     tree: &SyntaxTree,
     header: &ModuleHeader,
-    modules: &BTreeMap<Namespace, ModuleHeader>,
-    historical_modules: &BTreeMap<Namespace, ModuleHeader>,
-    attached_symbols: &BTreeMap<String, Symbol>,
-    dependency_summaries: &BTreeMap<Namespace, BTreeMap<String, BTreeSet<String>>>,
-    units: &UnitEnvironment,
+    inputs: ImportInputs<'_>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Scope {
-    let mut scope = Scope {
+    let ImportInputs {
+        modules,
+        attached_symbols,
+        dependency_summaries,
+        ..
+    } = &inputs;
+    let mut scope = module_scope(namespace, tree, header, &inputs, diagnostics);
+    install_attached_symbols(&mut scope, attached_symbols);
+    install_module_rows(&mut scope, modules);
+    let mut implicit_roots = register_implicit_modules(&mut scope, modules);
+    let (explicit, glob) =
+        collect_use_bindings(&mut scope, tree, modules, &mut implicit_roots, diagnostics);
+    apply_use_bindings(&mut scope, explicit, glob, diagnostics);
+    import_protocol_members(&mut scope, tree, modules);
+    import_dependency_provenance(&mut scope, tree, modules, dependency_summaries);
+    canonicalize_scope_metadata(&mut scope, namespace, tree);
+    scope.currency_types = currency_types(namespace, tree, &scope);
+    install_attached_type_rows(&mut scope, attached_symbols);
+    collect_protocol_implementations(&mut scope, tree);
+
+    collect_nominal_conversion_effects(&mut scope, tree);
+    merge_exported_conversion_metadata(&mut scope, modules);
+    scope
+}
+
+fn module_scope(
+    namespace: &Namespace,
+    tree: &SyntaxTree,
+    header: &ModuleHeader,
+    inputs: &ImportInputs<'_>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Scope {
+    Scope {
         names: header.symbols.clone(),
         current_namespace: None,
-        source_units: Rc::clone(&units.units),
-        source_dimensions: Rc::clone(&units.dimensions),
+        source_units: Rc::clone(&inputs.units.units),
+        source_dimensions: Rc::clone(&inputs.units.dimensions),
         function_dependencies: RefCell::new(BTreeMap::new()),
         unlinked_system_members: None,
         ambiguous: BTreeSet::new(),
         nominal_identities: BTreeMap::new(),
         modules: BTreeMap::new(),
-        available_modules: modules.clone(),
-        historical_modules: historical_modules.clone(),
+        available_modules: inputs.modules.clone(),
+        historical_modules: inputs.historical_modules.clone(),
+        attached_databases: inputs.attached_databases.clone(),
         // Row shapes and automatic-key tables are keyed by the same qualified
         // identity that table symbols carry, never by the bare declared name.
         table_rows: tree
@@ -4971,7 +4961,10 @@ fn resolve_imports_with_dependencies(
         nominal_conversions: BTreeMap::new(),
         nominal_conversion_effects: BTreeMap::new(),
         return_frames: RefCell::new(Vec::new()),
-    };
+    }
+}
+
+fn install_attached_symbols(scope: &mut Scope, attached_symbols: &BTreeMap<String, Symbol>) {
     for (name, symbol) in attached_symbols {
         scope
             .names
@@ -4997,6 +4990,9 @@ fn resolve_imports_with_dependencies(
                 .or_insert_with(|| Type::Record(row.clone()));
         }
     }
+}
+
+fn install_module_rows(scope: &mut Scope, modules: &BTreeMap<Namespace, ModuleHeader>) {
     for (module_namespace, module) in modules {
         for (name, symbol) in &module.exports {
             if symbol.kind != SymbolKind::Table {
@@ -5031,6 +5027,12 @@ fn resolve_imports_with_dependencies(
                 .or_insert_with(|| Type::Record(fields.clone()));
         }
     }
+}
+
+fn register_implicit_modules(
+    scope: &mut Scope,
+    modules: &BTreeMap<Namespace, ModuleHeader>,
+) -> BTreeSet<String> {
     if modules.contains_key(&Namespace(vec!["std".into()])) {
         scope
             .modules
@@ -5044,7 +5046,16 @@ fn resolve_imports_with_dependencies(
                 .or_insert_with(|| module_namespace.clone());
         }
     }
-    let mut implicit_roots = scope.modules.keys().cloned().collect::<BTreeSet<_>>();
+    scope.modules.keys().cloned().collect::<BTreeSet<_>>()
+}
+
+fn collect_use_bindings(
+    scope: &mut Scope,
+    tree: &SyntaxTree,
+    modules: &BTreeMap<Namespace, ModuleHeader>,
+    implicit_roots: &mut BTreeSet<String>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> (BTreeMap<String, Symbol>, BTreeMap<String, Vec<Symbol>>) {
     let mut explicit = BTreeMap::<String, Symbol>::new();
     let mut glob = BTreeMap::<String, Vec<Symbol>>::new();
     for item in &tree.items {
@@ -5185,6 +5196,15 @@ fn resolve_imports_with_dependencies(
             }
         }
     }
+    (explicit, glob)
+}
+
+fn apply_use_bindings(
+    scope: &mut Scope,
+    explicit: BTreeMap<String, Symbol>,
+    glob: BTreeMap<String, Vec<Symbol>>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
     for (name, symbol) in explicit {
         scope.names.entry(name).or_insert(symbol);
     }
@@ -5201,6 +5221,13 @@ fn resolve_imports_with_dependencies(
             scope.ambiguous.insert(name);
         }
     }
+}
+
+fn import_protocol_members(
+    scope: &mut Scope,
+    tree: &SyntaxTree,
+    modules: &BTreeMap<Namespace, ModuleHeader>,
+) {
     // Import the protocol member signatures alongside named or wildcard
     // imports so implementations are checked against captured source.
     for item in &tree.items {
@@ -5236,6 +5263,14 @@ fn resolve_imports_with_dependencies(
             }
         }
     }
+}
+
+fn import_dependency_provenance(
+    scope: &mut Scope,
+    tree: &SyntaxTree,
+    modules: &BTreeMap<Namespace, ModuleHeader>,
+    dependency_summaries: &BTreeMap<Namespace, BTreeMap<String, BTreeSet<String>>>,
+) {
     // Preserve dependency provenance for imported helpers without extending
     // the public ModuleHeader/Symbol representations. Qualified calls use the
     // module binding (including aliases); named and wildcard imports use their
@@ -5331,8 +5366,9 @@ fn resolve_imports_with_dependencies(
             }
         }
     }
-    canonicalize_scope_metadata(&mut scope, namespace, tree);
-    scope.currency_types = currency_types(namespace, tree, &scope);
+}
+
+fn install_attached_type_rows(scope: &mut Scope, attached_symbols: &BTreeMap<String, Symbol>) {
     for (name, symbol) in attached_symbols {
         if symbol.kind == SymbolKind::Type
             && let Some(row) = symbol.table_fields()
@@ -5347,6 +5383,9 @@ fn resolve_imports_with_dependencies(
                 .or_insert_with(|| Type::Record(row.clone()));
         }
     }
+}
+
+fn collect_protocol_implementations(scope: &mut Scope, tree: &SyntaxTree) {
     for item in &tree.items {
         let (target, members) = match &item.declaration {
             Declaration::Type {
@@ -5391,10 +5430,10 @@ fn resolve_imports_with_dependencies(
             ),
             _ => continue,
         };
-        let target_identity = canonical_nominal_name(target, &scope);
+        let target_identity = canonical_nominal_name(target, scope);
         let protocols = members
             .iter()
-            .map(|implementation| resolved_type_of(&implementation.protocol, &scope))
+            .map(|implementation| resolved_type_of(&implementation.protocol, scope))
             .filter(|protocol| *protocol != Type::Error)
             .collect::<Vec<_>>();
         scope
@@ -5412,7 +5451,7 @@ fn resolve_imports_with_dependencies(
             if path.as_slice() != ["From"] || arguments.len() != 1 {
                 continue;
             }
-            if let Some(source) = valid_static_type(&arguments[0], &scope) {
+            if let Some(source) = valid_static_type(&arguments[0], scope) {
                 scope
                     .nominal_conversions
                     .entry(target_identity.clone())
@@ -5421,10 +5460,8 @@ fn resolve_imports_with_dependencies(
             }
         }
     }
-    collect_nominal_conversion_effects(&mut scope, tree);
-    merge_exported_conversion_metadata(&mut scope, modules);
-    scope
 }
+
 fn collect_nominal_conversion_effects(scope: &mut Scope, tree: &SyntaxTree) {
     for item in &tree.items {
         let (target, implementations) = match &item.declaration {
@@ -6510,10 +6547,7 @@ fn infer_from_nominal_target(
             DIAG_TYPE,
             "From implementation result must construct its nominal target",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects: inferred.effects,
-        };
+        return Inferred::error_with(inferred.effects);
     }
     Inferred {
         ty: target.clone(),
@@ -8185,10 +8219,7 @@ fn infer_return_statement(
             infer_contextual(value, expected, scope, local, diagnostics)
         }
         (Some(value), None) => infer(value, scope, local, diagnostics),
-        (None, _) => Inferred {
-            ty: Type::Unit,
-            effects: EffectSummary::default(),
-        },
+        (None, _) => Inferred::pure(Type::Unit),
     };
     if let Some(index) = owner {
         if let Some(expected) = &expected {
@@ -9004,10 +9035,7 @@ fn infer_codec_decode_call(
             DIAG_TYPE,
             "codec decode requires an explicit `as: T` type witness",
         ));
-        return Some(Inferred {
-            ty: Type::Error,
-            effects,
-        });
+        return Some(Inferred::error_with(effects));
     };
     if input.is_none() {
         diagnostics.push(diag(DIAG_TYPE, "codec decode requires an input value"));
@@ -9523,6 +9551,30 @@ struct Inferred {
     effects: EffectSummary,
 }
 
+impl Inferred {
+    /// A result that performs no host effect and cannot fail.
+    fn pure(ty: Type) -> Self {
+        Self {
+            ty,
+            effects: EffectSummary::default(),
+        }
+    }
+
+    /// An expression that already produced a diagnostic and has no effects.
+    fn error() -> Self {
+        Self::pure(Type::Error)
+    }
+
+    /// An expression that already produced a diagnostic but whose operands
+    /// still carry `effects`.
+    fn error_with(effects: EffectSummary) -> Self {
+        Self {
+            ty: Type::Error,
+            effects,
+        }
+    }
+}
+
 /// Applies the sole contextual numeric conversion admitted by the language:
 /// an exact fractional literal may be checked directly as `Float`. All other
 /// expressions remain inferred through the ordinary closed-world path.
@@ -9556,10 +9608,7 @@ fn infer_contextual(
                 DIAG_TYPE,
                 "an untyped range needs at least one endpoint or a range context",
             ));
-            return Inferred {
-                ty: expected.clone(),
-                effects: EffectSummary::default(),
-            };
+            return Inferred::pure(expected.clone());
         }
         let mut effects = EffectSummary::default();
         for endpoint in [lower.as_deref(), upper.as_deref()].into_iter().flatten() {
@@ -9602,10 +9651,7 @@ fn infer_contextual(
             }
         )
     {
-        return Inferred {
-            ty: Type::Float,
-            effects: EffectSummary::default(),
-        };
+        return Inferred::pure(Type::Float);
     }
     if let Expr::Control {
         kind: ControlKind::If,
@@ -9618,11 +9664,13 @@ fn infer_contextual(
     } = expr
     {
         return infer_if(
-            binding.as_ref(),
-            condition.as_deref(),
-            body.as_deref(),
-            arms,
-            alternate.as_deref(),
+            ControlParts::new(
+                binding.as_ref(),
+                condition.as_deref(),
+                body.as_deref(),
+                arms,
+                alternate.as_deref(),
+            ),
             Some(expected),
             scope,
             local,
@@ -9804,19 +9852,16 @@ fn infer_node(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Inferred {
     match expr {
-        Expr::Literal { kind, .. } => Inferred {
-            ty: match kind {
-                LiteralKind::Integer => Type::Int,
-                LiteralKind::Decimal => Type::Decimal,
-                LiteralKind::Float => Type::Float,
-                LiteralKind::Date => Type::Date,
-                LiteralKind::Instant => Type::Instant,
-                LiteralKind::String => Type::Text,
-                LiteralKind::Boolean => Type::Bool,
-                LiteralKind::Null => Type::Null,
-            },
-            effects: EffectSummary::default(),
-        },
+        Expr::Literal { kind, .. } => Inferred::pure(match kind {
+            LiteralKind::Integer => Type::Int,
+            LiteralKind::Decimal => Type::Decimal,
+            LiteralKind::Float => Type::Float,
+            LiteralKind::Date => Type::Date,
+            LiteralKind::Instant => Type::Instant,
+            LiteralKind::String => Type::Text,
+            LiteralKind::Boolean => Type::Bool,
+            LiteralKind::Null => Type::Null,
+        }),
         Expr::InterpolatedString { segments, .. } => {
             let mut effects = EffectSummary::default();
             for segment in segments {
@@ -9832,62 +9877,7 @@ fn infer_node(
             }
         }
         Expr::Name { text, .. } | Expr::ReplBinding { text, .. } => {
-            if scope.ambiguous.contains(text) {
-                diagnostics.push(diag(
-                    DIAG_AMBIGUOUS,
-                    "name has multiple wildcard-import candidates",
-                ));
-                return Inferred {
-                    ty: Type::Error,
-                    effects: EffectSummary::default(),
-                };
-            }
-            let symbol = local.get(text).or_else(|| scope.names.get(text));
-            match symbol {
-                Some(s) if s.kind == SymbolKind::Table => Inferred {
-                    ty: Type::Relation(Box::new(s.ty.clone())),
-                    effects: EffectSummary {
-                        effects: BTreeSet::from([EffectKind::TableRead]),
-                        opaque: false,
-                        may_fail: true,
-                    },
-                },
-                Some(s) => Inferred {
-                    ty: s.ty.clone(),
-                    effects: s.effects.clone(),
-                },
-                None => match intrinsic_value_type(text) {
-                    Some(ty) => Inferred {
-                        ty,
-                        effects: EffectSummary::default(),
-                    },
-                    None => {
-                        let mut diagnostic = diag(
-                            if matches!(text.as_str(), "Ok" | "Err") {
-                                DIAG_LEGACY_RESULT
-                            } else {
-                                DIAG_UNRESOLVED
-                            },
-                            if matches!(text.as_str(), "Ok" | "Err") {
-                                "Result/Ok/Err control plumbing was removed; return the success type directly"
-                            } else {
-                                "name cannot be resolved"
-                            },
-                        );
-                        if !matches!(text.as_str(), "Ok" | "Err") {
-                            diagnostic = diagnostic.with_note(
-                                SafeText::new(format!("{UNRESOLVED_NAME_NOTE}{text}"))
-                                    .expect("identifier text is safe"),
-                            );
-                        }
-                        diagnostics.push(diagnostic);
-                        Inferred {
-                            ty: Type::Error,
-                            effects: EffectSummary::default(),
-                        }
-                    }
-                },
-            }
+            infer_name(text, scope, local, diagnostics)
         }
         Expr::Group { inner, .. } => infer(inner, scope, local, diagnostics),
         Expr::Record { fields, .. } => {
@@ -9906,203 +9896,7 @@ fn infer_node(
         Expr::Nominal { path, fields, .. } => {
             infer_nominal(path, fields, scope, local, diagnostics)
         }
-        Expr::List { elements, .. } => {
-            let mut element_types = Vec::with_capacity(elements.len());
-            let mut effects = EffectSummary::default();
-            for element in elements {
-                let value = infer(element, scope, local, diagnostics);
-                effects.join(&value.effects);
-                element_types.push(value.ty);
-            }
-
-            let omitted_pinned_tuple_path =
-                type_sequence_has_omitted_pinned_checkpoint_tuple(&element_types);
-            if omitted_pinned_tuple_path {
-                seed_omitted_pinned_checkpoint_tuple_paths(&mut element_types);
-            }
-            let first_parent = element_types.first().cloned();
-            let transactional_checkpoint_fold = element_types.len() > 2
-                && first_parent.as_ref().is_some_and(|first| {
-                    type_contains_pinned_checkpoint_tuple(first)
-                        || (type_contains_omitted_checkpoint_tuple(first)
-                            && element_types
-                                .iter()
-                                .any(type_contains_pinned_checkpoint_tuple))
-                        || omitted_pinned_tuple_path
-                });
-            let mut checkpoint_topology_parent = element_types
-                .iter()
-                .find(|parent| type_contains_pinned_checkpoint_tuple(parent))
-                .cloned()
-                .or_else(|| first_parent.clone());
-            // A sparse paired first row has no complete pin map to roll back
-            // to. Recover one as the first fully populated row is accepted,
-            // then retain the accepted sparse-chain map for later local rollback.
-            let paired_omission_recovery = first_parent
-                .as_ref()
-                .is_some_and(type_contains_paired_checkpoint_omissions);
-            // A complete anchor, or one concrete lane of a partial first
-            // pair, can grow into a recoverable checkpoint map as later rows
-            // fill omitted pins. Retain the latest accepted map so a later
-            // crossed row cannot erase that sparse-chain identity.
-            let first_parent_can_grow_checkpoint_map =
-                first_parent.as_ref().is_some_and(|parent| {
-                    type_contains_pinned_checkpoint_tuple(parent)
-                        && (!type_contains_omitted_checkpoint_tuple(parent)
-                            || type_contains_partially_omitted_pinned_tuple(parent))
-                });
-            let first_parent_has_omitted_checkpoint_tuple = first_parent
-                .as_ref()
-                .is_some_and(type_contains_omitted_checkpoint_tuple);
-            let later_parent_establishes_checkpoint_map = checkpoint_topology_parent
-                .as_ref()
-                .is_some_and(type_contains_pinned_checkpoint_tuple);
-            // If sparse compaction starts before any tuple pin exists, use the
-            // first concrete topology as the recovery point. The reference is
-            // silent on local compaction rollback, so keep accepted identities
-            // when a later parent conflicts instead of restoring empty slots.
-            let checkpoint_reanchor_recovery = paired_omission_recovery
-                || (omitted_pinned_tuple_path
-                    && (first_parent_can_grow_checkpoint_map
-                        || (first_parent_has_omitted_checkpoint_tuple
-                            && later_parent_establishes_checkpoint_map)));
-            let mut checkpoint_recovery_parent = first_parent.clone();
-            // Any omitted row can expose a cross-sibling selector collision.
-            // Sparse pinned tuples anywhere in the fold need a local scope so
-            // a later rebind can roll back only the crossed tuple path.
-            let scoped_checkpoint_rollback = element_types
-                .iter()
-                .any(type_contains_omitted_checkpoint_tuple)
-                || element_types
-                    .iter()
-                    .any(type_contains_partially_omitted_pinned_tuple)
-                || omitted_pinned_tuple_path
-                || element_types
-                    .iter()
-                    .any(type_contains_paired_pinned_checkpoint_siblings);
-            let mut rolled_back_checkpoint_paths = BTreeSet::new();
-            let mut rejected_checkpoint_parent = false;
-            let mut ty = None;
-            for value in element_types {
-                if let Some(prior) = &ty {
-                    // Paired sparse anchors evolve as accepted rows teach more
-                    // topology, so reject a bad row locally and retry later
-                    // rows. Folds without that recovery anchor retain their
-                    // original fold-wide freeze for a rejected path.
-                    let mut parent_rollback_paths = if checkpoint_reanchor_recovery {
-                        BTreeSet::new()
-                    } else {
-                        rolled_back_checkpoint_paths.clone()
-                    };
-                    let merged = if transactional_checkpoint_fold && scoped_checkpoint_rollback {
-                        merge_multi_parent_checkpoint_value_scoped(
-                            prior,
-                            &value,
-                            if checkpoint_reanchor_recovery {
-                                checkpoint_recovery_parent
-                                    .as_ref()
-                                    .expect("checkpoint re-anchor fold has a recovery anchor")
-                            } else {
-                                first_parent
-                                    .as_ref()
-                                    .expect("scoped fold has a rollback anchor")
-                            },
-                            checkpoint_topology_parent
-                                .as_ref()
-                                .expect("transactional fold has a topology parent"),
-                            &mut Vec::new(),
-                            &mut parent_rollback_paths,
-                        )
-                        .map(|mut fold| {
-                            if fold.rejected_scope {
-                                require_same(prior, &value, diagnostics);
-                                if checkpoint_reanchor_recovery {
-                                    fold.merged = merge_unpaired_checkpoint_record_siblings(
-                                        &fold.merged,
-                                        &value,
-                                    )
-                                    .unwrap_or(fold.merged);
-                                    fold.effective_parent =
-                                        merge_unpaired_checkpoint_record_siblings(
-                                            &fold.effective_parent,
-                                            &value,
-                                        )
-                                        .unwrap_or(fold.effective_parent);
-                                }
-                            }
-                            // An omitted tuple path has no identity topology in
-                            // the original anchor. Remember the first accepted
-                            // parent's concrete pins at those paths so later
-                            // parents cannot silently rebind them differently.
-                            checkpoint_topology_parent = Some(
-                                checkpoint_topology_parent
-                                    .as_ref()
-                                    .map(|anchor| {
-                                        checkpoint_topology_anchor_with_first_pins(
-                                            anchor,
-                                            &fold.effective_parent,
-                                        )
-                                    })
-                                    .unwrap_or_else(|| fold.effective_parent.clone()),
-                            );
-                            if checkpoint_reanchor_recovery
-                                && let Some(next_recovery_parent) =
-                                    checkpoint_recovery_parent.as_ref().and_then(|anchor| {
-                                        merge_checkpoint_field_map_multi_parent(
-                                            anchor,
-                                            &fold.effective_parent,
-                                        )
-                                    })
-                            {
-                                checkpoint_recovery_parent = Some(next_recovery_parent);
-                            }
-                            fold.merged
-                        })
-                    } else if transactional_checkpoint_fold {
-                        merge_multi_parent_checkpoint_value(
-                            prior,
-                            &value,
-                            checkpoint_topology_parent
-                                .as_ref()
-                                .expect("transactional fold has a topology parent"),
-                        )
-                    } else {
-                        merge_list_element_types(prior, &value)
-                    };
-                    if !checkpoint_reanchor_recovery {
-                        rolled_back_checkpoint_paths = parent_rollback_paths;
-                    }
-                    if let Some(merged) = merged {
-                        ty = Some(merged);
-                    } else {
-                        require_same(prior, &value, diagnostics);
-                        rejected_checkpoint_parent |= transactional_checkpoint_fold;
-                    }
-                } else {
-                    ty = Some(value);
-                }
-            }
-
-            // The reference does not define recovery when one parent in a
-            // multi-parent checkpoint fold cannot reconcile. For ordinary
-            // pinned folds, keep the whole first parent as the recovery
-            // anchor. When the first parent has omitted nested tuples, the
-            // scoped fold above freezes rejected paths at that anchor while
-            // allowing independent sibling paths to complete.
-            if rejected_checkpoint_parent {
-                ty = first_parent;
-            }
-            if ty.is_none() {
-                diagnostics.push(diag(
-                    DIAG_ANNOTATION,
-                    "empty list needs an expected element type",
-                ));
-            }
-            Inferred {
-                ty: Type::List(Box::new(ty.unwrap_or(Type::Error))),
-                effects,
-            }
-        }
+        Expr::List { elements, .. } => infer_list(elements, scope, local, diagnostics),
         Expr::Tuple { elements, .. } => {
             let mut effects = EffectSummary::default();
             let values = elements
@@ -10118,607 +9912,21 @@ fn infer_node(
                 effects,
             }
         }
-        Expr::Field { base, name, .. } => {
-            if let Some(path) = qualified_path(expr)
-                && let Some(inferred) = infer_system_path(&path, scope, diagnostics)
-            {
-                return inferred;
-            }
-            if let Some(projection) = infer_table_projection(expr, scope, local) {
-                return projection;
-            }
-            if let Some(variant) = infer_enum_variant_reference(expr, scope, local, diagnostics) {
-                return variant;
-            }
-            if let Some(path) = qualified_path(expr)
-                && scope.modules.contains_key(path[0])
-                && !local.contains_key(path[0])
-            {
-                if let Some(table) = table_symbol(expr, scope, local) {
-                    return Inferred {
-                        ty: Type::Relation(Box::new(table.ty.clone())),
-                        effects: EffectSummary {
-                            effects: BTreeSet::from([EffectKind::TableRead]),
-                            opaque: false,
-                            may_fail: true,
-                        },
-                    };
-                }
-                return resolve_qualified_module_member(&path, scope, diagnostics);
-            }
-            if let Some(path) = qualified_path(expr)
-                && path.first() == Some(&"sys")
-                && path
-                    .get(1)
-                    .is_some_and(|member| matches!(*member, "runtime" | "runtime_info"))
-            {
-                diagnostics.push(diag(
-                    DIAG_LEGACY_SYS_RUNTIME,
-                    "`sys.runtime` was renamed to `sys.rt`",
-                ));
-                return Inferred {
-                    ty: Type::Error,
-                    effects: EffectSummary::default(),
-                };
-            }
-            let diagnostics_before_base = diagnostics.len();
-            let base = infer(base, scope, local, diagnostics);
-            if base.ty == Type::Error && diagnostics.len() == diagnostics_before_base {
-                return Inferred {
-                    ty: Type::Error,
-                    effects: base.effects,
-                };
-            }
-            if let Some(inferred) = infer_historical_member(&base.ty, name, scope, diagnostics) {
-                return Inferred {
-                    ty: inferred.ty,
-                    effects: {
-                        let mut effects = base.effects;
-                        effects.join(&inferred.effects);
-                        effects
-                    },
-                };
-            }
-            if let Some(ty) = infer_system_member(&base.ty, name) {
-                return Inferred {
-                    ty,
-                    effects: base.effects,
-                };
-            }
-            if let Some(message) = legacy_sys_admin_message(&base.ty, name) {
-                diagnostics.push(diag(DIAG_SYS_ADMIN_METHOD, message));
-                return Inferred {
-                    ty: Type::Error,
-                    effects: base.effects,
-                };
-            }
-            if let Type::Named(system_type) = &base.ty
-                && system_api::embedded_system_api().describes_type(system_type)
-            {
-                diagnostics.push(diag(
-                    DIAG_UNSUPPORTED,
-                    "portable system member is described but not implemented by this semantic slice",
-                ));
-                return Inferred {
-                    ty: Type::Error,
-                    effects: base.effects,
-                };
-            }
-            if let Some(ty) = infer_text_member(&base.ty, name) {
-                return Inferred {
-                    ty,
-                    effects: base.effects,
-                };
-            }
-            if name == "display" && contains_secret_value_type(&base.ty) {
-                diagnostics.push(diag(
-                    DIAG_SECRET_DISPLAY,
-                    "secret values cannot be displayed",
-                ));
-                return Inferred {
-                    ty: Type::Error,
-                    effects: base.effects,
-                };
-            }
-            if let Some(ty) = infer_numeric_member(&base.ty, name) {
-                return Inferred {
-                    ty,
-                    effects: base.effects,
-                };
-            }
-            if let Some(ty) = infer_currency_suffix(&base.ty, name, scope, diagnostics) {
-                return Inferred {
-                    ty,
-                    effects: base.effects,
-                };
-            }
-            if let Some(ty) = infer_numeric_postfix(&base.ty, name) {
-                return Inferred {
-                    ty,
-                    effects: base.effects,
-                };
-            }
-            if let Some(ty) = infer_unit_suffix(&base.ty, name, scope, diagnostics) {
-                return Inferred {
-                    ty,
-                    effects: base.effects,
-                };
-            }
-            if let Some(ty) = infer_refined_member(&base.ty, name, scope) {
-                return Inferred {
-                    ty,
-                    effects: base.effects,
-                };
-            }
-            let ty = match &base.ty {
-                Type::Record(fields) => fields.get(name).cloned().unwrap_or_else(|| {
-                    diagnostics.push(diag(DIAG_UNRESOLVED, "record field cannot be resolved"));
-                    Type::Error
-                }),
-                Type::Named(nominal) => {
-                    if scope
-                        .nominal_private_fields
-                        .get(nominal)
-                        .is_some_and(|fields| fields.contains(name))
-                        && scope.private_field_owner.as_deref() != Some(nominal.as_str())
-                    {
-                        diagnostics.push(diag(
-                            DIAG_TYPE,
-                            "private nominal field is inaccessible outside its owning implementation",
-                        ));
-                        Type::Error
-                    } else {
-                        scope
-                            .table_rows
-                            .get(nominal)
-                            .or_else(|| scope.nominal_rows.get(nominal))
-                            .and_then(|row| match row {
-                                Type::Record(fields) => fields.get(name).cloned(),
-                                _ => None,
-                            })
-                            .or_else(|| error_value_field_type(nominal, name))
-                            .unwrap_or_else(|| {
-                                diagnostics.push(diag(DIAG_TYPE, "field access requires a record"));
-                                Type::Error
-                            })
-                    }
-                }
-                _ => {
-                    diagnostics.push(diag(DIAG_TYPE, "field access requires a record"));
-                    Type::Error
-                }
-            };
-            Inferred {
-                ty,
-                effects: base.effects,
-            }
-        }
+        Expr::Field { base, name, .. } => infer_field(expr, base, name, scope, local, diagnostics),
         Expr::Lambda {
             parameters, body, ..
-        } => {
-            let mut locals = local.clone();
-            let mut types = Vec::new();
-            for parameter in parameters {
-                let ty = parameter
-                    .annotation
-                    .as_ref()
-                    .map(type_of)
-                    .unwrap_or_else(|| {
-                        if let Pattern::Name(name, _) = &parameter.pattern
-                            && let Some(ty) =
-                                inferred_lambda_parameter_type(body, name, scope, local)
-                        {
-                            ty
-                        } else {
-                            diagnostics.push(diag(
-                                DIAG_ANNOTATION,
-                                "lambda parameter needs a static annotation",
-                            ));
-                            Type::Error
-                        }
-                    });
-                let ty = scope_snapshot_ref_parameter_pattern(&parameter.pattern, &ty);
-                if ty == Type::Error {
-                    // Keep an underconstrained lambda parameter in scope as
-                    // an error-typed local. This lets the annotation
-                    // diagnostic point at the useful site without turning
-                    // every use of that parameter into an unrelated
-                    // unresolved-name diagnostic.
-                    if let Pattern::Name(name, _) = &parameter.pattern {
-                        insert_local_binding(name, Type::Error, &mut locals, diagnostics);
-                        if let Some(symbol) = locals.get_mut(name) {
-                            symbol.kind = SymbolKind::Parameter;
-                        }
-                    }
-                } else {
-                    bind_parameter_pattern(
-                        &parameter.pattern,
-                        ty.clone(),
-                        scope,
-                        &mut locals,
-                        diagnostics,
-                    );
-                }
-                types.push(ty);
-            }
-            let value = if matches!(
-                &**body,
-                Expr::Block {
-                    statements,
-                    tail: None,
-                    ..
-                } if statements.is_empty()
-            ) {
-                Inferred {
-                    ty: Type::Record(BTreeMap::new()),
-                    effects: EffectSummary::default(),
-                }
-            } else {
-                infer_function_body(body, None, scope, &locals, diagnostics)
-            };
-            Inferred {
-                ty: Type::Function {
-                    parameters: types,
-                    default_parameters: BTreeSet::new(),
-                    parameter_names: parameters
-                        .iter()
-                        .map(|parameter| match &parameter.pattern {
-                            Pattern::Name(name, _) => Some(name.clone()),
-                            _ => None,
-                        })
-                        .collect::<Option<Vec<_>>>(),
-                    result: Box::new(value.ty),
-                },
-                effects: value.effects,
-            }
-        }
+        } => infer_lambda(parameters, body, scope, local, diagnostics),
         Expr::Call {
             callee,
             arguments,
             span,
-        } => {
-            if matches!(callee.as_ref(), Expr::Name { text, .. } if text == "fail")
-                && !local.contains_key("fail")
-                && !scope.names.contains_key("fail")
-            {
-                return infer_fail_call(arguments, scope, local, diagnostics);
-            }
-            if matches!(callee.as_ref(), Expr::Name { text, .. } if text == "error")
-                && !local.contains_key("error")
-                && !scope.names.contains_key("error")
-            {
-                return infer_error_call(arguments, scope, local, diagnostics);
-            }
-            if matches!(callee.as_ref(), Expr::Name { text, .. } if text == "Some")
-                && !local.contains_key("Some")
-                && !scope.names.contains_key("Some")
-            {
-                if let [argument] = arguments.as_slice()
-                    && argument.name.is_none()
-                {
-                    let value = infer(&argument.value, scope, local, diagnostics);
-                    return Inferred {
-                        ty: Type::Optional(Box::new(value.ty)),
-                        effects: value.effects,
-                    };
-                }
-                let mut effects = EffectSummary::default();
-                for argument in arguments {
-                    let value = infer(&argument.value, scope, local, diagnostics);
-                    effects.join(&value.effects);
-                }
-                diagnostics.push(diag(
-                    DIAG_TYPE,
-                    "Some requires exactly one positional value",
-                ));
-                return Inferred {
-                    ty: Type::Error,
-                    effects,
-                };
-            }
-            if qualified_path(callee)
-                .as_deref()
-                .is_some_and(|path| path == ["work", "Contact", "insert"])
-            {
-                diagnostics.push(diag(
-                    DIAG_CROSS_DATABASE_WRITE,
-                    "cross-database writes are not atomic/supported",
-                ));
-                return Inferred {
-                    ty: Type::Error,
-                    effects: EffectSummary::default(),
-                };
-            }
-            if matches!(callee.as_ref(), Expr::Name { text, .. } if text == "parallel")
-                && let [argument] = arguments.as_slice()
-                && let Expr::List { elements, .. } = &argument.value
-            {
-                let mut consumers = BTreeSet::new();
-                for element in elements {
-                    if let Some(path) = qualified_path(element)
-                        && !consumers.insert(path.join("."))
-                    {
-                        diagnostics.push(diag(
-                            DIAG_AMBIGUOUS_DURABLE_CONSUMER,
-                            "same durable source consumed twice without distinct consumer identity",
-                        ));
-                        break;
-                    }
-                }
-            }
-            if matches!(callee.as_ref(), Expr::Name { text, .. } if text == "merge_streams")
-                && let [argument] = arguments.as_slice()
-                && let Expr::List { elements, .. } = &argument.value
-                && elements.len() > 1
-            {
-                diagnostics.push(diag(
-                    DIAG_DURABLE_CONSUMER_SOURCE_ROOTS,
-                    "a durable consumer function may own only one checkpointed source root; extract separate named consumer functions",
-                ));
-            }
-            if matches!(
-                callee.as_ref(),
-                Expr::Name { text, .. }
-                    if matches!(text.as_str(), "Ok" | "Err")
-                        && local.get(text).or_else(|| scope.names.get(text)).is_none()
-            ) {
-                diagnostics.push(diag(
-                    DIAG_LEGACY_RESULT,
-                    "Result/Ok/Err control plumbing was removed; return the success type directly",
-                ));
-                return Inferred {
-                    ty: Type::Error,
-                    effects: EffectSummary::default(),
-                };
-            }
-            if qualified_path(callee).as_deref() == Some(["sys", "storage"].as_slice()) {
-                diagnostics.push(diag(
-                    DIAG_SYS_STORAGE_CALL,
-                    "`sys.storage` is a grouping namespace; use `sys.Storage` or `sys.admin` storage functions",
-                ));
-                return Inferred {
-                    ty: Type::Error,
-                    effects: EffectSummary::default(),
-                };
-            }
-            if qualified_path(callee).as_deref() == Some(["sys", "Commit", "insert"].as_slice()) {
-                diagnostics.push(diag(DIAG_SYS_COMMIT_READ_ONLY, "sys.Commit is read-only"));
-                return Inferred {
-                    ty: Type::Error,
-                    effects: EffectSummary::default(),
-                };
-            }
-            if let Some(path) = qualified_path(callee)
-                && let Some(inferred) =
-                    infer_ui_action_call(&path, arguments, scope, local, diagnostics)
-            {
-                return inferred;
-            }
-            if let Some(path) = qualified_path(callee)
-                && path.first() == Some(&"sys")
-                && let Some(inferred) =
-                    infer_descriptor_system_call(&path, arguments, None, scope, local, diagnostics)
-            {
-                return inferred;
-            }
-            if let Some(currency) = money_constructor_currency(callee)
-                && let Some(inferred) = infer_money_constructor(
-                    Type::Named(canonical_nominal_name(currency, scope)),
-                    arguments,
-                    scope,
-                    local,
-                    diagnostics,
-                )
-            {
-                return inferred;
-            }
-            if let Some(inferred) =
-                infer_stream_from_list(callee, arguments, scope, local, diagnostics)
-            {
-                return inferred;
-            }
-            if let Some(inferred) =
-                infer_finite_list_collection_call(callee, arguments, scope, local, diagnostics)
-            {
-                return inferred;
-            }
-            if let Some(inferred) =
-                infer_nominal_conversion_call(callee, arguments, scope, local, diagnostics)
-            {
-                return inferred;
-            }
-            if let Some(inferred) =
-                infer_relation_collection_call(callee, arguments, scope, local, diagnostics)
-            {
-                return inferred;
-            }
-            if let Some(inferred) =
-                infer_relation_statistics_call(callee, arguments, None, scope, local, diagnostics)
-            {
-                return inferred;
-            }
-            if let Some(inferred) =
-                infer_relation_call(callee, arguments, scope, local, diagnostics)
-            {
-                return inferred;
-            }
-            if let Some(inferred) =
-                infer_parallel_call(callee, arguments, scope, local, diagnostics)
-            {
-                return inferred;
-            }
-            if let Some(inferred) = infer_race_call(callee, arguments, scope, local, diagnostics) {
-                return inferred;
-            }
-            if let Some(inferred) = infer_timeout_call(callee, arguments, scope, local, diagnostics)
-            {
-                return inferred;
-            }
-            if let Some(inferred) =
-                infer_relation_member_call(callee, arguments, scope, local, diagnostics)
-            {
-                return inferred;
-            }
-            if let Some(inferred) =
-                infer_table_operation(callee, arguments, scope, local, diagnostics)
-            {
-                return inferred;
-            }
-            if let Some(inferred) =
-                infer_codec_decode_call(callee, arguments, scope, local, diagnostics)
-            {
-                return inferred;
-            }
-            if let Some(inferred) =
-                infer_local_generic_call(callee, None, arguments, scope, local, diagnostics)
-            {
-                return inferred;
-            }
-            let presentation_boundary = qualified_path(callee)
-                .is_some_and(|path| is_secret_sensitive_presentation_path(&path));
-            let intrinsic = intrinsic_call_effects(callee);
-            let callee = infer(callee, scope, local, diagnostics);
-            let mut effects = callee.effects.clone();
-            effects.join(&intrinsic);
-            let call_parameters =
-                callable_function_type(&callee.ty).and_then(|function_type| match function_type {
-                    Type::Function {
-                        parameters,
-                        parameter_names,
-                        ..
-                    } => Some((parameters.as_slice(), parameter_names.as_deref())),
-                    _ => None,
-                });
-            let values = arguments
-                .iter()
-                .enumerate()
-                .map(|(index, a)| {
-                    let x = if a.name.as_deref() == Some("as") {
-                        infer_type_argument(&a.value)
-                            .unwrap_or_else(|| infer(&a.value, scope, local, diagnostics))
-                    } else if let Some((parameters, parameter_names)) = call_parameters
-                        && let Some(expected) =
-                            expected_call_parameter(parameters, parameter_names, arguments, index)
-                    {
-                        infer_contextual(&a.value, expected, scope, local, diagnostics)
-                    } else {
-                        infer(&a.value, scope, local, diagnostics)
-                    };
-                    effects.join(&x.effects);
-                    x.ty
-                })
-                .collect::<Vec<_>>();
-            if presentation_boundary && values.iter().any(contains_secret_value_type) {
-                diagnostics.push(diag(DIAG_TYPE, "secret values cannot be presented"));
-                return Inferred {
-                    ty: Type::Error,
-                    effects,
-                };
-            }
-            let historical_context = historical_callable_context(&callee.ty).cloned();
-            match callable_function_type(&callee.ty).cloned() {
-                Some(Type::Function {
-                    parameters,
-                    parameter_names,
-                    result,
-                    default_parameters,
-                }) => {
-                    check_call_arguments(
-                        &parameters,
-                        parameter_names.as_deref(),
-                        &default_parameters,
-                        arguments,
-                        &values,
-                        None,
-                        diagnostics,
-                    );
-                    let historical_database =
-                        specialize_historical_database_result(&result, &values, arguments, local);
-                    let result = historical_database.unwrap_or_else(|| {
-                        specialize_dynamic_parameter_snapshot_contexts(
-                            &result,
-                            &parameters,
-                            &default_parameters,
-                            parameter_names.as_deref(),
-                            arguments,
-                            &values,
-                            local,
-                            span,
-                            historical_context.as_ref(),
-                        )
-                    });
-                    Inferred {
-                        ty: historical_context.as_ref().map_or_else(
-                            || result.clone(),
-                            |snapshot| bind_historical_closure_context(snapshot, &result),
-                        ),
-                        effects,
-                    }
-                }
-                _ if callee.ty == Type::Error => Inferred {
-                    ty: Type::Error,
-                    effects,
-                },
-                _ => {
-                    diagnostics.push(diag(DIAG_TYPE, "call requires a statically known function"));
-                    Inferred {
-                        ty: Type::Error,
-                        effects,
-                    }
-                }
-            }
-        }
+        } => infer_call(callee, arguments, span, scope, local, diagnostics),
         Expr::GenericCall {
             callee,
             type_arguments,
             arguments,
             ..
-        } => {
-            if let Some(path) = qualified_path(callee)
-                && path.first() == Some(&"sys")
-                && let Some(inferred) = infer_descriptor_system_call(
-                    &path,
-                    arguments,
-                    Some(type_arguments),
-                    scope,
-                    local,
-                    diagnostics,
-                )
-            {
-                return inferred;
-            }
-            if let Some(currency) =
-                money_generic_constructor_currency(callee, type_arguments, scope)
-                && let Some(inferred) =
-                    infer_money_constructor(currency, arguments, scope, local, diagnostics)
-            {
-                return inferred;
-            }
-            if let Some(inferred) = infer_local_generic_call(
-                callee,
-                Some(type_arguments),
-                arguments,
-                scope,
-                local,
-                diagnostics,
-            ) {
-                return inferred;
-            }
-            let intrinsic = intrinsic_call_effects(callee);
-            let mut effects = infer(callee, scope, local, diagnostics).effects;
-            effects.join(&intrinsic);
-            for argument in arguments {
-                effects.join(&infer(&argument.value, scope, local, diagnostics).effects);
-            }
-            diagnostics.push(diag(
-                DIAG_UNSUPPORTED,
-                "generic calls are outside this semantic slice",
-            ));
-            Inferred {
-                ty: Type::Error,
-                effects,
-            }
-        }
+        } => infer_generic_call(callee, type_arguments, arguments, scope, local, diagnostics),
         Expr::Unary { op, rhs, .. } => {
             let inferred = infer(rhs, scope, local, diagnostics);
             Inferred {
@@ -10726,382 +9934,1272 @@ fn infer_node(
                 effects: inferred.effects,
             }
         }
-        Expr::Range { lower, upper, .. } => {
-            let endpoints = [lower.as_deref(), upper.as_deref()]
-                .into_iter()
-                .flatten()
-                .map(|endpoint| infer(endpoint, scope, local, diagnostics))
-                .collect::<Vec<_>>();
-            let mut effects = EffectSummary::default();
-            for endpoint in &endpoints {
-                effects.join(&endpoint.effects);
-            }
-            let ty = match endpoints.as_slice() {
-                [] => {
-                    diagnostics.push(diag(
-                        DIAG_TYPE,
-                        "an untyped range needs at least one endpoint or a range context",
-                    ));
-                    Type::Error
-                }
-                [one] => {
-                    if !is_ordered_range_bound(&one.ty) {
-                        diagnostics.push(diag(
-                            DIAG_TYPE,
-                            "range bounds must have the same ordered type",
-                        ));
-                        Type::Error
-                    } else {
-                        Type::Range(Box::new(one.ty.clone()))
-                    }
-                }
-                [left, right] if left.ty == right.ty && is_ordered_range_bound(&left.ty) => {
-                    Type::Range(Box::new(left.ty.clone()))
-                }
-                _ => {
-                    diagnostics.push(diag(
-                        DIAG_TYPE,
-                        "range bounds must have the same ordered type",
-                    ));
-                    Type::Error
-                }
-            };
-            Inferred { ty, effects }
-        }
-        Expr::Binary { lhs, op, rhs, .. } => {
-            if op == "|" {
-                return infer_success_pipeline(lhs, rhs, scope, local, diagnostics);
-            }
-            if op == "|?" {
-                return infer_recovery_pipeline(lhs, rhs, scope, local, diagnostics);
-            }
-            let equality = matches!(op.as_str(), "==" | "!=");
-            let (left, right) = if equality
-                && is_empty_list_literal(lhs)
-                && !is_empty_list_literal(rhs)
-            {
-                let right = infer(rhs, scope, local, diagnostics);
-                let left = match &right.ty {
-                    Type::List(_) => infer_contextual(lhs, &right.ty, scope, local, diagnostics),
-                    _ => infer(lhs, scope, local, diagnostics),
-                };
-                (left, right)
-            } else {
-                let left = infer(lhs, scope, local, diagnostics);
-                let right = if op == "??" {
-                    match &left.ty {
-                        Type::Optional(inner) => {
-                            infer_contextual(rhs, inner, scope, local, diagnostics)
-                        }
-                        _ => infer(rhs, scope, local, diagnostics),
-                    }
-                } else if equality && is_empty_list_literal(rhs) && matches!(left.ty, Type::List(_))
-                {
-                    infer_contextual(rhs, &left.ty, scope, local, diagnostics)
-                } else {
-                    infer(rhs, scope, local, diagnostics)
-                };
-                (left, right)
-            };
-            let mut effects = left.effects;
-            effects.join(&right.effects);
-            if matches!(op.as_str(), "==" | "!=")
-                && (matches!(left.ty, Type::Relation(_)) || matches!(right.ty, Type::Relation(_)))
-            {
-                diagnostics.push(diag(
-                    DIAG_RELATION_EQUALITY_AMBIGUOUS,
-                    "relation equality is ambiguous; choose sequence or row-set comparison explicitly",
-                ));
-                return Inferred {
-                    ty: Type::Error,
-                    effects,
-                };
-            }
-            if matches!(op.as_str(), ".." | "..=") {
-                let ty = if left.ty == right.ty && is_ordered_range_bound(&left.ty) {
-                    Type::Range(Box::new(left.ty))
-                } else {
-                    diagnostics.push(diag(
-                        DIAG_TYPE,
-                        "range bounds must have the same ordered type",
-                    ));
-                    Type::Error
-                };
-                return Inferred { ty, effects };
-            }
-            if op == "in" {
-                let ty = match &right.ty {
-                    Type::Range(element) => {
-                        require_same(element, &left.ty, diagnostics);
-                        Type::Bool
-                    }
-                    _ => {
-                        diagnostics.push(diag(DIAG_TYPE, "membership requires an ordered range"));
-                        Type::Error
-                    }
-                };
-                return Inferred { ty, effects };
-            }
-            if op == "??" {
-                let ty = match (&left.ty, &right.ty) {
-                    (Type::Optional(_), Type::Error) | (Type::Error, _) => Type::Error,
-                    (Type::Optional(inner), right) if types_match(inner, right) => {
-                        (**inner).clone()
-                    }
-                    _ => {
-                        diagnostics.push(diag(
-                            DIAG_TYPE,
-                            "coalesce fallback must match the optional value type",
-                        ));
-                        Type::Error
-                    }
-                };
-                return Inferred { ty, effects };
-            }
-            if matches!(op.as_str(), "&&" | "||") {
-                require_same(&Type::Bool, &left.ty, diagnostics);
-                require_same(&Type::Bool, &right.ty, diagnostics);
-                return Inferred {
-                    ty: if left.ty == Type::Bool && right.ty == Type::Bool {
-                        Type::Bool
-                    } else {
-                        Type::Error
-                    },
-                    effects,
-                };
-            }
-            let ty = if matches!(op.as_str(), "==" | "!=") {
-                if left.ty == Type::Error || right.ty == Type::Error {
-                    Type::Error
-                } else if !types_match(&left.ty, &right.ty) && !types_match(&right.ty, &left.ty) {
-                    diagnostics.push(type_mismatch(
-                        DIAG_TYPE,
-                        "static types are incompatible",
-                        &left.ty,
-                        &right.ty,
-                    ));
-                    Type::Error
-                } else {
-                    Type::Bool
-                }
-            } else if matches!(op.as_str(), "<" | "<=" | ">" | ">=") {
-                if left.ty == Type::Error || right.ty == Type::Error {
-                    Type::Error
-                } else if left.ty != right.ty || !is_evaluator_ordered_comparison_type(&left.ty) {
-                    diagnostics.push(type_mismatch(
-                        DIAG_TYPE,
-                        "static types are incompatible",
-                        &left.ty,
-                        &right.ty,
-                    ));
-                    Type::Error
-                } else {
-                    Type::Bool
-                }
-            } else {
-                binary_arithmetic_type(op, &left.ty, &right.ty, scope, diagnostics)
-            };
-            Inferred { ty, effects }
-        }
+        Expr::Range { lower, upper, .. } => infer_range(
+            lower.as_deref(),
+            upper.as_deref(),
+            scope,
+            local,
+            diagnostics,
+        ),
+        Expr::Binary { lhs, op, rhs, .. } => infer_binary(lhs, op, rhs, scope, local, diagnostics),
         Expr::Block {
             statements, tail, ..
-        } => {
-            let mut locals = local.clone();
-            let mut effects = EffectSummary::default();
-            let mut final_control = None;
-            for (index, statement) in statements.iter().enumerate() {
-                match statement {
-                    Statement::Let {
-                        pattern,
-                        annotation,
-                        value,
-                        ..
-                    } => {
-                        let x = if let Some(annotation) = annotation {
-                            validate_type_annotation(
-                                annotation,
-                                scope,
-                                &BTreeSet::new(),
-                                diagnostics,
-                            );
-                            let expected = resolved_type_of(annotation, scope);
-                            let x = infer_contextual(value, &expected, scope, &locals, diagnostics);
-                            require_same(&expected, &x.ty, diagnostics);
-                            x
-                        } else {
-                            infer(value, scope, &locals, diagnostics)
-                        };
-                        effects.join(&x.effects);
-                        // A local alias of a typed pin keeps the source
-                        // parameter identity for later rebinding and capture.
-                        let ty = specialize_snapshot_ref_parameter(value, &x.ty, &locals);
-                        if ty == Type::Bottom {
-                            final_control = Some(Inferred {
-                                ty,
-                                effects: EffectSummary::default(),
-                            });
-                            break;
-                        }
-                        bind_pattern(pattern, ty, scope, &mut locals, diagnostics);
-                    }
-                    Statement::Assert { value, .. } => {
-                        let x = infer(value, scope, &locals, diagnostics);
-                        effects.join(&x.effects);
-                        require_same(&Type::Bool, &x.ty, diagnostics);
-                    }
-                    Statement::Expression { value, .. } => {
-                        let x = infer(value, scope, &locals, diagnostics);
-                        effects.join(&x.effects);
-                        if x.ty == Type::Bottom {
-                            final_control = Some(x);
-                            break;
-                        }
-                    }
-                    Statement::Control { value, .. } => {
-                        let x = infer(value, scope, &locals, diagnostics);
-                        effects.join(&x.effects);
-                        if x.ty == Type::Bottom {
-                            final_control = Some(x);
-                            break;
-                        }
-                        if index + 1 == statements.len() && tail.is_none() {
-                            final_control = Some(x);
-                        }
-                    }
-                    Statement::Assignment {
-                        target,
-                        operator,
-                        value,
-                        ..
-                    } => effects.join(&infer_assignment(
-                        target,
-                        operator,
-                        value,
-                        scope,
-                        &mut locals,
-                        diagnostics,
-                    )),
-                    Statement::Break { value, .. } => {
-                        if let Some(value) = value {
-                            let x = infer(value, scope, &locals, diagnostics);
-                            effects.join(&x.effects);
-                        }
-                    }
-                    Statement::Continue { .. } => {}
-                    Statement::Return { value, .. } => {
-                        let returned = infer_return_statement(
-                            statement,
-                            value.as_ref(),
-                            scope,
-                            &locals,
-                            diagnostics,
-                        );
-                        effects.join(&returned.effects);
-                        final_control = Some(Inferred {
-                            ty: Type::Bottom,
-                            effects: returned.effects,
-                        });
-                        break;
-                    }
+        } => infer_block(statements, tail.as_deref(), scope, local, diagnostics),
+        Expr::Control {
+            kind,
+            binding,
+            condition,
+            body,
+            arms,
+            alternate,
+            ..
+        } => infer_control(
+            *kind,
+            ControlParts::new(
+                binding.as_ref(),
+                condition.as_deref(),
+                body.as_deref(),
+                arms,
+                alternate.as_deref(),
+            ),
+            scope,
+            local,
+            diagnostics,
+        ),
+        // The 1.1.0 grammar has no index expression, so `base[index]` has no
+        // type rule here; an explicit arm keeps it from being absorbed by a
+        // catch-all that would also hide a future control kind.
+        Expr::Index { .. } => unsupported_expression(diagnostics),
+    }
+}
+
+fn infer_name(
+    text: &str,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    if scope.ambiguous.contains(text) {
+        diagnostics.push(diag(
+            DIAG_AMBIGUOUS,
+            "name has multiple wildcard-import candidates",
+        ));
+        return Inferred::error();
+    }
+    let symbol = local.get(text).or_else(|| scope.names.get(text));
+    match symbol {
+        Some(s) if s.kind == SymbolKind::Table => Inferred {
+            ty: Type::Relation(Box::new(s.ty.clone())),
+            effects: EffectSummary {
+                effects: BTreeSet::from([EffectKind::TableRead]),
+                opaque: false,
+                may_fail: true,
+            },
+        },
+        Some(s) => Inferred {
+            ty: s.ty.clone(),
+            effects: s.effects.clone(),
+        },
+        None => match intrinsic_value_type(text) {
+            Some(ty) => Inferred::pure(ty),
+            None => {
+                let mut diagnostic = diag(
+                    if matches!(text, "Ok" | "Err") {
+                        DIAG_LEGACY_RESULT
+                    } else {
+                        DIAG_UNRESOLVED
+                    },
+                    if matches!(text, "Ok" | "Err") {
+                        "Result/Ok/Err control plumbing was removed; return the success type directly"
+                    } else {
+                        "name cannot be resolved"
+                    },
+                );
+                if !matches!(text, "Ok" | "Err") {
+                    diagnostic = diagnostic.with_note(
+                        SafeText::new(format!("{UNRESOLVED_NAME_NOTE}{text}"))
+                            .expect("identifier text is safe"),
+                    );
+                }
+                diagnostics.push(diagnostic);
+                Inferred::error()
+            }
+        },
+    }
+}
+
+/// The element fold of a list literal. A list of checkpointed tuples folds
+/// transactionally: each later row must reconcile against the accumulated
+/// topology instead of being joined pairwise (12-checkpoints). The fold shapes
+/// differ in how a rejected parent is recovered, so the mode is explicit
+/// instead of a set of booleans read together at every row.
+struct ListFold {
+    merge: ListMerge,
+    element: Option<Type>,
+    rejected: bool,
+    first_parent: Option<Type>,
+}
+
+enum ListMerge {
+    /// Ordinary lists join element types pairwise.
+    Pairwise,
+    /// A transactional fold checked against one topology anchor.
+    Checkpoint { topology: Type },
+    /// A transactional fold whose rejected nested scopes roll back locally.
+    ScopedCheckpoint { topology: Type, rollback: Rollback },
+}
+
+/// Where a rejected scoped fold restores its value.
+enum Rollback {
+    /// Freeze rejected paths at the first row; every later row reuses them.
+    ToFirstRow {
+        first_row: Type,
+        frozen_paths: BTreeSet<Vec<SnapshotTopologyBoundary>>,
+    },
+    /// Retry every later row against the latest accepted row, which grows into
+    /// a checkpoint map as omitted pins are filled.
+    ToLatestMap { latest: Type },
+}
+
+/// Builds the fold for one list literal's element types, seeding omitted
+/// pinned tuple paths before the first row becomes the fold anchor.
+fn list_fold(element_types: &mut [Type]) -> ListFold {
+    let omitted_pinned_tuple_path =
+        type_sequence_has_omitted_pinned_checkpoint_tuple(element_types);
+    if omitted_pinned_tuple_path {
+        seed_omitted_pinned_checkpoint_tuple_paths(element_types);
+    }
+    let first_parent = element_types.first().cloned();
+    // A transactional fold needs at least three rows: a first row to anchor,
+    // a second to establish the topology and a third to cross it.
+    let transactional = element_types.len() > 2
+        && first_parent.as_ref().is_some_and(|first| {
+            type_contains_pinned_checkpoint_tuple(first)
+                || (type_contains_omitted_checkpoint_tuple(first)
+                    && element_types
+                        .iter()
+                        .any(type_contains_pinned_checkpoint_tuple))
+                || omitted_pinned_tuple_path
+        });
+    let topology = element_types
+        .iter()
+        .find(|parent| type_contains_pinned_checkpoint_tuple(parent))
+        .cloned()
+        .or_else(|| first_parent.clone());
+    let merge = match (transactional, topology, first_parent.clone()) {
+        (true, Some(topology), Some(first_row)) => {
+            // A sparse paired first row has no complete pin map to roll back
+            // to. Recover one as the first fully populated row is accepted,
+            // then retain the accepted sparse-chain map for later local
+            // rollback.
+            let paired_omission_recovery = type_contains_paired_checkpoint_omissions(&first_row);
+            // A complete anchor, or one concrete lane of a partial first pair,
+            // can grow into a recoverable checkpoint map as later rows fill
+            // omitted pins. Retain the latest accepted map so a later crossed
+            // row cannot erase that sparse-chain identity.
+            let first_parent_can_grow_checkpoint_map =
+                type_contains_pinned_checkpoint_tuple(&first_row)
+                    && (!type_contains_omitted_checkpoint_tuple(&first_row)
+                        || type_contains_partially_omitted_pinned_tuple(&first_row));
+            // If sparse compaction starts before any tuple pin exists, use the
+            // first concrete topology as the recovery point. The reference is
+            // silent on local compaction rollback, so keep accepted identities
+            // when a later parent conflicts instead of restoring empty slots.
+            let checkpoint_reanchor_recovery = paired_omission_recovery
+                || (omitted_pinned_tuple_path
+                    && (first_parent_can_grow_checkpoint_map
+                        || (type_contains_omitted_checkpoint_tuple(&first_row)
+                            && type_contains_pinned_checkpoint_tuple(&topology))));
+            // Any omitted row can expose a cross-sibling selector collision.
+            // Sparse pinned tuples anywhere in the fold need a local scope so
+            // a later rebind can roll back only the crossed tuple path.
+            let scoped = element_types
+                .iter()
+                .any(type_contains_omitted_checkpoint_tuple)
+                || element_types
+                    .iter()
+                    .any(type_contains_partially_omitted_pinned_tuple)
+                || omitted_pinned_tuple_path
+                || element_types
+                    .iter()
+                    .any(type_contains_paired_pinned_checkpoint_siblings);
+            if !scoped {
+                ListMerge::Checkpoint { topology }
+            } else if checkpoint_reanchor_recovery {
+                ListMerge::ScopedCheckpoint {
+                    topology,
+                    rollback: Rollback::ToLatestMap { latest: first_row },
+                }
+            } else {
+                ListMerge::ScopedCheckpoint {
+                    topology,
+                    rollback: Rollback::ToFirstRow {
+                        first_row,
+                        frozen_paths: BTreeSet::new(),
+                    },
                 }
             }
-            // A block without a final expression completes with `Unit`
-            // (ORNA-CFLOW-001); `Null` is reserved for the `null` literal.
-            let tail = final_control
-                .or_else(|| tail.as_ref().map(|x| infer(x, scope, &locals, diagnostics)))
-                .unwrap_or(Inferred {
-                    ty: Type::Unit,
-                    effects: EffectSummary::default(),
-                });
-            effects.join(&tail.effects);
+        }
+        _ => ListMerge::Pairwise,
+    };
+    ListFold {
+        merge,
+        element: None,
+        rejected: false,
+        first_parent,
+    }
+}
+
+impl ListFold {
+    /// Folds every row after the first into the element type.
+    fn fold(&mut self, element_types: Vec<Type>, diagnostics: &mut Vec<Diagnostic>) {
+        for value in element_types {
+            let Some(prior) = self.element.take() else {
+                self.element = Some(value);
+                continue;
+            };
+            if let Some(merged) = self.merge_parent(&prior, &value, diagnostics) {
+                self.element = Some(merged);
+            } else {
+                require_same(&prior, &value, diagnostics);
+                // A transactional fold that cannot reconcile keeps the whole
+                // first parent as the recovery anchor in `finish`.
+                self.rejected = matches!(
+                    &self.merge,
+                    ListMerge::Checkpoint { .. } | ListMerge::ScopedCheckpoint { .. }
+                );
+                self.element = Some(prior);
+            }
+        }
+    }
+
+    /// Reconciles one later row into the accumulated element type.
+    fn merge_parent(
+        &mut self,
+        prior: &Type,
+        value: &Type,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) -> Option<Type> {
+        match &mut self.merge {
+            ListMerge::Pairwise => merge_list_element_types(prior, value),
+            ListMerge::Checkpoint { topology } => {
+                merge_multi_parent_checkpoint_value(prior, value, topology)
+            }
+            ListMerge::ScopedCheckpoint { topology, rollback } => {
+                let mut parent_rollback_paths = match &*rollback {
+                    Rollback::ToFirstRow { frozen_paths, .. } => frozen_paths.clone(),
+                    Rollback::ToLatestMap { .. } => BTreeSet::new(),
+                };
+                let rollback_anchor = match &*rollback {
+                    Rollback::ToFirstRow { first_row, .. } => first_row,
+                    Rollback::ToLatestMap { latest } => latest,
+                };
+                let mut fold = merge_multi_parent_checkpoint_value_scoped(
+                    prior,
+                    value,
+                    rollback_anchor,
+                    topology,
+                    &mut Vec::new(),
+                    &mut parent_rollback_paths,
+                )?;
+                let reanchor = matches!(&*rollback, Rollback::ToLatestMap { .. });
+                if fold.rejected_scope {
+                    require_same(prior, value, diagnostics);
+                    if reanchor {
+                        fold.merged =
+                            merge_unpaired_checkpoint_record_siblings(&fold.merged, value)
+                                .unwrap_or(fold.merged);
+                        fold.effective_parent = merge_unpaired_checkpoint_record_siblings(
+                            &fold.effective_parent,
+                            value,
+                        )
+                        .unwrap_or(fold.effective_parent);
+                    }
+                }
+                // An omitted tuple path has no identity topology in the
+                // original anchor. Remember the first accepted parent's
+                // concrete pins at those paths so later parents cannot
+                // silently rebind them differently.
+                let next_topology =
+                    checkpoint_topology_anchor_with_first_pins(topology, &fold.effective_parent);
+                *topology = next_topology;
+                match rollback {
+                    // A re-anchored fold retries later rows against the latest
+                    // accepted map; an ordinary scoped fold keeps the paths it
+                    // rejected at the first row frozen for the whole fold.
+                    Rollback::ToLatestMap { latest } => {
+                        if let Some(next) =
+                            merge_checkpoint_field_map_multi_parent(latest, &fold.effective_parent)
+                        {
+                            *latest = next;
+                        }
+                    }
+                    Rollback::ToFirstRow { frozen_paths, .. } => {
+                        *frozen_paths = parent_rollback_paths;
+                    }
+                }
+                Some(fold.merged)
+            }
+        }
+    }
+
+    /// The folded element type, after a rejected transactional parent restores
+    /// the whole first row.
+    fn finish(self, diagnostics: &mut Vec<Diagnostic>) -> Option<Type> {
+        let element = if self.rejected {
+            self.first_parent
+        } else {
+            self.element
+        };
+        if element.is_none() {
+            diagnostics.push(diag(
+                DIAG_ANNOTATION,
+                "empty list needs an expected element type",
+            ));
+        }
+        element
+    }
+}
+
+fn infer_list(
+    elements: &[Expr],
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    let mut element_types = Vec::with_capacity(elements.len());
+    let mut effects = EffectSummary::default();
+    for element in elements {
+        let value = infer(element, scope, local, diagnostics);
+        effects.join(&value.effects);
+        element_types.push(value.ty);
+    }
+    let mut fold = list_fold(&mut element_types);
+    fold.fold(element_types, diagnostics);
+    let element = fold.finish(diagnostics).unwrap_or(Type::Error);
+    Inferred {
+        ty: Type::List(Box::new(element)),
+        effects,
+    }
+}
+
+/// The shape fields shared by every `Expr::Control` form. Grouping them keeps
+/// each control form's inference to the parts plus one inference context
+/// instead of five positional options behind an allow.
+struct ControlParts<'a> {
+    binding: Option<&'a Pattern>,
+    condition: Option<&'a Expr>,
+    body: Option<&'a Expr>,
+    arms: &'a [orna_syntax::CaseArm],
+    alternate: Option<&'a Expr>,
+}
+
+impl<'a> ControlParts<'a> {
+    fn new(
+        binding: Option<&'a Pattern>,
+        condition: Option<&'a Expr>,
+        body: Option<&'a Expr>,
+        arms: &'a [orna_syntax::CaseArm],
+        alternate: Option<&'a Expr>,
+    ) -> Self {
+        Self {
+            binding,
+            condition,
+            body,
+            arms,
+            alternate,
+        }
+    }
+}
+
+/// Routes one `Expr::Control` to its form's inference. The match is exhaustive
+/// so a new control kind cannot fall through to a generic diagnostic.
+fn infer_control(
+    kind: ControlKind,
+    parts: ControlParts<'_>,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    match kind {
+        ControlKind::If => infer_if(parts, None, scope, local, diagnostics),
+        ControlKind::Case => infer_case(parts, scope, local, diagnostics),
+        ControlKind::For => infer_for(parts, scope, local, diagnostics),
+        ControlKind::While => infer_while(parts, scope, local, diagnostics),
+        // `break` may carry a loop's value (ORNA-CFLOW-008) and this slice does
+        // not track break values, so typing `loop` as `Unit` would claim more
+        // than the slice can prove.
+        ControlKind::Loop => unsupported_expression(diagnostics),
+    }
+}
+
+fn unsupported_expression(diagnostics: &mut Vec<Diagnostic>) -> Inferred {
+    diagnostics.push(diag(
+        DIAG_UNSUPPORTED,
+        "expression form is outside this semantic slice",
+    ));
+    Inferred::error()
+}
+
+/// Types one qualified field access or member reference.
+fn infer_field(
+    expr: &Expr,
+    base: &Expr,
+    name: &str,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    if let Some(path) = qualified_path(expr)
+        && let Some(inferred) = infer_system_path(&path, scope, diagnostics)
+    {
+        return inferred;
+    }
+    if let Some(projection) = infer_table_projection(expr, scope, local) {
+        return projection;
+    }
+    if let Some(variant) = infer_enum_variant_reference(expr, scope, local, diagnostics) {
+        return variant;
+    }
+    if let Some(path) = qualified_path(expr)
+        && scope.modules.contains_key(path[0])
+        && !local.contains_key(path[0])
+    {
+        if let Some(table) = table_symbol(expr, scope, local) {
+            return Inferred {
+                ty: Type::Relation(Box::new(table.ty.clone())),
+                effects: EffectSummary {
+                    effects: BTreeSet::from([EffectKind::TableRead]),
+                    opaque: false,
+                    may_fail: true,
+                },
+            };
+        }
+        return resolve_qualified_module_member(&path, scope, diagnostics);
+    }
+    if let Some(path) = qualified_path(expr)
+        && path.first() == Some(&"sys")
+        && path
+            .get(1)
+            .is_some_and(|member| matches!(*member, "runtime" | "runtime_info"))
+    {
+        diagnostics.push(diag(
+            DIAG_LEGACY_SYS_RUNTIME,
+            "`sys.runtime` was renamed to `sys.rt`",
+        ));
+        return Inferred::error();
+    }
+    let diagnostics_before_base = diagnostics.len();
+    let base = infer(base, scope, local, diagnostics);
+    if base.ty == Type::Error && diagnostics.len() == diagnostics_before_base {
+        return Inferred::error_with(base.effects);
+    }
+    if let Some(inferred) = infer_historical_member(&base.ty, name, scope, diagnostics) {
+        return Inferred {
+            ty: inferred.ty,
+            effects: {
+                let mut effects = base.effects;
+                effects.join(&inferred.effects);
+                effects
+            },
+        };
+    }
+    if let Some(ty) = infer_system_member(&base.ty, name) {
+        return Inferred {
+            ty,
+            effects: base.effects,
+        };
+    }
+    if let Some(message) = legacy_sys_admin_message(&base.ty, name) {
+        diagnostics.push(diag(DIAG_SYS_ADMIN_METHOD, message));
+        return Inferred::error_with(base.effects);
+    }
+    if let Type::Named(system_type) = &base.ty
+        && system_api::embedded_system_api().describes_type(system_type)
+    {
+        diagnostics.push(diag(
+            DIAG_UNSUPPORTED,
+            "portable system member is described but not implemented by this semantic slice",
+        ));
+        return Inferred::error_with(base.effects);
+    }
+    if let Some(ty) = infer_text_member(&base.ty, name) {
+        return Inferred {
+            ty,
+            effects: base.effects,
+        };
+    }
+    if name == "display" && contains_secret_value_type(&base.ty) {
+        diagnostics.push(diag(
+            DIAG_SECRET_DISPLAY,
+            "secret values cannot be displayed",
+        ));
+        return Inferred::error_with(base.effects);
+    }
+    if let Some(ty) = infer_numeric_member(&base.ty, name) {
+        return Inferred {
+            ty,
+            effects: base.effects,
+        };
+    }
+    if let Some(ty) = infer_currency_suffix(&base.ty, name, scope, diagnostics) {
+        return Inferred {
+            ty,
+            effects: base.effects,
+        };
+    }
+    if let Some(ty) = infer_numeric_postfix(&base.ty, name) {
+        return Inferred {
+            ty,
+            effects: base.effects,
+        };
+    }
+    if let Some(ty) = infer_unit_suffix(&base.ty, name, scope, diagnostics) {
+        return Inferred {
+            ty,
+            effects: base.effects,
+        };
+    }
+    if let Some(ty) = infer_refined_member(&base.ty, name, scope) {
+        return Inferred {
+            ty,
+            effects: base.effects,
+        };
+    }
+    let ty = match &base.ty {
+        Type::Record(fields) => fields.get(name).cloned().unwrap_or_else(|| {
+            diagnostics.push(diag(DIAG_UNRESOLVED, "record field cannot be resolved"));
+            Type::Error
+        }),
+        Type::Named(nominal) => {
+            if scope
+                .nominal_private_fields
+                .get(nominal)
+                .is_some_and(|fields| fields.contains(name))
+                && scope.private_field_owner.as_deref() != Some(nominal.as_str())
+            {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "private nominal field is inaccessible outside its owning implementation",
+                ));
+                Type::Error
+            } else {
+                scope
+                    .table_rows
+                    .get(nominal)
+                    .or_else(|| scope.nominal_rows.get(nominal))
+                    .and_then(|row| match row {
+                        Type::Record(fields) => fields.get(name).cloned(),
+                        _ => None,
+                    })
+                    .or_else(|| error_value_field_type(nominal, name))
+                    .unwrap_or_else(|| {
+                        diagnostics.push(diag(DIAG_TYPE, "field access requires a record"));
+                        Type::Error
+                    })
+            }
+        }
+        _ => {
+            diagnostics.push(diag(DIAG_TYPE, "field access requires a record"));
+            Type::Error
+        }
+    };
+    Inferred {
+        ty,
+        effects: base.effects,
+    }
+}
+
+fn infer_lambda(
+    parameters: &[LambdaParameter],
+    body: &Expr,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    let mut locals = local.clone();
+    let mut types = Vec::new();
+    for parameter in parameters {
+        let ty = parameter
+            .annotation
+            .as_ref()
+            .map(type_of)
+            .unwrap_or_else(|| {
+                if let Pattern::Name(name, _) = &parameter.pattern
+                    && let Some(ty) = inferred_lambda_parameter_type(body, name, scope, local)
+                {
+                    ty
+                } else {
+                    diagnostics.push(diag(
+                        DIAG_ANNOTATION,
+                        "lambda parameter needs a static annotation",
+                    ));
+                    Type::Error
+                }
+            });
+        let ty = scope_snapshot_ref_parameter_pattern(&parameter.pattern, &ty);
+        if ty == Type::Error {
+            // Keep an underconstrained lambda parameter in scope as
+            // an error-typed local. This lets the annotation
+            // diagnostic point at the useful site without turning
+            // every use of that parameter into an unrelated
+            // unresolved-name diagnostic.
+            if let Pattern::Name(name, _) = &parameter.pattern {
+                insert_local_binding(name, Type::Error, &mut locals, diagnostics);
+                if let Some(symbol) = locals.get_mut(name) {
+                    symbol.kind = SymbolKind::Parameter;
+                }
+            }
+        } else {
+            bind_parameter_pattern(
+                &parameter.pattern,
+                ty.clone(),
+                scope,
+                &mut locals,
+                diagnostics,
+            );
+        }
+        types.push(ty);
+    }
+    let value = if matches!(
+        body,
+        Expr::Block {
+            statements,
+            tail: None,
+            ..
+        } if statements.is_empty()
+    ) {
+        Inferred::pure(Type::Record(BTreeMap::new()))
+    } else {
+        infer_function_body(body, None, scope, &locals, diagnostics)
+    };
+    Inferred {
+        ty: Type::Function {
+            parameters: types,
+            default_parameters: BTreeSet::new(),
+            parameter_names: parameters
+                .iter()
+                .map(|parameter| match &parameter.pattern {
+                    Pattern::Name(name, _) => Some(name.clone()),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>(),
+            result: Box::new(value.ty),
+        },
+        effects: value.effects,
+    }
+}
+
+fn infer_call(
+    callee: &Expr,
+    arguments: &[orna_syntax::Argument],
+    span: &SyntaxSpan,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    if matches!(callee, Expr::Name { text, .. } if text == "fail")
+        && !local.contains_key("fail")
+        && !scope.names.contains_key("fail")
+    {
+        return infer_fail_call(arguments, scope, local, diagnostics);
+    }
+    if matches!(callee, Expr::Name { text, .. } if text == "error")
+        && !local.contains_key("error")
+        && !scope.names.contains_key("error")
+    {
+        return infer_error_call(arguments, scope, local, diagnostics);
+    }
+    if matches!(callee, Expr::Name { text, .. } if text == "Some")
+        && !local.contains_key("Some")
+        && !scope.names.contains_key("Some")
+    {
+        if let [argument] = arguments
+            && argument.name.is_none()
+        {
+            let value = infer(&argument.value, scope, local, diagnostics);
+            return Inferred {
+                ty: Type::Optional(Box::new(value.ty)),
+                effects: value.effects,
+            };
+        }
+        let mut effects = EffectSummary::default();
+        for argument in arguments {
+            let value = infer(&argument.value, scope, local, diagnostics);
+            effects.join(&value.effects);
+        }
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "Some requires exactly one positional value",
+        ));
+        return Inferred::error_with(effects);
+    }
+    if cross_database_write(callee, scope) {
+        diagnostics.push(diag(
+            DIAG_CROSS_DATABASE_WRITE,
+            "cross-database writes are not atomic/supported",
+        ));
+        return Inferred::error();
+    }
+    if matches!(callee, Expr::Name { text, .. } if text == "parallel")
+        && let [argument] = arguments
+        && let Expr::List { elements, .. } = &argument.value
+    {
+        let mut consumers = BTreeSet::new();
+        for element in elements {
+            if let Some(path) = qualified_path(element)
+                && !consumers.insert(path.join("."))
+            {
+                diagnostics.push(diag(
+                    DIAG_AMBIGUOUS_DURABLE_CONSUMER,
+                    "same durable source consumed twice without distinct consumer identity",
+                ));
+                break;
+            }
+        }
+    }
+    if matches!(callee, Expr::Name { text, .. } if text == "merge_streams")
+        && let [argument] = arguments
+        && let Expr::List { elements, .. } = &argument.value
+        && elements.len() > 1
+    {
+        diagnostics.push(diag(
+            DIAG_DURABLE_CONSUMER_SOURCE_ROOTS,
+            "a durable consumer function may own only one checkpointed source root; extract separate named consumer functions",
+        ));
+    }
+    if matches!(
+        callee,
+        Expr::Name { text, .. }
+            if matches!(text.as_str(), "Ok" | "Err")
+                && local.get(text).or_else(|| scope.names.get(text)).is_none()
+    ) {
+        diagnostics.push(diag(
+            DIAG_LEGACY_RESULT,
+            "Result/Ok/Err control plumbing was removed; return the success type directly",
+        ));
+        return Inferred::error();
+    }
+    if qualified_path(callee).as_deref() == Some(["sys", "storage"].as_slice()) {
+        diagnostics.push(diag(
+            DIAG_SYS_STORAGE_CALL,
+            "`sys.storage` is a grouping namespace; use `sys.Storage` or `sys.admin` storage functions",
+        ));
+        return Inferred::error();
+    }
+    if qualified_path(callee).as_deref() == Some(["sys", "Commit", "insert"].as_slice()) {
+        diagnostics.push(diag(DIAG_SYS_COMMIT_READ_ONLY, "sys.Commit is read-only"));
+        return Inferred::error();
+    }
+    if let Some(path) = qualified_path(callee)
+        && let Some(inferred) = infer_ui_action_call(&path, arguments, scope, local, diagnostics)
+    {
+        return inferred;
+    }
+    if let Some(path) = qualified_path(callee)
+        && path.first() == Some(&"sys")
+        && let Some(inferred) =
+            infer_descriptor_system_call(&path, arguments, None, scope, local, diagnostics)
+    {
+        return inferred;
+    }
+    if let Some(currency) = money_constructor_currency(callee)
+        && let Some(inferred) = infer_money_constructor(
+            Type::Named(canonical_nominal_name(currency, scope)),
+            arguments,
+            scope,
+            local,
+            diagnostics,
+        )
+    {
+        return inferred;
+    }
+    if let Some(inferred) = infer_stream_from_list(callee, arguments, scope, local, diagnostics) {
+        return inferred;
+    }
+    if let Some(inferred) =
+        infer_finite_list_collection_call(callee, arguments, scope, local, diagnostics)
+    {
+        return inferred;
+    }
+    if let Some(inferred) =
+        infer_nominal_conversion_call(callee, arguments, scope, local, diagnostics)
+    {
+        return inferred;
+    }
+    if let Some(inferred) =
+        infer_relation_collection_call(callee, arguments, scope, local, diagnostics)
+    {
+        return inferred;
+    }
+    if let Some(inferred) =
+        infer_relation_statistics_call(callee, arguments, None, scope, local, diagnostics)
+    {
+        return inferred;
+    }
+    if let Some(inferred) = infer_relation_call(callee, arguments, scope, local, diagnostics) {
+        return inferred;
+    }
+    if let Some(inferred) = infer_parallel_call(callee, arguments, scope, local, diagnostics) {
+        return inferred;
+    }
+    if let Some(inferred) = infer_race_call(callee, arguments, scope, local, diagnostics) {
+        return inferred;
+    }
+    if let Some(inferred) = infer_timeout_call(callee, arguments, scope, local, diagnostics) {
+        return inferred;
+    }
+    if let Some(inferred) = infer_relation_member_call(callee, arguments, scope, local, diagnostics)
+    {
+        return inferred;
+    }
+    if let Some(inferred) = infer_table_operation(callee, arguments, scope, local, diagnostics) {
+        return inferred;
+    }
+    if let Some(inferred) = infer_codec_decode_call(callee, arguments, scope, local, diagnostics) {
+        return inferred;
+    }
+    if let Some(inferred) =
+        infer_local_generic_call(callee, None, arguments, scope, local, diagnostics)
+    {
+        return inferred;
+    }
+    let presentation_boundary =
+        qualified_path(callee).is_some_and(|path| is_secret_sensitive_presentation_path(&path));
+    let intrinsic = intrinsic_call_effects(callee);
+    let callee = infer(callee, scope, local, diagnostics);
+    let mut effects = callee.effects.clone();
+    effects.join(&intrinsic);
+    let call_parameters =
+        callable_function_type(&callee.ty).and_then(|function_type| match function_type {
+            Type::Function {
+                parameters,
+                parameter_names,
+                ..
+            } => Some((parameters.as_slice(), parameter_names.as_deref())),
+            _ => None,
+        });
+    let values = arguments
+        .iter()
+        .enumerate()
+        .map(|(index, a)| {
+            let x = if a.name.as_deref() == Some("as") {
+                infer_type_argument(&a.value)
+                    .unwrap_or_else(|| infer(&a.value, scope, local, diagnostics))
+            } else if let Some((parameters, parameter_names)) = call_parameters
+                && let Some(expected) =
+                    expected_call_parameter(parameters, parameter_names, arguments, index)
+            {
+                infer_contextual(&a.value, expected, scope, local, diagnostics)
+            } else {
+                infer(&a.value, scope, local, diagnostics)
+            };
+            effects.join(&x.effects);
+            x.ty
+        })
+        .collect::<Vec<_>>();
+    if presentation_boundary && values.iter().any(contains_secret_value_type) {
+        diagnostics.push(diag(DIAG_TYPE, "secret values cannot be presented"));
+        return Inferred::error_with(effects);
+    }
+    let historical_context = historical_callable_context(&callee.ty).cloned();
+    match callable_function_type(&callee.ty).cloned() {
+        Some(Type::Function {
+            parameters,
+            parameter_names,
+            result,
+            default_parameters,
+        }) => {
+            check_call_arguments(
+                &parameters,
+                parameter_names.as_deref(),
+                &default_parameters,
+                arguments,
+                &values,
+                None,
+                diagnostics,
+            );
+            let historical_database =
+                specialize_historical_database_result(&result, &values, arguments, local);
+            let result = historical_database.unwrap_or_else(|| {
+                specialize_dynamic_parameter_snapshot_contexts(
+                    &result,
+                    &parameters,
+                    &default_parameters,
+                    parameter_names.as_deref(),
+                    arguments,
+                    &values,
+                    local,
+                    span,
+                    historical_context.as_ref(),
+                )
+            });
             Inferred {
-                ty: tail.ty,
+                ty: historical_context.as_ref().map_or_else(
+                    || result.clone(),
+                    |snapshot| bind_historical_closure_context(snapshot, &result),
+                ),
                 effects,
             }
         }
-        Expr::Control {
-            kind: ControlKind::If,
-            binding,
-            condition,
-            body,
-            arms,
-            alternate,
-            ..
-        } => infer_if(
-            binding.as_ref(),
-            condition.as_deref(),
-            body.as_deref(),
-            arms,
-            alternate.as_deref(),
-            None,
-            scope,
-            local,
-            diagnostics,
-        ),
-        Expr::Control {
-            kind: ControlKind::Case,
-            binding,
-            condition,
-            body,
-            arms,
-            alternate,
-            ..
-        } => infer_case(
-            binding.as_ref(),
-            condition.as_deref(),
-            body.as_deref(),
-            arms,
-            alternate.as_deref(),
-            scope,
-            local,
-            diagnostics,
-        ),
-        Expr::Control {
-            kind: ControlKind::For,
-            binding,
-            condition,
-            body,
-            arms,
-            alternate,
-            ..
-        } => infer_for(
-            binding.as_ref(),
-            condition.as_deref(),
-            body.as_deref(),
-            arms,
-            alternate.as_deref(),
-            scope,
-            local,
-            diagnostics,
-        ),
-        Expr::Control {
-            kind: ControlKind::While,
-            binding,
-            condition,
-            body,
-            arms,
-            alternate,
-            ..
-        } => infer_while(
-            binding.as_ref(),
-            condition.as_deref(),
-            body.as_deref(),
-            arms,
-            alternate.as_deref(),
-            scope,
-            local,
-            diagnostics,
-        ),
+        _ if callee.ty == Type::Error => Inferred::error_with(effects),
         _ => {
+            diagnostics.push(diag(DIAG_TYPE, "call requires a statically known function"));
+            Inferred::error_with(effects)
+        }
+    }
+}
+
+/// Whether `callee` is a table write reached through an attached database
+/// alias. An attached database keeps its own transaction log, so Orna must not
+/// claim the write is atomic (ORNA-ATTACH-002, source/08-relations.md:131).
+fn cross_database_write(callee: &Expr, scope: &Scope) -> bool {
+    let Some(path) = qualified_path(callee) else {
+        return false;
+    };
+    let Some((member, target)) = path.split_last() else {
+        return false;
+    };
+    // The alias roots a qualified table path, so a write through it has at
+    // least an alias and a table before the write member.
+    target.len() >= 2
+        && scope.attached_databases.contains(target[0])
+        && matches!(*member, "insert" | "upsert" | "update" | "delete" | "rekey")
+}
+
+fn infer_generic_call(
+    callee: &Expr,
+    type_arguments: &[TypeExpr],
+    arguments: &[orna_syntax::Argument],
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    if let Some(path) = qualified_path(callee)
+        && path.first() == Some(&"sys")
+        && let Some(inferred) = infer_descriptor_system_call(
+            &path,
+            arguments,
+            Some(type_arguments),
+            scope,
+            local,
+            diagnostics,
+        )
+    {
+        return inferred;
+    }
+    if let Some(currency) = money_generic_constructor_currency(callee, type_arguments, scope)
+        && let Some(inferred) =
+            infer_money_constructor(currency, arguments, scope, local, diagnostics)
+    {
+        return inferred;
+    }
+    if let Some(inferred) = infer_local_generic_call(
+        callee,
+        Some(type_arguments),
+        arguments,
+        scope,
+        local,
+        diagnostics,
+    ) {
+        return inferred;
+    }
+    let intrinsic = intrinsic_call_effects(callee);
+    let mut effects = infer(callee, scope, local, diagnostics).effects;
+    effects.join(&intrinsic);
+    for argument in arguments {
+        effects.join(&infer(&argument.value, scope, local, diagnostics).effects);
+    }
+    diagnostics.push(diag(
+        DIAG_UNSUPPORTED,
+        "generic calls are outside this semantic slice",
+    ));
+    Inferred::error_with(effects)
+}
+
+fn infer_range(
+    lower: Option<&Expr>,
+    upper: Option<&Expr>,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    let endpoints = [lower, upper]
+        .into_iter()
+        .flatten()
+        .map(|endpoint| infer(endpoint, scope, local, diagnostics))
+        .collect::<Vec<_>>();
+    let mut effects = EffectSummary::default();
+    for endpoint in &endpoints {
+        effects.join(&endpoint.effects);
+    }
+    let ty = match endpoints.as_slice() {
+        [] => {
             diagnostics.push(diag(
-                DIAG_UNSUPPORTED,
-                "expression form is outside this semantic slice",
+                DIAG_TYPE,
+                "an untyped range needs at least one endpoint or a range context",
             ));
-            Inferred {
-                ty: Type::Error,
-                effects: EffectSummary::default(),
+            Type::Error
+        }
+        [one] => {
+            if !is_ordered_range_bound(&one.ty) {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "range bounds must have the same ordered type",
+                ));
+                Type::Error
+            } else {
+                Type::Range(Box::new(one.ty.clone()))
             }
         }
+        [left, right] if left.ty == right.ty && is_ordered_range_bound(&left.ty) => {
+            Type::Range(Box::new(left.ty.clone()))
+        }
+        _ => {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "range bounds must have the same ordered type",
+            ));
+            Type::Error
+        }
+    };
+    Inferred { ty, effects }
+}
+
+fn infer_binary(
+    lhs: &Expr,
+    op: &str,
+    rhs: &Expr,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    if op == "|" {
+        return infer_success_pipeline(lhs, rhs, scope, local, diagnostics);
+    }
+    if op == "|?" {
+        return infer_recovery_pipeline(lhs, rhs, scope, local, diagnostics);
+    }
+    let equality = matches!(op, "==" | "!=");
+    let (left, right) = if equality && is_empty_list_literal(lhs) && !is_empty_list_literal(rhs) {
+        let right = infer(rhs, scope, local, diagnostics);
+        let left = match &right.ty {
+            Type::List(_) => infer_contextual(lhs, &right.ty, scope, local, diagnostics),
+            _ => infer(lhs, scope, local, diagnostics),
+        };
+        (left, right)
+    } else {
+        let left = infer(lhs, scope, local, diagnostics);
+        let right = if op == "??" {
+            match &left.ty {
+                Type::Optional(inner) => infer_contextual(rhs, inner, scope, local, diagnostics),
+                _ => infer(rhs, scope, local, diagnostics),
+            }
+        } else if equality && is_empty_list_literal(rhs) && matches!(left.ty, Type::List(_)) {
+            infer_contextual(rhs, &left.ty, scope, local, diagnostics)
+        } else {
+            infer(rhs, scope, local, diagnostics)
+        };
+        (left, right)
+    };
+    let mut effects = left.effects;
+    effects.join(&right.effects);
+    if matches!(op, "==" | "!=")
+        && (matches!(left.ty, Type::Relation(_)) || matches!(right.ty, Type::Relation(_)))
+    {
+        diagnostics.push(diag(
+            DIAG_RELATION_EQUALITY_AMBIGUOUS,
+            "relation equality is ambiguous; choose sequence or row-set comparison explicitly",
+        ));
+        return Inferred::error_with(effects);
+    }
+    if matches!(op, ".." | "..=") {
+        let ty = if left.ty == right.ty && is_ordered_range_bound(&left.ty) {
+            Type::Range(Box::new(left.ty))
+        } else {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "range bounds must have the same ordered type",
+            ));
+            Type::Error
+        };
+        return Inferred { ty, effects };
+    }
+    if op == "in" {
+        let ty = match &right.ty {
+            Type::Range(element) => {
+                require_same(element, &left.ty, diagnostics);
+                Type::Bool
+            }
+            _ => {
+                diagnostics.push(diag(DIAG_TYPE, "membership requires an ordered range"));
+                Type::Error
+            }
+        };
+        return Inferred { ty, effects };
+    }
+    if op == "??" {
+        let ty = match (&left.ty, &right.ty) {
+            (Type::Optional(_), Type::Error) | (Type::Error, _) => Type::Error,
+            (Type::Optional(inner), right) if types_match(inner, right) => (**inner).clone(),
+            _ => {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "coalesce fallback must match the optional value type",
+                ));
+                Type::Error
+            }
+        };
+        return Inferred { ty, effects };
+    }
+    if matches!(op, "&&" | "||") {
+        require_same(&Type::Bool, &left.ty, diagnostics);
+        require_same(&Type::Bool, &right.ty, diagnostics);
+        return Inferred {
+            ty: if left.ty == Type::Bool && right.ty == Type::Bool {
+                Type::Bool
+            } else {
+                Type::Error
+            },
+            effects,
+        };
+    }
+    let ty = if matches!(op, "==" | "!=") {
+        if left.ty == Type::Error || right.ty == Type::Error {
+            Type::Error
+        } else if !types_match(&left.ty, &right.ty) && !types_match(&right.ty, &left.ty) {
+            diagnostics.push(type_mismatch(
+                DIAG_TYPE,
+                "static types are incompatible",
+                &left.ty,
+                &right.ty,
+            ));
+            Type::Error
+        } else {
+            Type::Bool
+        }
+    } else if matches!(op, "<" | "<=" | ">" | ">=") {
+        if left.ty == Type::Error || right.ty == Type::Error {
+            Type::Error
+        } else if left.ty != right.ty || !is_evaluator_ordered_comparison_type(&left.ty) {
+            diagnostics.push(type_mismatch(
+                DIAG_TYPE,
+                "static types are incompatible",
+                &left.ty,
+                &right.ty,
+            ));
+            Type::Error
+        } else {
+            Type::Bool
+        }
+    } else {
+        binary_arithmetic_type(op, &left.ty, &right.ty, scope, diagnostics)
+    };
+    Inferred { ty, effects }
+}
+
+fn infer_block(
+    statements: &[Statement],
+    tail: Option<&Expr>,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    let mut locals = local.clone();
+    let mut effects = EffectSummary::default();
+    let mut final_control = None;
+    for (index, statement) in statements.iter().enumerate() {
+        match statement {
+            Statement::Let {
+                pattern,
+                annotation,
+                value,
+                ..
+            } => {
+                let x = if let Some(annotation) = annotation {
+                    validate_type_annotation(annotation, scope, &BTreeSet::new(), diagnostics);
+                    let expected = resolved_type_of(annotation, scope);
+                    let x = infer_contextual(value, &expected, scope, &locals, diagnostics);
+                    require_same(&expected, &x.ty, diagnostics);
+                    x
+                } else {
+                    infer(value, scope, &locals, diagnostics)
+                };
+                effects.join(&x.effects);
+                // A local alias of a typed pin keeps the source
+                // parameter identity for later rebinding and capture.
+                let ty = specialize_snapshot_ref_parameter(value, &x.ty, &locals);
+                if ty == Type::Bottom {
+                    final_control = Some(Inferred::pure(ty));
+                    break;
+                }
+                bind_pattern(pattern, ty, scope, &mut locals, diagnostics);
+            }
+            Statement::Assert { value, .. } => {
+                let x = infer(value, scope, &locals, diagnostics);
+                effects.join(&x.effects);
+                require_same(&Type::Bool, &x.ty, diagnostics);
+            }
+            Statement::Expression { value, .. } => {
+                let x = infer(value, scope, &locals, diagnostics);
+                effects.join(&x.effects);
+                if x.ty == Type::Bottom {
+                    final_control = Some(x);
+                    break;
+                }
+            }
+            Statement::Control { value, .. } => {
+                let x = infer(value, scope, &locals, diagnostics);
+                effects.join(&x.effects);
+                if x.ty == Type::Bottom {
+                    final_control = Some(x);
+                    break;
+                }
+                if index + 1 == statements.len() && tail.is_none() {
+                    final_control = Some(x);
+                }
+            }
+            Statement::Assignment {
+                target,
+                operator,
+                value,
+                ..
+            } => effects.join(&infer_assignment(
+                target,
+                operator,
+                value,
+                scope,
+                &mut locals,
+                diagnostics,
+            )),
+            Statement::Break { value, .. } => {
+                if let Some(value) = value {
+                    let x = infer(value, scope, &locals, diagnostics);
+                    effects.join(&x.effects);
+                }
+            }
+            Statement::Continue { .. } => {}
+            Statement::Return { value, .. } => {
+                let returned =
+                    infer_return_statement(statement, value.as_ref(), scope, &locals, diagnostics);
+                effects.join(&returned.effects);
+                final_control = Some(Inferred {
+                    ty: Type::Bottom,
+                    effects: returned.effects,
+                });
+                break;
+            }
+        }
+    }
+    // A block without a final expression completes with `Unit`
+    // (ORNA-CFLOW-001); `Null` is reserved for the `null` literal.
+    let tail = final_control
+        .or_else(|| tail.map(|x| infer(x, scope, &locals, diagnostics)))
+        .unwrap_or(Inferred::pure(Type::Unit));
+    effects.join(&tail.effects);
+    Inferred {
+        ty: tail.ty,
+        effects,
     }
 }
 
@@ -11791,7 +11889,7 @@ fn inferred_comparison_parameter_type(
             Expr::Name { text, .. } if text == name => Some(other),
             Expr::Field {
                 base, name: field, ..
-            } if is_direct_name(base, name) => {
+            } if contains_direct_name(base, name) => {
                 Some(Type::Record(BTreeMap::from([(field.clone(), other)])))
             }
             _ => None,
@@ -11918,7 +12016,7 @@ fn inferred_relation_parameter_type(body: &Expr, name: &str) -> Option<Type> {
     let Expr::Binary { lhs, rhs, op, .. } = unwrap_group(body) else {
         return None;
     };
-    if op != "|" || !is_direct_name(lhs, name) {
+    if op != "|" || !contains_direct_name(lhs, name) {
         return None;
     }
     let Expr::Call {
@@ -11964,7 +12062,7 @@ fn inferred_record_fields(body: &Expr, name: &str) -> BTreeMap<String, Type> {
         match expression {
             Expr::Field {
                 base, name: field, ..
-            } if is_direct_name(base, name) => {
+            } if contains_direct_name(base, name) => {
                 fields.entry(field.clone()).or_insert(Type::Error);
             }
             Expr::Unary { rhs, .. } | Expr::Group { inner: rhs, .. } => visit(rhs, name, fields),
@@ -12106,15 +12204,12 @@ fn parameter_comparison_usage(expression: &Expr, name: &str) -> bool {
     visit(expression, name)
 }
 
+/// Whether the expression is the bare (possibly parenthesised) name `name`.
 fn contains_direct_name(expression: &Expr, name: &str) -> bool {
     match unwrap_group(expression) {
         Expr::Name { text, .. } => text == name,
         _ => false,
     }
-}
-
-fn is_direct_name(expression: &Expr, name: &str) -> bool {
-    contains_direct_name(expression, name)
 }
 
 fn unwrap_group(expression: &Expr) -> &Expr {
@@ -12124,17 +12219,19 @@ fn unwrap_group(expression: &Expr) -> &Expr {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn infer_while(
-    binding: Option<&Pattern>,
-    condition: Option<&Expr>,
-    body: Option<&Expr>,
-    arms: &[orna_syntax::CaseArm],
-    alternate: Option<&Expr>,
+    parts: ControlParts<'_>,
     scope: &Scope,
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Inferred {
+    let ControlParts {
+        binding,
+        condition,
+        body,
+        arms,
+        alternate,
+    } = parts;
     if binding.is_some() || !arms.is_empty() || alternate.is_some() {
         diagnostics.push(diag(
             DIAG_UNSUPPORTED,
@@ -12143,20 +12240,14 @@ fn infer_while(
     }
     let Some(condition) = condition else {
         diagnostics.push(diag(DIAG_UNSUPPORTED, "while control requires a condition"));
-        return Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        };
+        return Inferred::error();
     };
     let condition = infer(condition, scope, local, diagnostics);
     require_same(&Type::Bool, &condition.ty, diagnostics);
 
     let Some(body) = body else {
         diagnostics.push(diag(DIAG_UNSUPPORTED, "while control requires a body"));
-        return Inferred {
-            ty: Type::Error,
-            effects: condition.effects,
-        };
+        return Inferred::error_with(condition.effects);
     };
     let body = infer(body, scope, local, diagnostics);
     let mut effects = condition.effects;
@@ -12266,37 +12357,30 @@ fn infer_assignment(
     value.effects
 }
 
-#[allow(clippy::too_many_arguments)]
 fn infer_for(
-    binding: Option<&Pattern>,
-    iterable: Option<&Expr>,
-    body: Option<&Expr>,
-    arms: &[orna_syntax::CaseArm],
-    alternate: Option<&Expr>,
+    parts: ControlParts<'_>,
     scope: &Scope,
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Inferred {
+    let ControlParts {
+        binding,
+        condition: iterable,
+        body,
+        arms,
+        alternate,
+    } = parts;
     let Some(binding) = binding else {
         diagnostics.push(diag(DIAG_UNSUPPORTED, "for control requires a binding"));
-        return Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        };
+        return Inferred::error();
     };
     let Some(iterable) = iterable else {
         diagnostics.push(diag(DIAG_UNSUPPORTED, "for control requires an iterable"));
-        return Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        };
+        return Inferred::error();
     };
     let Some(body) = body else {
         diagnostics.push(diag(DIAG_UNSUPPORTED, "for control requires a body"));
-        return Inferred {
-            ty: Type::Error,
-            effects: infer(iterable, scope, local, diagnostics).effects,
-        };
+        return Inferred::error_with(infer(iterable, scope, local, diagnostics).effects);
     };
     if alternate.is_some()
         || arms.len() != 1
@@ -12308,10 +12392,7 @@ fn infer_for(
             DIAG_UNSUPPORTED,
             "malformed for control shape is outside this semantic slice",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects: infer(iterable, scope, local, diagnostics).effects,
-        };
+        return Inferred::error_with(infer(iterable, scope, local, diagnostics).effects);
     }
 
     let iterable_expression = iterable;
@@ -12323,10 +12404,7 @@ fn infer_for(
                 "for control supports only finite lists and integer ranges in this semantic slice",
             ));
         }
-        return Inferred {
-            ty: Type::Error,
-            effects: iterable.effects,
-        };
+        return Inferred::error_with(iterable.effects);
     };
     let mut body_locals = local.clone();
     bind_pattern(binding, element, scope, &mut body_locals, diagnostics);
@@ -12354,18 +12432,20 @@ fn finite_for_element_type(expression: &Expr, iterable: &Type) -> Option<Type> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn infer_if(
-    binding: Option<&Pattern>,
-    condition: Option<&Expr>,
-    body: Option<&Expr>,
-    arms: &[orna_syntax::CaseArm],
-    alternate: Option<&Expr>,
+    parts: ControlParts<'_>,
     expected: Option<&Type>,
     scope: &Scope,
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Inferred {
+    let ControlParts {
+        binding,
+        condition,
+        body,
+        arms,
+        alternate,
+    } = parts;
     if binding.is_some() || !arms.is_empty() {
         diagnostics.push(diag(
             DIAG_UNSUPPORTED,
@@ -12374,20 +12454,14 @@ fn infer_if(
     }
     let Some(condition) = condition else {
         diagnostics.push(diag(DIAG_UNSUPPORTED, "if expression requires a condition"));
-        return Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        };
+        return Inferred::error();
     };
     let condition = infer(condition, scope, local, diagnostics);
     require_same(&Type::Bool, &condition.ty, diagnostics);
 
     let Some(body) = body else {
         diagnostics.push(diag(DIAG_UNSUPPORTED, "if expression requires a body"));
-        return Inferred {
-            ty: Type::Error,
-            effects: condition.effects,
-        };
+        return Inferred::error_with(condition.effects);
     };
     // A declared or contextual type is the conditional's own unification
     // target (ORNA-CFLOW-003), so each value-producing branch is checked
@@ -12413,10 +12487,7 @@ fn infer_if(
             DIAG_UNSUPPORTED,
             "if expression requires an else branch in this semantic slice",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     };
     let alternate = match contextual {
         Some(expected) => infer_contextual(alternate, expected, scope, local, diagnostics),
@@ -12558,17 +12629,19 @@ fn expected_call_parameter<'a>(
     parameters.get(positional)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn infer_case(
-    binding: Option<&Pattern>,
-    condition: Option<&Expr>,
-    body: Option<&Expr>,
-    arms: &[orna_syntax::CaseArm],
-    alternate: Option<&Expr>,
+    parts: ControlParts<'_>,
     scope: &Scope,
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Inferred {
+    let ControlParts {
+        binding,
+        condition,
+        body,
+        arms,
+        alternate,
+    } = parts;
     let mut effects = EffectSummary::default();
     if binding.is_some() || body.is_some() || alternate.is_some() {
         diagnostics.push(diag(
@@ -12595,10 +12668,7 @@ fn infer_case(
                 &mut discarded_result,
             );
         }
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     };
     let scrutinee = infer(condition, scope, local, diagnostics);
     effects.join(&scrutinee.effects);
@@ -12607,10 +12677,7 @@ fn infer_case(
             DIAG_UNSUPPORTED,
             "case expression requires at least one arm",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     }
 
     let mut result = None;
@@ -13427,10 +13494,7 @@ fn infer_nominal(
             DIAG_UNRESOLVED,
             "nominal record type cannot be resolved",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     };
     let schema = symbol.table_schema.as_ref();
     let admission = schema.and_then(|schema| schema.admission.as_ref());
@@ -13578,10 +13642,7 @@ fn infer_enum_variant_reference(
             Type::Error
         }
     };
-    Some(Inferred {
-        ty,
-        effects: EffectSummary::default(),
-    })
+    Some(Inferred::pure(ty))
 }
 
 /// ORNA-ENUM-003 and ORNA-SYNTAX-001: `Enum.variant { field: value }` checks
@@ -13711,10 +13772,7 @@ fn infer_stream_from_list(
             DIAG_TYPE,
             "Stream.from_list requires values and source_identity",
         ));
-        return Some(Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        });
+        return Some(Inferred::error());
     };
     let values = infer(values, scope, local, diagnostics);
     let valid_identity = source_identity.is_some_and(|argument| {
@@ -13732,10 +13790,7 @@ fn infer_stream_from_list(
     }
     let Type::List(element) = values.ty else {
         diagnostics.push(diag(DIAG_TYPE, "Stream.from_list values must be a list"));
-        return Some(Inferred {
-            ty: Type::Error,
-            effects: values.effects,
-        });
+        return Some(Inferred::error_with(values.effects));
     };
     Some(Inferred {
         ty: Type::Stream(element),
@@ -14304,16 +14359,10 @@ fn infer_finite_list_collection(
             DIAG_TYPE,
             format!("std.collection {operation} requires a finite list"),
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     }
     let Some(callback) = callback else {
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     };
     let ty = match operation {
         "filter" => {
@@ -14396,10 +14445,7 @@ fn infer_finite_list_helper_collection(
             )
         }) && matches!(&argument.value, Expr::Lambda { .. });
         let inferred = if contextual_callback {
-            Inferred {
-                ty: Type::Error,
-                effects: EffectSummary::default(),
-            }
+            Inferred::error()
         } else {
             infer(&argument.value, scope, local, diagnostics)
         };
@@ -14710,10 +14756,7 @@ fn infer_finite_list_simple_collection(
             DIAG_TYPE,
             format!("finite-list {operation} requires a finite list"),
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     };
     let result = match operation {
         "count" => Type::Int,
@@ -14863,16 +14906,10 @@ fn infer_finite_list_sort_by(
             DIAG_TYPE,
             "finite-list sort_by requires a finite list",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     };
     let Some(index) = slots[1] else {
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     };
     let callback = infer_finite_list_sort_key(
         &arguments[index].value,
@@ -15191,16 +15228,10 @@ fn infer_finite_list_first(
     }
     let Type::List(element) = rows else {
         diagnostics.push(diag(DIAG_TYPE, "finite-list first requires a finite list"));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     };
     if malformed {
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     }
     Inferred {
         ty: Type::Optional(element),
@@ -15290,10 +15321,7 @@ fn infer_finite_list_one(
     }
     let Type::List(element) = rows else {
         diagnostics.push(diag(DIAG_TYPE, "finite-list one requires a finite list"));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     };
 
     if let Some(index) = slots[1] {
@@ -15331,10 +15359,7 @@ fn infer_finite_list_predicate(
                 DIAG_TYPE,
                 format!("finite-list {operation} predicate must take one parameter"),
             ));
-            return Inferred {
-                ty: Type::Error,
-                effects: EffectSummary::default(),
-            };
+            return Inferred::error();
         };
         if let Some(annotation) = &lambda_parameter.annotation {
             require_same(
@@ -15348,10 +15373,7 @@ fn infer_finite_list_predicate(
                 DIAG_UNSUPPORTED,
                 format!("finite-list {operation} predicate pattern is outside this semantic slice"),
             ));
-            return Inferred {
-                ty: Type::Error,
-                effects: EffectSummary::default(),
-            };
+            return Inferred::error();
         };
         let mut callback_locals = local.clone();
         insert_local_binding(name, parameter, &mut callback_locals, diagnostics);
@@ -15372,10 +15394,7 @@ fn infer_finite_list_predicate(
             DIAG_TYPE,
             format!("finite-list {operation} predicate must be a one-parameter function"),
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects: callback.effects,
-        };
+        return Inferred::error_with(callback.effects);
     };
     if parameters.len() != 1 {
         diagnostics.push(diag(
@@ -15482,17 +15501,11 @@ fn infer_finite_list_every_exists(
             DIAG_TYPE,
             format!("finite-list {operation} requires a finite list"),
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     };
 
     let Some(index) = slots[1] else {
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     };
     let callback = infer_finite_list_predicate(
         operation,
@@ -15535,10 +15548,7 @@ fn infer_relation_call(
     }
     if name == "window" && arguments.is_empty() {
         diagnostics.push(diag(DIAG_TYPE, "window requires a relation and a size"));
-        return Some(Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        });
+        return Some(Inferred::error());
     }
     let relation = infer(&arguments[0].value, scope, local, diagnostics);
     let Type::Relation(element) = relation.ty else {
@@ -15546,10 +15556,7 @@ fn infer_relation_call(
             DIAG_TYPE,
             format!("{name} requires a relation as its first argument"),
         ));
-        return Some(Inferred {
-            ty: Type::Error,
-            effects: relation.effects,
-        });
+        return Some(Inferred::error_with(relation.effects));
     };
     if name == "window" {
         let window = infer_relation_window(&arguments[1..], *element, scope, local, diagnostics);
@@ -16082,10 +16089,7 @@ fn infer_relation_collection_call(
         .enumerate()
         .map(|(index, argument)| {
             if Some(index) == callback_index {
-                Inferred {
-                    ty: Type::Error,
-                    effects: EffectSummary::default(),
-                }
+                Inferred::error()
             } else {
                 infer(&argument.value, scope, local, diagnostics)
             }
@@ -16103,10 +16107,7 @@ fn infer_relation_collection_call(
             DIAG_TYPE,
             format!("relation {operation} requires rows and {callback_name}"),
         ));
-        return Some(Inferred {
-            ty: Type::Error,
-            effects,
-        });
+        return Some(Inferred::error_with(effects));
     };
     let callback = infer_relation_callback(
         &arguments[callback_index].value,
@@ -16210,10 +16211,7 @@ fn infer_relation_collection_pipeline(
                 DIAG_TYPE,
                 format!("relation {operation} requires a {parameter} callback"),
             ));
-            return Inferred {
-                ty: Type::Error,
-                effects,
-            };
+            return Inferred::error_with(effects);
         };
         let callback = infer_relation_callback(
             &argument.value,
@@ -16431,10 +16429,7 @@ fn infer_relation_union_call(
             DIAG_TYPE,
             "relation union arguments do not match its static signature",
         ));
-        return Some(Inferred {
-            ty: Type::Error,
-            effects,
-        });
+        return Some(Inferred::error_with(effects));
     }
     let left = &values[slots[0].expect("validated relation union left slot")];
     let right = &values[slots[1].expect("validated relation union right slot")];
@@ -16447,10 +16442,7 @@ fn infer_relation_union_call(
             DIAG_TYPE,
             "relation union requires relations with compatible element types",
         ));
-        return Some(Inferred {
-            ty: Type::Error,
-            effects,
-        });
+        return Some(Inferred::error_with(effects));
     }
     Some(Inferred {
         ty: Type::Relation(left_element.clone()),
@@ -16589,10 +16581,7 @@ fn infer_relation_terminal_call(
         ));
     }
     let Type::Relation(element) = values[row_index].ty.clone() else {
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     };
     let mut valid = !malformed;
     if matches!(operation, "one" | "every" | "exists")
@@ -16828,6 +16817,38 @@ fn infer_success_pipeline(
     } else {
         infer(lhs, scope, local, diagnostics)
     };
+    if let Some(result) = pipeline_generic_stage(&input, rhs, scope, local, diagnostics) {
+        return result;
+    }
+    if diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code() == DIAG_DURABLE_CONSUMER_SOURCE_ROOTS)
+    {
+        return Inferred::error_with(input.effects);
+    }
+    if let Some(result) = pipeline_relation_module_stage(&input, rhs, scope, local, diagnostics) {
+        return result;
+    }
+    if let Some(result) = pipeline_relation_intrinsic_stage(&input, rhs, scope, local, diagnostics)
+    {
+        return result;
+    }
+    if let Some(result) = pipeline_collection_stage(&input, rhs, scope, local, diagnostics) {
+        return result;
+    }
+    if let Some(result) = pipeline_untyped_stage(&input, rhs, scope, local, diagnostics) {
+        return result;
+    }
+    infer_relation_stream_pipeline(input, rhs, scope, local, diagnostics)
+}
+
+fn pipeline_generic_stage(
+    input: &Inferred,
+    rhs: &Expr,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
     if let Expr::GenericCall {
         callee,
         type_arguments,
@@ -16835,15 +16856,15 @@ fn infer_success_pipeline(
         ..
     } = rhs
     {
-        return infer_generic_pipeline_stage(
-            input,
+        return Some(infer_generic_pipeline_stage(
+            input.clone(),
             callee,
             type_arguments,
             arguments,
             scope,
             local,
             diagnostics,
-        );
+        ));
     }
     if let Expr::Call {
         callee, arguments, ..
@@ -16863,12 +16884,12 @@ fn infer_success_pipeline(
             diagnostics,
         )
         .expect("sys.explain has a query-plan overload");
-        let mut effects = input.effects;
+        let mut effects = input.effects.clone();
         effects.join(&stage.effects);
-        return Inferred {
+        return Some(Inferred {
             ty: stage.ty,
             effects,
-        };
+        });
     }
     if let Expr::Call {
         callee, arguments, ..
@@ -16887,38 +16908,40 @@ fn infer_success_pipeline(
             local,
             diagnostics,
         );
-        let mut effects = input.effects;
+        let mut effects = input.effects.clone();
         effects.join(&stage.effects);
-        return Inferred {
+        return Some(Inferred {
             ty: stage.ty,
             effects,
-        };
+        });
     }
-    if diagnostics.iter().any(|diagnostic| {
-        diagnostic
-            .message()
-            .starts_with("a durable consumer function may own only one checkpointed source root")
-    }) {
-        return Inferred {
-            ty: Type::Error,
-            effects: input.effects,
-        };
-    }
+    None
+}
+
+fn pipeline_relation_module_stage(
+    input: &Inferred,
+    rhs: &Expr,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
     if matches!(&input.ty, Type::Relation(_))
         && let Expr::Call {
             callee, arguments, ..
         } = rhs
         && standard_statistics_module_operation(callee, scope, local).is_some()
     {
-        return infer_relation_statistics_call(
-            callee,
-            arguments,
-            Some(input),
-            scope,
-            local,
-            diagnostics,
-        )
-        .expect("recognized statistics module operation has relation input");
+        return Some(
+            infer_relation_statistics_call(
+                callee,
+                arguments,
+                Some(input.clone()),
+                scope,
+                local,
+                diagnostics,
+            )
+            .expect("recognized statistics module operation has relation input"),
+        );
     }
     if matches!(&input.ty, Type::Relation(_))
         && let Expr::Call {
@@ -16926,15 +16949,25 @@ fn infer_success_pipeline(
         } = rhs
         && let Some(operation) = standard_collection_module_operation(callee, scope, local)
     {
-        return infer_relation_collection_pipeline(
+        return Some(infer_relation_collection_pipeline(
             operation,
-            input,
+            input.clone(),
             arguments,
             scope,
             local,
             diagnostics,
-        );
+        ));
     }
+    None
+}
+
+fn pipeline_relation_intrinsic_stage(
+    input: &Inferred,
+    rhs: &Expr,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
     if let Type::Relation(element) = &input.ty
         && let Expr::Call {
             callee, arguments, ..
@@ -16953,12 +16986,12 @@ fn infer_success_pipeline(
             local,
             diagnostics,
         );
-        let mut effects = input.effects;
+        let mut effects = input.effects.clone();
         effects.join(&callback.effects);
-        return Inferred {
+        return Some(Inferred {
             ty: Type::Relation(element.clone()),
             effects,
-        };
+        });
     }
     if let Type::Relation(element) = &input.ty
         && let Expr::Call {
@@ -16978,16 +17011,16 @@ fn infer_success_pipeline(
             local,
             diagnostics,
         );
-        let mut effects = input.effects;
+        let mut effects = input.effects.clone();
         effects.join(&callback.effects);
-        return Inferred {
+        return Some(Inferred {
             ty: if callback.ty == Type::Bool {
                 Type::Bool
             } else {
                 Type::Error
             },
             effects,
-        };
+        });
     }
     if let Type::Relation(element) = &input.ty
         && let Expr::Call {
@@ -17004,12 +17037,12 @@ fn infer_success_pipeline(
             local,
             diagnostics,
         );
-        let mut effects = input.effects;
+        let mut effects = input.effects.clone();
         effects.join(&window.effects);
-        return Inferred {
+        return Some(Inferred {
             ty: window.ty,
             effects,
-        };
+        });
     }
     if let Type::Relation(element) = &input.ty
         && let Expr::Call {
@@ -17020,10 +17053,10 @@ fn infer_success_pipeline(
         && root_collection_intrinsic_is_unshadowed("first", scope, local)
         && arguments.is_empty()
     {
-        return Inferred {
+        return Some(Inferred {
             ty: Type::Optional(element.clone()),
-            effects: input.effects,
-        };
+            effects: input.effects.clone(),
+        });
     }
     if let Type::Relation(element) = &input.ty
         && let Expr::Call {
@@ -17036,48 +17069,52 @@ fn infer_success_pipeline(
         && (argument.name.is_none() || argument.name.as_deref() == Some("right"))
     {
         let right = infer(&argument.value, scope, local, diagnostics);
-        let mut effects = input.effects;
+        let mut effects = input.effects.clone();
         effects.join(&right.effects);
         let Type::Relation(right_element) = right.ty else {
             diagnostics.push(diag(
                 DIAG_TYPE,
                 "relation union requires a relation with a compatible element type",
             ));
-            return Inferred {
-                ty: Type::Error,
-                effects,
-            };
+            return Some(Inferred::error_with(effects));
         };
         if !types_match(element, &right_element) {
             diagnostics.push(diag(
                 DIAG_TYPE,
                 "relation union requires relations with compatible element types",
             ));
-            return Inferred {
-                ty: Type::Error,
-                effects,
-            };
+            return Some(Inferred::error_with(effects));
         }
-        return Inferred {
+        return Some(Inferred {
             ty: Type::Relation(element.clone()),
             effects,
-        };
+        });
     }
+    None
+}
+
+fn pipeline_collection_stage(
+    input: &Inferred,
+    rhs: &Expr,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
     if matches!(&input.ty, Type::List(_))
         && let Expr::Call {
             callee, arguments, ..
         } = rhs
         && let Some(operation) = finite_list_collection_operation(callee, scope, local)
     {
-        return infer_finite_list_collection(
+        return Some(infer_finite_list_collection(
             operation,
-            Some(input),
+            Some(input.clone()),
             arguments,
             finite_list_aggregate_element(callee, operation, scope),
             scope,
             local,
             diagnostics,
-        );
+        ));
     }
     if let Type::List(element) = &input.ty
         && let Expr::Call {
@@ -17097,63 +17134,54 @@ fn infer_success_pipeline(
                     local,
                     diagnostics,
                 );
-                let mut effects = input.effects;
+                let mut effects = input.effects.clone();
                 effects.join(&callback.effects);
-                return Inferred {
+                return Some(Inferred {
                     ty: if callback.ty == Type::Bool {
-                        input.ty
+                        input.ty.clone()
                     } else {
                         Type::Error
                     },
                     effects,
-                };
+                });
             }
             ("distinct", []) => {
                 if is_default_float_equality_type(element) {
                     diagnostics.push(diag(
-                        DIAG_TYPE,
-                        "distinct requires a lawful equality key; default Float equality is unavailable",
-                    ));
-                    return Inferred {
-                        ty: Type::Error,
-                        effects: input.effects,
-                    };
+                    DIAG_TYPE,
+                    "distinct requires a lawful equality key; default Float equality is unavailable",
+                ));
+                    return Some(Inferred::error_with(input.effects.clone()));
                 }
-                return Inferred {
-                    ty: input.ty,
-                    effects: input.effects,
-                };
+                return Some(Inferred {
+                    ty: input.ty.clone(),
+                    effects: input.effects.clone(),
+                });
             }
             ("union", [argument])
                 if argument.name.is_none() || argument.name.as_deref() == Some("right") =>
             {
                 let right = infer(&argument.value, scope, local, diagnostics);
-                let mut effects = input.effects;
+                let mut effects = input.effects.clone();
                 effects.join(&right.effects);
                 let Type::List(right_element) = right.ty else {
                     diagnostics.push(diag(
                         DIAG_TYPE,
                         "union requires a list with a compatible element type",
                     ));
-                    return Inferred {
-                        ty: Type::Error,
-                        effects,
-                    };
+                    return Some(Inferred::error_with(effects));
                 };
                 if !types_match(element, &right_element) {
                     diagnostics.push(diag(
                         DIAG_TYPE,
                         "union requires lists with compatible element types",
                     ));
-                    return Inferred {
-                        ty: Type::Error,
-                        effects,
-                    };
+                    return Some(Inferred::error_with(effects));
                 }
-                return Inferred {
-                    ty: input.ty,
+                return Some(Inferred {
+                    ty: input.ty.clone(),
                     effects,
-                };
+                });
             }
             ("sort_by", [argument]) if argument.name.is_none() => {
                 let callback = infer_callback(
@@ -17164,18 +17192,18 @@ fn infer_success_pipeline(
                     local,
                     diagnostics,
                 );
-                let mut effects = input.effects;
+                let mut effects = input.effects.clone();
                 effects.join(&callback.effects);
-                return Inferred {
-                    ty: input.ty,
+                return Some(Inferred {
+                    ty: input.ty.clone(),
                     effects,
-                };
+                });
             }
             ("last", []) => {
-                return Inferred {
+                return Some(Inferred {
                     ty: Type::Optional(element.clone()),
-                    effects: input.effects,
-                };
+                    effects: input.effects.clone(),
+                });
             }
             _ => {}
         }
@@ -17189,15 +17217,12 @@ fn infer_success_pipeline(
                 DIAG_TYPE,
                 "distinct requires a lawful equality key; default Float equality is unavailable",
             ));
-            return Inferred {
-                ty: Type::Error,
-                effects: input.effects,
-            };
+            return Some(Inferred::error_with(input.effects.clone()));
         }
-        return Inferred {
-            ty: input.ty,
-            effects: input.effects,
-        };
+        return Some(Inferred {
+            ty: input.ty.clone(),
+            effects: input.effects.clone(),
+        });
     }
     if let Expr::Call {
         callee, arguments, ..
@@ -17205,7 +17230,7 @@ fn infer_success_pipeline(
         && matches!(callee.as_ref(), Expr::Name { text, .. } if text == "take" || text == "drop")
         && let Type::List(element) = &input.ty
     {
-        let mut effects = input.effects;
+        let mut effects = input.effects.clone();
         let operation = match callee.as_ref() {
             Expr::Name { text, .. } => text.as_str(),
             _ => unreachable!("pipeline collection operation must be named"),
@@ -17240,41 +17265,41 @@ fn infer_success_pipeline(
                 Type::Error
             }
         };
-        return Inferred { ty, effects };
+        return Some(Inferred { ty, effects });
     }
     if let Type::List(element) = &input.ty
         && let Expr::Name { text, .. } = rhs
         && (text == "mean" || root_collection_intrinsic_is_unshadowed(text, scope, local))
         && let Some(ty) = infer_affine_collection_aggregate(text, element, diagnostics)
     {
-        return Inferred {
+        return Some(Inferred {
             ty,
-            effects: input.effects,
-        };
+            effects: input.effects.clone(),
+        });
     }
     if let Type::List(_) = &input.ty
         && let Some(operation @ ("sum" | "min" | "max")) =
             finite_list_collection_operation(rhs, scope, local)
     {
-        return infer_finite_list_collection(
+        return Some(infer_finite_list_collection(
             operation,
-            Some(input),
+            Some(input.clone()),
             &[],
             finite_list_aggregate_element(rhs, operation, scope),
             scope,
             local,
             diagnostics,
-        );
+        ));
     }
     if let Expr::Name { text, .. } = rhs
         && let Type::Relation(element) = &input.ty
         && root_collection_intrinsic_is_unshadowed(text, scope, local)
         && let Some(ty) = infer_relation_sum(text, element, diagnostics)
     {
-        return Inferred {
+        return Some(Inferred {
             ty,
-            effects: input.effects,
-        };
+            effects: input.effects.clone(),
+        });
     }
     if matches!(&input.ty, Type::Relation(_) | Type::Stream(_))
         && let Some((callee, arguments)) = match rhs {
@@ -17305,50 +17330,87 @@ fn infer_success_pipeline(
         )
         && !root_collection_intrinsic_is_unshadowed(text, scope, local)
     {
-        return infer_named_pipeline_stage(input, callee, arguments, scope, local, diagnostics);
+        return Some(infer_named_pipeline_stage(
+            input.clone(),
+            callee,
+            arguments,
+            scope,
+            local,
+            diagnostics,
+        ));
     }
     if let Expr::Name { text, .. } = rhs
         && text == "count"
         && matches!(input.ty, Type::List(_))
     {
-        return Inferred {
+        return Some(Inferred {
             ty: Type::Int,
-            effects: input.effects,
-        };
+            effects: input.effects.clone(),
+        });
     }
     if let Expr::Name { text, .. } = rhs
         && text == "count"
         && matches!(input.ty, Type::Relation(_))
         && root_collection_intrinsic_is_unshadowed("count", scope, local)
     {
-        return Inferred {
+        return Some(Inferred {
             ty: Type::Int,
-            effects: input.effects,
-        };
+            effects: input.effects.clone(),
+        });
     }
+    None
+}
+
+fn pipeline_untyped_stage(
+    input: &Inferred,
+    rhs: &Expr,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
     if !matches!(input.ty, Type::Relation(_) | Type::Stream(_)) {
         if let Some(lambda) = pipeline_lambda(rhs) {
-            return infer_lambda_pipeline_stage(input, lambda, scope, local, diagnostics);
+            return Some(infer_lambda_pipeline_stage(
+                input.clone(),
+                lambda,
+                scope,
+                local,
+                diagnostics,
+            ));
         }
-        return match rhs {
+        return Some(match rhs {
             Expr::Call {
                 callee, arguments, ..
-            } => infer_named_pipeline_stage(input, callee, arguments, scope, local, diagnostics),
+            } => infer_named_pipeline_stage(
+                input.clone(),
+                callee,
+                arguments,
+                scope,
+                local,
+                diagnostics,
+            ),
             Expr::Name { .. } | Expr::Field { .. } => {
-                infer_named_pipeline_stage(input, rhs, &[], scope, local, diagnostics)
+                infer_named_pipeline_stage(input.clone(), rhs, &[], scope, local, diagnostics)
             }
             _ => {
                 diagnostics.push(diag(
                     DIAG_UNSUPPORTED,
                     "pipeline stage is outside this semantic slice",
                 ));
-                Inferred {
-                    ty: Type::Error,
-                    effects: input.effects,
-                }
+                Inferred::error_with(input.effects.clone())
             }
-        };
+        });
     }
+    None
+}
+
+fn infer_relation_stream_pipeline(
+    input: Inferred,
+    rhs: &Expr,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
     let Expr::Call {
         callee, arguments, ..
     } = rhs
@@ -17373,10 +17435,7 @@ fn infer_success_pipeline(
                 DIAG_TYPE,
                 "pipeline input is not a supported relation or stream",
             ));
-            return Inferred {
-                ty: Type::Error,
-                effects: input.effects,
-            };
+            return Inferred::error_with(input.effects);
         }
     };
     if !is_stream
@@ -17442,10 +17501,7 @@ fn infer_success_pipeline(
                 DIAG_UNSUPPORTED,
                 format!("relation {text} count is outside the supported bounded form"),
             ));
-            return Inferred {
-                ty: Type::Error,
-                effects,
-            };
+            return Inferred::error_with(effects);
         }
         return Inferred {
             ty: Type::Relation(Box::new(element)),
@@ -17461,10 +17517,7 @@ fn infer_success_pipeline(
                 DIAG_TYPE,
                 "relation flat_map requires one transform callback",
             ));
-            return Inferred {
-                ty: Type::Error,
-                effects: input.effects,
-            };
+            return Inferred::error_with(input.effects);
         };
         let malformed = argument.name.is_some() && argument.name.as_deref() != Some("transform");
         if malformed {
@@ -17491,10 +17544,7 @@ fn infer_success_pipeline(
                     DIAG_TYPE,
                     "relation flat_map transform must return a finite collection",
                 ));
-                return Inferred {
-                    ty: Type::Error,
-                    effects,
-                };
+                return Inferred::error_with(effects);
             }
         };
         return Inferred {
@@ -17518,9 +17568,9 @@ fn infer_success_pipeline(
         {
             if is_default_float_equality_type(&element) {
                 diagnostics.push(diag(
-                    DIAG_TYPE,
-                    "distinct requires a lawful equality key; default Float equality is unavailable",
-                ));
+                DIAG_TYPE,
+                "distinct requires a lawful equality key; default Float equality is unavailable",
+            ));
                 (Type::Error, None)
             } else {
                 (Type::Relation(Box::new(element.clone())), None)
@@ -17556,14 +17606,11 @@ fn infer_success_pipeline(
                 DIAG_UNSUPPORTED,
                 "pipeline operation is outside this semantic slice",
             ));
-            return Inferred {
-                ty: Type::Error,
-                effects: {
-                    let mut effects = input.effects;
-                    effects.join(&ignored.effects);
-                    effects
-                },
-            };
+            return Inferred::error_with({
+                let mut effects = input.effects;
+                effects.join(&ignored.effects);
+                effects
+            });
         }
     };
     let mut effects = input.effects;
@@ -17612,10 +17659,7 @@ fn infer_success_pipeline(
         };
         if let Some((code, message)) = message {
             diagnostics.push(diag(code, message));
-            return Inferred {
-                ty: Type::Error,
-                effects,
-            };
+            return Inferred::error_with(effects);
         }
         return Inferred { ty, effects };
     }
@@ -17690,10 +17734,7 @@ fn infer_recovery_pipeline(
             DIAG_UNSUPPORTED,
             "recovery pipeline requires a one-parameter lambda",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects: input.effects,
-        };
+        return Inferred::error_with(input.effects);
     };
     let Expr::Lambda {
         parameters, body, ..
@@ -17706,20 +17747,14 @@ fn infer_recovery_pipeline(
             DIAG_TYPE,
             "recovery pipeline callback must take one parameter",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects: input.effects,
-        };
+        return Inferred::error_with(input.effects);
     };
     let Pattern::Name(name, _) = &parameter.pattern else {
         diagnostics.push(diag(
             DIAG_UNSUPPORTED,
             "recovery pipeline callback pattern is outside this semantic slice",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects: input.effects,
-        };
+        return Inferred::error_with(input.effects);
     };
     let mut callback_locals = local.clone();
     insert_local_binding(name, error_value_type(), &mut callback_locals, diagnostics);
@@ -17804,10 +17839,7 @@ fn infer_error_call(
             DIAG_TYPE,
             "error requires named code, message, and optional cause arguments",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     }
 
     let before = diagnostics.len();
@@ -17875,20 +17907,14 @@ fn infer_lambda_pipeline_stage(
             DIAG_UNSUPPORTED,
             "pipeline lambda must take exactly one parameter",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects: input.effects,
-        };
+        return Inferred::error_with(input.effects);
     };
     let Pattern::Name(name, _) = &parameter.pattern else {
         diagnostics.push(diag(
             DIAG_UNSUPPORTED,
             "pipeline lambda parameter pattern is outside this semantic slice",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects: input.effects,
-        };
+        return Inferred::error_with(input.effects);
     };
     let parameter_type = parameter
         .annotation
@@ -17948,20 +17974,14 @@ fn infer_named_pipeline_stage(
                 format!("pipeline stage {text} requires a collection input"),
             ));
         }
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     }
     if qualified_path(callee).is_none() {
         diagnostics.push(diag(
             DIAG_UNSUPPORTED,
             "pipeline stage must be a named callable",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects: input.effects,
-        };
+        return Inferred::error_with(input.effects);
     }
     let callee = infer(callee, scope, local, diagnostics);
     let mut effects = input.effects;
@@ -17976,10 +17996,7 @@ fn infer_named_pipeline_stage(
     else {
         for argument in arguments {
             let value = if matches!(argument.value, Expr::Lambda { .. }) {
-                Inferred {
-                    ty: Type::Error,
-                    effects: EffectSummary::default(),
-                }
+                Inferred::error()
             } else {
                 infer(&argument.value, scope, local, diagnostics)
             };
@@ -17991,10 +18008,7 @@ fn infer_named_pipeline_stage(
                 "pipeline stage is not a supported named callable",
             ));
         }
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     };
     let mut values = Vec::with_capacity(arguments.len() + 1);
     values.push(input.ty);
@@ -18009,17 +18023,11 @@ fn infer_named_pipeline_stage(
             Some(expected @ Type::Function { .. }) => {
                 infer_contextual(&argument.value, expected, scope, local, diagnostics)
             }
-            Some(_) if matches!(argument.value, Expr::Lambda { .. }) => Inferred {
-                ty: Type::Error,
-                effects: EffectSummary::default(),
-            },
+            Some(_) if matches!(argument.value, Expr::Lambda { .. }) => Inferred::error(),
             Some(expected) => {
                 infer_contextual(&argument.value, expected, scope, local, diagnostics)
             }
-            None if matches!(argument.value, Expr::Lambda { .. }) => Inferred {
-                ty: Type::Error,
-                effects: EffectSummary::default(),
-            },
+            None if matches!(argument.value, Expr::Lambda { .. }) => Inferred::error(),
             None => infer(&argument.value, scope, local, diagnostics),
         };
         effects.join(&value.effects);
@@ -18075,10 +18083,7 @@ fn infer_generic_pipeline_stage(
             DIAG_UNSUPPORTED,
             "generic pipeline stage must be a supported named callable",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     };
     if path == ["sys", "explain"]
         || path == ["sys", "meta"]
@@ -18119,10 +18124,7 @@ fn infer_generic_pipeline_stage(
             DIAG_TYPE,
             "Money constructor pipeline stage requires the piped value as its only argument",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     }
     effects.join(&infer(callee, scope, local, diagnostics).effects);
     for argument in arguments {
@@ -18132,10 +18134,7 @@ fn infer_generic_pipeline_stage(
         DIAG_UNSUPPORTED,
         "generic pipeline stage is outside this semantic slice",
     ));
-    Inferred {
-        ty: Type::Error,
-        effects,
-    }
+    Inferred::error_with(effects)
 }
 
 fn is_ordered_range_bound(ty: &Type) -> bool {
@@ -18249,30 +18248,21 @@ fn infer_callback(
             DIAG_TYPE,
             "core operation callback must be a one-parameter lambda",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        };
+        return Inferred::error();
     };
     let [lambda_parameter] = parameters.as_slice() else {
         diagnostics.push(diag(
             DIAG_TYPE,
             "core operation callback must take one parameter",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        };
+        return Inferred::error();
     };
     let Pattern::Name(name, _) = &lambda_parameter.pattern else {
         diagnostics.push(diag(
             DIAG_UNSUPPORTED,
             "core operation callback pattern is outside this semantic slice",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        };
+        return Inferred::error();
     };
     let mut callback_locals = local.clone();
     insert_local_binding(name, parameter, &mut callback_locals, diagnostics);
@@ -18323,10 +18313,7 @@ fn infer_relation_callback(
             DIAG_TYPE,
             "relation callback must be a one-parameter function",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects: callback.effects,
-        };
+        return Inferred::error_with(callback.effects);
     };
     if parameters.len() != 1 {
         diagnostics.push(diag(DIAG_TYPE, "relation callback must take one parameter"));
@@ -18364,10 +18351,7 @@ fn infer_finite_list_callback(
             DIAG_TYPE,
             "finite-list collection callback must be a one-parameter function",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects: callback.effects,
-        };
+        return Inferred::error_with(callback.effects);
     };
     if parameters.len() != 1 {
         diagnostics.push(diag(
@@ -18672,10 +18656,7 @@ fn infer_table_row_input(
                 if source_blob_values_are_external
                     && matches!(expected, Type::Named(name) if matches!(name.as_str(), "Blob" | "std.BINARY_LARGE_OBJECT"))
                 {
-                    Inferred {
-                        ty: expected.clone(),
-                        effects: EffectSummary::default(),
-                    }
+                    Inferred::pure(expected.clone())
                 } else {
                     infer_contextual(&field.value, expected, scope, local, diagnostics)
                 }
@@ -18857,10 +18838,7 @@ fn infer_table_projection(
         _ => None,
     })?;
     let field = fields.get(name)?.clone();
-    Some(Inferred {
-        ty: function(vec![table.ty.clone()], field),
-        effects: EffectSummary::default(),
-    })
+    Some(Inferred::pure(function(vec![table.ty.clone()], field)))
 }
 
 /// Resolves a member through an explicitly imported module root or a
@@ -18894,10 +18872,7 @@ fn resolve_qualified_module_member(
                     .expect("identifier text is safe"),
                 ),
             );
-            Inferred {
-                ty: Type::Error,
-                effects: EffectSummary::default(),
-            }
+            Inferred::error()
         }
     }
 }
@@ -19368,10 +19343,7 @@ fn infer_timeout_call(
             Some("duration") if duration.is_none() => duration = Some(&argument.value),
             Some(_) => {
                 diagnostics.push(diag(DIAG_TYPE, "timeout expects a callback and a duration"));
-                return Some(Inferred {
-                    ty: Type::Error,
-                    effects: EffectSummary::default(),
-                });
+                return Some(Inferred::error());
             }
             None => {
                 let slot = match positional {
@@ -19380,18 +19352,12 @@ fn infer_timeout_call(
                     _ => {
                         diagnostics
                             .push(diag(DIAG_TYPE, "timeout expects a callback and a duration"));
-                        return Some(Inferred {
-                            ty: Type::Error,
-                            effects: EffectSummary::default(),
-                        });
+                        return Some(Inferred::error());
                     }
                 };
                 if slot.is_some() {
                     diagnostics.push(diag(DIAG_TYPE, "timeout expects a callback and a duration"));
-                    return Some(Inferred {
-                        ty: Type::Error,
-                        effects: EffectSummary::default(),
-                    });
+                    return Some(Inferred::error());
                 }
                 *slot = Some(&argument.value);
                 positional += 1;
@@ -19400,10 +19366,7 @@ fn infer_timeout_call(
     }
     let (Some(callback), Some(duration)) = (callback, duration) else {
         diagnostics.push(diag(DIAG_TYPE, "timeout expects a callback and a duration"));
-        return Some(Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        });
+        return Some(Inferred::error());
     };
 
     let callback = infer(callback, scope, local, diagnostics);
@@ -19415,10 +19378,7 @@ fn infer_timeout_call(
     } = callback.ty
     else {
         diagnostics.push(diag(DIAG_TYPE, "timeout callback must be a function"));
-        return Some(Inferred {
-            ty: Type::Error,
-            effects,
-        });
+        return Some(Inferred::error_with(effects));
     };
     if !parameters.is_empty() {
         diagnostics.push(diag(DIAG_TYPE, "timeout callback must not take parameters"));
@@ -19503,20 +19463,14 @@ fn infer_descriptor_system_path(
         });
     }
     if let Some(enum_name) = api.enum_value(path) {
-        return DescriptorPathInference::Resolved(Inferred {
-            ty: Type::Named(enum_name),
-            effects: EffectSummary::default(),
-        });
+        return DescriptorPathInference::Resolved(Inferred::pure(Type::Named(enum_name)));
     }
     match api.resolve(path) {
         PathResolution::ReadOnly(ty) => {
             if let Some(singleton) = api.singleton_view(path) {
                 require_linked_system_member(SystemMember::Singleton(singleton), scope);
             }
-            DescriptorPathInference::Resolved(Inferred {
-                ty: descriptor_type(ty),
-                effects: EffectSummary::default(),
-            })
+            DescriptorPathInference::Resolved(Inferred::pure(descriptor_type(ty)))
         }
         PathResolution::Removed(removed) => {
             diagnostics.push(diag(
@@ -19718,10 +19672,7 @@ fn infer_descriptor_system_call(
             DIAG_UNSUPPORTED,
             "portable system function is described but not implemented by this semantic slice",
         ));
-        return Some(Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        });
+        return Some(Inferred::error());
     }
     let mut effects = EffectSummary::default();
     let values = arguments
@@ -19755,10 +19706,7 @@ fn infer_descriptor_system_call(
                 "arguments do not match a portable system function overload"
             },
         ));
-        return Some(Inferred {
-            ty: Type::Error,
-            effects,
-        });
+        return Some(Inferred::error_with(effects));
     };
     require_linked_system_member(system_api::SystemMember::Callable(&function.label), scope);
     effects.join(&descriptor_effects(function.effect));
@@ -19825,10 +19773,7 @@ fn infer_invoke_system_call(
             DIAG_UNSUPPORTED,
             "portable generic system function is described but not implemented by this semantic slice",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     };
     require_linked_system_member(system_api::SystemMember::Callable(&function.label), scope);
     let parameter = invoke_typed_descriptor(function)
@@ -19839,16 +19784,10 @@ fn infer_invoke_system_call(
             DIAG_TYPE,
             "typed sys.invoke requires an explicit as: T witness",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     };
     if values.iter().any(|value| matches!(value, Type::Error)) {
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     }
     let witness = values[witness_index].clone();
 
@@ -19858,30 +19797,21 @@ fn infer_invoke_system_call(
                 DIAG_TYPE,
                 "sys.invoke requires exactly one explicit type argument when generic arguments are supplied",
             ));
-            return Inferred {
-                ty: Type::Error,
-                effects,
-            };
+            return Inferred::error_with(effects);
         }
         let Some(type_argument) = valid_static_type(&type_arguments[0], scope) else {
             diagnostics.push(diag(
                 DIAG_TYPE,
                 "sys.invoke explicit type argument must name a known static type",
             ));
-            return Inferred {
-                ty: Type::Error,
-                effects,
-            };
+            return Inferred::error_with(effects);
         };
         if type_argument != witness {
             diagnostics.push(diag(
                 DIAG_TYPE,
                 "sys.invoke explicit type argument must match the as: witness",
             ));
-            return Inferred {
-                ty: Type::Error,
-                effects,
-            };
+            return Inferred::error_with(effects);
         }
     }
 
@@ -19895,10 +19825,7 @@ fn infer_invoke_system_call(
             DIAG_UNSUPPORTED,
             "portable generic system function has an unsupported type shape",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     };
     let names = function
         .parameters
@@ -19925,10 +19852,7 @@ fn infer_invoke_system_call(
             DIAG_TYPE,
             "arguments do not match the portable sys.invoke<T> signature",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     }
 
     effects.join(&descriptor_effects(function.effect));
@@ -20032,10 +19956,7 @@ fn infer_start_system_call(
             DIAG_UNSUPPORTED,
             "portable generic system function is described but not implemented by this semantic slice",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     };
     require_linked_system_member(system_api::SystemMember::Callable(&function.label), scope);
     let parameter = start_typed_descriptor(function)
@@ -20046,16 +19967,10 @@ fn infer_start_system_call(
             DIAG_TYPE,
             "typed sys.start requires an explicit as: T witness",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     };
     if values.iter().any(|value| matches!(value, Type::Error)) {
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     }
     let witness = values[witness_index].clone();
 
@@ -20065,30 +19980,21 @@ fn infer_start_system_call(
                 DIAG_TYPE,
                 "sys.start requires exactly one explicit type argument when generic arguments are supplied",
             ));
-            return Inferred {
-                ty: Type::Error,
-                effects,
-            };
+            return Inferred::error_with(effects);
         }
         let Some(type_argument) = valid_static_type(&type_arguments[0], scope) else {
             diagnostics.push(diag(
                 DIAG_TYPE,
                 "sys.start explicit type argument must name a known static type",
             ));
-            return Inferred {
-                ty: Type::Error,
-                effects,
-            };
+            return Inferred::error_with(effects);
         };
         if type_argument != witness {
             diagnostics.push(diag(
                 DIAG_TYPE,
                 "sys.start explicit type argument must match the as: witness",
             ));
-            return Inferred {
-                ty: Type::Error,
-                effects,
-            };
+            return Inferred::error_with(effects);
         }
     }
 
@@ -20102,10 +20008,7 @@ fn infer_start_system_call(
             DIAG_UNSUPPORTED,
             "portable generic system function has an unsupported type shape",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     };
     let names = function
         .parameters
@@ -20132,10 +20035,7 @@ fn infer_start_system_call(
             DIAG_TYPE,
             "arguments do not match the portable sys.start<T> signature",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     }
 
     effects.join(&descriptor_effects(function.effect));
@@ -20330,10 +20230,7 @@ fn infer_unsupported_generic_system_call(
         DIAG_UNSUPPORTED,
         "explicit generic arguments are not implemented for this portable system function",
     ));
-    Inferred {
-        ty: Type::Error,
-        effects,
-    }
+    Inferred::error_with(effects)
 }
 
 fn substitute_generic_descriptor_type(
@@ -20448,10 +20345,7 @@ fn infer_query_explain_system_call(
         );
         effects.join(&descriptor_effects(query_descriptor.effect));
         if query_value.is_some_and(|ty| matches!(ty, Type::Error)) {
-            return Some(Inferred {
-                ty: Type::Error,
-                effects,
-            });
+            return Some(Inferred::error_with(effects));
         }
         let query_element = match query_value.expect("query shape contains a value") {
             Type::Relation(element) => element.as_ref(),
@@ -20461,10 +20355,7 @@ fn infer_query_explain_system_call(
                         DIAG_TYPE,
                         "sys.explain(Query) requires a typed query value",
                     ));
-                    return Some(Inferred {
-                        ty: Type::Error,
-                        effects,
-                    });
+                    return Some(Inferred::error_with(effects));
                 };
                 element
             }
@@ -20473,10 +20364,7 @@ fn infer_query_explain_system_call(
                     DIAG_TYPE,
                     "sys.explain(Query) requires a typed query value",
                 ));
-                return Some(Inferred {
-                    ty: Type::Error,
-                    effects,
-                });
+                return Some(Inferred::error_with(effects));
             }
         };
 
@@ -20490,20 +20378,14 @@ fn infer_query_explain_system_call(
                     DIAG_TYPE,
                     "sys.explain requires exactly one valid explicit query element type",
                 ));
-                return Some(Inferred {
-                    ty: Type::Error,
-                    effects,
-                });
+                return Some(Inferred::error_with(effects));
             };
             if !types_match(explicit, query_element) {
                 diagnostics.push(diag(
                     DIAG_TYPE,
                     "sys.explain explicit query element type must match the query value",
                 ));
-                return Some(Inferred {
-                    ty: Type::Error,
-                    effects,
-                });
+                return Some(Inferred::error_with(effects));
             }
         }
 
@@ -20521,10 +20403,7 @@ fn infer_query_explain_system_call(
     }
 
     if values.iter().any(|ty| matches!(ty, Type::Error)) {
-        return Some(Inferred {
-            ty: Type::Error,
-            effects,
-        });
+        return Some(Inferred::error_with(effects));
     }
 
     if has_input {
@@ -20568,10 +20447,7 @@ fn infer_query_explain_system_call(
         DIAG_TYPE,
         "arguments do not match a portable sys.explain overload",
     ));
-    Some(Inferred {
-        ty: Type::Error,
-        effects,
-    })
+    Some(Inferred::error_with(effects))
 }
 
 /// `sys.meta<T>` is the one generic system operation whose type parameter is
@@ -20617,10 +20493,7 @@ fn infer_meta_system_call(
             DIAG_UNSUPPORTED,
             "portable generic system function is described but not implemented by this semantic slice",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     };
     require_linked_system_member(system_api::SystemMember::Callable(&function.label), scope);
     if !valid_shape {
@@ -20628,16 +20501,10 @@ fn infer_meta_system_call(
             DIAG_TYPE,
             "arguments do not match a portable system function overload",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     }
     if values.iter().any(|value| matches!(value, Type::Error)) {
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     }
     effects.join(&descriptor_effects(function.effect));
     let parameter = function.type_parameters.iter().next().unwrap();
@@ -20653,20 +20520,14 @@ fn infer_meta_system_call(
                 DIAG_TYPE,
                 "sys.meta requires exactly one explicit type argument when generic arguments are supplied",
             ));
-            return Inferred {
-                ty: Type::Error,
-                effects,
-            };
+            return Inferred::error_with(effects);
         };
         if type_argument != *value_type {
             diagnostics.push(diag(
                 DIAG_TYPE,
                 "sys.meta explicit type argument must match the value type",
             ));
-            return Inferred {
-                ty: Type::Error,
-                effects,
-            };
+            return Inferred::error_with(effects);
         }
     }
     let result = substitute_descriptor_type(&function.result, parameter, value_type);
@@ -20795,17 +20656,11 @@ fn infer_cancel_system_call(
             DIAG_UNSUPPORTED,
             "portable generic system function is described but not implemented by this semantic slice",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     };
     require_linked_system_member(system_api::SystemMember::Callable(&function.label), scope);
     if values.iter().any(|value| matches!(value, Type::Error)) {
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     }
 
     let mut used = vec![false; function.parameters.len()];
@@ -20870,10 +20725,7 @@ fn infer_cancel_system_call(
             DIAG_TYPE,
             "arguments do not match a portable system function overload",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     }
     let result_type = invocation_type.expect("valid invocation handle supplies its type");
     if let Some(type_arguments) = type_arguments {
@@ -20887,20 +20739,14 @@ fn infer_cancel_system_call(
                 DIAG_TYPE,
                 "sys.cancel requires exactly one explicit type argument when generic arguments are supplied",
             ));
-            return Inferred {
-                ty: Type::Error,
-                effects,
-            };
+            return Inferred::error_with(effects);
         };
         if type_argument != result_type {
             diagnostics.push(diag(
                 DIAG_TYPE,
                 "sys.cancel explicit type argument must match the invocation handle result type",
             ));
-            return Inferred {
-                ty: Type::Error,
-                effects,
-            };
+            return Inferred::error_with(effects);
         }
     }
     effects.join(&descriptor_effects(function.effect));
@@ -20955,17 +20801,11 @@ fn infer_await_system_call(
             DIAG_UNSUPPORTED,
             "portable generic system function is described but not implemented by this semantic slice",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     };
     require_linked_system_member(system_api::SystemMember::Callable(&function.label), scope);
     if values.iter().any(|value| matches!(value, Type::Error)) {
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     }
 
     let mut used = vec![false; function.parameters.len()];
@@ -21029,10 +20869,7 @@ fn infer_await_system_call(
             DIAG_TYPE,
             "arguments do not match a portable system function overload",
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred::error_with(effects);
     }
     let result_type = invocation_type.expect("valid invocation handle supplies its type");
     if let Some(type_arguments) = type_arguments {
@@ -21046,20 +20883,14 @@ fn infer_await_system_call(
                 DIAG_TYPE,
                 "sys.await requires exactly one explicit type argument when generic arguments are supplied",
             ));
-            return Inferred {
-                ty: Type::Error,
-                effects,
-            };
+            return Inferred::error_with(effects);
         };
         if type_argument != result_type {
             diagnostics.push(diag(
                 DIAG_TYPE,
                 "sys.await explicit type argument must match the invocation handle result type",
             ));
-            return Inferred {
-                ty: Type::Error,
-                effects,
-            };
+            return Inferred::error_with(effects);
         }
     }
     effects.join(&descriptor_effects(function.effect));
@@ -21253,10 +21084,7 @@ fn infer_system_path(
     }
     match infer_descriptor_system_path(path, scope, diagnostics) {
         DescriptorPathInference::Resolved(inferred) => Some(inferred),
-        DescriptorPathInference::Rejected => Some(Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        }),
+        DescriptorPathInference::Rejected => Some(Inferred::error()),
     }
 }
 fn infer_nominal_conversion_call(
@@ -21302,10 +21130,7 @@ fn infer_nominal_conversion_call(
             DIAG_TYPE,
             "nominal conversion requires exactly one source value",
         ));
-        return Some(Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        });
+        return Some(Inferred::error());
     }
     let argument = infer(&arguments[0].value, scope, local, diagnostics);
     if sources.iter().any(|source| source == &argument.ty) {
@@ -21339,10 +21164,7 @@ fn infer_nominal_conversion_call(
         DIAG_TYPE,
         "no matching From implementation for the source type",
     ));
-    Some(Inferred {
-        ty: Type::Error,
-        effects: argument.effects,
-    })
+    Some(Inferred::error_with(argument.effects))
 }
 
 fn is_snapshot_selector_context(selector: &str) -> bool {
@@ -25923,19 +25745,15 @@ fn infer_historical_member(
     {
         let namespace = name.to_owned();
         if historical_root_available(&scope.historical_modules, &namespace) || name == "sys" {
-            return Some(Inferred {
-                ty: historical_namespace_type(snapshot, &namespace),
-                effects: EffectSummary::default(),
-            });
+            return Some(Inferred::pure(historical_namespace_type(
+                snapshot, &namespace,
+            )));
         }
         diagnostics.push(diag(
             DIAG_UNRESOLVED,
             "historical database member cannot be resolved",
         ));
-        return Some(Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        });
+        return Some(Inferred::error());
     }
     let (snapshot, namespace) = historical_namespace_parts(base)?;
     let module_namespace = Namespace(
@@ -25946,10 +25764,10 @@ fn infer_historical_member(
             .collect(),
     );
     if scope.historical_modules.contains_key(&module_namespace) {
-        return Some(Inferred {
-            ty: historical_namespace_type(snapshot, &module_namespace.display()),
-            effects: EffectSummary::default(),
-        });
+        return Some(Inferred::pure(historical_namespace_type(
+            snapshot,
+            &module_namespace.display(),
+        )));
     }
 
     // The portable system surface is descriptor-backed rather than a source
@@ -26009,10 +25827,7 @@ fn infer_historical_member(
                 DIAG_UNSUPPORTED,
                 "historical callable permits only database-read effects",
             ));
-            return Some(Inferred {
-                ty: Type::Error,
-                effects: EffectSummary::default(),
-            });
+            return Some(Inferred::error());
         }
         return Some(Inferred {
             ty: if symbol.kind == SymbolKind::Function {
@@ -26032,10 +25847,7 @@ fn infer_historical_member(
         DIAG_UNRESOLVED,
         "historical database member cannot be resolved",
     ));
-    Some(Inferred {
-        ty: Type::Error,
-        effects: EffectSummary::default(),
-    })
+    Some(Inferred::error())
 }
 
 fn infer_system_member(base: &Type, name: &str) -> Option<Type> {
@@ -26448,18 +26260,12 @@ fn infer_money_constructor_type(
         ));
     }
     if !currency_is_valid || value_is_float {
-        return Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        };
+        return Inferred::error();
     }
-    Inferred {
-        ty: Type::Applied {
-            base: "Money".into(),
-            arguments: vec![currency],
-        },
-        effects: EffectSummary::default(),
-    }
+    Inferred::pure(Type::Applied {
+        base: "Money".into(),
+        arguments: vec![currency],
+    })
 }
 
 fn is_money_rate(ty: &Type) -> bool {
@@ -26614,10 +26420,7 @@ fn infer_ui_action_call(
             DIAG_TYPE,
             "std.ui.action requires explicit action_id provenance and input type",
         ));
-        return Some(Inferred {
-            ty: Type::Error,
-            effects,
-        });
+        return Some(Inferred::error_with(effects));
     }
 
     Some(Inferred {
@@ -26650,10 +26453,7 @@ fn qualified_path(expr: &Expr) -> Option<Vec<&str>> {
 
 fn infer_type_argument(expression: &Expr) -> Option<Inferred> {
     let path = qualified_path(expression)?;
-    Some(Inferred {
-        ty: Type::Named(path.join(".")),
-        effects: EffectSummary::default(),
-    })
+    Some(Inferred::pure(Type::Named(path.join("."))))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -26767,10 +26567,7 @@ fn infer_table_assertion(
         };
         if let Some(message) = message {
             diagnostics.push(diag(DIAG_ASSERTION_OWNER_PIPE, message));
-            return Inferred {
-                ty: Type::Bool,
-                effects: EffectSummary::default(),
-            };
+            return Inferred::pure(Type::Bool);
         }
     }
     let Expr::Call {
@@ -26789,22 +26586,13 @@ fn infer_table_assertion(
         parameters, body, ..
     } = &arguments[0].value
     else {
-        return Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        };
+        return Inferred::error();
     };
     let [parameter] = parameters.as_slice() else {
-        return Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        };
+        return Inferred::error();
     };
     let Pattern::Name(name, _) = &parameter.pattern else {
-        return Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        };
+        return Inferred::error();
     };
     let mut local = BTreeMap::new();
     insert_local_binding(name, row.clone(), &mut local, diagnostics);
@@ -27055,10 +26843,7 @@ fn infer_module_relation(
                 }
             }
             let mut inferred = tail.as_ref().map_or_else(
-                || Inferred {
-                    ty: Type::Tuple(Vec::new()),
-                    effects: EffectSummary::default(),
-                },
+                || Inferred::pure(Type::Tuple(Vec::new())),
                 |tail| infer_module_relation(tail, table_rows, scope, &locals, diagnostics),
             );
             effects.join(&inferred.effects);
@@ -27137,26 +26922,17 @@ fn infer_module_relation(
     let Some(row) = table_identity(&arguments[0].value, scope, local)
         .and_then(|identity| table_rows.get(&identity))
     else {
-        return Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        };
+        return Inferred::error();
     };
     let inferred = match &arguments[1].value {
         Expr::Lambda {
             parameters, body, ..
         } => {
             let [parameter] = parameters.as_slice() else {
-                return Inferred {
-                    ty: Type::Error,
-                    effects: EffectSummary::default(),
-                };
+                return Inferred::error();
             };
             let Pattern::Name(name, _) = &parameter.pattern else {
-                return Inferred {
-                    ty: Type::Error,
-                    effects: EffectSummary::default(),
-                };
+                return Inferred::error();
             };
             let mut locals = local.clone();
             insert_local_binding(name, row.clone(), &mut locals, diagnostics);
@@ -27164,19 +26940,13 @@ fn infer_module_relation(
         }
         Expr::Name { text, .. } => {
             let Some(symbol) = local.get(text) else {
-                return Inferred {
-                    ty: Type::Error,
-                    effects: EffectSummary::default(),
-                };
+                return Inferred::error();
             };
             let Type::Function {
                 parameters, result, ..
             } = &symbol.ty
             else {
-                return Inferred {
-                    ty: Type::Error,
-                    effects: EffectSummary::default(),
-                };
+                return Inferred::error();
             };
             if parameters.len() != 1 {
                 diagnostics.push(diag(
@@ -27193,10 +26963,7 @@ fn infer_module_relation(
             }
         }
         _ => {
-            return Inferred {
-                ty: Type::Error,
-                effects: EffectSummary::default(),
-            };
+            return Inferred::error();
         }
     };
     Inferred {
@@ -28524,1808 +28291,4 @@ fn diag(code: &'static str, message: impl Into<String>) -> Diagnostic {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Builds the catalogue and checks the bodies of one synthetic pinned
-    /// standard bundle.
-    fn check_bundle(sources: Vec<(String, String)>) -> StandardSourceCheck {
-        let profile = StandardDependencyProfile::from_sources("std-probe", sources.clone())
-            .expect("probe profile");
-        let catalogue = Catalogue::authoritative_core()
-            .with_standard_sources(&profile, sources.clone())
-            .expect("probe catalogue");
-        check_standard_sources(&catalogue, sources, SystemProviders::DeclaredSurface)
-    }
-
-    #[test]
-    fn pinned_standard_body_with_a_decided_mismatch_is_reported() {
-        let check = check_bundle(vec![(
-            String::from("std/probe.orna"),
-            String::from("\npub fn broken(): Int = \"text\";\n"),
-        )]);
-        let diagnostic = check
-            .diagnostics
-            .first()
-            .expect("the broken pinned body is decided");
-        assert_eq!(diagnostic.logical_path, "std/probe.orna");
-        assert_eq!(diagnostic.line, 2);
-        assert_eq!(diagnostic.code, DIAG_TYPE);
-        assert!(
-            diagnostic
-                .notes
-                .iter()
-                .any(|note| note == "expected Int, found Text"),
-            "{:?}",
-            diagnostic.notes
-        );
-    }
-
-    #[test]
-    fn pinned_standard_body_with_a_conditional_optional_is_admitted() {
-        // The conditional below is valid Orna: both branches unify with the
-        // declared `Int?` (ORNA-CFLOW-003, ORNA-TYPE-001). Once this slice
-        // typed the second branch against the first branch's `null` and
-        // reported a mismatch that described the checker rather than the
-        // pinned source; the pinned bundle is admitted here because its body
-        // really is well typed.
-        let check = check_bundle(vec![(
-            String::from("std/probe.orna"),
-            String::from(
-                "pub fn half(value: Int): Int? =\n    if value < 0 { null } else { Some(value) };\n",
-            ),
-        )]);
-        assert!(check.is_ok(), "{:?}", check.diagnostics);
-    }
-
-    #[test]
-    fn pinned_standard_body_with_an_unresolved_name_stays_admitted() {
-        let check = check_bundle(vec![(
-            String::from("std/probe.orna"),
-            String::from("pub fn broken(): Int = missing_name;\n"),
-        )]);
-        assert!(check.is_ok(), "{:?}", check.diagnostics);
-    }
-
-    #[test]
-    fn compiled_unit_analysis_retains_exact_source_basis_scale_and_provenance() {
-        let analysis = checked(&[ModuleInput::new(
-            "units/main.orna",
-            "pub dim Information; pub unit B : Information base; pub unit MiB : Information = 1048576.B; pub dim Temperature; pub unit K : Temperature base; pub unit C : Temperature = K offset 273.15 affine;",
-        )]);
-        assert!(analysis.is_ok(), "diagnostics: {:?}", analysis.diagnostics);
-
-        let mebibyte = &analysis.source_units[&SourceUnitIdentity {
-            namespace: Namespace(vec!["units".into()]),
-            name: "MiB".into(),
-        }];
-        assert_eq!(mebibyte.scale.numerator, "1048576");
-        assert_eq!(mebibyte.scale.denominator, "1");
-        assert_eq!(
-            mebibyte.dimension_basis.keys().next(),
-            Some(&SourceDimensionIdentity {
-                namespace: Namespace(vec!["units".into()]),
-                name: "Information".into(),
-            })
-        );
-        assert_eq!(mebibyte.dimension_basis.len(), 1);
-        assert_eq!(
-            mebibyte
-                .dimension_basis
-                .values()
-                .copied()
-                .collect::<Vec<_>>(),
-            [1]
-        );
-        assert_eq!(mebibyte.provenance.logical_path, "units/main.orna");
-
-        let celsius = &analysis.source_units[&SourceUnitIdentity {
-            namespace: Namespace(vec!["units".into()]),
-            name: "C".into(),
-        }];
-        assert_eq!(celsius.offset.numerator, "5463");
-        assert_eq!(celsius.offset.denominator, "20");
-        assert!(celsius.affine);
-    }
-
-    #[test]
-    fn sparse_checkpoint_seeding_crosses_relation_window_boundaries() {
-        let paired = Type::Tuple(vec![
-            contextual_snapshot_ref("selector:HEAD~left"),
-            contextual_snapshot_ref("selector:HEAD~right"),
-        ]);
-        let pinned = Type::Relation(Box::new(Type::List(Box::new(Type::Record(
-            BTreeMap::from([
-                ("left_checkpoint".into(), paired.clone()),
-                ("right_checkpoint".into(), paired),
-                ("witness".into(), Type::Int),
-            ]),
-        )))));
-        let omitted = Type::Relation(Box::new(Type::List(Box::new(Type::Record(
-            BTreeMap::from([("witness".into(), Type::Int)]),
-        )))));
-
-        assert!(type_sequence_has_omitted_pinned_checkpoint_tuple(&[
-            omitted.clone(),
-            pinned.clone(),
-        ]));
-
-        let mut rows = [omitted, pinned];
-        seed_omitted_pinned_checkpoint_tuple_paths(&mut rows);
-
-        let Type::Relation(window) = &rows[0] else {
-            panic!("window relation wrapper must survive sparse seeding");
-        };
-        let Type::List(row) = window.as_ref() else {
-            panic!("window row-list wrapper must survive sparse seeding");
-        };
-        let Type::Record(fields) = row.as_ref() else {
-            panic!("window row shape must be seeded as a record");
-        };
-        for name in ["left_checkpoint", "right_checkpoint"] {
-            assert_eq!(
-                fields.get(name),
-                Some(&Type::Tuple(vec![Type::Bottom, Type::Bottom])),
-                "the omitted {name} tuple keeps both fold slots neutral"
-            );
-        }
-    }
-
-    #[test]
-    fn suppressed_paired_rebind_keeps_same_named_tuple_pins_distinct() {
-        let left_selector = "selector:binder:pair.orna@10..18:parameter:selected";
-        let right_selector = "selector:binder:pair.orna@20..28:parameter:selected";
-        let formal_pair = Type::Tuple(vec![
-            contextual_snapshot_ref(left_selector),
-            contextual_snapshot_ref(right_selector),
-        ]);
-        let result = Type::Record(BTreeMap::from([
-            ("left".into(), contextual_snapshot_ref(left_selector)),
-            ("right".into(), contextual_snapshot_ref(right_selector)),
-            (
-                "paired_map".into(),
-                Type::Applied {
-                    base: "semantic.SnapshotContextMap".into(),
-                    arguments: vec![
-                        Type::Named(left_selector.into()),
-                        Type::Named(right_selector.into()),
-                    ],
-                },
-            ),
-        ]));
-        let call_span = SyntaxSpan::new(40, 72);
-        let arguments = vec![orna_syntax::Argument {
-            name: None,
-            value: Expr::Name {
-                text: "pins".into(),
-                span: SyntaxSpan::new(48, 52),
-            },
-            span: SyntaxSpan::new(48, 52),
-        }];
-
-        let specialized = specialize_dynamic_parameter_snapshot_contexts(
-            &result,
-            &[formal_pair, Type::Text],
-            &BTreeSet::new(),
-            None,
-            &arguments,
-            &[Type::Tuple(vec![
-                contextual_snapshot_ref("selector:HEAD~2"),
-                contextual_snapshot_ref("selector:HEAD~1"),
-            ])],
-            &BTreeMap::new(),
-            &call_span,
-            None,
-        );
-        let Type::Record(fields) = specialized else {
-            panic!("suppressed paired rebind must retain its record result");
-        };
-        let mut left = BTreeSet::new();
-        collect_test_snapshot_contexts(&fields["left"], &mut left);
-        let mut right = BTreeSet::new();
-        collect_test_snapshot_contexts(&fields["right"], &mut right);
-        assert_eq!(
-            left.len(),
-            1,
-            "left pin slot must retain one identity: {left:?}"
-        );
-        assert_eq!(
-            right.len(),
-            1,
-            "right pin slot must retain one identity: {right:?}"
-        );
-        assert!(
-            left.iter()
-                .next()
-                .is_some_and(|selector| selector.contains("pair.orna@10..18")),
-            "the left symbolic pin must keep its formal binder: {left:?}"
-        );
-        assert!(
-            right
-                .iter()
-                .next()
-                .is_some_and(|selector| selector.contains("pair.orna@20..28")),
-            "the right symbolic pin must keep its formal binder: {right:?}"
-        );
-        let Type::Applied {
-            base,
-            arguments: paired_map,
-        } = &fields["paired_map"]
-        else {
-            panic!("the suppressed paired checkpoint must retain a context map");
-        };
-        assert_eq!(base, "semantic.SnapshotContextMap");
-        assert_eq!(
-            paired_map.len(),
-            2,
-            "the paired symbolic map must retain its formal width: {paired_map:?}"
-        );
-        assert!(is_snapshot_context_map_shape(&fields["paired_map"]));
-        assert_ne!(
-            left, right,
-            "suppression must keep same-named paired pin slots at distinct widths"
-        );
-    }
-
-    #[test]
-    fn unknown_direct_pair_sibling_suppresses_valid_pin_promotion() {
-        let left = contextual_snapshot_ref("selector:binder:pair.orna@10..18:parameter:left_pin");
-        let right = contextual_snapshot_ref("selector:binder:pair.orna@20..28:parameter:right_pin");
-        let result = Type::Record(BTreeMap::from([
-            ("left".into(), left.clone()),
-            ("right".into(), right.clone()),
-        ]));
-        let arguments = (0..2)
-            .map(|index| orna_syntax::Argument {
-                name: None,
-                value: Expr::Name {
-                    text: format!("pair_pin_{index}"),
-                    span: SyntaxSpan::new(40 + index * 12, 48 + index * 12),
-                },
-                span: SyntaxSpan::new(40 + index * 12, 48 + index * 12),
-            })
-            .collect::<Vec<_>>();
-
-        let specialized = specialize_dynamic_parameter_snapshot_contexts(
-            &result,
-            &[left, right],
-            &BTreeSet::new(),
-            None,
-            &arguments,
-            &[contextual_snapshot_ref("selector:HEAD~12"), Type::Error],
-            &BTreeMap::new(),
-            &SyntaxSpan::new(30, 68),
-            None,
-        );
-
-        let mut contexts = BTreeSet::new();
-        collect_test_snapshot_contexts(&specialized, &mut contexts);
-        assert_eq!(
-            contexts.len(),
-            2,
-            "both pins must remain represented: {contexts:?}"
-        );
-        assert!(
-            contexts
-                .iter()
-                .all(|context| context.starts_with("selector:dynamic-call:")),
-            "an unknown pair sibling must suppress every sibling promotion: {contexts:?}"
-        );
-        assert!(
-            !contexts.iter().any(|context| context.contains("HEAD~12")),
-            "the valid sibling must not be promoted independently: {contexts:?}"
-        );
-    }
-
-    #[test]
-    fn unknown_nested_paired_width_suppresses_sibling_identity_promotion() {
-        let callback_selected =
-            contextual_snapshot_ref("selector:binder:callback.orna@10..18:parameter:selected");
-        let callback_sibling =
-            contextual_snapshot_ref("selector:binder:callback.orna@20..28:parameter:sibling");
-        let paired_selected =
-            contextual_snapshot_ref("selector:binder:pair.orna@30..38:parameter:selected");
-        let paired_sibling =
-            contextual_snapshot_ref("selector:binder:pair.orna@40..48:parameter:sibling");
-        let formal_callback = Type::Function {
-            parameters: vec![Type::Tuple(vec![
-                callback_selected.clone(),
-                callback_sibling.clone(),
-            ])],
-            parameter_names: None,
-            default_parameters: BTreeSet::new(),
-            result: Box::new(Type::Text),
-        };
-        let formal_pair = Type::Tuple(vec![paired_selected.clone(), paired_sibling.clone()]);
-        let actual_callback = Type::Function {
-            parameters: vec![Type::Tuple(vec![
-                contextual_snapshot_ref("selector:HEAD~12"),
-                Type::Error,
-            ])],
-            parameter_names: None,
-            default_parameters: BTreeSet::new(),
-            result: Box::new(Type::Text),
-        };
-        let arguments = (0..2)
-            .map(|index| orna_syntax::Argument {
-                name: None,
-                value: Expr::Name {
-                    text: format!("argument_{index}"),
-                    span: SyntaxSpan::new(50 + index * 10, 55 + index * 10),
-                },
-                span: SyntaxSpan::new(50 + index * 10, 55 + index * 10),
-            })
-            .collect::<Vec<_>>();
-        let result = Type::Record(BTreeMap::from([
-            ("callback_selected".into(), callback_selected),
-            ("callback_sibling".into(), callback_sibling),
-            ("paired_selected".into(), paired_selected),
-            ("paired_sibling".into(), paired_sibling),
-        ]));
-
-        let specialized = specialize_dynamic_parameter_snapshot_contexts(
-            &result,
-            &[formal_callback, formal_pair],
-            &BTreeSet::new(),
-            None,
-            &arguments,
-            &[
-                actual_callback,
-                Type::Tuple(vec![
-                    contextual_snapshot_ref("selector:HEAD~10"),
-                    contextual_snapshot_ref("selector:HEAD~9"),
-                ]),
-            ],
-            &BTreeMap::new(),
-            &SyntaxSpan::new(45, 75),
-            None,
-        );
-
-        let mut contexts = BTreeSet::new();
-        collect_test_snapshot_contexts(&specialized, &mut contexts);
-        assert_eq!(
-            contexts.len(),
-            4,
-            "all paired pins must remain represented after an unknown nested width: {contexts:?}"
-        );
-        assert!(
-            contexts
-                .iter()
-                .all(|context| context.starts_with("selector:dynamic-call:")),
-            "no valid callback or sibling pin may be promoted independently: {contexts:?}"
-        );
-        assert!(
-            !contexts.iter().any(|context| context.contains("HEAD~")),
-            "unknown paired width must suppress all concrete identities in this wave: {contexts:?}"
-        );
-    }
-
-    #[test]
-    fn binder_context_collector_rejects_partial_tuple_widths() {
-        let formal = Type::Tuple(vec![
-            contextual_snapshot_ref("selector:binder:pair.orna@10..18:parameter:selected"),
-            contextual_snapshot_ref("selector:binder:pair.orna@20..28:parameter:sibling"),
-        ]);
-        let actual = Type::Tuple(vec![contextual_snapshot_ref("selector:HEAD~12")]);
-        let mut binder_contexts = BTreeMap::new();
-
-        collect_snapshot_binder_contexts(&formal, &actual, &mut binder_contexts);
-
-        assert!(
-            binder_contexts.is_empty(),
-            "an unpaired width must not collect even the valid tuple prefix: {binder_contexts:?}"
-        );
-    }
-
-    #[test]
-    fn omitted_sibling_keeps_same_named_captured_and_live_slots_distinct() {
-        let result = Type::Applied {
-            base: "semantic.SnapshotContextMap".into(),
-            arguments: vec![
-                Type::Named("selector:capture:parameter:pin".into()),
-                Type::Named("selector:parameter:pin".into()),
-            ],
-        };
-        let arguments = vec![orna_syntax::Argument {
-            name: None,
-            value: Expr::Name {
-                text: "supplied_pin".into(),
-                span: SyntaxSpan::new(10, 22),
-            },
-            span: SyntaxSpan::new(10, 22),
-        }];
-        let specialized = specialize_dynamic_parameter_snapshot_contexts(
-            &result,
-            &[
-                Type::Named("sys.SnapshotRef".into()),
-                Type::Tuple(vec![
-                    Type::Named("sys.SnapshotRef".into()),
-                    Type::Named("sys.SnapshotRef".into()),
-                ]),
-            ],
-            &BTreeSet::new(),
-            None,
-            &arguments,
-            &[contextual_snapshot_ref("selector:HEAD~12")],
-            &BTreeMap::new(),
-            &SyntaxSpan::new(5, 30),
-            None,
-        );
-
-        let Type::Applied { base, arguments } = &specialized else {
-            panic!("omission must preserve the pair rather than collapse it: {specialized:?}");
-        };
-        assert_eq!(base, "semantic.SnapshotContextMap");
-        assert!(is_snapshot_context_map_shape(&specialized));
-        assert_eq!(
-            arguments.len(),
-            2,
-            "both paired slots must remain distinct: {arguments:?}"
-        );
-        let Type::Named(left) = &arguments[0] else {
-            panic!("the first suppressed slot must retain a selector identity: {arguments:?}");
-        };
-        let Type::Named(right) = &arguments[1] else {
-            panic!("the second suppressed slot must retain a selector identity: {arguments:?}");
-        };
-        assert!(
-            left.starts_with("selector:dynamic-call:")
-                && right.starts_with("selector:dynamic-call:"),
-            "the failed call must preserve symbolic identities: {arguments:?}"
-        );
-        assert_ne!(left, right, "captured and live slots must not collapse");
-    }
-
-    fn collect_test_snapshot_contexts(ty: &Type, into: &mut BTreeSet<String>) {
-        if let Some(selector) = snapshot_ref_context_key(ty) {
-            into.insert(selector.to_owned());
-            return;
-        }
-        match ty {
-            Type::Record(fields) => {
-                for field in fields.values() {
-                    collect_test_snapshot_contexts(field, into);
-                }
-            }
-            Type::Tuple(elements) => {
-                for element in elements {
-                    collect_test_snapshot_contexts(element, into);
-                }
-            }
-            Type::Applied { arguments, .. } => {
-                for argument in arguments {
-                    collect_test_snapshot_contexts(argument, into);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    #[test]
-    fn omitted_generic_argument_rollback_keeps_sibling_depth_identities() {
-        let wrapped = |arguments| Type::Applied {
-            base: "domain.CheckpointBundle".into(),
-            arguments,
-        };
-        let omitted_pair = || Type::Tuple(vec![Type::Bottom, Type::Bottom]);
-        let pin_pair = |left: &str, right: &str| {
-            Type::Tuple(vec![
-                contextual_snapshot_ref(left),
-                contextual_snapshot_ref(right),
-            ])
-        };
-        let anchor = wrapped(vec![omitted_pair(), omitted_pair()]);
-        let accumulated = wrapped(vec![
-            pin_pair("selector:HEAD~101", "selector:HEAD~102"),
-            pin_pair("selector:HEAD~201", "selector:HEAD~202"),
-        ]);
-        let parent = wrapped(vec![
-            pin_pair("selector:HEAD~102", "selector:HEAD~101"),
-            pin_pair("selector:HEAD~301", "selector:HEAD~302"),
-        ]);
-        let mut rolled_back_paths = BTreeSet::new();
-        let folded = merge_multi_parent_checkpoint_value_scoped(
-            &accumulated,
-            &parent,
-            &anchor,
-            &anchor,
-            &mut Vec::new(),
-            &mut rolled_back_paths,
-        )
-        .expect("same applied wrapper and tuple widths should fold transactionally");
-        let Type::Applied { arguments, .. } = folded.merged else {
-            panic!("the successful sibling argument must remain computed");
-        };
-        assert_eq!(
-            arguments[0],
-            omitted_pair(),
-            "the crossed argument rolls back"
-        );
-        assert_eq!(
-            arguments[1],
-            Type::Tuple(vec![
-                Type::Applied {
-                    base: "semantic.SnapshotContextMap".into(),
-                    arguments: vec![
-                        Type::Named("selector:HEAD~201".into()),
-                        Type::Named("selector:HEAD~301".into()),
-                    ],
-                },
-                Type::Applied {
-                    base: "semantic.SnapshotContextMap".into(),
-                    arguments: vec![
-                        Type::Named("selector:HEAD~202".into()),
-                        Type::Named("selector:HEAD~302".into()),
-                    ],
-                },
-            ]),
-            "the unaffected applied argument retains real folded depth identities"
-        );
-        assert_eq!(
-            folded.effective_parent,
-            wrapped(vec![
-                omitted_pair(),
-                pin_pair("selector:HEAD~301", "selector:HEAD~302"),
-            ]),
-            "the rejected argument is removed from the effective parent before later folds"
-        );
-        assert!(
-            folded.rejected_scope,
-            "a rejected argument must be reported"
-        );
-        assert_eq!(
-            rolled_back_paths,
-            BTreeSet::from([vec![SnapshotTopologyBoundary::AppliedArgument {
-                base: "domain.CheckpointBundle".into(),
-                index: 0,
-            }]]),
-            "rollback is frozen at the smallest failing applied-argument boundary"
-        );
-    }
-
-    #[test]
-    fn omitted_money_dimension_rollback_keeps_sibling_depth_identities() {
-        let omitted_pair = || Type::Tuple(vec![Type::Bottom, Type::Bottom]);
-        let pin_pair = |left: &str, right: &str| {
-            Type::Tuple(vec![
-                contextual_snapshot_ref(left),
-                contextual_snapshot_ref(right),
-            ])
-        };
-        let money = |currency, unit| Type::MoneyPerUnit {
-            currency: Box::new(currency),
-            unit: Box::new(unit),
-        };
-        let anchor = money(omitted_pair(), omitted_pair());
-        let accumulated = money(
-            pin_pair("selector:HEAD~401", "selector:HEAD~402"),
-            pin_pair("selector:HEAD~501", "selector:HEAD~502"),
-        );
-        let parent = money(
-            pin_pair("selector:HEAD~402", "selector:HEAD~401"),
-            pin_pair("selector:HEAD~601", "selector:HEAD~602"),
-        );
-        let mut rolled_back_paths = BTreeSet::new();
-        let folded = merge_multi_parent_checkpoint_value_scoped(
-            &accumulated,
-            &parent,
-            &anchor,
-            &anchor,
-            &mut Vec::new(),
-            &mut rolled_back_paths,
-        )
-        .expect("money dimensions should recover independently");
-
-        let Type::MoneyPerUnit { currency, unit } = folded.merged else {
-            panic!("the money result must retain its computed type");
-        };
-        assert_eq!(*currency, omitted_pair(), "the crossed currency rolls back");
-        assert_eq!(
-            *unit,
-            Type::Tuple(vec![
-                Type::Applied {
-                    base: "semantic.SnapshotContextMap".into(),
-                    arguments: vec![
-                        Type::Named("selector:HEAD~501".into()),
-                        Type::Named("selector:HEAD~601".into()),
-                    ],
-                },
-                Type::Applied {
-                    base: "semantic.SnapshotContextMap".into(),
-                    arguments: vec![
-                        Type::Named("selector:HEAD~502".into()),
-                        Type::Named("selector:HEAD~602".into()),
-                    ],
-                },
-            ]),
-            "the unaffected unit keeps both computed depth identities"
-        );
-        assert_eq!(
-            folded.effective_parent,
-            money(
-                omitted_pair(),
-                pin_pair("selector:HEAD~601", "selector:HEAD~602")
-            ),
-            "the rejected currency is removed from the effective parent before later folds"
-        );
-        assert!(folded.rejected_scope);
-        assert_eq!(
-            rolled_back_paths,
-            BTreeSet::from([vec![SnapshotTopologyBoundary::MoneyCurrency]]),
-            "rollback is frozen at the smallest failing money dimension"
-        );
-    }
-
-    #[test]
-    fn checkpoint_rebinds_require_canonical_snapshot_selector_maps() {
-        let first = Type::Applied {
-            base: "semantic.SnapshotContextMap".into(),
-            arguments: vec![
-                Type::Named("selector:HEAD~5".into()),
-                Type::Named("selector:binder:first".into()),
-            ],
-        };
-        let second = Type::Applied {
-            base: "semantic.SnapshotContextMap".into(),
-            arguments: vec![
-                Type::Named("selector:HEAD~4".into()),
-                Type::Named("selector:binder:second".into()),
-            ],
-        };
-        let wider = Type::Applied {
-            base: "semantic.SnapshotContextMap".into(),
-            arguments: vec![
-                Type::Named("selector:HEAD~4".into()),
-                Type::Named("selector:HEAD~5".into()),
-                Type::Named("selector:HEAD~6".into()),
-            ],
-        };
-        let malformed = Type::Applied {
-            base: "semantic.SnapshotContextMap".into(),
-            arguments: vec![Type::Named("domain.Factory".into())],
-        };
-        let singleton = Type::Applied {
-            base: "semantic.SnapshotContextMap".into(),
-            arguments: vec![Type::Named("selector:HEAD~3".into())],
-        };
-        let unsorted = Type::Applied {
-            base: "semantic.SnapshotContextMap".into(),
-            arguments: vec![
-                Type::Named("selector:binder:z".into()),
-                Type::Named("selector:binder:a".into()),
-            ],
-        };
-        let duplicate = Type::Applied {
-            base: "semantic.SnapshotContextMap".into(),
-            arguments: vec![
-                Type::Named("selector:HEAD~3".into()),
-                Type::Named("selector:HEAD~3".into()),
-            ],
-        };
-        let nested_malformed = Type::Record(BTreeMap::from([
-            ("pin".into(), contextual_snapshot_ref("selector:HEAD~3")),
-            ("map".into(), malformed.clone()),
-        ]));
-
-        assert!(is_snapshot_context_map_shape(&first));
-        assert!(types_match(&first, &first));
-        assert!(types_match(&first, &Type::Bottom));
-        assert!(pinned_snapshot_shape_matches(&first, &first));
-        assert!(pinned_snapshot_shape_matches(&first, &second));
-        assert!(!pinned_snapshot_shape_matches(&first, &wider));
-        assert!(!pinned_snapshot_shape_matches(
-            &contextual_snapshot_ref("selector:HEAD~3"),
-            &first
-        ));
-        assert!(type_contains_pinned_snapshot_identity(&first));
-        assert!(pinned_snapshot_reset_type(&first, &second).is_some());
-        assert!(pinned_snapshot_reset_type(&first, &wider).is_none());
-        let terminal_factory = Type::Function {
-            parameters: vec![],
-            parameter_names: Some(vec![]),
-            default_parameters: BTreeSet::new(),
-            result: Box::new(Type::Named("domain.Factory".into())),
-        };
-        let first_pinned_factory = historical_callable_type(&first, &terminal_factory);
-        let second_pinned_factory = historical_callable_type(&second, &terminal_factory);
-        let wider_pinned_factory = historical_callable_type(&wider, &terminal_factory);
-        assert!(pinned_snapshot_shape_matches(
-            &first_pinned_factory,
-            &second_pinned_factory
-        ));
-        assert!(!pinned_snapshot_shape_matches(
-            &first_pinned_factory,
-            &wider_pinned_factory
-        ));
-        assert!(
-            pinned_snapshot_reset_type(&first_pinned_factory, &second_pinned_factory).is_some()
-        );
-        assert!(pinned_snapshot_reset_type(&first_pinned_factory, &wider_pinned_factory).is_none());
-        assert!(!is_snapshot_context_map_shape(&malformed));
-        assert!(!types_match(&malformed, &malformed));
-        assert!(!types_match(&malformed, &Type::Bottom));
-        assert!(!pinned_snapshot_shape_matches(&malformed, &malformed));
-        assert!(!type_contains_pinned_snapshot_identity(&malformed));
-        assert!(pinned_snapshot_reset_type(&malformed, &second).is_none());
-        assert!(!is_snapshot_context_map_shape(&singleton));
-        assert!(!is_snapshot_context_map_shape(&unsorted));
-        assert!(!is_snapshot_context_map_shape(&duplicate));
-        assert_eq!(
-            merge_list_element_types(&first, &first),
-            Some(first.clone())
-        );
-        assert!(merge_list_element_types(&malformed, &malformed).is_none());
-        assert!(merge_checkpoint_field_map(&malformed, &malformed).is_none());
-        assert!(merge_checkpoint_field_map(&malformed, &first).is_none());
-        assert!(!checkpoint_snapshot_maps_are_valid(&nested_malformed));
-        assert!(!types_match(&nested_malformed, &nested_malformed));
-        assert!(!types_match(&nested_malformed, &Type::Bottom));
-        assert!(!pinned_snapshot_shape_matches(
-            &nested_malformed,
-            &nested_malformed
-        ));
-        assert!(!type_contains_pinned_snapshot_identity(&nested_malformed));
-        assert!(merge_list_element_types(&nested_malformed, &nested_malformed).is_none());
-        assert!(merge_checkpoint_field_map(&nested_malformed, &nested_malformed).is_none());
-        assert!(pinned_snapshot_reset_type(&nested_malformed, &nested_malformed).is_none());
-    }
-
-    #[test]
-    fn checkpoint_resets_preserve_nested_callable_input_contracts() {
-        let callable = |parameter: Type, result_selector: &str| Type::Function {
-            parameters: vec![parameter],
-            parameter_names: Some(vec!["nested_pin".into()]),
-            default_parameters: BTreeSet::new(),
-            result: Box::new(contextual_snapshot_ref(result_selector)),
-        };
-        let concrete_input = callable(
-            contextual_snapshot_ref("selector:input:checkpoint"),
-            "selector:result:checkpoint",
-        );
-        let omitted_input = callable(Type::Bottom, "selector:result:omitted-input");
-
-        assert!(pinned_snapshot_reset_type(&omitted_input, &concrete_input).is_some());
-        assert!(
-            pinned_snapshot_reset_type(&concrete_input, &omitted_input).is_none(),
-            "restoring a nested checkpoint must not remove an input boundary that the local accepted"
-        );
-    }
-
-    #[test]
-    fn tuple_checkpoint_rebind_preserves_full_selector_membership_signatures() {
-        let context_map = |selectors: &[&str]| Type::Applied {
-            base: "semantic.SnapshotContextMap".into(),
-            arguments: selectors
-                .iter()
-                .map(|selector| Type::Named((*selector).into()))
-                .collect(),
-        };
-        let saved = vec![
-            context_map(&["selector:pin:a", "selector:pin:b"]),
-            context_map(&["selector:pin:a", "selector:pin:c"]),
-            context_map(&["selector:pin:b", "selector:pin:c"]),
-        ];
-        let relabeled = vec![
-            context_map(&["selector:pin:d", "selector:pin:e"]),
-            context_map(&["selector:pin:d", "selector:pin:f"]),
-            context_map(&["selector:pin:d", "selector:pin:g"]),
-        ];
-        let same_topology = vec![
-            context_map(&["selector:pin:u", "selector:pin:v"]),
-            context_map(&["selector:pin:u", "selector:pin:w"]),
-            context_map(&["selector:pin:v", "selector:pin:w"]),
-        ];
-        let pairwise_overlaps = |maps: &[Type]| {
-            let selector_sets = maps
-                .iter()
-                .map(|map| {
-                    let Type::Applied { arguments, .. } = map else {
-                        panic!("checkpoint selector map must be applied");
-                    };
-                    arguments
-                        .iter()
-                        .filter_map(|argument| match argument {
-                            Type::Named(selector) => Some(selector.clone()),
-                            _ => None,
-                        })
-                        .collect::<BTreeSet<_>>()
-                })
-                .collect::<Vec<_>>();
-            let mut overlaps = Vec::new();
-            for index in 0..selector_sets.len() {
-                for other in index + 1..selector_sets.len() {
-                    overlaps.push(
-                        selector_sets[index]
-                            .intersection(&selector_sets[other])
-                            .count(),
-                    );
-                }
-            }
-            overlaps
-        };
-
-        assert!(saved.iter().all(is_snapshot_context_map_shape));
-        assert!(relabeled.iter().all(is_snapshot_context_map_shape));
-        assert_eq!(pairwise_overlaps(&saved), vec![1, 1, 1]);
-        assert_eq!(pairwise_overlaps(&relabeled), vec![1, 1, 1]);
-        assert!(tuple_pin_identity_topology_matches(&saved, &same_topology));
-        assert!(!tuple_pin_identity_topology_matches(&saved, &relabeled));
-        assert!(!pinned_snapshot_shape_matches(
-            &Type::Tuple(saved),
-            &Type::Tuple(relabeled)
-        ));
-    }
-
-    #[test]
-    fn record_checkpoint_compaction_rejects_cross_depth_selector_aliases() {
-        let pin = |selector: &str| contextual_snapshot_ref(selector);
-        let stacked = |root: &str, middle: &str, leaf: &str| {
-            BTreeMap::from([
-                ("root".into(), pin(root)),
-                (
-                    "stack".into(),
-                    Type::Tuple(vec![
-                        pin(middle),
-                        Type::Record(BTreeMap::from([("leaf".into(), pin(leaf))])),
-                    ]),
-                ),
-            ])
-        };
-        let first = stacked(
-            "selector:HEAD~501",
-            "selector:HEAD~502",
-            "selector:HEAD~503",
-        );
-        let cross_depth = stacked(
-            "selector:HEAD~504",
-            "selector:HEAD~501",
-            "selector:HEAD~505",
-        );
-        let depth_stable = stacked(
-            "selector:HEAD~601",
-            "selector:HEAD~602",
-            "selector:HEAD~603",
-        );
-
-        assert!(record_checkpoint_promotion_matches(&first, &depth_stable));
-        assert!(!record_checkpoint_promotion_matches(&first, &cross_depth));
-        assert!(
-            merge_list_element_types(&Type::Record(first), &Type::Record(cross_depth)).is_none()
-        );
-    }
-
-    #[test]
-    fn paired_omission_folds_do_not_collapse_distinct_depth_labels() {
-        let pin = |selector: &str| contextual_snapshot_ref(selector);
-        let before = [Type::Tuple(vec![
-            pin("selector:HEAD~depth-a"),
-            pin("selector:HEAD~depth-b"),
-        ])];
-        let after = [Type::Tuple(vec![
-            Type::Bottom,
-            pin("selector:HEAD~depth-a"),
-        ])];
-
-        assert!(checkpoint_pin_map_widths_match(&before[0], &after[0]));
-        assert!(
-            !tuple_checkpoint_compaction_fold_preserves_pin_identity(&before, &after),
-            "an omitted first slot must not hide the later fold merging depth-a with depth-b"
-        );
-
-        let stable_after = [Type::Tuple(vec![
-            Type::Bottom,
-            pin("selector:HEAD~depth-c"),
-        ])];
-        assert!(tuple_checkpoint_compaction_fold_preserves_pin_identity(
-            &before,
-            &stable_after
-        ));
-    }
-
-    fn checked(inputs: &[ModuleInput]) -> Analysis {
-        analyze(inputs)
-    }
-    /// Analysis as an evaluating host admits it: against production providers.
-    fn admitted(inputs: &[ModuleInput]) -> Analysis {
-        analyze_with_providers(inputs, &Catalogue::empty(), SystemProviders::Production)
-    }
-    fn has(analysis: &Analysis, code: &str) -> bool {
-        analysis.diagnostics.iter().any(|d| d.code() == code)
-    }
-    /// Every diagnostic as `code: message`. Diagnostic `Debug` output is
-    /// redacted, so tests compare these texts instead.
-    fn diagnostic_texts(diagnostics: &[Diagnostic]) -> Vec<String> {
-        diagnostics
-            .iter()
-            .map(|diagnostic| format!("{}: {}", diagnostic.code(), diagnostic.message()))
-            .collect()
-    }
-    /// The admission diagnostic for a portable member without a linked
-    /// production provider.
-    fn unlinked(member: &str) -> String {
-        format!(
-            "{DIAG_SYS_VERSION_INCOMPATIBLE}: {member} has no provider linked in this implementation"
-        )
-    }
-    #[test]
-    fn boolean_case_is_exhaustive_only_with_unguarded_coverage() {
-        let source = include_str!("../tests/fixtures/boolean_case_exhaustiveness.orna");
-        let analysis = checked(&[ModuleInput::new("boolean-case.orna", source)]);
-
-        assert!(
-            !has(&analysis, DIAG_UNSUPPORTED),
-            "Bool is a closed case scrutinee: {:?}",
-            analysis.diagnostics
-        );
-        assert_eq!(
-            analysis.diagnostics.len(),
-            1,
-            "diagnostics: {:?}",
-            analysis.diagnostics
-        );
-        assert_eq!(
-            analysis.diagnostics[0].message(),
-            "case expression does not cover true and false"
-        );
-        let module = analysis
-            .modules
-            .values()
-            .find(|module| module.symbols.contains_key("choose"))
-            .expect("fixture module is analyzed");
-        assert_eq!(
-            module.symbols["choose"].ty,
-            Type::Function {
-                parameters: vec![Type::Bool],
-                parameter_names: Some(vec!["flag".into()]),
-                default_parameters: BTreeSet::new(),
-                result: Box::new(Type::Int),
-            }
-        );
-        assert_eq!(
-            module.symbols["capture"].ty,
-            Type::Function {
-                parameters: vec![Type::Bool],
-                parameter_names: Some(vec!["flag".into()]),
-                default_parameters: BTreeSet::new(),
-                result: Box::new(Type::Bool),
-            }
-        );
-    }
-
-    #[test]
-    fn case_guards_do_not_establish_exhaustive_coverage() {
-        let source = include_str!("../tests/fixtures/guarded_case_exhaustiveness.orna");
-        let analysis = checked(&[ModuleInput::new("guarded-case.orna", source)]);
-
-        assert!(
-            !has(&analysis, DIAG_UNSUPPORTED),
-            "guards are supported and type-checked: {:?}",
-            analysis.diagnostics
-        );
-        assert_eq!(
-            analysis
-                .diagnostics
-                .iter()
-                .filter(|diagnostic| diagnostic.message()
-                    == "case expression must cover Some and null exactly once")
-                .count(),
-            1,
-            "the guarded-only Some arm must not count as exhaustive: {:?}",
-            analysis.diagnostics
-        );
-        assert_eq!(
-            analysis
-                .diagnostics
-                .iter()
-                .filter(|diagnostic| diagnostic.message()
-                    == "case expression does not cover every enum variant")
-                .count(),
-            1,
-            "guarded enum variants must not establish coverage: {:?}",
-            analysis.diagnostics
-        );
-        assert_eq!(
-            analysis.diagnostics.len(),
-            2,
-            "unguarded optional and enum fallbacks must remain exhaustive: {:?}",
-            analysis.diagnostics
-        );
-        let module = analysis
-            .modules
-            .values()
-            .find(|module| module.symbols.contains_key("positive_or_zero"))
-            .expect("fixture module is analyzed");
-        assert_eq!(
-            module.symbols["positive_or_zero"].ty,
-            Type::Function {
-                parameters: vec![Type::Optional(Box::new(Type::Int))],
-                parameter_names: Some(vec!["value".into()]),
-                default_parameters: BTreeSet::new(),
-                result: Box::new(Type::Int),
-            }
-        );
-        assert_eq!(
-            module.symbols["classify"].ty,
-            Type::Function {
-                parameters: vec![Type::Named("State".into())],
-                parameter_names: Some(vec!["value".into()]),
-                default_parameters: BTreeSet::new(),
-                result: Box::new(Type::Int),
-            }
-        );
-    }
-
-    #[test]
-    fn maps_main_and_leaf_paths() {
-        let a = checked(&[
-            ModuleInput::new("sensors/greenhouse/main.orna", ""),
-            ModuleInput::new("sensors/greenhouse/input.orna", ""),
-        ]);
-        assert!(
-            a.modules
-                .contains_key(&Namespace(vec!["sensors".into(), "greenhouse".into()]))
-        );
-        assert!(a.modules.contains_key(&Namespace(vec![
-            "sensors".into(),
-            "greenhouse".into(),
-            "input".into()
-        ])));
-    }
-    #[test]
-    fn rejects_duplicate_namespace_and_unicode_siblings() {
-        let a = checked(&[
-            ModuleInput::new("x.orna", ""),
-            ModuleInput::new("x/main.orna", ""),
-            ModuleInput::new("Café/a.orna", ""),
-        ]);
-        assert!(has(&a, DIAG_NAMESPACE));
-        assert!(has(&a, DIAG_BAD_PATH));
-    }
-    #[test]
-    fn reserved_roots_cannot_be_source_modules() {
-        let a = checked(&[
-            ModuleInput::new("sys/main.orna", ""),
-            ModuleInput::new("std/main.orna", ""),
-        ]);
-        assert!(has(&a, DIAG_RESERVED));
-    }
-
-    #[test]
-    fn reserved_sys_table_reaches_typechecking_without_shadowing_the_portable_root() {
-        let analysis = checked(&[ModuleInput::new(
-            "examples/invalid/reserved-sys.orna",
-            "pub table sys { value: Int, } pub fn view() = sys.rt.id;",
-        )]);
-
-        assert!(
-            !has(&analysis, DIAG_RESERVED),
-            "table-name validation must not fail during header collection: {:?}",
-            analysis.diagnostics
-        );
-        assert!(analysis.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code() == DIAG_RESERVED_SYS && diagnostic.message() == "`sys` is reserved"
-        }));
-        assert!(
-            !has(&analysis, DIAG_UNRESOLVED),
-            "the invalid table must not hide the portable root: {:?}",
-            analysis.diagnostics
-        );
-    }
-
-    #[test]
-    fn standard_dependency_profile_requires_exact_pinned_source_bytes() {
-        let profile = StandardDependencyProfile::from_sources(
-            "std-snapshot-1",
-            [("std/math.orna".into(), "fn increment() = 1;".into())],
-        )
-        .unwrap();
-
-        assert_eq!(profile.snapshot(), "std-snapshot-1");
-        assert_eq!(profile.module_digests().len(), 1);
-        assert_eq!(
-            profile.verify_source("std/math.orna", "fn increment() = 1;"),
-            Ok(())
-        );
-        assert_eq!(
-            profile.verify_source("std/math.orna", "fn increment() = 2;"),
-            Err(StandardProfileError::DigestMismatch)
-        );
-        assert_eq!(
-            profile.verify_source("std/text.orna", "fn trim() = 1;"),
-            Err(StandardProfileError::MissingModule)
-        );
-    }
-
-    #[test]
-    fn standard_dependency_profile_rejects_unsafe_or_duplicate_modules() {
-        assert_eq!(
-            StandardDependencyProfile::empty(""),
-            Err(StandardProfileError::EmptySnapshot)
-        );
-        assert_eq!(
-            StandardDependencyProfile::from_sources(
-                "std-snapshot-1",
-                [("project/math.orna".into(), "fn f() = 1;".into())],
-            ),
-            Err(StandardProfileError::InvalidModulePath)
-        );
-        assert_eq!(
-            StandardDependencyProfile::from_sources(
-                "std-snapshot-1",
-                [("std/hidden.module.orna".into(), "fn f() = 1;".into())],
-            ),
-            Err(StandardProfileError::InvalidModulePath)
-        );
-        assert_eq!(
-            StandardDependencyProfile::from_sources(
-                "std-snapshot-1",
-                [
-                    ("std/math.orna".into(), "fn f() = 1;".into()),
-                    ("std/math.orna".into(), "fn f() = 1;".into()),
-                ],
-            ),
-            Err(StandardProfileError::DuplicateModule)
-        );
-    }
-
-    #[test]
-    fn pinned_standard_sources_become_a_semantic_catalogue_without_execution() {
-        let source = "pub fn increment(value: Int): Int = value + 1;";
-        let profile = StandardDependencyProfile::from_sources(
-            "std-snapshot-1",
-            [("std/math.orna".into(), source.into())],
-        )
-        .unwrap();
-        let catalogue =
-            Catalogue::from_standard_sources(&profile, [("std/math.orna".into(), source.into())])
-                .unwrap();
-        let analysis = analyze_with_catalogue(
-            &[ModuleInput::new(
-                "client.orna",
-                "use std.math.{increment}; fn next(value: Int): Int = increment(value);",
-            )],
-            &catalogue,
-        );
-        assert!(analysis.is_ok(), "{:#?}", analysis.diagnostics);
-        assert_eq!(
-            Catalogue::from_standard_sources(
-                &profile,
-                [("std/math.orna".into(), "pub fn broken( = 1;".into())],
-            ),
-            Err(StandardCatalogueError::Profile(
-                StandardProfileError::DigestMismatch
-            ))
-        );
-        assert_eq!(
-            Catalogue::from_standard_sources(&profile, []),
-            Err(StandardCatalogueError::MissingModule)
-        );
-    }
-
-    #[test]
-    fn verified_standard_sources_replace_matching_core_modules() {
-        let source = "pub fn increment(value: Int): Int = value + 1;";
-        let profile = StandardDependencyProfile::from_sources(
-            "std-snapshot-1",
-            [("std/math.orna".into(), source.into())],
-        )
-        .unwrap();
-        let catalogue = Catalogue::authoritative_core()
-            .with_standard_sources(&profile, [("std/math.orna".into(), source.into())])
-            .unwrap();
-        let analysis = analyze_with_catalogue(
-            &[ModuleInput::new(
-                "client.orna",
-                "use std.math.{increment}; fn next(value: Int): Int = increment(value);",
-            )],
-            &catalogue,
-        );
-        assert!(analysis.is_ok(), "{:#?}", analysis.diagnostics);
-        assert_eq!(
-            Catalogue::authoritative_core().with_standard_sources(
-                &profile,
-                [("std/math.orna".into(), "pub fn broken( = 1;".into())],
-            ),
-            Err(StandardCatalogueError::Profile(
-                StandardProfileError::DigestMismatch
-            ))
-        );
-    }
-
-    #[test]
-    fn pinned_standard_root_prelude_is_explicit_and_source_defined() {
-        let source = "pub fn answer(): Int = 42;";
-        let profile = StandardDependencyProfile::from_sources(
-            "std-snapshot-1",
-            [("std/main.orna".into(), source.into())],
-        )
-        .unwrap()
-        .with_prelude_exports(["answer"]);
-        let catalogue =
-            Catalogue::from_standard_sources(&profile, [("std/main.orna".into(), source.into())])
-                .unwrap();
-        let analysis = analyze_with_catalogue(
-            &[ModuleInput::new(
-                "client.orna",
-                "use std as _; pub fn run(): Int = answer();",
-            )],
-            &catalogue,
-        );
-        assert!(analysis.is_ok(), "{:#?}", analysis.diagnostics);
-
-        let invalid = StandardDependencyProfile::from_sources(
-            "std-snapshot-1",
-            [("std/main.orna".into(), source.into())],
-        )
-        .unwrap()
-        .with_prelude_exports(["missing"]);
-        assert_eq!(
-            Catalogue::from_standard_sources(&invalid, [("std/main.orna".into(), source.into())]),
-            Err(StandardCatalogueError::Profile(
-                StandardProfileError::InvalidPreludeExport,
-            ))
-        );
-    }
-
-    #[test]
-    fn pinned_standard_module_prelude_uses_only_its_recorded_exports() {
-        let root = "pub fn root_only(): Int = 7;";
-        let prelude = "pub fn curated(): Int = 42; pub fn module_only(): Int = 9;";
-        let sources = [
-            ("std/main.orna".to_owned(), root.to_owned()),
-            ("std/prelude.orna".to_owned(), prelude.to_owned()),
-        ];
-        let profile = StandardDependencyProfile::from_sources("std-snapshot-2", sources.clone())
-            .unwrap()
-            .with_module_prelude_exports("std/prelude.orna", ["curated"]);
-        let catalogue = Catalogue::from_standard_sources(&profile, sources.clone()).unwrap();
-
-        let curated = analyze_with_catalogue(
-            &[ModuleInput::new(
-                "client.orna",
-                "use std.prelude as _; pub fn run(): Int = curated();",
-            )],
-            &catalogue,
-        );
-        assert!(curated.is_ok(), "{:#?}", curated.diagnostics);
-
-        let not_curated = analyze_with_catalogue(
-            &[ModuleInput::new(
-                "client.orna",
-                "use std.prelude as _; pub fn run(): Int = module_only();",
-            )],
-            &catalogue,
-        );
-        assert!(
-            has(&not_curated, DIAG_UNRESOLVED),
-            "{:#?}",
-            not_curated.diagnostics
-        );
-
-        let invalid = StandardDependencyProfile::from_sources("std-snapshot-2", sources.clone())
-            .unwrap()
-            .with_module_prelude_exports("std/prelude.orna", ["missing"]);
-        assert_eq!(
-            Catalogue::from_standard_sources(&invalid, sources),
-            Err(StandardCatalogueError::Profile(
-                StandardProfileError::InvalidPreludeExport,
-            ))
-        );
-    }
-
-    #[test]
-    fn descriptor_admin_defaults_keep_version_required() {
-        for (operation, status) in [("retry_failure", "open"), ("replay_failure", "skipped")] {
-            let valid = checked(&[ModuleInput::new(
-                "failure-cas.orna",
-                format!(
-                    "fn action(failure: sys.Failure) = sys.admin.{operation}(failure.reference, expected_version: failure.version, expected_status: sys.FailureStatus.{status});"
-                ),
-            )]);
-            assert!(valid.is_ok(), "{operation}: {:#?}", valid.diagnostics);
-            // The call types, but no production provider is linked for the
-            // failure administration callables (ORNA-SYS-008).
-            let admitted_call = admitted(&[ModuleInput::new(
-                "failure-cas.orna",
-                format!(
-                    "fn action(failure: sys.Failure) = sys.admin.{operation}(failure.reference, expected_version: failure.version, expected_status: sys.FailureStatus.{status});"
-                ),
-            )]);
-            assert_eq!(
-                diagnostic_texts(&admitted_call.diagnostics),
-                [unlinked(&format!(
-                    "portable system callable `sys.admin.{operation}`"
-                ))],
-            );
-
-            let missing_version = checked(&[ModuleInput::new(
-                "failure-cas.orna",
-                format!(
-                    "fn action(failure: sys.Failure) = sys.admin.{operation}(failure.reference, expected_status: sys.FailureStatus.{status});"
-                ),
-            )]);
-            assert!(
-                has(&missing_version, DIAG_TYPE),
-                "{operation}: {:#?}",
-                missing_version.diagnostics
-            );
-        }
-    }
-
-    /// Portable `sys` members without a linked production provider are rejected with
-    /// `sys.version.incompatible` before evaluation can perform writes (ORNA-SYS-008).
-    #[test]
-    fn unlinked_sys_members_are_rejected_with_version_incompatible() {
-        for (source, member) in [
-            (
-                "pub fn head() = sys.snapshot(\"HEAD~1\");",
-                "portable system callable `sys.snapshot(Str)`",
-            ),
-            (
-                "pub fn metadata() = sys.meta(1);",
-                "portable system callable `sys.meta`",
-            ),
-            (
-                "pub fn plan(function: sys.FunctionRef) = sys.explain(function);",
-                "portable system callable `sys.explain(FunctionRef)`",
-            ),
-            (
-                "pub fn plans() = sys.Plan;",
-                "portable system relation `sys.Plan`",
-            ),
-            (
-                "pub fn runs() = sys.Run;",
-                "portable system relation `sys.Run`",
-            ),
-            (
-                "pub fn objects() = sys.storage.objects;",
-                "portable system relation `sys.storage.objects`",
-            ),
-            (
-                "pub fn owner() = sys.rt.id;",
-                "portable system singleton `sys.rt`",
-            ),
-            (
-                "pub fn published() = sys.Storage.as_of(HEAD);",
-                "historical view `sys.Storage.as_of`",
-            ),
-            (
-                "pub fn old() = sys.database.as_of(HEAD);",
-                "historical view `sys.database.as_of`",
-            ),
-        ] {
-            let declared = checked(&[ModuleInput::new("main.orna", source)]);
-            assert!(
-                declared.is_ok(),
-                "{source}: {:#?}",
-                diagnostic_texts(&declared.diagnostics)
-            );
-            let analysis = admitted(&[ModuleInput::new("main.orna", source)]);
-            assert_eq!(
-                diagnostic_texts(&analysis.diagnostics),
-                [unlinked(member)],
-                "{source}"
-            );
-        }
-    }
-
-    /// Linked `sys` members are admitted. `sys.rt.info()` is one of them: ORNA-SYS-006
-    /// requires the runtime to expose the RuntimeInfo coordinates, which the production
-    /// host links (source/15-system.md:46).
-    #[test]
-    fn linked_sys_members_are_admitted() {
-        let analysis = admitted(&[ModuleInput::new(
-            "linked.orna",
-            "pub fn label(value: Blob): Blob = sys.blob.annotate(value, \"text/plain\");
-            pub fn capture(): Blob = sys.blob.capture_file(\"data\", \"input.bin\", 1024);
-            pub fn pause(stream: sys.StreamRef): Bool = sys.admin.pause_stream(stream);
-            pub fn resume(stream: sys.StreamRef): Bool = sys.admin.resume_stream(stream);
-            pub fn storage() = sys.Storage;
-            pub fn maintenance() = sys.MaintenanceJob;
-            pub fn info() = sys.rt.info();
-            pub fn plan() = sys.Storage | sys.explain();",
-        )]);
-        assert!(
-            analysis.is_ok(),
-            "{:#?}",
-            diagnostic_texts(&analysis.diagnostics)
-        );
-    }
-
-    #[test]
-    fn each_unlinked_sys_member_is_reported_once_per_analysis() {
-        let analysis = admitted(&[
-            ModuleInput::new(
-                "a.orna",
-                "pub fn first() = sys.snapshot(\"HEAD~1\"); pub fn second() = sys.snapshot(\"HEAD~1\");",
-            ),
-            ModuleInput::new("b.orna", "pub fn third() = sys.snapshot(\"HEAD~1\");"),
-        ]);
-        assert_eq!(
-            diagnostic_texts(&analysis.diagnostics),
-            [unlinked("portable system callable `sys.snapshot(Str)`")]
-        );
-    }
-
-    #[test]
-    fn provider_linkage_leaves_type_checking_unchanged() {
-        let source = [ModuleInput::new(
-            "typed.orna",
-            "pub fn head(): Int = sys.snapshot(\"HEAD~1\");",
-        )];
-        let declared = diagnostic_texts(&checked(&source).diagnostics);
-        let mut production = diagnostic_texts(&admitted(&source).diagnostics);
-        assert!(
-            declared.iter().any(|text| text.starts_with(DIAG_TYPE)),
-            "{declared:#?}"
-        );
-        let unlinked_member = unlinked("portable system callable `sys.snapshot(Str)`");
-        assert!(production.contains(&unlinked_member), "{production:#?}");
-        production.retain(|text| *text != unlinked_member);
-        assert_eq!(production, declared);
-    }
-
-    #[test]
-    fn repl_admission_rejects_unlinked_sys_members() {
-        let rejected = orna_syntax::parse_repl("sys.snapshot(\"HEAD~1\")");
-        assert!(rejected.is_ok());
-        let diagnostics = ReplContext::with_providers(SystemProviders::Production)
-            .stage(&rejected.value)
-            .expect_err("no production provider is linked for sys.snapshot(Str)");
-        assert_eq!(
-            diagnostic_texts(&diagnostics),
-            [unlinked("portable system callable `sys.snapshot(Str)`")]
-        );
-
-        assert!(ReplContext::empty().stage(&rejected.value).is_ok());
-        let project = admitted(&[ModuleInput::new("main.orna", "pub fn one(): Int = 1;")]);
-        assert!(
-            ReplContext::from_analysis(&project)
-                .unwrap()
-                .stage(&rejected.value)
-                .is_err(),
-            "a REPL built from a production analysis keeps its provider linkage"
-        );
-
-        let admitted_input = orna_syntax::parse_repl("sys.Storage");
-        assert!(admitted_input.is_ok());
-        assert!(
-            ReplContext::with_providers(SystemProviders::Production)
-                .stage(&admitted_input.value)
-                .is_ok()
-        );
-    }
-
-    #[test]
-    fn named_alias_glob_and_prelude_imports_resolve() {
-        let source = "pub fn f(x: Int): Int = x; pub fn p(): Bool = true;";
-        let a = checked(&[
-            ModuleInput::new("lib.orna", source).with_prelude_exports(["p"]),
-            ModuleInput::new(
-                "client.orna",
-                "use lib.{f}; use lib as l; use lib as _; fn g(x: Int) = f(x);",
-            ),
-        ]);
-        assert!(!has(&a, DIAG_IMPORT), "{:?}", a.diagnostics);
-        assert!(!has(&a, DIAG_UNRESOLVED));
-    }
-    #[test]
-    fn wildcard_ambiguity_is_stable() {
-        let a = checked(&[
-            ModuleInput::new("a.orna", "pub fn f(): Int = 1;"),
-            ModuleInput::new("b.orna", "pub fn f(): Int = 2;"),
-            ModuleInput::new("c.orna", "use a.*; use b.*; fn g() = f();"),
-        ]);
-        assert!(has(&a, DIAG_AMBIGUOUS));
-        let codes = a.diagnostics.iter().map(|d| d.code()).collect::<Vec<_>>();
-        assert_eq!(codes, {
-            let mut x = codes.clone();
-            x.sort();
-            x
-        });
-    }
-    #[test]
-    fn unresolved_name_and_omitted_parameter_annotation_are_diagnostics() {
-        let a = checked(&[ModuleInput::new("m.orna", "fn f(x) = missing;")]);
-        assert!(has(&a, DIAG_ANNOTATION));
-        assert!(has(&a, DIAG_UNRESOLVED));
-    }
-
-    #[test]
-    fn source_bindings_shadow_the_now_intrinsic() {
-        let function_analysis = checked(&[ModuleInput::new(
-            "function.orna",
-            "fn now(): Int = 7; fn use_now(): Int = now();",
-        )]);
-        assert!(
-            function_analysis.is_ok(),
-            "{:#?}",
-            function_analysis.diagnostics
-        );
-        assert_eq!(
-            function_analysis.modules.values().next().unwrap().symbols["use_now"].ty,
-            Type::Function {
-                parameters: vec![],
-                parameter_names: Some(vec![]),
-                default_parameters: BTreeSet::new(),
-                result: Box::new(Type::Int),
-            }
-        );
-
-        let value_analysis = checked(&[ModuleInput::new(
-            "value.orna",
-            "fn use_now(now: Int): Int = now;",
-        )]);
-        assert!(value_analysis.is_ok(), "{:#?}", value_analysis.diagnostics);
-        assert_eq!(
-            value_analysis.modules.values().next().unwrap().symbols["use_now"].ty,
-            Type::Function {
-                parameters: vec![Type::Int],
-                parameter_names: Some(vec!["now".into()]),
-                default_parameters: BTreeSet::new(),
-                result: Box::new(Type::Int),
-            }
-        );
-    }
-
-    #[test]
-    fn infers_primitive_record_list_and_function_without_any() {
-        let a = checked(&[ModuleInput::new(
-            "m.orna",
-            "fn record() = { a: 1, }; fn list() = [1, 2]; fn f(x: Int) = x;",
-        )]);
-        let m = a.modules.values().next().unwrap();
-        assert_eq!(
-            m.symbols.get("record").expect("record is collected").ty,
-            Type::Function {
-                parameters: vec![],
-                parameter_names: Some(vec![]),
-                default_parameters: BTreeSet::new(),
-                result: Box::new(Type::Record(BTreeMap::from([("a".into(), Type::Int)])))
-            }
-        );
-        assert_eq!(
-            m.symbols.get("list").expect("list is collected").ty,
-            Type::Function {
-                parameters: vec![],
-                parameter_names: Some(vec![]),
-                default_parameters: BTreeSet::new(),
-                result: Box::new(Type::List(Box::new(Type::Int)))
-            }
-        );
-        assert!(!has(&a, DIAG_TYPE));
-    }
-
-    #[test]
-    fn nested_optional_query_first_coalesces_with_integer_fallback() {
-        let analysis = checked(&[ModuleInput::new(
-            "query-coalesce.orna",
-            include_str!("../tests/fixtures/nested_optional_query_coalesce.orna"),
-        )]);
-
-        assert!(analysis.is_ok(), "diagnostics: {:?}", analysis.diagnostics);
-    }
-
-    #[test]
-    fn empty_lambda_blocks_match_empty_record_literals() {
-        let a = checked(&[ModuleInput::new(
-            "m.orna",
-            "pub fn makers() = [() => ({}), () => {},];",
-        )]);
-        assert!(
-            !has(&a, DIAG_TYPE),
-            "empty lambda records: {:?}",
-            a.diagnostics
-        );
-        let module = a.modules.values().next().expect("module is present");
-        let symbol = module.symbols.get("makers").expect("makers is collected");
-        assert_eq!(
-            symbol.ty,
-            Type::Function {
-                parameters: vec![],
-                parameter_names: Some(vec![]),
-                default_parameters: BTreeSet::new(),
-                result: Box::new(Type::List(Box::new(Type::Function {
-                    parameters: vec![],
-                    parameter_names: Some(vec![]),
-                    default_parameters: BTreeSet::new(),
-                    result: Box::new(Type::Record(BTreeMap::new())),
-                }))),
-            }
-        );
-    }
-
-    #[test]
-    fn duplicate_durable_consumers_are_rejected_before_execution() {
-        let a = analyze_with_catalogue(
-            &[ModuleInput::new(
-                "m.orna",
-                "pub fn main() = parallel([mail.google.sync, mail.google.sync]);",
-            )],
-            &Catalogue::authoritative_fixture(),
-        );
-        assert!(a.diagnostics.iter().any(|diagnostic| {
-            diagnostic.message()
-                == "same durable source consumed twice without distinct consumer identity"
-        }));
-    }
-
-    #[test]
-    fn durable_consumer_cannot_merge_multiple_source_roots() {
-        let a = analyze_with_catalogue(
-            &[ModuleInput::new(
-                "m.orna",
-                "pub fn main() = merge_streams([google.mail(), openbanking.transactions()]);",
-            )],
-            &Catalogue::authoritative_fixture(),
-        );
-        assert!(a.diagnostics.iter().any(|diagnostic| {
-            diagnostic.message().starts_with(
-                "a durable consumer function may own only one checkpointed source root",
-            )
-        }));
-    }
-
-    #[test]
-    fn fixture_provider_roots_reach_source_ownership_typechecking() {
-        let a = analyze_with_catalogue(
-            &[ModuleInput::new(
-                "examples/invalid/two-durable-sources.orna",
-                "pub fn main() = merge_streams([google.mail(), openbanking.transactions()]);",
-            )],
-            &Catalogue::authoritative_fixture(),
-        );
-        assert!(
-            !has(&a, DIAG_UNRESOLVED),
-            "provider roots resolved: {:?}",
-            a.diagnostics
-        );
-        assert!(a.diagnostics.iter().any(|diagnostic| {
-            diagnostic.message().starts_with(
-                "a durable consumer function may own only one checkpointed source root",
-            )
-        }));
-    }
-
-    #[test]
-    fn multiple_checkpointed_roots_explain_the_required_refactoring() {
-        let source = include_str!("../tests/fixtures/semantic_consumer_gap.orna");
-        let analysis = analyze_with_catalogue(
-            &[ModuleInput::new(
-                "examples/invalid/semantic-consumer-gap.orna",
-                source,
-            )],
-            &Catalogue::authoritative_fixture(),
-        );
-
-        assert!(
-            !has(&analysis, DIAG_UNRESOLVED),
-            "fixture provider roots must resolve before checking ownership: {:?}",
-            analysis.diagnostics
-        );
-        assert!(
-            analysis.diagnostics.iter().any(|diagnostic| {
-                diagnostic.message().contains(
-                    "a durable consumer function may own only one checkpointed source root",
-                ) && diagnostic
-                    .message()
-                    .contains("extract separate named consumer functions")
-            }),
-            "diagnostics: {:?}",
-            analysis.diagnostics
-        );
-    }
-
-    #[test]
-    fn assertion_plan_rejects_compile_time_boolean() {
-        let a = checked(&[ModuleInput::new("m.orna", "assert true;")]);
-        assert!(has(&a, DIAG_ASSERTION_SCOPE));
-        assert_eq!(
-            a.assertions.values().next().unwrap()[0].owner,
-            AssertionOwner::Module
-        );
-    }
-    #[test]
-    fn diagnostics_are_redacted_and_stable() {
-        let a = checked(&[ModuleInput::new("secret.orna", "fn f() = missing;")]);
-        let json = serde_json::to_string(&a.diagnostics[0]).unwrap();
-        assert!(!json.contains("secret.orna"));
-        assert!(!json.contains("missing"));
-    }
-
-    #[test]
-    fn shape_only_catalogue_does_not_invent_table_admission_rules() {
-        let catalogue = Catalogue::authoritative_fixture();
-        let order = &catalogue.attached_symbols["Order"];
-        assert_eq!(order.ty, Type::Named("Order".into()));
-        let schema = order.table_schema.as_ref().unwrap();
-        assert!(schema.fields.contains_key("customer"));
-        assert!(schema.admission.is_none());
-        let contact = &catalogue.modules[&Namespace(vec!["contacts".into()])].exports["Contact"];
-        assert_eq!(contact.ty, Type::Named("contacts.Contact".into()));
-        let admission = contact
-            .table_schema
-            .as_ref()
-            .unwrap()
-            .admission
-            .as_ref()
-            .unwrap();
-        assert_eq!(admission.required, BTreeSet::from(["name".into()]));
-        assert_eq!(admission.computed, BTreeSet::from(["full_name".into()]));
-        assert_eq!(admission.keys, vec![("id".into(), Type::Text)]);
-        assert!(!admission.automatic_key);
-    }
-
-    #[test]
-    fn type_diagnostics_do_not_serialize_non_identifier_catalogue_names() {
-        assert_eq!(
-            diagnostic_type_name(&Type::Named("bad/type".into())),
-            "<type>"
-        );
-        assert_eq!(
-            diagnostic_type_name(&Type::Applied {
-                base: "Float".into(),
-                arguments: vec![Type::Named("bad/type".into())],
-            }),
-            "Float<<type>>"
-        );
-    }
-    #[test]
-    fn ui_action_source_requires_explicit_provenance_and_input_type() {
-        let catalogue = Catalogue::authoritative_core();
-        let valid = analyze_with_catalogue(
-            &[ModuleInput::new(
-                "ui.orna",
-                r#"fn render() = std.ui.action("save", as: Text, debug_kind: "button");"#,
-            )],
-            &catalogue,
-        );
-        assert!(valid.is_ok(), "{:#?}", valid.diagnostics);
-
-        let missing_input = analyze_with_catalogue(
-            &[ModuleInput::new(
-                "ui.orna",
-                r#"fn render() = std.ui.action("save");"#,
-            )],
-            &catalogue,
-        );
-        assert!(has(&missing_input, DIAG_TYPE));
-    }
-    #[test]
-    fn loop_break_requires_an_inferred_result_contract() {
-        let analysis = checked(&[ModuleInput::new(
-            "loop-break.orna",
-            "fn invalid() { loop { break 1; } }",
-        )]);
-        assert!(analysis.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code() == DIAG_UNSUPPORTED
-                && diagnostic.message() == "break transfer requires a loop result contract"
-        }));
-    }
-    #[test]
-    fn structured_parameter_patterns_bind_recursively() {
-        let analysis = checked(&[ModuleInput::new(
-            "patterns.orna",
-            r#"
-                type Point {
-                    pub x: Int,
-                    pub y: Int,
-                }
-                fn tuple((left, (right, _)): (Int, (Int, Int))): Int = left + right;
-                fn list([head, tail]: [Int]): Int = head + tail;
-                fn record({name, count: total}: {name: Str, count: Int}): Int = total;
-                fn nominal({x, y: second}: Point): Int = x + second;
-            "#,
-        )]);
-        assert!(analysis.is_ok(), "{:#?}", analysis.diagnostics);
-    }
-
-    #[test]
-    fn structured_parameter_pattern_shape_errors_keep_type_diagnostic() {
-        let analysis = checked(&[ModuleInput::new(
-            "invalid-pattern.orna",
-            "fn wrong((first, second): (Int,)): Int = first;",
-        )]);
-        assert!(has(&analysis, DIAG_TYPE));
-    }
-}
+mod tests;

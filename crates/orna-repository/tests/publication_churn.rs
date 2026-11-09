@@ -407,9 +407,8 @@ async fn publication_reports_a_missing_row_index_root_as_unavailable() {
     )
     .await
     .expect_err("a missing row index root refuses the publication");
-    assert_eq!(
-        error,
-        orna_storage::Error::RepositoryUnavailable,
+    assert!(
+        matches!(error, orna_storage::Error::RepositoryUnavailable(_)),
         "a missing row index root is unavailable"
     );
 }

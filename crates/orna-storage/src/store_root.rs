@@ -72,9 +72,9 @@ impl NetRow {
     /// inserts and removes again needs none.
     fn index_mutations(self, key: &[u8]) -> Result<Vec<RowIndexMutation>, Error> {
         let delete =
-            || RowIndexMutation::delete_canonical(key).map_err(|_| Error::RepositoryUnavailable);
+            || RowIndexMutation::delete_canonical(key).map_err(Error::repository_unavailable);
         let insert = |value: &[u8]| {
-            RowIndexMutation::insert_canonical(key, value).map_err(|_| Error::RepositoryUnavailable)
+            RowIndexMutation::insert_canonical(key, value).map_err(Error::repository_unavailable)
         };
         match (self.committed, self.next) {
             (CommittedPresence::Absent, None) => Ok(Vec::new()),
@@ -173,9 +173,11 @@ pub(crate) fn build_frozen_publication_store_root(
 ) -> Result<FrozenStoreRoot, Error> {
     let format = repository
         .open_format_context_at_selector(expected_head.as_str())
-        .map_err(|_| Error::RepositoryUnavailable)?;
+        .map_err(Error::repository_unavailable)?;
     if format.repository_format() != RepositoryFormat::Format3 {
-        return Err(Error::RepositoryUnavailable);
+        return Err(Error::repository_unavailable_reason(
+            "publication snapshot is not format 3",
+        ));
     }
 
     let mut bases = BTreeMap::<[u8; 16], RelationBase>::new();
@@ -184,7 +186,9 @@ pub(crate) fn build_frozen_publication_store_root(
     for mutation in mutations {
         let relation_id = mutation
             .table_object_id()
-            .ok_or(Error::RepositoryUnavailable)?
+            .ok_or_else(|| {
+                Error::repository_unavailable_reason("runtime mutation has no table object id")
+            })?
             .bytes();
         let base = match bases.entry(relation_id) {
             std::collections::btree_map::Entry::Occupied(occupied) => occupied.into_mut(),
@@ -201,7 +205,7 @@ pub(crate) fn build_frozen_publication_store_root(
                     projected.key.clone(),
                     new_key.clone(),
                 )
-                .map_err(|_| Error::RepositoryUnavailable)?,
+                .map_err(Error::repository_unavailable)?,
             );
         }
         net_rows.fold(relation_id, projected, mutation.is_insert());
@@ -249,7 +253,7 @@ pub(crate) fn build_frozen_publication_store_root(
     let allocator_summary = if rows_changed {
         repository
             .allocator_summary_maintenance(expected_head)
-            .map_err(|_| Error::RepositoryUnavailable)?
+            .map_err(Error::repository_unavailable)?
     } else {
         None
     };
@@ -280,7 +284,7 @@ pub(crate) fn build_frozen_publication_store_root(
     }
     let store_root = repository
         .append_rekey_log(&format, &store_root, &logical_rekeys)
-        .map_err(|_| Error::RepositoryUnavailable)?;
+        .map_err(Error::repository_unavailable)?;
     Ok(FrozenStoreRoot {
         graph: first.graph,
         store_root,

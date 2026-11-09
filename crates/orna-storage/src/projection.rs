@@ -24,24 +24,34 @@ pub struct ProjectedRuntimeMutation {
 
 fn schema_descriptor_entry(schema: &SchemaDescriptor, number: i64) -> Result<&OvbRaw, Error> {
     let OvbRaw::Map(entries) = schema.raw() else {
-        return Err(Error::RepositoryUnavailable);
+        return Err(Error::repository_unavailable_reason(
+            "schema descriptor is not a map",
+        ));
     };
     let key = OvbRaw::Int(number.into());
     entries
         .iter()
         .find(|(candidate, _)| candidate == &key)
         .map(|(_, value)| value)
-        .ok_or(Error::RepositoryUnavailable)
+        .ok_or_else(|| {
+            Error::repository_unavailable_reason(format_args!(
+                "schema descriptor has no entry {number}"
+            ))
+        })
 }
 
 pub(crate) fn committed_projection_schema(
     descriptor: Cow<'_, SchemaDescriptor>,
 ) -> Result<CommittedProjectionSchema<'_>, Error> {
     let OvbRaw::Array(key_ids) = schema_descriptor_entry(&descriptor, 2)? else {
-        return Err(Error::RepositoryUnavailable);
+        return Err(Error::repository_unavailable_reason(
+            "schema key-id entry is not an array",
+        ));
     };
     let OvbRaw::Array(declared_fields) = schema_descriptor_entry(&descriptor, 3)? else {
-        return Err(Error::RepositoryUnavailable);
+        return Err(Error::repository_unavailable_reason(
+            "schema declared-fields entry is not an array",
+        ));
     };
     let text_primary_key = if key_ids.len() == 1 {
         let field = declared_fields
@@ -49,12 +59,23 @@ pub(crate) fn committed_projection_schema(
             .find(|candidate| {
                 matches!(candidate, OvbRaw::Array(parts) if parts.first() == key_ids.first())
             })
-            .ok_or(Error::RepositoryUnavailable)?;
+            .ok_or_else(|| {
+                Error::repository_unavailable_reason(
+                    "schema primary-key field is not declared",
+                )
+            })?;
         let OvbRaw::Array(parts) = field else {
-            return Err(Error::RepositoryUnavailable);
+            return Err(Error::repository_unavailable_reason(
+                "schema field declaration is not an array",
+            ));
         };
-        let OvbRaw::Array(type_node) = parts.get(2).ok_or(Error::RepositoryUnavailable)? else {
-            return Err(Error::RepositoryUnavailable);
+        let OvbRaw::Array(type_node) = parts.get(2).ok_or_else(|| {
+            Error::repository_unavailable_reason("schema primary-key type node is missing")
+        })?
+        else {
+            return Err(Error::repository_unavailable_reason(
+                "schema primary-key type node is not an array",
+            ));
         };
         matches!(
             type_node.as_slice(),
@@ -66,9 +87,13 @@ pub(crate) fn committed_projection_schema(
     };
     let stored_field_count = declared_fields.iter().try_fold(0usize, |count, field| {
         let OvbRaw::Array(parts) = field else {
-            return Err(Error::RepositoryUnavailable);
+            return Err(Error::repository_unavailable_reason(
+                "schema field declaration is not an array",
+            ));
         };
-        let role = parts.get(3).ok_or(Error::RepositoryUnavailable)?;
+        let role = parts.get(3).ok_or_else(|| {
+            Error::repository_unavailable_reason("schema field declaration has no role")
+        })?;
         Ok(count + usize::from(matches!(role, OvbRaw::Int(role) if role == &1.into())))
     })?;
     Ok(CommittedProjectionSchema {
@@ -89,17 +114,17 @@ fn project_runtime_key(
     bytes: &[u8],
 ) -> Result<Vec<u8>, Error> {
     let key = if schema.text_primary_key {
-        let text = std::str::from_utf8(bytes).map_err(|_| Error::RepositoryUnavailable)?;
+        let text = std::str::from_utf8(bytes).map_err(Error::repository_unavailable)?;
         TypedKey::Text(text.to_owned())
             .canonical_bytes()
-            .map_err(|_| Error::RepositoryUnavailable)?
+            .map_err(Error::repository_unavailable)?
     } else {
         bytes.to_vec()
     };
     schema
         .descriptor
         .validate_stored_key(relation_id, &key)
-        .map_err(|_| Error::RepositoryUnavailable)?;
+        .map_err(Error::repository_unavailable)?;
     Ok(key)
 }
 
@@ -128,7 +153,7 @@ pub(crate) fn project_runtime_mutation(
         .map(|bytes| {
             let row_key = rekey_to.as_deref().unwrap_or(key.as_slice());
             let decoded = ContextValue::decode_in_context(bytes, ValueFormat::Rov3, value_context)
-                .map_err(|_| Error::RepositoryUnavailable)?;
+                .map_err(Error::repository_unavailable)?;
             let fields = if schema
                 .descriptor
                 .validate_stored_row(relation_id, row_key, bytes)
@@ -142,14 +167,14 @@ pub(crate) fn project_runtime_mutation(
                     Raw::Array(vec![decoded.raw().clone()]),
                 )
                 .and_then(|value| value.encode())
-                .map_err(|_| Error::RepositoryUnavailable)?
+                .map_err(Error::repository_unavailable)?
             } else {
                 bytes.to_vec()
             };
             schema
                 .descriptor
                 .validate_stored_row(relation_id, row_key, &fields)
-                .map_err(|_| Error::RepositoryUnavailable)?;
+                .map_err(Error::repository_unavailable)?;
             Ok(fields)
         })
         .transpose()?;

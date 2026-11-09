@@ -11,9 +11,9 @@ mod repl;
 
 use std::collections::VecDeque;
 
-use orna_conformance::AdmittedReplSession;
 use orna_evaluator::Limits;
 use orna_live::live_presentation::{ResyncRequest, WatchPresentation};
+use orna_project_repl::AdmittedReplSession;
 use repl::{WatchCommandState, WatchFrameSource};
 
 const WATCH: [u8; 16] = [7; 16];

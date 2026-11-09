@@ -134,7 +134,7 @@ impl RuntimePublicationCoordinator {
             .hold_maintenance_lease()
             .map_err(|error| match error {
                 RepositoryError::RepositoryBusy => Error::RepositoryBusy,
-                _ => Error::RepositoryUnavailable,
+                other => Error::repository_unavailable(other),
             })?;
         let format = writable_snapshot_context(repository, expected_head)?;
         let mutations = runtime
@@ -166,20 +166,19 @@ impl RuntimePublicationCoordinator {
         }
         let candidate = repository
             .build_private_commit_with_store_root(expected_head, &graph, &store_root, message)
-            .map_err(|_| Error::RepositoryUnavailable)?;
+            .map_err(Error::repository_unavailable)?;
         // Store-only candidates still need a durable journal anchor. Keep the
         // format metadata file unchanged rather than projecting row keys into
         // legacy loose paths.
         let marker =
-            ManagedPath::new(".orna/database.orna").map_err(|_| Error::RepositoryUnavailable)?;
+            ManagedPath::new(".orna/database.orna").map_err(Error::repository_unavailable)?;
         let paths = [marker.clone()];
         let captured = repository
             .capture_managed_publication_state(expected_head, &expected_index, &paths)
             .map_err(map_publication_repository_error)?;
-        let expected = captured
-            .into_iter()
-            .next()
-            .ok_or(Error::RepositoryUnavailable)?;
+        let expected = captured.into_iter().next().ok_or_else(|| {
+            Error::repository_unavailable_reason("publication capture returned no managed state")
+        })?;
         let entry = PublicationJournalEntry::new(marker, expected.clone(), expected);
         let base_index_tree = expected_index
             .tree()
@@ -194,7 +193,7 @@ impl RuntimePublicationCoordinator {
         )
         .and_then(|journal| journal.with_store_root(&store_root))
         .and_then(|journal| journal.with_logical_rekeys(logical_rekeys))
-        .map_err(|_| Error::RepositoryUnavailable)?;
+        .map_err(Error::repository_unavailable)?;
         let protected_source_mutations = mutations
             .iter()
             .filter(|mutation| !mutation.protected_content_transfers().is_empty())
@@ -283,7 +282,7 @@ impl RuntimePublicationCoordinator {
         orna_repository::publication_crash_barrier("runtime-complete");
         repository
             .mark_runtime_complete(freeze.intent_id, &mut self.journal)
-            .map_err(|_| Error::RepositoryUnavailable)?;
+            .map_err(Error::repository_unavailable)?;
         self.protected_source_mutations.clear();
         Ok(())
     }
@@ -346,7 +345,7 @@ impl RuntimePublicationCoordinator {
                 .map_err(|_| Error::RuntimeUnavailable)?;
             return repository
                 .recover_publication()
-                .map_err(|_| Error::RepositoryUnavailable);
+                .map_err(map_publication_repository_error);
         }
 
         match repository.recover_publication() {
@@ -374,11 +373,11 @@ impl RuntimePublicationCoordinator {
             .map_err(|_| Error::RuntimeUnavailable)?;
         repository
             .mark_runtime_complete(intent_id, &mut journal)
-            .map_err(|_| Error::RepositoryUnavailable)?;
+            .map_err(Error::repository_unavailable)?;
         repository
             .index_generation()
             .map(Some)
-            .map_err(|_| Error::RepositoryUnavailable)
+            .map_err(Error::repository_unavailable)
     }
 }
 
@@ -416,7 +415,7 @@ pub fn writable_snapshot_context(
 ) -> Result<HistoricalFormatContext, Error> {
     let context = repository
         .open_format_context_at_selector(snapshot.as_str())
-        .map_err(|_| Error::RepositoryUnavailable)?;
+        .map_err(Error::repository_unavailable)?;
     match context.repository_format() {
         RepositoryFormat::Format3 => Ok(context),
         legacy => Err(Error::LegacyReadOnly {
@@ -825,6 +824,73 @@ mod tests {
         assert_eq!(
             fs::read_to_string(temp.path().join("ordinary.txt")).unwrap(),
             "later\n"
+        );
+    }
+
+    /// ORNA-PUB-011 and the recovery row "Index or affected path differs from
+    /// both recorded states": once the runtime tail is consumed, an index that
+    /// moved after reconciliation is a typed index conflict. It keeps the
+    /// journal, the moved index and the edited file intact.
+    #[tokio::test]
+    async fn coordinator_recovery_after_runtime_completion_reports_a_moved_index() {
+        let (temp, repository) = repository();
+        let (runtime, freeze) = frozen_runtime(&repository).await;
+        let head = repository.head().unwrap().unwrap();
+        let index = repository.index_generation().unwrap();
+        let path = ManagedPath::new("generated/row.orna").unwrap();
+        let candidate = repository
+            .build_private_commit(
+                &head,
+                &[ManagedFileChange::new(path.clone(), Some(b"row".to_vec()))],
+                "orna: publish runtime data",
+            )
+            .unwrap();
+        let mut journal = PublicationJournal::new_with_runtime_intent(
+            head,
+            candidate.commit().clone(),
+            index.tree().unwrap().clone(),
+            freeze.intent_id,
+            vec![PublicationJournalEntry::new(
+                path.clone(),
+                None,
+                Some(b"row".to_vec()),
+            )],
+        )
+        .unwrap();
+        repository
+            .publish_candidate(&index, &candidate, &mut journal)
+            .unwrap();
+        let commit = publication_commit_id(journal.new_head()).unwrap();
+        runtime
+            .complete_publication(&freeze, &commit)
+            .await
+            .unwrap();
+        // Crash boundary after the RuntimeCompleted journal write and before
+        // the Complete write: recovery must finish the repository step.
+        journal
+            .advance(orna_repository::PublicationJournalStage::RuntimeCompleted)
+            .unwrap();
+        repository.write_publication_journal(&journal).unwrap();
+        fs::write(temp.path().join("generated/row.orna"), "edited\n").unwrap();
+        git(temp.path(), &["add", "generated/row.orna"]);
+        let moved_index = repository.index_generation().unwrap();
+
+        assert_eq!(
+            RuntimePublicationCoordinator::recover(&repository, &runtime).await,
+            Err(Error::RecoveryIndexConflict)
+        );
+        let journal = repository
+            .read_publication_journal()
+            .unwrap()
+            .expect("a typed index conflict keeps the journal");
+        assert_eq!(
+            journal.stage(),
+            orna_repository::PublicationJournalStage::RuntimeCompleted
+        );
+        assert_eq!(repository.index_generation().unwrap(), moved_index);
+        assert_eq!(
+            fs::read_to_string(temp.path().join("generated/row.orna")).unwrap(),
+            "edited\n"
         );
     }
 

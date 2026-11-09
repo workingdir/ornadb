@@ -21,7 +21,7 @@ use std::{
 
 use sha2::{Digest, Sha256};
 
-use crate::hex::hex_encode;
+use crate::hex::{hex_decode, hex_encode};
 
 const INDEX_FILE: &str = "index.tsv";
 const MEDIA_DIR: &str = "media";
@@ -248,7 +248,7 @@ impl OfflineCopy {
             match fields.as_slice() {
                 ["row", key, media_type, suffix, length, sha256, has_payload] => {
                     rows.push(OfflineRowMetadata {
-                        key: unhex(key).ok_or(OfflineCopyError::InvalidBundle("row key"))?,
+                        key: hex_decode(key).ok_or(OfflineCopyError::InvalidBundle("row key"))?,
                         media_type: (*media_type).to_owned(),
                         suffix: (*suffix != "-").then(|| (*suffix).to_owned()),
                         length: length
@@ -723,19 +723,45 @@ fn verify_payload_stream(
     Ok(())
 }
 
-fn unhex(text: &str) -> Option<Vec<u8>> {
-    if !text.len().is_multiple_of(2) {
-        return None;
-    }
-    text.as_bytes()
-        .chunks_exact(2)
-        .map(|pair| {
-            let digits = std::str::from_utf8(pair).ok()?;
-            u8::from_str_radix(digits, 16).ok()
-        })
-        .collect()
+fn unhex_digest(text: &str) -> Option<[u8; 32]> {
+    hex_decode(text)?.try_into().ok()
 }
 
-fn unhex_digest(text: &str) -> Option<[u8; 32]> {
-    unhex(text)?.try_into().ok()
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bundle(row_key: &str, digest: &str) -> tempfile::TempDir {
+        let directory = tempfile::TempDir::new().expect("temporary bundle");
+        let index = format!("{HEADER}\nrow\t{row_key}\timage/png\t-\t0\t{digest}\t0\n");
+        fs::write(directory.path().join(INDEX_FILE), index).expect("write index");
+        directory
+    }
+
+    /// A bundle is written by this crate with [`hex_encode`], so opening one
+    /// accepts only that spelling. Uppercase and signed/radix forms are not a
+    /// second spelling of the same key or digest.
+    #[test]
+    fn index_hex_fields_require_the_canonical_lowercase_spelling() {
+        let canonical_digest = "00".repeat(32);
+        let canonical = bundle("0a0b", &canonical_digest);
+        assert!(OfflineCopy::open(canonical.path()).is_ok());
+
+        for noncanonical in ["0A0B", "+a0b"] {
+            let directory = bundle(noncanonical, &canonical_digest);
+            assert!(
+                matches!(
+                    OfflineCopy::open(directory.path()),
+                    Err(OfflineCopyError::InvalidBundle("row key"))
+                ),
+                "{noncanonical:?}"
+            );
+        }
+        let uppercase_digest = "AA".repeat(32);
+        let directory = bundle("0a0b", &uppercase_digest);
+        assert!(matches!(
+            OfflineCopy::open(directory.path()),
+            Err(OfflineCopyError::InvalidBundle("row digest"))
+        ));
+    }
 }

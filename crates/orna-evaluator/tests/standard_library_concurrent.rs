@@ -1,5 +1,6 @@
-use orna_evaluator::{AdmittedReplSession, Limits, SysHostBindingRegistry};
+use orna_evaluator::{Limits, SysHostBindingRegistry};
 use orna_foundation::CanonicalValue;
+use orna_project_repl::AdmittedReplSession;
 use orna_sys::ClockProvider;
 use orna_value::Raw;
 use std::time::Duration;

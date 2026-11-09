@@ -120,7 +120,7 @@ pub(crate) fn plan(
             "`{new_name}` is not a valid name: use an identifier that is not a reserved word"
         )));
     }
-    if let Some(reason) = &workspace.incomplete {
+    if let Some(reason) = workspace.incomplete() {
         return Err(Refusal::new(format!(
             "the project could not be loaded ({reason}), so every reference to `{old_name}` cannot be found"
         )));

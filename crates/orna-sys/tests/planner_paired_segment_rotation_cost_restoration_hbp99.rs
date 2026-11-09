@@ -1,14 +1,13 @@
 use std::collections::BTreeMap;
 
 use orna_sys::{
-    ExplainError, ExpressionRef, MutableBranchSnapshot, ObjectRef, PlanDetail, PlanNode,
-    PlanNodeKind, QueryJoinDescription, QueryJoinPairIdentityDescription,
+    ExplainError, ExplainInputs, ExpressionRef, MutableBranchSnapshot, ObjectRef, PlanDetail,
+    PlanNode, PlanNodeKind, QueryJoinDescription, QueryJoinPairIdentityDescription,
     QueryPairedCheckpointSegmentCompactionChainDescription,
     QueryPairedCheckpointSegmentCompactionStepDescription,
     QueryPairedSegmentRotationChainDescription, QueryPairedSegmentRotationDescription,
     QueryPartialIndexDescription, QueryPlanDescription, QuerySourceStatistics, SnapshotRef,
-    explain_query_with_partial_indexes_and_join_pair_identities,
-    explain_query_with_partial_indexes_and_paired_checkpoint_compaction_and_segment_rotation_chains,
+    explain_query_with,
 };
 
 const FIXTURE: &str =
@@ -232,12 +231,15 @@ fn plan(
     checkpoint_chains: &[QueryPairedCheckpointSegmentCompactionChainDescription],
     rotation_chains: &[QueryPairedSegmentRotationChainDescription],
 ) -> orna_sys::ExplainedPlan {
-    explain_query_with_partial_indexes_and_paired_checkpoint_compaction_and_segment_rotation_chains(
+    explain_query_with(
         &query(generation_a),
-        &indexes(),
-        &pairs(),
-        checkpoint_chains,
-        rotation_chains,
+        ExplainInputs {
+            partial_indexes: &indexes(),
+            join_pair_identities: &pairs(),
+            checkpoint_compaction_chains: checkpoint_chains,
+            segment_rotation_chains: rotation_chains,
+            ..ExplainInputs::default()
+        },
     )
     .expect("paired segment rotation chains fold into the branch-local plan")
 }
@@ -492,10 +494,13 @@ fn segment_rotation_cost_fold_nests_checkpoint_lineage_and_survives_sparse_joins
         after_beta
     );
 
-    let no_lineage = explain_query_with_partial_indexes_and_join_pair_identities(
+    let no_lineage = explain_query_with(
         &query(4),
-        &indexes(),
-        &pairs(),
+        ExplainInputs {
+            partial_indexes: &indexes(),
+            join_pair_identities: &pairs(),
+            ..ExplainInputs::default()
+        },
     )
     .expect("ordinary plan without lineage remains valid");
     assert_ne!(baseline.plan().id(), no_lineage.plan().id());
@@ -507,12 +512,15 @@ fn segment_rotation_chains_reject_wrong_branch_pair_and_incomplete_pairs() {
     let mut wrong_branch = rotation_chains(4, "v1");
     wrong_branch[0].branch.generation = 44;
     assert_eq!(
-        explain_query_with_partial_indexes_and_paired_checkpoint_compaction_and_segment_rotation_chains(
+        explain_query_with(
             &query(4),
-            &indexes(),
-            &pairs(),
-            &checkpoints,
-            &wrong_branch,
+            ExplainInputs {
+                partial_indexes: &indexes(),
+                join_pair_identities: &pairs(),
+                checkpoint_compaction_chains: &checkpoints,
+                segment_rotation_chains: &wrong_branch,
+                ..ExplainInputs::default()
+            },
         ),
         Err(ExplainError::InvalidObject),
     );
@@ -520,12 +528,15 @@ fn segment_rotation_chains_reject_wrong_branch_pair_and_incomplete_pairs() {
     let mut wrong_pair = rotation_chains(4, "v1");
     wrong_pair[0].join_pair_identity = object("pair:table:Middle");
     assert_eq!(
-        explain_query_with_partial_indexes_and_paired_checkpoint_compaction_and_segment_rotation_chains(
+        explain_query_with(
             &query(4),
-            &indexes(),
-            &pairs(),
-            &checkpoints,
-            &wrong_pair,
+            ExplainInputs {
+                partial_indexes: &indexes(),
+                join_pair_identities: &pairs(),
+                checkpoint_compaction_chains: &checkpoints,
+                segment_rotation_chains: &wrong_pair,
+                ..ExplainInputs::default()
+            },
         ),
         Err(ExplainError::InvalidObject),
     );
@@ -533,12 +544,15 @@ fn segment_rotation_chains_reject_wrong_branch_pair_and_incomplete_pairs() {
     let mut invalid_segment = rotation_chains(4, "v1");
     invalid_segment[0].rotations[0].right_segment_identity = object("");
     assert_eq!(
-        explain_query_with_partial_indexes_and_paired_checkpoint_compaction_and_segment_rotation_chains(
+        explain_query_with(
             &query(4),
-            &indexes(),
-            &pairs(),
-            &checkpoints,
-            &invalid_segment,
+            ExplainInputs {
+                partial_indexes: &indexes(),
+                join_pair_identities: &pairs(),
+                checkpoint_compaction_chains: &checkpoints,
+                segment_rotation_chains: &invalid_segment,
+                ..ExplainInputs::default()
+            },
         ),
         Err(ExplainError::InvalidObject),
     );

@@ -748,7 +748,7 @@ pub(super) fn describe_storage_failure(
             "the selected snapshot moved during publication; retry on the new snapshot".to_owned()
         }
         E::RuntimeUnavailable => "local runtime state is unavailable".to_owned(),
-        E::RepositoryUnavailable => "the backing repository is unavailable".to_owned(),
+        E::RepositoryUnavailable(_) => "the backing repository is unavailable".to_owned(),
         E::RepositoryMalformed(error) => format_context_detail(error),
         other => format!("{other}"),
     };

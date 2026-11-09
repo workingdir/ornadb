@@ -1,10 +1,16 @@
-use super::{
-    CheckpointKey, GitCommitRef, Repository, RuntimeError, RuntimeState, StreamCheckpoint,
-    StreamHandler, StreamSource, StreamStep, StreamStepError, WriterLease,
-    ensure_stream_checkpoint, load_stream_checkpoint, load_stream_lease,
-    read_checkpoint_snapshot_watermark, stream_key_id,
+use crate::RuntimeState;
+use crate::checkpoint_snapshot::read_checkpoint_snapshot_watermark;
+use crate::error::RuntimeError;
+use crate::lease::WriterLease;
+use crate::stream_run::{StreamStep, StreamStepError};
+use crate::stream_source::{StreamHandler, StreamSource};
+use crate::stream_store::{
+    ensure_stream_checkpoint, load_stream_checkpoint, load_stream_lease, stream_key_id,
 };
 use libsql::{TransactionBehavior, params};
+use orna_repository::{GitCommitRef, Repository};
+use orna_stream::Checkpoint as StreamCheckpoint;
+use orna_stream::CheckpointKey;
 
 impl RuntimeState {
     /// Bootstraps from the selected immutable fetched commit and performs the
@@ -52,8 +58,7 @@ impl RuntimeState {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         self.require_owner(&transaction, writer).await?;
         ensure_stream_checkpoint(&transaction, key).await?;
 
@@ -63,12 +68,10 @@ impl RuntimeState {
                 "SELECT selected_commit FROM stream_checkpoint_bootstrap WHERE key_id = ?1",
                 params![key_id.clone()],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let already_selected = rows
             .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .await?
             .map(|row| {
                 row.get::<String>(0)
                     .map_err(|_| RuntimeError::RecoveryInvalid)
@@ -76,10 +79,7 @@ impl RuntimeState {
             .transpose()?;
         if already_selected.as_deref() == Some(selected_commit.as_str()) {
             let checkpoint = load_stream_checkpoint(&transaction, key).await?;
-            transaction
-                .commit()
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            transaction.commit().await?;
             return Ok(checkpoint);
         }
 
@@ -102,22 +102,19 @@ impl RuntimeState {
                         .map(|position| position.token.as_str().to_owned()),
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         transaction
             .execute(
                 "DELETE FROM stream_checkpoint_history WHERE key_id = ?1",
                 params![key_id.clone()],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         transaction
             .execute(
                 "DELETE FROM stream_provider_failure WHERE key_id = ?1",
                 params![key_id.clone()],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         transaction
             .execute(
                 "INSERT INTO stream_checkpoint_bootstrap (key_id, selected_commit)
@@ -125,13 +122,9 @@ impl RuntimeState {
                  ON CONFLICT(key_id) DO UPDATE SET selected_commit = excluded.selected_commit",
                 params![key_id, selected_commit.as_str().to_owned()],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
 
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction.commit().await?;
         Ok(selected_checkpoint)
     }
 }
