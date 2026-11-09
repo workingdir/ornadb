@@ -6477,6 +6477,46 @@ impl Repository {
         extra_paths: &[ManagedPath],
         include_ignored: bool,
     ) -> Result<([u8; 32], Vec<ManagedStamp>), RepositoryError> {
+        let paths = self.worktree_scan_paths(extra_paths, include_ignored)?;
+        // Regular-file sections come from the previous scan when their stamp is
+        // unchanged and settled (see `stamp_settled_before`). The cache is
+        // replaced by this scan's sections, so it never outlives one observation
+        // of each path.
+        let previous = self
+            .section_cache
+            .lock()
+            .map(|mut cache| std::mem::take(&mut *cache))
+            .unwrap_or_default();
+        let mut next = HashMap::new();
+        let mut digest = Sha256::new();
+        digest.update(b"ORNA-WORKTREE-CONTENT-V2\0");
+        let mut stamps = Vec::with_capacity(paths.len());
+        for encoded_path in paths {
+            let path =
+                String::from_utf8(encoded_path).map_err(|_| RepositoryError::UnsafeManagedPath)?;
+            // Worktree paths are local user data: untracked `Sub/.GIT/` is legal,
+            // so only the structural check applies here.
+            let path = ManagedPath::from_worktree_listing(&path)?;
+            let (stamp, cache_entry) = self.scan_worktree_path(&path, &previous, &mut digest)?;
+            stamps.push(stamp);
+            if let Some((key, entry)) = cache_entry {
+                next.insert(key, entry);
+            }
+        }
+        if let Ok(mut cache) = self.section_cache.lock() {
+            *cache = next;
+        }
+        Ok((digest.finalize().into(), stamps))
+    }
+
+    /// Collects every worktree path one content scan observes: unstaged and
+    /// staged changes, untracked files (and ignored ones when asked), plus the
+    /// caller's extra paths.
+    fn worktree_scan_paths(
+        &self,
+        extra_paths: &[ManagedPath],
+        include_ignored: bool,
+    ) -> Result<BTreeSet<Vec<u8>>, RepositoryError> {
         let mut paths = BTreeSet::new();
         for path in self
             .git_bytes(["diff", "--no-renames", "--name-only", "-z", "--"])?
@@ -6525,80 +6565,66 @@ impl Repository {
         for path in extra_paths {
             paths.insert(path.as_path().as_os_str().as_encoded_bytes().to_vec());
         }
-        // Regular-file sections come from the previous scan when their stamp is
-        // unchanged and settled (see `stamp_settled_before`). The cache is
-        // replaced by this scan's sections, so it never outlives one observation
-        // of each path.
-        let previous = self
-            .section_cache
-            .lock()
-            .map(|mut cache| std::mem::take(&mut *cache))
-            .unwrap_or_default();
-        let mut next = HashMap::new();
-        let mut digest = Sha256::new();
-        digest.update(b"ORNA-WORKTREE-CONTENT-V2\0");
-        let mut stamps = Vec::with_capacity(paths.len());
-        for encoded_path in paths {
-            let path =
-                String::from_utf8(encoded_path).map_err(|_| RepositoryError::UnsafeManagedPath)?;
-            // Worktree paths are local user data: untracked `Sub/.GIT/` is legal,
-            // so only the structural check applies here.
-            let path = ManagedPath::from_worktree_listing(&path)?;
-            let encoded_path = path.as_path().as_os_str().as_encoded_bytes();
-            digest.update((encoded_path.len() as u64).to_be_bytes());
-            digest.update(encoded_path);
-            let key = encoded_path.to_vec();
-            let target = self.worktree.join(path.as_path());
-            let metadata = match fs::symlink_metadata(&target) {
-                Ok(metadata) => Some(metadata),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                Err(_) => return Err(RepositoryError::LocalStateUnavailable),
-            };
-            stamps.push(ManagedStamp {
-                path,
-                stamp: metadata.as_ref().map(Self::managed_file_stamp),
-            });
-            match metadata {
-                Some(metadata) if metadata.file_type().is_symlink() => {
-                    digest.update([1]);
-                    let link = fs::read_link(&target)
-                        .map_err(|_| RepositoryError::LocalStateUnavailable)?;
-                    let link = link.as_os_str().as_encoded_bytes();
-                    digest.update((link.len() as u64).to_be_bytes());
-                    digest.update(link);
-                }
-                Some(metadata) if metadata.is_file() => {
-                    digest.update([2]);
-                    digest.update([Self::worktree_executable_marker(&metadata)]);
-                    let file_stamp = Self::managed_file_stamp(&metadata);
-                    let (section, entry) = match previous.get(&key) {
-                        Some(cached) if cached.stamp == file_stamp => {
-                            (cached.digest, Some(cached.clone()))
-                        }
-                        _ => {
-                            let read_started = std::time::SystemTime::now();
-                            let section = Self::file_section_digest(&target)?;
-                            let settled = Self::stamp_settled_before(&file_stamp, read_started);
-                            let entry = settled.then_some(CachedFileDigest {
-                                stamp: file_stamp,
-                                digest: section,
-                            });
-                            (section, entry)
-                        }
-                    };
-                    if let Some(entry) = entry {
-                        next.insert(key, entry);
-                    }
-                    digest.update(section);
-                }
-                Some(_) => digest.update([3]),
-                None => digest.update([0]),
+        Ok(paths)
+    }
+
+    /// Hashes one worktree path into `digest` and returns its stamp plus the
+    /// cache entry to carry forward when a regular file's section was reused.
+    fn scan_worktree_path(
+        &self,
+        path: &ManagedPath,
+        previous: &HashMap<Vec<u8>, CachedFileDigest>,
+        digest: &mut Sha256,
+    ) -> Result<(ManagedStamp, Option<(Vec<u8>, CachedFileDigest)>), RepositoryError> {
+        let encoded_path = path.as_path().as_os_str().as_encoded_bytes();
+        digest.update((encoded_path.len() as u64).to_be_bytes());
+        digest.update(encoded_path);
+        let key = encoded_path.to_vec();
+        let target = self.worktree.join(path.as_path());
+        let metadata = match fs::symlink_metadata(&target) {
+            Ok(metadata) => Some(metadata),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => return Err(RepositoryError::LocalStateUnavailable),
+        };
+        let stamp = ManagedStamp {
+            path: path.clone(),
+            stamp: metadata.as_ref().map(Self::managed_file_stamp),
+        };
+        match metadata {
+            Some(metadata) if metadata.file_type().is_symlink() => {
+                digest.update([1]);
+                let link =
+                    fs::read_link(&target).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+                let link = link.as_os_str().as_encoded_bytes();
+                digest.update((link.len() as u64).to_be_bytes());
+                digest.update(link);
             }
+            Some(metadata) if metadata.is_file() => {
+                digest.update([2]);
+                digest.update([Self::worktree_executable_marker(&metadata)]);
+                let file_stamp = Self::managed_file_stamp(&metadata);
+                let (section, entry) = match previous.get(&key) {
+                    Some(cached) if cached.stamp == file_stamp => {
+                        (cached.digest, Some(cached.clone()))
+                    }
+                    _ => {
+                        let read_started = std::time::SystemTime::now();
+                        let section = Self::file_section_digest(&target)?;
+                        let settled = Self::stamp_settled_before(&file_stamp, read_started);
+                        let entry = settled.then_some(CachedFileDigest {
+                            stamp: file_stamp,
+                            digest: section,
+                        });
+                        (section, entry)
+                    }
+                };
+                digest.update(section);
+                return Ok((stamp, entry.map(|entry| (key, entry))));
+            }
+            Some(_) => digest.update([3]),
+            None => digest.update([0]),
         }
-        if let Ok(mut cache) = self.section_cache.lock() {
-            *cache = next;
-        }
-        Ok((digest.finalize().into(), stamps))
+        Ok((stamp, None))
     }
 
     /// Hashes one regular file's length and bytes as a standalone section, so
