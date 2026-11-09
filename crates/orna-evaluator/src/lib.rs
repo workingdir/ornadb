@@ -5220,6 +5220,7 @@ struct StreamRunContext<'a> {
 
 /// Outcome of filling the Blob ABI slots: ready values, or a terminal result
 /// from the `from_bytes` entry point.
+#[cfg(feature = "system-host-bindings")]
 enum BlobArguments {
     Ready {
         values: Vec<ContextValue>,
@@ -9320,6 +9321,7 @@ impl Context<'_, '_> {
     /// Fills every declared Blob ABI slot and converts each value to the
     /// argument the generated contract admits. `from_bytes` is terminal: it
     /// builds the annotated Blob itself, so the caller returns it directly.
+    #[cfg(feature = "system-host-bindings")]
     fn blob_argument_values(
         &mut self,
         function: orna_sys::SysFunction,
@@ -9369,6 +9371,7 @@ impl Context<'_, '_> {
 
     /// Runs the read entry point and converts its tagged result back to a
     /// source-level value.
+    #[cfg(feature = "system-host-bindings")]
     fn blob_read_value(
         &mut self,
         function: orna_sys::SysFunction,
