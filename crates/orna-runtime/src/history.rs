@@ -171,7 +171,7 @@ fn historical_snapshot_id(capture: &CwdCapture) -> [u8; 32] {
     // the mutable-data digest out of this stable logical key; CwdCapture still
     // carries that digest for exact context validation.
     match capture.snapshot() {
-        Snapshot::Cwd { id, .. } => *id,
+        Snapshot::Cwd { id, .. } => id,
         Snapshot::Commit { .. } => unreachable!("CwdCapture only contains CWD snapshots"),
     }
 }
@@ -444,7 +444,7 @@ impl RuntimeState {
             _ => return Err(RuntimeError::SnapshotNotFound),
         };
         let resolved = self.select_historical_snapshot(generation).await?;
-        if resolved.capture.snapshot() != &canonical || resolved.snapshot_id() != *id {
+        if resolved.capture.snapshot() != canonical || resolved.snapshot_id() != *id {
             return Err(RuntimeError::SnapshotContextMismatch);
         }
         Ok(resolved)

@@ -818,7 +818,7 @@ impl ApplicationAuthority {
         // The activation can name its admitted tables and the system relations
         // it serves from publication metadata, at its pinned CWD snapshot.
         let explain_catalogue = orna_evaluator::ActivationExplainCatalogue::new(
-            context.capture().snapshot(),
+            &context.capture().snapshot(),
             tables.keys().map(String::as_str).chain(
                 publication_rows
                     .is_some()
@@ -3675,7 +3675,7 @@ impl ApplicationLiveAdapter {
         if let Some(context) = context {
             handler.explain_catalogue = Some(
                 orna_evaluator::ActivationExplainCatalogue::new(
-                    context.capture().snapshot(),
+                    &context.capture().snapshot(),
                     handler.tables.keys().map(String::as_str),
                 )
                 .map_err(|_| LiveError::ApplicationRejected)?,

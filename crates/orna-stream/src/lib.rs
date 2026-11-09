@@ -1756,12 +1756,14 @@ mod tests {
         let predicate = ExpressionRef::from_row_ref(diagnostic_row("predicate"));
         let source_span = SourceSpan::new(
             diagnostic_file(),
-            24.into(),
-            53.into(),
-            2.into(),
-            5.into(),
-            4.into(),
-            11.into(),
+            orna_foundation::SourceSpanExtent {
+                start_byte: 24.into(),
+                end_byte: 53.into(),
+                start_line: 2.into(),
+                start_column: 5.into(),
+                end_line: 4.into(),
+                end_column: 11.into(),
+            },
         )
         .unwrap();
         let witness = SafeAssertionWitness::from_safe_presentation(
@@ -1806,12 +1808,14 @@ mod tests {
             ExpressionRef::from_row_ref(diagnostic_row("predicate")),
             SourceSpan::new(
                 diagnostic_file(),
-                1.into(),
-                2.into(),
-                1.into(),
-                2.into(),
-                1.into(),
-                3.into(),
+                orna_foundation::SourceSpanExtent {
+                    start_byte: 1.into(),
+                    end_byte: 2.into(),
+                    start_line: 1.into(),
+                    start_column: 2.into(),
+                    end_line: 1.into(),
+                    end_column: 3.into(),
+                },
             )
             .unwrap(),
             None,
