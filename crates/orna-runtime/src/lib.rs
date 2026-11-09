@@ -18515,19 +18515,18 @@ async fn record_published_prefix_tx(
 
 /// Decodes a stored writer epoch.
 ///
-/// The `writer_lease` and `takeover_recovery_pending` schemas forbid a zero
-/// epoch (`CHECK (epoch > 0)` / `CHECK (owner_epoch > 0)`), so a stored zero
-/// means the row contradicts the schema and the store cannot supply the
-/// required data: `sys.storage.unavailable`
+/// The `writer_lease` and `takeover_recovery_pending` schemas admit only a
+/// positive epoch (`CHECK (epoch > 0)` / `CHECK (owner_epoch > 0)`), so a
+/// stored zero or negative value means the row contradicts the schema and the
+/// store cannot supply the required data: `sys.storage.unavailable`
 /// (`reference/Orna-1.1.0/source/34-system-reference.md:3533`). Every reader
 /// of a stored lease or fence row uses this decoder so that corrupted row has
 /// one code instead of the caller-input validator's `InvalidIdentity`.
 fn decode_stored_epoch(epoch: i64) -> Result<u64, RuntimeError> {
-    let epoch = u64::try_from(epoch).map_err(|_| RuntimeError::RecoveryInvalid)?;
-    if epoch == 0 {
+    if epoch <= 0 {
         return Err(RuntimeError::StorageUnavailable);
     }
-    Ok(epoch)
+    Ok(epoch as u64)
 }
 
 /// Decodes one stored `(owner_id, epoch)` lease or takeover-fence row.
