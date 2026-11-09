@@ -11111,8 +11111,9 @@ impl RuntimeState {
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         self.require_recovery_owner(&transaction, replacement)
             .await?;
-        self.clear_takeover_recovery_if_resolved(&transaction, replacement, true)
-            .await?;
+        self.settle_takeover_barrier(&transaction, replacement)
+            .await?
+            .require_clear()?;
         transaction
             .commit()
             .await
@@ -11120,15 +11121,15 @@ impl RuntimeState {
     }
 
     /// Removes the matching takeover fence only after every Running request
-    /// is terminal. Recovery callers use the non-strict form so the final
-    /// row recovery and fence removal commit together; explicit completion
-    /// uses the strict form and reports a still-pending barrier.
-    async fn clear_takeover_recovery_if_resolved(
+    /// is terminal, and reports which side of that line the runtime is on.
+    /// Request recovery ignores a still-pending result so the final row
+    /// recovery and the fence removal commit together; explicit completion
+    /// and ordinary writers turn it into `RecoveryPending`.
+    async fn settle_takeover_barrier(
         &self,
         transaction: &Connection,
         replacement: WriterLease,
-        strict: bool,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<TakeoverBarrier, RuntimeError> {
         let mut fence = transaction
             .query(
                 "SELECT owner_id, owner_epoch FROM takeover_recovery_pending
@@ -11142,7 +11143,7 @@ impl RuntimeState {
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?
         else {
-            return Ok(());
+            return Ok(TakeoverBarrier::Clear);
         };
         let owner = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
         let epoch: i64 = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
@@ -11162,11 +11163,7 @@ impl RuntimeState {
             .map_err(|_| RuntimeError::StorageUnavailable)?
             .is_some()
         {
-            return if strict {
-                Err(RuntimeError::RecoveryPending)
-            } else {
-                Ok(())
-            };
+            return Ok(TakeoverBarrier::Pending);
         }
         let cleared = transaction
             .execute(
@@ -11182,7 +11179,7 @@ impl RuntimeState {
         if cleared != 1 {
             return Err(RuntimeError::RecoveryPending);
         }
-        Ok(())
+        Ok(TakeoverBarrier::Clear)
     }
 
     /// Compatibility handover for callers that only have the prior owner ID.
@@ -13707,8 +13704,7 @@ impl RuntimeState {
             external_effects_uncertain_outcome,
         )
         .await?;
-        self.clear_takeover_recovery_if_resolved(&tx, fence, false)
-            .await?;
+        self.settle_takeover_barrier(&tx, fence).await?;
         tx.commit()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -13763,8 +13759,7 @@ impl RuntimeState {
         }
         let (disposition, outcome) =
             orphan_running_request_tx(&tx, &current, evidence, outcome.clone(), outcome).await?;
-        self.clear_takeover_recovery_if_resolved(&tx, fence, false)
-            .await?;
+        self.settle_takeover_barrier(&tx, fence).await?;
         tx.commit()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -15358,8 +15353,9 @@ impl RuntimeState {
         // Resolve that already-satisfied barrier in this same writer
         // transaction; otherwise the strict check keeps every ordinary write
         // unavailable until recovery has made every Running row terminal.
-        self.clear_takeover_recovery_if_resolved(tx, lease, true)
-            .await
+        self.settle_takeover_barrier(tx, lease)
+            .await?
+            .require_clear()
     }
 
     /// Permits a recovery write only for the exact replacement lease that
@@ -19881,6 +19877,24 @@ async fn bound_writer_lease_tx(
         .map(fixed)
         .transpose()?;
     Ok(Some((lease, lock_id)))
+}
+
+/// The takeover fence after an attempt to clear it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TakeoverBarrier {
+    /// No fence is installed, or the matching fence has just been removed.
+    Clear,
+    /// The matching fence stays because a Running request is not yet terminal.
+    Pending,
+}
+
+impl TakeoverBarrier {
+    fn require_clear(self) -> Result<(), RuntimeError> {
+        match self {
+            Self::Clear => Ok(()),
+            Self::Pending => Err(RuntimeError::RecoveryPending),
+        }
+    }
 }
 
 /// How a writer lease takeover settles the Running requests left by the
