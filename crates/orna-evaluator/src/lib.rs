@@ -1097,6 +1097,9 @@ fn module_intrinsic(name: &str) -> Option<orna_intrinsics::IntrinsicId> {
     let (module_path, leaf) = name.rsplit_once('.')?;
     let module = orna_intrinsics::Module::from_path(module_path)?;
     let intrinsic = orna_intrinsics::lookup(module, leaf)?;
+    if intrinsic.module != module {
+        return None;
+    }
     if intrinsic.dispatch == orna_intrinsics::Dispatch::SourceOnly
         || !intrinsic.pins.contains(orna_intrinsics::CURRENT_STD_PIN)
     {
@@ -7448,6 +7451,9 @@ impl Context<'_, '_> {
                 };
                 let rows = self.collect_relation_values(plan, depth + 1)?;
                 ordered[0] = Value::list(rows);
+                if id == orna_intrinsics::IntrinsicId::StatsHistogram && ordered.len() == 2 {
+                    ordered.push(Value::Bool(false));
+                }
                 return self.stats(name, ordered);
             }
             if name == "union" {
@@ -9443,6 +9449,7 @@ impl Context<'_, '_> {
             && let Some(module) = orna_intrinsics::Module::from_path(module_path)
             && module != orna_intrinsics::Module::Time
             && let Some(intrinsic) = orna_intrinsics::lookup(module, name)
+            && intrinsic.module == module
             && (intrinsic.dispatch != orna_intrinsics::Dispatch::SourceOnly
                 || module == orna_intrinsics::Module::Math)
             && intrinsic.pins.contains(orna_intrinsics::CURRENT_STD_PIN)
@@ -12024,7 +12031,7 @@ impl Context<'_, '_> {
             ("__asof_join", [Value::List(left), Value::List(right), time, by]) => {
                 self.asof_join(left, right, time, by, depth)
             }
-            ("__bucket_by", [Value::List(rows), period, zone]) => {
+            ("bucket_by" | "__bucket_by", [Value::List(rows), period, zone]) => {
                 let spec = bucket_by_spec(period, Some(zone))?;
                 let mut state = RelationBucketState::try_new(spec).map_err(bucket_error)?;
                 self.items(rows.len())?;
