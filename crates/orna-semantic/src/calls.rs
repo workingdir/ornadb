@@ -312,785 +312,6 @@ pub(crate) fn is_optional_stat_argument(ty: &Type, inner: &Type) -> bool {
     ty == inner || ty == &Type::Null || ty == &Type::Optional(Box::new(inner.clone()))
 }
 
-/// Checks the direct core relation overloads. The finite-list overloads are
-/// intentionally checked by their existing source/profile path; this helper
-/// only claims an unqualified intrinsic when its rows argument is a relation.
-pub(crate) fn infer_relation_collection_call(
-    callee: &Expr,
-    arguments: &[orna_syntax::Argument],
-    scope: &Scope,
-    local: &BTreeMap<String, Symbol>,
-    diagnostics: &mut Vec<Diagnostic>,
-) -> Option<Inferred> {
-    let path = qualified_path(callee)?;
-    let operation = match path.as_slice() {
-        [operation]
-            if matches!(
-                *operation,
-                "filter"
-                    | "map"
-                    | "flat_map"
-                    | "sort_by"
-                    | "distinct"
-                    | "take"
-                    | "drop"
-                    | "count"
-                    | "first"
-                    | "one"
-                    | "every"
-                    | "exists"
-                    | "sum"
-                    | "min"
-                    | "max"
-                    | "window"
-                    | "union"
-            ) && root_collection_intrinsic_is_unshadowed(operation, scope, local) =>
-        {
-            *operation
-        }
-        _ => standard_collection_module_operation(callee, scope, local)?,
-    };
-    if operation == "union" {
-        return infer_relation_union_call(arguments, scope, local, diagnostics);
-    }
-    let mut row_index = None;
-    let mut callback_index = None;
-    let callback_name = match operation {
-        "filter" => "predicate",
-        "map" | "flat_map" => "transform",
-        "sort_by" => "key",
-        _ => "",
-    };
-    let mut positional = 0usize;
-    let mut named_started = false;
-    let mut malformed = arguments.len() != 2;
-    for (index, argument) in arguments.iter().enumerate() {
-        let slot = match argument.name.as_deref() {
-            Some("rows") => {
-                named_started = true;
-                Some(0)
-            }
-            Some(name) if name == callback_name => {
-                named_started = true;
-                Some(1)
-            }
-            Some(_) => {
-                malformed = true;
-                None
-            }
-            None if named_started => {
-                malformed = true;
-                None
-            }
-            None => {
-                let slot = positional;
-                positional += 1;
-                (slot < 2).then_some(slot)
-            }
-        };
-        match slot {
-            Some(0) if row_index.replace(index).is_some() => malformed = true,
-            Some(1) if callback_index.replace(index).is_some() => malformed = true,
-            None => {}
-            _ => {}
-        }
-    }
-    let row_index = row_index.or_else(|| (!arguments.is_empty()).then_some(0))?;
-    let mut probe_diagnostics = Vec::new();
-    let probe = infer(
-        &arguments[row_index].value,
-        scope,
-        local,
-        &mut probe_diagnostics,
-    );
-    if !matches!(probe.ty, Type::Relation(_)) {
-        return None;
-    }
-
-    if !matches!(operation, "filter" | "map" | "flat_map" | "sort_by") {
-        return Some(infer_relation_terminal_call(
-            operation,
-            arguments,
-            row_index,
-            scope,
-            local,
-            diagnostics,
-        ));
-    }
-
-    let inferred = arguments
-        .iter()
-        .enumerate()
-        .map(|(index, argument)| {
-            if Some(index) == callback_index {
-                Inferred::error()
-            } else {
-                infer(&argument.value, scope, local, diagnostics)
-            }
-        })
-        .collect::<Vec<_>>();
-    let mut effects = EffectSummary::default();
-    for value in &inferred {
-        effects.join(&value.effects);
-    }
-    let Type::Relation(element) = inferred[row_index].ty.clone() else {
-        unreachable!("the probe admitted only a relation rows argument")
-    };
-    let Some(callback_index) = callback_index else {
-        diagnostics.push(diag(
-            DIAG_TYPE,
-            format!("relation {operation} requires rows and {callback_name}"),
-        ));
-        return Some(Inferred::error_with(effects));
-    };
-    let callback = infer_relation_callback(
-        &arguments[callback_index].value,
-        element.as_ref().clone(),
-        if operation == "filter" {
-            Type::Bool
-        } else {
-            Type::Error
-        },
-        scope,
-        local,
-        diagnostics,
-    );
-    effects.join(&callback.effects);
-    if malformed {
-        diagnostics.push(diag(
-            DIAG_TYPE,
-            format!("relation {operation} arguments do not match its static signature"),
-        ));
-    }
-    let valid = !malformed
-        && match operation {
-            "filter" => callback.ty == Type::Bool,
-            "map" => callback.ty != Type::Error,
-            "flat_map" => matches!(callback.ty, Type::List(_) | Type::Relation(_)),
-            "sort_by" => is_sort_key_type(&callback.ty),
-            _ => false,
-        };
-    Some(Inferred {
-        ty: if valid {
-            match operation {
-                "map" => Type::Relation(Box::new(callback.ty)),
-                "flat_map" => match callback.ty {
-                    Type::List(element) | Type::Relation(element) => Type::Relation(element),
-                    _ => unreachable!("valid relation flat_map callback"),
-                },
-                _ => Type::Relation(element),
-            }
-        } else {
-            Type::Error
-        },
-        effects,
-    })
-}
-
-pub(crate) fn infer_relation_collection_pipeline(
-    operation: &str,
-    input: Inferred,
-    arguments: &[orna_syntax::Argument],
-    scope: &Scope,
-    local: &BTreeMap<String, Symbol>,
-    diagnostics: &mut Vec<Diagnostic>,
-) -> Inferred {
-    if matches!(
-        operation,
-        "chunk"
-            | "flatten"
-            | "partition"
-            | "zip"
-            | "zip_exact"
-            | "unique"
-            | "group_by"
-            | "pairs"
-            | "window"
-            | "split_when"
-            | "rank"
-            | "asof_join"
-            | "bucket_by"
-    ) {
-        return infer_finite_list_helper_collection(
-            operation,
-            Some(input),
-            arguments,
-            scope,
-            local,
-            diagnostics,
-        );
-    }
-    let Type::Relation(element) = input.ty else {
-        unreachable!("qualified relation pipeline is selected for Relation<T>")
-    };
-    let mut effects = input.effects;
-    let element = *element;
-    let callback_parameter = match operation {
-        "filter" | "every" | "exists" => Some("predicate"),
-        "map" | "flat_map" => Some("transform"),
-        "sort_by" => Some("key"),
-        _ => None,
-    };
-    if let Some(parameter) = callback_parameter {
-        let expected_count = 1;
-        let malformed = arguments.len() != expected_count
-            || arguments.first().is_some_and(|argument| {
-                argument
-                    .name
-                    .as_deref()
-                    .is_some_and(|name| name != parameter)
-            });
-        let Some(argument) = arguments.first() else {
-            diagnostics.push(diag(
-                DIAG_TYPE,
-                format!("relation {operation} requires a {parameter} callback"),
-            ));
-            return Inferred::error_with(effects);
-        };
-        let callback = infer_relation_callback(
-            &argument.value,
-            element.clone(),
-            if matches!(operation, "filter" | "every" | "exists") {
-                Type::Bool
-            } else {
-                Type::Error
-            },
-            scope,
-            local,
-            diagnostics,
-        );
-        effects.join(&callback.effects);
-        if malformed {
-            diagnostics.push(diag(
-                DIAG_TYPE,
-                format!(
-                    "relation {operation} pipeline arguments do not match its static signature"
-                ),
-            ));
-        }
-        let valid = !malformed
-            && match operation {
-                "filter" | "every" | "exists" => callback.ty == Type::Bool,
-                "map" => callback.ty != Type::Error,
-                "flat_map" => matches!(callback.ty, Type::List(_) | Type::Relation(_)),
-                "sort_by" => is_sort_key_type(&callback.ty),
-                _ => false,
-            };
-        return Inferred {
-            ty: if valid {
-                match operation {
-                    "every" | "exists" => Type::Bool,
-                    "map" => Type::Relation(Box::new(callback.ty)),
-                    "flat_map" => match callback.ty {
-                        Type::List(element) | Type::Relation(element) => Type::Relation(element),
-                        _ => Type::Error,
-                    },
-                    _ => Type::Relation(Box::new(element)),
-                }
-            } else {
-                Type::Error
-            },
-            effects,
-        };
-    }
-
-    let expected = match operation {
-        "take" | "drop" | "union" => 1,
-        "one" => usize::from(!arguments.is_empty()),
-        "count" | "first" | "distinct" | "sum" | "min" | "max" => 0,
-        _ => unreachable!("qualified relation collection operation was checked"),
-    };
-    let expected_name = match operation {
-        "take" | "drop" => Some("count"),
-        "union" => Some("right"),
-        "one" => Some("predicate"),
-        _ => None,
-    };
-    let mut malformed = arguments.len() != expected;
-    if let Some(name) = expected_name {
-        malformed |= arguments.first().is_some_and(|argument| {
-            argument
-                .name
-                .as_deref()
-                .is_some_and(|actual| actual != name)
-        });
-    }
-    let mut values = Vec::with_capacity(arguments.len());
-    for argument in arguments {
-        let value = if matches!(operation, "one") {
-            infer_relation_callback(
-                &argument.value,
-                element.clone(),
-                Type::Bool,
-                scope,
-                local,
-                diagnostics,
-            )
-        } else {
-            infer(&argument.value, scope, local, diagnostics)
-        };
-        effects.join(&value.effects);
-        values.push(value.ty);
-    }
-    if malformed {
-        diagnostics.push(diag(
-            DIAG_TYPE,
-            format!("relation {operation} pipeline arguments do not match its static signature"),
-        ));
-    }
-    let ty = match operation {
-        "count" => Type::Int,
-        "first" => Type::Optional(Box::new(element.clone())),
-        "one" => {
-            if values.first().is_some_and(|ty| *ty != Type::Bool) {
-                diagnostics.push(diag(DIAG_TYPE, "relation one predicate must return Bool"));
-                Type::Error
-            } else {
-                effects.may_fail = true;
-                element.clone()
-            }
-        }
-        "distinct" => {
-            if is_default_float_equality_type(&element) {
-                diagnostics.push(diag(
-                    DIAG_TYPE,
-                    "distinct requires a lawful equality key; default Float equality is unavailable",
-                ));
-                Type::Error
-            } else {
-                Type::Relation(Box::new(element.clone()))
-            }
-        }
-        "take" | "drop" => {
-            if values.first().is_some_and(|ty| *ty != Type::Int) {
-                diagnostics.push(diag(
-                    DIAG_TYPE,
-                    format!("relation {operation} count must be an Int"),
-                ));
-                Type::Error
-            } else if values.first() == Some(&Type::Int)
-                && is_negative_integer_constant(&arguments[0].value)
-            {
-                diagnostics.push(diag(
-                    DIAG_TYPE,
-                    format!("relation {operation} count must be nonnegative"),
-                ));
-                Type::Error
-            } else {
-                Type::Relation(Box::new(element.clone()))
-            }
-        }
-        "union" => match values.first() {
-            Some(Type::Relation(right)) if types_match(&element, right) => {
-                Type::Relation(Box::new(element.clone()))
-            }
-            Some(Type::Error) => Type::Error,
-            _ => {
-                diagnostics.push(diag(
-                    DIAG_TYPE,
-                    "relation union requires a compatible relation",
-                ));
-                Type::Error
-            }
-        },
-        "sum" if is_sum_element_type(&element) => element.clone(),
-        "min" | "max" if is_sort_key_type(&element) => Type::Optional(Box::new(element.clone())),
-        "sum" | "min" | "max" => {
-            diagnostics.push(diag(
-                DIAG_TYPE,
-                format!("relation {operation} requires a supported element type"),
-            ));
-            Type::Error
-        }
-        _ => unreachable!("qualified relation collection operation was checked"),
-    };
-    Inferred {
-        ty: if malformed { Type::Error } else { ty },
-        effects,
-    }
-}
-
-pub(crate) fn infer_relation_union_call(
-    arguments: &[orna_syntax::Argument],
-    scope: &Scope,
-    local: &BTreeMap<String, Symbol>,
-    diagnostics: &mut Vec<Diagnostic>,
-) -> Option<Inferred> {
-    let mut slots = [None; 2];
-    let mut positional = 0usize;
-    let mut named_started = false;
-    let mut malformed = arguments.len() != 2;
-    for (index, argument) in arguments.iter().enumerate() {
-        let slot = match argument.name.as_deref() {
-            Some("left") => {
-                named_started = true;
-                Some(0)
-            }
-            Some("right") => {
-                named_started = true;
-                Some(1)
-            }
-            Some(_) => {
-                malformed = true;
-                None
-            }
-            None if named_started => {
-                malformed = true;
-                None
-            }
-            None => {
-                let slot = positional;
-                positional += 1;
-                (slot < slots.len()).then_some(slot)
-            }
-        };
-        if let Some(slot) = slot
-            && slots[slot].replace(index).is_some()
-        {
-            malformed = true;
-        }
-    }
-    let values = arguments
-        .iter()
-        .map(|argument| infer(&argument.value, scope, local, diagnostics))
-        .collect::<Vec<_>>();
-    let mut effects = EffectSummary::default();
-    for value in &values {
-        effects.join(&value.effects);
-    }
-    if malformed || slots.iter().any(Option::is_none) {
-        diagnostics.push(diag(
-            DIAG_TYPE,
-            "relation union arguments do not match its static signature",
-        ));
-        return Some(Inferred::error_with(effects));
-    }
-    let left = &values[slots[0].expect("validated relation union left slot")];
-    let right = &values[slots[1].expect("validated relation union right slot")];
-    let (Type::Relation(left_element), Type::Relation(right_element)) = (&left.ty, &right.ty)
-    else {
-        return None;
-    };
-    if !types_match(left_element, right_element) {
-        diagnostics.push(diag(
-            DIAG_TYPE,
-            "relation union requires relations with compatible element types",
-        ));
-        return Some(Inferred::error_with(effects));
-    }
-    Some(Inferred {
-        ty: Type::Relation(left_element.clone()),
-        effects,
-    })
-}
-
-pub(crate) fn infer_relation_terminal_call(
-    operation: &str,
-    arguments: &[orna_syntax::Argument],
-    row_index: usize,
-    scope: &Scope,
-    local: &BTreeMap<String, Symbol>,
-    diagnostics: &mut Vec<Diagnostic>,
-) -> Inferred {
-    let expected = match operation {
-        "count" | "first" | "sum" | "min" | "max" | "distinct" => 1..=1,
-        "one" => 1..=2,
-        "take" | "drop" => 2..=2,
-        "window" => 2..=3,
-        "every" | "exists" => 2..=2,
-        _ => unreachable!("relation terminal operation was checked above"),
-    };
-    let mut malformed = !expected.contains(&arguments.len());
-    let mut positional = 0usize;
-    let mut named_started = false;
-    let mut slots = [None; 3];
-    let callback_name = match operation {
-        "every" | "exists" => Some("predicate"),
-        "take" | "drop" => Some("count"),
-        "window" => Some("size"),
-        _ => None,
-    };
-    for (index, argument) in arguments.iter().enumerate() {
-        let slot = match argument.name.as_deref() {
-            Some("rows") => {
-                named_started = true;
-                Some(0)
-            }
-            Some("predicate") if matches!(operation, "one" | "every" | "exists") => {
-                named_started = true;
-                Some(1)
-            }
-            Some("count") if matches!(operation, "take" | "drop") => {
-                named_started = true;
-                Some(1)
-            }
-            Some("size") if operation == "window" => {
-                named_started = true;
-                Some(1)
-            }
-            Some("step") if operation == "window" => {
-                named_started = true;
-                Some(2)
-            }
-            Some(_) => {
-                malformed = true;
-                None
-            }
-            None if named_started => {
-                malformed = true;
-                None
-            }
-            None => {
-                let slot = positional;
-                positional += 1;
-                (slot < slots.len()).then_some(slot)
-            }
-        };
-        if let Some(slot) = slot
-            && slots[slot].replace(index).is_some()
-        {
-            malformed = true;
-        }
-    }
-    if slots[0] != Some(row_index) {
-        malformed = true;
-    }
-    let missing_callback = callback_name
-        .filter(|_| slots[1].is_none())
-        .map(str::to_owned);
-    let mut relation_element = if slots[1].is_some_and(|index| index < row_index) {
-        arguments.get(row_index).and_then(|argument| {
-            let mut probe_diagnostics = Vec::new();
-            match infer(&argument.value, scope, local, &mut probe_diagnostics).ty {
-                Type::Relation(element) => Some(*element),
-                _ => None,
-            }
-        })
-    } else {
-        None
-    };
-    let mut effects = EffectSummary::default();
-    let mut values = Vec::with_capacity(arguments.len());
-    for (index, argument) in arguments.iter().enumerate() {
-        let value = if slots[1] == Some(index) && matches!(operation, "one" | "every" | "exists") {
-            // Infer a relation callback at its source position. The silent
-            // row probe supplies context for named/reordered arguments when
-            // the row argument has not appeared yet.
-            if let Some(element) = relation_element.clone() {
-                infer_relation_callback(
-                    &argument.value,
-                    element,
-                    Type::Bool,
-                    scope,
-                    local,
-                    diagnostics,
-                )
-            } else {
-                infer(&argument.value, scope, local, diagnostics)
-            }
-        } else {
-            infer(&argument.value, scope, local, diagnostics)
-        };
-        if index == row_index
-            && let Type::Relation(element) = &value.ty
-        {
-            relation_element = Some(element.as_ref().clone());
-        }
-        effects.join(&value.effects);
-        values.push(value);
-    }
-    if let Some(callback_name) = missing_callback.as_deref() {
-        // Preserve left-to-right argument inference before reporting the
-        // relation shape error for a malformed direct call.
-        diagnostics.push(diag(
-            DIAG_TYPE,
-            format!("relation {operation} requires rows and {callback_name}"),
-        ));
-        malformed = true;
-    }
-    if malformed && missing_callback.is_none() {
-        diagnostics.push(diag(
-            DIAG_TYPE,
-            format!("relation {operation} arguments do not match its static signature"),
-        ));
-    }
-    let Type::Relation(element) = values[row_index].ty.clone() else {
-        return Inferred::error_with(effects);
-    };
-    let mut valid = !malformed;
-    if matches!(operation, "one" | "every" | "exists")
-        && let Some(index) = slots[1]
-    {
-        valid &= values[index].ty == Type::Bool;
-    }
-    for (slot, &index) in slots.iter().enumerate().skip(1) {
-        if let Some(index) = index {
-            if matches!(operation, "take" | "drop" | "window")
-                && values[index].ty != Type::Int
-                && values[index].ty != Type::Error
-            {
-                diagnostics.push(diag(
-                    DIAG_TYPE,
-                    format!("relation {operation} parameter must be an Int"),
-                ));
-                valid = false;
-            }
-            if matches!(operation, "take" | "drop")
-                && slot == 1
-                && values[index].ty == Type::Int
-                && is_negative_integer_constant(&arguments[index].value)
-            {
-                diagnostics.push(diag(
-                    DIAG_TYPE,
-                    format!("relation {operation} count must be nonnegative"),
-                ));
-                valid = false;
-            }
-            if operation == "window"
-                && values[index].ty == Type::Int
-                && is_non_positive_integer_constant(&arguments[index].value)
-            {
-                let label = if slot == 1 { "size" } else { "step" };
-                diagnostics.push(diag(DIAG_TYPE, format!("window {label} must be positive")));
-                valid = false;
-            }
-        }
-    }
-    let ty = match operation {
-        "every" | "exists" => Type::Bool,
-        "count" => Type::Int,
-        "first" => Type::Optional(element.clone()),
-        "one" => {
-            // Cardinality failure is part of the ordinary failure channel,
-            // including when the relation overload is selected directly.
-            effects.may_fail = true;
-            element.as_ref().clone()
-        }
-        "distinct" => {
-            if is_default_float_equality_type(element.as_ref()) {
-                diagnostics.push(diag(
-                    DIAG_TYPE,
-                    "distinct requires a lawful equality key; default Float equality is unavailable",
-                ));
-                valid = false;
-                Type::Error
-            } else {
-                Type::Relation(element.clone())
-            }
-        }
-        "take" | "drop" => Type::Relation(element.clone()),
-        "window" => Type::Relation(Box::new(Type::List(Box::new(element.as_ref().clone())))),
-        "sum" if is_sum_element_type(element.as_ref()) => element.as_ref().clone(),
-        "min" | "max" if is_sort_key_type(element.as_ref()) => Type::Optional(element.clone()),
-        "sum" | "min" | "max" => {
-            diagnostics.push(diag(
-                DIAG_TYPE,
-                format!("relation {operation} requires a supported element type"),
-            ));
-            valid = false;
-            Type::Error
-        }
-        _ => {
-            diagnostics.push(diag(
-                DIAG_TYPE,
-                format!("relation {operation} requires numeric rows"),
-            ));
-            valid = false;
-            Type::Error
-        }
-    };
-    Inferred {
-        ty: if valid { ty } else { Type::Error },
-        effects,
-    }
-}
-
-/// Admits the positional relation-window signature without claiming that a
-/// dynamic `Int` is positive. The runtime remains responsible for values that
-/// are not statically provable constants.
-pub(crate) fn infer_relation_window(
-    arguments: &[orna_syntax::Argument],
-    element: Type,
-    scope: &Scope,
-    local: &BTreeMap<String, Symbol>,
-    diagnostics: &mut Vec<Diagnostic>,
-) -> Inferred {
-    let values = arguments
-        .iter()
-        .map(|argument| infer(&argument.value, scope, local, diagnostics))
-        .collect::<Vec<_>>();
-    let mut effects = EffectSummary::default();
-    for value in &values {
-        effects.join(&value.effects);
-    }
-
-    let mut slots = [None, None];
-    let mut positional = 0usize;
-    let mut named_started = false;
-    let mut malformed = !(1..=2).contains(&arguments.len());
-    for (index, argument) in arguments.iter().enumerate() {
-        let slot = match argument.name.as_deref() {
-            Some("size") => {
-                named_started = true;
-                0
-            }
-            Some("step") => {
-                named_started = true;
-                1
-            }
-            Some(_) => {
-                malformed = true;
-                continue;
-            }
-            None if named_started || positional >= slots.len() => {
-                malformed = true;
-                continue;
-            }
-            None => {
-                let slot = positional;
-                positional += 1;
-                slot
-            }
-        };
-        if slots[slot].replace(index).is_some() {
-            malformed = true;
-        }
-    }
-    if slots[0].is_none() {
-        malformed = true;
-    }
-    if malformed {
-        diagnostics.push(diag(
-            DIAG_TYPE,
-            "window arguments do not match its static signature",
-        ));
-    }
-
-    let mut valid = !malformed;
-    for (slot, label) in [(0, "size"), (1, "step")] {
-        let Some(index) = slots[slot] else {
-            continue;
-        };
-        let value = &values[index];
-        if value.ty != Type::Int && value.ty != Type::Error {
-            diagnostics.push(diag(DIAG_TYPE, format!("window {label} must be an Int")));
-            valid = false;
-        }
-        if is_non_positive_integer_constant(&arguments[index].value) {
-            diagnostics.push(diag(DIAG_TYPE, format!("window {label} must be positive")));
-            valid = false;
-        }
-    }
-    Inferred {
-        ty: if valid {
-            Type::Relation(Box::new(Type::List(Box::new(element))))
-        } else {
-            Type::Error
-        },
-        effects,
-    }
-}
-
 pub(crate) fn is_non_positive_integer_constant(expression: &Expr) -> bool {
     match expression {
         Expr::Literal {
@@ -1121,19 +342,6 @@ pub(crate) fn is_negative_integer_constant(expression: &Expr) -> bool {
         ),
         Expr::Group { inner, .. } => is_negative_integer_constant(inner),
         _ => false,
-    }
-}
-
-/// The frozen parser represents `!exists(rows, predicate)` as a call whose
-/// callee is unary `!exists`; it is still the root `exists` relation form.
-pub(crate) fn core_relation_call_name(callee: &Expr) -> Option<&str> {
-    match callee {
-        Expr::Name { text, .. } => Some(text),
-        Expr::Unary { op, rhs, .. } if op == "!" => match rhs.as_ref() {
-            Expr::Name { text, .. } => Some(text),
-            _ => None,
-        },
-        _ => None,
     }
 }
 
@@ -1259,40 +467,33 @@ pub(crate) fn pipeline_relation_module_stage(
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<Inferred> {
-    if matches!(&input.ty, Type::Relation(_))
-        && let Expr::Call {
-            callee, arguments, ..
-        } = rhs
-        && standard_statistics_module_operation(callee, scope, local).is_some()
-    {
-        return Some(
-            infer_relation_statistics_call(
-                callee,
-                arguments,
-                Some(input.clone()),
-                scope,
-                local,
-                diagnostics,
-            )
-            .expect("recognized statistics module operation has relation input"),
-        );
+    if !matches!(&input.ty, Type::Relation(_)) {
+        return None;
     }
-    if matches!(&input.ty, Type::Relation(_))
-        && let Expr::Call {
-            callee, arguments, ..
-        } = rhs
-        && let Some(operation) = standard_collection_module_operation(callee, scope, local)
-    {
-        return Some(infer_relation_collection_pipeline(
-            operation,
-            input.clone(),
+    let Expr::Call {
+        callee, arguments, ..
+    } = rhs
+    else {
+        return None;
+    };
+    let resolved = resolve_intrinsic(callee, scope, local)?;
+    if resolved.root || !is_registry_typed(resolved.id) {
+        return None;
+    }
+    Some(check_declared_aggregate_element(
+        callee,
+        resolved,
+        infer_intrinsic(
+            resolved.id,
+            Some(input.clone()),
             arguments,
             scope,
             local,
             diagnostics,
-        ));
-    }
-    None
+        ),
+        scope,
+        diagnostics,
+    ))
 }
 
 pub(crate) fn pipeline_relation_intrinsic_stage(
@@ -1302,129 +503,60 @@ pub(crate) fn pipeline_relation_intrinsic_stage(
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<Inferred> {
-    if let Type::Relation(element) = &input.ty
-        && let Expr::Call {
-            callee, arguments, ..
-        } = rhs
-        && let Expr::Name { text, .. } = callee.as_ref()
-        && text == "sort_by"
-        && root_collection_intrinsic_is_unshadowed("sort_by", scope, local)
-        && let [argument] = arguments.as_slice()
-        && (argument.name.is_none() || argument.name.as_deref() == Some("key"))
-    {
-        let callback = infer_relation_callback(
-            &argument.value,
-            element.as_ref().clone(),
-            Type::Error,
-            scope,
-            local,
-            diagnostics,
-        );
-        let mut effects = input.effects.clone();
-        effects.join(&callback.effects);
-        return Some(Inferred {
-            ty: Type::Relation(element.clone()),
-            effects,
-        });
+    if !matches!(&input.ty, Type::Relation(_)) {
+        return None;
     }
-    if let Type::Relation(element) = &input.ty
-        && let Expr::Call {
-            callee, arguments, ..
-        } = rhs
-        && let Expr::Name { text, .. } = callee.as_ref()
-        && matches!(text.as_str(), "every" | "exists")
-        && root_collection_intrinsic_is_unshadowed(text, scope, local)
-        && let [argument] = arguments.as_slice()
-        && (argument.name.is_none() || argument.name.as_deref() == Some("predicate"))
+    let Expr::Call {
+        callee, arguments, ..
+    } = rhs
+    else {
+        return None;
+    };
+    let resolved = resolve_intrinsic(callee, scope, local)?;
+    if !resolved.root
+        || !is_registry_typed(resolved.id)
+        || orna_intrinsics::by_id(resolved.id).module == orna_intrinsics::Module::Stats
     {
-        let callback = infer_relation_callback(
-            &argument.value,
-            element.as_ref().clone(),
-            Type::Bool,
-            scope,
-            local,
-            diagnostics,
-        );
-        let mut effects = input.effects.clone();
-        effects.join(&callback.effects);
-        return Some(Inferred {
-            ty: if callback.ty == Type::Bool {
-                Type::Bool
-            } else {
-                Type::Error
-            },
-            effects,
-        });
+        return None;
     }
-    if let Type::Relation(element) = &input.ty
-        && let Expr::Call {
-            callee, arguments, ..
-        } = rhs
-        && let Expr::Name { text, .. } = callee.as_ref()
-        && text == "window"
-        && root_collection_intrinsic_is_unshadowed("window", scope, local)
+    if resolved.id == orna_intrinsics::IntrinsicId::CollectionWindow
+        && !(1..=2).contains(&arguments.len())
     {
-        let window = infer_relation_window(
-            arguments,
-            element.as_ref().clone(),
-            scope,
-            local,
-            diagnostics,
-        );
         let mut effects = input.effects.clone();
-        effects.join(&window.effects);
-        return Some(Inferred {
-            ty: window.ty,
-            effects,
-        });
-    }
-    if let Type::Relation(element) = &input.ty
-        && let Expr::Call {
-            callee, arguments, ..
-        } = rhs
-        && let Expr::Name { text, .. } = callee.as_ref()
-        && text == "first"
-        && root_collection_intrinsic_is_unshadowed("first", scope, local)
-        && arguments.is_empty()
-    {
-        return Some(Inferred {
-            ty: Type::Optional(element.clone()),
-            effects: input.effects.clone(),
-        });
-    }
-    if let Type::Relation(element) = &input.ty
-        && let Expr::Call {
-            callee, arguments, ..
-        } = rhs
-        && let Expr::Name { text, .. } = callee.as_ref()
-        && text == "union"
-        && root_collection_intrinsic_is_unshadowed("union", scope, local)
-        && let [argument] = arguments.as_slice()
-        && (argument.name.is_none() || argument.name.as_deref() == Some("right"))
-    {
-        let right = infer(&argument.value, scope, local, diagnostics);
-        let mut effects = input.effects.clone();
-        effects.join(&right.effects);
-        let Type::Relation(right_element) = right.ty else {
-            diagnostics.push(diag(
-                DIAG_TYPE,
-                "relation union requires a relation with a compatible element type",
-            ));
-            return Some(Inferred::error_with(effects));
-        };
-        if !types_match(element, &right_element) {
-            diagnostics.push(diag(
-                DIAG_TYPE,
-                "relation union requires relations with compatible element types",
-            ));
-            return Some(Inferred::error_with(effects));
+        for argument in arguments {
+            effects.join(&infer(&argument.value, scope, local, diagnostics).effects);
         }
-        return Some(Inferred {
-            ty: Type::Relation(element.clone()),
-            effects,
-        });
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "window arguments do not match its static signature",
+        ));
+        return Some(Inferred::error_with(effects));
     }
-    None
+    if !relation_pipeline_shape_claimed(resolved.id, arguments) {
+        return None;
+    }
+    let result = infer_intrinsic(
+        resolved.id,
+        Some(input.clone()),
+        arguments,
+        scope,
+        local,
+        diagnostics,
+    );
+    if resolved.id == orna_intrinsics::IntrinsicId::CoreFlatMap
+        && arguments.iter().any(|argument| {
+            argument
+                .name
+                .as_deref()
+                .is_some_and(|name| name != "transform")
+        })
+    {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "relation flat_map argument name does not match its static signature",
+        ));
+    }
+    Some(result)
 }
 
 pub(crate) fn pipeline_collection_stage(
@@ -1438,15 +570,23 @@ pub(crate) fn pipeline_collection_stage(
         && let Expr::Call {
             callee, arguments, ..
         } = rhs
-        && let Some(operation) = finite_list_collection_operation(callee, scope, local)
+        && let Some(resolved) = resolve_intrinsic(callee, scope, local)
+        && is_registry_typed(resolved.id)
+        && orna_intrinsics::by_id(resolved.id).module != orna_intrinsics::Module::Stats
+        && (!resolved.root || list_pipeline_shape_claimed(resolved.id, arguments))
     {
-        return Some(infer_finite_list_collection(
-            operation,
-            Some(input.clone()),
-            arguments,
-            finite_list_aggregate_element(callee, operation, scope),
+        return Some(check_declared_aggregate_element(
+            callee,
+            resolved,
+            infer_intrinsic(
+                resolved.id,
+                Some(input.clone()),
+                arguments,
+                scope,
+                local,
+                diagnostics,
+            ),
             scope,
-            local,
             diagnostics,
         ));
     }
@@ -1603,7 +743,7 @@ pub(crate) fn pipeline_collection_stage(
     }
     if let Type::List(element) = &input.ty
         && let Expr::Name { text, .. } = rhs
-        && (text == "mean" || root_collection_intrinsic_is_unshadowed(text, scope, local))
+        && (text == "mean" || root_intrinsic_id(text, scope, local).is_some())
         && let Some(ty) = infer_affine_collection_aggregate(text, element, diagnostics)
     {
         return Some(Inferred {
@@ -1612,14 +752,18 @@ pub(crate) fn pipeline_collection_stage(
         });
     }
     if let Type::List(_) = &input.ty
-        && let Some(operation @ ("sum" | "min" | "max")) =
-            finite_list_collection_operation(rhs, scope, local)
+        && let Some(resolved) = resolve_intrinsic(rhs, scope, local)
+        && matches!(
+            resolved.id,
+            orna_intrinsics::IntrinsicId::CoreSum
+                | orna_intrinsics::IntrinsicId::CoreMin
+                | orna_intrinsics::IntrinsicId::CoreMax
+        )
     {
-        return Some(infer_finite_list_collection(
-            operation,
+        return Some(infer_intrinsic(
+            resolved.id,
             Some(input.clone()),
             &[],
-            finite_list_aggregate_element(rhs, operation, scope),
             scope,
             local,
             diagnostics,
@@ -1627,7 +771,7 @@ pub(crate) fn pipeline_collection_stage(
     }
     if let Expr::Name { text, .. } = rhs
         && let Type::Relation(element) = &input.ty
-        && root_collection_intrinsic_is_unshadowed(text, scope, local)
+        && root_intrinsic_id(text, scope, local).is_some()
         && let Some(ty) = infer_relation_sum(text, element, diagnostics)
     {
         return Some(Inferred {
@@ -1662,7 +806,7 @@ pub(crate) fn pipeline_collection_stage(
                 | "min"
                 | "max"
         )
-        && !root_collection_intrinsic_is_unshadowed(text, scope, local)
+        && root_intrinsic_id(text, scope, local).is_none()
     {
         return Some(infer_named_pipeline_stage(
             input.clone(),
@@ -1685,7 +829,7 @@ pub(crate) fn pipeline_collection_stage(
     if let Expr::Name { text, .. } = rhs
         && text == "count"
         && matches!(input.ty, Type::Relation(_))
-        && root_collection_intrinsic_is_unshadowed("count", scope, local)
+        && root_intrinsic_id("count", scope, local).is_some()
     {
         return Some(Inferred {
             ty: Type::Int,
@@ -1774,7 +918,7 @@ pub(crate) fn infer_relation_stream_pipeline(
     };
     if !is_stream
         && text == "map"
-        && root_collection_intrinsic_is_unshadowed(text, scope, local)
+        && root_intrinsic_id(text, scope, local).is_some()
         && let [argument] = arguments.as_slice()
         && (argument.name.is_none() || argument.name.as_deref() == Some("transform"))
     {
@@ -1819,7 +963,7 @@ pub(crate) fn infer_relation_stream_pipeline(
     }
     if !is_stream
         && matches!(text.as_str(), "take" | "drop")
-        && root_collection_intrinsic_is_unshadowed(text, scope, local)
+        && root_intrinsic_id(text, scope, local).is_some()
         && let [argument] = arguments.as_slice()
         && (argument.name.is_none() || argument.name.as_deref() == Some("count"))
     {
@@ -1842,10 +986,7 @@ pub(crate) fn infer_relation_stream_pipeline(
             effects,
         };
     }
-    if !is_stream
-        && text == "flat_map"
-        && root_collection_intrinsic_is_unshadowed("flat_map", scope, local)
-    {
+    if !is_stream && text == "flat_map" && root_intrinsic_id("flat_map", scope, local).is_some() {
         let [argument] = arguments.as_slice() else {
             diagnostics.push(diag(
                 DIAG_TYPE,
@@ -1893,13 +1034,11 @@ pub(crate) fn infer_relation_stream_pipeline(
     let (ty, callback_result) = match (text.as_str(), is_stream, arguments.as_slice()) {
         ("filter", false, [argument])
             if (argument.name.is_none() || argument.name.as_deref() == Some("predicate"))
-                && root_collection_intrinsic_is_unshadowed("filter", scope, local) =>
+                && root_intrinsic_id("filter", scope, local).is_some() =>
         {
             (Type::Relation(Box::new(element.clone())), Some(Type::Bool))
         }
-        ("distinct", false, [])
-            if root_collection_intrinsic_is_unshadowed("distinct", scope, local) =>
-        {
+        ("distinct", false, []) if root_intrinsic_id("distinct", scope, local).is_some() => {
             if is_default_float_equality_type(&element) {
                 diagnostics.push(diag(
                 DIAG_TYPE,
@@ -1910,14 +1049,14 @@ pub(crate) fn infer_relation_stream_pipeline(
                 (Type::Relation(Box::new(element.clone())), None)
             }
         }
-        ("one", false, []) if root_collection_intrinsic_is_unshadowed("one", scope, local) => {
+        ("one", false, []) if root_intrinsic_id("one", scope, local).is_some() => {
             (element.clone(), None)
         }
-        ("one", false, [_]) if root_collection_intrinsic_is_unshadowed("one", scope, local) => {
+        ("one", false, [_]) if root_intrinsic_id("one", scope, local).is_some() => {
             (element.clone(), Some(Type::Bool))
         }
         ("last", false, []) => (Type::Optional(Box::new(element.clone())), None),
-        ("count", false, []) if root_collection_intrinsic_is_unshadowed("count", scope, local) => {
+        ("count", false, []) if root_intrinsic_id("count", scope, local).is_some() => {
             (Type::Int, None)
         }
         ("pairs", false, []) => (
@@ -1928,7 +1067,7 @@ pub(crate) fn infer_relation_stream_pipeline(
             None,
         ),
         ("min", false, []) | ("max", false, [])
-            if root_collection_intrinsic_is_unshadowed(text, scope, local) =>
+            if root_intrinsic_id(text, scope, local).is_some() =>
         {
             (Type::Optional(Box::new(element.clone())), None)
         }
@@ -2279,7 +1418,7 @@ pub(crate) fn infer_named_pipeline_stage(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Inferred {
     if let Expr::Name { text, .. } = callee
-        && root_collection_intrinsic_is_unshadowed(text, scope, local)
+        && root_intrinsic_id(text, scope, local).is_some()
         && !matches!(
             input.ty,
             Type::Relation(_)

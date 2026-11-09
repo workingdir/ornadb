@@ -434,9 +434,7 @@ pub(crate) fn infer_call(
     if let Some(inferred) = infer_stream_from_list(callee, arguments, scope, local, diagnostics) {
         return inferred;
     }
-    if let Some(inferred) =
-        infer_finite_list_collection_call(callee, arguments, scope, local, diagnostics)
-    {
+    if let Some(inferred) = infer_collection_call(callee, arguments, scope, local, diagnostics) {
         return inferred;
     }
     if let Some(inferred) =
@@ -444,17 +442,7 @@ pub(crate) fn infer_call(
     {
         return inferred;
     }
-    if let Some(inferred) =
-        infer_relation_collection_call(callee, arguments, scope, local, diagnostics)
-    {
-        return inferred;
-    }
-    if let Some(inferred) =
-        infer_relation_statistics_call(callee, arguments, None, scope, local, diagnostics)
-    {
-        return inferred;
-    }
-    if let Some(inferred) = infer_relation_call(callee, arguments, scope, local, diagnostics) {
+    if let Some(inferred) = infer_statistics_call(callee, arguments, scope, local, diagnostics) {
         return inferred;
     }
     if let Some(inferred) = infer_parallel_call(callee, arguments, scope, local, diagnostics) {

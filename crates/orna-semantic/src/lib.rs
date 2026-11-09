@@ -72,6 +72,8 @@ mod collections;
 pub(crate) use collections::*;
 mod collection_calls;
 pub(crate) use collection_calls::*;
+mod intrinsics;
+pub(crate) use intrinsics::*;
 mod calls;
 pub(crate) use calls::*;
 mod system_calls;
@@ -3536,13 +3538,17 @@ fn infer_contextual_finite_list_aggregate(
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<Inferred> {
-    let (operation, rows, arguments, qualified_element) = match expr {
+    let (operation, rows, qualified_element) = match expr {
         Expr::Call {
             callee, arguments, ..
         } => {
-            let operation = finite_list_collection_operation(callee, scope, local)?;
-            if !matches!(operation, "sum" | "min" | "max")
-                || arguments.len() != 1
+            let resolved = resolve_intrinsic(callee, scope, local)?;
+            if !matches!(
+                resolved.id,
+                orna_intrinsics::IntrinsicId::CoreSum
+                    | orna_intrinsics::IntrinsicId::CoreMin
+                    | orna_intrinsics::IntrinsicId::CoreMax
+            ) || arguments.len() != 1
                 || arguments[0]
                     .name
                     .as_deref()
@@ -3552,53 +3558,59 @@ fn infer_contextual_finite_list_aggregate(
                 return None;
             }
             (
-                operation,
+                resolved.id,
                 &arguments[0].value,
-                arguments.as_slice(),
-                finite_list_aggregate_element(callee, operation, scope),
+                finite_list_aggregate_element(callee, resolved.descriptor().name, scope),
             )
         }
         Expr::Binary { lhs, op, rhs, .. } if op == "|" => {
-            let (callee, arguments) = match rhs.as_ref() {
+            let callee = match rhs.as_ref() {
                 Expr::Call {
                     callee, arguments, ..
-                } if arguments.is_empty() => (callee.as_ref(), arguments.as_slice()),
-                Expr::Name { .. } | Expr::Field { .. } => {
-                    (rhs.as_ref(), &[] as &[orna_syntax::Argument])
-                }
+                } if arguments.is_empty() => callee.as_ref(),
+                Expr::Name { .. } | Expr::Field { .. } => rhs.as_ref(),
                 _ => return None,
             };
-            let operation = finite_list_collection_operation(callee, scope, local)?;
-            if !matches!(operation, "sum" | "min" | "max") || !is_empty_list_literal(lhs) {
+            let resolved = resolve_intrinsic(callee, scope, local)?;
+            if !matches!(
+                resolved.id,
+                orna_intrinsics::IntrinsicId::CoreSum
+                    | orna_intrinsics::IntrinsicId::CoreMin
+                    | orna_intrinsics::IntrinsicId::CoreMax
+            ) || !is_empty_list_literal(lhs)
+            {
                 return None;
             }
             (
-                operation,
+                resolved.id,
                 lhs.as_ref(),
-                arguments,
-                finite_list_aggregate_element(callee, operation, scope),
+                finite_list_aggregate_element(callee, resolved.descriptor().name, scope),
             )
         }
         _ => return None,
     };
-    let element = qualified_element
-        .or_else(|| contextual_finite_list_aggregate_element(operation, expected))?;
+    let element = qualified_element.or_else(|| {
+        contextual_finite_list_aggregate_element(&operation_name(operation), expected)
+    })?;
     let row = infer_contextual(
         rows,
-        &Type::List(Box::new(element.clone())),
+        &Type::List(Box::new(element)),
         scope,
         local,
         diagnostics,
     );
-    Some(infer_finite_list_collection(
+    Some(infer_intrinsic(
         operation,
-        (matches!(expr, Expr::Binary { .. })).then_some(row),
-        arguments,
-        Some(element),
+        Some(row),
+        &[],
         scope,
         local,
         diagnostics,
     ))
+}
+
+fn operation_name(id: orna_intrinsics::IntrinsicId) -> String {
+    orna_intrinsics::by_id(id).name.to_owned()
 }
 
 fn infer_contextual_lambda(
@@ -4142,16 +4154,6 @@ struct EnumConstructor<'a> {
 // as `sum<T>(rows: [T]): T` takes its element type from the rows; a
 // monomorphic export such as `sum(rows: [Decimal]): Decimal` pins the element
 // type every call must supply and, with it, the declared result.
-
-/// One finite-list helper call's bound arguments and the values they produced.
-struct FiniteListCall<'a> {
-    operation: &'a str,
-    values: &'a [Option<Type>],
-    slots: &'a [Option<usize>],
-    arguments: &'a [orna_syntax::Argument],
-    scope: &'a Scope,
-    local: &'a BTreeMap<String, Symbol>,
-}
 
 /// The slot metadata and bound values one statistics call supplies.
 struct StatisticsOutcome<'a> {

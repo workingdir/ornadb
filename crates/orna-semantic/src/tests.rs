@@ -1863,3 +1863,78 @@ fn structured_parameter_pattern_shape_errors_keep_type_diagnostic() {
     )]);
     assert!(has(&analysis, DIAG_TYPE));
 }
+
+/// Every native operation must be reachable by the checker from the same
+/// catalogue row the evaluator dispatches on. The five-name evaluator/checker
+/// drift this stage removed (a native with no typing rule) cannot recur: a new
+/// collection, query or statistics descriptor without a registry typing rule,
+/// a module spelling the checker cannot resolve, or a core relation operation
+/// missing from the root environment fails here.
+#[test]
+fn every_non_source_intrinsic_has_a_checker_entry_point() {
+    let mut missing = Vec::new();
+    for descriptor in orna_intrinsics::catalogue() {
+        if descriptor.dispatch == orna_intrinsics::Dispatch::SourceOnly {
+            continue;
+        }
+        let reachable = match descriptor.module {
+            orna_intrinsics::Module::Core => {
+                orna_intrinsics::root_intrinsic(descriptor.name) == Some(descriptor.id)
+            }
+            orna_intrinsics::Module::Collection
+            | orna_intrinsics::Module::Query
+            | orna_intrinsics::Module::Stats => {
+                is_registry_typed(descriptor.id)
+                    && orna_intrinsics::lookup(descriptor.module, descriptor.name)
+                        .is_some_and(|intrinsic| intrinsic.id == descriptor.id)
+            }
+            _ => orna_intrinsics::lookup(descriptor.module, descriptor.name)
+                .is_some_and(|intrinsic| intrinsic.id == descriptor.id),
+        };
+        if !reachable {
+            missing.push(format!(
+                "{} ({:?})",
+                descriptor.id.name(),
+                descriptor.module
+            ));
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "no checker entry point for: {}",
+        missing.join(", ")
+    );
+
+    // The root relation environment is exactly the `Core*` collection set plus
+    // the helpers the evaluator roots; no checker-only or evaluator-only name
+    // may sit outside it.
+    for descriptor in orna_intrinsics::catalogue() {
+        if matches!(
+            descriptor.id,
+            orna_intrinsics::IntrinsicId::CoreFilter
+                | orna_intrinsics::IntrinsicId::CoreMap
+                | orna_intrinsics::IntrinsicId::CoreFlatMap
+                | orna_intrinsics::IntrinsicId::CoreSortBy
+                | orna_intrinsics::IntrinsicId::CoreTake
+                | orna_intrinsics::IntrinsicId::CoreDrop
+                | orna_intrinsics::IntrinsicId::CoreDistinct
+                | orna_intrinsics::IntrinsicId::CoreUnion
+                | orna_intrinsics::IntrinsicId::CoreCount
+                | orna_intrinsics::IntrinsicId::CoreFirst
+                | orna_intrinsics::IntrinsicId::CoreLast
+                | orna_intrinsics::IntrinsicId::CoreOne
+                | orna_intrinsics::IntrinsicId::CoreSum
+                | orna_intrinsics::IntrinsicId::CoreMin
+                | orna_intrinsics::IntrinsicId::CoreMax
+                | orna_intrinsics::IntrinsicId::CoreEvery
+                | orna_intrinsics::IntrinsicId::CoreExists
+        ) {
+            assert_eq!(
+                orna_intrinsics::root_intrinsic(descriptor.name),
+                Some(descriptor.id),
+                "{} must be a root intrinsic",
+                descriptor.name
+            );
+        }
+    }
+}
