@@ -35,6 +35,7 @@ expected = [
   "gate-d-crash-matrix",
   "claims-fixed-row-batching",
   "claims-prune-expire",
+  "claims-client-drafts",
   "claims-retired-row-writers",
   "gate-c-million-rows",
   "gate-h-browser-wasm",
@@ -206,8 +207,9 @@ title = "Ten and one million rows use ORP-1"
 select = [
   { record = "workspace-rest", package = "orna-repository", target = "test:row_store_scale", test = "orp1_production_writer_ten_rows" },
   { record = "gate-c-million-rows", package = "orna-repository", target = "test:row_store_scale", test = "orp1_row_store_one_million_rows" },
+  { record = "gate-c-million-rows", package = "orna-repository", target = "test:row_store_scale", test = "orp1_row_store_one_million_rows_production_written" },
 ]
-counters = ["^ORP-1 production_writer "]
+counters = ["^ORP-1 production_writer"]
 
 [[item]]
 gate = "C"
@@ -233,10 +235,11 @@ select = [
   { record = "workspace-rest", package = "orna-repository", target = "test:row_store_scale", test = "orp1_row_store_ten_rows" },
   { record = "workspace-rest", package = "orna-repository", target = "test:row_store_scale", test = "orp1_production_writer_ten_rows" },
   { record = "gate-c-million-rows", package = "orna-repository", target = "test:row_store_scale", test = "orp1_row_store_one_million_rows" },
+  { record = "gate-c-million-rows", package = "orna-repository", target = "test:row_store_scale", test = "orp1_row_store_one_million_rows_production_written" },
 ]
 counters = ["^ORP-1 "]
 limitations = [
-  "The traffic, latency, allocation and index counters come from the test-side ORP-1 fixture: orp1_row_store_ten_rows, and now orp1_row_store_one_million_rows, whose record carries the aggregate ORP-1 counter line (for example rows=1000000 leaves=12958 branches=163 index_churn=13121, with cold and warm point, range, missing-key and scan timings). orp1_production_writer_ten_rows now reports latency and allocation counters for a production-written graph as well (publish_us, publish_allocations, publish_bytes, read_us, read_allocations, read_bytes, measured around the publication and around the read), so the traffic, latency and allocation figures are no longer fixture-only at ten rows. What remains unmeasured is a production-written graph at one million rows (ornadb-5il1.6).",
+  "The traffic, latency, allocation and index counters come from the test-side ORP-1 fixture (orp1_row_store_ten_rows and orp1_row_store_one_million_rows, whose record carries the aggregate ORP-1 counter line with cold and warm point, range, missing-key and scan timings) and from production-written graphs at ten rows (orp1_production_writer_ten_rows) and one million rows (orp1_row_store_one_million_rows_production_written). The one-million-row production case admits its rows in one runtime request, the batch shape a bulk import uses: the per-row capture fixture costs about 70 ms per row (mostly test-side expression evaluation and Blob capture; the product request commit is about 7 ms) and derives its identities from a u16 ordinal, so it cannot name one million rows. The production-written million-row counters cover rows, leaves, branches, store roots, publication allocations and bytes, and read, point, range and missing-key latency and allocations on the graph the product wrote. Payload traffic on a production-written graph at one million rows stays unmeasured: those rows carry no Blob, and payload traffic at one million rows is measured on the test-side fixture (ornadb-5il1.6).",
 ]
 
 [[item]]
@@ -331,7 +334,7 @@ select = [
   { record = "workspace-rest", package = "orna-runtime", target = "lib", test = "legacy_running_request_recovers_as_uncertain_after_takeover" },
   { record = "workspace-rest", package = "orna-runtime", target = "lib", test = "recovery_retains_uncertainty_and_clears_old_owner_evidence" },
 ]
-limitations = ["Process kill covers only the ref-cas and tail publication boundaries; the other external-effect boundaries are covered by library tests only."]
+limitations = ["Process kill covers only the ref-cas and tail publication boundaries; the other external-effect boundaries are covered by library tests only.", "The ControlledEffectToken is not bound to the request identity: it proves only that the evaluation that minted it was admitted as controlled, not which request it belongs to. admit_sys_host derives the controlled verdict from the caller's host objects, so a caller that passes the wrong host objects is not detected. The controlled-transaction marker is feature-gated and is not cryptographic. Safe in-process Rust can still perform I/O, so the verdict is a contract on the evaluator's host bindings, not a sandbox."]
 
 # Gate E: actual writable mount. The workspace-cli record runs with ORNA_REQUIRE_FUSE=1.
 
@@ -628,8 +631,8 @@ select = [{ record = "workspace-cli", package = "orna-cli", target = "test:secon
 gate = "H"
 id = "H1"
 title = "Structured local drafts: FUSE editor drafts are listed with their code and removed only by an accepted edit"
-select = [{ record = "workspace-cli", package = "orna-cli", target = "bin:orna", test = "draft_list_lines_carry_the_code_and_draft_id" }, { record = "workspace-cli", package = "orna-cli", target = "bin:orna", test = "accepted_edit_removes_its_draft_and_refusals_retain_it" }]
-limitations = ["Covers FUSE editor drafts only. The Orna-authored browser profile is not claimed (ACCEPTANCE.md Gate H, lines 79-85), and no client draft store exists, so typed client drafts and their recovery after a reconnect or restart are not covered (ORNA-APP-018, source/39-source-hosted-apps.md:46; ornadb-jf1z1)."]
+select = [{ record = "workspace-cli", package = "orna-cli", target = "bin:orna", test = "draft_list_lines_carry_the_code_and_draft_id" }, { record = "workspace-cli", package = "orna-cli", target = "bin:orna", test = "accepted_edit_removes_its_draft_and_refusals_retain_it" }, { record = "claims-client-drafts", package = "workspace", target = "check:client-drafts" }]
+limitations = ["Covers FUSE editor drafts only. Structured local drafts for the Orna-authored browser profile are one of Gate H's later separately claimed profiles (ACCEPTANCE.md Gate H, lines 79-85); the product does not claim that profile, ORNA-APP-018 sits under it (source/39-source-hosted-apps.md:41-46), and no client draft store exists. `claims-client-drafts` checks that the product prose does not claim typed client drafts or their recovery after a reconnect or restart (ornadb-jf1z1)."]
 
 [[item]]
 gate = "H"
@@ -684,5 +687,24 @@ limitations = ["Covers the exact image 0.25.9 pin (with its gif, image-webp, png
 gate = "H"
 id = "H9"
 title = "Remote analysis is refused by default and needs explicit policy and recorded provenance"
-select = [{ record = "workspace-rest", package = "orna-application", target = "lib", test = "remote_analysis_is_denied_by_default_and_cannot_be_recorded" }, { record = "workspace-rest", package = "orna-application", target = "lib", test = "remote_analysis_records_the_disclosed_boundary_under_explicit_policy" }, { record = "workspace-rest", package = "orna-application", target = "lib", test = "remote_analysis_cost_above_host_ceiling_is_refused_even_when_acknowledged" }, { record = "workspace-rest", package = "orna-security", target = "lib", test = "remote_analysis_tests::local_only_policy_refuses_disclosure_even_when_cost_is_acknowledged" }, { record = "workspace-rest", package = "orna-security", target = "lib", test = "remote_analysis_tests::cost_bounds_hold_at_u64_maximum" }, { record = "workspace-rest", package = "orna-security", target = "lib", test = "remote_analysis_tests::zero_ceiling_refuses_any_cost_even_when_acknowledged" }, { record = "workspace-rest", package = "orna-security", target = "lib", test = "remote_analysis_tests::ceiling_check_takes_precedence_over_acknowledgement" }, { record = "workspace-rest", package = "orna-security", target = "lib", test = "remote_analysis_tests::provenance_snapshot_is_not_a_reproducibility_claim" }, { record = "workspace-rest", package = "orna-security", target = "lib", test = "remote_analysis_tests::replay_and_reexecution_are_distinct_claims_over_a_retained_artifact" }]
-limitations = ["Disclosure coverage beyond default-deny is open (ornadb-5il1.34)."]
+select = [
+  { record = "workspace-rest", package = "orna-application", target = "test:remote_analysis", test = "remote_analysis_is_denied_by_default_and_records_nothing" },
+  { record = "workspace-rest", package = "orna-application", target = "test:remote_analysis", test = "allowed_analysis_records_the_exact_provenance_and_disclosure" },
+  { record = "workspace-rest", package = "orna-application", target = "test:remote_analysis", test = "nontrivial_cost_needs_an_acknowledgement_within_the_host_ceiling" },
+  { record = "workspace-rest", package = "orna-application", target = "test:remote_analysis", test = "cost_above_the_host_ceiling_is_refused_even_when_acknowledged" },
+  { record = "workspace-rest", package = "orna-application", target = "test:remote_analysis", test = "provenance_is_not_a_reproducibility_claim" },
+  { record = "workspace-rest", package = "orna-application", target = "test:remote_analysis", test = "worktree_project_has_no_recordable_provenance" },
+  { record = "workspace-rest", package = "orna-application", target = "test:remote_analysis", test = "source_outside_the_pinned_snapshot_is_refused" },
+  { record = "workspace-rest", package = "orna-security", target = "lib", test = "remote_analysis_tests::local_only_policy_refuses_disclosure_even_when_cost_is_acknowledged" },
+  { record = "workspace-rest", package = "orna-security", target = "lib", test = "remote_analysis_tests::zero_cost_disclosure_needs_no_cost_acknowledgement_and_records_the_boundary" },
+  { record = "workspace-rest", package = "orna-security", target = "lib", test = "remote_analysis_tests::nontrivial_cost_within_ceiling_requires_per_analysis_acknowledgement" },
+  { record = "workspace-rest", package = "orna-security", target = "lib", test = "remote_analysis_tests::cost_above_host_ceiling_is_refused_even_when_acknowledged" },
+  { record = "workspace-rest", package = "orna-security", target = "lib", test = "remote_analysis_tests::recording_refuses_every_request_the_policy_did_not_allow" },
+  { record = "workspace-rest", package = "orna-security", target = "lib", test = "remote_analysis_tests::provenance_snapshot_is_not_a_reproducibility_claim" },
+  { record = "workspace-rest", package = "orna-security", target = "lib", test = "remote_analysis_tests::replay_and_reexecution_are_distinct_claims_over_a_retained_artifact" },
+  { record = "workspace-rest", package = "orna-security", target = "lib", test = "remote_analysis_tests::retained_artifact_refuses_empty_and_control_character_identities" },
+  { record = "workspace-rest", package = "orna-security", target = "lib", test = "remote_analysis_tests::cost_bounds_hold_at_u64_maximum" },
+  { record = "workspace-rest", package = "orna-security", target = "lib", test = "remote_analysis_tests::zero_ceiling_refuses_any_cost_even_when_acknowledged" },
+  { record = "workspace-rest", package = "orna-security", target = "lib", test = "remote_analysis_tests::ceiling_check_takes_precedence_over_acknowledgement" },
+]
+limitations = ["The gate is an application-boundary API called by integrations: the product ships no remote model provider, so no selected test performs a network call, nothing persists a recorded analysis, and no effect site enforces the policy automatically. Provenance binds the committed source snapshot, the admitted module source and the pinned standard dependency; it does not identify row content at a runtime snapshot or a provider/model coordinate (ornadb-5il1.34)."]

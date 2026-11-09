@@ -7,6 +7,7 @@
 //! activation context and is never published by this crate.
 
 use num_bigint::BigInt;
+use orna_evaluator::{ActivationEffectReport, EffectGate};
 use orna_evaluator::{
     EffectHandler, Environment, EvaluationError, Functions, Limits, NominalDefinitions,
     Ovb2EffectHandler, PureFunction, RelationPage, ReplSession, StandardLayer, StepBudget,
@@ -16,8 +17,8 @@ use orna_evaluator::{
 };
 use orna_foundation::{CanonicalSnapshot, CanonicalValue, OvbRaw, SafeText};
 use orna_live::{
-    Error as LiveError, LiveAdminEffectDispatcher, LiveApplication, LiveApplicationWorkLease,
-    LiveEvalResponse, LiveEvalTransaction,
+    Error as LiveError, FirstPartyEffectTrust, LiveAdminEffectDispatcher, LiveApplication,
+    LiveApplicationWorkLease, LiveEvalResponse, LiveEvalTransaction,
 };
 use orna_project::{
     AdmittedSourceRow, CommittedReadLimits, LoadedProject, ProjectLimits, ResolvedTableSchema,
@@ -29,9 +30,9 @@ use orna_protocol::{
 };
 use orna_repository::{GitCommitRef, ProtectedContentPin, RepositoryCaptureCapability};
 use orna_runtime::{
-    ActivationEffectReport, EffectGate, NoFault, RequestIdentity, RuntimeActivationContext,
-    RuntimeError, RuntimePublicationMetadataRows, RuntimeTableActivationSnapshot,
-    RuntimeTableIdentity, RuntimeTableRows, StagedTableActivation, TableMutation, TableObjectId,
+    NoFault, RequestIdentity, RuntimeActivationContext, RuntimeError,
+    RuntimePublicationMetadataRows, RuntimeTableActivationSnapshot, RuntimeTableIdentity,
+    RuntimeTableRows, StagedTableActivation, TableMutation, TableObjectId,
 };
 pub use orna_security::{
     CostAcknowledgement, RecordedRemoteAnalysis, RemoteAnalysisDecision, RemoteAnalysisPolicy,
@@ -57,28 +58,12 @@ use std::{
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
-/// Applies explicit remote-analysis consent and records the source/snapshot disclosure boundary.
-/// This method only authorizes/records; integrations must call a remote provider only when
-/// `request.is_allowed()` is true. Local evaluation does not depend on this decision.
-#[must_use]
-pub fn remote_analysis_request(
-    policy: RemoteAnalysisPolicy,
-    admitted_snapshot_identity: impl Into<String>,
-    disclosed_data: impl IntoIterator<Item = String>,
-    declared_cost_units: u64,
-    acknowledgement: CostAcknowledgement,
-) -> RemoteAnalysisRequest {
-    RemoteAnalysisRequest::new(
-        policy,
-        admitted_snapshot_identity,
-        disclosed_data,
-        declared_cost_units,
-        acknowledgement,
-    )
-}
-
 mod browser_profile;
 mod contextual_snapshot;
+mod remote_analysis;
+pub use remote_analysis::{
+    RemoteAnalysisGate, RemoteAnalysisProvenance, RemoteAnalysisProvenanceError,
+};
 mod repl_transaction;
 mod table_reference;
 pub use browser_profile::execute_browser_profile;
@@ -1286,10 +1271,12 @@ type ActivationParts = (
 );
 
 impl StagedActivation {
-    /// The effect report this activation declared when it was evaluated.
+    /// Consumes the activation and yields the effect report it declared when it
+    /// was evaluated. The report is evaluator-minted and not cloneable, so it
+    /// moves into exactly one transaction.
     #[must_use]
-    pub fn effects(&self) -> ActivationEffectReport {
-        self.effects.clone()
+    pub fn into_effects(self) -> ActivationEffectReport {
+        self.effects
     }
 
     #[must_use]
@@ -1937,10 +1924,7 @@ impl SourceMutationEffectHandler {
     /// with a sys host attached reports `ExternalPossible` from the attachment
     /// alone. Adding a registry field here requires passing it as `bindings`.
     pub(crate) fn effect_report(&self) -> ActivationEffectReport {
-        EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::bound(
-            self.sys_host.as_ref(),
-            None,
-        ))
+        EffectGate::admit_sys_host(self.sys_host.as_ref(), None)
     }
 
     /// Finishes evaluation while retaining source schema and protected pins.
@@ -4068,8 +4052,11 @@ impl LiveApplication for ApplicationLiveAdapter {
     // `ControlledOnly` whatever the authority binds. That is only true when the
     // authority binds no sys host; a bound host can reach state the handler does
     // not observe, so its reports are downgraded at the commit boundary.
-    fn trusts_controlled_effect_reports(&self) -> bool {
-        self.authority.sys_host.is_none()
+    fn first_party_effect_trust(&self) -> Option<FirstPartyEffectTrust> {
+        self.authority
+            .sys_host
+            .is_none()
+            .then(FirstPartyEffectTrust::mint)
     }
 
     fn eval(
@@ -4567,14 +4554,11 @@ mod tests {
         let registry = orna_evaluator::SysHostBindingRegistry::default();
         assert!(registry.may_reach_external_state());
         assert!(matches!(
-            EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::bound(
-                None,
-                Some(&registry)
-            )),
+            EffectGate::admit_sys_host(None, Some(&registry)),
             ActivationEffectReport::ExternalPossible
         ));
         assert!(matches!(
-            EffectGate::admit(&orna_evaluator::SysHostEffectEvidence::unbound()),
+            EffectGate::admit_unbound_for_test(),
             ActivationEffectReport::ControlledOnly(_)
         ));
     }
@@ -4588,71 +4572,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn remote_analysis_is_denied_by_default_and_cannot_be_recorded() {
-        let denied = remote_analysis_request(
-            RemoteAnalysisPolicy::default(),
-            "snapshot:sha256:source-deps-resources-toolchain-abi",
-            ["source".to_owned()],
-            0,
-            CostAcknowledgement::Given,
-        );
-        assert_eq!(denied.decision(), RemoteAnalysisDecision::DeniedLocalOnly);
-        assert!(!denied.is_allowed());
-        assert!(denied.disclosed_data().is_empty());
-        assert_eq!(
-            RecordedRemoteAnalysis::record(&denied, Reproducibility::NotReproducible),
-            Err(RemoteAnalysisRecordError::NotAllowed(
-                RemoteAnalysisDecision::DeniedLocalOnly
-            ))
-        );
-    }
-
-    #[test]
-    fn remote_analysis_records_the_disclosed_boundary_under_explicit_policy() {
-        let policy = RemoteAnalysisPolicy::AllowRemoteDisclosure { max_cost_units: 0 };
-        let allowed = remote_analysis_request(
-            policy,
-            "snapshot:sha256:source-deps-resources-toolchain-abi",
-            ["source", "dependency snapshot", "query"].map(str::to_owned),
-            0,
-            CostAcknowledgement::Withheld,
-        );
-        assert_eq!(
-            allowed.decision(),
-            RemoteAnalysisDecision::AllowedByUserPolicy
-        );
-        let recorded = RecordedRemoteAnalysis::record(
-            &allowed,
-            Reproducibility::RetainedOutputReplay(
-                RetainedArtifact::new("remote-output:sha256:abc").unwrap(),
-            ),
-        )
-        .unwrap();
-        assert_eq!(
-            recorded.disclosed_data(),
-            &["source", "dependency snapshot", "query"]
-        );
-        assert_eq!(recorded.declared_cost_units(), 0);
-    }
-
-    #[test]
-    fn remote_analysis_cost_above_host_ceiling_is_refused_even_when_acknowledged() {
-        let policy = RemoteAnalysisPolicy::AllowRemoteDisclosure { max_cost_units: 10 };
-        let over = remote_analysis_request(
-            policy,
-            "snapshot:sha256:source-deps-resources-toolchain-abi",
-            ["source".to_owned()],
-            11,
-            CostAcknowledgement::Given,
-        );
-        assert_eq!(
-            over.decision(),
-            RemoteAnalysisDecision::DeniedCostExceedsPolicy
-        );
-        assert!(over.disclosed_data().is_empty());
-        assert!(!over.is_allowed());
-    }
     #[test]
     fn source_admission_reaches_real_evaluator() {
         let authority =

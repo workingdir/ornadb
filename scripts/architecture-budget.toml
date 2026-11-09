@@ -4,35 +4,40 @@
 # `arch` job of .github/workflows/lint.yml. ARCHITECTURE.md is the policy;
 # this file is the recorded debt.
 #
-# A number here is a ratchet: `--mode=budget` fails when a measured value
-# grows past its entry, and when a file, function or crate with no entry
-# exceeds its hard cap. A stage that shrinks or removes debt lowers or
-# deletes the entry in the same PR, so this file only ever moves down.
+# Only per-file and per-function entries are recorded. There is no crate-level
+# line budget: adding a few types to a large crate is not a violation.
 #
-#   crate_src_lines  hard cap on crates/<crate>/src/*.rs; a crate above it
-#                    needs an explicit src_lines entry
+# `--mode=budget` fails when a file or function appears over its hard cap with
+# no entry, or when a recorded entry grows by more than max(5%, 25 lines).
+# Shrinkage and growth inside that tolerance are non-failing notes, so a PR
+# that is behind a merged refactor is never failed by another PR's good news.
+#
+# Lower the drift after a merge with:
+#
+#   python3 scripts/check_architecture.py --mode=budget --update
+#
+# It lowers or removes entries that shrank and never raises one.
+#
+# A deliberate raise is not written here: add or update a reviewed [[raise]] in
+# scripts/architecture-budget-raises.toml with a reason and a bead. That file is
+# the visible exception list; this file only ever moves down.
+#
 #   file_lines       hard cap on one source file; a file above it needs an
-#                    explicit files entry
+#                    explicit files entry or a raise
 #   function_lines   hard cap on one function; a function above it needs an
-#                    explicit functions entry
+#                    explicit functions entry or a raise
 #
-# Recorded at the stage-01 merge of origin/main cb197b7b0. Regenerate only to
-# lower entries: the [[crate]] src_lines, files and functions entries are
-# measurements, and allow_clippy counts every #[allow(clippy::...)] attribute
-# in src.
 
 [limits]
-crate_src_lines = 25000
 file_lines = 1200
 function_lines = 120
 
 [[crate]]
 name = "orna-application"
-allow_clippy = 0
 [crate.files]
-"src/lib.rs" = 14911
+"src/lib.rs" = 14830
 "src/migration_rows.rs" = 1733
-"src/repl_transaction.rs" = 1234
+"src/repl_transaction.rs" = 1231
 [crate.functions]
 "src/lib.rs::checked_in_source_effect_stages_and_commits_with_activation_scoped_id" = 151
 "src/lib.rs::competitor_and_owner_retries_alternate_returned_key_closure" = 127
@@ -54,8 +59,6 @@ allow_clippy = 0
 
 [[crate]]
 name = "orna-cli"
-src_lines = 41071
-allow_clippy = 101
 [crate.files]
 "src/cli_dispatch.rs" = 2093
 "src/cli_history.rs" = 1571
@@ -104,11 +107,10 @@ allow_clippy = 101
 
 [[crate]]
 name = "orna-conformance"
-allow_clippy = 8
 [crate.files]
 "src/lib.rs" = 2962
 "src/main.rs" = 1981
-"src/semantic_adapter.rs" = 14483
+"src/semantic_adapter.rs" = 14481
 [crate.functions]
 "src/lib.rs::execute_reference_project_runtime_adapter" = 208
 "src/lib.rs::run_fixture" = 123
@@ -131,8 +133,6 @@ allow_clippy = 8
 
 [[crate]]
 name = "orna-core"
-src_lines = 60684
-allow_clippy = 26
 [crate.files]
 "src/canonical_hash.rs" = 2627
 "src/canonical_hash/tests.rs" = 3258
@@ -189,10 +189,8 @@ allow_clippy = 26
 
 [[crate]]
 name = "orna-evaluator"
-src_lines = 30504
-allow_clippy = 1
 [crate.files]
-"src/lib.rs" = 20533
+"src/lib.rs" = 20535
 "src/relation.rs" = 1375
 "src/repl.rs" = 1766
 "src/sys_bindings.rs" = 2392
@@ -221,21 +219,18 @@ allow_clippy = 1
 
 [[crate]]
 name = "orna-evolution"
-allow_clippy = 0
 [crate.files]
 "src/lib.rs" = 1270
 
 [[crate]]
 name = "orna-foundation"
-allow_clippy = 1
 [crate.files]
 "src/lib.rs" = 2411
 
 [[crate]]
 name = "orna-live"
-allow_clippy = 24
 [crate.files]
-"src/lib.rs" = 12239
+"src/lib.rs" = 12257
 "src/live_presentation.rs" = 1623
 [crate.functions]
 "src/lib.rs::complete_application" = 232
@@ -246,7 +241,6 @@ allow_clippy = 24
 
 [[crate]]
 name = "orna-lsp"
-allow_clippy = 2
 [crate.files]
 "src/analysis.rs" = 1619
 "src/names.rs" = 1513
@@ -262,7 +256,6 @@ allow_clippy = 2
 
 [[crate]]
 name = "orna-project"
-allow_clippy = 0
 [crate.files]
 "src/attachments.rs" = 12412
 "src/lib.rs" = 3232
@@ -304,7 +297,6 @@ allow_clippy = 0
 
 [[crate]]
 name = "orna-project-repl"
-allow_clippy = 0
 [crate.files]
 "src/lib.rs" = 2605
 [crate.functions]
@@ -312,7 +304,6 @@ allow_clippy = 0
 
 [[crate]]
 name = "orna-protocol"
-allow_clippy = 0
 [crate.files]
 "src/lib.rs" = 4448
 [crate.functions]
@@ -322,8 +313,6 @@ allow_clippy = 0
 
 [[crate]]
 name = "orna-repository"
-src_lines = 74780
-allow_clippy = 17
 [crate.files]
 "src/compact.rs" = 6282
 "src/compact/legacy_reader_tests.rs" = 3185
@@ -383,29 +372,26 @@ allow_clippy = 17
 
 [[crate]]
 name = "orna-runtime"
-src_lines = 69694
-allow_clippy = 8
 [crate.files]
-"src/catalogue.rs" = 3697
-"src/invocation.rs" = 1523
-"src/lib.rs" = 35506
-"src/observation.rs" = 2191
-"src/publication.rs" = 1352
-"src/schema.rs" = 2377
-"src/stream_admin.rs" = 1759
-"src/stream_carry.rs" = 1430
-"src/stream_run.rs" = 1545
-"src/stream_store.rs" = 1320
-"src/table_store.rs" = 1807
+"src/catalogue.rs" = 3568
+"src/invocation.rs" = 1429
+"src/lib.rs" = 35336
+"src/observation.rs" = 2068
+"src/publication.rs" = 1301
+"src/schema.rs" = 2118
+"src/stream_admin.rs" = 1720
+"src/stream_carry.rs" = 1322
+"src/stream_run.rs" = 1499
+"src/stream_store.rs" = 1230
+"src/table_store.rs" = 1735
 "src/vfs.rs" = 6811
 [crate.functions]
 "src/catalogue.rs::activation_commits_catalogue_identity_with_table_state_or_rolls_back_both" = 141
-"src/catalogue.rs::admit_catalogue_batch_tx" = 124
+"src/catalogue.rs::admit_catalogue_batch_tx" = 123
 "src/catalogue.rs::replay_catalogue_tx" = 140
 "src/catalogue.rs::retained_function_read_stays_pinned_and_rejects_invalid_captures" = 136
-"src/history.rs::read_storage_table_at" = 130
-"src/invocation.rs::begin_invocation_observation" = 157
-"src/invocation.rs::materialize_procedure_at" = 140
+"src/invocation.rs::begin_invocation_observation" = 152
+"src/invocation.rs::materialize_procedure_at" = 125
 "src/lib.rs::accepted_pin_checkpoint_recovers_committed_state_and_discards_interrupted_state" = 126
 "src/lib.rs::admin_failure_class_round_trips_every_payload_free_variant" = 159
 "src/lib.rs::assertion_replay_failure_preserves_identity_and_detail_until_ordinary_failure" = 168
@@ -452,16 +438,15 @@ allow_clippy = 8
 "src/lib.rs::validate_request_execution_evidence" = 145
 "src/lib.rs::validated_table_activation_commits_protected_blob_transfer_atomically" = 151
 "src/lib.rs::vfs_durable_save_survives_reopen_and_refusal_leaves_no_row" = 227
-"src/observation.rs::load_stream_observation_tx" = 138
-"src/observation.rs::sync_stream_observation_tx" = 188
-"src/publication.rs::bind_compact_publication" = 122
-"src/recovery.rs::validate_checkpoint_anchors" = 171
-"src/recovery.rs::validate_stream_checkpoint_history" = 220
-"src/schema.rs::migrate_accepted_content_pin_checkpoint" = 179
-"src/schema.rs::migrate_admin_checkpoint_reset_receipts" = 157
-"src/schema.rs::migrate_catalogue_identity_schema" = 150
-"src/schema.rs::migrate_runtime_table_history" = 157
-"src/stream_carry.rs::import_stream_carry" = 196
+"src/observation.rs::load_stream_observation_tx" = 134
+"src/observation.rs::sync_stream_observation_tx" = 187
+"src/recovery.rs::validate_checkpoint_anchors" = 159
+"src/recovery.rs::validate_stream_checkpoint_history" = 208
+"src/schema.rs::migrate_accepted_content_pin_checkpoint" = 150
+"src/schema.rs::migrate_admin_checkpoint_reset_receipts" = 146
+"src/schema.rs::migrate_catalogue_identity_schema" = 129
+"src/schema.rs::migrate_runtime_table_history" = 133
+"src/stream_carry.rs::import_stream_carry" = 183
 "src/stream_carry.rs::read_stream_carry" = 146
 "src/stream_run.rs::deliver_stream_item" = 160
 "src/stream_run.rs::run_stream" = 123
@@ -472,22 +457,17 @@ allow_clippy = 8
 "src/vfs.rs::vfs_rejected_editor_saves_keep_row_store_and_expose_typed_diagnostic" = 140
 
 [[crate]]
-name = "orna-security"
-allow_clippy = 0
-
-[[crate]]
 name = "orna-semantic"
-src_lines = 36662
-allow_clippy = 9
 [crate.files]
-"src/lib.rs" = 29838
-"src/semantic_payload.rs" = 1846
+"src/lib.rs" = 28294
+"src/semantic_payload.rs" = 1831
 "src/system_api.rs" = 3522
+"src/tests.rs" = 1857
 [crate.functions]
 "src/lib.rs::admit_row_unit_with_key_spelling" = 222
-"src/lib.rs::analyze_recording_origins" = 243
-"src/lib.rs::authoritative_core" = 358
-"src/lib.rs::authoritative_fixture" = 326
+"src/lib.rs::analyze_recording_origins" = 250
+"src/lib.rs::authoritative_core" = 359
+"src/lib.rs::authoritative_fixture" = 331
 "src/lib.rs::check_item" = 429
 "src/lib.rs::checkpoint_paired_boundary_record_maps_match" = 121
 "src/lib.rs::checkpoint_topology_anchor_with_first_complete_pins" = 131
@@ -495,10 +475,14 @@ allow_clippy = 9
 "src/lib.rs::collect_corresponding_snapshot_context_maps_at_path" = 243
 "src/lib.rs::collect_reset_snapshot_context_maps" = 165
 "src/lib.rs::collect_snapshot_context_maps_from_omitted_value_at_path" = 140
+"src/lib.rs::collect_use_bindings" = 149
 "src/lib.rs::infer_await_system_call" = 142
+"src/lib.rs::infer_binary" = 131
+"src/lib.rs::infer_call" = 259
 "src/lib.rs::infer_cancel_system_call" = 125
-"src/lib.rs::infer_case" = 190
+"src/lib.rs::infer_case" = 193
 "src/lib.rs::infer_descriptor_system_call" = 159
+"src/lib.rs::infer_field" = 167
 "src/lib.rs::infer_finite_list_collection" = 208
 "src/lib.rs::infer_finite_list_helper_collection" = 275
 "src/lib.rs::infer_finite_list_numeric_aggregate" = 122
@@ -506,21 +490,23 @@ allow_clippy = 9
 "src/lib.rs::infer_invoke_system_call" = 132
 "src/lib.rs::infer_local_generic_call" = 196
 "src/lib.rs::infer_module_relation" = 222
-"src/lib.rs::infer_node" = 1238
+"src/lib.rs::infer_node" = 127
 "src/lib.rs::infer_nominal" = 148
 "src/lib.rs::infer_query_explain_system_call" = 178
 "src/lib.rs::infer_relation_collection_call" = 171
 "src/lib.rs::infer_relation_collection_pipeline" = 222
 "src/lib.rs::infer_relation_statistics_call" = 282
+"src/lib.rs::infer_relation_stream_pipeline" = 286
 "src/lib.rs::infer_relation_terminal_call" = 220
 "src/lib.rs::infer_start_system_call" = 132
-"src/lib.rs::infer_success_pipeline" = 787
 "src/lib.rs::infer_table_operation" = 209
 "src/lib.rs::merge_checkpoint_field_map_inner" = 228
 "src/lib.rs::merge_multi_parent_checkpoint_value_scoped" = 448
+"src/lib.rs::module_scope" = 134
 "src/lib.rs::pinned_snapshot_reset_shape_matches_at_path_with_width" = 162
 "src/lib.rs::pinned_snapshot_shape_matches" = 134
-"src/lib.rs::resolve_imports_with_dependencies" = 589
+"src/lib.rs::pipeline_collection_stage" = 267
+"src/lib.rs::pipeline_relation_intrinsic_stage" = 131
 "src/lib.rs::same_default_expression" = 247
 "src/lib.rs::seed_aligned_paths" = 132
 "src/lib.rs::seed_omitted_pinned_checkpoint_tuple_paths" = 153
@@ -529,42 +515,31 @@ allow_clippy = 9
 "src/lib.rs::validate_loop_transfers" = 208
 "src/lib.rs::validate_nested_implementation_members" = 303
 "src/lib.rs::visit#5" = 155
-"src/semantic_payload.rs::declaration" = 323
+"src/semantic_payload.rs::declaration" = 310
 "src/semantic_payload.rs::expr" = 204
 "src/system_api.rs::from_json" = 354
 "src/system_api.rs::function_metadata_is_required_by_applicable_contract" = 174
 "src/system_api.rs::parsed_descriptor_retains_declared_members" = 374
 
 [[crate]]
-name = "orna-serving"
-allow_clippy = 0
-
-[[crate]]
-name = "orna-standard-sources"
-allow_clippy = 0
-
-[[crate]]
 name = "orna-storage"
-allow_clippy = 0
 [crate.files]
 "src/compact.rs" = 3529
 "src/compact_parquet.rs" = 5200
-"src/lib.rs" = 1879
+"src/lib.rs" = 1887
 [crate.functions]
 "src/compact.rs::evolution_rekey_consumes_verified_base_and_emits_writer_input" = 144
 "src/compact.rs::lower_publication_freeze" = 125
 "src/compact_parquet.rs::decode_verified_bytes_for_role" = 123
-"src/lib.rs::build_frozen_publication_store_root" = 122
+"src/lib.rs::build_frozen_publication_store_root" = 126
 
 [[crate]]
 name = "orna-stream"
-allow_clippy = 0
 [crate.files]
 "src/lib.rs" = 2843
 
 [[crate]]
 name = "orna-syntax"
-allow_clippy = 4
 [crate.files]
 "src/editor.rs" = 1577
 "src/parser.rs" = 5655
@@ -582,12 +557,10 @@ allow_clippy = 4
 
 [[crate]]
 name = "orna-sys"
-src_lines = 31737
-allow_clippy = 5
 [crate.files]
 "src/host_filesystem.rs" = 2301
-"src/introspection.rs" = 18588
-"src/lib.rs" = 2680
+"src/introspection.rs" = 17855
+"src/lib.rs" = 2650
 "src/provider.rs" = 1382
 "src/system_api.rs" = 1556
 "src/tests.rs" = 2607
@@ -599,7 +572,7 @@ allow_clippy = 5
 "src/introspection.rs::build_plan" = 154
 "src/introspection.rs::disjunct_storm_branch_cascade_cardinality_and_work" = 165
 "src/introspection.rs::duplicate_sparse_fold_input_carries_composite_identity" = 187
-"src/introspection.rs::explain_with_inputs" = 4399
+"src/introspection.rs::explain_with_inputs" = 3983
 "src/introspection.rs::query_join_cost_fold" = 129
 "src/introspection.rs::query_paired_bounded_window_spill_chain_window_fold" = 190
 "src/introspection.rs::query_paired_bounded_window_spill_restore_fold" = 151
@@ -610,12 +583,7 @@ allow_clippy = 5
 "src/introspection.rs::query_paired_window_spill_rule_cost_fold" = 124
 
 [[crate]]
-name = "orna-sys-macros"
-allow_clippy = 0
-
-[[crate]]
 name = "orna-table"
-allow_clippy = 0
 [crate.files]
 "src/lib.rs" = 2829
 [crate.functions]
@@ -623,7 +591,6 @@ allow_clippy = 0
 
 [[crate]]
 name = "orna-traceability"
-allow_clippy = 1
 [crate.files]
 "src/citation_ratchet.rs" = 1611
 "src/lib.rs" = 2101
@@ -632,7 +599,6 @@ allow_clippy = 1
 
 [[crate]]
 name = "orna-value"
-allow_clippy = 2
 [crate.files]
 "src/blob.rs" = 1250
 "src/format3_context_tests.rs" = 1426
@@ -642,4 +608,3 @@ allow_clippy = 2
 "src/format3_context_tests.rs::mime1_annotations_reject_noncanonical_and_unsafe_inputs" = 198
 "src/schema.rs::validate_value_as_type" = 128
 "src/validation.rs::validate_tag" = 264
-

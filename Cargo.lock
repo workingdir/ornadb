@@ -1518,7 +1518,6 @@ dependencies = [
  "orna-project",
  "orna-project-repl",
  "orna-repository",
- "orna-runtime",
  "orna-semantic",
  "orna-standard-sources",
  "orna-syntax",
@@ -1780,6 +1779,13 @@ dependencies = [
  "syn 2.0.119",
  "tempfile",
  "uuid",
+]
+
+[[package]]
+name = "orna-sys-id"
+version = "1.0.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

@@ -61,7 +61,7 @@ sha256 `10ef7dab9665de4e065ee2b96797b2751c7c3f98f9886241011aee0cc8c0d40e`)
 is declared normative by `source/34-system-reference.md:3`:
 
 > This reference defines system names, field types and callable interfaces. ...
-> A machine-readable schema is available in [`api/sys.json`](api/sys.json).
+> A machine-readable schema is available in `api/sys.json` (reference/Orna-1.1.0/api/sys.json).
 
 Its `counts` object fixes the closed sets:
 

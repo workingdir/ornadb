@@ -25,6 +25,7 @@ members = [
     "crates/orna-stream",
     "crates/orna-syntax",
     "crates/orna-sys",
+    "crates/orna-sys-id",
     "crates/orna-traceability",
     "crates/orna-value",
 ]

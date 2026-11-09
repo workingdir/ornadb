@@ -23,11 +23,11 @@ use std::{
     process::{Command, ExitStatus},
 };
 
+use orna_evaluator::ActivationEffectReport;
 use orna_repository::Repository;
 use orna_runtime::{
-    ActivationEffectReport, FaultInjector, FaultPoint, RecoveryDisposition, RequestIdentity,
-    RequestOwner, RequestState, RuntimeError, RuntimeIdentity, RuntimeState, TableMutation,
-    TerminalOutcome, WriterLease,
+    FaultInjector, FaultPoint, RecoveryDisposition, RequestIdentity, RequestOwner, RequestState,
+    RuntimeError, RuntimeIdentity, RuntimeState, TableMutation, TerminalOutcome, WriterLease,
 };
 use tempfile::{Builder, TempDir};
 
