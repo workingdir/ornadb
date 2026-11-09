@@ -1040,6 +1040,9 @@ fn root_collection_intrinsic(name: &str) -> Option<orna_intrinsics::IntrinsicId>
         "window" => IntrinsicId::CollectionWindow,
         "rank" => IntrinsicId::CollectionRank,
         "bucket_by" => IntrinsicId::CollectionBucketBy,
+        // `project` is the relation result-shaping spelling of `map`; the
+        // source has no separate projection grammar. S3 removes the root name.
+        "project" => IntrinsicId::CoreMap,
         "__recursive_cte" => IntrinsicId::CollectionRecursiveCte,
         _ => return None,
     })
@@ -1071,8 +1074,9 @@ fn local_intrinsic(name: &str) -> Option<orna_intrinsics::IntrinsicId> {
 /// the spelling's module path must name a catalogue module, the leaf (the
 /// public export or the private implementation leaf) must be registered, the
 /// entry must be native rather than `SourceOnly`, and its pins must cover the
-/// current standard pin. A declaration that fails any clause is ordinary
-/// source and runs its Orna body.
+/// current standard pin. A descriptor that records a private marker leaf is
+/// native through that leaf only. A declaration that fails any clause is
+/// ordinary source and runs its Orna body.
 fn module_intrinsic(name: &str) -> Option<orna_intrinsics::IntrinsicId> {
     let (module_path, leaf) = name.rsplit_once('.')?;
     let module = orna_intrinsics::Module::from_path(module_path)?;
@@ -1082,19 +1086,14 @@ fn module_intrinsic(name: &str) -> Option<orna_intrinsics::IntrinsicId> {
     {
         return None;
     }
-    // Modules whose table binds only the private leaf keep their public source
-    // wrapper; binding the public name would skip its validation and hand the
-    // handler a spelling it does not match.
-    let bind_public = !matches!(
-        module,
-        orna_intrinsics::Module::Stats
-            | orna_intrinsics::Module::Ui
-            | orna_intrinsics::Module::Json
-            | orna_intrinsics::Module::OrnaCodec
-            | orna_intrinsics::Module::OvbCodec
-            | orna_intrinsics::Module::Money
-    ) && !(module == orna_intrinsics::Module::Query && intrinsic.leaf.is_some());
-    if !bind_public && !leaf.starts_with("__") {
+    // A descriptor that records a private marker leaf is native through that
+    // leaf alone: its public export stays the captured Orna wrapper, which is
+    // where the operation's arguments are named and defaulted (ORNA-LIB-001).
+    // `std.money` proves the distinction: its wrappers are the only spellings
+    // that carry the generic amount parameter, and the money arm is keyed by
+    // `__quantize`/`__allocate`/`__format`. The descriptor already records
+    // which spelling the registry binds, so no module list is needed here.
+    if intrinsic.leaf.is_some_and(|marker| marker != leaf) {
         return None;
     }
     Some(intrinsic.id)
