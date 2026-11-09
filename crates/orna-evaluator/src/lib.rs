@@ -16874,8 +16874,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
-    #[test]
     fn relation_query_aggregations_and_statistics_return_computed_values() {
         let ints = |values: &[i64]| {
             values
@@ -17674,7 +17672,6 @@ mod tests {
         assert_eq!(effects.calls, 0);
     }
 
-    #[test]
     #[test]
     fn error_intrinsic_builds_tagged_error_and_rejects_successful_escape() {
         let failure = evaluate_expression(

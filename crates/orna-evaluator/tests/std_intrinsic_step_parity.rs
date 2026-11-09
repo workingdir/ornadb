@@ -68,8 +68,6 @@ fn list(size: usize) -> String {
 /// One program per catalogue family, parameterised by the list length.
 fn programs(size: usize) -> Vec<(&'static str, String)> {
     let values = list(size);
-    let small = list(size.min(5));
-    let windowed = list(size.min(8));
     vec![
         (
             "filter",
