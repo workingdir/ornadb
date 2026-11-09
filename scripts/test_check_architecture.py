@@ -527,7 +527,10 @@ class BudgetTests(unittest.TestCase):
         result = fixture.run("--mode=budget")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_shrunk_entry_warns_but_does_not_fail(self) -> None:
+    def test_another_pr_shrinking_a_file_is_a_note_not_a_failure(self) -> None:
+        # A PR based on an older main still records 10 lines; a merged refactor
+        # lowered the file to 3. That is good news from another PR and must not
+        # fail this PR's budget check.
         fixture = self.fixture({"src/lib.rs": "a\nb\nc\n"})
         fixture.budget(
             "[limits]\ncrate_src_lines = 25000\nfile_lines = 1200\nfunction_lines = 120\n"
@@ -537,7 +540,67 @@ class BudgetTests(unittest.TestCase):
         )
         result = fixture.run("--mode=budget")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("[note]", result.stdout)
         self.assertIn("lower the entry", result.stdout)
+        self.assertNotIn("violation", result.stdout.lower())
+
+    def test_update_lowers_and_removes_entries_without_raising(self) -> None:
+        fixture = self.fixture({"src/lib.rs": "a\nb\nc\nd\ne\n"})
+        fixture.budget(
+            "[limits]\ncrate_src_lines = 25000\nfile_lines = 2\nfunction_lines = 2\n"
+            '\n[[crate]]\nname = "demo-a"\nsrc_lines = 10\nallow_clippy = 3\n'
+            "[crate.files]\n"
+            '"src/lib.rs" = 10\n'
+            '"src/gone.rs" = 50\n'
+            "[crate.functions]\n"
+            '"src/lib.rs::gone" = 90\n'
+        )
+        result = fixture.run("--mode=budget", "--update")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("lowered demo-a/src/lib.rs 10 -> 5", result.stdout)
+        self.assertIn("removed demo-a:src_lines", result.stdout)
+        self.assertIn("removed demo-a/src/gone.rs", result.stdout)
+        self.assertIn("removed demo-a/src/lib.rs::gone", result.stdout)
+        updated = (fixture.root / "scripts" / "architecture-budget.toml").read_text(encoding="utf-8")
+        self.assertNotIn("\nsrc_lines =", updated)
+        self.assertIn('"src/lib.rs" = 5', updated)
+        self.assertIn("allow_clippy = 0", updated)
+        self.assertNotIn("src/gone.rs", updated)
+        self.assertNotIn("src/lib.rs::gone", updated)
+        self.assertEqual(fixture.run("--mode=budget").returncode, 0)
+
+    def test_update_never_raises_a_growth_entry(self) -> None:
+        fixture = self.fixture({"src/lib.rs": "a\nb\nc\nd\ne\n"})
+        fixture.budget(
+            "[limits]\ncrate_src_lines = 25000\nfile_lines = 2\nfunction_lines = 120\n"
+            '\n[[crate]]\nname = "demo-a"\nallow_clippy = 0\n'
+            "[crate.files]\n"
+            '"src/lib.rs" = 3\n'
+        )
+        result = fixture.run("--mode=budget", "--update")
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("a reviewed edit must raise the entry", result.stdout)
+        updated = (fixture.root / "scripts" / "architecture-budget.toml").read_text(encoding="utf-8")
+        self.assertIn('"src/lib.rs" = 3', updated)
+
+    def test_update_does_not_add_new_debt(self) -> None:
+        fixture = self.fixture({"src/big.rs": "a\nb\nc\nd\ne\n"})
+        fixture.budget(
+            "[limits]\ncrate_src_lines = 25000\nfile_lines = 2\nfunction_lines = 120\n"
+            '\n[[crate]]\nname = "demo-a"\nallow_clippy = 0\n'
+        )
+        result = fixture.run("--mode=budget", "--update")
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("no budget entry records the debt", result.stdout)
+        updated = (fixture.root / "scripts" / "architecture-budget.toml").read_text(encoding="utf-8")
+        self.assertNotIn("src/big.rs", updated)
+
+    def test_update_requires_budget_mode(self) -> None:
+        fixture = self.fixture({"src/lib.rs": "a\nb\nc\n"})
+        fixture.budget("[limits]\ncrate_src_lines = 25000\nfile_lines = 1200\nfunction_lines = 120\n")
+        result = fixture.run("--mode=report", "--update")
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("--update requires --mode=budget", result.stderr)
 
     def test_budget_entry_for_missing_crate_fails(self) -> None:
         fixture = self.fixture({"src/lib.rs": "a\nb\nc\n"})

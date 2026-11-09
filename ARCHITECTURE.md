@@ -53,8 +53,10 @@ that file agree.
 
 File 1,200 lines; function 120 lines and cognitive complexity 25; crate source
 25,000 lines. `python3 scripts/check_architecture.py --mode=budget` enforces them
-against `scripts/architecture-budget.toml`, whose recorded numbers may only
-shrink.
+against `scripts/architecture-budget.toml`, whose recorded numbers may only shrink.
+Shrinkage is a non-failing note; lower the drift with
+`python3 scripts/check_architecture.py --mode=budget --update`, which never raises
+an entry.
 
 ## Checking
 
@@ -62,6 +64,7 @@ shrink.
 python3 scripts/check_architecture.py --mode=report   # current state, exit 0
 python3 scripts/check_architecture.py --mode=deny     # fails on new violations
 python3 scripts/check_architecture.py --mode=budget   # fails on budget growth
+python3 scripts/check_architecture.py --mode=budget --update   # lower drift; never raises
 python3 -m unittest scripts.test_check_architecture
 cargo deny --locked check bans licenses sources
 ```
