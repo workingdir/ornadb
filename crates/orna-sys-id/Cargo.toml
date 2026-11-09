@@ -1,0 +1,15 @@
+[package]
+name = "orna-sys-id"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.95"
+license.workspace = true
+description = "Generated typed identity for the Orna 1.1.0 sys surface"
+
+[dependencies]
+
+[build-dependencies]
+serde_json = "1.0"
+
+[dev-dependencies]
+serde_json = "1.0"

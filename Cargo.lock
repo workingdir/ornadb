@@ -1778,6 +1778,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "orna-sys-id"
+version = "1.0.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "orna-sys-macros"
 version = "1.0.0"
 
