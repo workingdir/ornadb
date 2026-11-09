@@ -1,4 +1,5 @@
-use orna_evaluator::{AdmittedReplSession, Limits};
+use orna_evaluator::Limits;
+use orna_project_repl::AdmittedReplSession;
 use orna_semantic::{Catalogue, StandardDependencyProfile};
 
 fn admitted_session(

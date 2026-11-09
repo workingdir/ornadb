@@ -10,10 +10,10 @@
 //! its value, including from inside a `case` arm.
 
 use orna_evaluator::{
-    AdmittedReplSession, Environment, Functions, Limits, PureFunction, evaluate_expression,
-    evaluate_with_functions,
+    Environment, Functions, Limits, PureFunction, evaluate_expression, evaluate_with_functions,
 };
 use orna_foundation::CanonicalValue;
+use orna_project_repl::AdmittedReplSession;
 use orna_value::{Raw, Value};
 
 const RECURSIVE_MODULE: &str = "

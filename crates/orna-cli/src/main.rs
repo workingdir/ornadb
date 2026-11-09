@@ -65,12 +65,13 @@ use orna_application::{
     ReplEvaluationFailure, ReplTransactionScope, StagedActivation,
 };
 use orna_conformance::{
-    AdmittedReplSession, BoundedEvaluator, DurableTransactionalEvaluator, ProjectEnvironment,
-    ProjectExpectations, ProjectUnit, ReplError, RuntimeEvaluator, SourceUnit, StageOutcome,
-    project_declares_assertions, transactional_loaded_project_candidate_validator,
+    BoundedEvaluator, DurableTransactionalEvaluator, ProjectEnvironment, ProjectExpectations,
+    ProjectUnit, RuntimeEvaluator, SourceUnit, StageOutcome, project_declares_assertions,
+    transactional_loaded_project_candidate_validator,
 };
 use orna_evaluator::{Environment, Limits, SysHostBindingRegistry};
 use orna_foundation::{CanonicalValue, OvbRaw, Value};
+use orna_project_repl::{AdmittedReplSession, ReplError};
 use orna_runtime::{
     FaultInjector, NoFault, PinnedCommittedRows, QueryObservationRegistration, RequestIdentity,
     RuntimeError, RuntimeIdentity, RuntimePublicationMetadataRows, RuntimeState,
@@ -3381,7 +3382,7 @@ impl repl::SnapshotSessionLoader for ReplSnapshotSessionLoader<'_> {
 fn repl_effect_failure(message: &str, remedy: &str) -> repl::ReplFailure {
     repl::ReplFailure {
         code: "ORNA-REPL-EFFECT".to_owned(),
-        detail: Some(orna_evaluator::ReplDetail {
+        detail: Some(orna_project_repl::ReplDetail {
             code: "ORNA-REPL-EFFECT".to_owned(),
             message: message.to_owned(),
             span: None,
@@ -3404,7 +3405,7 @@ fn repl_lease_failure(error: &RuntimeError, state: &RuntimeState) -> repl::ReplF
         // on this path and no remedy is offered for it.
         return repl::ReplFailure {
             code: "ORNA-REPL-EFFECT".to_owned(),
-            detail: Some(orna_evaluator::ReplDetail {
+            detail: Some(orna_project_repl::ReplDetail {
                 code: "ORNA-REPL-EFFECT".to_owned(),
                 message:
                     "another writer owns the repository writer lease for this runtime owner lock"
@@ -3462,9 +3463,9 @@ fn run_repl_input(
         return session.submit(source).map_err(repl::ReplFailure::from);
     };
     let (Some(repository), Some(transactions)) = (repository, transactions) else {
-        return Err(repl::ReplFailure::from(orna_evaluator::effect_rejection(
-            staged.effects(),
-        )));
+        return Err(repl::ReplFailure::from(
+            orna_project_repl::effect_rejection(staged.effects()),
+        ));
     };
     let (current_commit, _) = repository
         .open_pinned_format_context_with_commit("HEAD")
@@ -3887,7 +3888,7 @@ fn repl_evaluation_failure(failure: ReplEvaluationFailure) -> repl::ReplFailure 
 fn repl_effect_uncertain(message: String) -> repl::ReplFailure {
     repl::ReplFailure {
         code: REPL_EFFECT_UNCERTAIN.to_owned(),
-        detail: Some(orna_evaluator::ReplDetail {
+        detail: Some(orna_project_repl::ReplDetail {
             code: REPL_EFFECT_UNCERTAIN.to_owned(),
             message,
             span: None,
@@ -3905,7 +3906,7 @@ fn repl_effect_uncertain(message: String) -> repl::ReplFailure {
 fn repl_effect_cancelled(message: String) -> repl::ReplFailure {
     repl::ReplFailure {
         code: "ORNA-REPL-EFFECT".to_owned(),
-        detail: Some(orna_evaluator::ReplDetail {
+        detail: Some(orna_project_repl::ReplDetail {
             code: "ORNA-REPL-EFFECT".to_owned(),
             message,
             span: None,

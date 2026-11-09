@@ -24,8 +24,8 @@ use crate::media_range::{MediaMethod, MediaReply, media_reply, plan_media_respon
 use orna_application::{
     AdmittedApplication, ApplicationAuthority, ApplicationError, StagedActivation,
 };
-use orna_conformance::AdmittedReplSession;
 use orna_evaluator::Environment;
+use orna_project_repl::AdmittedReplSession;
 use orna_repository::{GitHashAlgorithm, KeyRange, NativeOid, RepositoryFormatContext};
 use orna_semantic::TableSchema;
 use orna_serving::media_preview::{

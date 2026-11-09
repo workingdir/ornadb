@@ -10,8 +10,9 @@
 
 use std::time::Instant;
 
-use orna_evaluator::{AdmittedReplSession, Limits};
+use orna_evaluator::Limits;
 use orna_foundation::CanonicalValue;
+use orna_project_repl::AdmittedReplSession;
 use orna_semantic::{Catalogue, StandardDependencyProfile};
 use orna_value::Raw;
 
@@ -149,7 +150,7 @@ fn prove(size: usize, proofs: Vec<Proof>) {
     }
 }
 
-fn outcome(result: &Result<Option<CanonicalValue>, orna_evaluator::ReplError>) -> String {
+fn outcome(result: &Result<Option<CanonicalValue>, orna_project_repl::ReplError>) -> String {
     match result {
         Ok(value) => format!("{value:?}"),
         Err(error) => error.code().to_owned(),

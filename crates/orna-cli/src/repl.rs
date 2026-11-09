@@ -1,10 +1,9 @@
 use std::fmt::Write as _;
 use std::io::{self, BufRead, Write};
 
-use orna_conformance::AdmittedReplSession;
-use orna_evaluator::{ReplDetail, ReplError};
 use orna_foundation::{CanonicalValue, canonical_uuid_text};
 use orna_live::live_presentation::{LivePresentationUpdate, ResyncRequest, WatchPresentation};
+use orna_project_repl::{AdmittedReplSession, ReplDetail, ReplError};
 use orna_value::{ContextValue, Raw};
 
 const MAX_INPUT_BYTES: usize = 65_536;

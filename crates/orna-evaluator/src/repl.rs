@@ -147,8 +147,11 @@ impl ReplSession {
     /// Attaches the activation facts `sys.rt.info()` reports to pure
     /// submissions. Without a context, `sys.rt.info()` reports
     /// `sys.version.incompatible`.
+    ///
+    /// Unstable host seam for `orna-project-repl`; not a supported API.
     #[cfg(feature = "system-host-bindings")]
-    pub(crate) fn with_sys_host_context(mut self, context: SysHostContext) -> Self {
+    #[doc(hidden)]
+    pub fn with_sys_host_context(mut self, context: SysHostContext) -> Self {
         self.sys_host = Some(Arc::new(SysHostAttachment::new(context)));
         self
     }
@@ -163,8 +166,9 @@ impl ReplSession {
         None
     }
 
-    #[cfg(feature = "project-repl")]
-    pub(crate) fn with_module_aliases(
+    /// Unstable repl-host seam used by `orna-project-repl`; not an evaluator API.
+    #[doc(hidden)]
+    pub fn with_module_aliases(
         mut self,
         aliases: BTreeMap<String, String>,
     ) -> Result<Self, EvaluationError> {
@@ -272,8 +276,9 @@ impl ReplSession {
 
     /// Publishes the typed REPL's redacted execution status. This is kept
     /// separate from ordinary bindings so module source cannot capture it.
-    #[cfg(feature = "project-repl")]
-    pub(crate) fn set_last_status(&mut self, status: CanonicalValue) {
+    /// Unstable repl-host seam used by `orna-project-repl`; not an evaluator API.
+    #[doc(hidden)]
+    pub fn set_last_status(&mut self, status: CanonicalValue) {
         self.last_status = Some(status);
     }
 
