@@ -5064,31 +5064,7 @@ fn collect_use_bindings(
         };
         let target = Namespace(path.iter().map(|x| x.name.clone()).collect());
         if target.0.first().is_some_and(|r| r == "sys") {
-            let binding = Symbol {
-                table_schema: None,
-                kind: SymbolKind::Let,
-                ty: Type::Named(target.display()),
-                public: true,
-                effects: EffectSummary::default(),
-                generic_parameters: Vec::new(),
-                enum_variants: BTreeSet::new(),
-            };
-            match tail {
-                UseTail::None => {
-                    if let Some(name) = target.0.last() {
-                        insert_explicit(&mut explicit, name.clone(), binding, diagnostics);
-                    }
-                }
-                UseTail::Alias { name, .. } if name != "_" => {
-                    insert_explicit(&mut explicit, name.clone(), binding, diagnostics);
-                }
-                UseTail::Alias { .. } | UseTail::Glob { .. } | UseTail::Names(_) => {
-                    diagnostics.push(diag(
-                        DIAG_IMPORT,
-                        "built-in namespace has no source export table",
-                    ));
-                }
-            }
+            import_builtin_namespace(&target, tail, &mut explicit, diagnostics);
             continue;
         }
         let Some(module) = modules.get(&target) else {
@@ -5101,102 +5077,153 @@ fn collect_use_bindings(
                     diagnostics.push(diag(DIAG_IMPORT, "root namespace requires an alias"));
                     continue;
                 };
-                if scope.names.contains_key(name)
-                    || explicit.contains_key(name)
-                    || scope.modules.get(name).is_some_and(|root| root != &target)
-                {
-                    diagnostics.push(diag(
-                        DIAG_AMBIGUOUS,
-                        "module import conflicts with an existing binding",
-                    ));
-                    if implicit_roots.remove(name) {
-                        scope.modules.remove(name);
-                    }
-                    continue;
-                }
-                scope.modules.insert(name.clone(), target.clone());
-                implicit_roots.remove(name);
-                insert_explicit(
+                bind_module_root(
+                    scope,
+                    implicit_roots,
+                    name,
+                    &target,
                     &mut explicit,
-                    name.clone(),
-                    Symbol {
-                        table_schema: None,
-                        kind: SymbolKind::Let,
-                        ty: Type::Named(target.display()),
-                        public: true,
-                        effects: EffectSummary::default(),
-                        generic_parameters: Vec::new(),
-                        enum_variants: BTreeSet::new(),
-                    },
                     diagnostics,
                 );
             }
             UseTail::Alias { name, .. } if name == "_" => {
-                for name in &module.prelude_exports {
-                    if let Some(symbol) = module.exports.get(name) {
-                        insert_explicit(&mut explicit, name.clone(), symbol.clone(), diagnostics);
-                    } else {
-                        diagnostics.push(diag(DIAG_IMPORT, "prelude export is not public"));
-                    }
-                }
+                import_prelude_exports(module, &mut explicit, diagnostics);
             }
             UseTail::Alias { name, .. } => {
                 if rejects_portable_sys_shadow(name, diagnostics) {
                     continue;
                 }
-                if scope.names.contains_key(name)
-                    || explicit.contains_key(name)
-                    || scope.modules.get(name).is_some_and(|root| root != &target)
-                {
-                    diagnostics.push(diag(
-                        DIAG_AMBIGUOUS,
-                        "module import conflicts with an existing binding",
-                    ));
-                    if implicit_roots.remove(name) {
-                        scope.modules.remove(name);
-                    }
-                    continue;
-                }
-                scope.modules.insert(name.clone(), target.clone());
-                implicit_roots.remove(name);
-                insert_explicit(
+                bind_module_root(
+                    scope,
+                    implicit_roots,
+                    name,
+                    &target,
                     &mut explicit,
-                    name.clone(),
-                    Symbol {
-                        table_schema: None,
-                        kind: SymbolKind::Let,
-                        ty: Type::Named(target.display()),
-                        public: true,
-                        effects: EffectSummary::default(),
-                        generic_parameters: Vec::new(),
-                        enum_variants: BTreeSet::new(),
-                    },
                     diagnostics,
                 );
             }
             UseTail::Names(names) => {
-                for import in names {
-                    if let Some(symbol) = module.exports.get(&import.name) {
-                        insert_explicit(
-                            &mut explicit,
-                            import.name.clone(),
-                            symbol.clone(),
-                            diagnostics,
-                        )
-                    } else {
-                        diagnostics
-                            .push(diag(DIAG_IMPORT, "named import is unavailable or private"));
-                    }
-                }
+                import_named_symbols(module, names, &mut explicit, diagnostics)
             }
-            UseTail::Glob { .. } => {
-                for (name, symbol) in &module.exports {
-                    glob.entry(name.clone()).or_default().push(symbol.clone());
-                }
-            }
+            UseTail::Glob { .. } => import_glob_exports(module, &mut glob),
         }
     }
     (explicit, glob)
+}
+
+/// The reserved `sys` namespace has no source export table; only a root or
+/// alias binding can name it (ORNA-NS-001).
+fn import_builtin_namespace(
+    target: &Namespace,
+    tail: &UseTail,
+    explicit: &mut BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let binding = Symbol {
+        table_schema: None,
+        kind: SymbolKind::Let,
+        ty: Type::Named(target.display()),
+        public: true,
+        effects: EffectSummary::default(),
+        generic_parameters: Vec::new(),
+        enum_variants: BTreeSet::new(),
+    };
+    match tail {
+        UseTail::None => {
+            if let Some(name) = target.0.last() {
+                insert_explicit(explicit, name.clone(), binding, diagnostics);
+            }
+        }
+        UseTail::Alias { name, .. } if name != "_" => {
+            insert_explicit(explicit, name.clone(), binding, diagnostics);
+        }
+        UseTail::Alias { .. } | UseTail::Glob { .. } | UseTail::Names(_) => {
+            diagnostics.push(diag(
+                DIAG_IMPORT,
+                "built-in namespace has no source export table",
+            ));
+        }
+    }
+}
+
+/// Binds one module root under `name`, or reports the conflict that keeps the
+/// earlier binding. A name already owned by another root drops the implicit
+/// root so later resolution cannot see both.
+fn bind_module_root(
+    scope: &mut Scope,
+    implicit_roots: &mut BTreeSet<String>,
+    name: &str,
+    target: &Namespace,
+    explicit: &mut BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if scope.names.contains_key(name)
+        || explicit.contains_key(name)
+        || scope.modules.get(name).is_some_and(|root| root != target)
+    {
+        diagnostics.push(diag(
+            DIAG_AMBIGUOUS,
+            "module import conflicts with an existing binding",
+        ));
+        if implicit_roots.remove(name) {
+            scope.modules.remove(name);
+        }
+        return;
+    }
+    scope.modules.insert(name.to_owned(), target.clone());
+    implicit_roots.remove(name);
+    insert_explicit(
+        explicit,
+        name.to_owned(),
+        Symbol {
+            table_schema: None,
+            kind: SymbolKind::Let,
+            ty: Type::Named(target.display()),
+            public: true,
+            effects: EffectSummary::default(),
+            generic_parameters: Vec::new(),
+            enum_variants: BTreeSet::new(),
+        },
+        diagnostics,
+    );
+}
+
+/// `use module as _` imports the module's declared prelude exports.
+fn import_prelude_exports(
+    module: &ModuleHeader,
+    explicit: &mut BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    for name in &module.prelude_exports {
+        if let Some(symbol) = module.exports.get(name) {
+            insert_explicit(explicit, name.clone(), symbol.clone(), diagnostics);
+        } else {
+            diagnostics.push(diag(DIAG_IMPORT, "prelude export is not public"));
+        }
+    }
+}
+
+fn import_named_symbols(
+    module: &ModuleHeader,
+    names: &[orna_syntax::ImportSegment],
+    explicit: &mut BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    for import in names {
+        if let Some(symbol) = module.exports.get(&import.name) {
+            insert_explicit(explicit, import.name.clone(), symbol.clone(), diagnostics);
+        } else {
+            diagnostics.push(diag(DIAG_IMPORT, "named import is unavailable or private"));
+        }
+    }
+}
+
+/// A wildcard import collects candidates; `apply_use_bindings` reports the
+/// ambiguous names once every module has contributed.
+fn import_glob_exports(module: &ModuleHeader, glob: &mut BTreeMap<String, Vec<Symbol>>) {
+    for (name, symbol) in &module.exports {
+        glob.entry(name.clone()).or_default().push(symbol.clone());
+    }
 }
 
 fn apply_use_bindings(
@@ -5784,15 +5811,17 @@ fn check_item(
         Declaration::Assertion { value } => {
             let inferred = infer_module_assertion(value, &scope.table_rows, scope, diagnostics);
             assertion(
-                AssertionOwner::Module,
-                value,
-                inferred,
-                Some(&scope.table_rows),
-                Some(scope),
-                // A module assertion is evaluated over the unpublished
-                // candidate database before publication (ORNA-ASSERT-027).
-                AssertionScope::SnapshotCandidate,
-                source_order,
+                AssertionInput {
+                    owner: AssertionOwner::Module,
+                    value,
+                    inferred,
+                    resolved_tables: Some(&scope.table_rows),
+                    scope: Some(scope),
+                    // A module assertion is evaluated over the unpublished
+                    // candidate database before publication (ORNA-ASSERT-027).
+                    enforcement: AssertionScope::SnapshotCandidate,
+                    source_order,
+                },
                 plans,
                 diagnostics,
             );
@@ -5976,15 +6005,17 @@ fn check_item(
                     orna_syntax::TableMember::Assertion { value, .. } => {
                         let inferred = infer_table_assertion(value, name, &row, scope, diagnostics);
                         assertion(
-                            AssertionOwner::Table(name.clone()),
-                            value,
-                            inferred,
-                            None,
-                            Some(scope),
-                            // A table assertion is always enforced at the
-                            // activation boundary.
-                            AssertionScope::Activation,
-                            source_order,
+                            AssertionInput {
+                                owner: AssertionOwner::Table(name.clone()),
+                                value,
+                                inferred,
+                                resolved_tables: None,
+                                scope: Some(scope),
+                                // A table assertion is always enforced at the
+                                // activation boundary.
+                                enforcement: AssertionScope::Activation,
+                                source_order,
+                            },
                             plans,
                             diagnostics,
                         );
@@ -6050,16 +6081,18 @@ fn check_item(
                     TypeMember::Assertion { value, .. } => {
                         let inferred = infer_refined_assertion(value, &base, scope, diagnostics);
                         assertion(
-                            AssertionOwner::RefinedType(name.clone()),
-                            value,
-                            inferred,
-                            None,
-                            Some(scope),
-                            // A refined assertion runs whenever a base value
-                            // is constructed or converted into the refined
-                            // type (ORNA-ASSERT-041).
-                            AssertionScope::ValueConstruction,
-                            source_order,
+                            AssertionInput {
+                                owner: AssertionOwner::RefinedType(name.clone()),
+                                value,
+                                inferred,
+                                resolved_tables: None,
+                                scope: Some(scope),
+                                // A refined assertion runs whenever a base
+                                // value is constructed or converted into the
+                                // refined type (ORNA-ASSERT-041).
+                                enforcement: AssertionScope::ValueConstruction,
+                                source_order,
+                            },
                             plans,
                             diagnostics,
                         );
@@ -10824,14 +10857,16 @@ fn infer_call(
             let result = historical_database.unwrap_or_else(|| {
                 specialize_dynamic_parameter_snapshot_contexts(
                     &result,
-                    &parameters,
-                    &default_parameters,
-                    parameter_names.as_deref(),
-                    arguments,
-                    &values,
-                    local,
-                    span,
-                    historical_context.as_ref(),
+                    DynamicParameters {
+                        formal_parameters: &parameters,
+                        default_parameters: &default_parameters,
+                        parameter_names: parameter_names.as_deref(),
+                        arguments,
+                        argument_types: &values,
+                        local,
+                        call_span: span,
+                        historical_context: historical_context.as_ref(),
+                    },
                 )
             });
             Inferred {
@@ -12528,7 +12563,6 @@ fn infer_if(
     Inferred { ty, effects }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn check_call_arguments(
     parameters: &[Type],
     parameter_names: Option<&[String]>,
@@ -21310,18 +21344,30 @@ fn snapshot_selector_context(
 /// captured alias is specialized at the depth where it was introduced.
 /// The seven inputs are one call site's formal parameters and its arguments,
 /// which the two callers read from the same inference frame.
-#[allow(clippy::too_many_arguments)]
-fn specialize_dynamic_parameter_snapshot_contexts(
-    ty: &Type,
-    formal_parameters: &[Type],
-    default_parameters: &BTreeSet<usize>,
-    parameter_names: Option<&[String]>,
-    arguments: &[orna_syntax::Argument],
-    argument_types: &[Type],
-    local: &BTreeMap<String, Symbol>,
-    call_span: &SyntaxSpan,
-    historical_context: Option<&Type>,
-) -> Type {
+/// The call shape a dynamic result's snapshot contexts specialize against.
+#[derive(Clone, Copy)]
+struct DynamicParameters<'a> {
+    formal_parameters: &'a [Type],
+    default_parameters: &'a BTreeSet<usize>,
+    parameter_names: Option<&'a [String]>,
+    arguments: &'a [orna_syntax::Argument],
+    argument_types: &'a [Type],
+    local: &'a BTreeMap<String, Symbol>,
+    call_span: &'a SyntaxSpan,
+    historical_context: Option<&'a Type>,
+}
+
+fn specialize_dynamic_parameter_snapshot_contexts(ty: &Type, call: DynamicParameters<'_>) -> Type {
+    let DynamicParameters {
+        formal_parameters,
+        default_parameters,
+        parameter_names,
+        arguments,
+        argument_types,
+        local,
+        call_span,
+        historical_context,
+    } = call;
     let mut binder_contexts = BTreeMap::new();
     let nonreturning_argument = argument_types
         .iter()
@@ -21409,34 +21455,50 @@ fn specialize_dynamic_parameter_snapshot_contexts(
     } else {
         (parameter_names, arguments, argument_types)
     };
-    specialize_dynamic_parameter_snapshot_contexts_scoped(
-        ty,
+    let scoped_call = SpecializationCall {
         parameter_names,
         arguments,
         argument_types,
         local,
         call_span,
         historical_context,
+    };
+    specialize_dynamic_parameter_snapshot_contexts_scoped(
+        ty,
+        &scoped_call,
         &BTreeSet::new(),
         &binder_contexts,
     )
 }
 
+/// The call inputs every scoped recursion needs, so the two scope inputs that
+/// vary per node stand alone.
+#[derive(Clone, Copy)]
+struct SpecializationCall<'a> {
+    parameter_names: Option<&'a [String]>,
+    arguments: &'a [orna_syntax::Argument],
+    argument_types: &'a [Type],
+    local: &'a BTreeMap<String, Symbol>,
+    call_span: &'a SyntaxSpan,
+    historical_context: Option<&'a Type>,
+}
+
 /// The scoped form adds the shadowed parameter names and binder contexts the
-/// caller already tracks, so the seven-parameter shape above is repeated here
-/// with the two scope inputs it threads through.
-#[allow(clippy::too_many_arguments)]
+/// caller already tracks.
 fn specialize_dynamic_parameter_snapshot_contexts_scoped(
     ty: &Type,
-    parameter_names: Option<&[String]>,
-    arguments: &[orna_syntax::Argument],
-    argument_types: &[Type],
-    local: &BTreeMap<String, Symbol>,
-    call_span: &SyntaxSpan,
-    historical_context: Option<&Type>,
+    call: &SpecializationCall<'_>,
     shadowed_parameters: &BTreeSet<String>,
     binder_contexts: &BTreeMap<String, Type>,
 ) -> Type {
+    let SpecializationCall {
+        parameter_names,
+        arguments,
+        argument_types,
+        local,
+        call_span,
+        historical_context,
+    } = *call;
     match ty {
         Type::Applied {
             base,
@@ -21524,12 +21586,7 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
                     .map(|parameter| {
                         specialize_dynamic_parameter_snapshot_contexts_scoped(
                             parameter,
-                            parameter_names,
-                            arguments,
-                            argument_types,
-                            local,
-                            call_span,
-                            historical_context,
+                            call,
                             &nested_shadowed_parameters,
                             binder_contexts,
                         )
@@ -21539,12 +21596,7 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
                 default_parameters: default_parameters.clone(),
                 result: Box::new(specialize_dynamic_parameter_snapshot_contexts_scoped(
                     result,
-                    parameter_names,
-                    arguments,
-                    argument_types,
-                    local,
-                    call_span,
-                    historical_context,
+                    call,
                     &nested_shadowed_parameters,
                     binder_contexts,
                 )),
@@ -21565,12 +21617,7 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
                 let context = contextual_snapshot_ref(selector);
                 let context = specialize_dynamic_parameter_snapshot_contexts_scoped(
                     &context,
-                    parameter_names,
-                    arguments,
-                    argument_types,
-                    local,
-                    call_span,
-                    historical_context,
+                    call,
                     shadowed_parameters,
                     binder_contexts,
                 );
@@ -21587,12 +21634,7 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
         Type::List(element) => Type::List(Box::new(
             specialize_dynamic_parameter_snapshot_contexts_scoped(
                 element,
-                parameter_names,
-                arguments,
-                argument_types,
-                local,
-                call_span,
-                historical_context,
+                call,
                 shadowed_parameters,
                 binder_contexts,
             ),
@@ -21600,12 +21642,7 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
         Type::Range(element) => Type::Range(Box::new(
             specialize_dynamic_parameter_snapshot_contexts_scoped(
                 element,
-                parameter_names,
-                arguments,
-                argument_types,
-                local,
-                call_span,
-                historical_context,
+                call,
                 shadowed_parameters,
                 binder_contexts,
             ),
@@ -21613,12 +21650,7 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
         Type::Relation(element) => Type::Relation(Box::new(
             specialize_dynamic_parameter_snapshot_contexts_scoped(
                 element,
-                parameter_names,
-                arguments,
-                argument_types,
-                local,
-                call_span,
-                historical_context,
+                call,
                 shadowed_parameters,
                 binder_contexts,
             ),
@@ -21626,12 +21658,7 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
         Type::Stream(element) => Type::Stream(Box::new(
             specialize_dynamic_parameter_snapshot_contexts_scoped(
                 element,
-                parameter_names,
-                arguments,
-                argument_types,
-                local,
-                call_span,
-                historical_context,
+                call,
                 shadowed_parameters,
                 binder_contexts,
             ),
@@ -21639,12 +21666,7 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
         Type::Optional(element) => Type::Optional(Box::new(
             specialize_dynamic_parameter_snapshot_contexts_scoped(
                 element,
-                parameter_names,
-                arguments,
-                argument_types,
-                local,
-                call_span,
-                historical_context,
+                call,
                 shadowed_parameters,
                 binder_contexts,
             ),
@@ -21657,12 +21679,7 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
                         name.clone(),
                         specialize_dynamic_parameter_snapshot_contexts_scoped(
                             value,
-                            parameter_names,
-                            arguments,
-                            argument_types,
-                            local,
-                            call_span,
-                            historical_context,
+                            call,
                             shadowed_parameters,
                             binder_contexts,
                         ),
@@ -21676,12 +21693,7 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
                 .map(|element| {
                     specialize_dynamic_parameter_snapshot_contexts_scoped(
                         element,
-                        parameter_names,
-                        arguments,
-                        argument_types,
-                        local,
-                        call_span,
-                        historical_context,
+                        call,
                         shadowed_parameters,
                         binder_contexts,
                     )
@@ -21698,12 +21710,7 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
                 .map(|value| {
                     specialize_dynamic_parameter_snapshot_contexts_scoped(
                         value,
-                        parameter_names,
-                        arguments,
-                        argument_types,
-                        local,
-                        call_span,
-                        historical_context,
+                        call,
                         shadowed_parameters,
                         binder_contexts,
                     )
@@ -26456,18 +26463,31 @@ fn infer_type_argument(expression: &Expr) -> Option<Inferred> {
     Some(Inferred::pure(Type::Named(path.join("."))))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn assertion(
+/// One assertion to check: what it is, where it runs and over which tables.
+struct AssertionInput<'a> {
     owner: AssertionOwner,
-    value: &Expr,
+    value: &'a Expr,
     inferred: Inferred,
-    resolved_tables: Option<&BTreeMap<String, Type>>,
-    scope: Option<&Scope>,
+    resolved_tables: Option<&'a BTreeMap<String, Type>>,
+    scope: Option<&'a Scope>,
     enforcement: AssertionScope,
     source_order: usize,
+}
+
+fn assertion(
+    input: AssertionInput<'_>,
     plans: &mut Vec<AssertionPlan>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
+    let AssertionInput {
+        owner,
+        value,
+        inferred,
+        resolved_tables,
+        scope,
+        enforcement,
+        source_order,
+    } = input;
     let dependencies = tables_referenced(value, resolved_tables, scope, None);
     if inferred.ty != Type::Bool {
         let message = match &owner {
