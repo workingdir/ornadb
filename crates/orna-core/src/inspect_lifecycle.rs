@@ -157,7 +157,6 @@ impl InspectEpochBinding {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct InspectFreezeToken {
     binding: InspectEpochBinding,
-    generation: u64,
     nonce: InspectEpochId,
 }
 
@@ -166,7 +165,6 @@ impl InspectFreezeToken {
     pub fn issue(binding: InspectEpochBinding) -> Self {
         Self {
             binding,
-            generation: binding.generation(),
             nonce: InspectEpochId::new(),
         }
     }
@@ -176,9 +174,9 @@ impl InspectFreezeToken {
         self.binding
     }
 
-    /// Returns the generation captured by this token.
+    /// Returns the generation captured by this token, which is its binding's.
     pub const fn generation(self) -> u64 {
-        self.generation
+        self.binding.generation()
     }
 }
 
@@ -236,7 +234,13 @@ impl fmt::Display for InspectLifecycleError {
                     self.code()
                 )
             }
-            _ => formatter.write_str(self.code()),
+            Self::PrincipalMismatch
+            | Self::RevisionMismatch { .. }
+            | Self::EpochMismatch
+            | Self::TokenMismatch
+            | Self::NotFrozen
+            | Self::Cancelled
+            | Self::Closed => formatter.write_str(self.code()),
         }
     }
 }
