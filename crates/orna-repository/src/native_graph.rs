@@ -32,8 +32,15 @@ use sha2::{Digest, Sha256};
 
 use crate::hex::hex_encode;
 
+mod cbor;
 mod ordered;
 mod pins;
+
+use cbor::{CborReader, array, bytes, decode_node, null, uint, validate_canonical_value};
+
+pub(crate) use cbor::{
+    CborValue, canonical_value_bytes, decode_canonical_cbor, decode_canonical_content,
+};
 
 use ordered::{
     OrderedDomain, check_branch_fence_order, check_domain, check_leaf_key_order,
@@ -456,20 +463,36 @@ fn graph_error_to_value_error(error: GraphError) -> ValueError {
     }
 }
 
+/// The sealed identity one graph context is issued from. Each field binds the
+/// context to the same repository snapshot, so the record is refused unless the
+/// row snapshot agrees with the store root, database and schema digest.
+pub(crate) struct NativeGraphIssuance {
+    pub(crate) repository: crate::Repository,
+    pub(crate) repository_id: [u8; 32],
+    pub(crate) identity: [u8; 32],
+    pub(crate) database_id: [u8; 16],
+    pub(crate) owner_id: [u8; 16],
+    pub(crate) snapshot_id: [u8; 32],
+    pub(crate) algorithm: GitHashAlgorithm,
+    pub(crate) store_root: NativeOid,
+    pub(crate) schema_digest: [u8; 32],
+    pub(crate) row_snapshot: crate::row_store::RowMapSnapshot,
+}
+
 impl NativeGraphContext {
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn issue(
-        repository: crate::Repository,
-        repository_id: [u8; 32],
-        identity: [u8; 32],
-        database_id: [u8; 16],
-        owner_id: [u8; 16],
-        snapshot_id: [u8; 32],
-        algorithm: GitHashAlgorithm,
-        store_root: NativeOid,
-        schema_digest: [u8; 32],
-        row_snapshot: crate::row_store::RowMapSnapshot,
-    ) -> Result<Self, GraphError> {
+    pub(crate) fn issue(issuance: NativeGraphIssuance) -> Result<Self, GraphError> {
+        let NativeGraphIssuance {
+            repository,
+            repository_id,
+            identity,
+            database_id,
+            owner_id,
+            snapshot_id,
+            algorithm,
+            store_root,
+            schema_digest,
+            row_snapshot,
+        } = issuance;
         let version = row_snapshot.version();
         let schema_oid = version.schema().schema_oid();
         if store_root.algorithm() != algorithm || schema_oid.algorithm() != algorithm {
@@ -835,15 +858,15 @@ impl NativeGraphContext {
             schema_digest,
             generation,
         );
-        crate::row_store::RowMapVersion::issue(
+        crate::row_store::RowMapVersion::issue(crate::row_store::RowMapVersionRecord {
             database_id,
             relation_id,
-            store_root.clone(),
+            store_root: store_root.clone(),
             schema,
             primary_root,
             generation,
-            Some(row_count),
-        )
+            row_count: Some(row_count),
+        })
         .map_err(|_| GraphError::ContextMismatch)
     }
 
@@ -6146,15 +6169,15 @@ pub(crate) fn load_format3_row_map(
         schema_digest,
         generation,
     );
-    let version = crate::row_store::RowMapVersion::issue(
+    let version = crate::row_store::RowMapVersion::issue(crate::row_store::RowMapVersionRecord {
         database_id,
         relation_id,
-        store_root.clone(),
+        store_root: store_root.clone(),
         schema,
         primary_root,
         generation,
-        Some(row_count),
-    )
+        row_count: Some(row_count),
+    })
     .map_err(|_| GraphError::ContextMismatch)?;
     let mut authority = Sha256::new();
     authority.update(b"orna.repository.orp.snapshot-authority.v1\0");
@@ -6725,6 +6748,7 @@ fn maintain_row_map(
 #[cfg(test)]
 mod persisted_orp_tests {
     use super::*;
+    use crate::native_graph::cbor::cbor_head;
     use crate::native_graph::pins::NativeGraphCoordinationLock;
     use crate::row_store::{RowValue, TypedKey};
     use std::future::Future;
@@ -7131,32 +7155,33 @@ mod persisted_orp_tests {
             schema_digest,
             generation,
         );
-        let version = crate::row_store::RowMapVersion::issue(
-            database_id,
-            relation_id,
-            store_root.clone(),
-            schema_generation,
-            primary_root,
-            generation,
-            Some(0),
-        )
-        .expect("consistent fixture row-map version");
+        let version =
+            crate::row_store::RowMapVersion::issue(crate::row_store::RowMapVersionRecord {
+                database_id,
+                relation_id,
+                store_root: store_root.clone(),
+                schema: schema_generation,
+                primary_root,
+                generation,
+                row_count: Some(0),
+            })
+            .expect("consistent fixture row-map version");
         let snapshot = crate::row_store::RowMapSnapshot::issue(version, [0x34; 32], Vec::new())
             .expect("sealed empty fixture row map");
         let repository = crate::Repository::discover(root).expect("discover capture repository");
 
-        NativeGraphContext::issue(
+        NativeGraphContext::issue(NativeGraphIssuance {
             repository,
-            [0x35; 32],
-            [0x36; 32],
+            repository_id: [0x35; 32],
+            identity: [0x36; 32],
             database_id,
-            [0x37; 16],
+            owner_id: [0x37; 16],
             snapshot_id,
             algorithm,
             store_root,
             schema_digest,
-            snapshot,
-        )
+            row_snapshot: snapshot,
+        })
         .expect("issue graph context after verifying fixture schema")
     }
 
@@ -8178,16 +8203,17 @@ mod persisted_orp_tests {
             *original.schema().schema_digest(),
             original.schema().generation(),
         );
-        let substituted = crate::row_store::RowMapVersion::issue(
-            *original.database_id(),
-            substituted_relation_id,
-            original.store_root().clone(),
-            substituted_schema,
-            original.primary_root().clone(),
-            original.generation(),
-            original.row_count(),
-        )
-        .expect("internally consistent substituted relation binding");
+        let substituted =
+            crate::row_store::RowMapVersion::issue(crate::row_store::RowMapVersionRecord {
+                database_id: *original.database_id(),
+                relation_id: substituted_relation_id,
+                store_root: original.store_root().clone(),
+                schema: substituted_schema,
+                primary_root: original.primary_root().clone(),
+                generation: original.generation(),
+                row_count: original.row_count(),
+            })
+            .expect("internally consistent substituted relation binding");
         let key = TypedKey::Text("must-not-be-written".to_owned());
         let fields = vec![0x80];
 
@@ -9678,18 +9704,18 @@ mod persisted_orp_tests {
     /// same repository, identity, snapshot and row map, owned by the runtime
     /// lease owner instead of the repository-derived default.
     fn lease_owned_graph(derived: &NativeGraphContext, owner_id: [u8; 16]) -> NativeGraphContext {
-        NativeGraphContext::issue(
-            derived.repository.clone(),
-            derived.repository_id,
-            derived.identity.0,
-            derived.database_id,
+        NativeGraphContext::issue(NativeGraphIssuance {
+            repository: derived.repository.clone(),
+            repository_id: derived.repository_id,
+            identity: derived.identity.0,
+            database_id: derived.database_id,
             owner_id,
-            derived.snapshot_id,
-            derived.algorithm,
-            derived.store_root.clone(),
-            derived.schema_digest,
-            derived.row_snapshot.clone(),
-        )
+            snapshot_id: derived.snapshot_id,
+            algorithm: derived.algorithm,
+            store_root: derived.store_root.clone(),
+            schema_digest: derived.schema_digest,
+            row_snapshot: derived.row_snapshot.clone(),
+        })
         .expect("issue the lease-owned graph over the derived snapshot")
     }
 
@@ -10651,16 +10677,17 @@ mod persisted_orp_tests {
         let admitted_version = graph.row_snapshot.version();
         let foreign_root =
             NativeObjectId::new(graph.algorithm, [0x55; 20]).expect("foreign root OID");
-        let foreign_version = crate::row_store::RowMapVersion::issue(
-            *admitted_version.database_id(),
-            *admitted_version.relation_id(),
-            foreign_root.clone(),
-            admitted_version.schema().clone(),
-            admitted_version.primary_root().clone(),
-            admitted_version.generation(),
-            Some(0),
-        )
-        .expect("consistent foreign-root version");
+        let foreign_version =
+            crate::row_store::RowMapVersion::issue(crate::row_store::RowMapVersionRecord {
+                database_id: *admitted_version.database_id(),
+                relation_id: *admitted_version.relation_id(),
+                store_root: foreign_root.clone(),
+                schema: admitted_version.schema().clone(),
+                primary_root: admitted_version.primary_root().clone(),
+                generation: admitted_version.generation(),
+                row_count: Some(0),
+            })
+            .expect("consistent foreign-root version");
         let row = crate::row_store::AdmittedRow::issue(
             &foreign_version,
             TypedKey::Text("foreign".to_owned()),
@@ -10691,16 +10718,17 @@ mod persisted_orp_tests {
                 .checked_add(1)
                 .expect("fixture schema generation has room"),
         );
-        let stale_version = crate::row_store::RowMapVersion::issue(
-            *admitted_version.database_id(),
-            *admitted_version.relation_id(),
-            admitted_version.store_root().clone(),
-            stale_schema,
-            admitted_version.primary_root().clone(),
-            admitted_version.generation(),
-            Some(0),
-        )
-        .expect("consistent stale schema version");
+        let stale_version =
+            crate::row_store::RowMapVersion::issue(crate::row_store::RowMapVersionRecord {
+                database_id: *admitted_version.database_id(),
+                relation_id: *admitted_version.relation_id(),
+                store_root: admitted_version.store_root().clone(),
+                schema: stale_schema,
+                primary_root: admitted_version.primary_root().clone(),
+                generation: admitted_version.generation(),
+                row_count: Some(0),
+            })
+            .expect("consistent stale schema version");
         let row = crate::row_store::AdmittedRow::issue(
             &stale_version,
             TypedKey::Text("foreign".to_owned()),
@@ -10731,16 +10759,17 @@ mod persisted_orp_tests {
                 .checked_add(1)
                 .expect("fixture schema generation has room"),
         );
-        let stale_version = crate::row_store::RowMapVersion::issue(
-            *admitted_version.database_id(),
-            *admitted_version.relation_id(),
-            admitted_version.store_root().clone(),
-            stale_schema,
-            admitted_version.primary_root().clone(),
-            admitted_version.generation(),
-            Some(0),
-        )
-        .expect("consistent stale schema version");
+        let stale_version =
+            crate::row_store::RowMapVersion::issue(crate::row_store::RowMapVersionRecord {
+                database_id: *admitted_version.database_id(),
+                relation_id: *admitted_version.relation_id(),
+                store_root: admitted_version.store_root().clone(),
+                schema: stale_schema,
+                primary_root: admitted_version.primary_root().clone(),
+                generation: admitted_version.generation(),
+                row_count: Some(0),
+            })
+            .expect("consistent stale schema version");
         let row = crate::row_store::AdmittedRow::issue(
             &stale_version,
             TypedKey::Text("foreign".to_owned()),
@@ -10796,18 +10825,18 @@ mod persisted_orp_tests {
             *source_version.relation_id(),
         )
         .expect("load source-root row map");
-        let source_graph = NativeGraphContext::issue(
-            graph.repository.clone(),
-            graph.repository_id,
-            [0x41; 32],
-            graph.database_id,
-            graph.owner_id,
-            source_snapshot_id,
-            graph.algorithm,
-            source_store_root,
-            graph.schema_digest,
-            source_rows,
-        )
+        let source_graph = NativeGraphContext::issue(NativeGraphIssuance {
+            repository: graph.repository.clone(),
+            repository_id: graph.repository_id,
+            identity: [0x41; 32],
+            database_id: graph.database_id,
+            owner_id: graph.owner_id,
+            snapshot_id: source_snapshot_id,
+            algorithm: graph.algorithm,
+            store_root: source_store_root,
+            schema_digest: graph.schema_digest,
+            row_snapshot: source_rows,
+        })
         .expect("issue source-root graph");
         let source_scope = source_graph.open_read_scope().expect("source read scope");
         let old_row = source_graph
@@ -10881,18 +10910,18 @@ mod persisted_orp_tests {
             *source_graph.row_snapshot.version().relation_id(),
         )
         .expect("load later-root row map");
-        let later_graph = NativeGraphContext::issue(
-            source_graph.repository.clone(),
-            source_graph.repository_id,
-            [0x42; 32],
-            source_graph.database_id,
-            source_graph.owner_id,
-            later_snapshot_id,
-            source_graph.algorithm,
-            later_store_root,
-            source_graph.schema_digest,
-            later_rows,
-        )
+        let later_graph = NativeGraphContext::issue(NativeGraphIssuance {
+            repository: source_graph.repository.clone(),
+            repository_id: source_graph.repository_id,
+            identity: [0x42; 32],
+            database_id: source_graph.database_id,
+            owner_id: source_graph.owner_id,
+            snapshot_id: later_snapshot_id,
+            algorithm: source_graph.algorithm,
+            store_root: later_store_root,
+            schema_digest: source_graph.schema_digest,
+            row_snapshot: later_rows,
+        })
         .expect("issue valid later-root graph");
         let later_scope = later_graph.open_read_scope().expect("later read scope");
         assert_ne!(old_row.version(), later_graph.row_snapshot.version());
@@ -13224,36 +13253,6 @@ fn check_height(height: u8) -> Result<(), GraphError> {
     }
 }
 
-fn validate_canonical_value(bytes: &[u8]) -> Result<(), GraphError> {
-    decode_canonical_cbor(bytes).map(|_| ())
-}
-
-pub(crate) fn canonical_value_bytes(value: &CborValue) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    value.encode(&mut bytes);
-    bytes
-}
-
-pub(crate) fn decode_canonical_cbor(bytes: &[u8]) -> Result<CborValue, GraphError> {
-    decode_canonical_cbor_limited(bytes, NODE_DATA_LIMIT)
-}
-
-pub(crate) fn decode_canonical_content(bytes: &[u8]) -> Result<CborValue, GraphError> {
-    decode_canonical_cbor_limited(bytes, crate::row_store::ROW_CANONICAL_LIMIT)
-}
-
-fn decode_canonical_cbor_limited(bytes: &[u8], maximum: usize) -> Result<CborValue, GraphError> {
-    if bytes.len() > maximum {
-        return Err(GraphError::InvalidLength(bytes.len() as u64));
-    }
-    let mut reader = CborReader::new(bytes);
-    let value = reader.value()?;
-    if !reader.is_finished() || canonical_value_bytes(&value) != bytes {
-        return Err(GraphError::NonCanonicalData);
-    }
-    Ok(value)
-}
-
 fn oid_from_width(bytes: &[u8]) -> Result<NativeObjectId, GraphError> {
     let algorithm = match bytes.len() {
         20 => GitHashAlgorithm::Sha1,
@@ -13911,486 +13910,6 @@ fn validate_byte_entries(
     Ok(())
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum CborValue {
-    Unsigned(u64),
-    Negative(u64),
-    Bytes(Vec<u8>),
-    Text(String),
-    Array(Vec<CborValue>),
-    Map(Vec<(CborValue, CborValue)>),
-    Tag(u64, Box<CborValue>),
-    Bool(bool),
-    Float64(u64),
-    Null,
-}
-
-impl CborValue {
-    fn encode(&self, output: &mut Vec<u8>) {
-        match self {
-            Self::Unsigned(value) => uint(output, *value),
-            Self::Negative(value) => {
-                cbor_head(output, 1, *value);
-            }
-            Self::Bytes(value) => bytes(output, value),
-            Self::Text(value) => {
-                cbor_head(output, 3, value.len() as u64);
-                output.extend_from_slice(value.as_bytes());
-            }
-            Self::Array(values) => {
-                array(output, values.len() as u64);
-                for value in values {
-                    value.encode(output);
-                }
-            }
-            Self::Map(entries) => {
-                cbor_head(output, 5, entries.len() as u64);
-                for (key, value) in entries {
-                    key.encode(output);
-                    value.encode(output);
-                }
-            }
-            Self::Tag(tag, value) => {
-                cbor_head(output, 6, *tag);
-                value.encode(output);
-            }
-            Self::Bool(value) => output.push(if *value { 0xf5 } else { 0xf4 }),
-            Self::Float64(value) => {
-                output.push(0xfb);
-                output.extend_from_slice(&value.to_be_bytes());
-            }
-            Self::Null => null(output),
-        }
-    }
-}
-
-struct CborReader<'a> {
-    bytes: &'a [u8],
-    cursor: usize,
-}
-
-impl<'a> CborReader<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, cursor: 0 }
-    }
-
-    fn is_finished(&self) -> bool {
-        self.cursor == self.bytes.len()
-    }
-
-    fn value(&mut self) -> Result<CborValue, GraphError> {
-        let head = *self
-            .bytes
-            .get(self.cursor)
-            .ok_or(GraphError::NonCanonicalData)?;
-        self.cursor += 1;
-        let major = head >> 5;
-        let additional = head & 0x1f;
-        if major == 7 {
-            return match additional {
-                20 => Ok(CborValue::Bool(false)),
-                21 => Ok(CborValue::Bool(true)),
-                22 => Ok(CborValue::Null),
-                27 => Ok(CborValue::Float64(self.read_u64()?)),
-                _ => Err(GraphError::NonCanonicalData),
-            };
-        }
-        let length = self.argument(additional)?;
-        match major {
-            0 => Ok(CborValue::Unsigned(length)),
-            // Every negative head is an Orna Int; values below -2^64 use tag 3.
-            1 => Ok(CborValue::Negative(length)),
-            2 => {
-                let length = usize::try_from(length).map_err(|_| GraphError::NonCanonicalData)?;
-                let end = self
-                    .cursor
-                    .checked_add(length)
-                    .ok_or(GraphError::NonCanonicalData)?;
-                let bytes = self
-                    .bytes
-                    .get(self.cursor..end)
-                    .ok_or(GraphError::NonCanonicalData)?
-                    .to_vec();
-                self.cursor = end;
-                Ok(CborValue::Bytes(bytes))
-            }
-            3 => {
-                let length = usize::try_from(length).map_err(|_| GraphError::NonCanonicalData)?;
-                let end = self
-                    .cursor
-                    .checked_add(length)
-                    .ok_or(GraphError::NonCanonicalData)?;
-                let text = std::str::from_utf8(
-                    self.bytes
-                        .get(self.cursor..end)
-                        .ok_or(GraphError::NonCanonicalData)?,
-                )
-                .map_err(|_| GraphError::NonCanonicalData)?
-                .to_owned();
-                self.cursor = end;
-                Ok(CborValue::Text(text))
-            }
-            4 => {
-                let length = usize::try_from(length).map_err(|_| GraphError::NonCanonicalData)?;
-                if length > NODE_DATA_LIMIT {
-                    return Err(GraphError::NodeDataTooLarge(length));
-                }
-                let mut values = Vec::with_capacity(length);
-                for _ in 0..length {
-                    values.push(self.value()?);
-                }
-                Ok(CborValue::Array(values))
-            }
-            5 => {
-                let length = usize::try_from(length).map_err(|_| GraphError::NonCanonicalData)?;
-                if length > NODE_DATA_LIMIT {
-                    return Err(GraphError::NodeDataTooLarge(length));
-                }
-                let mut entries = Vec::with_capacity(length);
-                let mut previous_key = None;
-                for _ in 0..length {
-                    let key_start = self.cursor;
-                    let key = self.value()?;
-                    let key_bytes = self.bytes[key_start..self.cursor].to_vec();
-                    if previous_key
-                        .as_ref()
-                        .is_some_and(|previous| previous >= &key_bytes)
-                    {
-                        return Err(GraphError::NonCanonicalData);
-                    }
-                    previous_key = Some(key_bytes);
-                    entries.push((key, self.value()?));
-                }
-                Ok(CborValue::Map(entries))
-            }
-            6 => {
-                if !orna_value::is_format3_node_tag(length) {
-                    return Err(GraphError::NonCanonicalData);
-                }
-                let payload = self.value()?;
-                // A bignum spells only an Int beyond the 64-bit heads: at least
-                // nine big-endian bytes without a leading zero.
-                if matches!(length, 2 | 3)
-                    && !matches!(&payload, CborValue::Bytes(bytes) if bytes.len() >= 9 && bytes[0] != 0)
-                {
-                    return Err(GraphError::NonCanonicalData);
-                }
-                Ok(CborValue::Tag(length, Box::new(payload)))
-            }
-            _ => Err(GraphError::NonCanonicalData),
-        }
-    }
-
-    fn argument(&mut self, additional: u8) -> Result<u64, GraphError> {
-        let (value, width) = match additional {
-            0..=23 => (u64::from(additional), 0),
-            24 => (u64::from(self.read_u8()?), 1),
-            25 => (u64::from(self.read_u16()?), 2),
-            26 => (u64::from(self.read_u32()?), 4),
-            27 => (self.read_u64()?, 8),
-            _ => return Err(GraphError::NonCanonicalData),
-        };
-        if width != 0
-            && ((width == 1 && value < 24)
-                || (width == 2 && value <= u64::from(u8::MAX))
-                || (width == 4 && value <= u64::from(u16::MAX))
-                || (width == 8 && value <= u64::from(u32::MAX)))
-        {
-            return Err(GraphError::NonCanonicalData);
-        }
-        Ok(value)
-    }
-
-    fn read_u8(&mut self) -> Result<u8, GraphError> {
-        let value = *self
-            .bytes
-            .get(self.cursor)
-            .ok_or(GraphError::NonCanonicalData)?;
-        self.cursor += 1;
-        Ok(value)
-    }
-
-    fn read_u16(&mut self) -> Result<u16, GraphError> {
-        let bytes = self
-            .bytes
-            .get(self.cursor..self.cursor + 2)
-            .ok_or(GraphError::NonCanonicalData)?;
-        self.cursor += 2;
-        Ok(u16::from_be_bytes([bytes[0], bytes[1]]))
-    }
-
-    fn read_u32(&mut self) -> Result<u32, GraphError> {
-        let bytes = self
-            .bytes
-            .get(self.cursor..self.cursor + 4)
-            .ok_or(GraphError::NonCanonicalData)?;
-        self.cursor += 4;
-        Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-    }
-
-    fn read_u64(&mut self) -> Result<u64, GraphError> {
-        let bytes = self
-            .bytes
-            .get(self.cursor..self.cursor + 8)
-            .ok_or(GraphError::NonCanonicalData)?;
-        self.cursor += 8;
-        Ok(u64::from_be_bytes([
-            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-        ]))
-    }
-}
-
-fn cbor_head(output: &mut Vec<u8>, major: u8, value: u64) {
-    let prefix = major << 5;
-    match value {
-        0..=23 => output.push(prefix | value as u8),
-        24..=255 => {
-            output.extend_from_slice(&[prefix | 24, value as u8]);
-        }
-        256..=65_535 => {
-            output.push(prefix | 25);
-            output.extend_from_slice(&(value as u16).to_be_bytes());
-        }
-        65_536..=4_294_967_295 => {
-            output.push(prefix | 26);
-            output.extend_from_slice(&(value as u32).to_be_bytes());
-        }
-        _ => {
-            output.push(prefix | 27);
-            output.extend_from_slice(&value.to_be_bytes());
-        }
-    }
-}
-
-fn decode_node(value: CborValue, algorithm: GitHashAlgorithm) -> Result<NodeData, GraphError> {
-    let fields = array_fields(value)?;
-    let version = unsigned(fields.first())?;
-    if version != 1 {
-        return Err(GraphError::NonCanonicalData);
-    }
-    let kind = NodeKind::from_number(unsigned(fields.get(1))?)?;
-    match kind {
-        NodeKind::StoreRoot => Ok(NodeData::StoreRoot {
-            relation_map: oid(bytes_field(fields.get(2))?, algorithm)?,
-        }),
-        NodeKind::OrderedLeaf => {
-            let domain = canonical_value_bytes(fields.get(2).ok_or(GraphError::NonCanonicalData)?);
-            check_domain(&domain)?;
-            let entries =
-                array_fields(fields.get(3).cloned().ok_or(GraphError::NonCanonicalData)?)?
-                    .into_iter()
-                    .map(|value| {
-                        let fields = array_fields(value)?;
-                        if fields.len() != 2 {
-                            return Err(GraphError::NonCanonicalData);
-                        }
-                        Ok(OrderedLeafEntry {
-                            key: canonical_value_bytes(
-                                fields.first().ok_or(GraphError::NonCanonicalData)?,
-                            ),
-                            value: canonical_value_bytes(
-                                fields.get(1).ok_or(GraphError::NonCanonicalData)?,
-                            ),
-                        })
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-            Ok(NodeData::OrderedLeaf { domain, entries })
-        }
-        NodeKind::OrderedBranch => {
-            let domain = canonical_value_bytes(fields.get(2).ok_or(GraphError::NonCanonicalData)?);
-            check_domain(&domain)?;
-            let height = bounded_height(unsigned(fields.get(3))?)?;
-            let entries =
-                array_fields(fields.get(4).cloned().ok_or(GraphError::NonCanonicalData)?)?
-                    .into_iter()
-                    .map(|value| {
-                        let fields = array_fields(value)?;
-                        if fields.len() != 3 {
-                            return Err(GraphError::NonCanonicalData);
-                        }
-                        let row_count = unsigned(fields.get(2))?;
-                        check_length(row_count)?;
-                        Ok(OrderedBranchEntry {
-                            inclusive_max_key: canonical_value_bytes(
-                                fields.first().ok_or(GraphError::NonCanonicalData)?,
-                            ),
-                            child: oid(bytes_field(fields.get(1))?, algorithm)?,
-                            row_count,
-                        })
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-            Ok(NodeData::OrderedBranch {
-                domain,
-                height,
-                entries,
-            })
-        }
-        NodeKind::ValueOverflow => Ok(NodeData::ValueOverflow {
-            encoded_length: checked_length(unsigned(fields.get(2))?)?,
-            semantic_digest: digest(bytes_field(fields.get(3))?)?,
-            byte_root: oid(bytes_field(fields.get(4))?, algorithm)?,
-            dependency_root: match fields.get(5).ok_or(GraphError::NonCanonicalData)? {
-                CborValue::Null => None,
-                CborValue::Bytes(bytes) => Some(oid(bytes, algorithm)?),
-                _ => return Err(GraphError::NonCanonicalData),
-            },
-        }),
-        NodeKind::ByteIndex => {
-            let height = bounded_height(unsigned(fields.get(2))?)?;
-            let total_length = checked_length(unsigned(fields.get(3))?)?;
-            let entries = decode_byte_entries(fields.get(4), algorithm)?;
-            Ok(NodeData::ByteIndex {
-                height,
-                total_length,
-                entries,
-            })
-        }
-        NodeKind::BlobDescriptor => {
-            let length = checked_length(unsigned(fields.get(2))?)?;
-            let raw_sha256 = digest(bytes_field(fields.get(3))?)?;
-            let byte_root = match fields.get(4).ok_or(GraphError::NonCanonicalData)? {
-                CborValue::Null => None,
-                CborValue::Bytes(bytes) => Some(oid(bytes, algorithm)?),
-                _ => return Err(GraphError::NonCanonicalData),
-            };
-            if (length == 0) != byte_root.is_none() {
-                return Err(GraphError::InvalidEmptyBlob);
-            }
-            Ok(NodeData::BlobDescriptor {
-                length,
-                raw_sha256,
-                byte_root,
-            })
-        }
-        NodeKind::Schema => Ok(NodeData::Schema {
-            encoded_length: checked_length(unsigned(fields.get(2))?)?,
-            schema_digest: digest(bytes_field(fields.get(3))?)?,
-            byte_root: oid(bytes_field(fields.get(4))?, algorithm)?,
-        }),
-        NodeKind::DependencyIndex => {
-            let height = bounded_height(unsigned(fields.get(2))?)?;
-            let children =
-                array_fields(fields.get(3).cloned().ok_or(GraphError::NonCanonicalData)?)?
-                    .into_iter()
-                    .map(|value| oid(bytes_value(&value)?, algorithm))
-                    .collect::<Result<Vec<_>, _>>()?;
-            Ok(NodeData::DependencyIndex { height, children })
-        }
-    }
-}
-
-fn decode_byte_entries(
-    value: Option<&CborValue>,
-    algorithm: GitHashAlgorithm,
-) -> Result<Vec<ByteIndexEntry>, GraphError> {
-    let entries = array_fields(value.cloned().ok_or(GraphError::NonCanonicalData)?)?
-        .into_iter()
-        .map(|value| {
-            let fields = array_fields(value)?;
-            if fields.len() != 3 {
-                return Err(GraphError::NonCanonicalData);
-            }
-            let chunk_sha256 = match fields.get(2).ok_or(GraphError::NonCanonicalData)? {
-                CborValue::Null => None,
-                CborValue::Bytes(bytes) => Some(digest(bytes)?),
-                _ => return Err(GraphError::NonCanonicalData),
-            };
-            Ok(ByteIndexEntry {
-                span_length: unsigned(fields.first())?,
-                target: oid(bytes_field(fields.get(1))?, algorithm)?,
-                chunk_sha256,
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(entries)
-}
-
-fn array_fields(value: CborValue) -> Result<Vec<CborValue>, GraphError> {
-    match value {
-        CborValue::Array(values) => Ok(values),
-        _ => Err(GraphError::NonCanonicalData),
-    }
-}
-
-fn unsigned(value: Option<&CborValue>) -> Result<u64, GraphError> {
-    match value.ok_or(GraphError::NonCanonicalData)? {
-        CborValue::Unsigned(value) => Ok(*value),
-        _ => Err(GraphError::NonCanonicalData),
-    }
-}
-
-fn bytes_value(value: &CborValue) -> Result<&[u8], GraphError> {
-    match value {
-        CborValue::Bytes(value) => Ok(value),
-        _ => Err(GraphError::NonCanonicalData),
-    }
-}
-
-fn bytes_field(value: Option<&CborValue>) -> Result<&[u8], GraphError> {
-    bytes_value(value.ok_or(GraphError::NonCanonicalData)?)
-}
-
-fn digest(value: &[u8]) -> Result<[u8; 32], GraphError> {
-    value
-        .try_into()
-        .map_err(|_| GraphError::InvalidDigestLength)
-}
-
-fn oid(value: &[u8], algorithm: GitHashAlgorithm) -> Result<NativeObjectId, GraphError> {
-    NativeObjectId::new(algorithm, value)
-}
-
-fn bounded_height(value: u64) -> Result<u8, GraphError> {
-    let height = u8::try_from(value).map_err(|_| GraphError::HeightExceeded(u8::MAX))?;
-    check_height(height)?;
-    Ok(height)
-}
-
-fn checked_length(value: u64) -> Result<u64, GraphError> {
-    check_length(value)?;
-    Ok(value)
-}
-
-fn array(output: &mut Vec<u8>, length: u64) {
-    head(output, 4, length);
-}
-
-fn bytes(output: &mut Vec<u8>, value: &[u8]) {
-    head(output, 2, value.len() as u64);
-    output.extend_from_slice(value);
-}
-
-fn uint(output: &mut Vec<u8>, value: u64) {
-    head(output, 0, value);
-}
-
-fn null(output: &mut Vec<u8>) {
-    output.push(0xf6);
-}
-
-fn head(output: &mut Vec<u8>, major: u8, value: u64) {
-    let base = major << 5;
-    match value {
-        0..=23 => output.push(base | value as u8),
-        24..=255 => {
-            output.push(base | 24);
-            output.push(value as u8);
-        }
-        256..=65_535 => {
-            output.push(base | 25);
-            output.extend_from_slice(&(value as u16).to_be_bytes());
-        }
-        65_536..=4_294_967_295 => {
-            output.push(base | 26);
-            output.extend_from_slice(&(value as u32).to_be_bytes());
-        }
-        _ => {
-            output.push(base | 27);
-            output.extend_from_slice(&value.to_be_bytes());
-        }
-    }
-}
-
 #[cfg(test)]
 mod option_value_tests {
     use super::*;
@@ -14473,19 +13992,16 @@ mod option_value_tests {
 
     #[test]
     fn optional_blob_row_dependencies_handle_none_and_some() {
-        let mut none = Vec::new();
-        CborValue::Array(vec![option_none()]).encode(&mut none);
+        let none = canonical_value_bytes(&CborValue::Array(vec![option_none()]));
         assert!(row_fields_dependencies(&none).unwrap().is_empty());
 
-        let mut some = Vec::new();
-        CborValue::Array(vec![CborValue::Tag(
+        let some = canonical_value_bytes(&CborValue::Array(vec![CborValue::Tag(
             60013,
             Box::new(CborValue::Array(vec![
                 CborValue::Unsigned(1),
                 rov3_blob(vec![0x44; 20]),
             ])),
-        )])
-        .encode(&mut some);
+        )]));
         assert_eq!(row_fields_dependencies(&some).unwrap().len(), 1);
     }
     #[test]

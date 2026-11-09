@@ -103,17 +103,30 @@ pub struct RowMapVersion {
     row_count: Option<u64>,
 }
 
+/// The fields one admitted row map is issued from, before they are checked
+/// against each other.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RowMapVersionRecord {
+    pub(crate) database_id: [u8; 16],
+    pub(crate) relation_id: [u8; 16],
+    pub(crate) store_root: NativeObjectId,
+    pub(crate) schema: SchemaGeneration,
+    pub(crate) primary_root: NativeObjectId,
+    pub(crate) generation: u64,
+    pub(crate) row_count: Option<u64>,
+}
+
 impl RowMapVersion {
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn issue(
-        database_id: [u8; 16],
-        relation_id: [u8; 16],
-        store_root: NativeObjectId,
-        schema: SchemaGeneration,
-        primary_root: NativeObjectId,
-        generation: u64,
-        row_count: Option<u64>,
-    ) -> Result<Self, RowStoreError> {
+    pub(crate) fn issue(record: RowMapVersionRecord) -> Result<Self, RowStoreError> {
+        let RowMapVersionRecord {
+            database_id,
+            relation_id,
+            store_root,
+            schema,
+            primary_root,
+            generation,
+            row_count,
+        } = record;
         if schema.database_id != database_id || schema.relation_id != relation_id {
             return Err(RowStoreError::VersionIdentityMismatch);
         }
@@ -1497,18 +1510,28 @@ mod tests {
         NativeOid::new(GitHashAlgorithm::Sha1, [byte; 20]).expect("valid test oid")
     }
 
+    /// One coherent row-map identity for these tests: the fixture database and
+    /// relation, with the caller's schema, generation and row count.
+    fn row_map_version(
+        schema: SchemaGeneration,
+        generation: u64,
+        row_count: Option<u64>,
+    ) -> RowMapVersion {
+        RowMapVersion::issue(RowMapVersionRecord {
+            database_id: [0x11; 16],
+            relation_id: [0x22; 16],
+            store_root: oid(0x55),
+            schema,
+            primary_root: oid(0x66),
+            generation,
+            row_count,
+        })
+        .expect("coherent row-map version")
+    }
+
     fn admitted_row(generation: u64) -> AdmittedRow {
         let schema = SchemaGeneration::issue([0x11; 16], [0x22; 16], oid(0x33), [0x44; 32], 7);
-        let version = RowMapVersion::issue(
-            [0x11; 16],
-            [0x22; 16],
-            oid(0x55),
-            schema,
-            oid(0x66),
-            generation,
-            Some(1),
-        )
-        .expect("coherent row-map version");
+        let version = row_map_version(schema, generation, Some(1));
         let value = RowValue::decode_canonical_fields(vec![0x80]).expect("empty field tuple");
         AdmittedRow::issue(&version, TypedKey::Text("london".to_owned()), value)
     }
@@ -1555,16 +1578,7 @@ mod tests {
     #[test]
     fn materialized_range_reads_a_bounded_interval_and_keeps_snapshot_pin() {
         let schema = SchemaGeneration::issue([0x11; 16], [0x22; 16], oid(0x33), [0x44; 32], 7);
-        let version = RowMapVersion::issue(
-            [0x11; 16],
-            [0x22; 16],
-            oid(0x55),
-            schema,
-            oid(0x66),
-            8,
-            Some(600),
-        )
-        .expect("coherent row-map version");
+        let version = row_map_version(schema, 8, Some(600));
         let value = RowValue::decode_canonical_fields(vec![0x80]).expect("empty row value");
         let entries = (0..600)
             .map(|key| RowEntry::new(TypedKey::Int(key), value.clone()))
@@ -1598,16 +1612,7 @@ mod tests {
     /// ascending and of one key type.
     fn sealed_snapshot(keys: &[TypedKey]) -> RowMapSnapshot {
         let schema = SchemaGeneration::issue([0x11; 16], [0x22; 16], oid(0x33), [0x44; 32], 7);
-        let version = RowMapVersion::issue(
-            [0x11; 16],
-            [0x22; 16],
-            oid(0x55),
-            schema,
-            oid(0x66),
-            8,
-            Some(keys.len() as u64),
-        )
-        .expect("coherent row-map version");
+        let version = row_map_version(schema, 8, Some(keys.len() as u64));
         let value = RowValue::decode_canonical_fields(vec![0x80]).expect("empty row value");
         let entries = keys
             .iter()
@@ -2189,16 +2194,7 @@ mod tests {
     #[test]
     fn lazy_snapshot_range_requires_graph_context_instead_of_empty_result() {
         let schema = SchemaGeneration::issue([0x11; 16], [0x22; 16], oid(0x33), [0x44; 32], 7);
-        let version = RowMapVersion::issue(
-            [0x11; 16],
-            [0x22; 16],
-            oid(0x55),
-            schema,
-            oid(0x66),
-            8,
-            Some(1),
-        )
-        .expect("coherent row-map version");
+        let version = row_map_version(schema, 8, Some(1));
         let snapshot = RowMapSnapshot::issue_lazy(version, [0x77; 32])
             .expect("seal persisted snapshot without materializing rows");
         let range = KeyRange::new(None, None, 1).expect("valid bounded range");

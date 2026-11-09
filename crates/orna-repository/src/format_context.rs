@@ -12,7 +12,8 @@ use orna_syntax::{Declaration, Expr, LiteralKind, RecordField, parse_module, par
 use sha2::{Digest, Sha256};
 
 use crate::native_graph::{
-    GitHashAlgorithm, GraphError, NativeGraphContext, NativeOid, RepositoryCaptureCapability,
+    GitHashAlgorithm, GraphError, NativeGraphContext, NativeGraphIssuance, NativeOid,
+    RepositoryCaptureCapability,
 };
 use crate::object_reader::{ObjectKind, ObjectReader, TreeEntry, TreeEntryMode};
 use crate::row_store::RowMapSnapshot;
@@ -735,18 +736,18 @@ impl RepositoryFormatContext {
         identity_hash.update(authority);
         let identity: [u8; 32] = identity_hash.finalize().into();
 
-        NativeGraphContext::issue(
-            self.repository.clone(),
+        NativeGraphContext::issue(NativeGraphIssuance {
+            repository: self.repository.clone(),
             repository_id,
             identity,
-            *database_id.as_bytes(),
+            database_id: *database_id.as_bytes(),
             owner_id,
             snapshot_id,
             algorithm,
-            store.oid,
+            store_root: store.oid,
             schema_digest,
-            rows.clone(),
-        )
+            row_snapshot: rows.clone(),
+        })
         .map(|graph| graph.with_accepted_pin_fallback_owner(derived_owner_id))
         .map_err(|_| FormatContextError::GraphContextInvalid)
     }
@@ -1898,8 +1899,8 @@ mod graph_bridge_tests {
             decode_canonical_cbor,
         },
         row_store::{
-            KeyRange, MAX_ROW_RANGE_LIMIT, RowEntry, RowMapSnapshot, RowMapVersion, RowValue,
-            SchemaGeneration, TypedKey,
+            KeyRange, MAX_ROW_RANGE_LIMIT, RowEntry, RowMapSnapshot, RowMapVersion,
+            RowMapVersionRecord, RowValue, SchemaGeneration, TypedKey,
         },
     };
     use orna_value::{Raw, SchemaDescriptor};
@@ -4002,15 +4003,15 @@ mod graph_bridge_tests {
             schema_digest,
             0,
         );
-        let version = RowMapVersion::issue(
-            *database_id.as_bytes(),
+        let version = RowMapVersion::issue(RowMapVersionRecord {
+            database_id: *database_id.as_bytes(),
             relation_id,
-            store.oid.clone(),
-            schema_generation,
-            store.oid.clone(),
-            0,
-            Some(0),
-        )
+            store_root: store.oid.clone(),
+            schema: schema_generation,
+            primary_root: store.oid.clone(),
+            generation: 0,
+            row_count: Some(0),
+        })
         .expect("consistent row-map identity");
 
         let snapshot_id = context.snapshot.snapshot_id();
