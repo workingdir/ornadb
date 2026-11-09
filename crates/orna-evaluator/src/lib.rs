@@ -1077,6 +1077,14 @@ fn module_intrinsic(name: &str) -> Option<orna_intrinsics::IntrinsicId> {
     let (module_path, leaf) = name.rsplit_once('.')?;
     let module = orna_intrinsics::Module::from_path(module_path)?;
     let intrinsic = orna_intrinsics::lookup(module, leaf)?;
+    // A descriptor that records a private marker leaf is native through that
+    // leaf alone: its public export stays the captured Orna wrapper, which is
+    // where the operation's arguments are named and defaulted (ORNA-LIB-001).
+    // `std.money` proves the distinction: its wrappers are the only spellings
+    // that carry the generic amount parameter.
+    if intrinsic.leaf.is_some_and(|marker| marker != leaf) {
+        return None;
+    }
     (intrinsic.dispatch != orna_intrinsics::Dispatch::SourceOnly
         && intrinsic.pins.contains(orna_intrinsics::CURRENT_STD_PIN))
     .then_some(intrinsic.id)
