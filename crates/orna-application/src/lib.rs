@@ -347,6 +347,7 @@ impl ApplicationAuthority {
                             module.and_then(|module| orna_intrinsics::lookup(module, &lookup_name))
                         {
                             if intrinsic.dispatch != orna_intrinsics::Dispatch::SourceOnly
+                                && intrinsic.binds_declaration(&lookup_name)
                                 && intrinsic.pins.contains(orna_intrinsics::CURRENT_STD_PIN)
                             {
                                 intrinsics.insert(key.clone(), intrinsic.id);

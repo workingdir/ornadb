@@ -1048,6 +1048,22 @@ fn root_collection_intrinsic(name: &str) -> Option<orna_intrinsics::IntrinsicId>
     })
 }
 
+/// The native id a qualified `std.<module>.<leaf>` spelling names under the
+/// current pin, ignoring whether an admitted declaration keeps its Orna body.
+fn qualified_intrinsic(name: &str) -> Option<orna_intrinsics::IntrinsicId> {
+    let (module_path, leaf) = name.rsplit_once('.')?;
+    let module = orna_intrinsics::Module::from_path(module_path)?;
+    if module == orna_intrinsics::Module::Time {
+        return None;
+    }
+    orna_intrinsics::lookup(module, leaf)
+        .filter(|intrinsic| {
+            intrinsic.dispatch != orna_intrinsics::Dispatch::SourceOnly
+                && intrinsic.pins.contains(orna_intrinsics::CURRENT_STD_PIN)
+        })
+        .map(|intrinsic| intrinsic.id)
+}
+
 /// Binds one admitted declaration name to the intrinsic it implements.
 ///
 /// The name is the qualified key of a function admitted into the local table,
@@ -1091,9 +1107,11 @@ fn module_intrinsic(name: &str) -> Option<orna_intrinsics::IntrinsicId> {
     // where the operation's arguments are named and defaulted (ORNA-LIB-001).
     // `std.money` proves the distinction: its wrappers are the only spellings
     // that carry the generic amount parameter, and the money arm is keyed by
-    // `__quantize`/`__allocate`/`__format`. The descriptor already records
-    // which spelling the registry binds, so no module list is needed here.
-    if intrinsic.leaf.is_some_and(|marker| marker != leaf) {
+    // `__quantize`/`__allocate`/`__format`. A leaf-less `SourceExpressible`
+    // descriptor names the wrapper too; its captured body is authoritative.
+    // The catalogue records which spelling the registry binds, so no module
+    // list is needed here.
+    if !intrinsic.binds_declaration(leaf) {
         return None;
     }
     Some(intrinsic.id)
@@ -7361,42 +7379,33 @@ impl Context<'_, '_> {
     ) -> Option<Result<Value, EvaluationError>> {
         let resolved = self.resolve_function_name(callee, scope);
         let id = match resolved.as_deref() {
-            Some(name) => self.functions.intrinsic(name)?,
+            // A resolved standard declaration may still keep its Orna body
+            // (leaf-bearing descriptors and `SourceExpressible` wrappers); the
+            // relation overload of the same identity stays native.
+            Some(name) => self
+                .functions
+                .intrinsic(name)
+                .or_else(|| qualified_intrinsic(name))?,
             None => {
                 let spelling = function_name(callee)?;
-                let leaf = spelling.rsplit('.').next().unwrap_or(spelling.as_str());
-                match spelling.rsplit_once('.') {
-                    Some((module_path, leaf)) => {
-                        // A qualified spelling resolves through the catalogue
-                        // exactly like the native route does; an unknown
-                        // module member stays a source call.
-                        let module = orna_intrinsics::Module::from_path(module_path);
-                        let intrinsic = module
-                            .filter(|module| *module != orna_intrinsics::Module::Time)
-                            .and_then(|module| orna_intrinsics::lookup(module, leaf))
-                            .filter(|intrinsic| {
-                                intrinsic.dispatch != orna_intrinsics::Dispatch::SourceOnly
-                                    && intrinsic
-                                        .pins
-                                        .contains(orna_intrinsics::CURRENT_STD_PIN)
-                            });
-                        let Some(intrinsic) = intrinsic else {
-                            return None;
-                        };
-                        intrinsic.id
+                if let Some(id) = qualified_intrinsic(&spelling) {
+                    id
+                } else {
+                    if spelling.contains('.') {
+                        // An unknown module member stays a source call.
+                        return None;
                     }
-                    None => {
-                        if scope.0.contains_key(leaf) {
-                            return None;
-                        }
-                        // `project` is the relation-stage spelling of the
-                        // one-to-one map; it has no finite-list intrinsic.
-                        if leaf == "project" {
-                            orna_intrinsics::IntrinsicId::CoreMap
-                        } else {
-                            orna_intrinsics::root_intrinsic(leaf)
-                                .or_else(|| root_collection_intrinsic(leaf))?
-                        }
+                    let leaf = spelling.as_str();
+                    if scope.0.contains_key(leaf) {
+                        return None;
+                    }
+                    // `project` is the relation-stage spelling of the
+                    // one-to-one map; it has no finite-list intrinsic.
+                    if leaf == "project" {
+                        orna_intrinsics::IntrinsicId::CoreMap
+                    } else {
+                        orna_intrinsics::root_intrinsic(leaf)
+                            .or_else(|| root_collection_intrinsic(leaf))?
                     }
                 }
             }
