@@ -15,6 +15,15 @@
 /// field length must stay under before it is read.
 pub(crate) const MAX_JOURNAL_BYTES: usize = 64 * 1024 * 1024;
 
+use self::little::{
+    put_optional_bytes, put_optional_string, take_byte, take_fixed as take_fixed_array,
+    take_optional_bytes, take_optional_string,
+};
+use crate::{
+    CwdGeneration, GitCommitRef, IndexGeneration, IndexTreeRef, RepositoryError, RuntimeGeneration,
+    WorktreeState, valid_branch_name,
+};
+
 macro_rules! wire_codec {
     (
         $module:ident,
@@ -195,6 +204,113 @@ wire_codec!(big, to_be_bytes, from_be_bytes, {
         Ok(u64::from_be_bytes(take_fixed::<8>(bytes, cursor)?))
     }
 });
+
+fn checkout_journal_optional_string(
+    bytes: &[u8],
+    cursor: &mut usize,
+) -> Result<Option<String>, RepositoryError> {
+    take_optional_string(bytes, cursor).map_err(|_| RepositoryError::InvalidCheckoutJournal)
+}
+
+fn checkout_journal_optional_bytes(
+    bytes: &[u8],
+    cursor: &mut usize,
+) -> Result<Option<Vec<u8>>, RepositoryError> {
+    take_optional_bytes(bytes, cursor).map_err(|_| RepositoryError::InvalidCheckoutJournal)
+}
+
+pub(crate) fn encode_checkout_cwd(
+    bytes: &mut Vec<u8>,
+    cwd: &CwdGeneration,
+) -> Result<(), RepositoryError> {
+    put_optional_string(bytes, cwd.head.as_ref().map(GitCommitRef::as_str))
+        .map_err(|_| RepositoryError::InvalidCheckoutJournal)?;
+    put_optional_string(bytes, cwd.branch.as_deref())
+        .map_err(|_| RepositoryError::InvalidCheckoutJournal)?;
+    put_optional_string(bytes, cwd.index.head.as_ref().map(GitCommitRef::as_str))
+        .map_err(|_| RepositoryError::InvalidCheckoutJournal)?;
+    put_optional_string(bytes, cwd.index.tree.as_ref().map(IndexTreeRef::as_str))
+        .map_err(|_| RepositoryError::InvalidCheckoutJournal)?;
+    put_optional_bytes(bytes, Some(cwd.worktree.as_porcelain_v2_z()))
+        .map_err(|_| RepositoryError::InvalidCheckoutJournal)?;
+    bytes.extend_from_slice(cwd.worktree.content_digest());
+    bytes.extend_from_slice(&cwd.runtime.get().to_be_bytes());
+    Ok(())
+}
+
+pub(crate) fn encode_optional_checkout_cwd(
+    bytes: &mut Vec<u8>,
+    cwd: Option<&CwdGeneration>,
+) -> Result<(), RepositoryError> {
+    match cwd {
+        Some(cwd) => {
+            bytes.push(1);
+            encode_checkout_cwd(bytes, cwd)
+        }
+        None => {
+            bytes.push(0);
+            Ok(())
+        }
+    }
+}
+
+pub(crate) fn decode_checkout_cwd(
+    bytes: &[u8],
+    cursor: &mut usize,
+    object_id_length: usize,
+    has_content_digest: bool,
+) -> Result<CwdGeneration, RepositoryError> {
+    let head = checkout_journal_optional_string(bytes, cursor)?
+        .map(|value| GitCommitRef::from_verified_commit(value, object_id_length))
+        .transpose()?;
+    let branch = checkout_journal_optional_string(bytes, cursor)?;
+    if branch
+        .as_deref()
+        .is_some_and(|branch| !valid_branch_name(branch))
+    {
+        return Err(RepositoryError::InvalidCheckoutJournal);
+    }
+    let index_head = checkout_journal_optional_string(bytes, cursor)?
+        .map(|value| GitCommitRef::from_verified_commit(value, object_id_length))
+        .transpose()?;
+    let index_tree = checkout_journal_optional_string(bytes, cursor)?
+        .map(|value| IndexTreeRef::from_verified_tree(value, object_id_length))
+        .transpose()?;
+    let worktree = checkout_journal_optional_bytes(bytes, cursor)?
+        .ok_or(RepositoryError::InvalidCheckoutJournal)?;
+    let content_digest = if has_content_digest {
+        take_fixed_array::<32>(bytes, cursor)?
+    } else {
+        [0; 32]
+    };
+    let runtime = RuntimeGeneration::new(u64::from_be_bytes(take_fixed_array::<8>(bytes, cursor)?));
+    if head != index_head {
+        return Err(RepositoryError::InvalidCheckoutJournal);
+    }
+    Ok(CwdGeneration {
+        head,
+        branch,
+        index: IndexGeneration {
+            head: index_head,
+            tree: index_tree,
+        },
+        worktree: WorktreeState(worktree, content_digest),
+        runtime,
+    })
+}
+
+pub(crate) fn decode_optional_checkout_cwd(
+    bytes: &[u8],
+    cursor: &mut usize,
+    object_id_length: usize,
+    has_content_digest: bool,
+) -> Result<Option<CwdGeneration>, RepositoryError> {
+    match take_byte(bytes, cursor)? {
+        0 => Ok(None),
+        1 => decode_checkout_cwd(bytes, cursor, object_id_length, has_content_digest).map(Some),
+        _ => Err(RepositoryError::InvalidCheckoutJournal),
+    }
+}
 
 #[cfg(test)]
 mod tests {

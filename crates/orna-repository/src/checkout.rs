@@ -1,6 +1,10 @@
 //! Extracted from `lib.rs` along its seams; contents are moved verbatim.
 
 use super::*;
+use crate::wire::{
+    decode_checkout_cwd, decode_optional_checkout_cwd, encode_checkout_cwd,
+    encode_optional_checkout_cwd,
+};
 
 /// Version marker of the force-discard recovery journal.
 pub(crate) const CHECKOUT_JOURNAL_MAGIC: &[u8] = b"ORNA-CHECKOUT-JOURNAL\0";
