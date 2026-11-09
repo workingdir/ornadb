@@ -81,10 +81,10 @@ pub struct GeneratedSysArtifacts {
     pub binding_bundle: String,
 }
 
-/// Collect the same explicitly written Rust source methods consumed by build.rs.
-/// Keeping traversal here lets the parity test rerun the real registry collector.
-pub fn collect_rust_sources(root: &Path) -> Result<Collector, String> {
-    fn rust_sources(root: &Path, output: &mut Vec<PathBuf>) -> Result<(), String> {
+/// Every `.rs` file below `root`, directories visited in sorted order. build.rs
+/// watches exactly this list and the collector reads exactly this list.
+pub fn rust_sources(root: &Path) -> Result<Vec<PathBuf>, String> {
+    fn walk(root: &Path, output: &mut Vec<PathBuf>) -> Result<(), String> {
         let mut entries = fs::read_dir(root)
             .map_err(|error| format!("read source directory {}: {error}", root.display()))?
             .collect::<Result<Vec<_>, _>>()
@@ -93,7 +93,7 @@ pub fn collect_rust_sources(root: &Path) -> Result<Collector, String> {
         for entry in entries {
             let path = entry.path();
             if path.is_dir() {
-                rust_sources(&path, output)?;
+                walk(&path, output)?;
             } else if path.extension().is_some_and(|extension| extension == "rs") {
                 output.push(path);
             }
@@ -102,7 +102,14 @@ pub fn collect_rust_sources(root: &Path) -> Result<Collector, String> {
     }
 
     let mut sources = Vec::new();
-    rust_sources(root, &mut sources)?;
+    walk(root, &mut sources)?;
+    Ok(sources)
+}
+
+/// Collect the same explicitly written Rust source methods consumed by build.rs.
+/// Keeping traversal here lets the parity test rerun the real registry collector.
+pub fn collect_rust_sources(root: &Path) -> Result<Collector, String> {
+    let sources = rust_sources(root)?;
     let mut collector = Collector::default();
     for source in sources {
         let text = fs::read_to_string(&source)
