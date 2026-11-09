@@ -18,6 +18,7 @@ mod cli_legacy;
 mod cli_migrate;
 mod cli_mount;
 mod cli_mv;
+mod cli_options;
 mod cli_publish;
 mod cli_query;
 mod cli_row_key;
