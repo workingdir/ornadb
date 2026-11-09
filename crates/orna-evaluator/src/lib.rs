@@ -12467,57 +12467,12 @@ impl Context<'_, '_> {
                 self.asof_join(left, right, time, by, depth)
             }
             ("bucket_by" | "__bucket_by", [Value::List(rows), period, zone]) => {
-                let spec = bucket_by_spec(period, Some(zone))?;
-                let mut state = RelationBucketState::try_new(spec).map_err(bucket_error)?;
-                self.items(rows.len())?;
-                let mut groups = Vec::new();
-                for row in rows {
-                    self.step()?;
-                    if let Some(bucket) = state.push(row.clone()).map_err(bucket_error)? {
-                        self.items(bucket.values.len())?;
-                        groups.push(Value::list(bucket.values));
-                        self.items(groups.len())?;
-                    }
-                }
-                if let Some(bucket) = state.finish() {
-                    self.items(bucket.values.len())?;
-                    groups.push(Value::list(bucket.values));
-                    self.items(groups.len())?;
-                }
-                Ok(Value::list(groups))
+                self.collection_bucket_by(rows, period, zone)
             }
             ("chunk", [Value::List(values), Value::Int(size)]) => {
-                self.items(values.len())?;
-                let size = self.positive_collection_size(size)?;
-                for _ in values {
-                    self.step()?;
-                }
-                let mut chunks = Vec::new();
-                for chunk in values.chunks(size) {
-                    self.items(chunk.len())?;
-                    self.step()?;
-                    chunks.push(Value::list(chunk.to_vec()));
-                    self.items(chunks.len())?;
-                }
-                Ok(Value::list(chunks))
+                self.collection_chunk(values, size)
             }
-            ("flatten", [Value::List(values)]) => {
-                self.items(values.len())?;
-                let mut flattened = Vec::new();
-                for value in values {
-                    self.step()?;
-                    let Value::List(inner) = value else {
-                        return Err(error("ORNA-EVAL-TYPE"));
-                    };
-                    self.items(inner.len())?;
-                    for value in inner {
-                        self.step()?;
-                        flattened.push(value.clone());
-                        self.items(flattened.len())?;
-                    }
-                }
-                Ok(Value::list(flattened))
-            }
+            ("flatten", [Value::List(values)]) => self.collection_flatten(values),
             ("distinct", [Value::List(values)]) | ("unique", [Value::List(values)]) => {
                 self.distinct(values)
             }
@@ -12590,6 +12545,76 @@ impl Context<'_, '_> {
             ("__window_integrate", [Value::List(points), Value::Int(size), Value::Int(step)]) => {
                 self.window_time_series_statistics(points, size, step, "integrate")
             }
+            _ => Self::collection_shape_error(name, values.as_slice()),
+        }
+    }
+
+    /// Groups finite rows by a bucket period, charging one step per row and
+    /// one item budget per retained bucket.
+    fn collection_bucket_by(
+        &mut self,
+        rows: &List,
+        period: &Value,
+        zone: &Value,
+    ) -> Result<Value, EvaluationError> {
+        let spec = bucket_by_spec(period, Some(zone))?;
+        let mut state = RelationBucketState::try_new(spec).map_err(bucket_error)?;
+        self.items(rows.len())?;
+        let mut groups = Vec::new();
+        for row in rows {
+            self.step()?;
+            if let Some(bucket) = state.push(row.clone()).map_err(bucket_error)? {
+                self.items(bucket.values.len())?;
+                groups.push(Value::list(bucket.values));
+                self.items(groups.len())?;
+            }
+        }
+        if let Some(bucket) = state.finish() {
+            self.items(bucket.values.len())?;
+            groups.push(Value::list(bucket.values));
+            self.items(groups.len())?;
+        }
+        Ok(Value::list(groups))
+    }
+
+    fn collection_chunk(&mut self, values: &List, size: &BigInt) -> Result<Value, EvaluationError> {
+        self.items(values.len())?;
+        let size = self.positive_collection_size(size)?;
+        for _ in values {
+            self.step()?;
+        }
+        let mut chunks = Vec::new();
+        for chunk in values.chunks(size) {
+            self.items(chunk.len())?;
+            self.step()?;
+            chunks.push(Value::list(chunk.to_vec()));
+            self.items(chunks.len())?;
+        }
+        Ok(Value::list(chunks))
+    }
+
+    fn collection_flatten(&mut self, values: &List) -> Result<Value, EvaluationError> {
+        self.items(values.len())?;
+        let mut flattened = Vec::new();
+        for value in values {
+            self.step()?;
+            let Value::List(inner) = value else {
+                return Err(error("ORNA-EVAL-TYPE"));
+            };
+            self.items(inner.len())?;
+            for value in inner {
+                self.step()?;
+                flattened.push(value.clone());
+                self.items(flattened.len())?;
+            }
+        }
+        Ok(Value::list(flattened))
+    }
+
+    /// Rejects a known collection spelling whose argument shape does not fit,
+    /// keeping the type error distinct from the unsupported fallback.
+    fn collection_shape_error(name: &str, values: &[Value]) -> Result<Value, EvaluationError> {
+        match (name, values) {
             ("chunk", [_, _])
             | (
                 "flatten" | "distinct" | "unique" | "pairs" | "count" | "first" | "last" | "min"
