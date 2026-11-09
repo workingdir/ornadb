@@ -1,179 +1,75 @@
 //! Deterministic step parity for the typed intrinsic dispatch.
 //!
-//! The baseline was captured from the pre-S2 evaluator at the stage base
-//! (`origin/main` before the catalogue dispatch). Each program exercises a
-//! native operation through the unresolved qualified spelling, so both the old
-//! string-table route and the new id route reach the same handler.
+//! Stage S2 replaces the string tables in `orna-evaluator` with a typed
+//! `IntrinsicId` dispatch. The routing change must not alter how many
+//! evaluation steps a program consumes: `docs/design/std-native.md` section 4
+//! (S2) requires this test to record the baseline captured from the
+//! pre-stage implementation (`origin/main`) and assert equality.
+//!
+//! Every program is built from a finite list of `n` values and reaches the
+//! native arm through an unresolved `std.<module>.<leaf>` spelling, so the
+//! measurement is independent of whether a caller admitted a standard layer.
+//! The recorded number is the smallest `max_steps` budget that lets the whole
+//! expression evaluate; raising the budget never turns success into failure,
+//! so the predicate is monotone and the minimum is well defined.
+//!
+//! `ORNA_STD_STEP_PARITY_EMIT=1` prints the table instead of asserting it; the
+//! constants below were produced by running this same file against
+//! `origin/main` (pre-stage) with that variable set.
 
-use orna_evaluator::{
-    Environment, Functions, Limits, StepBudget, evaluate_with_functions_and_budget,
-};
-use orna_syntax::parse_expression;
+use orna_evaluator::{Environment, Limits, evaluate_expression};
 
-const N_SMALL: usize = 256;
-const N_MEDIUM: usize = 1024;
-const N_LARGE: usize = 4096;
+/// Sizes measured by the design (section 4, stage S2).
+const SIZES: [usize; 3] = [256, 1024, 4096];
 
-/// Pre-stage step counts, in `PROGRAMS` order.
-const BASELINE: &[u64] = &[
-    259, 2050, 4098, 514, 2050, 20484, 1797, 7172, 12292, 292, 3044, 16389, 1283, 1059, 16389,
-    1795, 3077, 8709, 770, 7173, 20485, 2052, 3075, 12292, 258, 2049, 8194, 516, 3074, 8194, 9, 9,
-    3, 3, 2, 3, 2, 3, 902, 10247,
+/// Smallest successful `max_steps` per program at `SIZES`.
+const BASELINE: [(&str, [u64; 3]); 40] = [
+    ("filter", [1795, 7171, 28675]),
+    ("map", [1027, 4099, 16387]),
+    ("flat_map", [1027, 4099, 16387]),
+    ("sort_by", [2330, 11589, 54102]),
+    ("take", [269, 1037, 4109]),
+    ("drop", [505, 2041, 8185]),
+    ("distinct", [770, 3074, 12290]),
+    ("union", [1027, 4099, 16387]),
+    ("count", [259, 1027, 4099]),
+    ("first", [258, 1026, 4098]),
+    ("one", [261, 1029, 4101]),
+    ("sum", [514, 2050, 8194]),
+    ("min", [514, 2050, 8194]),
+    ("max", [514, 2050, 8194]),
+    ("every", [1283, 5123, 20483]),
+    ("exists", [1283, 5123, 20483]),
+    ("chunk", [552, 2198, 8781]),
+    ("flatten", [846, 3370, 13464]),
+    ("partition", [1795, 7171, 28675]),
+    ("zip", [771, 3075, 12291]),
+    ("zip_exact", [771, 3075, 12291]),
+    ("unique", [770, 3074, 12290]),
+    ("pairs", [16, 16, 16]),
+    ("window", [25, 25, 25]),
+    ("window_step", [23, 23, 23]),
+    ("split_when", [1795, 7171, 28675]),
+    ("rank", [3198, 14687, 66341]),
+    ("group_by", [1283, 5123, 20483]),
+    ("stats_mean", [258, 1026, 4098]),
+    ("stats_median", [513, 2049, 8193]),
+    ("stats_sum", [514, 2050, 8194]),
+    ("stats_range", [770, 3074, 12290]),
+    ("stats_mode", [514, 2050, 8194]),
+    ("stats_variance", [514, 2050, 8194]),
+    ("text_split", [1031, 4103, 16391]),
+    ("stats_percentile", [260, 1028, 4100]),
+    ("text_join", [773, 3077, 12293]),
+    ("bits_or", [3, 3, 3]),
+    ("math_clamp", [4, 4, 4]),
+    ("math_increment", [2, 2, 2]),
 ];
 
-/// One program per entry. `{L}` is the input list and `{M}` the second list.
-const PROGRAMS: &[(&str, usize, &str)] = &[
-    ("count-256", N_SMALL, "std.collection.count({L})"),
-    ("sum-1024", N_MEDIUM, "std.collection.sum({L})"),
-    ("first-4096", N_LARGE, "std.collection.first({L})"),
-    ("min-256", N_SMALL, "std.collection.min({L})"),
-    ("max-1024", N_MEDIUM, "std.collection.max({L})"),
-    (
-        "map-sum-4096",
-        N_LARGE,
-        "std.collection.map({L}, x => x + 1) | std.collection.sum",
-    ),
-    (
-        "filter-count-256",
-        N_SMALL,
-        "std.collection.filter({L}, x => x % 2 == 0) | std.collection.count",
-    ),
-    (
-        "sort-first-1024",
-        N_MEDIUM,
-        "std.collection.sort_by({L}, x => x) | std.collection.first",
-    ),
-    (
-        "distinct-count-4096",
-        N_LARGE,
-        "std.collection.distinct({L}) | std.collection.count",
-    ),
-    (
-        "take-sum-256",
-        N_SMALL,
-        "std.collection.take({L}, 16) | std.collection.sum",
-    ),
-    (
-        "drop-sum-1024",
-        N_MEDIUM,
-        "std.collection.drop({L}, 16) | std.collection.sum",
-    ),
-    (
-        "union-count-4096",
-        N_LARGE,
-        "std.collection.union({L}, {M}) | std.collection.count",
-    ),
-    (
-        "every-256",
-        N_SMALL,
-        "std.collection.every({L}, x => x >= 0)",
-    ),
-    (
-        "exists-1024",
-        N_MEDIUM,
-        "std.collection.exists({L}, x => x == 7)",
-    ),
-    (
-        "flat-map-count-4096",
-        N_LARGE,
-        "std.collection.flat_map({L}, x => [x, x]) | std.collection.count",
-    ),
-    (
-        "partition-count-256",
-        N_SMALL,
-        "std.collection.partition({L}, x => x % 2 == 0)",
-    ),
-    (
-        "zip-count-1024",
-        N_MEDIUM,
-        "std.collection.zip({L}, {M}) | std.collection.count",
-    ),
-    (
-        "chunk-count-4096",
-        N_LARGE,
-        "std.collection.chunk({L}, 8) | std.collection.count",
-    ),
-    (
-        "window-count-256",
-        N_SMALL,
-        "std.collection.window({L}, 4) | std.collection.count",
-    ),
-    (
-        "split-when-count-1024",
-        N_MEDIUM,
-        "std.collection.split_when({L}, x => x % 5 == 0) | std.collection.count",
-    ),
-    (
-        "group-by-count-4096",
-        N_LARGE,
-        "std.collection.group_by({L}, x => x % 3) | std.collection.count",
-    ),
-    (
-        "rank-count-256",
-        N_SMALL,
-        "std.collection.rank({L}, x => x) | std.collection.count",
-    ),
-    (
-        "pairs-count-1024",
-        N_MEDIUM,
-        "std.collection.pairs({L}) | std.collection.count",
-    ),
-    (
-        "unique-count-4096",
-        N_LARGE,
-        "std.collection.unique({L}) | std.collection.count",
-    ),
-    ("stats-mean-256", N_SMALL, "std.stats.mean({L})"),
-    ("stats-median-1024", N_MEDIUM, "std.stats.median({L})"),
-    ("stats-sum-4096", N_LARGE, "std.stats.sum({L})"),
-    (
-        "stats-mode-256",
-        N_SMALL,
-        "std.stats.mode({L}) | std.collection.count",
-    ),
-    ("stats-range-1024", N_MEDIUM, "std.stats.range({L})"),
-    ("stats-variance-4096", N_LARGE, "std.stats.variance({L})"),
-    (
-        "text-split-count-256",
-        N_SMALL,
-        "std.text.split(\"a,b,c,d\", \",\") | std.collection.count",
-    ),
-    (
-        "text-join-1024",
-        N_MEDIUM,
-        "std.text.join([\"a\", \"b\", \"c\"], \"-\")",
-    ),
-    ("bits-or-4096", N_LARGE, "std.bits.bit_or(255, 15)"),
-    (
-        "hash-sha256-1024",
-        N_MEDIUM,
-        "std.hash.sha256_text(\"orna\")",
-    ),
-    (
-        "base64-encode-4096",
-        N_LARGE,
-        "std.encoding.base64.decode(\"aGVsbG8=\")",
-    ),
-    ("bits-and-256", N_SMALL, "std.bits.bit_and(255, 15)"),
-    ("money-quantize-1024", N_MEDIUM, "std.text.trim(\"  x  \")"),
-    ("json-encode-4096", N_LARGE, "std.encoding.json.__encode(1)"),
-    (
-        "chunk-flatten-count-256",
-        N_SMALL,
-        "std.collection.chunk({L}, 4) | std.collection.flatten | std.collection.count",
-    ),
-    (
-        "map-filter-count-1024",
-        N_MEDIUM,
-        "std.collection.map({L}, x => x + 1) | std.collection.filter(x => x % 2 == 0) | std.collection.count",
-    ),
-];
-
-fn list(n: usize) -> String {
-    let mut source = String::with_capacity(n * 4 + 2);
-    source.push('[');
-    for value in 0..n {
-        if value != 0 {
+fn list(size: usize) -> String {
+    let mut source = String::from("[");
+    for value in 1..=size {
+        if value > 1 {
             source.push_str(", ");
         }
         source.push_str(&value.to_string());
@@ -182,42 +78,180 @@ fn list(n: usize) -> String {
     source
 }
 
-fn limits() -> Limits {
-    Limits {
-        max_collection_items: N_LARGE * 2,
-        max_steps: 50_000_000,
-        max_string_bytes: 1 << 20,
-        ..Limits::default()
-    }
+/// One program per catalogue family, parameterised by the list length.
+fn programs(size: usize) -> Vec<(&'static str, String)> {
+    let values = list(size);
+    let small = list(size.min(5));
+    let windowed = list(size.min(8));
+    vec![
+        (
+            "filter",
+            format!("std.collection.filter({values}, value => value % 2 == 0)"),
+        ),
+        (
+            "map",
+            format!("std.collection.map({values}, value => value + 1)"),
+        ),
+        (
+            "flat_map",
+            format!("std.collection.flat_map({values}, value => [value, value])"),
+        ),
+        (
+            "sort_by",
+            format!("std.collection.sort_by({values}, value => value % 97)"),
+        ),
+        ("take", format!("std.collection.take({values}, 10)")),
+        ("drop", format!("std.collection.drop({values}, 10)")),
+        ("distinct", format!("std.collection.distinct({values})")),
+        ("union", format!("std.collection.union({values}, {values})")),
+        ("count", format!("std.collection.count({values})")),
+        ("first", format!("std.collection.first({values})")),
+        (
+            "one",
+            format!("std.collection.one(std.collection.take({values}, 1))"),
+        ),
+        ("sum", format!("std.collection.sum({values})")),
+        ("min", format!("std.collection.min({values})")),
+        ("max", format!("std.collection.max({values})")),
+        (
+            "every",
+            format!("std.collection.every({values}, value => value > 0)"),
+        ),
+        (
+            "exists",
+            format!("std.collection.exists({values}, value => value < 0)"),
+        ),
+        ("chunk", format!("std.collection.chunk({values}, 7)")),
+        (
+            "flatten",
+            format!("std.collection.flatten(std.collection.chunk({values}, 7))"),
+        ),
+        (
+            "partition",
+            format!("std.collection.partition({values}, value => value % 3 == 0)"),
+        ),
+        ("zip", format!("std.collection.zip({values}, {values})")),
+        (
+            "zip_exact",
+            format!("std.collection.zip_exact({values}, {values})"),
+        ),
+        ("unique", format!("std.collection.unique({values})")),
+        ("pairs", format!("std.collection.pairs({small})")),
+        ("window", format!("std.collection.window({windowed}, 3)")),
+        (
+            "window_step",
+            format!("std.collection.window({windowed}, 3, 2)"),
+        ),
+        (
+            "split_when",
+            format!("std.collection.split_when({values}, value => value % 5 == 0)"),
+        ),
+        (
+            "rank",
+            format!("std.collection.rank({values}, value => value % 7)"),
+        ),
+        (
+            "group_by",
+            format!("std.collection.group_by({values}, value => value % 4)"),
+        ),
+        ("stats_mean", format!("std.stats.mean({values})")),
+        ("stats_median", format!("std.stats.median({values})")),
+        ("stats_sum", format!("std.stats.sum({values})")),
+        ("stats_range", format!("std.stats.range({values})")),
+        ("stats_mode", format!("std.stats.mode({values})")),
+        ("stats_variance", format!("std.stats.variance({values})")),
+        (
+            "text_split",
+            format!(
+                "std.text.split(std.text.join(std.collection.map({values}, value => \"x\"), \",\"), \",\")"
+            ),
+        ),
+        (
+            "stats_percentile",
+            format!("std.stats.percentile({values}, 0.25, \"linear\")"),
+        ),
+        (
+            "text_join",
+            format!("std.text.join(std.collection.map({values}, value => \"x\"), \",\")"),
+        ),
+        ("bits_or", String::from("std.bits.bit_or(123, 456)")),
+        ("math_clamp", String::from("std.math.clamp(5, 1, 3)")),
+        ("math_increment", String::from("std.math.increment(41)")),
+    ]
 }
 
-fn steps(source: &str) -> u64 {
-    let limits = limits();
-    let parsed = parse_expression(source);
-    assert!(parsed.is_ok(), "{source}: {:?}", parsed.diagnostics);
-    let mut budget = StepBudget::new(limits.max_steps);
-    evaluate_with_functions_and_budget(
-        &parsed.value,
+fn evaluates_within(program: &str, max_steps: u64) -> bool {
+    evaluate_expression(
+        program,
         &Environment::new(),
-        &Functions::new(),
-        limits,
-        &mut budget,
+        Limits {
+            max_steps,
+            max_collection_items: 16_384,
+            ..Limits::default()
+        },
     )
-    .unwrap_or_else(|error| panic!("{source}: {}", error.code()));
-    limits.max_steps - budget.remaining()
+    .is_ok()
+}
+
+/// The smallest step budget that evaluates `program` completely.
+fn consumed_steps(program: &str) -> u64 {
+    assert!(
+        evaluates_within(program, u64::MAX),
+        "program must evaluate without a budget: {program}"
+    );
+    let mut high = 64u64;
+    while !evaluates_within(program, high) {
+        high = high
+            .checked_mul(2)
+            .expect("step budget search does not overflow");
+        assert!(high <= 1 << 40, "step budget stays bounded: {program}");
+    }
+    let mut low = 0u64;
+    while low < high {
+        let middle = low + (high - low) / 2;
+        if evaluates_within(program, middle) {
+            high = middle;
+        } else {
+            low = middle + 1;
+        }
+    }
+    low
 }
 
 #[test]
 fn step_counts_match_the_pre_stage_baseline() {
-    assert_eq!(PROGRAMS.len(), BASELINE.len());
-    let print = std::env::var_os("ORNA_STEP_BASELINE").is_some();
-    for (index, (name, n, template)) in PROGRAMS.iter().enumerate() {
-        let source = template.replace("{L}", &list(*n)).replace("{M}", &list(*n));
-        let measured = steps(&source);
-        if print {
-            println!("BASELINE[{index}] = {measured}; // {name}");
-        } else {
-            assert_eq!(measured, BASELINE[index], "{name}");
+    let emit = std::env::var_os("ORNA_STD_STEP_PARITY_EMIT").is_some();
+    let per_size = SIZES
+        .into_iter()
+        .map(|size| {
+            let programs = programs(size);
+            assert_eq!(programs.len(), BASELINE.len(), "one program per row");
+            programs
+        })
+        .collect::<Vec<_>>();
+    for (index, (expected_name, expected)) in BASELINE.iter().enumerate() {
+        let mut measured = [0u64; 3];
+        for (size_index, programs) in per_size.iter().enumerate() {
+            let (name, program) = &programs[index];
+            assert_eq!(
+                name, expected_name,
+                "program order is part of the recorded table"
+            );
+            measured[size_index] = consumed_steps(program);
+        }
+        if emit {
+            println!(
+                "    (\"{expected_name}\", [{}, {}, {}]),",
+                measured[0], measured[1], measured[2]
+            );
+            continue;
+        }
+        for (size_index, size) in SIZES.into_iter().enumerate() {
+            assert_eq!(
+                measured[size_index], expected[size_index],
+                "{expected_name} at n = {size} consumed {} steps; the pre-stage baseline is {}",
+                measured[size_index], expected[size_index]
+            );
         }
     }
 }

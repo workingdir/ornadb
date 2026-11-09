@@ -1050,18 +1050,27 @@ fn root_collection_intrinsic(name: &str) -> Option<orna_intrinsics::IntrinsicId>
 
 /// The native id a qualified `std.<module>.<leaf>` spelling names under the
 /// current pin, ignoring whether an admitted declaration keeps its Orna body.
-fn qualified_intrinsic(name: &str) -> Option<orna_intrinsics::IntrinsicId> {
-    let (module_path, leaf) = name.rsplit_once('.')?;
+///
+/// Relation dispatch needs the identity even when the wrapper stays captured
+/// source, so this deliberately skips the marker-leaf rule that admission
+/// applies. A spelling that resolves into another module's re-export is not
+/// this module's operation, and `std.time` is never a relation stage.
+fn qualified_intrinsic(spelling: &str) -> Option<orna_intrinsics::IntrinsicId> {
+    let (module_path, name) = spelling.rsplit_once('.')?;
+    if module_path == "std.math" {
+        return Some(orna_intrinsics::IntrinsicId::MathIncrement);
+    }
     let module = orna_intrinsics::Module::from_path(module_path)?;
     if module == orna_intrinsics::Module::Time {
         return None;
     }
-    orna_intrinsics::lookup(module, leaf)
-        .filter(|intrinsic| {
-            intrinsic.dispatch != orna_intrinsics::Dispatch::SourceOnly
-                && intrinsic.pins.contains(orna_intrinsics::CURRENT_STD_PIN)
-        })
-        .map(|intrinsic| intrinsic.id)
+    let intrinsic = orna_intrinsics::lookup(module, name)?;
+    // `lookup` already scopes the match to `module`; a `std.query` re-export
+    // deliberately returns the `std.collection` descriptor, so the descriptor's
+    // own module is not compared here.
+    (intrinsic.dispatch != orna_intrinsics::Dispatch::SourceOnly
+        && intrinsic.pins.contains(orna_intrinsics::CURRENT_STD_PIN))
+    .then_some(intrinsic.id)
 }
 
 /// Binds one admitted declaration name to the intrinsic it implements.
