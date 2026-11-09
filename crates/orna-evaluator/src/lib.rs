@@ -1050,11 +1050,18 @@ fn local_intrinsic(name: &str) -> Option<orna_intrinsics::IntrinsicId> {
         return Some(id);
     }
     let (module_path, leaf) = name.rsplit_once('.')?;
-    if !leaf.starts_with("__") {
-        return None;
+    if leaf.starts_with("__") {
+        return orna_intrinsics::Module::from_path(module_path)
+            .and_then(|module| orna_intrinsics::lookup(module, leaf))
+            .map(|intrinsic| intrinsic.id);
     }
-    let module = orna_intrinsics::Module::from_path(module_path)?;
-    orna_intrinsics::lookup(module, leaf).map(|intrinsic| intrinsic.id)
+    // A `std.time` export is its native operation. The clock helpers forward to
+    // private leaves that call them back, so leaving the public name as source
+    // would recurse until the step budget fails; and the duration formatters
+    // live in `std/time/duration/*.orna`, whose dotted catalogue spelling
+    // (`duration.compact.format`) no module-path split reaches.
+    let relative = name.strip_prefix("std.time.")?;
+    orna_intrinsics::lookup(orna_intrinsics::Module::Time, relative).map(|intrinsic| intrinsic.id)
 }
 
 fn legacy_intrinsic(name: &str) -> Option<orna_intrinsics::IntrinsicId> {
