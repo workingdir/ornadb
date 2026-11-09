@@ -1,0 +1,644 @@
+# Size budgets for the OrnaDB workspace.
+#
+# Enforced by `python3 scripts/check_architecture.py --mode=budget` in the
+# `arch` job of .github/workflows/lint.yml. ARCHITECTURE.md is the policy;
+# this file is the recorded debt.
+#
+# A number here is a ratchet: `--mode=budget` fails when a measured value
+# grows past its entry, and when a file, function or crate with no entry
+# exceeds its hard cap. A stage that shrinks or removes debt lowers or
+# deletes the entry in the same PR, so this file only ever moves down.
+#
+#   crate_src_lines  hard cap on crates/<crate>/src/*.rs; a crate above it
+#                    needs an explicit src_lines entry
+#   file_lines       hard cap on one source file; a file above it needs an
+#                    explicit files entry
+#   function_lines   hard cap on one function; a function above it needs an
+#                    explicit functions entry
+#
+# Recorded at origin/main 95b55e026. Regenerate only to lower entries:
+# the [[crate]] src_lines, files and functions entries are measurements, and
+# allow_clippy counts every #[allow(clippy::...)] attribute in src.
+
+[limits]
+crate_src_lines = 25000
+file_lines = 1200
+function_lines = 120
+
+[[crate]]
+name = "orna-application"
+allow_clippy = 0
+[crate.files]
+"src/lib.rs" = 14854
+"src/migration_rows.rs" = 1733
+"src/repl_transaction.rs" = 1234
+[crate.functions]
+"src/lib.rs::checked_in_source_effect_stages_and_commits_with_activation_scoped_id" = 151
+"src/lib.rs::competitor_and_owner_retries_alternate_returned_key_closure" = 127
+"src/lib.rs::competitor_retry_reuses_inserted_move_destination_after_closure" = 155
+"src/lib.rs::competitor_retry_survives_successive_inserted_target_moves" = 407
+"src/lib.rs::handle#2" = 169
+"src/lib.rs::inserted_identity_keeps_recovery_update_across_later_rekey_retry" = 143
+"src/lib.rs::inserted_move_retry_survives_reused_occupied_destination" = 139
+"src/lib.rs::inserted_target_move_closure_releases_occupied_destination" = 135
+"src/lib.rs::original_owner_key_retries_after_competitor_closure" = 139
+"src/lib.rs::owner_retry_after_nested_competitor_handoff_reclaims_released_key" = 230
+"src/lib.rs::owner_retry_closure_moves_inserted_reuse_target" = 124
+"src/lib.rs::owner_retry_survives_inserted_reuse_after_repeated_target_deletes" = 127
+"src/lib.rs::owner_target_retry_survives_repeated_delete_and_reuse_closures" = 124
+"src/lib.rs::page_watches_read_the_admitted_module_not_the_console_repl" = 175
+"src/lib.rs::record_admitted_source_row" = 149
+"src/lib.rs::served_repl_typed_run_event_snapshots_are_isolated_across_presentations_and_live_sessions" = 176
+"src/migration_store.rs::build_store_with_expectation" = 198
+
+[[crate]]
+name = "orna-cli"
+src_lines = 41069
+allow_clippy = 101
+[crate.files]
+"src/cli_dispatch.rs" = 2093
+"src/cli_history.rs" = 1571
+"src/cli_mount.rs" = 2251
+"src/cli_query.rs" = 1252
+"src/cli_serve.rs" = 4802
+"src/cli_serve_app.rs" = 1270
+"src/fuse_mount.rs" = 12006
+"src/main.rs" = 5962
+"src/repl.rs" = 1674
+[crate.functions]
+"src/cli_commit.rs::run" = 127
+"src/cli_commit.rs::stage_store" = 121
+"src/cli_dispatch.rs::declaration_name_span" = 125
+"src/cli_dispatch.rs::prepare_migration_copy" = 171
+"src/cli_dispatch.rs::run_mv" = 199
+"src/cli_dispatch.rs::run_store_mv" = 154
+"src/cli_history.rs::parse_options" = 132
+"src/cli_query.rs::parse_options" = 173
+"src/cli_query.rs::run" = 296
+"src/cli_query.rs::run_legacy" = 124
+"src/cli_serve.rs::smart_http_clones_and_pushes_the_selected_clones_head" = 143
+"src/cli_serve_app.rs::stage_at_head" = 128
+"src/fuse_mount.rs::candidate" = 228
+"src/fuse_mount.rs::commit_blob_candidate" = 169
+"src/fuse_mount.rs::create" = 139
+"src/fuse_mount.rs::from_snapshot" = 173
+"src/fuse_mount.rs::mount_blob_window_reads_charge_only_intersecting_chunks" = 135
+"src/fuse_mount.rs::open#4" = 346
+"src/fuse_mount.rs::prepare_edit" = 172
+"src/fuse_mount.rs::project_row_files" = 294
+"src/fuse_mount.rs::read" = 162
+"src/fuse_mount.rs::rename" = 340
+"src/fuse_mount.rs::retain" = 124
+"src/fuse_mount.rs::retain_all_drafts" = 281
+"src/fuse_mount.rs::setattr" = 135
+"src/fuse_mount.rs::unresolved_drafts_of" = 131
+"src/fuse_mount.rs::workspace_readdir_uses_lazy_indexed_pages" = 128
+"src/main.rs::parsing_is_bounded_and_diagnostic_is_stable" = 165
+"src/main.rs::repl_snapshot_loader_keeps_a_selected_ref_stable_after_it_moves" = 175
+"src/main.rs::run_committed_table_invocation" = 126
+"src/main.rs::run_project_invocation_with_arguments" = 128
+"src/main.rs::run_pure_invocation" = 203
+"src/main.rs::run_push" = 126
+"src/main.rs::run_repl_input" = 395
+
+[[crate]]
+name = "orna-conformance"
+allow_clippy = 8
+[crate.files]
+"src/lib.rs" = 2962
+"src/main.rs" = 1981
+"src/semantic_adapter.rs" = 14773
+[crate.functions]
+"src/lib.rs::execute_reference_project_runtime_adapter" = 208
+"src/lib.rs::run_fixture" = 123
+"src/lib.rs::validate" = 253
+"src/semantic_adapter.rs::admit_recorded_rows" = 168
+"src/semantic_adapter.rs::admit_transaction_project_with" = 203
+"src/semantic_adapter.rs::admitted_transaction_module" = 174
+"src/semantic_adapter.rs::evaluate_module_assertion_continuation" = 233
+"src/semantic_adapter.rs::evaluate_module_assertion_rows_continuation" = 121
+"src/semantic_adapter.rs::execute_running_table_request_with_success_terminal_with_faults" = 151
+"src/semantic_adapter.rs::handle_inner_with_budget" = 467
+"src/semantic_adapter.rs::lower_relation_expression_with_resolution" = 274
+"src/semantic_adapter.rs::relation_aggregate" = 138
+"src/semantic_adapter.rs::relation_quantifier" = 203
+"src/semantic_adapter.rs::running_table_continuation_fault_recovers_as_proven" = 152
+"src/semantic_adapter.rs::running_table_continuation_rejects_foreign_and_stale_capabilities_without_writes" = 125
+"src/semantic_adapter.rs::typed_composite_scan_orders_components_and_rejects_invalid_cursors" = 145
+"src/semantic_adapter.rs::validate_changed" = 125
+"src/vector_suites.rs::float_vectors" = 137
+"src/vector_suites.rs::path_vectors" = 122
+
+[[crate]]
+name = "orna-core"
+src_lines = 60684
+allow_clippy = 26
+[crate.files]
+"src/canonical_hash.rs" = 2627
+"src/canonical_hash/tests.rs" = 3258
+"src/catalogue.rs" = 4124
+"src/catalogue_diff.rs" = 1991
+"src/inspect.rs" = 2780
+"src/inspect_carrier.rs" = 1354
+"src/invocation.rs" = 2929
+"src/invocation_binding.rs" = 1229
+"src/physical.rs" = 1351
+"src/physical/tests.rs" = 4145
+"src/revision.rs" = 4309
+"src/revision/tests.rs" = 4226
+"src/revision/tests/record_values.rs" = 1277
+"src/security.rs" = 2483
+"src/security/tests.rs" = 2515
+"src/state.rs" = 1651
+"src/system.rs" = 2180
+"src/value.rs" = 2220
+"src/value/opaque_codec.rs" = 1732
+"src/value/tests/constructed.rs" = 3431
+[crate.functions]
+"src/canonical_hash/tests.rs::executable_standard_digest_binds_each_retained_v2_fact" = 176
+"src/canonical_hash/tests.rs::resolved_value_slot_scan_has_the_closed_order_and_version_gates" = 198
+"src/canonical_hash/tests.rs::version_two_record_fields_accept_only_the_closed_primitive_and_enum_family" = 141
+"src/canonical_hash/tests.rs::version_two_record_hash_binds_every_semantic_member_fact" = 152
+"src/catalogue.rs::record_value_types_collide_with_every_primary_type_category" = 143
+"src/catalogue.rs::snapshot_validates_record_value_field_representation_shape" = 183
+"src/invocation.rs::protected_decision_allows_application_and_verified_standard_and_denies_closed" = 136
+"src/physical/tests.rs::planner_checks_base_drops_existing_projections_and_new_objects_in_order" = 152
+"src/physical/tests.rs::plans_new_unique_text_fields_from_exact_scalar_and_value_authority" = 132
+"src/physical/tests.rs::rejects_every_existing_object_storage_change_category" = 179
+"src/physical/tests.rs::rejects_unsupported_new_field_semantics_fail_closed" = 151
+"src/physical/tests.rs::unique_text_keeps_other_unique_shapes_and_existing_changes_closed" = 139
+"src/physical/tests.rs::value_appended_field_projection_errors_precede_admission_rejection" = 123
+"src/physical/tests.rs::value_appends_that_break_existing_object_causality_keep_exact_rejections" = 153
+"src/physical/tests.rs::value_field_gates_preserve_transient_void_and_delete_precedence" = 216
+"src/revision/error.rs::message" = 185
+"src/revision/tests.rs::deployable_version_one_rejects_each_version_two_catalogue_fact" = 121
+"src/revision/tests.rs::rejects_stale_parent_and_duplicate_reference_ordinals" = 189
+"src/revision/tests.rs::revision_construction_validates_resolved_types_in_durable_slot_order" = 130
+"src/revision/tests.rs::version_two_standard_snapshot_requires_complete_ordered_executable_evidence" = 238
+"src/revision/tests/record_values.rs::record_value_field_type_policy_is_closed_and_uses_pinned_standard_primitives" = 259
+"src/revision/tests/record_values.rs::record_value_types_require_version_two_at_every_revision_admission_boundary" = 196
+"src/security.rs::new_with_function_targets_local_peer_credentials_and_privilege_grants" = 122
+"src/value.rs::preflight_collection_descriptor" = 124
+"src/value.rs::validate_collection_runtime_value" = 124
+"src/value/tests/constructed.rs::active_map_revision" = 174
+"src/value/tests/constructed.rs::empty_option_list_and_map_retain_exact_constructed_views_and_equal_contents" = 128
+"src/value/tests/constructed.rs::map_canonical_order_holds_for_every_admitted_flat_key_family" = 227
+"src/value/tests/constructed.rs::stale_and_identical_revision_semantics_are_exact" = 239
+"src/value/tests/opaque_codecs.rs::terminal_document_codec_enforces_canonical_text_payloads" = 128
+"src/value/tests/records_and_rows.rs::record_value_equality_is_nominal_across_semantically_identical_revisions" = 165
+
+[[crate]]
+name = "orna-evaluator"
+src_lines = 30504
+allow_clippy = 1
+[crate.files]
+"src/lib.rs" = 20533
+"src/relation.rs" = 1375
+"src/repl.rs" = 1766
+"src/sys_bindings.rs" = 2392
+[crate.functions]
+"src/lib.rs::apply_binary" = 203
+"src/lib.rs::call_blob_operation" = 123
+"src/lib.rs::call_native" = 121
+"src/lib.rs::collection" = 187
+"src/lib.rs::concurrent" = 134
+"src/lib.rs::consume_provider_stream" = 289
+"src/lib.rs::context_named_invocation_adopts_effect_result_owner_context" = 163
+"src/lib.rs::context_named_invocation_preserves_owner_context_after_ovb2_effects" = 147
+"src/lib.rs::evaluate_node" = 308
+"src/lib.rs::extreme" = 139
+"src/lib.rs::format_duration" = 126
+"src/lib.rs::named_arguments" = 202
+"src/lib.rs::observe_relation" = 121
+"src/lib.rs::raw" = 200
+"src/lib.rs::relation_call" = 173
+"src/lib.rs::route_call" = 154
+"src/lib.rs::stream" = 432
+"src/row_admission.rs::admit_row" = 147
+"src/sys_bindings.rs::dispatch_filesystem" = 174
+"src/sys_bindings.rs::rov3_descriptor_only_is_unavailable_and_self_equal" = 159
+"src/ui.rs::ui_node" = 152
+
+[[crate]]
+name = "orna-evolution"
+allow_clippy = 0
+[crate.files]
+"src/lib.rs" = 1270
+
+[[crate]]
+name = "orna-foundation"
+allow_clippy = 1
+[crate.files]
+"src/lib.rs" = 2411
+
+[[crate]]
+name = "orna-live"
+allow_clippy = 24
+[crate.files]
+"src/lib.rs" = 12214
+"src/live_presentation.rs" = 1623
+[crate.functions]
+"src/lib.rs::complete_application" = 232
+"src/lib.rs::direct_dispatch_request_status_mismatch_preserves_original_record" = 124
+"src/lib.rs::durable_async_rejections_replay_after_session_resume" = 124
+"src/lib.rs::handle_with_optional_children" = 248
+"src/lib.rs::request_status_snapshots_retain_reserved_and_running_targets_after_completion" = 122
+
+[[crate]]
+name = "orna-lsp"
+allow_clippy = 2
+[crate.files]
+"src/analysis.rs" = 1619
+"src/names.rs" = 1513
+"src/server.rs" = 2585
+[crate.functions]
+"src/analysis.rs::completion_at" = 183
+"src/analysis.rs::declaration_child_symbols" = 121
+"src/editor_ranges.rs::collect_expr_spans" = 133
+"src/editor_ranges.rs::collect_item_spans" = 147
+"src/names.rs::bind_pattern" = 147
+"src/names.rs::expr" = 168
+"src/names.rs::item" = 219
+
+[[crate]]
+name = "orna-project"
+allow_clippy = 1
+[crate.files]
+"src/attachments.rs" = 12412
+"src/lib.rs" = 3220
+"src/object_identity.rs" = 4562
+"src/typed_row.rs" = 1222
+"src/unicode16.rs" = 1636
+[crate.functions]
+"src/attachments.rs::nested_pin_closure_keeps_revision_specific_pins_through_terminal_edges" = 154
+"src/attachments.rs::nested_pin_cycle_keeps_equal_alias_routes_distinct_to_historical_terminals" = 157
+"src/attachments.rs::nested_pin_cycle_keeps_repeated_aliases_distinct_to_the_terminal_edge" = 139
+"src/attachments.rs::nested_pin_long_rebind_keeps_alias_distinct_at_short_endpoint_oid" = 137
+"src/attachments.rs::nested_pin_reverse_prefix_distinct_middle_first_dissolve_keeps_endpoints" = 177
+"src/attachments.rs::nested_pin_reverse_prefix_distinct_skipped_dissolve_preserves_middle_alias" = 178
+"src/attachments.rs::nested_pin_reverse_prefix_endpoint_reattach_keeps_middle_revision" = 183
+"src/attachments.rs::nested_pin_reverse_prefix_historical_edges_keep_exact_tail_revisions" = 155
+"src/attachments.rs::nested_pin_reverse_prefix_historical_tail_keeps_older_middle_pin" = 158
+"src/attachments.rs::nested_pin_reverse_prefix_long_reattach_matches_middle_by_oid_only" = 149
+"src/attachments.rs::nested_pin_reverse_prefix_middle_reattach_keeps_equal_oid_endpoint_distinct" = 150
+"src/attachments.rs::nested_pin_reverse_prefix_middle_reattach_keeps_skipped_endpoints" = 153
+"src/attachments.rs::nested_pin_reverse_prefix_middle_reattach_matches_long_endpoint_only" = 153
+"src/attachments.rs::nested_pin_reverse_prefix_older_distinct_oid_pair_dissolves_per_closure" = 178
+"src/attachments.rs::nested_pin_reverse_prefix_older_edges_keep_alias_tail_isolated" = 195
+"src/attachments.rs::nested_pin_reverse_prefix_older_equal_oid_aliases_remain_distinct" = 170
+"src/attachments.rs::nested_pin_reverse_prefix_older_equal_oid_long_alias_detach_keeps_short" = 165
+"src/attachments.rs::nested_pin_reverse_prefix_older_equal_oid_outer_aliases_stay_distinct" = 147
+"src/attachments.rs::nested_pin_reverse_prefix_older_equal_oid_outer_short_detach_keeps_long" = 150
+"src/attachments.rs::nested_pin_reverse_prefix_older_equal_oid_pair_dissolves_per_closure" = 169
+"src/attachments.rs::nested_pin_reverse_prefix_older_tail_preserves_archive_pin" = 147
+"src/attachments.rs::nested_pin_reverse_prefix_route_keeps_historical_terminal_isolated" = 122
+"src/attachments.rs::nested_pin_reverse_prefix_terminal_keeps_equal_oid_edges_distinct" = 132
+"src/attachments.rs::nested_pin_reverse_prefix_terminal_keeps_shorter_tail_edge" = 130
+"src/attachments.rs::nested_pin_short_rebind_keeps_alias_distinct_at_long_endpoint_oid" = 131
+"src/attachments.rs::nested_pin_short_rebind_keeps_long_endpoint_child_closure" = 1955
+"src/attachments.rs::nested_pin_swapped_alias_closure_composes_terminal_pin_swaps" = 211
+"src/attachments.rs::nested_pin_terminal_closure_preserves_swapped_equal_alias_edges" = 157
+"src/lib.rs::load_reachable_project" = 142
+"src/object_identity.rs::nominal_enum_and_refined_field_types_emit_closed_definitions" = 214
+
+[[crate]]
+name = "orna-project-repl"
+allow_clippy = 0
+[crate.files]
+"src/lib.rs" = 2605
+[crate.functions]
+"src/lib.rs::admitted_runtime_sources" = 190
+
+[[crate]]
+name = "orna-protocol"
+allow_clippy = 0
+[crate.files]
+"src/lib.rs" = 4448
+[crate.functions]
+"src/lib.rs::body" = 138
+"src/lib.rs::error_trace_values_are_redacted_on_wire_and_present_serialization" = 150
+"src/lib.rs::messages" = 131
+
+[[crate]]
+name = "orna-repository"
+src_lines = 74780
+allow_clippy = 17
+[crate.files]
+"src/compact.rs" = 6282
+"src/compact/legacy_reader_tests.rs" = 3185
+"src/complete_copy.rs" = 2945
+"src/format_context.rs" = 6287
+"src/lib.rs" = 15926
+"src/migration_copy.rs" = 3042
+"src/native_graph.rs" = 15685
+"src/object_reader.rs" = 1503
+"src/relation_admission.rs" = 4743
+"src/row_store.rs" = 1786
+"src/transport.rs" = 2542
+[crate.functions]
+"src/compact.rs::compact_schema_history_projects_by_field_id_and_frozen_fallback" = 131
+"src/compact.rs::decode_compact_segment_projection" = 127
+"src/compact.rs::decode_projection_column" = 145
+"src/compact.rs::verify_physical_columns" = 169
+"src/compact/legacy_fixture_builder.rs::parquet" = 126
+"src/compact/legacy_reader_tests.rs::compact_manifest_inventory_hydration_rejects_missing_malformed_and_orphan_closure_without_mutation" = 121
+"src/compact/legacy_reader_tests.rs::compact_manifest_range_hydration_materializes_selected_promises_only" = 124
+"src/compact/legacy_reader_tests.rs::filtered_compact_clone" = 153
+"src/complete_copy.rs::decode" = 153
+"src/complete_copy.rs::export_complete_copy_of" = 131
+"src/format2_ogb.rs::verify_node" = 123
+"src/format_context.rs::admitted_fields_decode_inline_and_overflow_from_bound_manifest_without_media_reads" = 220
+"src/format_context.rs::captured_ogb2_protected_pin_is_admitted_through_committed_orp_row" = 125
+"src/format_context.rs::checkout_of_a_prior_commit_reads_its_rows_and_annotated_blob" = 125
+"src/format_context.rs::committed_table_bindings_pin_imported_source_repository_uuid_and_schema" = 198
+"src/format_context.rs::frozen_publication_candidate_carries_only_the_store_root" = 121
+"src/format_context.rs::indexed_point_and_range_reads_walk_only_the_pages_they_need" = 127
+"src/format_context.rs::metadata_only_projection_reads_the_row_and_no_media_payload" = 163
+"src/format_context.rs::orp1_index_maintenance_reports_index_churn_separately_from_payload_reuse" = 249
+"src/format_context.rs::revision_walk_lists_commits_and_root_trees_for_admitted_graph" = 124
+"src/lib.rs::commit_reviewed_candidate_with_stage_hook" = 181
+"src/lib.rs::decode#3" = 137
+"src/lib.rs::materialize_managed_file_impl_with_quarantine_locked" = 186
+"src/lib.rs::publish_candidate_body" = 174
+"src/lib.rs::reconcile_store_worktree_transition" = 127
+"src/lib.rs::recover_publication" = 173
+"src/migration_copy.rs::prepare_format3_migration_in" = 150
+"src/migration_copy.rs::recover_prepared_copy" = 168
+"src/native_graph.rs::collect_ordered_range_with" = 140
+"src/native_graph.rs::encode_canonical" = 159
+"src/native_graph.rs::find_ordered_entry_with" = 122
+"src/native_graph.rs::maintain_row_index_keeps_one_at_a_time_outcomes" = 155
+"src/native_graph.rs::maintain_row_map" = 136
+"src/native_graph.rs::one_native_store_root_publishes_row_changes_for_multiple_relations" = 163
+"src/native_graph.rs::prior_root_captured_blob_is_rejected_before_later_graph_reads" = 152
+"src/native_graph.rs::publication_transaction_commit_supports_metadata_lookup_without_payload_read" = 134
+"src/native_graph.rs::publication_transaction_keeps_capture_closure_pinned_until_rejected_callback_cleanup" = 174
+"src/native_graph.rs::restart_preserves_accepted_pin_and_reclaims_unaccepted_pin" = 133
+"src/native_graph.rs::typed_row_values_round_trip_through_a_published_row_map" = 141
+"src/orp.rs::recipe" = 122
+"src/orp/maintenance.rs::rewrite_leaves" = 121
+"src/transport.rs::fetch_locked" = 136
+"src/transport.rs::ordinary_push_fences_journal_and_serializes_continuity_publication" = 126
+
+[[crate]]
+name = "orna-runtime"
+src_lines = 69694
+allow_clippy = 8
+[crate.files]
+"src/catalogue.rs" = 3697
+"src/invocation.rs" = 1523
+"src/lib.rs" = 35506
+"src/observation.rs" = 2191
+"src/publication.rs" = 1352
+"src/schema.rs" = 2377
+"src/stream_admin.rs" = 1759
+"src/stream_carry.rs" = 1430
+"src/stream_run.rs" = 1545
+"src/stream_store.rs" = 1320
+"src/table_store.rs" = 1807
+"src/vfs.rs" = 6811
+[crate.functions]
+"src/catalogue.rs::activation_commits_catalogue_identity_with_table_state_or_rolls_back_both" = 141
+"src/catalogue.rs::admit_catalogue_batch_tx" = 124
+"src/catalogue.rs::replay_catalogue_tx" = 140
+"src/catalogue.rs::retained_function_read_stays_pinned_and_rejects_invalid_captures" = 136
+"src/history.rs::read_storage_table_at" = 130
+"src/invocation.rs::begin_invocation_observation" = 157
+"src/invocation.rs::materialize_procedure_at" = 140
+"src/lib.rs::accepted_pin_checkpoint_recovers_committed_state_and_discards_interrupted_state" = 126
+"src/lib.rs::admin_failure_class_round_trips_every_payload_free_variant" = 159
+"src/lib.rs::assertion_replay_failure_preserves_identity_and_detail_until_ordinary_failure" = 168
+"src/lib.rs::cancellation_does_not_become_a_durable_provider_failure" = 123
+"src/lib.rs::checkpoint_history_retains_complete_and_skip_by_snapshot" = 279
+"src/lib.rs::checkpoint_reset_rejects_active_delivery_and_blocking_failure" = 130
+"src/lib.rs::combined_catalogue_activation_rollback_and_writer_fencing" = 254
+"src/lib.rs::combined_catalogue_activation_success_source_only_reopen_and_replay" = 154
+"src/lib.rs::commit_validated_table_activation" = 244
+"src/lib.rs::current_runtime_view_is_owner_generation_fenced_and_coherent" = 150
+"src/lib.rs::direct_failure_recovery_rejects_corrupt_identity_or_checkpoint_key" = 150
+"src/lib.rs::durable_stream_backend_persists_skip_replay_resolution_and_stale_cas" = 259
+"src/lib.rs::empty_row_key_migration_runs_on_reopen_and_admits_empty_keys" = 132
+"src/lib.rs::exact_query_session_reads_its_staged_writes_and_keeps_them_private_until_commit" = 156
+"src/lib.rs::external_effect_downgrades_a_marker_left_by_an_earlier_commit_attempt" = 131
+"src/lib.rs::failure_reference_resolution_is_exact_and_fails_closed" = 128
+"src/lib.rs::observation_counters_follow_checkpoint_and_owner_loss_orphans_the_run" = 133
+"src/lib.rs::observed_request_lifecycle_admits_before_work_and_keeps_terminals_distinct" = 203
+"src/lib.rs::populated_legacy_catalogue_kind_domain_migrates_without_losing_rows" = 178
+"src/lib.rs::query_projection_failures_recover_at_the_outer_boundary" = 1937
+"src/lib.rs::query_relation_projection_effects_read_staged_insert_update_and_delete" = 187
+"src/lib.rs::recovered_failure_reopens_with_its_stable_identity_after_reset" = 151
+"src/lib.rs::recovery_rejects_missing_orphaned_and_malformed_failure_payloads" = 162
+"src/lib.rs::reentrant_stream_reference_pause_retains_failed_invocation_audit" = 149
+"src/lib.rs::repeated_delivery_failures_coalesce_one_durable_failure_after_reopen" = 153
+"src/lib.rs::replay_handler_cancellation_uses_owner_fenced_claim_transition" = 123
+"src/lib.rs::replay_updates_preserve_paused_source_stream_observation" = 335
+"src/lib.rs::replaying_an_already_durable_vfs_save_does_not_commit_twice" = 144
+"src/lib.rs::runtime_stream_runner_repeats_until_exhaustion_and_fences_cancellation" = 216
+"src/lib.rs::runtime_stream_scheduler_commits_noop_and_keeps_failures_unadvanced" = 144
+"src/lib.rs::staged_table_failure_rolls_back_and_retries_the_same_list_delivery" = 198
+"src/lib.rs::stream_observation_projects_nullable_partition_and_failure_sys_dto_across_reopen" = 180
+"src/lib.rs::stream_observation_rejects_cross_run_checkpoint_rebinding_and_projects_checked_sys_dtos" = 228
+"src/lib.rs::sys_admin_reset_receipt_replay_preserves_lifecycle_tail_order_across_reopen" = 272
+"src/lib.rs::sys_invocation_admission_shares_admin_receipt_id_without_tail_collision" = 123
+"src/lib.rs::sys_invocation_cancel_tail_survives_same_id_admin_receipt_replay" = 232
+"src/lib.rs::sys_invocation_tail_end_cursor_observes_admission_after_reset_replay" = 127
+"src/lib.rs::sys_invocation_tail_partial_cursor_tracks_admission_between_polls" = 122
+"src/lib.rs::sys_lifecycle_parent_waits_for_children_and_replacement_orphans_old_owner" = 157
+"src/lib.rs::sys_lifecycle_procedure_materialization_admits_durable_invocation" = 161
+"src/lib.rs::takeover_recovery_validation_rolls_back_lease_and_barrier" = 121
+"src/lib.rs::terminal_failure_reopens_with_its_stable_identity_after_reset_and_restart" = 202
+"src/lib.rs::two_vfs_saves_from_one_stale_baseline_refuse_only_the_second" = 134
+"src/lib.rs::validate_request_execution_evidence" = 145
+"src/lib.rs::validated_table_activation_commits_protected_blob_transfer_atomically" = 151
+"src/lib.rs::vfs_durable_save_survives_reopen_and_refusal_leaves_no_row" = 227
+"src/observation.rs::load_stream_observation_tx" = 138
+"src/observation.rs::sync_stream_observation_tx" = 188
+"src/publication.rs::bind_compact_publication" = 122
+"src/recovery.rs::validate_checkpoint_anchors" = 171
+"src/recovery.rs::validate_stream_checkpoint_history" = 220
+"src/schema.rs::migrate_accepted_content_pin_checkpoint" = 179
+"src/schema.rs::migrate_admin_checkpoint_reset_receipts" = 157
+"src/schema.rs::migrate_catalogue_identity_schema" = 150
+"src/schema.rs::migrate_runtime_table_history" = 157
+"src/stream_carry.rs::import_stream_carry" = 196
+"src/stream_carry.rs::read_stream_carry" = 146
+"src/stream_run.rs::deliver_stream_item" = 160
+"src/stream_run.rs::run_stream" = 123
+"src/vfs.rs::accepted_rename_invalidates_shared_directory_attribute_and_handle_projections" = 135
+"src/vfs.rs::commit_durable_save" = 178
+"src/vfs.rs::durable_blob_temp_rename_cas_commits_canonical_media_and_pin" = 451
+"src/vfs.rs::durable_temporary_rename_commits_and_refuses_changed_row_baseline" = 267
+"src/vfs.rs::vfs_rejected_editor_saves_keep_row_store_and_expose_typed_diagnostic" = 140
+
+[[crate]]
+name = "orna-security"
+allow_clippy = 0
+
+[[crate]]
+name = "orna-semantic"
+src_lines = 36662
+allow_clippy = 9
+[crate.files]
+"src/lib.rs" = 29838
+"src/semantic_payload.rs" = 1846
+"src/system_api.rs" = 3522
+[crate.functions]
+"src/lib.rs::admit_row_unit_with_key_spelling" = 222
+"src/lib.rs::analyze_recording_origins" = 243
+"src/lib.rs::authoritative_core" = 358
+"src/lib.rs::authoritative_fixture" = 326
+"src/lib.rs::check_item" = 429
+"src/lib.rs::checkpoint_paired_boundary_record_maps_match" = 121
+"src/lib.rs::checkpoint_topology_anchor_with_first_complete_pins" = 131
+"src/lib.rs::checkpoint_topology_anchor_with_first_pins_local" = 131
+"src/lib.rs::collect_corresponding_snapshot_context_maps_at_path" = 243
+"src/lib.rs::collect_reset_snapshot_context_maps" = 165
+"src/lib.rs::collect_snapshot_context_maps_from_omitted_value_at_path" = 140
+"src/lib.rs::infer_await_system_call" = 142
+"src/lib.rs::infer_cancel_system_call" = 125
+"src/lib.rs::infer_case" = 190
+"src/lib.rs::infer_descriptor_system_call" = 159
+"src/lib.rs::infer_finite_list_collection" = 208
+"src/lib.rs::infer_finite_list_helper_collection" = 275
+"src/lib.rs::infer_finite_list_numeric_aggregate" = 122
+"src/lib.rs::infer_finite_list_simple_collection" = 148
+"src/lib.rs::infer_invoke_system_call" = 132
+"src/lib.rs::infer_local_generic_call" = 196
+"src/lib.rs::infer_module_relation" = 222
+"src/lib.rs::infer_node" = 1238
+"src/lib.rs::infer_nominal" = 148
+"src/lib.rs::infer_query_explain_system_call" = 178
+"src/lib.rs::infer_relation_collection_call" = 171
+"src/lib.rs::infer_relation_collection_pipeline" = 222
+"src/lib.rs::infer_relation_statistics_call" = 282
+"src/lib.rs::infer_relation_terminal_call" = 220
+"src/lib.rs::infer_start_system_call" = 132
+"src/lib.rs::infer_success_pipeline" = 787
+"src/lib.rs::infer_table_operation" = 209
+"src/lib.rs::merge_checkpoint_field_map_inner" = 228
+"src/lib.rs::merge_multi_parent_checkpoint_value_scoped" = 448
+"src/lib.rs::pinned_snapshot_reset_shape_matches_at_path_with_width" = 162
+"src/lib.rs::pinned_snapshot_shape_matches" = 134
+"src/lib.rs::resolve_imports_with_dependencies" = 589
+"src/lib.rs::same_default_expression" = 247
+"src/lib.rs::seed_aligned_paths" = 132
+"src/lib.rs::seed_omitted_pinned_checkpoint_tuple_paths" = 153
+"src/lib.rs::specialize_dynamic_parameter_snapshot_contexts_scoped" = 287
+"src/lib.rs::tables_referenced" = 172
+"src/lib.rs::validate_loop_transfers" = 208
+"src/lib.rs::validate_nested_implementation_members" = 303
+"src/lib.rs::visit#5" = 155
+"src/semantic_payload.rs::declaration" = 323
+"src/semantic_payload.rs::expr" = 204
+"src/system_api.rs::from_json" = 354
+"src/system_api.rs::function_metadata_is_required_by_applicable_contract" = 174
+"src/system_api.rs::parsed_descriptor_retains_declared_members" = 374
+
+[[crate]]
+name = "orna-serving"
+allow_clippy = 0
+
+[[crate]]
+name = "orna-standard-sources"
+allow_clippy = 0
+
+[[crate]]
+name = "orna-storage"
+allow_clippy = 0
+[crate.files]
+"src/compact.rs" = 3529
+"src/compact_parquet.rs" = 5200
+"src/lib.rs" = 1879
+[crate.functions]
+"src/compact.rs::evolution_rekey_consumes_verified_base_and_emits_writer_input" = 144
+"src/compact.rs::lower_publication_freeze" = 125
+"src/compact_parquet.rs::decode_verified_bytes_for_role" = 123
+"src/lib.rs::build_frozen_publication_store_root" = 122
+
+[[crate]]
+name = "orna-stream"
+allow_clippy = 0
+[crate.files]
+"src/lib.rs" = 2843
+
+[[crate]]
+name = "orna-syntax"
+allow_clippy = 4
+[crate.files]
+"src/editor.rs" = 1577
+"src/parser.rs" = 5655
+[crate.functions]
+"src/parser.rs::annotate_expr" = 143
+"src/parser.rs::annotate_item" = 154
+"src/parser.rs::item" = 294
+"src/parser.rs::parse_block_inner" = 202
+"src/parser.rs::parse_control_expression_inner" = 131
+"src/parser.rs::parse_pattern_inner" = 191
+"src/parser.rs::parse_type_expr_inner" = 177
+"src/parser.rs::pratt_from" = 214
+"src/parser.rs::prefix" = 192
+"src/parser.rs::validate_token_grammar" = 189
+
+[[crate]]
+name = "orna-sys"
+src_lines = 31737
+allow_clippy = 5
+[crate.files]
+"src/host_filesystem.rs" = 2301
+"src/introspection.rs" = 18588
+"src/lib.rs" = 2680
+"src/provider.rs" = 1382
+"src/system_api.rs" = 1556
+"src/tests.rs" = 2607
+[crate.functions]
+"src/host_process.rs::run" = 162
+"src/introspection.rs::add_paired_bounded_window_spill_chain_window_restore_envelope_fold_details" = 148
+"src/introspection.rs::add_paired_window_cost_restoration_fold_details" = 365
+"src/introspection.rs::add_paired_window_spill_rule_cost_fold_details" = 172
+"src/introspection.rs::build_plan" = 154
+"src/introspection.rs::disjunct_storm_branch_cascade_cardinality_and_work" = 165
+"src/introspection.rs::duplicate_sparse_fold_input_carries_composite_identity" = 187
+"src/introspection.rs::explain_with_inputs" = 4399
+"src/introspection.rs::query_join_cost_fold" = 129
+"src/introspection.rs::query_paired_bounded_window_spill_chain_window_fold" = 190
+"src/introspection.rs::query_paired_bounded_window_spill_restore_fold" = 151
+"src/introspection.rs::query_paired_bounded_window_spill_window_chain_fold" = 162
+"src/introspection.rs::query_paired_checkpoint_spill_cost_restoration_fold" = 129
+"src/introspection.rs::query_paired_wal_rotation_cost_restoration_fold" = 151
+"src/introspection.rs::query_paired_window_cost_restoration_fold" = 623
+"src/introspection.rs::query_paired_window_spill_rule_cost_fold" = 124
+
+[[crate]]
+name = "orna-sys-macros"
+allow_clippy = 0
+
+[[crate]]
+name = "orna-table"
+allow_clippy = 0
+[crate.files]
+"src/lib.rs" = 2829
+[crate.functions]
+"src/lib.rs::lazy_relations_compose_in_order_over_committed_and_candidate_rows" = 172
+
+[[crate]]
+name = "orna-traceability"
+allow_clippy = 1
+[crate.files]
+"src/citation_ratchet.rs" = 1611
+"src/lib.rs" = 2101
+[crate.functions]
+"src/lib.rs::generate_inner" = 122
+
+[[crate]]
+name = "orna-value"
+allow_clippy = 2
+[crate.files]
+"src/blob.rs" = 1250
+"src/format3_context_tests.rs" = 1426
+"src/lib.rs" = 2334
+"src/schema.rs" = 1240
+[crate.functions]
+"src/format3_context_tests.rs::mime1_annotations_reject_noncanonical_and_unsafe_inputs" = 198
+"src/schema.rs::validate_value_as_type" = 128
+"src/validation.rs::validate_tag" = 264
+

@@ -1,0 +1,146 @@
+# Dependency policy for the OrnaDB workspace.
+#
+# Enforced by `cargo deny --locked check bans licenses sources` in the `arch`
+# job of .github/workflows/lint.yml. This file covers external crates only; the
+# crate-to-crate layer table is ARCHITECTURE.md and docs/design/layers.toml,
+# enforced by scripts/check_architecture.py.
+#
+# Every list below is a ratchet: it records the state of origin/main 95b55e026
+# and may only shrink. A stage that removes a duplicate version, a banned user or
+# a license removes its entry in the same PR.
+
+[bans]
+# A second version of a crate is a second copy of its bugs. The skip list below
+# records the duplicates present on the pre-stage tree; each entry may only be
+# removed. The newest version of each duplicated crate is left unskipped, so a
+# third copy of an already duplicated crate still fails.
+multiple-versions = "deny"
+
+# Every workspace-internal dependency is a versionless path dependency today, so
+# this lint would flag ~110 correct edges. Pinning the workspace version into the
+# path dependencies is a manifest change owned by a later stage; the crate DAG
+# itself is enforced by scripts/check_architecture.py.
+wildcards = "allow"
+
+# The one hex implementation lives in orna-base; every other crate must not
+# re-implement or re-depend on it. Until stage 03 moves orna-value's identity
+# codecs, orna-value is the only permitted user.
+[[bans.deny]]
+crate = "hex"
+wrappers = ["orna-value"]
+use-instead = "orna-base::hex"
+
+# The embedded database is below the state layer only. Stage 09 renames
+# orna-runtime to orna-store and stage 10 removes the CLI's direct use.
+[[bans.deny]]
+crate = "libsql"
+wrappers = ["orna-cli", "orna-runtime"]
+
+# base64 is not banned yet: orna-core and orna-storage depend on it directly, and
+# reqwest/hyper-util depend on it transitively, so a wrapper list would have to
+# name external crates. Stage 03 moves the workspace implementations to
+# orna-base; the ban is added there once the external route is the only one.
+
+[[bans.skip]]
+name = "bitflags"
+version = "=1.3.2"
+
+[[bans.skip]]
+name = "block-buffer"
+version = "=0.10.4"
+
+[[bans.skip]]
+name = "cpufeatures"
+version = "=0.2.17"
+
+[[bans.skip]]
+name = "crypto-common"
+version = "=0.1.7"
+
+[[bans.skip]]
+name = "digest"
+version = "=0.10.7"
+
+[[bans.skip]]
+name = "getrandom"
+version = "=0.2.17"
+
+[[bans.skip]]
+name = "getrandom"
+version = "=0.3.4"
+
+[[bans.skip]]
+name = "linux-raw-sys"
+version = "=0.4.15"
+
+[[bans.skip]]
+name = "miniz_oxide"
+version = "=0.8.9"
+
+[[bans.skip]]
+name = "num-bigint"
+version = "=0.4.8"
+
+[[bans.skip]]
+name = "r-efi"
+version = "=5.3.0"
+
+[[bans.skip]]
+name = "rustix"
+version = "=0.38.44"
+
+[[bans.skip]]
+name = "sha2"
+version = "=0.10.9"
+
+[[bans.skip]]
+name = "shlex"
+version = "=1.3.0"
+
+[[bans.skip]]
+name = "syn"
+version = "=2.0.119"
+
+[[bans.skip]]
+name = "windows-sys"
+version = "=0.52.0"
+
+[[bans.skip]]
+name = "windows-sys"
+version = "=0.59.0"
+
+[[bans.skip]]
+name = "zerocopy"
+version = "=0.7.35"
+
+[[bans.skip]]
+name = "zerocopy-derive"
+version = "=0.7.35"
+
+[licenses]
+# Every license expression that appears in the resolved graph on the pre-stage
+# tree. Adding an external dependency with a new license requires adding it here
+# in the same PR, which is the review point for a licensing decision.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "LGPL-2.1-or-later",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
