@@ -86,7 +86,7 @@ fn diagnostics_snapshot() -> Vec<String> {
             &[ModuleInput::new(logical_path.clone(), source)],
             &catalogue,
         );
-        let mut rendered = analysis
+        let rendered = analysis
             .diagnostics
             .iter()
             .map(render_diagnostic)

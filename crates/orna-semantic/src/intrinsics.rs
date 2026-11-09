@@ -129,7 +129,7 @@ fn signature_type(sig: SigType, subst: &[Option<Type>], container: Container, sl
 }
 
 /// Binds an unbound type parameter from an actual argument type.
-fn bind_type(sig: SigType, actual: &Type, subst: &mut [Option<Type>], container: Container) {
+fn bind_type(sig: SigType, actual: &Type, subst: &mut [Option<Type>], _container: Container) {
     match (sig, actual) {
         (SigType::Param(index), _) => {
             if let Some(slot) = subst.get_mut(usize::from(index))
@@ -139,24 +139,24 @@ fn bind_type(sig: SigType, actual: &Type, subst: &mut [Option<Type>], container:
             }
         }
         (SigType::List(expected), Type::List(actual) | Type::Relation(actual)) => {
-            bind_type(*expected, actual.as_ref(), subst, container);
+            bind_type(*expected, actual.as_ref(), subst, _container);
         }
         (SigType::Relation(expected), Type::Relation(actual)) => {
-            bind_type(*expected, actual.as_ref(), subst, container);
+            bind_type(*expected, actual.as_ref(), subst, _container);
         }
         (SigType::Option(expected), Type::Optional(actual)) => {
-            bind_type(*expected, actual.as_ref(), subst, container);
+            bind_type(*expected, actual.as_ref(), subst, _container);
         }
-        (SigType::Option(expected), actual) => bind_type(*expected, actual, subst, container),
+        (SigType::Option(expected), actual) => bind_type(*expected, actual, subst, _container),
         (SigType::Range(expected), Type::Range(actual)) => {
-            bind_type(*expected, actual.as_ref(), subst, container);
+            bind_type(*expected, actual.as_ref(), subst, _container);
         }
         (SigType::Stream(expected), Type::Stream(actual)) => {
-            bind_type(*expected, actual.as_ref(), subst, container);
+            bind_type(*expected, actual.as_ref(), subst, _container);
         }
         (SigType::Tuple(expected), Type::Tuple(actual)) if expected.len() == actual.len() => {
             for (expected, actual) in expected.iter().zip(actual) {
-                bind_type(*expected, actual, subst, container);
+                bind_type(*expected, actual, subst, _container);
             }
         }
         (
@@ -166,9 +166,9 @@ fn bind_type(sig: SigType, actual: &Type, subst: &mut [Option<Type>], container:
             },
         ) if expected_parameters.len() == parameters.len() => {
             for (expected, actual) in expected_parameters.iter().zip(parameters) {
-                bind_type(*expected, actual, subst, container);
+                bind_type(*expected, actual, subst, _container);
             }
-            bind_type(*expected_result, result.as_ref(), subst, container);
+            bind_type(*expected_result, result.as_ref(), subst, _container);
         }
         _ => {}
     }
@@ -961,49 +961,27 @@ fn check_intrinsic_constraints(
             .map(|value| &value.ty)
     };
     match id {
-        IntrinsicId::CoreDistinct => {
-            if is_default_float_equality_type(&element) {
+        IntrinsicId::CoreDistinct if is_default_float_equality_type(&element) => {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "distinct requires a lawful equality key; default Float equality is unavailable",
+            ));
+            *invalid = true;
+        }
+        IntrinsicId::CollectionUnique if is_default_float_equality_type(&element) => {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "unique requires lawful equality; default Float equality is unavailable",
+            ));
+            *invalid = true;
+        }
+        IntrinsicId::CoreSum if !is_sum_element_type(&element) => {
+            if is_absolute_affine(&element) {
                 diagnostics.push(diag(
-                    DIAG_TYPE,
-                    "distinct requires a lawful equality key; default Float equality is unavailable",
+                    DIAG_ABSOLUTE_QUANTITY_SUM,
+                    format!("cannot {name} absolute affine quantities"),
                 ));
-                *invalid = true;
-            }
-        }
-        IntrinsicId::CollectionUnique => {
-            if is_default_float_equality_type(&element) {
-                diagnostics.push(diag(
-                    DIAG_TYPE,
-                    "unique requires lawful equality; default Float equality is unavailable",
-                ));
-                *invalid = true;
-            }
-        }
-        IntrinsicId::CoreSum => {
-            if !is_sum_element_type(&element) {
-                if is_absolute_affine(&element) {
-                    diagnostics.push(diag(
-                        DIAG_ABSOLUTE_QUANTITY_SUM,
-                        format!("cannot {name} absolute affine quantities"),
-                    ));
-                } else {
-                    diagnostics.push(diag(
-                        DIAG_TYPE,
-                        match container {
-                            Container::List => format!(
-                                "finite-list {name} requires a finite list with a supported {name} element type"
-                            ),
-                            Container::Relation => {
-                                format!("relation {name} requires a supported element type")
-                            }
-                        },
-                    ));
-                }
-                *invalid = true;
-            }
-        }
-        IntrinsicId::CoreMin | IntrinsicId::CoreMax => {
-            if !is_sort_key_type(&element) {
+            } else {
                 diagnostics.push(diag(
                     DIAG_TYPE,
                     match container {
@@ -1015,8 +993,22 @@ fn check_intrinsic_constraints(
                         }
                     },
                 ));
-                *invalid = true;
             }
+            *invalid = true;
+        }
+        IntrinsicId::CoreMin | IntrinsicId::CoreMax if !is_sort_key_type(&element) => {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                match container {
+                    Container::List => format!(
+                        "finite-list {name} requires a finite list with a supported {name} element type"
+                    ),
+                    Container::Relation => {
+                        format!("relation {name} requires a supported element type")
+                    }
+                },
+            ));
+            *invalid = true;
         }
         IntrinsicId::CoreSortBy => {
             let key = subst.get(1).and_then(Clone::clone).unwrap_or(Type::Error);
@@ -1091,26 +1083,25 @@ fn check_intrinsic_constraints(
                         },
                     ));
                     *invalid = true;
-                } else if let Type::List(right_element) | Type::Relation(right_element) = right {
-                    if !matches!(right_element.as_ref(), Type::Error)
-                        && !types_match(&element, right_element)
-                    {
-                        diagnostics.push(diag(
-                            DIAG_TYPE,
-                            match (container, pipeline) {
-                                (Container::Relation, _) => {
-                                    "relation union requires relations with compatible element types"
-                                }
-                                (Container::List, true) => {
-                                    "union requires lists with compatible element types"
-                                }
-                                (Container::List, false) => {
-                                    "finite-list union requires lists with compatible element types"
-                                }
-                            },
-                        ));
-                        *invalid = true;
-                    }
+                } else if let Type::List(right_element) | Type::Relation(right_element) = right
+                    && !matches!(right_element.as_ref(), Type::Error)
+                    && !types_match(&element, right_element)
+                {
+                    diagnostics.push(diag(
+                        DIAG_TYPE,
+                        match (container, pipeline) {
+                            (Container::Relation, _) => {
+                                "relation union requires relations with compatible element types"
+                            }
+                            (Container::List, true) => {
+                                "union requires lists with compatible element types"
+                            }
+                            (Container::List, false) => {
+                                "finite-list union requires lists with compatible element types"
+                            }
+                        },
+                    ));
+                    *invalid = true;
                 }
             }
         }

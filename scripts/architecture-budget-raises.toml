@@ -350,26 +350,8 @@ reason = "pure module split of orna-semantic lib.rs: this section moved to its o
 bead = "ornadb-rkn8m"
 
 [[raise]]
-path = "crates/orna-semantic/src/calls.rs::infer_relation_collection_call"
-new_limit = 171
-reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
-bead = "ornadb-rkn8m"
-
-[[raise]]
-path = "crates/orna-semantic/src/calls.rs::infer_relation_collection_pipeline"
-new_limit = 222
-reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
-bead = "ornadb-rkn8m"
-
-[[raise]]
 path = "crates/orna-semantic/src/calls.rs::infer_relation_stream_pipeline"
 new_limit = 286
-reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
-bead = "ornadb-rkn8m"
-
-[[raise]]
-path = "crates/orna-semantic/src/calls.rs::infer_relation_terminal_call"
-new_limit = 220
 reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
 bead = "ornadb-rkn8m"
 
@@ -454,30 +436,6 @@ bead = "ornadb-rkn8m"
 [[raise]]
 path = "crates/orna-semantic/src/checkpoint.rs::specialize_dynamic_parameter_snapshot_contexts_scoped"
 new_limit = 235
-reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
-bead = "ornadb-rkn8m"
-
-[[raise]]
-path = "crates/orna-semantic/src/collection_calls.rs::finite_list_helper_result"
-new_limit = 201
-reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
-bead = "ornadb-rkn8m"
-
-[[raise]]
-path = "crates/orna-semantic/src/collection_calls.rs::infer_finite_list_numeric_aggregate"
-new_limit = 122
-reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
-bead = "ornadb-rkn8m"
-
-[[raise]]
-path = "crates/orna-semantic/src/collection_calls.rs::infer_finite_list_simple_collection"
-new_limit = 148
-reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
-bead = "ornadb-rkn8m"
-
-[[raise]]
-path = "crates/orna-semantic/src/collections.rs::infer_finite_list_collection"
-new_limit = 208
 reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
 bead = "ornadb-rkn8m"
 
@@ -619,3 +577,21 @@ path = "crates/orna-sys-codegen/src/build_host.rs"
 new_limit = 1350
 reason = "stage S2 adds the typed declaration parser, doc-comment precondition extraction and generated-vocabulary resolution"
 bead = "ornadb-ouxeq.3"
+
+[[raise]]
+path = "crates/orna-semantic/src/intrinsics.rs"
+new_limit = 1240
+reason = "stage S3 replaces the deleted finite-list and relation typing tables with one registry-driven signature engine; splitting the engine per rule family is follow-up work on the bead"
+bead = "ornadb-yuzot.3"
+
+[[raise]]
+path = "crates/orna-semantic/src/intrinsics.rs::check_intrinsic_constraints"
+new_limit = 181
+reason = "stage S3 keeps the rules a closed SigType cannot express (equality/order, bounds, calendar bucketing, union kind agreement) in one reviewable dispatch; further splitting is follow-up work on the bead"
+bead = "ornadb-yuzot.3"
+
+[[raise]]
+path = "crates/orna-semantic/src/intrinsics.rs::infer_intrinsic"
+new_limit = 347
+reason = "stage S3's generic binder: argument naming/arity, pipeline insertion, container-overload selection and the contextual-lambda rule in one routine; further splitting is follow-up work on the bead"
+bead = "ornadb-yuzot.3"
