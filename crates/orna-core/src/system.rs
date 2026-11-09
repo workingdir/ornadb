@@ -908,42 +908,58 @@ const SYS_STATE_LOAD_USER_STATE_SIGNATURE: SystemStateSignature =
 const SYS_STATE_WRITE_USER_STATE_SIGNATURE: SystemStateSignature =
     SystemStateSignature::new(1, true);
 
+/// The sealed behaviour of one registry entry together with the signature facts
+/// its class carries. A class that has no sealed signature carries none, and an
+/// entry can never carry a signature of another class.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SystemFunctionBehaviour {
+    Health,
+    Invoke(SystemInvocationSignature),
+    SourceIntrospection,
+    InspectSnapshot(SystemInspectSignature),
+    InspectProjection(SystemInspectSignature),
+    InspectTrace(SystemInspectSignature),
+    SecurityIdentity(SystemSecuritySignature),
+    SecurityAdmin(SystemSecuritySignature),
+    SecurityCheck(SystemSecuritySignature),
+    State(SystemStateSignature),
+}
+
 /// One immutable entry in the sealed system-function registry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SystemFunctionDefinition {
-    kind: SystemFunctionKind,
     id: FunctionId,
     name_parts: &'static [&'static str],
-    invocation_signature: Option<SystemInvocationSignature>,
-    inspect_signature: Option<SystemInspectSignature>,
-    security_signature: Option<SystemSecuritySignature>,
-    state_signature: Option<SystemStateSignature>,
+    behaviour: SystemFunctionBehaviour,
 }
 
 impl SystemFunctionDefinition {
     const fn new(
-        kind: SystemFunctionKind,
         id: FunctionId,
         name_parts: &'static [&'static str],
-        invocation_signature: Option<SystemInvocationSignature>,
-        inspect_signature: Option<SystemInspectSignature>,
-        security_signature: Option<SystemSecuritySignature>,
-        state_signature: Option<SystemStateSignature>,
+        behaviour: SystemFunctionBehaviour,
     ) -> Self {
         Self {
-            kind,
             id,
             name_parts,
-            invocation_signature,
-            inspect_signature,
-            security_signature,
-            state_signature,
+            behaviour,
         }
     }
 
     /// Returns the sealed behaviour selected for this entry.
     pub const fn kind(self) -> SystemFunctionKind {
-        self.kind
+        match self.behaviour {
+            SystemFunctionBehaviour::Health => SystemFunctionKind::Health,
+            SystemFunctionBehaviour::Invoke(_) => SystemFunctionKind::Invoke,
+            SystemFunctionBehaviour::SourceIntrospection => SystemFunctionKind::SourceIntrospection,
+            SystemFunctionBehaviour::InspectSnapshot(_) => SystemFunctionKind::InspectSnapshot,
+            SystemFunctionBehaviour::InspectProjection(_) => SystemFunctionKind::InspectProjection,
+            SystemFunctionBehaviour::InspectTrace(_) => SystemFunctionKind::InspectTrace,
+            SystemFunctionBehaviour::SecurityIdentity(_) => SystemFunctionKind::SecurityIdentity,
+            SystemFunctionBehaviour::SecurityAdmin(_) => SystemFunctionKind::SecurityAdmin,
+            SystemFunctionBehaviour::SecurityCheck(_) => SystemFunctionKind::SecurityCheck,
+            SystemFunctionBehaviour::State(_) => SystemFunctionKind::State,
+        }
     }
 
     /// Returns this system function's stable identity.
@@ -960,7 +976,18 @@ impl SystemFunctionDefinition {
     ///
     /// Other system functions do not have an invocation signature.
     pub const fn invocation_signature(self) -> Option<SystemInvocationSignature> {
-        self.invocation_signature
+        match self.behaviour {
+            SystemFunctionBehaviour::Invoke(signature) => Some(signature),
+            SystemFunctionBehaviour::Health
+            | SystemFunctionBehaviour::SourceIntrospection
+            | SystemFunctionBehaviour::InspectSnapshot(_)
+            | SystemFunctionBehaviour::InspectProjection(_)
+            | SystemFunctionBehaviour::InspectTrace(_)
+            | SystemFunctionBehaviour::SecurityIdentity(_)
+            | SystemFunctionBehaviour::SecurityAdmin(_)
+            | SystemFunctionBehaviour::SecurityCheck(_)
+            | SystemFunctionBehaviour::State(_) => None,
+        }
     }
 
     /// Returns the sealed inspect signature when this entry is a `sys.inspect`
@@ -968,7 +995,18 @@ impl SystemFunctionDefinition {
     ///
     /// Other system functions do not have an inspect signature.
     pub const fn inspect_signature(self) -> Option<SystemInspectSignature> {
-        self.inspect_signature
+        match self.behaviour {
+            SystemFunctionBehaviour::InspectSnapshot(signature)
+            | SystemFunctionBehaviour::InspectProjection(signature)
+            | SystemFunctionBehaviour::InspectTrace(signature) => Some(signature),
+            SystemFunctionBehaviour::Health
+            | SystemFunctionBehaviour::Invoke(_)
+            | SystemFunctionBehaviour::SourceIntrospection
+            | SystemFunctionBehaviour::SecurityIdentity(_)
+            | SystemFunctionBehaviour::SecurityAdmin(_)
+            | SystemFunctionBehaviour::SecurityCheck(_)
+            | SystemFunctionBehaviour::State(_) => None,
+        }
     }
 
     /// Returns the sealed security signature when this entry is a
@@ -976,7 +1014,18 @@ impl SystemFunctionDefinition {
     ///
     /// Other system functions do not have a security signature.
     pub const fn security_signature(self) -> Option<SystemSecuritySignature> {
-        self.security_signature
+        match self.behaviour {
+            SystemFunctionBehaviour::SecurityIdentity(signature)
+            | SystemFunctionBehaviour::SecurityAdmin(signature)
+            | SystemFunctionBehaviour::SecurityCheck(signature) => Some(signature),
+            SystemFunctionBehaviour::Health
+            | SystemFunctionBehaviour::Invoke(_)
+            | SystemFunctionBehaviour::SourceIntrospection
+            | SystemFunctionBehaviour::InspectSnapshot(_)
+            | SystemFunctionBehaviour::InspectProjection(_)
+            | SystemFunctionBehaviour::InspectTrace(_)
+            | SystemFunctionBehaviour::State(_) => None,
+        }
     }
 
     /// Returns the sealed state signature when this entry is a `sys.state`
@@ -984,7 +1033,18 @@ impl SystemFunctionDefinition {
     ///
     /// Other system functions do not have a state signature.
     pub const fn state_signature(self) -> Option<SystemStateSignature> {
-        self.state_signature
+        match self.behaviour {
+            SystemFunctionBehaviour::State(signature) => Some(signature),
+            SystemFunctionBehaviour::Health
+            | SystemFunctionBehaviour::Invoke(_)
+            | SystemFunctionBehaviour::SourceIntrospection
+            | SystemFunctionBehaviour::InspectSnapshot(_)
+            | SystemFunctionBehaviour::InspectProjection(_)
+            | SystemFunctionBehaviour::InspectTrace(_)
+            | SystemFunctionBehaviour::SecurityIdentity(_)
+            | SystemFunctionBehaviour::SecurityAdmin(_)
+            | SystemFunctionBehaviour::SecurityCheck(_) => None,
+        }
     }
 
     pub(crate) fn has_name(self, name: &QualifiedSemanticName) -> bool {
@@ -998,247 +1058,139 @@ impl SystemFunctionDefinition {
 /// The complete sealed system-function registry in canonical order.
 pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
     SystemFunctionDefinition::new(
-        SystemFunctionKind::Health,
         CATALOGUE_HEALTH_FUNCTION_ID,
         CATALOGUE_HEALTH_NAME_PARTS,
-        None,
-        None,
-        None,
-        None,
+        SystemFunctionBehaviour::Health,
     ),
     SystemFunctionDefinition::new(
-        SystemFunctionKind::Invoke,
         SYS_INVOKE_FUNCTION_ID,
         SYS_INVOKE_NAME_PARTS,
-        Some(SYS_INVOKE_SIGNATURE),
-        None,
-        None,
-        None,
+        SystemFunctionBehaviour::Invoke(SYS_INVOKE_SIGNATURE),
     ),
     SystemFunctionDefinition::new(
-        SystemFunctionKind::SourceIntrospection,
         SYS_SOURCE_CURRENT_FUNCTION_ID,
         SYS_SOURCE_CURRENT_FUNCTION_NAME_PARTS,
-        None,
-        None,
-        None,
-        None,
+        SystemFunctionBehaviour::SourceIntrospection,
     ),
     SystemFunctionDefinition::new(
-        SystemFunctionKind::InspectSnapshot,
         SYS_INSPECT_SNAPSHOT_FUNCTION_ID,
         SYS_INSPECT_SNAPSHOT_FUNCTION_NAME_PARTS,
-        None,
-        Some(SYS_INSPECT_SNAPSHOT_SIGNATURE),
-        None,
-        None,
+        SystemFunctionBehaviour::InspectSnapshot(SYS_INSPECT_SNAPSHOT_SIGNATURE),
     ),
     SystemFunctionDefinition::new(
-        SystemFunctionKind::InspectProjection,
         SYS_INSPECT_INVOCATION_NODES_FUNCTION_ID,
         SYS_INSPECT_INVOCATION_NODES_FUNCTION_NAME_PARTS,
-        None,
-        Some(SYS_INSPECT_INVOCATION_NODES_SIGNATURE),
-        None,
-        None,
+        SystemFunctionBehaviour::InspectProjection(SYS_INSPECT_INVOCATION_NODES_SIGNATURE),
     ),
     SystemFunctionDefinition::new(
-        SystemFunctionKind::InspectProjection,
         SYS_INSPECT_CALLS_FUNCTION_ID,
         SYS_INSPECT_CALLS_FUNCTION_NAME_PARTS,
-        None,
-        Some(SYS_INSPECT_CALLS_SIGNATURE),
-        None,
-        None,
+        SystemFunctionBehaviour::InspectProjection(SYS_INSPECT_CALLS_SIGNATURE),
     ),
     SystemFunctionDefinition::new(
-        SystemFunctionKind::InspectProjection,
         SYS_INSPECT_RESOURCES_FUNCTION_ID,
         SYS_INSPECT_RESOURCES_FUNCTION_NAME_PARTS,
-        None,
-        Some(SYS_INSPECT_RESOURCES_SIGNATURE),
-        None,
-        None,
+        SystemFunctionBehaviour::InspectProjection(SYS_INSPECT_RESOURCES_SIGNATURE),
     ),
     SystemFunctionDefinition::new(
-        SystemFunctionKind::InspectProjection,
         SYS_INSPECT_STATE_CELLS_FUNCTION_ID,
         SYS_INSPECT_STATE_CELLS_FUNCTION_NAME_PARTS,
-        None,
-        Some(SYS_INSPECT_STATE_CELLS_SIGNATURE),
-        None,
-        None,
+        SystemFunctionBehaviour::InspectProjection(SYS_INSPECT_STATE_CELLS_SIGNATURE),
     ),
     SystemFunctionDefinition::new(
-        SystemFunctionKind::InspectProjection,
         SYS_INSPECT_UI_NODES_FUNCTION_ID,
         SYS_INSPECT_UI_NODES_FUNCTION_NAME_PARTS,
-        None,
-        Some(SYS_INSPECT_UI_NODES_SIGNATURE),
-        None,
-        None,
+        SystemFunctionBehaviour::InspectProjection(SYS_INSPECT_UI_NODES_SIGNATURE),
     ),
     SystemFunctionDefinition::new(
-        SystemFunctionKind::InspectProjection,
         SYS_INSPECT_PRESENTATION_CANDIDATES_FUNCTION_ID,
         SYS_INSPECT_PRESENTATION_CANDIDATES_FUNCTION_NAME_PARTS,
-        None,
-        Some(SYS_INSPECT_PRESENTATION_CANDIDATES_SIGNATURE),
-        None,
-        None,
+        SystemFunctionBehaviour::InspectProjection(SYS_INSPECT_PRESENTATION_CANDIDATES_SIGNATURE),
     ),
     SystemFunctionDefinition::new(
-        SystemFunctionKind::InspectProjection,
         SYS_INSPECT_RUNTIME_BINDINGS_FUNCTION_ID,
         SYS_INSPECT_RUNTIME_BINDINGS_FUNCTION_NAME_PARTS,
-        None,
-        Some(SYS_INSPECT_RUNTIME_BINDINGS_SIGNATURE),
-        None,
-        None,
+        SystemFunctionBehaviour::InspectProjection(SYS_INSPECT_RUNTIME_BINDINGS_SIGNATURE),
     ),
     SystemFunctionDefinition::new(
-        SystemFunctionKind::InspectProjection,
         SYS_INSPECT_SECURITY_DECISIONS_FUNCTION_ID,
         SYS_INSPECT_SECURITY_DECISIONS_FUNCTION_NAME_PARTS,
-        None,
-        Some(SYS_INSPECT_SECURITY_DECISIONS_SIGNATURE),
-        None,
-        None,
+        SystemFunctionBehaviour::InspectProjection(SYS_INSPECT_SECURITY_DECISIONS_SIGNATURE),
     ),
     SystemFunctionDefinition::new(
-        SystemFunctionKind::InspectTrace,
         SYS_INSPECT_TRACE_FUNCTION_ID,
         SYS_INSPECT_TRACE_FUNCTION_NAME_PARTS,
-        None,
-        Some(SYS_INSPECT_TRACE_SIGNATURE),
-        None,
-        None,
+        SystemFunctionBehaviour::InspectTrace(SYS_INSPECT_TRACE_SIGNATURE),
     ),
     SystemFunctionDefinition::new(
-        SystemFunctionKind::SecurityIdentity,
         SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID,
         SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_NAME_PARTS,
-        None,
-        None,
-        Some(SYS_SECURITY_SESSION_PRINCIPAL_SIGNATURE),
-        None,
+        SystemFunctionBehaviour::SecurityIdentity(SYS_SECURITY_SESSION_PRINCIPAL_SIGNATURE),
     ),
     SystemFunctionDefinition::new(
-        SystemFunctionKind::SecurityIdentity,
         SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID,
         SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_NAME_PARTS,
-        None,
-        None,
-        Some(SYS_SECURITY_EFFECTIVE_PRINCIPAL_SIGNATURE),
-        None,
+        SystemFunctionBehaviour::SecurityIdentity(SYS_SECURITY_EFFECTIVE_PRINCIPAL_SIGNATURE),
     ),
     SystemFunctionDefinition::new(
-        SystemFunctionKind::SecurityIdentity,
         SYS_SECURITY_ACTIVE_ROLES_FUNCTION_ID,
         SYS_SECURITY_ACTIVE_ROLES_FUNCTION_NAME_PARTS,
-        None,
-        None,
-        Some(SYS_SECURITY_ACTIVE_ROLES_SIGNATURE),
-        None,
+        SystemFunctionBehaviour::SecurityIdentity(SYS_SECURITY_ACTIVE_ROLES_SIGNATURE),
     ),
     SystemFunctionDefinition::new(
-        SystemFunctionKind::SecurityAdmin,
         SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_ID,
         SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_NAME_PARTS,
-        None,
-        None,
-        Some(SYS_SECURITY_CREATE_PRINCIPAL_SIGNATURE),
-        None,
+        SystemFunctionBehaviour::SecurityAdmin(SYS_SECURITY_CREATE_PRINCIPAL_SIGNATURE),
     ),
     SystemFunctionDefinition::new(
-        SystemFunctionKind::SecurityAdmin,
         SYS_SECURITY_DISABLE_PRINCIPAL_FUNCTION_ID,
         SYS_SECURITY_DISABLE_PRINCIPAL_FUNCTION_NAME_PARTS,
-        None,
-        None,
-        Some(SYS_SECURITY_DISABLE_PRINCIPAL_SIGNATURE),
-        None,
+        SystemFunctionBehaviour::SecurityAdmin(SYS_SECURITY_DISABLE_PRINCIPAL_SIGNATURE),
     ),
     SystemFunctionDefinition::new(
-        SystemFunctionKind::SecurityAdmin,
         SYS_SECURITY_CREATE_ROLE_FUNCTION_ID,
         SYS_SECURITY_CREATE_ROLE_FUNCTION_NAME_PARTS,
-        None,
-        None,
-        Some(SYS_SECURITY_CREATE_ROLE_SIGNATURE),
-        None,
+        SystemFunctionBehaviour::SecurityAdmin(SYS_SECURITY_CREATE_ROLE_SIGNATURE),
     ),
     SystemFunctionDefinition::new(
-        SystemFunctionKind::SecurityAdmin,
         SYS_SECURITY_GRANT_ROLE_FUNCTION_ID,
         SYS_SECURITY_GRANT_ROLE_FUNCTION_NAME_PARTS,
-        None,
-        None,
-        Some(SYS_SECURITY_GRANT_ROLE_SIGNATURE),
-        None,
+        SystemFunctionBehaviour::SecurityAdmin(SYS_SECURITY_GRANT_ROLE_SIGNATURE),
     ),
     SystemFunctionDefinition::new(
-        SystemFunctionKind::SecurityAdmin,
         SYS_SECURITY_REVOKE_ROLE_FUNCTION_ID,
         SYS_SECURITY_REVOKE_ROLE_FUNCTION_NAME_PARTS,
-        None,
-        None,
-        Some(SYS_SECURITY_REVOKE_ROLE_SIGNATURE),
-        None,
+        SystemFunctionBehaviour::SecurityAdmin(SYS_SECURITY_REVOKE_ROLE_SIGNATURE),
     ),
     SystemFunctionDefinition::new(
-        SystemFunctionKind::SecurityAdmin,
         SYS_SECURITY_GRANT_PRIVILEGE_FUNCTION_ID,
         SYS_SECURITY_GRANT_PRIVILEGE_FUNCTION_NAME_PARTS,
-        None,
-        None,
-        Some(SYS_SECURITY_GRANT_PRIVILEGE_SIGNATURE),
-        None,
+        SystemFunctionBehaviour::SecurityAdmin(SYS_SECURITY_GRANT_PRIVILEGE_SIGNATURE),
     ),
     SystemFunctionDefinition::new(
-        SystemFunctionKind::SecurityAdmin,
         SYS_SECURITY_REVOKE_PRIVILEGE_FUNCTION_ID,
         SYS_SECURITY_REVOKE_PRIVILEGE_FUNCTION_NAME_PARTS,
-        None,
-        None,
-        Some(SYS_SECURITY_REVOKE_PRIVILEGE_SIGNATURE),
-        None,
+        SystemFunctionBehaviour::SecurityAdmin(SYS_SECURITY_REVOKE_PRIVILEGE_SIGNATURE),
     ),
     SystemFunctionDefinition::new(
-        SystemFunctionKind::SecurityCheck,
         SYS_SECURITY_CAN_EXECUTE_FUNCTION_ID,
         SYS_SECURITY_CAN_EXECUTE_FUNCTION_NAME_PARTS,
-        None,
-        None,
-        Some(SYS_SECURITY_CAN_EXECUTE_SIGNATURE),
-        None,
+        SystemFunctionBehaviour::SecurityCheck(SYS_SECURITY_CAN_EXECUTE_SIGNATURE),
     ),
     SystemFunctionDefinition::new(
-        SystemFunctionKind::SecurityCheck,
         SYS_SECURITY_HAS_PRIVILEGE_FUNCTION_ID,
         SYS_SECURITY_HAS_PRIVILEGE_FUNCTION_NAME_PARTS,
-        None,
-        None,
-        Some(SYS_SECURITY_HAS_PRIVILEGE_SIGNATURE),
-        None,
+        SystemFunctionBehaviour::SecurityCheck(SYS_SECURITY_HAS_PRIVILEGE_SIGNATURE),
     ),
     SystemFunctionDefinition::new(
-        SystemFunctionKind::State,
         SYS_STATE_LOAD_USER_STATE_FUNCTION_ID,
         SYS_STATE_LOAD_USER_STATE_FUNCTION_NAME_PARTS,
-        None,
-        None,
-        None,
-        Some(SYS_STATE_LOAD_USER_STATE_SIGNATURE),
+        SystemFunctionBehaviour::State(SYS_STATE_LOAD_USER_STATE_SIGNATURE),
     ),
     SystemFunctionDefinition::new(
-        SystemFunctionKind::State,
         SYS_STATE_WRITE_USER_STATE_FUNCTION_ID,
         SYS_STATE_WRITE_USER_STATE_FUNCTION_NAME_PARTS,
-        None,
-        None,
-        None,
-        Some(SYS_STATE_WRITE_USER_STATE_SIGNATURE),
+        SystemFunctionBehaviour::State(SYS_STATE_WRITE_USER_STATE_SIGNATURE),
     ),
 ];
 
@@ -1279,7 +1231,7 @@ mod tests {
     }
 
     #[test]
-    fn system_registry_contains_exactly_the_twenty_six_sealed_entries_in_order() {
+    fn system_registry_contains_exactly_the_sealed_entries_in_order() {
         assert_eq!(SYSTEM_FUNCTIONS.len(), 27);
         let health = SYSTEM_FUNCTIONS[0];
         assert_eq!(health.kind(), SystemFunctionKind::Health);
