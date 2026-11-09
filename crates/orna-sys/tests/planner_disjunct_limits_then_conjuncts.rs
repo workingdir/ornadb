@@ -1,6 +1,6 @@
 use orna_sys::{
-    ExplainError, ExpressionRef, ObjectRef, PlanDetail, PlanNodeKind, QueryPlanDescription,
-    QuerySourceStatistics, SnapshotRef, explain_query_with_disjunct_limit_conjunct_chain,
+    ExplainError, ExplainInputs, ExpressionRef, ObjectRef, PlanDetail, PlanNodeKind,
+    QueryPlanDescription, QuerySourceStatistics, SnapshotRef, explain_query_with,
 };
 
 const DISJUNCT_LIMIT_FIXTURE: &str =
@@ -13,7 +13,7 @@ fn explain_disjunct_limits_then_conjuncts(
     conjunct_count: u64,
     additional_limits: &[u64],
 ) -> Result<orna_sys::ExplainedPlan, ExplainError> {
-    explain_query_with_disjunct_limit_conjunct_chain(
+    explain_query_with(
         &QueryPlanDescription {
             snapshot: SnapshotRef::descriptive("snapshot:disjunct-limits-then-conjuncts"),
             source: ObjectRef::descriptive("table:PlannerDisjunctLimitsThenConjuncts"),
@@ -31,11 +31,14 @@ fn explain_disjunct_limits_then_conjuncts(
             mutations: Vec::new(),
             materialize_into: None,
         },
-        disjunct_count,
-        nested_limits,
-        ExpressionRef::descriptive("expr:third-and-fourth"),
-        conjunct_count,
-        additional_limits,
+        ExplainInputs {
+            disjunct_count,
+            conjunct_count: Some(conjunct_count),
+            limits_between_disjunct_and_conjunct: Some(nested_limits),
+            post_expansion_conjunct: Some(&ExpressionRef::descriptive("expr:third-and-fourth")),
+            additional_limits,
+            ..ExplainInputs::default()
+        },
     )
 }
 

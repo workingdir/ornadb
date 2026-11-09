@@ -1,6 +1,6 @@
 use orna_sys::{
-    ExplainError, ExpressionRef, ObjectRef, PlanDetail, PlanNodeKind, QueryPlanDescription,
-    QuerySourceStatistics, SnapshotRef, explain_query_with_disjunct_conjunct_limit_chain,
+    ExplainError, ExplainInputs, ExpressionRef, ObjectRef, PlanDetail, PlanNodeKind,
+    QueryPlanDescription, QuerySourceStatistics, SnapshotRef, explain_query_with,
 };
 
 const DISJUNCT_CONJUNCT_FIXTURE: &str =
@@ -11,7 +11,7 @@ fn explain_disjunct_conjunct_chain(
     conjunct_count: u64,
     additional_limits: &[u64],
 ) -> Result<orna_sys::ExplainedPlan, ExplainError> {
-    explain_query_with_disjunct_conjunct_limit_chain(
+    explain_query_with(
         &QueryPlanDescription {
             snapshot: SnapshotRef::descriptive("snapshot:disjunct-conjunct-limits"),
             source: ObjectRef::descriptive("table:PlannerDisjunctConjunctLimits"),
@@ -29,9 +29,12 @@ fn explain_disjunct_conjunct_chain(
             mutations: Vec::new(),
             materialize_into: None,
         },
-        2,
-        conjunct_count,
-        additional_limits,
+        ExplainInputs {
+            disjunct_count: 2,
+            conjunct_count: Some(conjunct_count),
+            additional_limits,
+            ..ExplainInputs::default()
+        },
     )
 }
 

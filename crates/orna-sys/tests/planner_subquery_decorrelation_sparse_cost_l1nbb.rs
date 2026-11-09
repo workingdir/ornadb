@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 
 use orna_sys::{
-    ExpressionRef, ObjectRef, PlanDetail, PlanNode, PlanNodeKind,
+    ExplainInputs, ExpressionRef, ObjectRef, PlanDetail, PlanNode, PlanNodeKind,
     QueryDecorrelatedSubqueryDescription, QueryJoinDescription, QueryPlanDescription,
-    QuerySourceStatistics, SnapshotRef, explain_query_with_decorrelated_subqueries,
+    QuerySourceStatistics, SnapshotRef, explain_query_with,
 };
 
 const SUBQUERY_FIXTURE: &str =
@@ -98,8 +98,14 @@ fn decorrelated_subquery_identity_survives_sparse_cost_reordering() {
         correlation_predicate: expression("expr:owner-orders"),
         statistics: Some(statistics(4, 8_192)),
     };
-    let explained = explain_query_with_decorrelated_subqueries(&query(), &[subquery])
-        .expect("resolved subquery inputs produce a plan");
+    let explained = explain_query_with(
+        &query(),
+        ExplainInputs {
+            decorrelated_subqueries: &[subquery],
+            ..ExplainInputs::default()
+        },
+    )
+    .expect("resolved subquery inputs produce a plan");
     let nodes_by_reference = explained
         .nodes()
         .iter()

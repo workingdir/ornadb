@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use orna_sys::{
-    ExplainError, ExpressionRef, MutableBranchSnapshot, ObjectRef, PlanDetail, PlanNode,
-    PlanNodeKind, QueryCheckpointGenerationDescription, QueryJoinDescription,
+    ExplainError, ExplainInputs, ExpressionRef, MutableBranchSnapshot, ObjectRef, PlanDetail,
+    PlanNode, PlanNodeKind, QueryCheckpointGenerationDescription, QueryJoinDescription,
     QueryJoinPairIdentityDescription, QueryPairedCheckpointSegmentCompactionChainDescription,
     QueryPairedCheckpointSegmentCompactionStepDescription,
     QueryPairedCheckpointSpillRestoreChainDescription,
@@ -10,7 +10,7 @@ use orna_sys::{
     QueryPairedSegmentRotationChainDescription, QueryPairedSegmentRotationDescription,
     QueryPairedStreamCompactionChainDescription, QueryPairedStreamCompactionOccurrenceDescription,
     QueryPartialIndexDescription, QueryPlanDescription, QuerySourceStatistics, SnapshotRef,
-    explain_query_with_partial_indexes_and_paired_checkpoint_rotation_stream_and_spill_restore_chains,
+    explain_query_with,
 };
 
 const FIXTURE: &str =
@@ -318,14 +318,17 @@ fn plan(
     generation_a: u64,
     spills: &[QueryPairedCheckpointSpillRestoreChainDescription],
 ) -> orna_sys::ExplainedPlan {
-    explain_query_with_partial_indexes_and_paired_checkpoint_rotation_stream_and_spill_restore_chains(
+    explain_query_with(
         &query(generation_a),
-        &indexes(),
-        &pairs(),
-        &checkpoint_chains(generation_a),
-        &rotation_chains(generation_a),
-        &stream_chains(generation_a),
-        spills,
+        ExplainInputs {
+            partial_indexes: &indexes(),
+            join_pair_identities: &pairs(),
+            checkpoint_compaction_chains: &checkpoint_chains(generation_a),
+            segment_rotation_chains: &rotation_chains(generation_a),
+            stream_compaction_chains: &stream_chains(generation_a),
+            spill_restore_chains: spills,
+            ..ExplainInputs::default()
+        },
     )
     .expect("paired checkpoint spill restores fold into the branch-local plan")
 }
@@ -638,9 +641,17 @@ fn checkpoint_spill_chains_reject_wrong_branch_pair_and_empty_identity() {
     let mut wrong_branch = spill_chains(4, "v1");
     wrong_branch[0].branch.generation = 44;
     assert_eq!(
-        explain_query_with_partial_indexes_and_paired_checkpoint_rotation_stream_and_spill_restore_chains(
-            &query(4), &indexes(), &pairs(), &checkpoint_chains(4), &rotation_chains(4),
-            &stream_chains(4), &wrong_branch,
+        explain_query_with(
+            &query(4),
+            ExplainInputs {
+                partial_indexes: &indexes(),
+                join_pair_identities: &pairs(),
+                checkpoint_compaction_chains: &checkpoint_chains(4),
+                segment_rotation_chains: &rotation_chains(4),
+                stream_compaction_chains: &stream_chains(4),
+                spill_restore_chains: &wrong_branch,
+                ..ExplainInputs::default()
+            },
         ),
         Err(ExplainError::InvalidObject),
     );
@@ -648,9 +659,17 @@ fn checkpoint_spill_chains_reject_wrong_branch_pair_and_empty_identity() {
     let mut wrong_pair = spill_chains(4, "v1");
     wrong_pair[0].join_pair_identity = object("pair:table:Middle");
     assert_eq!(
-        explain_query_with_partial_indexes_and_paired_checkpoint_rotation_stream_and_spill_restore_chains(
-            &query(4), &indexes(), &pairs(), &checkpoint_chains(4), &rotation_chains(4),
-            &stream_chains(4), &wrong_pair,
+        explain_query_with(
+            &query(4),
+            ExplainInputs {
+                partial_indexes: &indexes(),
+                join_pair_identities: &pairs(),
+                checkpoint_compaction_chains: &checkpoint_chains(4),
+                segment_rotation_chains: &rotation_chains(4),
+                stream_compaction_chains: &stream_chains(4),
+                spill_restore_chains: &wrong_pair,
+                ..ExplainInputs::default()
+            },
         ),
         Err(ExplainError::InvalidObject),
     );
@@ -658,9 +677,17 @@ fn checkpoint_spill_chains_reject_wrong_branch_pair_and_empty_identity() {
     let mut empty_identity = spill_chains(4, "v1");
     empty_identity[0].occurrences[0].source_stream_identity = object("");
     assert_eq!(
-        explain_query_with_partial_indexes_and_paired_checkpoint_rotation_stream_and_spill_restore_chains(
-            &query(4), &indexes(), &pairs(), &checkpoint_chains(4), &rotation_chains(4),
-            &stream_chains(4), &empty_identity,
+        explain_query_with(
+            &query(4),
+            ExplainInputs {
+                partial_indexes: &indexes(),
+                join_pair_identities: &pairs(),
+                checkpoint_compaction_chains: &checkpoint_chains(4),
+                segment_rotation_chains: &rotation_chains(4),
+                stream_compaction_chains: &stream_chains(4),
+                spill_restore_chains: &empty_identity,
+                ..ExplainInputs::default()
+            },
         ),
         Err(ExplainError::InvalidObject),
     );

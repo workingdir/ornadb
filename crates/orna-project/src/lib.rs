@@ -656,8 +656,45 @@ pub fn admit_format3_row(
     )
 }
 
+/// Everything a caller knows about one source row before it is admitted.
+///
+/// `owner_field_values` carries stored scalar fields the trusted source owner
+/// derives (for example a payload size measured from a Blob); it is empty for
+/// callers that own none. `key_components` names the row's key only when the
+/// logical path spells it as a `~key-` long alias.
+pub struct SourceRowRequest<'a> {
+    pub logical_path: &'a str,
+    pub source: &'a str,
+    pub blob_bindings: Vec<(String, OrpBlobBinding)>,
+    pub owner_field_values: Vec<(String, Raw)>,
+    pub key_components: &'a [KeyComponentText],
+    pub mutation_id: [u8; 16],
+}
+
+impl<'a> SourceRowRequest<'a> {
+    /// A request with no source-owner scalars whose key components are spelled
+    /// canonically rather than as `~key-` long aliases.
+    #[must_use]
+    pub fn new(
+        logical_path: &'a str,
+        source: &'a str,
+        blob_bindings: Vec<(String, OrpBlobBinding)>,
+        mutation_id: [u8; 16],
+    ) -> Self {
+        Self {
+            logical_path,
+            source,
+            blob_bindings,
+            owner_field_values: Vec::new(),
+            key_components: &[],
+            mutation_id,
+        }
+    }
+}
+
 /// Admit a source row expression and accepted captured Blob bindings as one
-/// canonical mutation. This variant accepts no source-owner scalar fields.
+/// canonical mutation, filling the stored scalar fields the trusted source owner
+/// supplies in the request.
 ///
 /// The logical key path must use the VFS-1 projection (profiles/vfs-1.md:44-56).
 /// The legacy `key-path-v1` spelling (`~xx`, `~ff`) is refused with
@@ -665,43 +702,18 @@ pub fn admit_format3_row(
 /// import context (Orna-1.1.0.md, "File extension"), which this path does not admit.
 pub fn admit_source_row(
     project: &LoadedProject,
-    logical_path: &str,
-    source: &str,
     schema: &ResolvedTableSchema,
     context: &Format3Context,
-    blob_bindings: Vec<(String, OrpBlobBinding)>,
-    mutation_id: [u8; 16],
+    request: SourceRowRequest<'_>,
 ) -> Result<AdmittedSourceRow, ProjectLoadError> {
-    admit_source_row_with_owner_fields(
-        project,
+    let SourceRowRequest {
         logical_path,
         source,
-        schema,
-        context,
         blob_bindings,
-        Vec::new(),
-        &[],
+        owner_field_values,
+        key_components,
         mutation_id,
-    )
-}
-
-/// Admit a source row while filling additional stored scalar fields supplied
-/// by the trusted source owner (for example, payload size derived from a Blob).
-///
-/// The nine positional values are kept because callers in other crates share
-/// this signature.
-#[allow(clippy::too_many_arguments)]
-pub fn admit_source_row_with_owner_fields(
-    project: &LoadedProject,
-    logical_path: &str,
-    source: &str,
-    schema: &ResolvedTableSchema,
-    context: &Format3Context,
-    blob_bindings: Vec<(String, OrpBlobBinding)>,
-    owner_field_values: Vec<(String, Raw)>,
-    key_components: &[KeyComponentText],
-    mutation_id: [u8; 16],
-) -> Result<AdmittedSourceRow, ProjectLoadError> {
+    } = request;
     if project.source_commit() != Some(schema.source_commit())
         || project.source_snapshot_id().as_ref() != Some(schema.snapshot_id())
         || !format_context_matches_source_schema(

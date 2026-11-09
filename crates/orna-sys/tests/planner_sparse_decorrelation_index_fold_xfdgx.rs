@@ -1,10 +1,9 @@
 use std::collections::BTreeMap;
 
 use orna_sys::{
-    ExpressionRef, ObjectRef, PlanDetail, PlanNode, PlanNodeKind,
+    ExplainInputs, ExpressionRef, ObjectRef, PlanDetail, PlanNode, PlanNodeKind,
     QueryDecorrelatedSubqueryDescription, QueryJoinDescription, QueryPartialIndexDescription,
-    QueryPlanDescription, QuerySourceStatistics, SnapshotRef,
-    explain_query_with_partial_indexes_and_decorrelated_subqueries,
+    QueryPlanDescription, QuerySourceStatistics, SnapshotRef, explain_query_with,
 };
 
 const FIXTURE: &str = include_str!("fixtures/planner_sparse_decorrelation_index_fold_xfdgx.orna");
@@ -133,10 +132,13 @@ fn explain(
     reverse_subqueries: bool,
     orders_indexed: bool,
 ) -> orna_sys::ExplainedPlan {
-    explain_query_with_partial_indexes_and_decorrelated_subqueries(
+    explain_query_with(
         &query(reverse_joins),
-        &indexes(orders_indexed, reverse_catalog),
-        &subqueries(reverse_subqueries),
+        ExplainInputs {
+            partial_indexes: &indexes(orders_indexed, reverse_catalog),
+            decorrelated_subqueries: &subqueries(reverse_subqueries),
+            ..ExplainInputs::default()
+        },
     )
     .expect("sparse decorrelation folds explain against exact index tuples")
 }

@@ -272,8 +272,7 @@ impl RuntimeState {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         self.require_owner(&tx, writer).await?;
         tx.execute(
             "INSERT OR IGNORE INTO sys_procedure_materialization
@@ -290,8 +289,7 @@ impl RuntimeState {
                 materialized_ms,
             ],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
         for parameter in &function.parameters {
             tx.execute(
                 "INSERT OR IGNORE INTO sys_procedure_parameter_materialization
@@ -305,8 +303,7 @@ impl RuntimeState {
                     parameter.type_object.object_id().to_vec(),
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         }
         let mut rows = tx
             .query(
@@ -316,13 +313,8 @@ impl RuntimeState {
                  WHERE function_object_id = ?1 AND snapshot = ?2",
                 params![object_id.to_vec(), snapshot.clone()],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let row = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-            .ok_or(RuntimeError::RecoveryInvalid)?;
+            .await?;
+        let row = rows.next().await?.ok_or(RuntimeError::RecoveryInvalid)?;
         let stored_name: String = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
         let stored_revision: [u8; 32] =
             fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
@@ -346,14 +338,9 @@ impl RuntimeState {
                  WHERE function_object_id = ?1 AND snapshot = ?2 ORDER BY position",
                 params![object_id.to_vec(), snapshot],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let mut persisted_parameters = Vec::new();
-        while let Some(row) = parameter_rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        {
+        while let Some(row) = parameter_rows.next().await? {
             persisted_parameters.push((
                 decode_u64(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
                 row.get::<String>(1)
@@ -375,9 +362,7 @@ impl RuntimeState {
         if persisted_parameters != expected_parameters {
             return Err(RuntimeError::ProcedureMaterializationConflict);
         }
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        tx.commit().await?;
         Ok(Some(materialized_procedure_from_catalogue(
             function,
             capture.clone(),
@@ -432,8 +417,7 @@ impl RuntimeState {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         self.require_owner(&tx, writer).await?;
         let mut procedure_rows = tx
             .query(
@@ -446,12 +430,10 @@ impl RuntimeState {
                     procedure.qualified_name.clone(),
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let procedure_row = procedure_rows
             .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .await?
             .ok_or(RuntimeError::ProcedureMaterializationConflict)?;
         let revision: [u8; 32] = fixed(
             procedure_row
@@ -536,9 +518,7 @@ impl RuntimeState {
             InvocationObservationStatus::Running,
         )
         .await?;
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        tx.commit().await?;
         self.invocation_observation(registration.id)
             .await?
             .ok_or(RuntimeError::RecoveryInvalid)
@@ -557,8 +537,7 @@ impl RuntimeState {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         self.require_owner(&tx, writer).await?;
         let mut rows = tx
             .query(
@@ -566,12 +545,10 @@ impl RuntimeState {
                  FROM sys_invocation_observation WHERE invocation_id = ?1",
                 params![id.to_vec()],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let row = rows
             .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .await?
             .ok_or(RuntimeError::InvocationStateConflict)?;
         let owner = WriterLease {
             owner_id: fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
@@ -601,14 +578,8 @@ impl RuntimeState {
                     InvocationObservationStatus::Running.code()
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        if children
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-            .is_some()
-        {
+            .await?;
+        if children.next().await?.is_some() {
             return Err(RuntimeError::InvocationChildrenActive);
         }
         let ended_ms = now_ms()?;
@@ -629,8 +600,7 @@ impl RuntimeState {
                     InvocationObservationStatus::Running.code(),
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         if changed != 1 {
             return Err(RuntimeError::InvocationStateConflict);
         }
@@ -639,9 +609,7 @@ impl RuntimeState {
             // Parent ownership is recorded for readers; it does not transfer
             // child effects or permit detaching a child from its owner.
         }
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        tx.commit().await?;
         self.invocation_observation(id)
             .await?
             .ok_or(RuntimeError::RecoveryInvalid)
@@ -657,8 +625,7 @@ impl RuntimeState {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         self.require_owner(&tx, replacement).await?;
         let ended_ms = now_ms()?;
         let mut rows = tx
@@ -674,14 +641,9 @@ impl RuntimeState {
                     i64::try_from(replacement.epoch).map_err(|_| RuntimeError::RecoveryInvalid)?,
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let mut parents = BTreeMap::new();
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        {
+        while let Some(row) = rows.next().await? {
             let id = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
             let parent = row
                 .get::<Option<Vec<u8>>>(1)
@@ -743,8 +705,7 @@ impl RuntimeState {
                             .map_err(|_| RuntimeError::RecoveryInvalid)?,
                     ],
                 )
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
+                .await?;
             if updated == 1 {
                 append_invocation_tail_event(
                     &tx,
@@ -756,9 +717,7 @@ impl RuntimeState {
                 changed += 1;
             }
         }
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        tx.commit().await?;
         Ok(changed)
     }
 
@@ -782,14 +741,9 @@ impl RuntimeState {
                  ORDER BY started_ms, invocation_id",
                 (),
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let mut ids = Vec::new();
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        {
+        while let Some(row) = rows.next().await? {
             ids.push(fixed(
                 row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
             )?);
@@ -819,8 +773,7 @@ impl RuntimeState {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Deferred)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let capture = crate::codec::capture_tx(&tx).await?;
         // CWD captures include generation as well as digest, so repeating an
         // old digest cannot revive its cursors. Receipt replay or a rolled-back
@@ -844,14 +797,9 @@ impl RuntimeState {
                     row_limit,
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let mut events = Vec::new();
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        {
+        while let Some(row) = rows.next().await? {
             events.push((
                 decode_u64(
                     row.get::<i64>(0)
@@ -894,9 +842,7 @@ impl RuntimeState {
                 sequence: entry.sequence,
             })
             .or(after);
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        tx.commit().await?;
         Ok(InvocationObservationTailPage {
             entries,
             next_cursor,
@@ -964,8 +910,7 @@ async fn append_invocation_tail_event(
              (invocation_id, observed_ms, status) VALUES (?1, ?2, ?3)",
             params![id.to_vec(), observed_ms, status.code()],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     Ok(())
 }
 
@@ -1057,12 +1002,10 @@ async fn validate_launch_owner(
                      FROM sys_invocation_observation WHERE invocation_id = ?1",
                     params![parent_id.to_vec()],
                 )
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
+                .await?;
             let row = rows
                 .next()
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?
+                .await?
                 .ok_or(RuntimeError::InvocationOwnerInvalid)?;
             let parent_snapshot: Vec<u8> = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
             let parent_digest: [u8; 32] =
@@ -1107,14 +1050,8 @@ async fn validate_launch_owner(
                         capture.generation_digest().to_vec(),
                     ],
                 )
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
-            if rows
-                .next()
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?
-                .is_none()
-            {
+                .await?;
+            if rows.next().await?.is_none() {
                 return Err(RuntimeError::InvocationOwnerInvalid);
             }
         }
@@ -1131,14 +1068,8 @@ async fn validate_launch_owner(
                     capture.generation_digest().to_vec(),
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        if rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-            .is_none()
-        {
+            .await?;
+        if rows.next().await?.is_none() {
             return Err(RuntimeError::InvocationOwnerInvalid);
         }
     }
@@ -1159,13 +1090,8 @@ async fn load_invocation_observation(
              FROM sys_invocation_observation WHERE invocation_id = ?1",
             params![id.to_vec()],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    else {
+        .await?;
+    let Some(row) = rows.next().await? else {
         return Ok(None);
     };
     let function_object_id = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
@@ -1242,13 +1168,8 @@ async fn load_invocation_observation(
             "SELECT owner_id, epoch FROM writer_lease WHERE singleton = 1",
             (),
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    let live = match current_writer_rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    {
+        .await?;
+    let live = match current_writer_rows.next().await? {
         Some(row) => {
             let current = WriterLease {
                 owner_id: fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
@@ -1326,13 +1247,8 @@ async fn load_materialized_procedure(
              WHERE function_object_id = ?1 AND snapshot = ?2",
             params![function_object_id.to_vec(), snapshot.clone()],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    let row = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-        .ok_or(RuntimeError::RecoveryInvalid)?;
+        .await?;
+    let row = rows.next().await?.ok_or(RuntimeError::RecoveryInvalid)?;
     let qualified_name: String = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
     validate_observation_text(&qualified_name)?;
     let revision_id = fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
@@ -1360,14 +1276,9 @@ async fn load_materialized_procedure(
              WHERE function_object_id = ?1 AND snapshot = ?2 ORDER BY position",
             params![function_object_id.to_vec(), snapshot],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     let mut parameters = Vec::new();
-    while let Some(row) = parameter_rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    {
+    while let Some(row) = parameter_rows.next().await? {
         let position = decode_u64(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
         let name: String = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
         validate_observation_text(&name)?;
@@ -1435,14 +1346,9 @@ async fn load_invocation_arguments(
              FROM sys_invocation_argument WHERE invocation_id = ?1 ORDER BY position",
             params![invocation_id.to_vec()],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     let mut arguments = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    {
+    while let Some(row) = rows.next().await? {
         let position = decode_u64(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
         let name: String = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
         validate_observation_text(&name)?;
