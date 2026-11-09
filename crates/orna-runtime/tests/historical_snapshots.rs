@@ -1103,22 +1103,14 @@ async fn case_closure_matrix_preserves_each_transition_pin() {
         (1_u64, both.capture().snapshot(), both_rows.clone()),
         (2, tail_only.capture().snapshot(), tail_only_rows),
         (3, restored.capture().snapshot(), both_rows),
-        (
-            4,
-            prefix_only.capture().snapshot(),
-            prefix_only_rows,
-        ),
+        (4, prefix_only.capture().snapshot(), prefix_only_rows),
         (5, empty.capture().snapshot(), Vec::new()),
         (
             6,
             reopened_tail_only.capture().snapshot(),
             reopened_tail_rows.clone(),
         ),
-        (
-            7,
-            reopened_both.capture().snapshot(),
-            reopened_both_rows,
-        ),
+        (7, reopened_both.capture().snapshot(), reopened_both_rows),
         (
             8,
             reopened_tail_after_closure.capture().snapshot(),
