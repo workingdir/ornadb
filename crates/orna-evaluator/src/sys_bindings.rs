@@ -792,15 +792,15 @@ impl SysHostBindingRegistry {
             .ok_or_else(|| redacted_error("ORNA-EVAL-UNSUPPORTED"))?;
         let request = process_request(arguments)?;
         let output = provider
-            .run(
-                request.executable,
-                &request.args,
-                request.working_directory,
-                &request.environment,
-                request.input,
-                request.timeout,
-                request.output_limit,
-            )
+            .run(&orna_sys::ProcessRequest {
+                executable: request.executable,
+                arguments: &request.args,
+                working_directory: request.working_directory,
+                environment: &request.environment,
+                input: request.input,
+                timeout: request.timeout,
+                max_output_bytes: request.output_limit,
+            })
             .map_err(|failure| self.failure(operation, failure.code()))?;
         let exit_status = process_exit_status(output.exit_status);
         CanonicalValue::new(OvbRaw::Tag(

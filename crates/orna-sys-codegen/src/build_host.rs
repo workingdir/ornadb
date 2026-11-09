@@ -9,15 +9,10 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use syn::visit::Visit;
 
-#[cfg(not(test))]
-use crate::abi_version::AbiVersion;
-#[cfg(not(test))]
-use crate::host_registry_model::{
-    HostOperationDescriptor, HostProviderRole, SystemHostOperationRegistry,
-};
-#[cfg(test)]
-use orna_sys::{
-    AbiVersion, HostOperationDescriptor, HostProviderRole, SystemHostOperationRegistry,
+use orna_sys_model::{
+    abi_version::AbiVersion,
+    host_registry_model::{HostOperationDescriptor, HostProviderRole, SystemHostOperationRegistry},
+    signature::{matching_delimiter, split_top_level},
 };
 
 #[derive(Default)]
@@ -113,9 +108,7 @@ pub fn serialize_host_registry(registry: &SystemHostOperationRegistry) -> Result
     serde_json::to_string_pretty(&canonical_value).map_err(|error| error.to_string())
 }
 
-/// Used by the host and system registry parity test targets, which include this
-/// module; the build-script copy of the module has no such caller.
-#[allow(dead_code)]
+/// Regenerates the host registry for parity test targets.
 pub fn generate_host_registry(source_root: &Path) -> Result<String, String> {
     let registry = generate_typed_host_registry(source_root)?;
     serialize_host_registry(&registry)
@@ -559,21 +552,19 @@ impl<'ast> Visit<'ast> for Collector {
                     let mut metadata: Value = serde_json::from_str(&literal.value())
                         .map_err(|error| format!("invalid host-operation JSON: {error}"))?;
                     validate_operation(&metadata, &method.sig)?;
+                    // The registry describes the portable operation, not the
+                    // Rust implementation shape. A host method may take one
+                    // request struct where the portable signature has several
+                    // parameters, so the declared signature owns the names.
                     metadata["parameters"] = Value::Array(
-                        method
-                            .sig
-                            .inputs
-                            .iter()
-                            .filter_map(|input| match input {
-                                syn::FnArg::Typed(argument) => match argument.pat.as_ref() {
-                                    syn::Pat::Ident(name) => {
-                                        Some(Value::String(name.ident.to_string()))
-                                    }
-                                    _ => None,
-                                },
-                                syn::FnArg::Receiver(_) => None,
-                            })
-                            .collect(),
+                        signature_parameter_names(
+                            metadata["signature"]
+                                .as_str()
+                                .expect("validated host signature"),
+                        )?
+                        .into_iter()
+                        .map(Value::String)
+                        .collect(),
                     );
                     let operation: HostOperationDescriptor = serde_json::from_value(metadata)
                         .map_err(|error| {
@@ -594,6 +585,26 @@ impl<'ast> Visit<'ast> for Collector {
         }
         syn::visit::visit_impl_item_fn(self, method);
     }
+}
+
+/// Names the parameters the declared portable signature lists.
+fn signature_parameter_names(signature: &str) -> Result<Vec<String>, String> {
+    let open = signature
+        .find('(')
+        .ok_or_else(|| "host operation signature is missing `(`".to_owned())?;
+    let close = matching_delimiter(signature, open, '(', ')')
+        .ok_or_else(|| "host operation signature has unbalanced parameters".to_owned())?;
+    split_top_level(&signature[open + 1..close], ',')
+        .map_err(|_| "host operation signature has unbalanced parameters".to_owned())?
+        .into_iter()
+        .filter(|parameter| !parameter.trim().is_empty())
+        .map(|parameter| {
+            parameter
+                .split_once(':')
+                .map(|(name, _)| name.trim().to_owned())
+                .ok_or_else(|| "host operation parameter must use `name: Type`".to_owned())
+        })
+        .collect()
 }
 
 fn validate_operation(metadata: &Value, method: &syn::Signature) -> Result<(), String> {
@@ -768,15 +779,7 @@ fn validate_native_method_signature(
                 (&[("name", "&str")], "&str", "EnvironmentProviderError")
             }
             "std.io.process.run" => (
-                &[
-                    ("executable", "&str"),
-                    ("arguments", "&[String]"),
-                    ("working_directory", "&str"),
-                    ("environment", "&[(String, String)]"),
-                    ("input", "Option<&[u8]>"),
-                    ("timeout", "Option<Duration>"),
-                    ("max_output_bytes", "usize"),
-                ],
+                &[("request", "&ProcessRequest<'_>")],
                 "ProcessRunOutput",
                 "ProcessProviderError",
             ),

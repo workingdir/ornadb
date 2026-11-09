@@ -27,7 +27,7 @@
 //!
 //! The model carries the typed value as [`RuntimeValue`]. Encoding to the
 //! canonical ORV5 byte form happens at the protocol boundary, exactly like
-//! the rest of orna-core; this module imports neither `orna-protocol` nor
+//! the rest of orna-compat-v1; this module imports neither `orna-protocol` nor
 //! `orna-standard`. `updated_at` is stamped by the boundary when a write is
 //! persisted; the pure model computes only the revision.
 

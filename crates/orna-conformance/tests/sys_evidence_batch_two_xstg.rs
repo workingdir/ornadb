@@ -1,9 +1,9 @@
 use orna_semantic::{Catalogue, ModuleInput, analyze_with_catalogue};
 use orna_sys::{
     AdmissionError, AdmissionRequest, Argument, ArgumentMap, ExecutionBoundary, FunctionDescriptor,
-    FunctionId, FunctionIdentity, InvocationContext, InvocationExecutor, InvocationMode,
-    InvocationResult, RevisionId, RuntimeId, RuntimeSupervisor, SnapshotId, TransactionMode,
-    TypeId, TypeWitness, TypedValue,
+    FunctionId, FunctionIdentity, InvocationCompletion, InvocationContext, InvocationExecutor,
+    InvocationMode, RevisionId, RuntimeId, RuntimeSupervisor, SnapshotId, TransactionMode, TypeId,
+    TypeWitness, TypedValue,
 };
 use std::sync::{
     Arc,
@@ -278,9 +278,9 @@ fn argument_map_contract_is_type_preserving_and_canonical() {
 struct CountingExecutor(Arc<AtomicUsize>);
 
 impl InvocationExecutor for CountingExecutor {
-    fn execute(&mut self, _: &ExecutionBoundary) -> InvocationResult<TypedValue> {
+    fn execute(&mut self, _: &ExecutionBoundary) -> InvocationCompletion<TypedValue> {
         self.0.fetch_add(1, Ordering::SeqCst);
-        InvocationResult::Success(TypedValue::public(TypeId::new("Contact"), []))
+        InvocationCompletion::Success(TypedValue::public(TypeId::new("Contact"), []))
     }
 }
 

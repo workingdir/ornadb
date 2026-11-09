@@ -1,4 +1,9 @@
-//! Core types shared by OrnaDB components.
+//! The frozen 1.0.0 compatibility reference model.
+//!
+//! This crate records the identifiers, catalogue and revision hashes, system
+//! function registry, security surface and value models that OrnaDB 1.0.0
+//! wrote and read. It is an archive consumed only by conformance tests;
+//! nothing in the shipped binary may depend on it. See `README.md`.
 //!
 //! The public text form of each identifier is opaque and type-tagged. The
 //! random 128-bit representation is an implementation detail, not a UUID API.

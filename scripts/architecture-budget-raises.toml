@@ -8,7 +8,9 @@
 #
 # Every entry needs:
 #   path       crates/<crate>/<relative file>::<function> for a function,
-#              crates/<crate>/<relative file> for a file
+#              crates/<crate>/<relative file> for a file, or the same forms one
+#              level deeper for an archived crate:
+#              crates/archive/<crate>/<relative file>[::<function>]
 #   new_limit  the reviewed size the path may reach (the same max(5%, 25 lines)
 #              tolerance applies above it)
 #   reason     why the size is accepted
@@ -17,7 +19,7 @@
 # A raise whose path is not present in the workspace is reserved for an
 # in-flight PR and is reported as a note; remove it once the PR lands or the
 # code shrinks below the hard cap. A raise that is no longer needed is also a
-# note, never a failure.
+# note, never a failure; --mode=budget --update removes it automatically.
 #
 # A pure split that creates over-cap children records each child here with the
 # split's bead, while --mode=budget --update lowers the parent's entries. The
@@ -28,24 +30,6 @@ path = "crates/orna-lsp/src/server.rs"
 new_limit = 2728
 reason = "PR #9783 replaces ten positional arguments with SymbolHeader and folds the position/document requests into one locate_request/workspace_request path"
 bead = "ornadb-qvsyc"
-
-[[raise]]
-path = "crates/orna-syntax/src/parser.rs"
-new_limit = 5784
-reason = "PR #9783 splits Parser::item per declaration kind and adds the located-span accessors; the remaining long parser functions are on the bead"
-bead = "ornadb-18ky0"
-
-[[raise]]
-path = "crates/orna-syntax/src/parser.rs::parse_block_inner"
-new_limit = 205
-reason = "PR #9783's located-span accessors touch parse_block_inner; splitting it is the remaining ornadb-18ky0 work"
-bead = "ornadb-18ky0"
-
-[[raise]]
-path = "crates/orna-syntax/src/visit.rs::walk_expr"
-new_limit = 146
-reason = "PR #9783 adds the exhaustive orna_syntax::visit traversal; walk_expr is the one arm over the 120-line cap"
-bead = "ornadb-41661"
 
 [[raise]]
 path = "crates/orna-evaluator/src/sys_bindings.rs"
@@ -72,7 +56,7 @@ reason = "PR #9768 shares byte-index chunk verification across the native graph 
 bead = "ornadb-l0ouj"
 
 [[raise]]
-path = "crates/orna-core/src/security.rs"
+path = "crates/archive/orna-compat-v1/src/security.rs"
 new_limit = 2633
 reason = "PR #9767 replaces the SecurityAuditDecision wildcard projections with every rejected shape named, and splits SecuritySnapshot validation into one helper per definition category so from_definitions stays under the 120-line cap; the accessor expansion is the remaining ornadb-x5oag debt"
 bead = "ornadb-x5oag"
@@ -232,3 +216,394 @@ path = "crates/orna-evaluator/src/lib.rs::dispatch"
 new_limit = 153
 reason = "S2 replaces the per-kind native string tables with one match on IntrinsicId; the arms are scheduled to move beside their handlers as the catalogue grows"
 bead = "ornadb-yuzot.2"
+
+[[raise]]
+path = "crates/orna-sys-codegen/src/build_support.rs"
+new_limit = 2702
+reason = "PR #9777 moves the sys API collector out of orna-sys/build_support.rs into the codegen crate without changing its bodies"
+bead = "ornadb-y603r"
+
+[[raise]]
+path = "crates/orna-sys-codegen/src/build_host.rs::validate_native_method_signature"
+new_limit = 193
+reason = "PR #9777 moves the host registry generator into orna-sys-codegen; the validation body is unchanged"
+bead = "ornadb-y603r"
+
+[[raise]]
+path = "crates/orna-sys-codegen/src/build_host.rs::validate_operation"
+new_limit = 154
+reason = "PR #9777 moves the host registry generator into orna-sys-codegen; the validation body is unchanged"
+bead = "ornadb-y603r"
+
+[[raise]]
+path = "crates/orna-sys-codegen/src/build_host.rs::validate_schema_value"
+new_limit = 174
+reason = "PR #9777 moves the host registry generator into orna-sys-codegen; the validation body is unchanged"
+bead = "ornadb-y603r"
+
+[[raise]]
+path = "crates/orna-sys-codegen/src/build_support.rs::validate_api_document"
+new_limit = 189
+reason = "PR #9777 moves the sys API collector into orna-sys-codegen; the validation body is unchanged"
+bead = "ornadb-y603r"
+
+[[raise]]
+path = "crates/orna-sys-codegen/src/build_support.rs::validate_api_type_graph"
+new_limit = 197
+reason = "PR #9777 moves the sys API collector into orna-sys-codegen; the validation body is unchanged"
+bead = "ornadb-y603r"
+
+[[raise]]
+path = "crates/orna-sys-codegen/src/build_support.rs::validate_function_metadata"
+new_limit = 144
+reason = "PR #9777 moves the sys API collector into orna-sys-codegen; the validation body is unchanged"
+bead = "ornadb-y603r"
+
+[[raise]]
+path = "crates/orna-protocol/src/lib.rs::apply_at"
+new_limit = 136
+reason = "PR #9777 replaces three duplicated add/remove/replace walkers with one apply_at; splitting it per operation is follow-up"
+bead = "ornadb-xssb1"
+
+[[raise]]
+path = "crates/orna-runtime/src/publication.rs"
+new_limit = 1445
+reason = "main's #9794 writer-entry fence grows publication.rs; recorded with the fence bead so the budget gate stays green"
+bead = "ornadb-5il1.127"
+
+[[raise]]
+path = "crates/orna-runtime/src/lib.rs::replaying_a_published_vfs_save_keeps_the_durable_generation"
+new_limit = 122
+reason = "main's #9794 writer-entry fence adds the replay test; recorded with the fence bead"
+bead = "ornadb-5il1.127"
+
+[[raise]]
+path = "crates/orna-runtime/src/lib.rs::replaying_a_published_vfs_save_reports_the_idempotent_outcome"
+new_limit = 124
+reason = "main's #9794 writer-entry fence adds the replay test; recorded with the fence bead"
+bead = "ornadb-5il1.127"
+
+[[raise]]
+path = "crates/orna-semantic/src/calls.rs"
+new_limit = 3738
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/checkpoint.rs"
+new_limit = 3574
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/collection_calls.rs"
+new_limit = 1245
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/flow.rs"
+new_limit = 1234
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/inference.rs"
+new_limit = 3306
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/item_checks.rs"
+new_limit = 1600
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/system_calls.rs"
+new_limit = 1915
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/units.rs"
+new_limit = 1498
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/analysis_support.rs::tables_referenced"
+new_limit = 172
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/analysis_support.rs::visit"
+new_limit = 155
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/assertions.rs::infer_module_relation"
+new_limit = 222
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/calls.rs::infer_relation_collection_call"
+new_limit = 171
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/calls.rs::infer_relation_collection_pipeline"
+new_limit = 222
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/calls.rs::infer_relation_stream_pipeline"
+new_limit = 286
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/calls.rs::infer_relation_terminal_call"
+new_limit = 220
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/calls.rs::infer_table_operation"
+new_limit = 209
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/calls.rs::pipeline_collection_stage"
+new_limit = 267
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/calls.rs::pipeline_relation_intrinsic_stage"
+new_limit = 131
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/calls.rs::statistics_outcome"
+new_limit = 188
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/checkpoint.rs::checkpoint_paired_boundary_record_maps_match"
+new_limit = 121
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/checkpoint.rs::checkpoint_topology_anchor_with_first_complete_pins"
+new_limit = 134
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/checkpoint.rs::checkpoint_topology_anchor_with_first_pins_local"
+new_limit = 134
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/checkpoint.rs::collect_reset_snapshot_context_maps"
+new_limit = 165
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/checkpoint.rs::merge_scoped_checkpoint_children"
+new_limit = 323
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/checkpoint.rs::pinned_snapshot_reset_shape_matches_at_path_with_width"
+new_limit = 162
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/checkpoint.rs::pinned_snapshot_shape_matches"
+new_limit = 134
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/checkpoint.rs::seed_aligned_paths"
+new_limit = 132
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/checkpoint.rs::seed_omitted_pinned_checkpoint_tuple_paths"
+new_limit = 153
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/checkpoint.rs::specialize_dynamic_parameter_snapshot_contexts_scoped"
+new_limit = 235
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/collection_calls.rs::finite_list_helper_result"
+new_limit = 201
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/collection_calls.rs::infer_finite_list_numeric_aggregate"
+new_limit = 122
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/collection_calls.rs::infer_finite_list_simple_collection"
+new_limit = 148
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/collections.rs::infer_finite_list_collection"
+new_limit = 208
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/flow.rs::infer_local_generic_call"
+new_limit = 196
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/flow.rs::validate_loop_transfers"
+new_limit = 208
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/imports.rs::module_scope"
+new_limit = 134
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/inference.rs::infer_binary"
+new_limit = 131
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/inference.rs::infer_call"
+new_limit = 261
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/inference.rs::infer_case"
+new_limit = 193
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/inference.rs::infer_field"
+new_limit = 167
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/inference.rs::infer_nominal"
+new_limit = 148
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/inference.rs::merge_checkpoint_field_map_inner"
+new_limit = 228
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/item_checks.rs::same_default_expression"
+new_limit = 153
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/item_checks.rs::validate_nested_implementation_members"
+new_limit = 177
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/lib.rs::check_table_item"
+new_limit = 228
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/lib.rs::core_root_modules"
+new_limit = 135
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/lib.rs::core_std_modules"
+new_limit = 216
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/lib.rs::fixture_modules"
+new_limit = 220
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/system_calls.rs::infer_await_system_call"
+new_limit = 142
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/system_calls.rs::infer_cancel_system_call"
+new_limit = 125
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/system_calls.rs::infer_descriptor_system_call"
+new_limit = 159
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/system_calls.rs::infer_invoke_system_call"
+new_limit = 132
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/system_calls.rs::infer_query_explain_system_call"
+new_limit = 178
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-semantic/src/system_calls.rs::infer_start_system_call"
+new_limit = 132
+reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
+bead = "ornadb-rkn8m"
+

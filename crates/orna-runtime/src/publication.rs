@@ -15,6 +15,29 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::Path;
 
+/// Validates the schema-admission identities a compact freeze pins.
+fn validate_compact_identities(
+    checkpoint: &Checkpoint,
+    identities: &[PublicationTableIdentity],
+) -> Result<(), RuntimeError> {
+    if checkpoint.generation == 0 || identities.is_empty() {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+    let mut seen = BTreeMap::new();
+    for identity in identities {
+        validate_table_name(&identity.table)?;
+        if identity.candidate_generation != checkpoint.generation
+            || identity.table_id == [0; 16]
+            || identity.schema_fingerprint == [0; 32]
+            || identity.candidate_generation == 0
+            || seen.insert(identity.table.clone(), ()).is_some()
+        {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+    }
+    Ok(())
+}
+
 /// Effective publication policy used by the runtime's compact publisher.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RuntimePublicationPolicy {
@@ -574,7 +597,7 @@ impl RuntimeState {
     /// SQLite statement so maintenance and storage projections share a
     /// coherent snapshot. Row and byte counts describe durable runtime
     /// mutation payloads, not physical compact-file layout.
-    pub async fn set_publication_compressed_target_bytes(
+    pub(crate) async fn set_publication_compressed_target_bytes_inner(
         &self,
         compressed_target_bytes: u64,
     ) -> Result<(), RuntimeError> {
@@ -808,7 +831,7 @@ impl RuntimeState {
         Ok(Some(decode_checkpoint_row(&row)?))
     }
 
-    pub async fn freeze(
+    pub(crate) async fn freeze_inner(
         &self,
         intent_id: [u8; 16],
         checkpoint: &Checkpoint,
@@ -869,47 +892,44 @@ impl RuntimeState {
     }
 
     /// Freezes a compact publication using schema admission's authoritative
-    /// table/profile identities. The legacy [`Self::freeze`] API intentionally
-    /// carries no synthetic identity and therefore cannot produce compact
-    /// mutations.
-    pub async fn freeze_compact(
+    /// table/profile identities. The legacy [`PublicationWriter::freeze`] API
+    /// intentionally carries no synthetic identity and therefore cannot
+    /// produce compact mutations.
+    pub(crate) async fn freeze_compact_inner(
         &self,
         intent_id: [u8; 16],
         checkpoint: &Checkpoint,
         identities: &[PublicationTableIdentity],
     ) -> Result<PublicationFreeze, RuntimeError> {
-        if checkpoint.generation == 0 || identities.is_empty() {
-            return Err(RuntimeError::RecoveryInvalid);
-        }
-        let mut seen = BTreeMap::new();
-        for identity in identities {
-            validate_table_name(&identity.table)?;
-            if identity.candidate_generation != checkpoint.generation
-                || identity.table_id == [0; 16]
-                || identity.schema_fingerprint == [0; 32]
-                || identity.candidate_generation == 0
-                || seen.insert(identity.table.clone(), ()).is_some()
-            {
-                return Err(RuntimeError::RecoveryInvalid);
-            }
-        }
-        let mut freeze = self.freeze(intent_id, checkpoint).await?;
+        validate_compact_identities(checkpoint, identities)?;
+        let mut freeze = self.freeze_inner(intent_id, checkpoint).await?;
+        self.load_compact_freeze(&mut freeze, identities).await?;
+        Ok(freeze)
+    }
+
+    /// Fills a compact freeze with the frozen prefix's typed mutations and the
+    /// candidate digest they certify.
+    async fn load_compact_freeze(
+        &self,
+        freeze: &mut PublicationFreeze,
+        identities: &[PublicationTableIdentity],
+    ) -> Result<(), RuntimeError> {
         freeze.mutations = self
-            .load_publication_mutations(checkpoint, identities)
+            .load_publication_mutations(&freeze.checkpoint, identities)
             .await?;
         freeze.candidate_digest = freeze
             .mutations
             .first()
             .map(|mutation| mutation.equivalence_witness.candidate_digest)
             .ok_or(RuntimeError::EmptyMutationBatch)?;
-        Ok(freeze)
+        Ok(())
     }
 
     /// Durably binds a freeze to one compact candidate before receipt
-    /// completion. Once bound, [`Self::complete_publication`] rejects the
-    /// freeze; only signed compact receipt completion may consume its prefix.
-    /// Repeating the exact binding is safe after restart.
-    pub async fn bind_compact_publication(
+    /// completion. Once bound, [`PublicationWriter::complete_publication`]
+    /// rejects the freeze; only signed compact receipt completion may consume
+    /// its prefix. Repeating the exact binding is safe after restart.
+    pub(crate) async fn bind_compact_publication_inner(
         &self,
         pending: &CompactPublicationPending,
         freeze: &PublicationFreeze,
@@ -1011,7 +1031,7 @@ impl RuntimeState {
     /// The returned receipt is stable across restart for one intent and
     /// candidate. The signing key is runtime-owned durable state; callers
     /// cannot supply signing or verification material.
-    pub async fn complete_compact_publication(
+    pub(crate) async fn complete_compact_publication_inner(
         &self,
         pending: &CompactPublicationPending,
         freeze: &PublicationFreeze,
@@ -1023,7 +1043,7 @@ impl RuntimeState {
         {
             return Err(RuntimeError::ConflictingPublicationIntent);
         }
-        self.bind_compact_publication(pending, freeze).await?;
+        self.bind_compact_publication_inner(pending, freeze).await?;
         let upper = i64::try_from(freeze.checkpoint.mutation_sequence)
             .map_err(|_| RuntimeError::RecoveryInvalid)?;
         let signing_bytes = CompactRuntimeReceipt::signing_bytes(
@@ -1099,11 +1119,11 @@ impl RuntimeState {
 
     /// Records a verified ordinary publication and consumes only the frozen
     /// pending prefix. Compact publication must use
-    /// [`Self::complete_compact_publication`] so its signed receipt is
-    /// persisted in the same transaction.
+    /// [`PublicationWriter::complete_compact_publication`] so its signed
+    /// receipt is persisted in the same transaction.
     /// prefix. Repeating the same intent and commit is safe after restart;
     /// another commit for that intent is rejected.
-    pub async fn complete_publication(
+    pub(crate) async fn complete_publication_inner(
         &self,
         freeze: &PublicationFreeze,
         commit_id: &PublicationCommitId,
@@ -1277,8 +1297,15 @@ impl RuntimeState {
             .frozen_intent(intent_id)
             .await?
             .ok_or(RuntimeError::RecoveryInvalid)?;
-        self.freeze_compact(intent_id, &checkpoint, identities)
-            .await
+        validate_compact_identities(&checkpoint, identities)?;
+        let mut freeze = PublicationFreeze {
+            intent_id,
+            checkpoint,
+            candidate_digest: [0; 32],
+            mutations: Vec::new(),
+        };
+        self.load_compact_freeze(&mut freeze, identities).await?;
+        Ok(freeze)
     }
 
     pub(crate) fn verify_compact_receipt(

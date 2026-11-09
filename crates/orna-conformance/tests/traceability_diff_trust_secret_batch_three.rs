@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, process::Command};
 
 use futures::executor::block_on;
-use orna_core::{
+use orna_compat_v1::{
     CatalogueRevisionId, SchemaId,
     catalogue::CatalogueSnapshot,
     catalogue::QualifiedSemanticName,

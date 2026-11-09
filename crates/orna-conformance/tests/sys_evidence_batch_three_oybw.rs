@@ -1,7 +1,7 @@
 use orna_semantic::{Catalogue, ModuleInput, analyze_with_catalogue};
 use orna_sys::{
     Admission, AdmissionRequest, ArgumentMap, ExecutionBoundary, FunctionDescriptor, FunctionId,
-    FunctionIdentity, InvocationContext, InvocationExecutor, InvocationMode, InvocationResult,
+    FunctionIdentity, InvocationCompletion, InvocationContext, InvocationExecutor, InvocationMode,
     InvocationState, InvocationStatus, RetainedInvocationResult, RevisionId, Runtime, RuntimeId,
     SnapshotId, TransactionMode, TypeId, TypeWitness, TypedValue,
 };
@@ -110,17 +110,17 @@ fn request(mode: InvocationMode) -> AdmissionRequest<TypedValue> {
 struct IdentityFirst;
 
 impl InvocationExecutor for IdentityFirst {
-    fn execute(&mut self, boundary: &ExecutionBoundary) -> InvocationResult<TypedValue> {
+    fn execute(&mut self, boundary: &ExecutionBoundary) -> InvocationCompletion<TypedValue> {
         assert!(!boundary.invocation.as_str().is_empty());
-        InvocationResult::Success(TypedValue::public(TypeId::new("Int"), [42]))
+        InvocationCompletion::Success(TypedValue::public(TypeId::new("Int"), [42]))
     }
 }
 
 struct OrdinaryFailure;
 
 impl InvocationExecutor for OrdinaryFailure {
-    fn execute(&mut self, _: &ExecutionBoundary) -> InvocationResult<TypedValue> {
-        InvocationResult::OrdinaryFailure(orna_sys::Diagnostic {
+    fn execute(&mut self, _: &ExecutionBoundary) -> InvocationCompletion<TypedValue> {
+        InvocationCompletion::OrdinaryFailure(orna_sys::Diagnostic {
             code: "sys.fixture.failure",
             message: "fixture handler failed",
             fields: Default::default(),
@@ -132,9 +132,9 @@ impl InvocationExecutor for OrdinaryFailure {
 struct DelayedSuccess;
 
 impl InvocationExecutor for DelayedSuccess {
-    fn execute(&mut self, _: &ExecutionBoundary) -> InvocationResult<TypedValue> {
+    fn execute(&mut self, _: &ExecutionBoundary) -> InvocationCompletion<TypedValue> {
         thread::sleep(Duration::from_millis(40));
-        InvocationResult::Success(TypedValue::public(TypeId::new("Int"), [7]))
+        InvocationCompletion::Success(TypedValue::public(TypeId::new("Int"), [7]))
     }
 }
 
@@ -189,7 +189,7 @@ fn ten_sys_gap_rows_have_bounded_runtime_and_fixture_evidence() {
     idempotent
         .retain_terminal(
             &first,
-            InvocationResult::Success(TypedValue::public(TypeId::new("Int"), [1])),
+            InvocationCompletion::Success(TypedValue::public(TypeId::new("Int"), [1])),
         )
         .unwrap();
     assert!(matches!(
@@ -220,7 +220,7 @@ fn ten_sys_gap_rows_have_bounded_runtime_and_fixture_evidence() {
         _ => unreachable!(),
     };
     cancelled
-        .retain_terminal(&cancellation_handle, InvocationResult::Cancelled(None))
+        .retain_terminal(&cancellation_handle, InvocationCompletion::Cancelled(None))
         .unwrap();
     assert!(matches!(
         cancelled.invocation_state(&cancellation_handle).unwrap(),

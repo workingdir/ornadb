@@ -1460,13 +1460,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "orna-compat-v1"
+version = "1.0.0"
+dependencies = [
+ "base64",
+ "orna-syntax",
+ "orna-value",
+ "proptest",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "uuid",
+]
+
+[[package]]
 name = "orna-conformance"
 version = "1.0.0"
 dependencies = [
  "futures",
  "getrandom 0.3.4",
  "num-bigint 0.4.8",
- "orna-core",
+ "orna-compat-v1",
  "orna-evaluator",
  "orna-foundation",
  "orna-live",
@@ -1489,20 +1503,6 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "tokio",
-]
-
-[[package]]
-name = "orna-core"
-version = "1.0.0"
-dependencies = [
- "base64",
- "orna-syntax",
- "orna-value",
- "proptest",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "uuid",
 ]
 
 [[package]]
@@ -1720,6 +1720,7 @@ version = "1.0.0"
 dependencies = [
  "image",
  "orna-protocol",
+ "orna-security",
  "orna-value",
 ]
 
@@ -1771,16 +1772,27 @@ dependencies = [
  "orna-foundation",
  "orna-security",
  "orna-syntax",
+ "orna-sys-codegen",
  "orna-sys-macros",
- "quote",
+ "orna-sys-model",
  "reqwest",
  "rustix 0.38.44",
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "syn 2.0.119",
  "tempfile",
  "uuid",
+]
+
+[[package]]
+name = "orna-sys-codegen"
+version = "1.1.0"
+dependencies = [
+ "orna-sys-model",
+ "quote",
+ "serde",
+ "serde_json",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -1793,6 +1805,14 @@ dependencies = [
 [[package]]
 name = "orna-sys-macros"
 version = "1.0.0"
+
+[[package]]
+name = "orna-sys-model"
+version = "1.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "orna-table"

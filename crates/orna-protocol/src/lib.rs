@@ -1233,17 +1233,28 @@ impl PatchPathComponent {
 fn apply_patch(root: &mut Node, operation: &Node) -> Result<()> {
     let fields = array(operation).ok_or(Error::InvalidValue)?;
     match patch_op(fields)? {
-        PatchOp::Add => add_at(root, &path(&fields[1])?, fields[2].clone()),
-        PatchOp::Remove => remove_at(root, &path(&fields[1])?).map(drop),
-        PatchOp::Replace => replace_at(root, &path(&fields[1])?, fields[2].clone()),
+        PatchOp::Add => apply_at(
+            root,
+            &path(&fields[1])?,
+            PatchOperation::Add(fields[2].clone()),
+        )
+        .map(drop),
+        PatchOp::Remove => apply_at(root, &path(&fields[1])?, PatchOperation::Remove).map(drop),
+        PatchOp::Replace => apply_at(
+            root,
+            &path(&fields[1])?,
+            PatchOperation::Replace(fields[2].clone()),
+        )
+        .map(drop),
         PatchOp::Move => {
             let from = path(&fields[1])?;
             let to = path(&fields[2])?;
             if from.is_empty() || from.len() <= to.len() && from == to[..from.len()] {
                 return Err(Error::InvalidValue);
             }
-            let value = remove_at(root, &from)?;
-            add_at(root, &to, value)
+            let value =
+                apply_at(root, &from, PatchOperation::Remove)?.ok_or(Error::InvalidValue)?;
+            apply_at(root, &to, PatchOperation::Add(value)).map(drop)
         }
     }
 }
@@ -1256,172 +1267,153 @@ fn path(node: &Node) -> Result<Vec<PatchPathComponent>> {
         .collect()
 }
 
-fn add_at(root: &mut Node, path: &[PatchPathComponent], value: Node) -> Result<()> {
+/// One patch operation over the location the path walker resolves.
+enum PatchOperation {
+    Add(Node),
+    Remove,
+    Replace(Node),
+}
+
+/// Walks one patch path and applies its leaf operation.
+///
+/// Add, remove and replace share the same navigation: a `Field` component
+/// addresses an existing property before an identically keyed child, index
+/// components address children positionally, and relation/key components
+/// resolve only through a child selector. Only the leaf action differs, so the
+/// three operations cannot drift apart. `Remove` returns the removed node;
+/// the other operations return `Ok(None)`.
+fn apply_at(
+    root: &mut Node,
+    path: &[PatchPathComponent],
+    operation: PatchOperation,
+) -> Result<Option<Node>> {
+    if path.is_empty() {
+        return match operation {
+            PatchOperation::Replace(value) => {
+                present_value(&value)?;
+                *root = value;
+                Ok(None)
+            }
+            PatchOperation::Add(_) | PatchOperation::Remove => Err(Error::InvalidValue),
+        };
+    }
     let (head, tail) = path.split_first().ok_or(Error::InvalidValue)?;
     let (properties, children) = present_parts_mut(root)?;
     match head {
         PatchPathComponent::Field(key) => {
+            let selector = PatchPathComponent::Field(key.clone());
             if let Some(property_index) = properties.iter().position(|(current, _)| current == key)
             {
-                if tail.is_empty() {
-                    return Err(Error::InvalidValue);
-                }
-                return add_at(&mut properties[property_index].1, tail, value);
+                return if tail.is_empty() {
+                    match operation {
+                        PatchOperation::Remove => Ok(Some(properties.remove(property_index).1)),
+                        PatchOperation::Replace(value) => {
+                            canonical_value(&value)?;
+                            properties[property_index].1 = value;
+                            Ok(None)
+                        }
+                        PatchOperation::Add(_) => Err(Error::InvalidValue),
+                    }
+                } else {
+                    apply_at(&mut properties[property_index].1, tail, operation)
+                };
             }
-            let selector = PatchPathComponent::Field(key.clone());
-            if let Some(child_index) = child_index(children, &selector) {
-                if tail.is_empty() {
-                    return Err(Error::InvalidValue);
-                }
-                return add_at(&mut children[child_index], tail, value);
+            if let Some(child_index) = child_index(children, &selector)? {
+                return if tail.is_empty() {
+                    match operation {
+                        PatchOperation::Remove => Ok(Some(children.remove(child_index))),
+                        PatchOperation::Replace(value) => {
+                            present_value(&value)?;
+                            if !matches_selector(&value, &selector)? {
+                                return Err(Error::InvalidValue);
+                            }
+                            children[child_index] = value;
+                            Ok(None)
+                        }
+                        PatchOperation::Add(_) => Err(Error::InvalidValue),
+                    }
+                } else {
+                    apply_at(&mut children[child_index], tail, operation)
+                };
             }
             if !tail.is_empty() {
                 return Err(Error::InvalidValue);
             }
+            let PatchOperation::Add(value) = operation else {
+                return Err(Error::InvalidValue);
+            };
             if matches!(&value, Node::Tag(TAG_PRESENT, _)) {
                 present_value(&value)?;
                 if matches_selector(&value, &selector)? {
                     children.push(value);
-                    return Ok(());
+                    return Ok(None);
                 }
                 if is_record_field_value(&value)? {
                     return Err(Error::InvalidValue);
                 }
             }
-            add_property(properties, key, value)
+            add_property(properties, key, value)?;
+            Ok(None)
         }
         PatchPathComponent::Index(index) => {
             if tail.is_empty() {
-                present_value(&value)?;
-                if *index > children.len() {
-                    return Err(Error::InvalidValue);
+                match operation {
+                    PatchOperation::Add(value) => {
+                        present_value(&value)?;
+                        if *index > children.len() {
+                            return Err(Error::InvalidValue);
+                        }
+                        children.insert(*index, value);
+                        Ok(None)
+                    }
+                    PatchOperation::Remove => (*index < children.len())
+                        .then(|| children.remove(*index))
+                        .map(Some)
+                        .ok_or(Error::InvalidValue),
+                    PatchOperation::Replace(value) => {
+                        let child = children.get_mut(*index).ok_or(Error::InvalidValue)?;
+                        present_value(&value)?;
+                        *child = value;
+                        Ok(None)
+                    }
                 }
-                children.insert(*index, value);
-                Ok(())
             } else {
-                add_at(
+                apply_at(
                     children.get_mut(*index).ok_or(Error::InvalidValue)?,
                     tail,
-                    value,
+                    operation,
                 )
             }
         }
         selector @ (PatchPathComponent::Relation(_, _) | PatchPathComponent::Key(_)) => {
-            let existing = child_index(children, selector);
+            let existing = child_index(children, selector)?;
             if tail.is_empty() {
-                present_value(&value)?;
-                if existing.is_some() || !matches_selector(&value, selector)? {
-                    return Err(Error::InvalidValue);
+                match operation {
+                    PatchOperation::Add(value) => {
+                        present_value(&value)?;
+                        if existing.is_some() || !matches_selector(&value, selector)? {
+                            return Err(Error::InvalidValue);
+                        }
+                        children.push(value);
+                        Ok(None)
+                    }
+                    PatchOperation::Remove => {
+                        let index = existing.ok_or(Error::InvalidValue)?;
+                        Ok(Some(children.remove(index)))
+                    }
+                    PatchOperation::Replace(value) => {
+                        let index = existing.ok_or(Error::InvalidValue)?;
+                        present_value(&value)?;
+                        if !matches_selector(&value, selector)? {
+                            return Err(Error::InvalidValue);
+                        }
+                        children[index] = value;
+                        Ok(None)
+                    }
                 }
-                children.push(value);
-                Ok(())
             } else {
-                add_at(
-                    children
-                        .get_mut(existing.ok_or(Error::InvalidValue)?)
-                        .ok_or(Error::InvalidValue)?,
-                    tail,
-                    value,
-                )
-            }
-        }
-    }
-}
-
-fn remove_at(root: &mut Node, path: &[PatchPathComponent]) -> Result<Node> {
-    let (head, tail) = path.split_first().ok_or(Error::InvalidValue)?;
-    let (properties, children) = present_parts_mut(root)?;
-    match head {
-        PatchPathComponent::Field(key) => {
-            if let Some(property_index) = properties.iter().position(|(current, _)| current == key)
-            {
-                if tail.is_empty() {
-                    return Ok(properties.remove(property_index).1);
-                }
-                return remove_at(&mut properties[property_index].1, tail);
-            }
-            let selector = PatchPathComponent::Field(key.clone());
-            let child_index = child_index(children, &selector).ok_or(Error::InvalidValue)?;
-            if tail.is_empty() {
-                return Ok(children.remove(child_index));
-            }
-            remove_at(&mut children[child_index], tail)
-        }
-        PatchPathComponent::Index(index) => {
-            if tail.is_empty() {
-                (*index < children.len())
-                    .then(|| children.remove(*index))
-                    .ok_or(Error::InvalidValue)
-            } else {
-                remove_at(children.get_mut(*index).ok_or(Error::InvalidValue)?, tail)
-            }
-        }
-        selector @ (PatchPathComponent::Relation(_, _) | PatchPathComponent::Key(_)) => {
-            let index = child_index(children, selector).ok_or(Error::InvalidValue)?;
-            if tail.is_empty() {
-                Ok(children.remove(index))
-            } else {
-                remove_at(&mut children[index], tail)
-            }
-        }
-    }
-}
-
-fn replace_at(root: &mut Node, path: &[PatchPathComponent], value: Node) -> Result<()> {
-    if path.is_empty() {
-        present_value(&value)?;
-        *root = value;
-        return Ok(());
-    }
-    let (head, tail) = path.split_first().ok_or(Error::InvalidValue)?;
-    let (properties, children) = present_parts_mut(root)?;
-    match head {
-        PatchPathComponent::Field(key) => {
-            if let Some(property_index) = properties.iter().position(|(current, _)| current == key)
-            {
-                let child = &mut properties[property_index].1;
-                if tail.is_empty() {
-                    canonical_value(&value)?;
-                    *child = value;
-                    return Ok(());
-                }
-                return replace_at(child, tail, value);
-            }
-            let selector = PatchPathComponent::Field(key.clone());
-            let child_index = child_index(children, &selector).ok_or(Error::InvalidValue)?;
-            let child = &mut children[child_index];
-            if tail.is_empty() {
-                present_value(&value)?;
-                if !matches_selector(&value, &selector)? {
-                    return Err(Error::InvalidValue);
-                }
-                *child = value;
-                return Ok(());
-            }
-            replace_at(child, tail, value)
-        }
-        PatchPathComponent::Index(index) => {
-            let child = children.get_mut(*index).ok_or(Error::InvalidValue)?;
-            if tail.is_empty() {
-                present_value(&value)?;
-                *child = value;
-                Ok(())
-            } else {
-                replace_at(child, tail, value)
-            }
-        }
-        selector @ (PatchPathComponent::Relation(_, _) | PatchPathComponent::Key(_)) => {
-            let index = child_index(children, selector).ok_or(Error::InvalidValue)?;
-            let child = children.get_mut(index).ok_or(Error::InvalidValue)?;
-            if tail.is_empty() {
-                present_value(&value)?;
-                if !matches_selector(&value, selector)? {
-                    return Err(Error::InvalidValue);
-                }
-                *child = value;
-                Ok(())
-            } else {
-                replace_at(child, tail, value)
+                let index = existing.ok_or(Error::InvalidValue)?;
+                apply_at(&mut children[index], tail, operation)
             }
         }
     }
@@ -1517,10 +1509,18 @@ fn validate_bounded_node(
     Ok(())
 }
 
-fn child_index(children: &[Node], selector: &PatchPathComponent) -> Option<usize> {
-    children
-        .iter()
-        .position(|child| matches_selector(child, selector).unwrap_or(false))
+/// Returns the position of the child `selector` names.
+///
+/// A malformed child is a wire error, not a non-match: swallowing it would
+/// silently address a different child (or report a missing one) for a page
+/// the caller cannot validly have sent.
+fn child_index(children: &[Node], selector: &PatchPathComponent) -> Result<Option<usize>> {
+    for (index, child) in children.iter().enumerate() {
+        if matches_selector(child, selector)? {
+            return Ok(Some(index));
+        }
+    }
+    Ok(None)
 }
 
 fn is_record_field_value(node: &Node) -> Result<bool> {
@@ -4444,5 +4444,17 @@ mod tests {
                 Err(Error::InvalidValue)
             );
         }
+    }
+
+    #[test]
+    fn child_selector_surfaces_malformed_children() {
+        let children = vec![Node::Null, named_cell("name", 1).0.0.clone()];
+        assert_eq!(
+            child_index(
+                &children,
+                &PatchPathComponent::Field(Node::Text("name".into()))
+            ),
+            Err(Error::InvalidValue)
+        );
     }
 }

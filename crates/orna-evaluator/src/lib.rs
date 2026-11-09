@@ -4030,204 +4030,250 @@ impl Value {
     /// fold can encode each relation row without first deep-copying it; only
     /// the leaves and containers that the owned raw form needs are allocated.
     fn raw(&self) -> Result<Raw, EvaluationError> {
-        Ok(match self {
-            Self::Function { .. } | Self::Closure(_) => {
-                return Err(error("ORNA-EVAL-UNSUPPORTED"));
-            }
-            Self::Relation(_) | Self::Period { .. } => {
-                return Err(error("ORNA-EVAL-UNSUPPORTED"));
+        match self {
+            // Callables, relations and calendar periods have no canonical form.
+            Self::Function { .. } | Self::Closure(_) | Self::Relation(_) | Self::Period { .. } => {
+                Err(error("ORNA-EVAL-UNSUPPORTED"))
             }
             // Error values are only available to the handling side of `|?`.
             // They must not cross the successful canonical-value boundary,
             // but a containing value must preserve the original failure while
             // propagating to that boundary.
-            Self::Error(failure) => return Err(failure.clone()),
-            Self::Null => Raw::Null,
-            Self::Unit => Raw::Tag(60014, Box::new(Raw::Array(vec![]))),
-            Self::Bool(value) => Raw::Bool(*value),
-            Self::Int(value) => Raw::Int(value.clone()),
-            Self::Decimal(value) => Raw::Tag(
-                60000,
-                Box::new(Raw::Array(vec![
-                    Raw::Int(value.coefficient.clone()),
-                    Raw::Int(value.exponent10.clone()),
-                ])),
-            ),
-            Self::Money { amount, currency } => Raw::Tag(
-                60007,
-                Box::new(Raw::Array(vec![
-                    Raw::Tag(
-                        60000,
-                        Box::new(Raw::Array(vec![
-                            Raw::Int(amount.coefficient.clone()),
-                            Raw::Int(amount.exponent10.clone()),
-                        ])),
-                    ),
-                    object_id_raw(*currency),
-                ])),
-            ),
-            Self::Float(bits) => Raw::Float(*bits),
-            Self::String(value) => Raw::Text(value.clone()),
-            Self::Blob(value) => Raw::Bytes(value.clone()),
-            Self::AnnotatedBlob(value) => value.clone(),
-            Self::ContextualBlob(value) => value.raw().clone(),
-            Self::Date(value) => Raw::Tag(60001, Box::new(Raw::Text(value.clone()))),
-            Self::Uuid(value) => object_id_raw(*value),
-            Self::Digest(value) => Raw::Tag(
-                60025,
-                Box::new(Raw::Array(vec![
-                    Raw::Text("sha256".to_owned()),
-                    Raw::Bytes(value.to_vec()),
-                ])),
-            ),
-            Self::Reference(value) => value.raw().clone(),
-            Self::TableReference(value) => value.raw().clone(),
+            Self::Error(failure) => Err(failure.clone()),
+            // A provider-backed stream is consumable, not canonical.
+            Self::Stream {
+                provider: Some(_), ..
+            } => Err(error("ORNA-EVAL-UNSUPPORTED")),
+            Self::Null => Ok(Raw::Null),
+            Self::Unit => Ok(Self::raw_unit()),
+            Self::Bool(value) => Ok(Raw::Bool(*value)),
+            Self::Int(value) => Ok(Raw::Int(value.clone())),
+            Self::Float(bits) => Ok(Raw::Float(*bits)),
+            Self::String(value) => Ok(Raw::Text(value.clone())),
+            Self::Blob(value) => Ok(Raw::Bytes(value.clone())),
+            Self::Decimal(value) => Ok(Self::raw_decimal(value)),
+            Self::Money { amount, currency } => Ok(Self::raw_money(amount, currency)),
+            Self::Date(value) => Ok(Self::raw_date(value)),
+            Self::Uuid(value) => Ok(object_id_raw(*value)),
+            Self::Digest(value) => Ok(Self::raw_digest(value)),
             Self::Instant {
                 unix_seconds,
                 nanosecond,
-            } => Raw::Tag(
-                60002,
-                Box::new(Raw::Array(vec![
-                    Raw::Int((*unix_seconds).into()),
-                    Raw::Int((*nanosecond).into()),
-                ])),
-            ),
+            } => Ok(Self::raw_instant(*unix_seconds, *nanosecond)),
             Self::Duration {
                 seconds,
                 nanosecond,
-            } => Raw::Tag(
-                60005,
-                Box::new(Raw::Array(vec![
-                    Raw::Int(seconds.clone()),
-                    Raw::Int((*nanosecond).into()),
-                ])),
-            ),
+            } => Ok(Self::raw_duration(seconds, *nanosecond)),
+            Self::AnnotatedBlob(value) => Ok(value.clone()),
+            Self::ContextualBlob(value) => Ok(value.raw().clone()),
+            Self::Reference(value) | Self::TableReference(value) => Ok(value.raw().clone()),
             Self::Range {
                 lower,
                 upper,
                 upper_inclusive,
-            } => Raw::Tag(
-                60019,
-                Box::new(Raw::Array(vec![
-                    raw_option_value(lower.as_deref())?,
-                    raw_option_value(upper.as_deref())?,
-                    Raw::Bool(*upper_inclusive),
-                ])),
-            ),
-            Self::List(values) => {
-                Raw::Array(values.iter().map(Value::raw).collect::<Result<_, _>>()?)
-            }
-            Self::Tuple(values) if values.is_empty() => {
-                Raw::Tag(60014, Box::new(Raw::Array(Vec::new())))
-            }
-            Self::Tuple(values) => Raw::Tag(
-                60015,
-                Box::new(Raw::Array(
-                    values.iter().map(Value::raw).collect::<Result<_, _>>()?,
-                )),
-            ),
-            // The finite stream's source identity and digest remain in the
-            // live evaluator value; the canonical boundary exposes its real
-            // item sequence rather than substituting a placeholder result.
+            } => Self::raw_range(lower.as_deref(), upper.as_deref(), *upper_inclusive),
+            Self::List(values) => Self::raw_list(values.as_slice()),
+            Self::Tuple(values) => Self::raw_tuple(values),
             Self::Stream {
-                values,
-                position,
-                provider,
-                ..
-            } => {
-                if provider.is_some() {
-                    return Err(error("ORNA-EVAL-UNSUPPORTED"));
-                }
-                Raw::Array(
-                    values
-                        .iter()
-                        .skip(*position)
-                        .map(Value::raw)
-                        .collect::<Result<_, _>>()?,
-                )
-            }
-            Self::Record(values) => {
-                // OVB orders map keys by complete deterministic encodings.
-                // Keep the comparator tied to that rule, including CBOR head
-                // length transitions and multi-byte Unicode field names.
-                let mut fields = values
-                    .iter()
-                    .map(|(key, value)| {
-                        if !key.nfc().eq(key.chars()) {
-                            return Err(error("ORNA-EVAL-VALUE"));
-                        }
-                        let encoded_key = CanonicalValue::new(Raw::Text(key.clone()))
-                            .map_err(|_| error("ORNA-EVAL-VALUE"))?
-                            .encode()
-                            .map_err(|_| error("ORNA-EVAL-VALUE"))?;
-                        Ok((encoded_key, key, value))
-                    })
-                    .collect::<Result<Vec<_>, EvaluationError>>()?;
-                fields.sort_by(|(left, _, _), (right, _, _)| left.cmp(right));
-                Raw::Map(
-                    fields
-                        .into_iter()
-                        .map(|(_, key, value)| {
-                            value.raw().map(|value| (Raw::Text(key.clone()), value))
-                        })
-                        .collect::<Result<_, _>>()?,
-                )
-            }
-            Self::NominalRecord { type_id, fields } => {
-                // The runtime value preserves declaration order. OVB requires
-                // canonical field-key order only at the serialization edge.
-                let mut encoded = fields
-                    .iter()
-                    .map(|(key, value)| {
-                        let encoded_key = CanonicalValue::new(key.clone())
-                            .map_err(|_| error("ORNA-EVAL-VALUE"))?
-                            .encode()
-                            .map_err(|_| error("ORNA-EVAL-VALUE"))?;
-                        Ok((encoded_key, key, value))
-                    })
-                    .collect::<Result<Vec<_>, EvaluationError>>()?;
-                encoded.sort_by(|(left, _, _), (right, _, _)| left.cmp(right));
-                Raw::Tag(
-                    60009,
-                    Box::new(Raw::Array(vec![
-                        type_id.clone(),
-                        Raw::Array(
-                            encoded
-                                .into_iter()
-                                .map(|(_, key, value)| {
-                                    value
-                                        .raw()
-                                        .map(|value| Raw::Array(vec![key.clone(), value]))
-                                })
-                                .collect::<Result<_, _>>()?,
-                        ),
-                    ])),
-                )
-            }
+                values, position, ..
+            } => Self::raw_stream(values, *position),
+            Self::Record(values) => Self::raw_record(values),
+            Self::NominalRecord { type_id, fields } => Self::raw_nominal_record(type_id, fields),
             Self::Enum {
                 type_id,
                 variant_id,
                 payload,
-            } => Raw::Tag(
-                60008,
-                Box::new(Raw::Array(vec![
-                    type_id.clone(),
-                    variant_id.clone(),
-                    payload
-                        .as_deref()
-                        .map(Value::raw)
-                        .transpose()?
-                        .unwrap_or(Raw::Null),
-                ])),
-            ),
-            Self::Option(value) => Raw::Tag(
-                60013,
-                Box::new(match value.as_deref() {
-                    Some(value) => Raw::Array(vec![Raw::Int(1.into()), value.raw()?]),
-                    None => Raw::Array(vec![Raw::Int(0.into())]),
-                }),
-            ),
-        })
+            } => Self::raw_enum(type_id, variant_id, payload.as_deref()),
+            Self::Option(value) => Self::raw_option(value.as_deref()),
+        }
+    }
+
+    fn raw_unit() -> Raw {
+        Raw::Tag(60014, Box::new(Raw::Array(vec![])))
+    }
+
+    fn raw_decimal(value: &DecimalValue) -> Raw {
+        Raw::Tag(
+            60000,
+            Box::new(Raw::Array(vec![
+                Raw::Int(value.coefficient.clone()),
+                Raw::Int(value.exponent10.clone()),
+            ])),
+        )
+    }
+
+    fn raw_money(amount: &DecimalValue, currency: &[u8; 16]) -> Raw {
+        Raw::Tag(
+            60007,
+            Box::new(Raw::Array(vec![
+                Self::raw_decimal(amount),
+                object_id_raw(*currency),
+            ])),
+        )
+    }
+
+    fn raw_date(value: &str) -> Raw {
+        Raw::Tag(60001, Box::new(Raw::Text(value.to_owned())))
+    }
+
+    fn raw_digest(value: &[u8; 32]) -> Raw {
+        Raw::Tag(
+            60025,
+            Box::new(Raw::Array(vec![
+                Raw::Text("sha256".to_owned()),
+                Raw::Bytes(value.to_vec()),
+            ])),
+        )
+    }
+
+    fn raw_instant(unix_seconds: i64, nanosecond: u32) -> Raw {
+        Raw::Tag(
+            60002,
+            Box::new(Raw::Array(vec![
+                Raw::Int(unix_seconds.into()),
+                Raw::Int(nanosecond.into()),
+            ])),
+        )
+    }
+
+    fn raw_duration(seconds: &BigInt, nanosecond: u32) -> Raw {
+        Raw::Tag(
+            60005,
+            Box::new(Raw::Array(vec![
+                Raw::Int(seconds.clone()),
+                Raw::Int(nanosecond.into()),
+            ])),
+        )
+    }
+
+    fn raw_range(
+        lower: Option<&Value>,
+        upper: Option<&Value>,
+        upper_inclusive: bool,
+    ) -> Result<Raw, EvaluationError> {
+        Ok(Raw::Tag(
+            60019,
+            Box::new(Raw::Array(vec![
+                raw_option_value(lower)?,
+                raw_option_value(upper)?,
+                Raw::Bool(upper_inclusive),
+            ])),
+        ))
+    }
+
+    fn raw_list(values: &[Value]) -> Result<Raw, EvaluationError> {
+        Ok(Raw::Array(
+            values.iter().map(Value::raw).collect::<Result<_, _>>()?,
+        ))
+    }
+
+    /// Tuples use the empty tuple's dedicated unit tag only when empty.
+    fn raw_tuple(values: &[Value]) -> Result<Raw, EvaluationError> {
+        if values.is_empty() {
+            return Ok(Raw::Tag(60014, Box::new(Raw::Array(Vec::new()))));
+        }
+        Ok(Raw::Tag(
+            60015,
+            Box::new(Raw::Array(
+                values.iter().map(Value::raw).collect::<Result<_, _>>()?,
+            )),
+        ))
+    }
+
+    /// The finite stream's source identity and digest remain in the live
+    /// evaluator value; the canonical boundary exposes its real item sequence
+    /// rather than substituting a placeholder result.
+    fn raw_stream(values: &[Value], position: usize) -> Result<Raw, EvaluationError> {
+        Ok(Raw::Array(
+            values
+                .iter()
+                .skip(position)
+                .map(Value::raw)
+                .collect::<Result<_, _>>()?,
+        ))
+    }
+
+    fn raw_record(values: &BTreeMap<String, Value>) -> Result<Raw, EvaluationError> {
+        // OVB orders map keys by complete deterministic encodings. Keep the
+        // comparator tied to that rule, including CBOR head length transitions
+        // and multi-byte Unicode field names.
+        let mut fields = values
+            .iter()
+            .map(|(key, value)| {
+                if !key.nfc().eq(key.chars()) {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+                let encoded_key = CanonicalValue::new(Raw::Text(key.clone()))
+                    .map_err(|_| error("ORNA-EVAL-VALUE"))?
+                    .encode()
+                    .map_err(|_| error("ORNA-EVAL-VALUE"))?;
+                Ok((encoded_key, key, value))
+            })
+            .collect::<Result<Vec<_>, EvaluationError>>()?;
+        fields.sort_by(|(left, _, _), (right, _, _)| left.cmp(right));
+        Ok(Raw::Map(
+            fields
+                .into_iter()
+                .map(|(_, key, value)| value.raw().map(|value| (Raw::Text(key.clone()), value)))
+                .collect::<Result<_, _>>()?,
+        ))
+    }
+
+    fn raw_nominal_record(type_id: &Raw, fields: &[(Raw, Value)]) -> Result<Raw, EvaluationError> {
+        // The runtime value preserves declaration order. OVB requires
+        // canonical field-key order only at the serialization edge.
+        let mut encoded = fields
+            .iter()
+            .map(|(key, value)| {
+                let encoded_key = CanonicalValue::new(key.clone())
+                    .map_err(|_| error("ORNA-EVAL-VALUE"))?
+                    .encode()
+                    .map_err(|_| error("ORNA-EVAL-VALUE"))?;
+                Ok((encoded_key, key, value))
+            })
+            .collect::<Result<Vec<_>, EvaluationError>>()?;
+        encoded.sort_by(|(left, _, _), (right, _, _)| left.cmp(right));
+        Ok(Raw::Tag(
+            60009,
+            Box::new(Raw::Array(vec![
+                type_id.clone(),
+                Raw::Array(
+                    encoded
+                        .into_iter()
+                        .map(|(_, key, value)| {
+                            value
+                                .raw()
+                                .map(|value| Raw::Array(vec![key.clone(), value]))
+                        })
+                        .collect::<Result<_, _>>()?,
+                ),
+            ])),
+        ))
+    }
+
+    fn raw_enum(
+        type_id: &Raw,
+        variant_id: &Raw,
+        payload: Option<&Value>,
+    ) -> Result<Raw, EvaluationError> {
+        Ok(Raw::Tag(
+            60008,
+            Box::new(Raw::Array(vec![
+                type_id.clone(),
+                variant_id.clone(),
+                payload.map(Value::raw).transpose()?.unwrap_or(Raw::Null),
+            ])),
+        ))
+    }
+
+    fn raw_option(value: Option<&Value>) -> Result<Raw, EvaluationError> {
+        Ok(Raw::Tag(
+            60013,
+            Box::new(match value {
+                Some(value) => Raw::Array(vec![Raw::Int(1.into()), value.raw()?]),
+                None => Raw::Array(vec![Raw::Int(0.into())]),
+            }),
+        ))
     }
     fn from_canonical(
         value: &CanonicalValue,

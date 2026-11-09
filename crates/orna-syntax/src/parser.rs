@@ -1789,6 +1789,13 @@ const LEGACY_FORMS: &[LegacyForm] = &[
     },
 ];
 
+/// What the block loop does after one block item.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BlockStep {
+    Next,
+    End,
+}
+
 struct Parser {
     tokens: Vec<Token>,
     at: usize,
@@ -3073,94 +3080,12 @@ impl Parser {
             TokenKind::Identifier { .. } | TokenKind::Keyword(Keyword::SelfValue) => {
                 self.bump();
                 if self.is_punct(".") || self.is_punct("{") || self.is_punct("(") {
-                    let mut path = vec![NameSegment {
-                        text: token.text.clone(),
-                        span: token.span.clone(),
-                    }];
-                    while self.is_punct(".") {
-                        self.bump();
-                        if self.contextual() {
-                            path.push(NameSegment {
-                                text: self.current().text.clone(),
-                                span: self.current().span.clone(),
-                            });
-                            self.bump()
-                        } else {
-                            self.error_here("ORNA-PARSE-001", "expected qualified pattern segment");
-                            break;
-                        }
-                    }
-                    let mut arguments = Vec::new();
-                    let mut fields = Vec::new();
-                    if self.is_punct("{") && path.len() == 1 {
-                        self.error_here(
-                            "ORNA-PARSE-001",
-                            "enum record pattern requires a qualified variant",
-                        );
-                    } else if self.is_punct("{") {
-                        self.bump();
-                        while !self.eof() && !self.is_punct("}") {
-                            if !self.contextual() {
-                                self.error_here(
-                                    "ORNA-PARSE-001",
-                                    "expected enum-record pattern field",
-                                );
-                                break;
-                            }
-                            let field = self.current().clone();
-                            self.bump();
-                            let pattern = if self.is_punct(":") {
-                                self.bump();
-                                Some(self.parse_pattern())
-                            } else {
-                                None
-                            };
-                            let end = pattern.as_ref().map_or_else(
-                                || field.span.clone(),
-                                |pattern| pattern.span().clone(),
-                            );
-                            fields.push(PatternField {
-                                name: field.text,
-                                pattern,
-                                span: field.span.join(end),
-                            });
-                            if self.is_punct(",") {
-                                self.bump()
-                            } else {
-                                break;
-                            }
-                        }
-                        if self.is_punct("}") {
-                            self.bump()
-                        } else {
-                            self.error_here("ORNA-PARSE-003", "unterminated enum-record pattern")
-                        }
-                    } else if self.is_punct("(") {
-                        self.bump();
-                        while !self.eof() && !self.is_punct(")") {
-                            arguments.push(self.parse_pattern());
-                            if self.is_punct(",") {
-                                self.bump()
-                            } else {
-                                break;
-                            }
-                        }
-                        if self.is_punct(")") {
-                            self.bump()
-                        } else {
-                            self.error_here("ORNA-PARSE-003", "unterminated constructor pattern")
-                        }
-                    }
-                    Pattern::Constructor {
-                        path,
-                        arguments,
-                        fields,
-                        span: token.span.join(self.previous().span.clone()),
-                    }
+                    self.constructor_pattern(token)
                 } else {
                     Pattern::Name(token.text, token.span)
                 }
             }
+            TokenKind::Punct("(" | "{" | "[") => self.delimited_pattern(token),
             TokenKind::Integer
             | TokenKind::Decimal
             | TokenKind::Float
@@ -3179,76 +3104,6 @@ impl Parser {
                 self.bump();
                 Pattern::Wildcard(token.span)
             }
-            TokenKind::Punct("(" | "{" | "[") => {
-                let open = token.text.clone();
-                let close = match open.as_str() {
-                    "(" => ")",
-                    "{" => "}",
-                    _ => "]",
-                };
-                self.bump();
-                if open == "{" {
-                    let mut fields = Vec::new();
-                    while !self.eof() && !self.is_punct(close) {
-                        let field = self.current().clone();
-                        if !self.contextual() {
-                            self.error_here("ORNA-PARSE-001", "expected record pattern field");
-                            break;
-                        }
-                        self.bump();
-                        let value = if self.is_punct(":") {
-                            self.bump();
-                            Some(self.parse_pattern())
-                        } else {
-                            None
-                        };
-                        let span =
-                            field.span.clone().join(value.as_ref().map_or_else(
-                                || field.span.clone(),
-                                |pattern| pattern.span().clone(),
-                            ));
-                        fields.push((field.text, value, span));
-                        if self.is_punct(",") {
-                            self.bump()
-                        } else {
-                            break;
-                        }
-                    }
-                    if self.is_punct(close) {
-                        self.bump()
-                    } else {
-                        self.error_here("ORNA-PARSE-003", "unterminated record pattern")
-                    }
-                    return Pattern::Record {
-                        fields,
-                        span: token.span.join(self.previous().span.clone()),
-                    };
-                }
-                let mut elements = Vec::new();
-                let mut saw_comma = false;
-                while !self.eof() && !self.is_punct(close) {
-                    elements.push(self.parse_pattern());
-                    if self.is_punct(",") {
-                        self.bump();
-                        saw_comma = true;
-                    } else {
-                        break;
-                    }
-                }
-                if self.is_punct(close) {
-                    self.bump()
-                } else {
-                    self.error_here("ORNA-PARSE-003", "unterminated pattern")
-                }
-                let span = token.span.join(self.previous().span.clone());
-                match open.as_str() {
-                    // A parenthesised pattern without a comma is grouping, not a tuple.
-                    "(" if !saw_comma && elements.len() == 1 => elements.swap_remove(0),
-                    "(" => Pattern::Tuple { elements, span },
-                    "[" => Pattern::List { elements, span },
-                    _ => unreachable!(),
-                }
-            }
             _ => {
                 self.error_here("ORNA-PARSE-001", "expected pattern");
                 Pattern::Record {
@@ -3258,6 +3113,161 @@ impl Parser {
             }
         }
     }
+
+    fn constructor_pattern(&mut self, token: Token) -> Pattern {
+        let mut path = vec![NameSegment {
+            text: token.text.clone(),
+            span: token.span.clone(),
+        }];
+        while self.is_punct(".") {
+            self.bump();
+            if self.contextual() {
+                path.push(NameSegment {
+                    text: self.current().text.clone(),
+                    span: self.current().span.clone(),
+                });
+                self.bump()
+            } else {
+                self.error_here("ORNA-PARSE-001", "expected qualified pattern segment");
+                break;
+            }
+        }
+        let mut arguments = Vec::new();
+        let mut fields = Vec::new();
+        if self.is_punct("{") && path.len() == 1 {
+            self.error_here(
+                "ORNA-PARSE-001",
+                "enum record pattern requires a qualified variant",
+            );
+        } else if self.is_punct("{") {
+            self.bump();
+            while !self.eof() && !self.is_punct("}") {
+                if !self.contextual() {
+                    self.error_here("ORNA-PARSE-001", "expected enum-record pattern field");
+                    break;
+                }
+                let field = self.current().clone();
+                self.bump();
+                let pattern = if self.is_punct(":") {
+                    self.bump();
+                    Some(self.parse_pattern())
+                } else {
+                    None
+                };
+                let end = pattern
+                    .as_ref()
+                    .map_or_else(|| field.span.clone(), |pattern| pattern.span().clone());
+                fields.push(PatternField {
+                    name: field.text,
+                    pattern,
+                    span: field.span.join(end),
+                });
+                if self.is_punct(",") {
+                    self.bump()
+                } else {
+                    break;
+                }
+            }
+            if self.is_punct("}") {
+                self.bump()
+            } else {
+                self.error_here("ORNA-PARSE-003", "unterminated enum-record pattern")
+            }
+        } else if self.is_punct("(") {
+            self.bump();
+            while !self.eof() && !self.is_punct(")") {
+                arguments.push(self.parse_pattern());
+                if self.is_punct(",") {
+                    self.bump()
+                } else {
+                    break;
+                }
+            }
+            if self.is_punct(")") {
+                self.bump()
+            } else {
+                self.error_here("ORNA-PARSE-003", "unterminated constructor pattern")
+            }
+        }
+        Pattern::Constructor {
+            path,
+            arguments,
+            fields,
+            span: token.span.join(self.previous().span.clone()),
+        }
+    }
+
+    fn delimited_pattern(&mut self, token: Token) -> Pattern {
+        let open = token.text.clone();
+        let close = match open.as_str() {
+            "(" => ")",
+            "{" => "}",
+            _ => "]",
+        };
+        self.bump();
+        if open == "{" {
+            let mut fields = Vec::new();
+            while !self.eof() && !self.is_punct(close) {
+                let field = self.current().clone();
+                if !self.contextual() {
+                    self.error_here("ORNA-PARSE-001", "expected record pattern field");
+                    break;
+                }
+                self.bump();
+                let value = if self.is_punct(":") {
+                    self.bump();
+                    Some(self.parse_pattern())
+                } else {
+                    None
+                };
+                let span = field.span.clone().join(
+                    value
+                        .as_ref()
+                        .map_or_else(|| field.span.clone(), |pattern| pattern.span().clone()),
+                );
+                fields.push((field.text, value, span));
+                if self.is_punct(",") {
+                    self.bump()
+                } else {
+                    break;
+                }
+            }
+            if self.is_punct(close) {
+                self.bump()
+            } else {
+                self.error_here("ORNA-PARSE-003", "unterminated record pattern")
+            }
+            return Pattern::Record {
+                fields,
+                span: token.span.join(self.previous().span.clone()),
+            };
+        }
+        let mut elements = Vec::new();
+        let mut saw_comma = false;
+        while !self.eof() && !self.is_punct(close) {
+            elements.push(self.parse_pattern());
+            if self.is_punct(",") {
+                self.bump();
+                saw_comma = true;
+            } else {
+                break;
+            }
+        }
+        if self.is_punct(close) {
+            self.bump()
+        } else {
+            self.error_here("ORNA-PARSE-003", "unterminated pattern")
+        }
+        let span = token.span.join(self.previous().span.clone());
+        match open.as_str() {
+            // A parenthesised pattern without a comma is grouping, not a tuple.
+            "(" if !saw_comma && elements.len() == 1 => elements.swap_remove(0),
+            "(" => Pattern::Tuple { elements, span },
+            "[" => Pattern::List { elements, span },
+            _ => unreachable!(),
+        }
+    }
+
     fn parse_interpolated_string(&mut self) -> Expr {
         let start = self.current().span.clone();
         self.bump();
@@ -3362,179 +3372,19 @@ impl Parser {
         }
         self.bump();
         while !self.eof() && !self.is_punct("}") {
-            match self.keyword() {
-                Some(Keyword::Let) => {
-                    let statement_start = self.current().span.clone();
-                    self.bump();
-                    let pattern = self.parse_pattern();
-                    let annotation = if self.is_punct(":") {
-                        self.bump();
-                        self.parse_type_expr()
-                    } else {
-                        None
-                    };
-                    if self.is_punct("=") {
-                        self.bump();
-                        let value = self.expr().unwrap_or(Expr::Tuple {
-                            elements: Vec::new(),
-                            span: statement_start.clone(),
-                        });
-                        let end = value.span();
-                        statements.push(Statement::Let {
-                            pattern,
-                            annotation,
-                            value,
-                            span: statement_start.join(end),
-                        });
-                    } else {
-                        self.error_here("ORNA-PARSE-001", "expected `=` in let statement")
-                    }
-                    if self.is_punct(";") {
-                        self.bump()
-                    } else {
-                        self.error_here("ORNA-PARSE-002", MissingSemicolon::LetStatement.message());
-                        break;
-                    }
-                }
-                Some(Keyword::Assert) => {
-                    let statement_start = self.current().span.clone();
-                    self.bump();
-                    let (value, terminated) = self.parse_assertion_clause(
-                        statement_start.clone(),
-                        false,
-                        MissingSemicolon::AssertionItem,
-                    );
-                    if let Some(value) = value {
-                        let end = value.span();
-                        statements.push(Statement::Assert {
-                            value,
-                            span: statement_start.join(end),
-                        });
-                    }
-                    if !terminated {
-                        break;
-                    }
-                }
+            let step = match self.keyword() {
+                Some(Keyword::Let) => self.block_let_statement(&mut statements),
+                Some(Keyword::Assert) => self.block_assert_statement(&mut statements),
                 Some(Keyword::Return | Keyword::Break | Keyword::Continue) => {
-                    let statement_start = self.current().span.clone();
-                    let keyword = self.keyword();
-                    self.bump();
-                    let value = if !self.is_punct(";") {
-                        self.expr()
-                    } else {
-                        None
-                    };
-                    let end = value
-                        .as_ref()
-                        .map(Expr::span)
-                        .unwrap_or_else(|| statement_start.clone());
-                    match keyword {
-                        Some(Keyword::Return) => statements.push(Statement::Return {
-                            value,
-                            span: statement_start.join(end),
-                        }),
-                        Some(Keyword::Break) => statements.push(Statement::Break {
-                            value,
-                            span: statement_start.join(end),
-                        }),
-                        _ => {
-                            if let Some(value) = &value {
-                                self.errors.push(Diagnostic::error(
-                                    "ORNA-PARSE-002",
-                                    "`continue` takes no value",
-                                    value.span(),
-                                ));
-                            }
-                            statements.push(Statement::Continue {
-                                span: statement_start,
-                            });
-                        }
-                    }
-                    if self.is_punct(";") {
-                        self.bump()
-                    } else {
-                        self.error_here(
-                            "ORNA-PARSE-002",
-                            MissingSemicolon::ControlStatement.message(),
-                        );
-                        break;
-                    }
+                    self.block_jump_statement(&mut statements)
                 }
                 Some(
                     Keyword::For | Keyword::While | Keyword::Loop | Keyword::If | Keyword::Case,
-                ) => {
-                    let value = self.parse_control_block_item();
-                    let span = value.span();
-                    if self.is_punct(";") {
-                        if matches!(&value, Expr::Control { .. }) {
-                            statements.push(Statement::Control { value, span });
-                        } else {
-                            statements.push(Statement::Expression { value, span });
-                        }
-                        self.bump()
-                    } else if self.is_punct("}") {
-                        tail = Some(Box::new(value));
-                        break;
-                    } else if matches!(&value, Expr::Control { .. }) {
-                        statements.push(Statement::Control { value, span });
-                    } else {
-                        statements.push(Statement::Expression { value, span });
-                        self.error_here(
-                            "ORNA-PARSE-002",
-                            MissingSemicolon::ExpressionStatement.message(),
-                        );
-                        // The expression parser stopped at the next block
-                        // item. Diagnose the missing boundary, then let the
-                        // block loop parse that item so a later final tail is
-                        // retained in the malformed tree.
-                        continue;
-                    }
-                }
-                _ => {
-                    if self.assignment_follows() {
-                        let statement_start = self.current().span.clone();
-                        let target = self.parse_assignment_target();
-                        let operator = match self.current().text.as_str() {
-                            "=" => AssignmentOperator::Set,
-                            "+=" => AssignmentOperator::Add,
-                            "-=" => AssignmentOperator::Subtract,
-                            "*=" => AssignmentOperator::Multiply,
-                            "/=" => AssignmentOperator::Divide,
-                            _ => unreachable!(
-                                "assignment_follows accepted a non-assignment operator"
-                            ),
-                        };
-                        self.bump();
-                        let value = self.expr().unwrap_or(Expr::Tuple {
-                            elements: Vec::new(),
-                            span: statement_start.clone(),
-                        });
-                        let end = value.span();
-                        statements.push(Statement::Assignment {
-                            target,
-                            operator,
-                            value,
-                            span: statement_start.join(end),
-                        });
-                    } else {
-                        let value = match self.expr() {
-                            Some(value) => value,
-                            None => break,
-                        };
-                        let span = value.span();
-                        if self.is_punct(";") {
-                            statements.push(Statement::Expression { value, span })
-                        } else {
-                            tail = Some(Box::new(value));
-                            break;
-                        }
-                    }
-                    if self.is_punct(";") {
-                        self.bump()
-                    } else {
-                        break;
-                    }
-                }
+                ) => self.block_control_statement(&mut statements, &mut tail),
+                _ => self.block_expression_statement(&mut statements, &mut tail),
+            };
+            if matches!(step, BlockStep::End) {
+                break;
             }
         }
         if self.is_punct("}") {
@@ -3553,6 +3403,193 @@ impl Parser {
             self.error_expr()
         }
     }
+
+    fn block_let_statement(&mut self, statements: &mut Vec<Statement>) -> BlockStep {
+        let statement_start = self.current().span.clone();
+        self.bump();
+        let pattern = self.parse_pattern();
+        let annotation = if self.is_punct(":") {
+            self.bump();
+            self.parse_type_expr()
+        } else {
+            None
+        };
+        if self.is_punct("=") {
+            self.bump();
+            let value = self.expr().unwrap_or(Expr::Tuple {
+                elements: Vec::new(),
+                span: statement_start.clone(),
+            });
+            let end = value.span();
+            statements.push(Statement::Let {
+                pattern,
+                annotation,
+                value,
+                span: statement_start.join(end),
+            });
+        } else {
+            self.error_here("ORNA-PARSE-001", "expected `=` in let statement")
+        }
+        if self.is_punct(";") {
+            self.bump();
+            BlockStep::Next
+        } else {
+            self.error_here("ORNA-PARSE-002", MissingSemicolon::LetStatement.message());
+            BlockStep::End
+        }
+    }
+
+    fn block_assert_statement(&mut self, statements: &mut Vec<Statement>) -> BlockStep {
+        let statement_start = self.current().span.clone();
+        self.bump();
+        let (value, terminated) = self.parse_assertion_clause(
+            statement_start.clone(),
+            false,
+            MissingSemicolon::AssertionItem,
+        );
+        if let Some(value) = value {
+            let end = value.span();
+            statements.push(Statement::Assert {
+                value,
+                span: statement_start.join(end),
+            });
+        }
+        if terminated {
+            BlockStep::Next
+        } else {
+            BlockStep::End
+        }
+    }
+
+    fn block_jump_statement(&mut self, statements: &mut Vec<Statement>) -> BlockStep {
+        let statement_start = self.current().span.clone();
+        let keyword = self.keyword();
+        self.bump();
+        let value = if !self.is_punct(";") {
+            self.expr()
+        } else {
+            None
+        };
+        let end = value
+            .as_ref()
+            .map(Expr::span)
+            .unwrap_or_else(|| statement_start.clone());
+        match keyword {
+            Some(Keyword::Return) => statements.push(Statement::Return {
+                value,
+                span: statement_start.join(end),
+            }),
+            Some(Keyword::Break) => statements.push(Statement::Break {
+                value,
+                span: statement_start.join(end),
+            }),
+            _ => {
+                if let Some(value) = &value {
+                    self.errors.push(Diagnostic::error(
+                        "ORNA-PARSE-002",
+                        "`continue` takes no value",
+                        value.span(),
+                    ));
+                }
+                statements.push(Statement::Continue {
+                    span: statement_start,
+                });
+            }
+        }
+        if self.is_punct(";") {
+            self.bump();
+            BlockStep::Next
+        } else {
+            self.error_here(
+                "ORNA-PARSE-002",
+                MissingSemicolon::ControlStatement.message(),
+            );
+            BlockStep::End
+        }
+    }
+
+    fn block_control_statement(
+        &mut self,
+        statements: &mut Vec<Statement>,
+        tail: &mut Option<Box<Expr>>,
+    ) -> BlockStep {
+        let value = self.parse_control_block_item();
+        let span = value.span();
+        if self.is_punct(";") {
+            if matches!(&value, Expr::Control { .. }) {
+                statements.push(Statement::Control { value, span });
+            } else {
+                statements.push(Statement::Expression { value, span });
+            }
+            self.bump();
+            BlockStep::Next
+        } else if self.is_punct("}") {
+            *tail = Some(Box::new(value));
+            BlockStep::End
+        } else if matches!(&value, Expr::Control { .. }) {
+            statements.push(Statement::Control { value, span });
+            BlockStep::Next
+        } else {
+            statements.push(Statement::Expression { value, span });
+            self.error_here(
+                "ORNA-PARSE-002",
+                MissingSemicolon::ExpressionStatement.message(),
+            );
+            // The expression parser stopped at the next block item. Diagnose
+            // the missing boundary, then let the block loop parse that item so
+            // a later final tail is retained in the malformed tree.
+            BlockStep::Next
+        }
+    }
+
+    fn block_expression_statement(
+        &mut self,
+        statements: &mut Vec<Statement>,
+        tail: &mut Option<Box<Expr>>,
+    ) -> BlockStep {
+        if self.assignment_follows() {
+            let statement_start = self.current().span.clone();
+            let target = self.parse_assignment_target();
+            let operator = match self.current().text.as_str() {
+                "=" => AssignmentOperator::Set,
+                "+=" => AssignmentOperator::Add,
+                "-=" => AssignmentOperator::Subtract,
+                "*=" => AssignmentOperator::Multiply,
+                "/=" => AssignmentOperator::Divide,
+                _ => unreachable!("assignment_follows accepted a non-assignment operator"),
+            };
+            self.bump();
+            let value = self.expr().unwrap_or(Expr::Tuple {
+                elements: Vec::new(),
+                span: statement_start.clone(),
+            });
+            let end = value.span();
+            statements.push(Statement::Assignment {
+                target,
+                operator,
+                value,
+                span: statement_start.join(end),
+            });
+        } else {
+            let Some(value) = self.expr() else {
+                return BlockStep::End;
+            };
+            let span = value.span();
+            if self.is_punct(";") {
+                statements.push(Statement::Expression { value, span })
+            } else {
+                *tail = Some(Box::new(value));
+                return BlockStep::End;
+            }
+        }
+        if self.is_punct(";") {
+            self.bump();
+            BlockStep::Next
+        } else {
+            BlockStep::End
+        }
+    }
+
     /// Parses a block item that begins with `if`, `case`, `for`, `while` or
     /// `loop`. Under ORNA-PARSE-002 the braced control expression is a whole
     /// item when another block item follows, so a following `(`, `[`, `-`,
@@ -4531,90 +4568,59 @@ impl Parser {
     fn prefix(&mut self, mode: NominalBraceMode, allow_lambda: bool) -> Option<Expr> {
         let t = self.current().clone();
         if matches!(t.kind, TokenKind::Punct(".." | "..=")) {
-            self.bump();
-            if !self.can_start_expression() {
-                self.error_here("ORNA-PARSE-001", "expected range upper endpoint");
-                return Some(Expr::Range {
-                    lower: None,
-                    operator: t.text,
-                    upper: None,
-                    span: t.span,
-                });
-            }
-            let upper = self.recurse(|parser| parser.pratt(7, mode))?;
-            let span = t.span.join(upper.span());
-            return Some(Expr::Range {
-                lower: None,
-                operator: t.text,
-                upper: Some(Box::new(upper)),
-                span,
-            });
+            return self.prefix_range(mode, t);
         }
         if matches!(
             t.kind,
             TokenKind::Punct("!") | TokenKind::Punct("-") | TokenKind::Punct("+")
         ) {
-            self.bump();
-            // Unary operators bind below the complete postfix spine. This
-            // keeps `-value.field`, `-value.call()`, and `-value[index]`
-            // equivalent to applying the operator to the selected value.
-            let rhs = self.recurse(|parser| parser.pratt(10, mode))?;
-            if !self.within_depth(expr_depth(&rhs) + 1) {
-                return None;
-            }
-            let end = rhs.span();
-            return Some(Expr::Unary {
-                op: t.text,
-                rhs: Box::new(rhs),
-                span: t.span.join(end),
+            return self.prefix_unary(mode, t);
+        }
+        self.prefix_primary(allow_lambda, t)
+    }
+
+    fn prefix_range(&mut self, mode: NominalBraceMode, t: Token) -> Option<Expr> {
+        self.bump();
+        if !self.can_start_expression() {
+            self.error_here("ORNA-PARSE-001", "expected range upper endpoint");
+            return Some(Expr::Range {
+                lower: None,
+                operator: t.text,
+                upper: None,
+                span: t.span,
             });
         }
+        let upper = self.recurse(|parser| parser.pratt(7, mode))?;
+        let span = t.span.join(upper.span());
+        Some(Expr::Range {
+            lower: None,
+            operator: t.text,
+            upper: Some(Box::new(upper)),
+            span,
+        })
+    }
+
+    fn prefix_unary(&mut self, mode: NominalBraceMode, t: Token) -> Option<Expr> {
+        self.bump();
+        // Unary operators bind below the complete postfix spine. This keeps
+        // `-value.field`, `-value.call()`, and `-value[index]` equivalent to
+        // applying the operator to the selected value.
+        let rhs = self.recurse(|parser| parser.pratt(10, mode))?;
+        if !self.within_depth(expr_depth(&rhs) + 1) {
+            return None;
+        }
+        let end = rhs.span();
+        Some(Expr::Unary {
+            op: t.text,
+            rhs: Box::new(rhs),
+            span: t.span.join(end),
+        })
+    }
+
+    fn prefix_primary(&mut self, allow_lambda: bool, t: Token) -> Option<Expr> {
         match t.kind {
             TokenKind::Identifier { .. } | TokenKind::Keyword(Keyword::SelfValue) => {
-                if matches!(t.kind, TokenKind::Identifier { .. })
-                    && t.text == "match"
-                    && self.is_legacy_match_expression(self.at)
-                {
-                    self.errors.push(Diagnostic::error(
-                        "ORNA091-E-MATCH",
-                        "use `case` with colon-delimited arms",
-                        t.span.clone(),
-                    ));
-                }
-                self.bump();
-                if allow_lambda
-                    && matches!(t.kind, TokenKind::Identifier { .. })
-                    && self.is_punct("=>")
-                {
-                    self.bump();
-                    let body = self.parse_lambda_body();
-                    return Some(Expr::Lambda {
-                        parameters: vec![LambdaParameter {
-                            pattern: Pattern::Name(t.text, t.span.clone()),
-                            annotation: None,
-                            span: t.span.clone(),
-                        }],
-                        span: t.span.join(body.span()),
-                        body: Box::new(body),
-                    });
-                }
-                if let Some(type_arguments) = self.generic_call_type_arguments() {
-                    let arguments = self.parse_arguments();
-                    let end = self.previous().span.end;
-                    return Some(Expr::GenericCall {
-                        callee: Box::new(Expr::Name {
-                            text: t.text,
-                            span: t.span.clone(),
-                        }),
-                        type_arguments,
-                        arguments,
-                        span: SourceSpan::new(t.span.start, end),
-                    });
-                }
-                Some(Expr::Name {
-                    text: t.text,
-                    span: t.span,
-                })
+                self.identifier_expression(t, allow_lambda)
             }
             TokenKind::Integer
             | TokenKind::Decimal
@@ -4641,65 +4647,7 @@ impl Parser {
             TokenKind::Keyword(
                 Keyword::If | Keyword::Case | Keyword::For | Keyword::While | Keyword::Loop,
             ) => Some(self.parse_control_expression()),
-            TokenKind::Punct("(") => {
-                if allow_lambda && self.group_followed_by_arrow() {
-                    let parameters = self.parse_lambda_parameters();
-                    self.bump();
-                    let body = self.parse_lambda_body();
-                    return Some(Expr::Lambda {
-                        parameters,
-                        body: Box::new(body),
-                        span: t.span.join(self.previous().span.clone()),
-                    });
-                }
-                self.bump();
-                if self.is_punct(")") {
-                    self.bump();
-                    return Some(Expr::Tuple {
-                        elements: Vec::new(),
-                        span: t.span.join(self.previous().span.clone()),
-                    });
-                }
-                let inner = self.expr()?;
-                self.reject_assignment_expression();
-                if self.is_punct(",") {
-                    let mut elements = vec![inner];
-                    while self.is_punct(",") {
-                        self.bump();
-                        if self.is_punct(")") {
-                            break;
-                        }
-                        if let Some(value) = self.expr() {
-                            elements.push(value);
-                            self.reject_assignment_expression();
-                        } else {
-                            break;
-                        }
-                    }
-                    if self.is_punct(")") {
-                        self.bump()
-                    } else {
-                        self.error_here("ORNA-PARSE-001", "expected `)` after tuple")
-                    }
-                    return Some(Expr::Tuple {
-                        elements,
-                        span: t.span.join(self.previous().span.clone()),
-                    });
-                }
-                if !self.is_punct(")") {
-                    self.error_here("ORNA-PARSE-001", "expected `)`")
-                } else {
-                    self.bump()
-                }
-                let span = t.span.join(self.previous().span.clone());
-                if !self.within_depth(expr_depth(&inner) + 1) {
-                    return None;
-                }
-                Some(Expr::Group {
-                    inner: Box::new(inner),
-                    span,
-                })
-            }
+            TokenKind::Punct("(") => self.parenthesized_or_lambda(allow_lambda, t),
             TokenKind::Punct("{") => {
                 let fields = self.parse_record();
                 Some(Expr::Record {
@@ -4720,6 +4668,111 @@ impl Parser {
             }
         }
     }
+
+    fn identifier_expression(&mut self, t: Token, allow_lambda: bool) -> Option<Expr> {
+        if matches!(t.kind, TokenKind::Identifier { .. })
+            && t.text == "match"
+            && self.is_legacy_match_expression(self.at)
+        {
+            self.errors.push(Diagnostic::error(
+                "ORNA091-E-MATCH",
+                "use `case` with colon-delimited arms",
+                t.span.clone(),
+            ));
+        }
+        self.bump();
+        if allow_lambda && matches!(t.kind, TokenKind::Identifier { .. }) && self.is_punct("=>") {
+            self.bump();
+            let body = self.parse_lambda_body();
+            return Some(Expr::Lambda {
+                parameters: vec![LambdaParameter {
+                    pattern: Pattern::Name(t.text, t.span.clone()),
+                    annotation: None,
+                    span: t.span.clone(),
+                }],
+                span: t.span.join(body.span()),
+                body: Box::new(body),
+            });
+        }
+        if let Some(type_arguments) = self.generic_call_type_arguments() {
+            let arguments = self.parse_arguments();
+            let end = self.previous().span.end;
+            return Some(Expr::GenericCall {
+                callee: Box::new(Expr::Name {
+                    text: t.text,
+                    span: t.span.clone(),
+                }),
+                type_arguments,
+                arguments,
+                span: SourceSpan::new(t.span.start, end),
+            });
+        }
+        Some(Expr::Name {
+            text: t.text,
+            span: t.span,
+        })
+    }
+
+    fn parenthesized_or_lambda(&mut self, allow_lambda: bool, t: Token) -> Option<Expr> {
+        if allow_lambda && self.group_followed_by_arrow() {
+            let parameters = self.parse_lambda_parameters();
+            self.bump();
+            let body = self.parse_lambda_body();
+            return Some(Expr::Lambda {
+                parameters,
+                body: Box::new(body),
+                span: t.span.join(self.previous().span.clone()),
+            });
+        }
+        self.bump();
+        if self.is_punct(")") {
+            self.bump();
+            return Some(Expr::Tuple {
+                elements: Vec::new(),
+                span: t.span.join(self.previous().span.clone()),
+            });
+        }
+        let inner = self.expr()?;
+        self.reject_assignment_expression();
+        if self.is_punct(",") {
+            let mut elements = vec![inner];
+            while self.is_punct(",") {
+                self.bump();
+                if self.is_punct(")") {
+                    break;
+                }
+                if let Some(value) = self.expr() {
+                    elements.push(value);
+                    self.reject_assignment_expression();
+                } else {
+                    break;
+                }
+            }
+            if self.is_punct(")") {
+                self.bump()
+            } else {
+                self.error_here("ORNA-PARSE-001", "expected `)` after tuple")
+            }
+            return Some(Expr::Tuple {
+                elements,
+                span: t.span.join(self.previous().span.clone()),
+            });
+        }
+        if !self.is_punct(")") {
+            self.error_here("ORNA-PARSE-001", "expected `)`")
+        } else {
+            self.bump()
+        }
+        let span = t.span.join(self.previous().span.clone());
+        if !self.within_depth(expr_depth(&inner) + 1) {
+            return None;
+        }
+        Some(Expr::Group {
+            inner: Box::new(inner),
+            span,
+        })
+    }
+
     fn parse_record(&mut self) -> Vec<RecordField> {
         let mut fields = Vec::new();
         self.bump();

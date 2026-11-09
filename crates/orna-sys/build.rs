@@ -3,19 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[path = "src/abi_version.rs"]
-mod abi_version;
-// These modules are compiled into the build script and, by path, into the
-// parity test targets. Each inclusion sees only part of their uses, so the
-// allow sits on each inclusion rather than inside the files.
-#[path = "src/host_registry_model.rs"]
-#[allow(dead_code)]
-mod host_registry_model;
-
-#[allow(dead_code)]
-mod build_host;
-mod build_provider;
-mod build_support;
+use orna_sys_codegen::{build_host, build_provider, build_support};
 
 use build_support::{collect_rust_sources, generate_sys_artifacts, rust_sources};
 
@@ -90,15 +78,11 @@ fn build_id(manifest: &Path) -> String {
 fn main() {
     let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("manifest directory"));
     let source_root = manifest.join("src");
-    let build_support_path = manifest.join("build_support.rs");
-    let build_host_path = manifest.join("build_host.rs");
-    let build_provider_path = manifest.join("build_provider.rs");
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed={}", build_support_path.display());
-    println!("cargo:rerun-if-changed={}", build_host_path.display());
-    println!("cargo:rerun-if-changed={}", build_provider_path.display());
     // Watch the directory recursively so adding a new annotated module also
     // invalidates the collected schema, even before that file is known here.
+    // The codegen crate itself is a build dependency, so Cargo reruns this
+    // script when any of its sources change.
     println!("cargo:rerun-if-changed={}", source_root.display());
 
     // `sys.RuntimeInfo` coordinates this build reports; see `src/host_context.rs`.
