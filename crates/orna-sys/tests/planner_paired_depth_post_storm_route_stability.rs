@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 
 use orna_sys::{
     DisjunctStormBranchDescription, DisjunctStormCascadeDescription,
-    DisjunctStormLimitRebindDescription, ExpressionRef, ObjectRef, PlanByteCapHandoffRoute,
-    PlanByteCapScopeSegment, PlanDetail, PlanNodeKind, QueryPlanDescription, QuerySourceStatistics,
-    SnapshotRef, explain_query_with_disjunct_storm_branch_limit_chains,
+    DisjunctStormLimitRebindDescription, ExplainInputs, ExpressionRef, ObjectRef,
+    PlanByteCapHandoffRoute, PlanByteCapScopeSegment, PlanDetail, PlanNodeKind,
+    QueryPlanDescription, QuerySourceStatistics, SnapshotRef, explain_query_with,
 };
 
 const FIXTURE: &str = include_str!("fixtures/planner_paired_depth_post_storm_route_stability.orna");
@@ -155,10 +155,24 @@ fn paired_depth_routes_are_stable_across_nested_and_post_storm_ancestry() {
         top_level_stage("post-storm-stage", &[96, 48], [16, 32]),
         top_level_stage("third-stage", &[72, 36], [12, 24]),
     ];
-    let explained = explain_query_with_disjunct_storm_branch_limit_chains(&query(), &stages, &[])
-        .expect("paired-depth routes are emitted across both storm stages");
-    let repeated = explain_query_with_disjunct_storm_branch_limit_chains(&query(), &stages, &[])
-        .expect("repeated planning keeps the same route order");
+    let explained = explain_query_with(
+        &query(),
+        ExplainInputs {
+            additional_limits: &[],
+            disjunct_storm_cascades: Some(&stages),
+            ..ExplainInputs::default()
+        },
+    )
+    .expect("paired-depth routes are emitted across both storm stages");
+    let repeated = explain_query_with(
+        &query(),
+        ExplainInputs {
+            additional_limits: &[],
+            disjunct_storm_cascades: Some(&stages),
+            ..ExplainInputs::default()
+        },
+    )
+    .expect("repeated planning keeps the same route order");
     let serialized = serde_json::to_value(&explained).expect("plan serializes");
     assert_eq!(
         serialized,
@@ -413,8 +427,15 @@ fn unknown_byte_handoffs_retain_prior_stage_output_paths() {
         .collect::<Vec<_>>();
     let mut query = query();
     query.source_statistics = None;
-    let explained = explain_query_with_disjunct_storm_branch_limit_chains(&query, &stages, &[])
-        .expect("unknown byte estimates keep typed stage handoff routes");
+    let explained = explain_query_with(
+        &query,
+        ExplainInputs {
+            additional_limits: &[],
+            disjunct_storm_cascades: Some(&stages),
+            ..ExplainInputs::default()
+        },
+    )
+    .expect("unknown byte estimates keep typed stage handoff routes");
 
     for stage in 1..=3 {
         let routes = routes_for_stage(&explained, stage);

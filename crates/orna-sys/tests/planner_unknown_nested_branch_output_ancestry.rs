@@ -1,8 +1,8 @@
 use orna_sys::{
     DisjunctStormBranchDescription, DisjunctStormCascadeDescription,
-    DisjunctStormLimitRebindDescription, ExpressionRef, ObjectRef, PlanByteCapScopeSegment,
-    PlanDetail, PlanNodeKind, QueryPlanDescription, SnapshotRef,
-    explain_query_with_disjunct_storm_branch_limit_chains,
+    DisjunctStormLimitRebindDescription, ExplainInputs, ExpressionRef, ObjectRef,
+    PlanByteCapScopeSegment, PlanDetail, PlanNodeKind, QueryPlanDescription, SnapshotRef,
+    explain_query_with,
 };
 
 const FIXTURE: &str = include_str!("fixtures/planner_unknown_nested_branch_output_ancestry.orna");
@@ -115,10 +115,13 @@ fn unknown_nested_storm_routes_retain_bounded_branch_output_ancestry() {
     // The reference does not specify a separate named scope for this
     // intermediate result. Nested storms consume each parent's bounded
     // branch output after its limit/rebind chain and conjuncts.
-    let explained = explain_query_with_disjunct_storm_branch_limit_chains(
+    let explained = explain_query_with(
         &query(),
-        &[storm("expr:unknown-parent-stage", vec![parent])],
-        &[],
+        ExplainInputs {
+            additional_limits: &[],
+            disjunct_storm_cascades: Some(&[storm("expr:unknown-parent-stage", vec![parent])]),
+            ..ExplainInputs::default()
+        },
     )
     .expect("nested routes retain provenance without row or byte estimates");
     let filter = explained
