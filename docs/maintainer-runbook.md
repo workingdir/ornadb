@@ -209,8 +209,9 @@ completion from a CLI smoke alone.
 The Orna standard library source is the `stdlib/std` git submodule, which
 tracks `workingdir/ornadb-std`. The superproject gitlink is the only source of
 truth for which commit ornadb builds against. The Rust mirror in
-`crates/orna-standard-sources/src/lib.rs` embeds those bytes with `include_str!`
-and must match the pinned blobs byte for byte. Snapshot identities and accepted
+`crates/orna-standard-sources/src/lib.rs` embeds those bytes (one
+`reference_standard_modules!` row per file) and must match the pinned blobs byte
+for byte. Snapshot identities and accepted
 digests are governed by `docs/decisions/0055-standard-executable-source-units.md`
 and the later snapshot ADRs (0058, 0059); they are not regenerated in place.
 
@@ -225,13 +226,15 @@ Bump procedure:
    `git -C stdlib/std checkout --detach <sha>`, then stage the gitlink with
    `git add stdlib/std`. Do not change git configuration.
 3. Mirror the changed files in `crates/orna-standard-sources/src/lib.rs`. A
-   changed file keeps its `include_str!` path, so only a new file needs edits:
-   a source const, a `REFERENCE_STANDARD_*_PATH_V1` const, an entry in
-   `reference_standard_sources_v1`, and the `[(String, String); N]` length bumped
-   everywhere that type appears. Every tracked `.orna` file must have an
-   `include_str!` entry, or an entry in `UNMIRRORED_SOURCES` in
+   changed file keeps its path, so only a new file needs edits: one
+   `REFERENCE_STANDARD_<STEM>_PATH_V1 = "std/<rel>";` row in
+   `reference_standard_modules!` (the literal is both the public path const and
+   the file embedded from `stdlib/`), and the `[(String, String); N]` length
+   bumped where that type is spelled out (`reference_standard_sources` in
+   `orna-evaluator`; the standard-sources crate derives its own count). Every
+   tracked `.orna` file must have a row, or an entry in `UNMIRRORED_SOURCES` in
    `scripts/check_standard_library_pin.py` with a reason. The checker fails when
-   a path const and its source const do not pair.
+   the macro stops embedding each module from its row's path literal.
 4. Do not treat the `orna.std/N` ids or the `ACCEPTED_*_SOURCE_REVISION_DIGEST`
    constants as part of a stdlib change. They cover only the retained SQL-era
    database snapshots (ADR 0055/0059) and are unrelated to the mirrored

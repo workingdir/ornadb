@@ -17,21 +17,7 @@ mod build_host;
 mod build_provider;
 mod build_support;
 
-use build_support::{collect_rust_sources, generate_sys_artifacts};
-
-fn rust_sources(root: &Path, output: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    let mut entries = fs::read_dir(root)?.collect::<Result<Vec<_>, _>>()?;
-    entries.sort_by_key(|entry| entry.path());
-    for entry in entries {
-        let path = entry.path();
-        if path.is_dir() {
-            rust_sources(&path, output)?;
-        } else if path.extension().is_some_and(|extension| extension == "rs") {
-            output.push(path);
-        }
-    }
-    Ok(())
-}
+use build_support::{collect_rust_sources, generate_sys_artifacts, rust_sources};
 
 /// Runs `git` in the package directory. `None` when git is unavailable, the
 /// directory is not a checkout, or the output is empty.
@@ -130,8 +116,7 @@ fn main() {
     // `macro_rules!` or procedural-macro expansion. Annotated methods in impls
     // and trait declarations are collected; methods emitted by macros remain
     // unsupported and are documented at the source declaration.
-    let mut sources = Vec::new();
-    rust_sources(&source_root, &mut sources).expect("walk sys crate Rust source");
+    let sources = rust_sources(&source_root).expect("walk sys crate Rust source");
     for source in &sources {
         println!("cargo:rerun-if-changed={}", source.display());
     }
