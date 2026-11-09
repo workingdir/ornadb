@@ -42,6 +42,13 @@ pub struct FunctionDescriptor {
 /// boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct SystemFunctionDescriptor {
+    /// The generated catalogue identity of this callable.
+    ///
+    /// `None` is reserved for the two 1.0.0 callables retired by 1.1.0 that are
+    /// still selectable by historical format 1/2 readers; their identity lives in
+    /// [`orna_sys_id::RETIRED_ENGINE_FUNCTIONS`], not in the 1.1.0 catalogue.
+    #[serde(skip)]
+    pub function: Option<orna_sys_id::SysFunction>,
     pub name: &'static str,
     pub effect: SystemEffect,
     pub signature: &'static str,

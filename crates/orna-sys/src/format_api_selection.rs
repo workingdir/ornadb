@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 
+use orna_sys_id::{SYS_FUNCTION_COUNT, SysFunction};
 use serde::Deserialize;
 
 use super::{SystemEffect, SystemFunctionDescriptor};
@@ -207,50 +208,76 @@ struct RawFunction<'a> {
     contexts: Option<Vec<&'a str>>,
 }
 
-/// Immutable native API selection keyed by callable name, then selected through
-/// a caller-verified recorded [`SystemFormatContext`].
+/// Immutable native API selection.
+///
+/// The current catalogue is indexed by [`SysFunction`] discriminant, so a
+/// lookup is one integer index and admission is a per-callable constant. The two
+/// 1.0.0 callables retired by 1.1.0 stay in a small historical table because
+/// format 1/2 readers still select them; they have no catalogue identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SystemApiSelection {
-    callables: BTreeMap<String, SystemCallable>,
+    callables: [SystemCallable; SYS_FUNCTION_COUNT],
+    historical: Vec<SystemCallable>,
 }
 
 impl SystemApiSelection {
     fn from_generated() -> Self {
         let raw: RawApiSelection<'static> = serde_json::from_str(GENERATED_API_SELECTION)
             .expect("build-validated native sys API selection");
-        let callables = raw
-            .functions
-            .into_iter()
-            .map(|function| {
-                let availability = callable_availability(function.contexts.as_deref());
-                let effect = match function.effect {
-                    "read" => SystemEffect::Read,
-                    "invoke" => SystemEffect::Invoke,
-                    "admin" => SystemEffect::Admin,
-                    _ => panic!("invalid generated sys effect for {}", function.name),
-                };
-                let descriptor = SystemFunctionDescriptor {
-                    name: function.name,
-                    effect,
-                    signature: function.signature,
-                    purpose: function.purpose,
-                    since: function.since,
-                    documentation: function.documentation,
-                    contract: function.contract,
-                    preconditions: function.preconditions,
-                    ownership: function.ownership,
-                    snapshot_rule: function.snapshot_rule,
-                };
-                (
-                    function.name.to_owned(),
-                    SystemCallable {
-                        descriptor,
-                        availability,
-                    },
-                )
-            })
-            .collect();
-        Self { callables }
+        let mut availability = BTreeMap::<&'static str, SystemCallableAvailability>::new();
+        let mut historical = Vec::new();
+        for function in raw.functions {
+            let callable_availability = callable_availability(function.contexts.as_deref());
+            if let Some(identity) = SysFunction::from_label(function.name) {
+                if availability
+                    .insert(function.name, callable_availability)
+                    .is_some()
+                {
+                    panic!("duplicate generated sys callable `{}`", function.name);
+                }
+                debug_assert_eq!(identity.label(), function.name);
+                continue;
+            }
+            // Only the explicitly retired 1.0.0 callables are outside the
+            // 1.1.0 catalogue. Fail closed on anything else.
+            if !orna_sys_id::RETIRED_ENGINE_FUNCTIONS
+                .iter()
+                .any(|retired| retired.name == function.name)
+            {
+                panic!(
+                    "generated sys callable `{}` has no catalogue identity",
+                    function.name
+                );
+            }
+            historical.push(SystemCallable {
+                descriptor: historical_descriptor(function),
+                availability: callable_availability,
+            });
+        }
+        historical.sort_by_key(|callable| callable.descriptor.name);
+        let callables: [SystemCallable; SYS_FUNCTION_COUNT] = std::array::from_fn(|index| {
+            let function = SysFunction::ALL[index];
+            let callable_availability = *availability
+                .get(function.label())
+                .unwrap_or_else(|| panic!("generated sys callable `{function}` is missing"));
+            SystemCallable {
+                descriptor: super::system_api::SYSTEM_FUNCTION_DESCRIPTORS[index],
+                availability: callable_availability,
+            }
+        });
+        Self {
+            callables,
+            historical,
+        }
+    }
+
+    fn callable(&self, name: &str) -> Option<&SystemCallable> {
+        if let Some(function) = SysFunction::from_label(name) {
+            return Some(&self.callables[function.index()]);
+        }
+        self.historical
+            .iter()
+            .find(|callable| callable.descriptor.name == name)
     }
 
     /// Select a callable using the recorded format/context pair.
@@ -260,8 +287,7 @@ impl SystemApiSelection {
         name: &str,
     ) -> Result<&SystemCallable, SystemDispatchError> {
         let callable = self
-            .callables
-            .get(name)
+            .callable(name)
             .ok_or_else(|| SystemDispatchError::UnknownCallable(name.to_owned()))?;
         if !callable.is_admitted(context) {
             return Err(SystemDispatchError::Unavailable {
@@ -286,13 +312,38 @@ impl SystemApiSelection {
     }
 
     pub fn callables(&self) -> impl Iterator<Item = &SystemCallable> {
-        self.callables.values()
+        self.callables.iter().chain(self.historical.iter())
     }
 
     pub fn available(&self, context: SystemFormatContext) -> impl Iterator<Item = &SystemCallable> {
-        self.callables
-            .values()
-            .filter(move |callable| callable.is_admitted(context))
+        self.callables()
+            .filter(move |callable| callable.availability().admits(context))
+    }
+}
+
+/// Metadata for a 1.0.0 callable that 1.1.0 retired but historical readers select.
+fn historical_descriptor(function: RawFunction<'static>) -> SystemFunctionDescriptor {
+    let effect = match function.effect {
+        "read" => SystemEffect::Read,
+        "invoke" => SystemEffect::Invoke,
+        "admin" => SystemEffect::Admin,
+        other => panic!(
+            "invalid generated sys effect `{other}` for `{}`",
+            function.name
+        ),
+    };
+    SystemFunctionDescriptor {
+        function: None,
+        name: function.name,
+        effect,
+        signature: function.signature,
+        purpose: function.purpose,
+        since: function.since,
+        documentation: function.documentation,
+        contract: function.contract,
+        preconditions: function.preconditions,
+        ownership: function.ownership,
+        snapshot_rule: function.snapshot_rule,
     }
 }
 
