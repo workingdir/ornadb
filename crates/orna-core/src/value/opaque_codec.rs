@@ -4,6 +4,7 @@ use std::{collections::HashSet, error::Error, fmt};
 
 use crate::{
     TypeId,
+    byte_reader::Reader,
     catalogue::{QualifiedSemanticName, ValueTypeKind, ValueTypeMutability, ValueTypePersistence},
     inspect_carrier::InspectCarrierEnvelope,
     revision::{ActiveDatabaseRevision, VerifiedStandardLibrarySnapshot},
@@ -471,56 +472,6 @@ fn validate_opaque_payload(
     }
 }
 
-/// A forward-only reader over a big-endian length-prefixed byte layout. Every
-/// read is bounds checked and yields `None` rather than panicking, and a failed
-/// read consumes nothing.
-struct Reader<'a> {
-    bytes: &'a [u8],
-    position: usize,
-}
-
-impl<'a> Reader<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, position: 0 }
-    }
-
-    fn take(&mut self, length: usize) -> Option<&'a [u8]> {
-        let end = self.position.checked_add(length)?;
-        let taken = self.bytes.get(self.position..end)?;
-        self.position = end;
-        Some(taken)
-    }
-
-    fn u8(&mut self) -> Option<u8> {
-        self.take(1)?.first().copied()
-    }
-
-    fn u16(&mut self) -> Option<u16> {
-        self.take(2)?.try_into().ok().map(u16::from_be_bytes)
-    }
-
-    fn u32(&mut self) -> Option<u32> {
-        self.take(4)?.try_into().ok().map(u32::from_be_bytes)
-    }
-
-    /// Reads a big-endian `u32` length or count as a `usize`.
-    fn length(&mut self) -> Option<usize> {
-        usize::try_from(self.u32()?).ok()
-    }
-
-    fn remaining(&self) -> usize {
-        self.bytes.len() - self.position
-    }
-
-    fn is_empty(&self) -> bool {
-        self.remaining() == 0
-    }
-
-    fn rest(&self) -> &'a [u8] {
-        &self.bytes[self.position..]
-    }
-}
-
 /// Splits `MAGIC <len:u32 be> <body>` into its body, requiring exactly `len`
 /// body bytes, no trailing bytes, and a body no larger than the codec bound.
 fn framed_body<'a>(
@@ -533,7 +484,7 @@ fn framed_body<'a>(
         .ok_or(OpaqueValueError::InvalidMagic { opaque_type })?;
     let mut reader = Reader::new(after_magic);
     let invalid_length = || OpaqueValueError::InvalidFrameLength { opaque_type };
-    let body_length = reader.length().ok_or_else(invalid_length)?;
+    let body_length = reader.length().map_err(|()| invalid_length())?;
     if body_length > MAX_OPAQUE_CODEC_PAYLOAD_LENGTH || reader.remaining() != body_length {
         return Err(invalid_length());
     }
@@ -550,10 +501,10 @@ fn validate_rows_payload(
     }
     let after_magic = payload.strip_prefix(magic).ok_or_else(invalid)?;
     let mut reader = Reader::new(after_magic);
-    if reader.u16().ok_or_else(invalid)? != ROWS_FRAME_VERSION {
+    if reader.u16().map_err(|()| invalid())? != ROWS_FRAME_VERSION {
         return Err(invalid());
     }
-    let column_count = reader.length().ok_or_else(invalid)?;
+    let column_count = reader.length().map_err(|()| invalid())?;
     if !(1..=MAX_ROWS_COLUMNS).contains(&column_count) {
         return Err(invalid());
     }
@@ -568,24 +519,24 @@ fn validate_rows_payload(
 
     let mut names = HashSet::with_capacity(column_count);
     for _ in 0..column_count {
-        let name_length = reader.length().ok_or_else(invalid)?;
-        let name = reader.take(name_length).ok_or_else(invalid)?;
+        let name_length = reader.length().map_err(|()| invalid())?;
+        let name = reader.take(name_length).map_err(|()| invalid())?;
         if std::str::from_utf8(name).is_err() || name.is_empty() || !names.insert(name) {
             return Err(invalid());
         }
-        let type_form = reader.u8().ok_or_else(invalid)?;
-        let type_id = reader.take(16).ok_or_else(invalid)?;
+        let type_form = reader.u8().map_err(|()| invalid())?;
+        let type_id = reader.take(16).map_err(|()| invalid())?;
         if !(0x01..=0x04).contains(&type_form)
             || (type_form == 0x01 && !is_rows_standard_scalar_type_id(type_id))
         {
             return Err(invalid());
         }
-        if reader.u8().ok_or_else(invalid)? > 1 {
+        if reader.u8().map_err(|()| invalid())? > 1 {
             return Err(invalid());
         }
     }
 
-    let row_count = reader.length().ok_or_else(invalid)?;
+    let row_count = reader.length().map_err(|()| invalid())?;
     if row_count > MAX_ROWS_ROWS
         || row_count
             .checked_mul(column_count)
@@ -595,15 +546,15 @@ fn validate_rows_payload(
     }
 
     for _ in 0..row_count {
-        if reader.length().ok_or_else(invalid)? != column_count {
+        if reader.length().map_err(|()| invalid())? != column_count {
             return Err(invalid());
         }
         for _ in 0..column_count {
-            let length = reader.length().ok_or_else(invalid)?;
+            let length = reader.length().map_err(|()| invalid())?;
             if length > MAX_ROWS_PAYLOAD_LENGTH {
                 return Err(invalid());
             }
-            let cell = reader.take(length).ok_or_else(invalid)?;
+            let cell = reader.take(length).map_err(|()| invalid())?;
             if validate_rows_orv5_value(cell, 0).is_err() {
                 return Err(invalid());
             }
@@ -640,9 +591,7 @@ fn validate_rows_orv5_value(bytes: &[u8], depth: usize) -> Result<(), ()> {
     }
     let tag = bytes[4];
     let type_identity = &bytes[5..21];
-    let declared = Reader::new(&bytes[21..ORV_HEADER_BYTES])
-        .length()
-        .ok_or(())?;
+    let declared = Reader::<()>::new(&bytes[21..ORV_HEADER_BYTES]).length()?;
     let payload = &bytes[ORV_HEADER_BYTES..];
     if declared > MAX_OPAQUE_CODEC_PAYLOAD_LENGTH || declared != payload.len() {
         return Err(());
@@ -672,20 +621,20 @@ fn validate_rows_record_payload(payload: &[u8], depth: usize) -> Result<(), ()> 
         return Err(());
     }
     let mut reader = Reader::new(payload);
-    let count = reader.length().ok_or(())?;
+    let count = reader.length()?;
     if count > reader.remaining() / ROWS_RECORD_FIELD_HEADER_BYTES {
         return Err(());
     }
     let mut field_ids = HashSet::with_capacity(count);
     let mut previous = None;
     for _ in 0..count {
-        let field_id = reader.take(16).ok_or(())?;
+        let field_id = reader.take(16)?;
         if !field_ids.insert(field_id) || previous.is_some_and(|prior: &[u8]| prior >= field_id) {
             return Err(());
         }
         previous = Some(field_id);
-        let length = reader.length().ok_or(())?;
-        let nested = reader.take(length).ok_or(())?;
+        let length = reader.length()?;
+        let nested = reader.take(length)?;
         validate_rows_orv5_value(nested, depth + 1)?;
     }
     ensure(reader.is_empty())
@@ -700,11 +649,11 @@ fn validate_rows_constructed_payload(
         return Err(());
     }
     let mut reader = Reader::new(payload);
-    let descriptor_length = usize::from(reader.u16().ok_or(())?);
+    let descriptor_length = usize::from(reader.u16()?);
     if descriptor_length == 0 {
         return Err(());
     }
-    let descriptor_bytes = reader.take(descriptor_length).ok_or(())?;
+    let descriptor_bytes = reader.take(descriptor_length)?;
     let (descriptor, consumed) = validate_rows_descriptor(descriptor_bytes, 0, 0)?;
     if consumed != descriptor_bytes.len() {
         return Err(());
@@ -771,7 +720,7 @@ fn validate_rows_constructor_content(
     }
     let mut reader = Reader::new(content);
     match descriptor {
-        RowsDescriptor::Option => match reader.u8().ok_or(())? {
+        RowsDescriptor::Option => match reader.u8()? {
             0 => ensure(reader.is_empty()),
             1 => {
                 let nested = take_rows_child(&mut reader)?;
@@ -790,11 +739,11 @@ fn validate_rows_constructor_content(
 /// length-prefixed ORV5 children (one for a list element, a key and a value for
 /// a map entry), consuming the whole reader.
 fn validate_rows_repeated_content(
-    reader: &mut Reader<'_>,
+    reader: &mut Reader<'_, ()>,
     depth: usize,
     children_per_item: usize,
 ) -> Result<(), ()> {
-    let count = reader.length().ok_or(())?;
+    let count = reader.length()?;
     for _ in 0..count {
         for _ in 0..children_per_item {
             validate_rows_orv5_value(take_rows_child(reader)?, depth)?;
@@ -804,9 +753,9 @@ fn validate_rows_repeated_content(
 }
 
 /// Takes one `<len:u32 be> <bytes>` child.
-fn take_rows_child<'a>(reader: &mut Reader<'a>) -> Result<&'a [u8], ()> {
-    let length = reader.length().ok_or(())?;
-    reader.take(length).ok_or(())
+fn take_rows_child<'a>(reader: &mut Reader<'a, ()>) -> Result<&'a [u8], ()> {
+    let length = reader.length()?;
+    reader.take(length)
 }
 
 /// Parses and validates one canonical JSON frame, returning its body value for
@@ -1069,7 +1018,7 @@ fn validate_action_frame(
 
     let mut reader = Reader::new(body);
     if !matches!(
-        reader.u8().ok_or_else(invalid_action)?,
+        reader.u8().map_err(|()| invalid_action())?,
         ACTION_DOMAIN_CLIENT | ACTION_DOMAIN_SERVER
     ) {
         return Err(invalid_action());
@@ -1077,12 +1026,12 @@ fn validate_action_frame(
     for _ in 0..ACTION_IDENTITY_FIELDS {
         let identity = reader
             .take(ACTION_IDENTITY_BYTES)
-            .ok_or_else(invalid_action)?;
+            .map_err(|()| invalid_action())?;
         if is_zero_identity(identity) {
             return Err(invalid_action());
         }
     }
-    let argument_count = reader.length().ok_or_else(invalid_action)?;
+    let argument_count = reader.length().map_err(|()| invalid_action())?;
     if argument_count > MAX_OPAQUE_CODEC_ACTION_ARGUMENTS {
         return Err(invalid_action());
     }
@@ -1091,7 +1040,7 @@ fn validate_action_frame(
     for _ in 0..argument_count {
         let parameter = reader
             .take(ACTION_IDENTITY_BYTES)
-            .ok_or_else(invalid_action)?;
+            .map_err(|()| invalid_action())?;
         if is_zero_identity(parameter)
             || previous_parameter.is_some_and(|previous| previous >= parameter)
         {
@@ -1099,8 +1048,8 @@ fn validate_action_frame(
         }
         previous_parameter = Some(parameter);
 
-        let frame_length = reader.length().ok_or_else(invalid_action)?;
-        let frame = reader.take(frame_length).ok_or_else(invalid_action)?;
+        let frame_length = reader.length().map_err(|()| invalid_action())?;
+        let frame = reader.take(frame_length).map_err(|()| invalid_action())?;
         if validate_orv3_frame(frame).is_err() {
             return Err(invalid_action());
         }
@@ -1127,9 +1076,7 @@ fn validate_orv3_frame(encoded: &[u8]) -> Result<(), ()> {
         if frame.len() < ORV_HEADER_BYTES || !frame.starts_with(ORV3_MARKER) {
             return Err(());
         }
-        let declared = Reader::new(&frame[21..ORV_HEADER_BYTES])
-            .length()
-            .ok_or(())?;
+        let declared = Reader::<()>::new(&frame[21..ORV_HEADER_BYTES]).length()?;
         if declared > MAX_OPAQUE_CODEC_PAYLOAD_LENGTH || frame.len() - ORV_HEADER_BYTES != declared
         {
             return Err(());
@@ -1156,7 +1103,7 @@ fn validate_orv3_frame(encoded: &[u8]) -> Result<(), ()> {
             0x08 if body.len() == ACTION_IDENTITY_BYTES => {}
             0x0b => {
                 let mut reader = Reader::new(body);
-                let field_count = reader.length().ok_or(())?;
+                let field_count = reader.length()?;
                 if field_count >= MAX_RUNTIME_VALUE_NODES {
                     return Err(());
                 }
@@ -1169,15 +1116,15 @@ fn validate_orv3_frame(encoded: &[u8]) -> Result<(), ()> {
                 }
                 let mut field_identities: HashSet<&[u8]> = HashSet::new();
                 for _ in 0..field_count {
-                    let identity = reader.take(ACTION_IDENTITY_BYTES).ok_or(())?;
+                    let identity = reader.take(ACTION_IDENTITY_BYTES)?;
                     if !field_identities.insert(identity) {
                         return Err(());
                     }
-                    let length = reader.length().ok_or(())?;
+                    let length = reader.length()?;
                     if length < ORV_HEADER_BYTES {
                         return Err(());
                     }
-                    pending.push(reader.take(length).ok_or(())?);
+                    pending.push(reader.take(length)?);
                 }
                 if !reader.is_empty() {
                     return Err(());
@@ -1210,12 +1157,14 @@ fn validate_media_type_framed(
         .strip_prefix(magic)
         .ok_or(OpaqueValueError::InvalidMagic { opaque_type })?;
     let mut reader = Reader::new(after_magic);
-    let media_type_length = reader.length().ok_or_else(invalid_length)?;
+    let media_type_length = reader.length().map_err(|()| invalid_length())?;
     if media_type_length == 0 {
         return Err(OpaqueValueError::InvalidMediaType { opaque_type });
     }
-    reader.take(media_type_length).ok_or_else(invalid_length)?;
-    let body_length = reader.length().ok_or_else(invalid_length)?;
+    reader
+        .take(media_type_length)
+        .map_err(|()| invalid_length())?;
+    let body_length = reader.length().map_err(|()| invalid_length())?;
     if body_length > MAX_OPAQUE_CODEC_PAYLOAD_LENGTH || reader.remaining() != body_length {
         return Err(invalid_length());
     }

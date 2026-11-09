@@ -5,7 +5,10 @@
 
 use std::{collections::HashSet, error::Error, fmt};
 
-use crate::{CatalogueRevisionId, InspectEpochId, InvocationId, SourceRevisionId, TypeId};
+use crate::{
+    CatalogueRevisionId, InspectEpochId, InvocationId, SourceRevisionId, TypeId,
+    byte_reader::{Reader, TruncatedError},
+};
 
 pub const INSPECT_CARRIER_MAGIC: &[u8; 15] = b"ORNA-INSPECT/1 ";
 pub const INSPECT_CARRIER_VERSION: u16 = 1;
@@ -396,7 +399,7 @@ impl InspectCarrierEnvelope {
                 maximum: MAX_INSPECT_CARRIER_BYTES,
             });
         }
-        let mut reader = Reader { bytes, position: 0 };
+        let mut reader = Reader::<InspectCarrierError>::new(bytes);
         if reader.take(INSPECT_CARRIER_MAGIC.len())? != INSPECT_CARRIER_MAGIC {
             return Err(InspectCarrierError::InvalidMagic);
         }
@@ -804,40 +807,9 @@ fn validate_child_at(
     Ok(value_start + length)
 }
 
-struct Reader<'a> {
-    bytes: &'a [u8],
-    position: usize,
-}
-
-impl<'a> Reader<'a> {
-    fn take(&mut self, length: usize) -> Result<&'a [u8], InspectCarrierError> {
-        let end = self
-            .position
-            .checked_add(length)
-            .ok_or(InspectCarrierError::Truncated)?;
-        let value = self
-            .bytes
-            .get(self.position..end)
-            .ok_or(InspectCarrierError::Truncated)?;
-        self.position = end;
-        Ok(value)
-    }
-    fn array<const N: usize>(&mut self) -> Result<[u8; N], InspectCarrierError> {
-        self.take(N)?
-            .try_into()
-            .map_err(|_| InspectCarrierError::Truncated)
-    }
-    fn u8(&mut self) -> Result<u8, InspectCarrierError> {
-        Ok(u8::from_be_bytes(self.array()?))
-    }
-    fn u16(&mut self) -> Result<u16, InspectCarrierError> {
-        Ok(u16::from_be_bytes(self.array()?))
-    }
-    fn u32(&mut self) -> Result<u32, InspectCarrierError> {
-        Ok(u32::from_be_bytes(self.array()?))
-    }
-    fn remaining(&self) -> usize {
-        self.bytes.len() - self.position
+impl TruncatedError for InspectCarrierError {
+    fn truncated() -> Self {
+        Self::Truncated
     }
 }
 
