@@ -1045,15 +1045,16 @@ fn root_collection_intrinsic(name: &str) -> Option<orna_intrinsics::IntrinsicId>
     })
 }
 
+/// Binds one admitted declaration name to the intrinsic it implements.
+///
+/// The name is the qualified key of a function admitted into the local table,
+/// so a standard declaration and its private leaf are both reachable here.
 fn local_intrinsic(name: &str) -> Option<orna_intrinsics::IntrinsicId> {
     if let Some(id) = legacy_intrinsic(name) {
         return Some(id);
     }
-    let (module_path, leaf) = name.rsplit_once('.')?;
-    if leaf.starts_with("__") {
-        return orna_intrinsics::Module::from_path(module_path)
-            .and_then(|module| orna_intrinsics::lookup(module, leaf))
-            .map(|intrinsic| intrinsic.id);
+    if let Some(id) = module_intrinsic(name) {
+        return Some(id);
     }
     // A `std.time` export is its native operation. The clock helpers forward to
     // private leaves that call them back, so leaving the public name as source
@@ -1062,6 +1063,41 @@ fn local_intrinsic(name: &str) -> Option<orna_intrinsics::IntrinsicId> {
     // (`duration.compact.format`) no module-path split reaches.
     let relative = name.strip_prefix("std.time.")?;
     orna_intrinsics::lookup(orna_intrinsics::Module::Time, relative).map(|intrinsic| intrinsic.id)
+}
+
+/// Binds a `std.<module>.<leaf>` declaration through its module path.
+///
+/// One rule covers every admission path (`docs/design/std-native.md:3.4-3.5`):
+/// the spelling's module path must name a catalogue module, the leaf (the
+/// public export or the private implementation leaf) must be registered, the
+/// entry must be native rather than `SourceOnly`, and its pins must cover the
+/// current standard pin. A declaration that fails any clause is ordinary
+/// source and runs its Orna body.
+fn module_intrinsic(name: &str) -> Option<orna_intrinsics::IntrinsicId> {
+    let (module_path, leaf) = name.rsplit_once('.')?;
+    let module = orna_intrinsics::Module::from_path(module_path)?;
+    let intrinsic = orna_intrinsics::lookup(module, leaf)?;
+    if intrinsic.dispatch == orna_intrinsics::Dispatch::SourceOnly
+        || !intrinsic.pins.contains(orna_intrinsics::CURRENT_STD_PIN)
+    {
+        return None;
+    }
+    // Modules whose table binds only the private leaf keep their public source
+    // wrapper; binding the public name would skip its validation and hand the
+    // handler a spelling it does not match.
+    let bind_public = !matches!(
+        module,
+        orna_intrinsics::Module::Stats
+            | orna_intrinsics::Module::Ui
+            | orna_intrinsics::Module::Json
+            | orna_intrinsics::Module::OrnaCodec
+            | orna_intrinsics::Module::OvbCodec
+            | orna_intrinsics::Module::Money
+    ) && !(module == orna_intrinsics::Module::Query && intrinsic.leaf.is_some());
+    if !bind_public && !leaf.starts_with("__") {
+        return None;
+    }
+    Some(intrinsic.id)
 }
 
 fn legacy_intrinsic(name: &str) -> Option<orna_intrinsics::IntrinsicId> {
@@ -9384,9 +9420,9 @@ impl Context<'_, '_> {
     /// stream or collection intrinsic, or an unresolved qualified standard
     /// spelling claims it; otherwise the resolved or first-class function
     /// runs from its Orna body.
-    fn route_call<'s>(
+    fn route_call(
         &self,
-        site: &'s CallSite<'_>,
+        site: &CallSite<'_>,
         input: Option<&Value>,
         scope: &Scope,
     ) -> Result<CallRoute, EvaluationError> {
@@ -9418,17 +9454,17 @@ impl Context<'_, '_> {
             && let Some(name) = site.spelled.as_deref()
             && !scope.0.contains_key(name)
         {
-            if let Some(id) = orna_intrinsics::root_intrinsic(name) {
-                if !matches!(
+            if let Some(id) = orna_intrinsics::root_intrinsic(name)
+                && !matches!(
                     id,
                     orna_intrinsics::IntrinsicId::CoreSome
                         | orna_intrinsics::IntrinsicId::CoreNow
                         | orna_intrinsics::IntrinsicId::CoreUuid7
                         | orna_intrinsics::IntrinsicId::CoreError
                         | orna_intrinsics::IntrinsicId::CoreFail
-                ) {
-                    return Ok(CallRoute::Native(id));
-                }
+                )
+            {
+                return Ok(CallRoute::Native(id));
             }
             if let Some(id) = root_collection_intrinsic(name) {
                 return Ok(CallRoute::Native(id));
@@ -15109,25 +15145,6 @@ fn ordered_host_arguments<'a>(
 
 // The registry connects pinned source identities to bounded evaluator
 // intrinsics. System host effects use their separate generated registry.
-
-/// A pinned `*_from` helper whose body is a `while` loop. Historical pins
-/// define these helpers recursively; the loop rewrite makes the Orna body the
-/// evaluation target, while historical pins keep their native bindings
-/// (ORNA-LIB-001).
-
-/// Root intrinsics that pinned collection and query modules used to re-declare
-/// as `std.<module>.<name>` wrappers. Only the historical wrappers keep a Rust
-/// shadow; the current pin declares none, so these names resolve to the root
-/// intrinsic without consulting the registry.
-
-/// Whether a captured pin still declares the legacy root wrapper that the
-/// registry shadows. A wrapper whose `*_from` helper is a `while` loop is
-/// evaluated from its Orna body instead (ORNA-LIB-001).
-
-/// Whether a registered collection binding still evaluates in Rust for a
-/// captured pin. `__` leaves are always native. `map` stays native only while
-/// its pinned `map_from` is not a loop. Other public operations take their
-/// Orna bodies for list inputs; relation inputs are routed before this gate.
 
 fn format_duration_context(context: Option<&Value>) -> Result<(), EvaluationError> {
     let (locale, zone) = match context {
