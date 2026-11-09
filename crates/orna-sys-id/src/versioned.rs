@@ -163,6 +163,7 @@ impl fmt::Display for VersionedId {
     }
 }
 
+#[allow(clippy::cmp_owned)]
 impl PartialEq<&str> for VersionedId {
     fn eq(&self, other: &&str) -> bool {
         self.to_string() == *other
