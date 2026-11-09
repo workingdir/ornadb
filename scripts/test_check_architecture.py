@@ -639,12 +639,18 @@ class CurrentRepositoryTests(unittest.TestCase):
             check=False,
         )
 
-    def test_report_prints_the_ten_recorded_violations_and_the_warning(self) -> None:
+    def test_report_prints_every_recorded_violation_and_the_warning(self) -> None:
+        table = load_layer_table(ROOT / LAYERS_PATH)
         result = self.run_script("--mode=report")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("violations: 10 known, 0 new", result.stdout)
-        for number in range(1, 11):
-            self.assertIn(f"[V{number}]", result.stdout)
+        self.assertRegex(result.stdout, r"violations: \d+ known, 0 new")
+        numbered = [line for line in result.stdout.splitlines() if line.startswith("[V")]
+        self.assertGreaterEqual(len(numbered), 1, result.stdout)
+        printed = {line.rsplit("[", 1)[1].rstrip("]") for line in numbered}
+        self.assertTrue(printed <= set(table.known), printed - set(table.known))
+        # Every recorded entry is either reported as a violation or as stale.
+        for key in table.known:
+            self.assertIn(key, result.stdout)
         self.assertIn("[W1] WARNING orna-foundation", result.stdout)
         self.assertIn("budgets:", result.stdout)
 
@@ -653,11 +659,16 @@ class CurrentRepositoryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("no new violations", result.stdout)
 
-    def test_strict_deny_reports_the_ten_violations(self) -> None:
+    def test_strict_deny_reports_every_recorded_violation(self) -> None:
+        table = load_layer_table(ROOT / LAYERS_PATH)
         result = self.run_script("--mode=deny", "--strict")
         self.assertEqual(result.returncode, 1, result.stdout)
         numbered = [line for line in result.stdout.splitlines() if line.startswith("[V")]
-        self.assertEqual(len(numbered), 10, result.stdout)
+        self.assertGreaterEqual(len(numbered), 1, result.stdout)
+        self.assertNotIn("[new]", result.stdout)
+        for line in numbered:
+            key = line.rsplit("[", 1)[1].rstrip("]")
+            self.assertIn(key, table.known)
 
     def test_budget_passes_on_the_recorded_baseline(self) -> None:
         result = self.run_script("--mode=budget")

@@ -35,7 +35,7 @@ allow_clippy = 0
 [crate.files]
 "src/lib.rs" = 14911
 "src/migration_rows.rs" = 1733
-"src/repl_transaction.rs" = 1234
+"src/repl_transaction.rs" = 1231
 [crate.functions]
 "src/lib.rs::checked_in_source_effect_stages_and_commits_with_activation_scoped_id" = 151
 "src/lib.rs::competitor_and_owner_retries_alternate_returned_key_closure" = 127
@@ -111,7 +111,7 @@ allow_clippy = 8
 [crate.files]
 "src/lib.rs" = 2962
 "src/main.rs" = 1981
-"src/semantic_adapter.rs" = 14483
+"src/semantic_adapter.rs" = 14481
 [crate.functions]
 "src/lib.rs::execute_reference_project_runtime_adapter" = 208
 "src/lib.rs::run_fixture" = 123
@@ -192,10 +192,10 @@ allow_clippy = 26
 
 [[crate]]
 name = "orna-evaluator"
-src_lines = 30504
+src_lines = 30594
 allow_clippy = 1
 [crate.files]
-"src/lib.rs" = 20533
+"src/lib.rs" = 20535
 "src/relation.rs" = 1375
 "src/repl.rs" = 1766
 "src/sys_bindings.rs" = 2392
@@ -238,7 +238,7 @@ allow_clippy = 1
 name = "orna-live"
 allow_clippy = 24
 [crate.files]
-"src/lib.rs" = 12239
+"src/lib.rs" = 12257
 "src/live_presentation.rs" = 1623
 [crate.functions]
 "src/lib.rs::complete_application" = 232
@@ -386,12 +386,12 @@ allow_clippy = 17
 
 [[crate]]
 name = "orna-runtime"
-src_lines = 68189
+src_lines = 68108
 allow_clippy = 8
 [crate.files]
 "src/catalogue.rs" = 3568
 "src/invocation.rs" = 1429
-"src/lib.rs" = 35417
+"src/lib.rs" = 35336
 "src/observation.rs" = 2068
 "src/publication.rs" = 1301
 "src/schema.rs" = 2118
