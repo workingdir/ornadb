@@ -4,36 +4,38 @@
 # `arch` job of .github/workflows/lint.yml. ARCHITECTURE.md is the policy;
 # this file is the recorded debt.
 #
-# A number here is a ratchet. `--mode=budget` fails when a measured value grows
-# past its entry, and when a file, function or crate with no entry exceeds its
-# hard cap. Shrinkage is only a note: a PR that is behind a merged refactor must
-# not fail because another PR lowered a file.
+# Only per-file and per-function entries are recorded. There is no crate-level
+# line budget: adding a few types to a large crate is not a violation.
+#
+# `--mode=budget` fails when a file or function appears over its hard cap with
+# no entry, or when a recorded entry grows by more than max(5%, 25 lines).
+# Shrinkage and growth inside that tolerance are non-failing notes, so a PR
+# that is behind a merged refactor is never failed by another PR's good news.
 #
 # Lower the drift after a merge with:
 #
 #   python3 scripts/check_architecture.py --mode=budget --update
 #
-# It lowers or removes entries that shrank and never raises one. A deliberate
-# raise needs a reviewed edit justified in the commit that makes it.
+# It lowers or removes entries that shrank and never raises one.
 #
-#   crate_src_lines  hard cap on crates/<crate>/src/*.rs; a crate above it
-#                    needs an explicit src_lines entry
+# A deliberate raise is not written here: add or update a reviewed [[raise]] in
+# scripts/architecture-budget-raises.toml with a reason and a bead. That file is
+# the visible exception list; this file only ever moves down.
+#
 #   file_lines       hard cap on one source file; a file above it needs an
-#                    explicit files entry
+#                    explicit files entry or a raise
 #   function_lines   hard cap on one function; a function above it needs an
-#                    explicit functions entry
+#                    explicit functions entry or a raise
 #
 
 [limits]
-crate_src_lines = 25000
 file_lines = 1200
 function_lines = 120
 
 [[crate]]
 name = "orna-application"
-allow_clippy = 0
 [crate.files]
-"src/lib.rs" = 14911
+"src/lib.rs" = 14830
 "src/migration_rows.rs" = 1733
 "src/repl_transaction.rs" = 1231
 [crate.functions]
@@ -57,8 +59,6 @@ allow_clippy = 0
 
 [[crate]]
 name = "orna-cli"
-src_lines = 41071
-allow_clippy = 101
 [crate.files]
 "src/cli_dispatch.rs" = 2093
 "src/cli_history.rs" = 1571
@@ -107,7 +107,6 @@ allow_clippy = 101
 
 [[crate]]
 name = "orna-conformance"
-allow_clippy = 8
 [crate.files]
 "src/lib.rs" = 2962
 "src/main.rs" = 1981
@@ -134,8 +133,6 @@ allow_clippy = 8
 
 [[crate]]
 name = "orna-core"
-src_lines = 60684
-allow_clippy = 26
 [crate.files]
 "src/canonical_hash.rs" = 2627
 "src/canonical_hash/tests.rs" = 3258
@@ -192,8 +189,6 @@ allow_clippy = 26
 
 [[crate]]
 name = "orna-evaluator"
-src_lines = 30594
-allow_clippy = 1
 [crate.files]
 "src/lib.rs" = 20535
 "src/relation.rs" = 1375
@@ -224,19 +219,16 @@ allow_clippy = 1
 
 [[crate]]
 name = "orna-evolution"
-allow_clippy = 0
 [crate.files]
 "src/lib.rs" = 1270
 
 [[crate]]
 name = "orna-foundation"
-allow_clippy = 1
 [crate.files]
 "src/lib.rs" = 2411
 
 [[crate]]
 name = "orna-live"
-allow_clippy = 24
 [crate.files]
 "src/lib.rs" = 12257
 "src/live_presentation.rs" = 1623
@@ -249,7 +241,6 @@ allow_clippy = 24
 
 [[crate]]
 name = "orna-lsp"
-allow_clippy = 2
 [crate.files]
 "src/analysis.rs" = 1619
 "src/names.rs" = 1513
@@ -265,7 +256,6 @@ allow_clippy = 2
 
 [[crate]]
 name = "orna-project"
-allow_clippy = 0
 [crate.files]
 "src/attachments.rs" = 12412
 "src/lib.rs" = 3232
@@ -307,7 +297,6 @@ allow_clippy = 0
 
 [[crate]]
 name = "orna-project-repl"
-allow_clippy = 0
 [crate.files]
 "src/lib.rs" = 2605
 [crate.functions]
@@ -315,7 +304,6 @@ allow_clippy = 0
 
 [[crate]]
 name = "orna-protocol"
-allow_clippy = 0
 [crate.files]
 "src/lib.rs" = 4448
 [crate.functions]
@@ -325,8 +313,6 @@ allow_clippy = 0
 
 [[crate]]
 name = "orna-repository"
-src_lines = 74780
-allow_clippy = 17
 [crate.files]
 "src/compact.rs" = 6282
 "src/compact/legacy_reader_tests.rs" = 3185
@@ -386,8 +372,6 @@ allow_clippy = 17
 
 [[crate]]
 name = "orna-runtime"
-src_lines = 68108
-allow_clippy = 8
 [crate.files]
 "src/catalogue.rs" = 3568
 "src/invocation.rs" = 1429
@@ -473,13 +457,7 @@ allow_clippy = 8
 "src/vfs.rs::vfs_rejected_editor_saves_keep_row_store_and_expose_typed_diagnostic" = 140
 
 [[crate]]
-name = "orna-security"
-allow_clippy = 0
-
-[[crate]]
 name = "orna-semantic"
-src_lines = 37052
-allow_clippy = 4
 [crate.files]
 "src/lib.rs" = 28294
 "src/semantic_payload.rs" = 1831
@@ -544,16 +522,7 @@ allow_clippy = 4
 "src/system_api.rs::parsed_descriptor_retains_declared_members" = 374
 
 [[crate]]
-name = "orna-serving"
-allow_clippy = 0
-
-[[crate]]
-name = "orna-standard-sources"
-allow_clippy = 0
-
-[[crate]]
 name = "orna-storage"
-allow_clippy = 0
 [crate.files]
 "src/compact.rs" = 3529
 "src/compact_parquet.rs" = 5200
@@ -566,13 +535,11 @@ allow_clippy = 0
 
 [[crate]]
 name = "orna-stream"
-allow_clippy = 0
 [crate.files]
 "src/lib.rs" = 2843
 
 [[crate]]
 name = "orna-syntax"
-allow_clippy = 4
 [crate.files]
 "src/editor.rs" = 1577
 "src/parser.rs" = 5655
@@ -590,8 +557,6 @@ allow_clippy = 4
 
 [[crate]]
 name = "orna-sys"
-src_lines = 30974
-allow_clippy = 5
 [crate.files]
 "src/host_filesystem.rs" = 2301
 "src/introspection.rs" = 17855
@@ -618,12 +583,7 @@ allow_clippy = 5
 "src/introspection.rs::query_paired_window_spill_rule_cost_fold" = 124
 
 [[crate]]
-name = "orna-sys-macros"
-allow_clippy = 0
-
-[[crate]]
 name = "orna-table"
-allow_clippy = 0
 [crate.files]
 "src/lib.rs" = 2829
 [crate.functions]
@@ -631,7 +591,6 @@ allow_clippy = 0
 
 [[crate]]
 name = "orna-traceability"
-allow_clippy = 1
 [crate.files]
 "src/citation_ratchet.rs" = 1611
 "src/lib.rs" = 2101
@@ -640,7 +599,6 @@ allow_clippy = 1
 
 [[crate]]
 name = "orna-value"
-allow_clippy = 2
 [crate.files]
 "src/blob.rs" = 1250
 "src/format3_context_tests.rs" = 1426

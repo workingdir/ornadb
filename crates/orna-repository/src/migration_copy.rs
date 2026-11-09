@@ -29,7 +29,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::Arc;
 
 use fs2::FileExt;
@@ -48,7 +48,7 @@ use crate::relation_admission::{
 use crate::{
     DatabaseId, GitCommitRef, IndexGeneration, LegacyAnnotationCandidate,
     MigrationAnnotationDefaults, MigrationContinuityRecord, PublicationJournal,
-    PublicationJournalEntry, Repository, RepositoryError, RepositoryFormat,
+    PublicationJournalEntry, Repository, RepositoryError, RepositoryFormat, git_command_at_root,
 };
 use crate::{ManagedFileChange, ManagedPath, PrivateCommit};
 
@@ -1331,7 +1331,7 @@ fn pin_migration_index_blob(root: &Path, object_id: &str) -> Result<(), Reposito
     let object_id = object_id.to_ascii_lowercase();
     let reference = migration_index_blob_ref(&object_id);
     let zero = "0".repeat(object_id.len());
-    let mut command = git_command(root);
+    let mut command = git_command_at_root(root);
     command.args(["update-ref", "--no-deref", &reference, &object_id, &zero]);
     if command
         .status()
@@ -1340,7 +1340,7 @@ fn pin_migration_index_blob(root: &Path, object_id: &str) -> Result<(), Reposito
     {
         return Ok(());
     }
-    let mut verify = git_command(root);
+    let mut verify = git_command_at_root(root);
     verify.args(["rev-parse", "--verify", &reference]);
     let output = verify
         .output()
@@ -1355,7 +1355,7 @@ fn pin_migration_index_blob(root: &Path, object_id: &str) -> Result<(), Reposito
 fn pin_migration_index(repository: &Repository, tree: &str) -> Result<(), RepositoryError> {
     let reference = migration_index_ref(tree);
     let zero = "0".repeat(tree.len());
-    let mut command = git_command(repository.worktree());
+    let mut command = git_command_at_root(repository.worktree());
     command.args(["update-ref", "--no-deref", &reference, tree, &zero]);
     if command
         .status()
@@ -1369,7 +1369,7 @@ fn pin_migration_index(repository: &Repository, tree: &str) -> Result<(), Reposi
 
 fn require_migration_index_pin(repository: &Repository, tree: &str) -> Result<(), RepositoryError> {
     let reference = migration_index_ref(tree);
-    let mut command = git_command(repository.worktree());
+    let mut command = git_command_at_root(repository.worktree());
     command.args(["rev-parse", "--verify", &reference]);
     let output = command
         .output()
@@ -1389,7 +1389,7 @@ fn pin_migration_candidate(
 ) -> Result<(), RepositoryError> {
     let reference = migration_candidate_ref(commit);
     let zero = "0".repeat(commit.as_str().len());
-    let mut command = git_command(repository.worktree());
+    let mut command = git_command_at_root(repository.worktree());
     command.args([
         "update-ref",
         "--no-deref",
@@ -1412,7 +1412,7 @@ fn require_migration_candidate_pin(
     commit: &GitCommitRef,
 ) -> Result<(), RepositoryError> {
     let reference = migration_candidate_ref(commit);
-    let mut command = git_command(repository.worktree());
+    let mut command = git_command_at_root(repository.worktree());
     command.args(["rev-parse", "--verify", &reference]);
     let output = command
         .output()
@@ -1612,7 +1612,7 @@ fn candidate_file(
     path: &str,
 ) -> Result<Option<Vec<u8>>, RepositoryError> {
     let expression = format!("{tree}:{path}");
-    let mut exists = git_command(repository.worktree());
+    let mut exists = git_command_at_root(repository.worktree());
     exists
         .args(["cat-file", "-e", &expression])
         .stderr(Stdio::null());
@@ -1623,7 +1623,7 @@ fn candidate_file(
     {
         return Ok(None);
     }
-    let mut blob = git_command(repository.worktree());
+    let mut blob = git_command_at_root(repository.worktree());
     blob.args(["cat-file", "blob", &expression]);
     let output = blob.output().map_err(|_| RepositoryError::GitUnavailable)?;
     if !output.status.success() {
@@ -1893,7 +1893,7 @@ fn configure_migration_commit_identity(root: &Path) -> Result<(), RepositoryErro
         ("user.email", "migration@orna.invalid"),
         ("commit.gpgsign", "false"),
     ] {
-        let mut command = git_command(root);
+        let mut command = git_command_at_root(root);
         command.args(["config", "--local", key, value]);
         let output = command
             .output()
@@ -1912,7 +1912,7 @@ fn configure_migration_commit_identity(root: &Path) -> Result<(), RepositoryErro
 /// makes the candidate commit object a function of the input alone: two
 /// independent preparations of the same source then build the same object.
 fn source_commit_time(source: &Repository, commit: &GitCommitRef) -> Result<i64, RepositoryError> {
-    let mut command = git_command(source.worktree());
+    let mut command = git_command_at_root(source.worktree());
     command
         .args(["log", "-1", "--format=%ct"])
         .arg(commit.as_str());
@@ -2024,7 +2024,7 @@ fn clone_source_graph(source_root: &Path, destination: &Path) -> Result<PathBuf,
     if root == canonical_source || root.starts_with(&canonical_source) {
         return Err(RepositoryError::InvalidSelector);
     }
-    let mut command = git_command(&parent);
+    let mut command = git_command_at_root(&parent);
     command
         // `--no-local` forces the real transport, so the copy keeps its own
         // object store and neither depends on nor writes into the source's.
@@ -2085,7 +2085,7 @@ fn copy_submodule_admin(source: &Path, destination: &Path) -> Result<(), Reposit
 /// Resolves Git's per-worktree administrative path without assuming `.git` is
 /// a directory in the source or destination worktree.
 fn git_path(root: &Path, name: &str) -> Result<PathBuf, RepositoryError> {
-    let mut command = git_command(root);
+    let mut command = git_command_at_root(root);
     command.args(["rev-parse", "--path-format=absolute", "--git-path", name]);
     let output = command
         .output()
@@ -2101,7 +2101,7 @@ fn git_path(root: &Path, name: &str) -> Result<PathBuf, RepositoryError> {
 /// staged blob is not reachable from the source's committed refs, so clone
 /// alone cannot guarantee that the exact copied index remains readable.
 fn copy_index_blobs(source: &Path, destination: &Path) -> Result<(), RepositoryError> {
-    let mut command = git_command(source);
+    let mut command = git_command_at_root(source);
     command.args(["ls-files", "--stage", "-z"]);
     let output = command
         .output()
@@ -2115,13 +2115,10 @@ fn copy_index_blobs(source: &Path, destination: &Path) -> Result<(), RepositoryE
         .split(|byte| *byte == 0)
         .filter(|entry| !entry.is_empty())
     {
-        let header = entry
-            .split(|byte| *byte == b'\t')
-            .next()
-            .ok_or(RepositoryError::GitOperationFailed)?;
-        let mut fields = header.split(|byte| *byte == b' ');
-        let mode = fields.next().ok_or(RepositoryError::GitOperationFailed)?;
-        let object_id = fields.next().ok_or(RepositoryError::GitOperationFailed)?;
+        let record =
+            crate::GitListRecord::parse(entry).ok_or(RepositoryError::GitOperationFailed)?;
+        let mode = record.field(0).ok_or(RepositoryError::GitOperationFailed)?;
+        let object_id = record.field(1).ok_or(RepositoryError::GitOperationFailed)?;
         if !matches!(mode, b"100644" | b"100755" | b"120000") {
             continue;
         }
@@ -2131,7 +2128,7 @@ fn copy_index_blobs(source: &Path, destination: &Path) -> Result<(), RepositoryE
         let object_id =
             std::str::from_utf8(object_id).map_err(|_| RepositoryError::GitOperationFailed)?;
 
-        let mut exists = git_command(destination);
+        let mut exists = git_command_at_root(destination);
         exists
             .env("GIT_NO_LAZY_FETCH", "1")
             .args(["cat-file", "-e"])
@@ -2146,12 +2143,12 @@ fn copy_index_blobs(source: &Path, destination: &Path) -> Result<(), RepositoryE
             continue;
         }
 
-        let mut read = git_command(source);
+        let mut read = git_command_at_root(source);
         read.env("GIT_NO_LAZY_FETCH", "1")
             .args(["cat-file", "blob", object_id])
             .stdout(Stdio::piped());
         let mut read = read.spawn().map_err(|_| RepositoryError::GitUnavailable)?;
-        let mut write = git_command(destination);
+        let mut write = git_command_at_root(destination);
         write
             .args(["hash-object", "-w", "--stdin"])
             .stdin(Stdio::piped())
@@ -2381,7 +2378,7 @@ fn hash_optional_length_prefixed(hash: &mut Sha256, bytes: Option<&[u8]>) {
 /// Settles the copy's index, repairing the stat entries its own checkout left
 /// behind so the migration does not republish the source's block transfers.
 fn settle_index(root: &Path) -> Result<(), RepositoryError> {
-    let mut command = git_command(root);
+    let mut command = git_command_at_root(root);
     command.args(["update-index", "--refresh", "--quiet"]);
     // A refresh that reports `needs update` still repaired every stat entry it
     // could, which is the whole purpose here; only a missing Git or a killed
@@ -2576,7 +2573,7 @@ fn hash_working_tree(
 
 fn hash_nested_git_state(root: &Path, hash: &mut Sha256) -> Result<(), RepositoryError> {
     hash.update(b"nested-git-state.v1\0");
-    let mut head = git_command(root);
+    let mut head = git_command_at_root(root);
     head.args(["rev-parse", "--verify", "HEAD"]);
     let output = head.output().map_err(|_| RepositoryError::GitUnavailable)?;
     if output.status.success() {
@@ -2695,20 +2692,6 @@ fn migration_record(
         predecessors = continuity.predecessors().len(),
     )
     .into_bytes()
-}
-
-/// A Git command bound to one directory, with inherited routing scrubbed and
-/// repository discovery stopped at the directory's parent. Every call site in
-/// this module names a repository root (the discovered worktree, a migration
-/// copy, a dependency clone, or an index source/destination). The bind is
-/// unconditional so a directory that is not a root cannot reach an enclosing
-/// repository's refs or objects.
-fn git_command(directory: &Path) -> Command {
-    let mut command = Command::new("git");
-    command.current_dir(directory);
-    crate::scrub_git_routing_environment(&mut command);
-    crate::bind_git_ceiling_above(&mut command, directory);
-    command
 }
 
 #[cfg(test)]
@@ -2867,7 +2850,7 @@ mod tests {
         std::fs::create_dir(&plain).unwrap();
 
         // Without the unconditional bind, discovery would read the parent's refs.
-        let pin = super::git_command(&plain)
+        let pin = super::git_command_at_root(&plain)
             .args(["rev-parse", "--verify", &migration_index_ref(EMPTY_TREE)])
             .output()
             .unwrap();

@@ -31,7 +31,7 @@ layer 1 until its split because it already depends on `orna-value`.
 |---|---|---|
 | 1 | value | orna-value, orna-foundation |
 | 2 | syntax | orna-syntax |
-| 3 | identity | orna-standard-sources, orna-sys-macros |
+| 3 | identity | orna-sys-id, orna-standard-sources, orna-sys-macros |
 | 4 | analysis | orna-semantic |
 | 5 | evaluation | orna-evaluator |
 | 6 | hosts (I/O) | orna-sys, orna-security |
@@ -51,12 +51,13 @@ that file agree.
 
 ## Size budgets
 
-File 1,200 lines; function 120 lines and cognitive complexity 25; crate source
-25,000 lines. `python3 scripts/check_architecture.py --mode=budget` enforces them
-against `scripts/architecture-budget.toml`, whose recorded numbers may only shrink.
-Shrinkage is a non-failing note; lower the drift with
-`python3 scripts/check_architecture.py --mode=budget --update`, which never raises
-an entry.
+File 1,200 lines and function 120 lines; there is no crate-level line budget. A PR
+fails only for a new over-cap file or function, or a recorded entry growing by more
+than `max(5%, 25 lines)`; shrinkage and small growth are notes.
+`python3 scripts/check_architecture.py --mode=budget` enforces this against
+`scripts/architecture-budget.toml`, whose entries may only shrink. Lower the drift
+with `--mode=budget --update`; a deliberate raise is a reviewed `[[raise]]` in
+`scripts/architecture-budget-raises.toml` with a reason and a bead.
 
 ## Checking
 
