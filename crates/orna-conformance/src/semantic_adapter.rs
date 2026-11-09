@@ -5374,7 +5374,10 @@ impl StreamHandler for ListTableHandler {
     }
 }
 
-const PROJECT_STREAM_ROOT_ADMISSION_REASON: &str = "project transaction admission does not run stream roots; use the explicit finite-list stream seam";
+/// Why project transaction admission skips a stream root. The CLI routes the
+/// skipped stage to the explicit stream seam through
+/// [`StageOutcome::is_stream_root_admission_skip`], never by copying this text.
+pub(crate) const PROJECT_STREAM_ROOT_ADMISSION_REASON: &str = "project transaction admission does not run stream roots; use the explicit finite-list stream seam";
 
 fn stream_handler_diagnostic() -> SafeDiagnostic {
     SafeDiagnostic {
