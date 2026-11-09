@@ -3601,10 +3601,13 @@ mod tests {
             wake.notify_all();
         }
         supervisor.synchronous.set_enter_hook(None);
+        // The restart is released the moment admission ends, so its cancel-all
+        // can land before the run commits its result. Success and Cancelled
+        // are both legal; a lost or orphaned run is not.
         assert!(matches!(
             run_thread.join().unwrap(),
             Ok(InvocationState::Terminal(
-                RetainedInvocationResult::Success(_)
+                RetainedInvocationResult::Success(_) | RetainedInvocationResult::Cancelled(_)
             ))
         ));
         assert_eq!(
