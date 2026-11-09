@@ -385,18 +385,30 @@ pub struct FunctionIdentity {
     pub snapshot: SnapshotId,
 }
 
+/// What a typed value holds. Protected bytes never cross the source-evaluation
+/// seam; only the value's type and redaction bit are observable.
+#[derive(Clone, Eq, PartialEq)]
+enum Payload {
+    Public(Vec<u8>),
+    Protected {
+        canonical: Vec<u8>,
+        /// Caller-supplied stable name for idempotency matching. A digest of
+        /// low-entropy plaintext would remain dictionary-testable, so the
+        /// canonical bytes of a protected value never participate.
+        identity: Option<Vec<u8>>,
+    },
+}
+
 #[derive(Clone, Eq, PartialEq)]
 pub struct TypedValue {
     static_type: TypeId,
-    canonical: Vec<u8>,
-    redacted: bool,
-    protected_identity: Option<Vec<u8>>,
+    payload: Payload,
 }
 impl fmt::Debug for TypedValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TypedValue")
             .field("static_type", &self.static_type)
-            .field("redacted", &self.redacted)
+            .field("redacted", &self.is_redacted())
             .field("canonical", &"<withheld>")
             .finish()
     }
@@ -406,17 +418,16 @@ impl TypedValue {
     pub fn public(static_type: TypeId, canonical: impl Into<Vec<u8>>) -> Self {
         Self {
             static_type,
-            canonical: canonical.into(),
-            redacted: false,
-            protected_identity: None,
+            payload: Payload::Public(canonical.into()),
         }
     }
     pub fn protected(static_type: TypeId, canonical: impl Into<Vec<u8>>) -> Self {
         Self {
             static_type,
-            canonical: canonical.into(),
-            redacted: true,
-            protected_identity: None,
+            payload: Payload::Protected {
+                canonical: canonical.into(),
+                identity: None,
+            },
         }
     }
     /// Creates a protected value with its stable `SecretRef` identity. The
@@ -429,37 +440,48 @@ impl TypedValue {
     ) -> Self {
         Self {
             static_type,
-            canonical: canonical.into(),
-            redacted: true,
-            protected_identity: Some(reference.as_str().as_bytes().to_vec()),
+            payload: Payload::Protected {
+                canonical: canonical.into(),
+                identity: Some(reference.as_str().as_bytes().to_vec()),
+            },
         }
     }
     pub fn static_type(&self) -> &TypeId {
         &self.static_type
     }
     pub fn is_redacted(&self) -> bool {
-        self.redacted
+        matches!(self.payload, Payload::Protected { .. })
     }
     /// Returns public OVB-1 bytes for a bounded pure evaluator.
     ///
     /// Protected values deliberately never cross the source-evaluation seam.
     pub fn canonical(&self) -> Option<&[u8]> {
-        (!self.redacted).then_some(self.canonical.as_slice())
+        match &self.payload {
+            Payload::Public(canonical) => Some(canonical),
+            Payload::Protected { .. } => None,
+        }
     }
     fn has_protected_identity(&self) -> bool {
-        self.protected_identity.is_some()
+        matches!(
+            self.payload,
+            Payload::Protected {
+                identity: Some(_),
+                ..
+            }
+        )
     }
     fn append_identity(&self, out: &mut Vec<u8>) {
         append(out, self.static_type.as_str().as_bytes());
-        out.push(u8::from(self.redacted));
-        // Hash only a caller-supplied stable identity for protected values:
-        // a digest of low-entropy plaintext remains dictionary-testable.
-        let identity = if self.redacted {
-            self.protected_identity.as_deref().unwrap_or_default()
-        } else {
-            &self.canonical
-        };
-        append(out, identity);
+        match &self.payload {
+            Payload::Public(canonical) => {
+                out.push(0);
+                append(out, canonical);
+            }
+            Payload::Protected { identity, .. } => {
+                out.push(1);
+                append(out, identity.as_deref().unwrap_or_default());
+            }
+        }
     }
 }
 
@@ -516,7 +538,7 @@ impl ArgumentMap {
                 name: name.clone(),
                 position,
                 static_type: value.static_type.clone(),
-                value: (!value.is_redacted()).then(|| value.canonical.clone()),
+                value: value.canonical().map(<[u8]>::to_vec),
                 redacted: value.is_redacted(),
             })
             .collect()
@@ -1030,15 +1052,15 @@ pub trait InvocationExecutor {
 pub struct RetainedValue {
     static_type: TypeId,
     codec_version: String,
+    /// The public canonical bytes; `None` exactly when the value is protected.
     canonical: Option<Vec<u8>>,
-    redacted: bool,
 }
 impl fmt::Debug for RetainedValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RetainedValue")
             .field("static_type", &self.static_type)
             .field("codec_version", &self.codec_version)
-            .field("redacted", &self.redacted)
+            .field("redacted", &self.is_redacted())
             .field("canonical", &"<withheld>")
             .finish()
     }
@@ -1047,15 +1069,15 @@ impl RetainedValue {
     fn new(value: TypedValue) -> Self {
         let TypedValue {
             static_type,
-            canonical,
-            redacted,
-            ..
+            payload,
         } = value;
         Self {
             static_type,
             codec_version: CANONICAL_VALUE_CODEC_V1.into(),
-            canonical: (!redacted).then_some(canonical),
-            redacted,
+            canonical: match payload {
+                Payload::Public(canonical) => Some(canonical),
+                Payload::Protected { .. } => None,
+            },
         }
     }
     pub fn static_type(&self) -> &TypeId {
@@ -1068,7 +1090,7 @@ impl RetainedValue {
         self.canonical.as_deref()
     }
     pub fn is_redacted(&self) -> bool {
-        self.redacted
+        self.canonical.is_none()
     }
 }
 
