@@ -7,7 +7,9 @@
 //! with `RequestCancelled` without running, and one already running has its
 //! result replaced by that error.
 
+use std::any::Any;
 use std::collections::HashMap;
+use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -113,8 +115,8 @@ fn work<C>(
             return;
         };
         let id = job.request.id.clone();
-        let result =
-            (!job.cancelled.load(Ordering::Acquire)).then(|| handler(&job.context, job.request));
+        let result = (!job.cancelled.load(Ordering::Acquire))
+            .then(|| answer(handler, &job.context, job.request));
         lock(in_flight).remove(&id);
         let response_result = match result {
             Some(result) if !job.cancelled.load(Ordering::Acquire) => result,
@@ -131,6 +133,35 @@ fn work<C>(
     }
 }
 
+/// Runs `handler` on `request`, answering a panic as an internal error.
+///
+/// A worker that unwound with the request would never answer it, would leave
+/// its cancellation flag registered, and would take its thread out of the
+/// pool, so a few panics would stop the server answering anything. The
+/// handler only reads its shared context, and the locks it may hold across a
+/// panic are poison-tolerant (`crate::sync::lock`), so continuing is sound.
+fn answer<C>(
+    handler: &Handler<C>,
+    context: &C,
+    request: Request,
+) -> Result<serde_json::Value, ResponseError> {
+    panic::catch_unwind(AssertUnwindSafe(|| handler(context, request))).unwrap_or_else(|payload| {
+        Err(ResponseError {
+            code: ErrorCode::InternalError as i32,
+            message: format!("internal error: {}", panic_text(payload.as_ref())),
+            data: None,
+        })
+    })
+}
+
+fn panic_text(payload: &(dyn Any + Send)) -> &str {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("the request handler panicked")
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::mpsc::RecvTimeoutError;
@@ -138,8 +169,8 @@ mod tests {
 
     use super::*;
 
-    /// A pool whose `block` requests wait until released, and whose other
-    /// requests answer their method name.
+    /// A pool whose `block` requests wait until released, whose `panic`
+    /// requests panic, and whose other requests answer their method name.
     fn pool(threads: usize) -> (RequestPool<()>, Receiver<Message>, Sender<()>) {
         let (release, released) = mpsc::channel::<()>();
         let released = Mutex::new(released);
@@ -151,6 +182,7 @@ mod tests {
                 if request.method == "block" {
                     lock(&released).recv().unwrap();
                 }
+                assert_ne!(request.method, "panic", "handler bug");
                 Ok(serde_json::Value::String(request.method))
             }),
             Arc::new(move |message| {
@@ -223,5 +255,24 @@ mod tests {
         // Unknown and answered ids are ignored.
         pool.cancel(&RequestId::from(7));
         pool.cancel(&RequestId::from(99));
+    }
+
+    #[test]
+    fn a_panicking_handler_is_answered_and_the_worker_keeps_serving() {
+        let (pool, received, _release) = pool(1);
+        pool.submit((), request(1, "panic"));
+        pool.submit((), request(2, "hover"));
+        let failed = response(&received);
+        assert_eq!(failed.id, RequestId::from(1));
+        assert_eq!(
+            failed.response_result.unwrap_err().code,
+            ErrorCode::InternalError as i32
+        );
+        // The one worker survived the panic and answered the next request.
+        let answered = response(&received);
+        assert_eq!(answered.id, RequestId::from(2));
+        assert_eq!(answered.response_result.unwrap(), "hover");
+        // The panicked request no longer counts as in flight.
+        assert!(lock(&pool.in_flight).is_empty());
     }
 }
