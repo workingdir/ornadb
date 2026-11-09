@@ -1469,6 +1469,17 @@ impl LiveSessionChildren for LiveApplicationWorkSupervisor {
     }
 }
 
+/// What a `Cancel` frame asks to cancel, as it stood at admission.
+#[derive(Clone, Copy)]
+struct CancelTarget {
+    id: [u8; 16],
+    kind: TargetKind,
+    /// Whether the target request was still running or the target watch open.
+    active: bool,
+    /// Whether the target is a request tracked by the durable runtime.
+    durable: bool,
+}
+
 /// Work admitted by the transport before application execution. The ticket
 /// owns the application lease and is therefore not complete until the
 /// application task explicitly acknowledges its terminal boundary.
@@ -1487,7 +1498,9 @@ pub struct LiveApplicationTicket {
     work: LiveApplicationWorkLease,
     invoke_callback: bool,
     resync_revisions: usize,
-    cancel_target: Option<([u8; 16], TargetKind, bool, bool)>,
+    /// Whether the target of a `Cancel` frame was still active at admission.
+    /// Always false for any other message.
+    cancel_target_active: bool,
 }
 
 /// Result returned by the application task to the transport actor.
@@ -2792,7 +2805,12 @@ impl LiveHost {
             let durable_request = *target_kind == TargetKind::Request && self.runtime.is_some();
             invoke_callback =
                 target_active && (*target_kind == TargetKind::Watch || !durable_request);
-            cancel_target = Some((*target, *target_kind, target_active, durable_request));
+            cancel_target = Some(CancelTarget {
+                id: *target,
+                kind: *target_kind,
+                active: target_active,
+                durable: durable_request,
+            });
         } else if let Message::Unsubscribe = &envelope.message {
             let watch = envelope.watch.ok_or(Error::InvalidMessage)?;
             invoke_callback = self.watches.contains(&(session, watch));
@@ -2884,8 +2902,12 @@ impl LiveHost {
                 as Arc<dyn LiveAdminEffectDispatcher>),
             _ => None,
         };
-        if let Some((target, target_kind, target_active, durable_request)) = cancel_target
-            && target_active
+        if let Some(CancelTarget {
+            id: target,
+            kind: target_kind,
+            durable: durable_request,
+            ..
+        }) = cancel_target.filter(|cancel| cancel.active)
         {
             let target_cancelled = if target_kind == TargetKind::Request {
                 if let Err(error) = self
@@ -2929,7 +2951,7 @@ impl LiveHost {
             work,
             invoke_callback,
             resync_revisions,
-            cancel_target,
+            cancel_target_active: cancel_target.is_some_and(|cancel| cancel.active),
         }))
     }
     /// Validates and publishes a completed application ticket after the actor
@@ -2958,7 +2980,7 @@ impl LiveHost {
             activation_lease: _,
             work,
             resync_revisions,
-            cancel_target,
+            cancel_target_active,
             ..
         } = ticket;
         let message = *message;
@@ -3142,10 +3164,7 @@ impl LiveHost {
                     response,
                     self.limits.protocol,
                 )?;
-                if let Some((_, _, target_active, _)) = cancel_target
-                    && target_active
-                    && *target_kind == TargetKind::Watch
-                {
+                if cancel_target_active && *target_kind == TargetKind::Watch {
                     close_watch = Some(*target);
                 }
                 DispatchOutcome {
@@ -3336,12 +3355,17 @@ impl LiveHost {
         Ok(mismatch)
     }
 
-    #[allow(clippy::too_many_lines)]
+    /// Dispatches one inbound frame to completion in a single call: protocol
+    /// admission, the application callback and the terminal response, with the
+    /// transport borrowed throughout. Use [`Self::prepare_application_frame`]
+    /// and [`Self::complete_application`] when the application work must run
+    /// without borrowing the transport.
     ///
     /// # Errors
     ///
     /// Returns attachment, security, serving, and response validation errors
     /// as produced by the frame pipeline; see `Self::complete`.
+    #[allow(clippy::too_many_lines)]
     pub async fn dispatch_frame(
         &mut self,
         attachment: [u8; 16],
