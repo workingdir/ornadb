@@ -2065,22 +2065,82 @@ struct CheckoutRecoveryJournal {
     runtime: RuntimeGeneration,
     force_token: CheckoutPlanToken,
     discard_paths: Vec<ManagedPath>,
-    phase: CheckoutRecoveryPhase,
-    before: Option<CwdGeneration>,
-    discarded: Option<CwdGeneration>,
-    after: Option<CwdGeneration>,
+    state: CheckoutRecoveryState,
 }
 
-/// Durable Git-visible boundaries of one force-discard transition.
+/// Durable Git-visible boundaries of one force-discard transition, each with
+/// the CWD generations observed up to it.
 ///
 /// Each state is written only after the preceding Git operation has reached a
 /// fully observable CWD generation. Recovery therefore either recognizes an
 /// exact recorded generation or stops without applying a broad reset.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CheckoutRecoveryPhase {
-    Prepared,
-    Discarded,
-    Applied,
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum CheckoutRecoveryState {
+    /// A version-1 record: the intent without any CWD generation. It cannot be
+    /// written any more, and recovery keeps its historical no-mutation
+    /// behavior.
+    PreparedWithoutGeneration,
+    Prepared {
+        before: CwdGeneration,
+    },
+    Discarded {
+        before: CwdGeneration,
+        discarded: CwdGeneration,
+    },
+    Applied {
+        before: CwdGeneration,
+        discarded: CwdGeneration,
+        after: CwdGeneration,
+    },
+}
+
+impl CheckoutRecoveryState {
+    /// Ensures every journalled generation belongs to the transition it
+    /// claims to record. Recovery must not treat independently decodable CWD
+    /// snapshots as interchangeable: the discard boundary retains the old
+    /// attachment, while the applied boundary must carry the selected target
+    /// attachment. This is deliberately checked before recovery can clear a
+    /// journal or invoke Git.
+    fn validate(&self, target: &CheckoutTarget) -> Result<(), RepositoryError> {
+        let valid = match self {
+            Self::PreparedWithoutGeneration | Self::Prepared { .. } => true,
+            Self::Discarded { before, discarded } => {
+                discarded.head == before.head && discarded.branch == before.branch
+            }
+            Self::Applied {
+                before,
+                discarded,
+                after,
+            } => {
+                discarded.head == before.head
+                    && discarded.branch == before.branch
+                    && after.head.as_ref() == Some(target.commit())
+                    && after.branch.as_deref() == target.branch_name()
+            }
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(RepositoryError::InvalidCheckoutJournal)
+        }
+    }
+}
+
+/// What restart recovery does with a retained force-discard record once it
+/// has compared the record with the current CWD.
+enum CheckoutRecoveryStep {
+    /// A version-1 record: prove the intent is still current and release it.
+    ReleaseLegacyIntent,
+    /// Nothing was switched and the CWD is the recorded one: prove the
+    /// original preflight still holds and release the record.
+    ReleasePrepared,
+    /// The recorded transition finished and the CWD is the recorded result.
+    ReleaseApplied,
+    /// The scoped discard is recorded and current: select the target.
+    SelectTarget,
+    /// Git selected the target but the process stopped before journalling the
+    /// result; the observed generation proves it is the recorded transition.
+    AdoptSelection(CwdGeneration),
 }
 
 impl CheckoutRecoveryJournal {
@@ -2090,10 +2150,19 @@ impl CheckoutRecoveryJournal {
             runtime: discard.preflight.cwd.runtime,
             force_token: discard.force_token,
             discard_paths: discard.discard_paths.clone(),
-            phase: CheckoutRecoveryPhase::Prepared,
-            before: Some(discard.preflight.cwd.clone()),
-            discarded: None,
-            after: None,
+            state: CheckoutRecoveryState::Prepared {
+                before: discard.preflight.cwd.clone(),
+            },
+        }
+    }
+
+    /// The CWD recorded before the discard, absent only in a version-1 record.
+    fn before(&self) -> Option<&CwdGeneration> {
+        match &self.state {
+            CheckoutRecoveryState::PreparedWithoutGeneration => None,
+            CheckoutRecoveryState::Prepared { before }
+            | CheckoutRecoveryState::Discarded { before, .. }
+            | CheckoutRecoveryState::Applied { before, .. } => Some(before),
         }
     }
 
@@ -2102,57 +2171,34 @@ impl CheckoutRecoveryJournal {
             && self.runtime == discard.preflight.cwd.runtime
             && self.force_token == discard.force_token
             && self.discard_paths == discard.discard_paths
-            && self.before.as_ref() == Some(&discard.preflight.cwd)
+            && self.before() == Some(&discard.preflight.cwd)
     }
 
-    fn record_discarded(&mut self, cwd: CwdGeneration) -> Result<(), RepositoryError> {
-        if self.phase != CheckoutRecoveryPhase::Prepared || self.discarded.is_some() {
+    fn record_discarded(&mut self, discarded: CwdGeneration) -> Result<(), RepositoryError> {
+        let CheckoutRecoveryState::Prepared { before } = &self.state else {
             return Err(RepositoryError::InvalidCheckoutJournal);
-        }
-        self.phase = CheckoutRecoveryPhase::Discarded;
-        self.discarded = Some(cwd);
+        };
+        let next = CheckoutRecoveryState::Discarded {
+            before: before.clone(),
+            discarded,
+        };
+        next.validate(&self.target)?;
+        self.state = next;
         Ok(())
     }
 
-    fn record_applied(&mut self, cwd: CwdGeneration) -> Result<(), RepositoryError> {
-        if self.phase != CheckoutRecoveryPhase::Discarded || self.after.is_some() {
+    fn record_applied(&mut self, after: CwdGeneration) -> Result<(), RepositoryError> {
+        let CheckoutRecoveryState::Discarded { before, discarded } = &self.state else {
             return Err(RepositoryError::InvalidCheckoutJournal);
-        }
-        self.phase = CheckoutRecoveryPhase::Applied;
-        self.after = Some(cwd);
+        };
+        let next = CheckoutRecoveryState::Applied {
+            before: before.clone(),
+            discarded: discarded.clone(),
+            after,
+        };
+        next.validate(&self.target)?;
+        self.state = next;
         Ok(())
-    }
-
-    /// Ensures every journalled generation belongs to the transition it
-    /// claims to record. Recovery must not treat independently decodable CWD
-    /// snapshots as interchangeable: the discard boundary retains the old
-    /// attachment, while the applied boundary must carry the selected target
-    /// attachment. This is deliberately checked before recovery can clear a
-    /// journal or invoke Git.
-    fn validate_generation_transition(&self) -> Result<(), RepositoryError> {
-        match (
-            self.phase,
-            self.before.as_ref(),
-            self.discarded.as_ref(),
-            self.after.as_ref(),
-        ) {
-            (CheckoutRecoveryPhase::Prepared, None, None, None) => Ok(()),
-            (CheckoutRecoveryPhase::Prepared, Some(_), None, None) => Ok(()),
-            (CheckoutRecoveryPhase::Discarded, Some(before), Some(discarded), None)
-                if discarded.head == before.head && discarded.branch == before.branch =>
-            {
-                Ok(())
-            }
-            (CheckoutRecoveryPhase::Applied, Some(before), Some(discarded), Some(after))
-                if discarded.head == before.head
-                    && discarded.branch == before.branch
-                    && after.head.as_ref() == Some(self.target.commit())
-                    && after.branch.as_deref() == self.target.branch_name() =>
-            {
-                Ok(())
-            }
-            _ => Err(RepositoryError::InvalidCheckoutJournal),
-        }
     }
 
     fn encode(&self) -> Result<Vec<u8>, RepositoryError> {
@@ -2181,20 +2227,25 @@ impl CheckoutRecoveryJournal {
                     .ok_or(RepositoryError::InvalidCheckoutJournal)?,
             )?;
         }
-        bytes.push(match self.phase {
-            CheckoutRecoveryPhase::Prepared => 1,
-            CheckoutRecoveryPhase::Discarded => 2,
-            CheckoutRecoveryPhase::Applied => 3,
-        });
-        encode_checkout_cwd(
-            &mut bytes,
-            self.before
-                .as_ref()
-                .ok_or(RepositoryError::InvalidCheckoutJournal)?,
-        )?;
-        encode_optional_checkout_cwd(&mut bytes, self.discarded.as_ref())?;
-        encode_optional_checkout_cwd(&mut bytes, self.after.as_ref())?;
-        self.validate_generation_transition()?;
+        let (phase, before, discarded, after) = match &self.state {
+            CheckoutRecoveryState::PreparedWithoutGeneration => {
+                return Err(RepositoryError::InvalidCheckoutJournal);
+            }
+            CheckoutRecoveryState::Prepared { before } => (1, before, None, None),
+            CheckoutRecoveryState::Discarded { before, discarded } => {
+                (2, before, Some(discarded), None)
+            }
+            CheckoutRecoveryState::Applied {
+                before,
+                discarded,
+                after,
+            } => (3, before, Some(discarded), Some(after)),
+        };
+        bytes.push(phase);
+        encode_checkout_cwd(&mut bytes, before)?;
+        encode_optional_checkout_cwd(&mut bytes, discarded)?;
+        encode_optional_checkout_cwd(&mut bytes, after)?;
+        self.state.validate(&self.target)?;
         if bytes.len() > MAX_JOURNAL_BYTES {
             return Err(RepositoryError::InvalidCheckoutJournal);
         }
@@ -2256,47 +2307,43 @@ impl CheckoutRecoveryJournal {
                 runtime,
                 force_token,
                 discard_paths,
-                phase: CheckoutRecoveryPhase::Prepared,
-                before: None,
-                discarded: None,
-                after: None,
+                state: CheckoutRecoveryState::PreparedWithoutGeneration,
             });
         }
         let phase = match take_byte(bytes, &mut cursor)? {
-            1 => CheckoutRecoveryPhase::Prepared,
-            2 => CheckoutRecoveryPhase::Discarded,
-            3 => CheckoutRecoveryPhase::Applied,
+            phase @ 1..=3 => phase,
             _ => return Err(RepositoryError::InvalidCheckoutJournal),
         };
-        let before = Some(decode_checkout_cwd(
-            bytes,
-            &mut cursor,
-            object_id_length,
-            version >= 3,
-        )?);
+        let before = decode_checkout_cwd(bytes, &mut cursor, object_id_length, version >= 3)?;
         let discarded =
             decode_optional_checkout_cwd(bytes, &mut cursor, object_id_length, version >= 3)?;
         let after =
             decode_optional_checkout_cwd(bytes, &mut cursor, object_id_length, version >= 3)?;
         if cursor != bytes.len()
-            || before.as_ref().is_none_or(|cwd| cwd.runtime != runtime)
+            || before.runtime != runtime
             || discarded.as_ref().is_some_and(|cwd| cwd.runtime != runtime)
             || after.as_ref().is_some_and(|cwd| cwd.runtime != runtime)
         {
             return Err(RepositoryError::InvalidCheckoutJournal);
         }
-        let journal = Self {
+        let state = match (phase, discarded, after) {
+            (1, None, None) => CheckoutRecoveryState::Prepared { before },
+            (2, Some(discarded), None) => CheckoutRecoveryState::Discarded { before, discarded },
+            (3, Some(discarded), Some(after)) => CheckoutRecoveryState::Applied {
+                before,
+                discarded,
+                after,
+            },
+            _ => return Err(RepositoryError::InvalidCheckoutJournal),
+        };
+        state.validate(&target)?;
+        Ok(Self {
             target,
             runtime,
             force_token,
             discard_paths,
-            phase,
-            before,
-            discarded,
-            after,
-        };
-        journal.validate_generation_transition()?;
-        Ok(journal)
+            state,
+        })
     }
 }
 
@@ -7209,16 +7256,13 @@ impl Repository {
         let mut journal = match self.read_checkout_recovery_journal_locked()? {
             Some(journal)
                 if journal.matches_validated(discard)
-                    && journal.phase == CheckoutRecoveryPhase::Prepared =>
+                    && matches!(journal.state, CheckoutRecoveryState::Prepared { .. }) =>
             {
                 journal
             }
             Some(_) | None => return Err(RepositoryError::CheckoutRecoveryRequired),
         };
         self.verify_validated_checkout_discard_locked(discard)?;
-        if journal.before.as_ref() != Some(&discard.preflight.cwd) {
-            return Err(RepositoryError::CheckoutRecoveryRequired);
-        }
 
         self.restore_checkout_discard_paths(discard)?;
         journal.record_discarded(self.cwd_generation_locked(discard.preflight.cwd.runtime)?)?;
@@ -7303,56 +7347,73 @@ impl Repository {
         let Some(mut journal) = self.read_checkout_recovery_journal_locked()? else {
             return Ok(());
         };
-        if let Some(before) = journal.before.as_ref() {
-            let current = self.cwd_generation_locked(journal.runtime)?;
-            return match journal.phase {
-                CheckoutRecoveryPhase::Prepared if &current == before => {
-                    self.verify_prepared_checkout_journal_locked(&journal, true)?;
-                    self.clear_checkout_recovery_journal_locked()
+        let step = match &journal.state {
+            // Version-one journals did not contain enough state to recognize a
+            // post-mutation CWD. Retain their historical no-mutation recovery
+            // behavior rather than assuming a destructive transition completed.
+            CheckoutRecoveryState::PreparedWithoutGeneration => {
+                CheckoutRecoveryStep::ReleaseLegacyIntent
+            }
+            CheckoutRecoveryState::Prepared { before } => {
+                if &self.cwd_generation_locked(journal.runtime)? != before {
+                    return Err(RepositoryError::CheckoutRecoveryRequired);
                 }
-                CheckoutRecoveryPhase::Applied if journal.after.as_ref() == Some(&current) => {
-                    self.clear_checkout_recovery_journal_locked()
-                }
-                CheckoutRecoveryPhase::Discarded
-                    if journal.discarded.as_ref() == Some(&current) =>
+                CheckoutRecoveryStep::ReleasePrepared
+            }
+            CheckoutRecoveryState::Discarded { discarded, .. } => {
+                let current = self.cwd_generation_locked(journal.runtime)?;
+                if &current == discarded {
+                    CheckoutRecoveryStep::SelectTarget
+                } else if current.head.as_ref() == Some(journal.target.commit())
+                    && current.branch.as_deref() == journal.target.branch_name()
                 {
-                    // The target may be a movable branch. Re-resolve it while
-                    // the recovery lock is held before switching: otherwise a
-                    // branch update between discard and restart could make
-                    // recovery mutate HEAD/worktree to a different commit
-                    // than the one the force witness authorized.
-                    self.verify_prepared_checkout_journal_locked(&journal, false)?;
-                    self.switch_checkout_target(&journal.target)?;
-                    let after = self.cwd_generation_locked(journal.runtime)?;
-                    if after.head.as_ref() != Some(journal.target.commit())
-                        || after.branch.as_deref() != journal.target.branch_name()
-                    {
-                        return Err(RepositoryError::GitOperationFailed);
-                    }
-                    journal.record_applied(after)?;
-                    self.write_checkout_recovery_journal_locked(&journal)?;
-                    self.clear_checkout_recovery_journal_locked()
+                    // A process may stop after Git has selected the target but
+                    // before that observable CWD generation is journalled. The
+                    // target attachment proves this is the recorded transition,
+                    // while retaining the observed index and worktree state
+                    // avoids any broad reset over later local changes.
+                    CheckoutRecoveryStep::AdoptSelection(current)
+                } else {
+                    return Err(RepositoryError::CheckoutRecoveryRequired);
                 }
-                // A process may stop after Git has selected the target but
-                // before that observable CWD generation is journalled. The
-                // target attachment proves this is the recorded transition,
-                // while retaining the observed index and worktree state
-                // avoids any broad reset over later local changes.
-                CheckoutRecoveryPhase::Discarded
-                    if current.head.as_ref() == Some(journal.target.commit())
-                        && current.branch.as_deref() == journal.target.branch_name() =>
+            }
+            CheckoutRecoveryState::Applied { after, .. } => {
+                if &self.cwd_generation_locked(journal.runtime)? != after {
+                    return Err(RepositoryError::CheckoutRecoveryRequired);
+                }
+                CheckoutRecoveryStep::ReleaseApplied
+            }
+        };
+        match step {
+            CheckoutRecoveryStep::ReleaseLegacyIntent => {
+                self.verify_prepared_checkout_journal_locked(&journal, false)?;
+            }
+            CheckoutRecoveryStep::ReleasePrepared => {
+                self.verify_prepared_checkout_journal_locked(&journal, true)?;
+            }
+            CheckoutRecoveryStep::ReleaseApplied => {}
+            CheckoutRecoveryStep::SelectTarget => {
+                // The target may be a movable branch. Re-resolve it while
+                // the recovery lock is held before switching: otherwise a
+                // branch update between discard and restart could make
+                // recovery mutate HEAD/worktree to a different commit
+                // than the one the force witness authorized.
+                self.verify_prepared_checkout_journal_locked(&journal, false)?;
+                self.switch_checkout_target(&journal.target)?;
+                let after = self.cwd_generation_locked(journal.runtime)?;
+                if after.head.as_ref() != Some(journal.target.commit())
+                    || after.branch.as_deref() != journal.target.branch_name()
                 {
-                    journal.record_applied(current)?;
-                    self.write_checkout_recovery_journal_locked(&journal)?;
-                    self.clear_checkout_recovery_journal_locked()
+                    return Err(RepositoryError::GitOperationFailed);
                 }
-                _ => Err(RepositoryError::CheckoutRecoveryRequired),
-            };
+                journal.record_applied(after)?;
+                self.write_checkout_recovery_journal_locked(&journal)?;
+            }
+            CheckoutRecoveryStep::AdoptSelection(current) => {
+                journal.record_applied(current)?;
+                self.write_checkout_recovery_journal_locked(&journal)?;
+            }
         }
-        // Version-one journals did not contain enough state to recognize a
-        // post-mutation CWD. Retain their historical no-mutation recovery
-        // behavior rather than assuming a destructive transition completed.
-        self.verify_prepared_checkout_journal_locked(&journal, false)?;
         self.clear_checkout_recovery_journal_locked()
     }
 
@@ -11771,6 +11832,109 @@ mod tests {
         let hostile =
             splice_length_prefixed(&bytes, "generated/row.orna", "../escape", u32::to_le_bytes);
         assert!(super::CheckoutRecoveryJournal::decode(&hostile, 40).is_err());
+    }
+
+    /// The force-discard record advances Prepared, Discarded, Applied one
+    /// boundary at a time. No step can be skipped or repeated, and a boundary
+    /// is refused when its generation does not belong to the transition.
+    #[test]
+    fn checkout_journal_records_each_boundary_once_and_in_order() {
+        use super::{
+            CheckoutPlanToken, CheckoutRecoveryJournal, CheckoutRecoveryState, CheckoutTarget,
+            CwdGeneration, IndexGeneration, WorktreeState,
+        };
+
+        let cwd = |head: char, branch: &str| {
+            let head = GitCommitRef(head.to_string().repeat(40));
+            CwdGeneration {
+                head: Some(head.clone()),
+                branch: Some(branch.to_owned()),
+                index: IndexGeneration {
+                    head: Some(head),
+                    tree: None,
+                },
+                worktree: WorktreeState(Vec::new(), [0; 32]),
+                runtime: RuntimeGeneration::new(7),
+            }
+        };
+        let mut journal = CheckoutRecoveryJournal {
+            target: CheckoutTarget::Branch {
+                name: "main".to_owned(),
+                commit: GitCommitRef("b".repeat(40)),
+            },
+            runtime: RuntimeGeneration::new(7),
+            force_token: CheckoutPlanToken([9; 32]),
+            discard_paths: vec![ManagedPath::new("generated/row.orna").unwrap()],
+            state: CheckoutRecoveryState::Prepared {
+                before: cwd('a', "old"),
+            },
+        };
+        let prepared = journal.clone();
+
+        assert!(matches!(
+            journal.record_applied(cwd('b', "main")),
+            Err(RepositoryError::InvalidCheckoutJournal)
+        ));
+        assert!(matches!(
+            journal.record_discarded(cwd('c', "old")),
+            Err(RepositoryError::InvalidCheckoutJournal)
+        ));
+        assert!(matches!(
+            journal.record_discarded(cwd('a', "other")),
+            Err(RepositoryError::InvalidCheckoutJournal)
+        ));
+        assert_eq!(
+            journal, prepared,
+            "a refused boundary leaves the record as it was"
+        );
+
+        journal.record_discarded(cwd('a', "old")).unwrap();
+        assert!(matches!(
+            journal.record_discarded(cwd('a', "old")),
+            Err(RepositoryError::InvalidCheckoutJournal)
+        ));
+        assert!(matches!(
+            journal.record_applied(cwd('a', "old")),
+            Err(RepositoryError::InvalidCheckoutJournal)
+        ));
+        journal.record_applied(cwd('b', "main")).unwrap();
+        assert!(matches!(
+            journal.state,
+            CheckoutRecoveryState::Applied { .. }
+        ));
+        assert!(matches!(
+            journal.record_applied(cwd('b', "main")),
+            Err(RepositoryError::InvalidCheckoutJournal)
+        ));
+
+        let encoded = journal.encode().unwrap();
+        assert_eq!(
+            CheckoutRecoveryJournal::decode(&encoded, 40).unwrap(),
+            journal
+        );
+    }
+
+    /// A version-1 record has no CWD generation to write back, so it can be
+    /// read for recovery but never encoded again.
+    #[test]
+    fn checkout_journal_v1_record_is_read_only() {
+        let mut bytes = super::CHECKOUT_JOURNAL_MAGIC.to_vec();
+        bytes.push(1);
+        bytes.extend_from_slice(&7_u64.to_be_bytes());
+        bytes.push(2);
+        super::put_string(&mut bytes, &"a".repeat(40)).unwrap();
+        bytes.extend_from_slice(&[9; 32]);
+        bytes.extend_from_slice(&1_u32.to_le_bytes());
+        super::put_string(&mut bytes, "generated/row.orna").unwrap();
+        let journal = super::CheckoutRecoveryJournal::decode(&bytes, 40).unwrap();
+        assert_eq!(
+            journal.state,
+            super::CheckoutRecoveryState::PreparedWithoutGeneration
+        );
+        assert!(matches!(
+            journal.encode(),
+            Err(RepositoryError::InvalidCheckoutJournal)
+        ));
     }
 
     #[test]
