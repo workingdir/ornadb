@@ -68,19 +68,19 @@ mod tests {
     }
 
     #[test]
-    fn detached_adapter_trusts_controlled_effect_reports() {
+    fn detached_adapter_holds_first_party_effect_trust() {
         let adapter = ApplicationLiveAdapter::new(ApplicationAuthority::new(
             Catalogue::authoritative_core(),
             Limits::default(),
         ));
         assert!(
-            adapter.trusts_controlled_effect_reports(),
+            adapter.first_party_effect_trust().is_some(),
             "an adapter with no bound sys host reports only its own controlled effects"
         );
     }
 
     #[test]
-    fn host_bound_adapter_never_trusts_controlled_effect_reports() {
+    fn host_bound_adapter_never_holds_first_party_effect_trust() {
         let context = sys_host_context(
             Path::new("."),
             identity(),
@@ -92,7 +92,7 @@ mod tests {
                 .with_sys_host_context(context),
         );
         assert!(
-            !adapter.trusts_controlled_effect_reports(),
+            adapter.first_party_effect_trust().is_none(),
             "a bound sys host can reach state the handler does not observe, so its reports are downgraded"
         );
     }

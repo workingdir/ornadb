@@ -154,56 +154,19 @@ pub(super) struct Parsed {
     pub(super) color: ColorMode,
 }
 
-pub(super) fn requested_color_mode(arguments: &[String]) -> ColorMode {
-    let mut color = ColorMode::Auto;
-    let mut words = arguments.iter().map(String::as_str).peekable();
-    while let Some(option) = words.peek().copied() {
-        match option {
-            "--debug" => {
-                words.next();
-            }
-            "--db" | "--format" => {
-                words.next();
-                if words.next().is_none() {
-                    break;
-                }
-            }
-            "--color" => {
-                words.next();
-                let Some(value) = words.next() else {
-                    break;
-                };
-                let Some(mode) = ColorMode::parse(value) else {
-                    break;
-                };
-                color = mode;
-            }
-
-            _ => break,
-        }
-    }
-    color
+/// The global options a command line selected, reported even when the command
+/// itself is rejected, so the failure is written in the requested color and
+/// verbosity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct RequestedModes {
+    pub(super) color: ColorMode,
+    pub(super) debug: bool,
 }
 
-pub(super) fn requested_debug_mode(arguments: &[String]) -> bool {
-    let mut enabled = false;
-    let mut words = arguments.iter().map(String::as_str).peekable();
-    while let Some(option) = words.peek().copied() {
-        match option {
-            "--debug" => {
-                words.next();
-                enabled = true;
-            }
-            "--db" | "--color" | "--format" => {
-                words.next();
-                if words.next().is_none() {
-                    break;
-                }
-            }
-            _ => break,
-        }
-    }
-    enabled
+/// A command line parsed once, with the reporting modes available on failure.
+pub(super) struct ParseReport {
+    pub(super) modes: RequestedModes,
+    pub(super) result: Result<Parsed, Diagnostic>,
 }
 
 /// Options for `semantic-legend`. `--limit N` caps the token-type rows of the
@@ -350,6 +313,19 @@ struct GlobalOptions {
     has_explicit_endpoint: bool,
     color: ColorMode,
     output_format: Option<StatusFormat>,
+    debug: bool,
+}
+
+impl Default for GlobalOptions {
+    fn default() -> Self {
+        Self {
+            endpoint: Endpoint::ManagedLocal,
+            has_explicit_endpoint: false,
+            color: ColorMode::Auto,
+            output_format: None,
+            debug: false,
+        }
+    }
 }
 
 /// Git operations run against the backing repository unchanged (ORNA-CLI-001).
@@ -360,80 +336,147 @@ const REFUSED_COMMANDS: [&str; 8] = [
     "switch", "merge", "reset", "pull", "stash", "fmt", "verify", "prune",
 ];
 
+/// Parses a command line, for tests that assert the command and its diagnostic.
+#[cfg(test)]
 pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
-    let mut words = Words::new(arguments);
-    let globals = parse_global_options(&mut words)?;
-    let command = parse_command(&mut words, &globals)?;
-    if globals.output_format.is_some() && !matches!(&command, Command::Status { .. }) {
-        return Err(Diagnostic::usage(
-            "E1002",
-            "`--format` is supported only by `status`",
-            "use `--format human|short|json status` or `status --format human|short|json`",
-        ));
-    }
-    if words.next().is_some() {
-        return Err(Diagnostic::usage(
-            "E1003",
-            "command has unexpected arguments",
-            "this bounded slice accepts no extra arguments",
-        ));
-    }
-    Ok(Parsed {
-        endpoint: globals.endpoint,
-        command,
-        color: globals.color,
-    })
+    parse_cli_reporting(arguments).result
 }
 
-fn parse_global_options(words: &mut Words<'_>) -> Result<GlobalOptions, Diagnostic> {
-    let mut globals = GlobalOptions {
-        endpoint: Endpoint::ManagedLocal,
-        has_explicit_endpoint: false,
-        color: ColorMode::Auto,
-        output_format: None,
-    };
+/// Parses the command line once. The requested reporting modes are returned
+/// even when parsing fails, so the caller does not rescan the global options
+/// to decide how to render the failure.
+pub(super) fn parse_cli_reporting(arguments: &[String]) -> ParseReport {
+    let mut words = Words::new(arguments);
+    let mut globals = GlobalOptions::default();
+    let result = parse_global_options(&mut words, &mut globals).and_then(|()| {
+        let command = parse_command(&mut words, &globals)?;
+        if globals.output_format.is_some() && !matches!(&command, Command::Status { .. }) {
+            return Err(Diagnostic::usage(
+                "E1002",
+                "`--format` is supported only by `status`",
+                "use `--format human|short|json status` or `status --format human|short|json`",
+            ));
+        }
+        if words.next().is_some() {
+            return Err(Diagnostic::usage(
+                "E1003",
+                "command has unexpected arguments",
+                "this bounded slice accepts no extra arguments",
+            ));
+        }
+        Ok(Parsed {
+            endpoint: globals.endpoint.clone(),
+            command,
+            color: globals.color,
+        })
+    });
+    ParseReport {
+        modes: RequestedModes {
+            color: globals.color,
+            debug: globals.debug,
+        },
+        result,
+    }
+}
+
+/// Reads the global options into `globals` and reports the first rejection.
+/// The scan continues past a rejected value so a later `--debug` is still
+/// honoured for rendering that rejection, matching the modes a rejected
+/// command line has always been reported with.
+fn parse_global_options(
+    words: &mut Words<'_>,
+    globals: &mut GlobalOptions,
+) -> Result<(), Diagnostic> {
+    let mut first_error = None;
+    // Once a `--color` value is rejected, later `--color` options are ignored:
+    // the last valid value stays in force, as it did before the command was
+    // parsed.
+    let mut color_rejected = false;
     while let Some(option) = words.peek() {
         match option {
             "--debug" => {
                 words.next();
+                globals.debug = true;
             }
             "--db" => {
                 words.next();
                 globals.has_explicit_endpoint = true;
-                globals.endpoint = Endpoint::parse(words.require(
-                    "option `--db` needs a value",
-                    "supply an endpoint after `--db`",
-                )?)?;
+                let Some(value) = words.next() else {
+                    first_error.get_or_insert_with(|| {
+                        Diagnostic::usage(
+                            "E1001",
+                            "option `--db` needs a value",
+                            "supply an endpoint after `--db`",
+                        )
+                    });
+                    break;
+                };
+                match Endpoint::parse(value) {
+                    Ok(endpoint) => globals.endpoint = endpoint,
+                    Err(error) => {
+                        first_error.get_or_insert(error);
+                    }
+                }
             }
             "--color" => {
                 words.next();
-                let value = words.require(
-                    "option `--color` needs a value",
-                    "choose `auto`, `always`, or `never` after `--color`",
-                )?;
-                globals.color = ColorMode::parse(value).ok_or(Diagnostic::usage(
-                    "E1002",
-                    "unsupported value for `--color`",
-                    "choose `auto`, `always`, or `never`",
-                ))?;
+                let Some(value) = words.next() else {
+                    first_error.get_or_insert_with(|| {
+                        Diagnostic::usage(
+                            "E1001",
+                            "option `--color` needs a value",
+                            "choose `auto`, `always`, or `never` after `--color`",
+                        )
+                    });
+                    break;
+                };
+                if !color_rejected {
+                    if let Some(mode) = ColorMode::parse(value) {
+                        globals.color = mode;
+                    } else {
+                        color_rejected = true;
+                        first_error.get_or_insert_with(|| {
+                            Diagnostic::usage(
+                                "E1002",
+                                "unsupported value for `--color`",
+                                "choose `auto`, `always`, or `never`",
+                            )
+                        });
+                    }
+                }
             }
             "--format" => {
                 words.next();
-                let value = words.require(
-                    "option `--format` needs a value",
-                    "choose `human`, `short`, or `json` after `--format`",
-                )?;
-                globals.output_format =
-                    Some(StatusFormat::parse(value).ok_or(Diagnostic::usage(
-                        "E1002",
-                        "unsupported value for `--format`",
-                        "choose `human`, `short`, or `json`",
-                    ))?);
+                let Some(value) = words.next() else {
+                    first_error.get_or_insert_with(|| {
+                        Diagnostic::usage(
+                            "E1001",
+                            "option `--format` needs a value",
+                            "choose `human`, `short`, or `json` after `--format`",
+                        )
+                    });
+                    break;
+                };
+                match StatusFormat::parse(value) {
+                    Some(format) => globals.output_format = Some(format),
+                    None => {
+                        first_error.get_or_insert_with(|| {
+                            Diagnostic::usage(
+                                "E1002",
+                                "unsupported value for `--format`",
+                                "choose `human`, `short`, or `json`",
+                            )
+                        });
+                    }
+                }
             }
             _ => break,
         }
     }
-    Ok(globals)
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 fn parse_command(words: &mut Words<'_>, globals: &GlobalOptions) -> Result<Command, Diagnostic> {
@@ -1085,6 +1128,22 @@ mod tests {
                 "changed path.orna".into(),
             ])
         );
+    }
+
+    #[test]
+    fn rejected_command_line_reports_the_requested_color_and_verbosity() {
+        let report = parse_cli_reporting(&args(&["--debug", "--color", "always", "unknown"]));
+        assert_eq!(report.result.expect_err("unknown command").code, "E1002");
+        assert_eq!(report.modes.color, ColorMode::Always);
+        assert!(report.modes.debug);
+
+        // A rejected `--color` value keeps the last valid color in force and a
+        // later `--debug` still selects how the rejection is rendered.
+        let report =
+            parse_cli_reporting(&args(&["--color", "always", "--color", "bogus", "--debug"]));
+        assert_eq!(report.result.expect_err("invalid color").code, "E1002");
+        assert_eq!(report.modes.color, ColorMode::Always);
+        assert!(report.modes.debug);
     }
 
     #[test]

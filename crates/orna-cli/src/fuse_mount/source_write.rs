@@ -35,10 +35,34 @@ const SOURCE_COMMIT_ATTEMPTS: usize = 3;
 pub(super) struct SourceDraft {
     pub(super) baseline: Vec<u8>,
     pub(super) candidate: Vec<u8>,
-    /// The candidate holds bytes that no commit has accepted.
-    pub(super) dirty: bool,
-    /// Why the candidate was not accepted, and its retained draft id when kept.
-    pub(super) refusal: Option<SourceRefusal>,
+    pub(super) status: SourceDraftStatus,
+}
+
+/// What a source candidate holds relative to the committed baseline.
+pub(super) enum SourceDraftStatus {
+    /// The candidate equals the committed bytes.
+    Clean,
+    /// The candidate holds bytes no commit has accepted.
+    Unsynced,
+    /// A commit refused the candidate; `unsynced` when those bytes still
+    /// differ from the accepted row, so a later commit can accept them.
+    Refused {
+        unsynced: bool,
+        refusal: SourceRefusal,
+    },
+}
+
+impl SourceDraftStatus {
+    /// The state a group member records when its commit begins.
+    fn member_state(&self) -> MemberState {
+        match self {
+            Self::Clean => MemberState::Clean,
+            Self::Unsynced => MemberState::Unsynced,
+            Self::Refused { unsynced, .. } => MemberState::Refused {
+                unsynced: *unsynced,
+            },
+        }
+    }
 }
 
 pub(super) struct SourceRefusal {
@@ -51,9 +75,41 @@ impl SourceDraft {
         Self {
             baseline: committed.clone(),
             candidate: committed,
-            dirty: false,
-            refusal: None,
+            status: SourceDraftStatus::Clean,
         }
+    }
+
+    /// Whether the candidate holds bytes no commit has accepted.
+    pub(super) fn is_unsynced(&self) -> bool {
+        matches!(
+            self.status,
+            SourceDraftStatus::Unsynced | SourceDraftStatus::Refused { unsynced: true, .. }
+        )
+    }
+
+    pub(super) fn refusal(&self) -> Option<&SourceRefusal> {
+        match &self.status {
+            SourceDraftStatus::Refused { refusal, .. } => Some(refusal),
+            SourceDraftStatus::Clean | SourceDraftStatus::Unsynced => None,
+        }
+    }
+
+    pub(super) fn is_refused(&self) -> bool {
+        self.refusal().is_some()
+    }
+
+    /// Marks the candidate as holding unaccepted writes, clearing an old refusal.
+    fn mark_unsynced(&mut self) {
+        self.status = SourceDraftStatus::Unsynced;
+    }
+
+    /// Records a refusal, keeping the candidate pending only when
+    /// `keep_unsynced` says those bytes still differ from the accepted row.
+    fn refuse(&mut self, refusal: SourceRefusal, keep_unsynced: bool) {
+        self.status = SourceDraftStatus::Refused {
+            unsynced: keep_unsynced,
+            refusal,
+        };
     }
 }
 
@@ -63,8 +119,16 @@ struct SourceMember {
     path: String,
     baseline: Vec<u8>,
     candidate: Vec<u8>,
-    dirty: bool,
-    refused: bool,
+    state: MemberState,
+}
+
+/// A group member's draft state when its commit began, without the refusal
+/// detail the live draft keeps.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MemberState {
+    Clean,
+    Unsynced,
+    Refused { unsynced: bool },
 }
 
 /// The verdict on one group member.
@@ -162,7 +226,7 @@ impl WorkspaceFilesystem {
             .map(|(_, draft)| draft.baseline.len() + draft.candidate.len())
             .sum();
         let baseline_len = match draft_state.source_drafts.get(&inode) {
-            Some(draft) if !rebase || draft.dirty => draft.baseline.len(),
+            Some(draft) if !rebase || draft.is_unsynced() => draft.baseline.len(),
             _ => self
                 .with_source_committed(inode, <[u8]>::len)
                 .ok_or(Errno::EBADF)?,
@@ -184,7 +248,7 @@ impl WorkspaceFilesystem {
     ) -> Result<&'a mut SourceDraft, Errno> {
         let reseed = match draft_state.source_drafts.get(&inode) {
             None => true,
-            Some(draft) => rebase && !draft.dirty,
+            Some(draft) => rebase && !draft.is_unsynced(),
         };
         if reseed {
             let committed = self.source_committed_bytes(inode).ok_or(Errno::EBADF)?;
@@ -199,8 +263,8 @@ impl WorkspaceFilesystem {
     }
 
     fn mark_source_handle(draft_state: &mut DraftState, handle: u64, inode: u64) {
-        draft_state.unresolved_handles.insert(handle, inode);
-        draft_state.dirty_handles.insert(handle);
+        draft_state.set_unresolved(handle, inode);
+        draft_state.set_unaccepted_write(handle);
     }
 
     /// Opens a source module for writing (ORNA-VFS-020). A mount without a writer
@@ -222,15 +286,14 @@ impl WorkspaceFilesystem {
         let draft = self.source_candidate_mut(draft_state, inode, truncate)?;
         if truncate {
             draft.candidate.clear();
-            draft.dirty = true;
-            draft.refusal = None;
+            draft.mark_unsynced();
         }
         let handle = self.next_handle.fetch_add(1, Ordering::Relaxed);
         self.open_files
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(handle, OpenFile::Source(inode));
-        draft_state.writer_owners.insert(handle, pid);
+        draft_state.set_writer_owner(handle, pid);
         if truncate {
             Self::mark_source_handle(draft_state, handle, inode);
         }
@@ -265,8 +328,7 @@ impl WorkspaceFilesystem {
             draft.candidate.resize(end, 0);
         }
         draft.candidate[start..end].copy_from_slice(data);
-        draft.dirty = true;
-        draft.refusal = None;
+        draft.mark_unsynced();
         Self::mark_source_handle(draft_state, handle, inode);
         Ok(())
     }
@@ -286,8 +348,7 @@ impl WorkspaceFilesystem {
         self.source_budget_fits(&*draft_state, inode, false, size)?;
         let draft = self.source_candidate_mut(draft_state, inode, false)?;
         draft.candidate.resize(size, 0);
-        draft.dirty = true;
-        draft.refusal = None;
+        draft.mark_unsynced();
         Self::mark_source_handle(draft_state, handle, inode);
         Ok(())
     }
@@ -339,8 +400,8 @@ impl WorkspaceFilesystem {
             })
             .collect();
         for handle in handles {
-            draft_state.unresolved_handles.remove(&handle);
-            draft_state.dirty_handles.remove(&handle);
+            draft_state.take_unresolved(handle);
+            draft_state.clear_unaccepted_write(handle);
         }
     }
 
@@ -372,11 +433,13 @@ impl WorkspaceFilesystem {
                     (None, Some(error.errno))
                 }
             };
-        draft.refusal = Some(SourceRefusal {
-            cause,
-            draft: draft_id,
-        });
-        draft.dirty = keep_dirty;
+        draft.refuse(
+            SourceRefusal {
+                cause,
+                draft: draft_id,
+            },
+            keep_dirty,
+        );
         failure
     }
 
@@ -388,14 +451,10 @@ impl WorkspaceFilesystem {
             .source_gate
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if self
-            .draft_state
+        self.draft_state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .quiescing
-        {
-            return Err(Errno::EBUSY);
-        }
+            .ensure_serving()?;
         self.source_group_commit(trigger).map_err(|error| {
             eprintln!("source commit did not accept the group: {error}");
             error.errno()
@@ -537,7 +596,9 @@ impl WorkspaceFilesystem {
         let member_inodes: Vec<u64> = draft_state
             .source_drafts
             .iter()
-            .filter(|(inode, draft)| draft.dirty || (**inode == trigger && draft.refusal.is_some()))
+            .filter(|(inode, draft)| {
+                draft.is_unsynced() || (**inode == trigger && draft.is_refused())
+            })
             .map(|(inode, _)| *inode)
             .collect();
         let state = self
@@ -555,8 +616,7 @@ impl WorkspaceFilesystem {
                 path,
                 baseline: draft.baseline.clone(),
                 candidate: draft.candidate.clone(),
-                dirty: draft.dirty,
-                refused: draft.refusal.is_some(),
+                state: draft.status.member_state(),
             });
         }
         let siblings = state
@@ -583,7 +643,7 @@ impl WorkspaceFilesystem {
             return;
         }
         let (dirty, refused) = if let Some(draft) = draft_state.source_drafts.get(&inode) {
-            (draft.dirty, draft.refusal.is_some())
+            (draft.is_unsynced(), draft.is_refused())
         } else {
             eprintln!("[vfs] source module {inode}: closed with no candidate; nothing to retain");
             return;
@@ -601,11 +661,13 @@ impl WorkspaceFilesystem {
                     "[vfs] source module {inode}: not retained at release (no writer or path)"
                 );
                 if let Some(draft) = draft_state.source_drafts.get_mut(&inode) {
-                    draft.dirty = false;
-                    draft.refusal = Some(SourceRefusal {
-                        cause: SOURCE_UNSYNCED,
-                        draft: None,
-                    });
+                    draft.refuse(
+                        SourceRefusal {
+                            cause: SOURCE_UNSYNCED,
+                            draft: None,
+                        },
+                        false,
+                    );
                 }
             }
         }
@@ -618,7 +680,7 @@ impl WorkspaceFilesystem {
         let pending: Vec<(u64, String)> = draft_state
             .source_drafts
             .iter()
-            .filter(|(_, draft)| draft.dirty && draft.refusal.is_none())
+            .filter(|(_, draft)| matches!(draft.status, SourceDraftStatus::Unsynced))
             .filter_map(|(inode, _)| self.source_path(*inode).map(|path| (*inode, path)))
             .collect();
         let mut worst = None;
@@ -628,10 +690,13 @@ impl WorkspaceFilesystem {
             };
             match retain_source_candidate(&writer, &path, SOURCE_UNSYNCED, &draft.candidate) {
                 Ok(id) => {
-                    draft.refusal = Some(SourceRefusal {
-                        cause: SOURCE_UNSYNCED,
-                        draft: Some(id),
-                    });
+                    draft.refuse(
+                        SourceRefusal {
+                            cause: SOURCE_UNSYNCED,
+                            draft: Some(id),
+                        },
+                        true,
+                    );
                 }
                 Err(error) => worst = worst_retention_errno(worst, error.errno),
             }
@@ -652,8 +717,7 @@ fn group_result(
 /// Whether the draft still holds what the snapshot captured.
 fn draft_matches(draft: Option<&SourceDraft>, member: &SourceMember) -> bool {
     draft.is_some_and(|draft| {
-        draft.dirty == member.dirty
-            && draft.refusal.is_some() == member.refused
+        draft.status.member_state() == member.state
             && draft.baseline == member.baseline
             && draft.candidate == member.candidate
     })
