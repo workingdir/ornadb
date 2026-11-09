@@ -1557,6 +1557,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "orna-intrinsics"
+version = "1.0.0"
+
+[[package]]
 name = "orna-live"
 version = "1.0.0"
 dependencies = [
