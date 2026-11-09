@@ -9583,7 +9583,15 @@ impl Context<'_, '_> {
             .as_deref()
             .or(site.resolved.as_deref())
             .unwrap_or(intrinsic.name);
-        let name = spelling.rsplit('.').next().unwrap_or(intrinsic.name);
+        let name = if intrinsic.module == orna_intrinsics::Module::Time {
+            site.resolved
+                .as_deref()
+                .or(site.spelled.as_deref())
+                .and_then(|spelling| spelling.strip_prefix("std.time."))
+                .unwrap_or(spelling)
+        } else {
+            spelling.rsplit('.').next().unwrap_or(intrinsic.name)
+        };
         let (callee, arguments) = (site.callee, site.arguments);
         let implicit = usize::from(input.is_some());
         self.items(arguments.len() + implicit)?;
