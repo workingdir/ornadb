@@ -15860,6 +15860,46 @@ fn infer_relation_statistics_call(
             format!("std.stats.{operation} relation arguments do not match its static signature"),
         ));
     }
+    effects.may_fail = true;
+    let result = statistics_outcome(
+        StatisticsOutcome {
+            operation,
+            parameters,
+            values: &values,
+            scope,
+        },
+        element,
+        &mut valid,
+        diagnostics,
+    );
+    Some(Inferred {
+        ty: if valid { result } else { Type::Error },
+        effects,
+    })
+}
+
+/// The slot metadata and bound values one statistics call supplies.
+struct StatisticsOutcome<'a> {
+    operation: &'a str,
+    parameters: &'a [&'a str],
+    values: &'a [Option<Inferred>],
+    scope: &'a Scope,
+}
+
+/// Checks the operation's own constraints on the relation element and bound
+/// arguments, and types the successful result.
+fn statistics_outcome(
+    call: StatisticsOutcome<'_>,
+    element: Type,
+    valid: &mut bool,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Type {
+    let StatisticsOutcome {
+        operation,
+        parameters,
+        values,
+        scope,
+    } = call;
     let argument_type = |slot: usize| {
         values
             .get(slot)
@@ -15873,49 +15913,49 @@ fn infer_relation_statistics_call(
                 DIAG_TYPE,
                 format!("std.stats.{operation} requires numeric relation rows"),
             ));
-            valid = false;
+            *valid = false;
         }
         "sum" if is_absolute_affine(&element) => {
             diagnostics.push(diag(
                 DIAG_ABSOLUTE_QUANTITY_SUM,
                 "cannot sum absolute affine quantities",
             ));
-            valid = false;
+            *valid = false;
         }
         "sum" if !is_sum_element_type(&element) => {
             diagnostics.push(diag(
                 DIAG_TYPE,
                 "std.stats.sum requires numeric relation rows",
             ));
-            valid = false;
+            *valid = false;
         }
         "min" | "max" if !is_sort_key_type(&element) => {
             diagnostics.push(diag(
                 DIAG_TYPE,
                 format!("std.stats.{operation} requires ordered relation rows"),
             ));
-            valid = false;
+            *valid = false;
         }
         "range" if !numeric => {
             diagnostics.push(diag(
                 DIAG_TYPE,
                 "std.stats.range requires numeric relation rows",
             ));
-            valid = false;
+            *valid = false;
         }
         "mode" if is_default_float_equality_type(&element) => {
             diagnostics.push(diag(
                 DIAG_TYPE,
                 "std.stats.mode requires a lawful equality relation; default Float equality is unavailable",
             ));
-            valid = false;
+            *valid = false;
         }
         "histogram" if !is_sort_key_type(&element) => {
             diagnostics.push(diag(
                 DIAG_TYPE,
                 "std.stats.histogram requires ordered relation rows",
             ));
-            valid = false;
+            *valid = false;
         }
         "rate" | "derivative" | "integrate" => match &element {
             Type::Tuple(parts)
@@ -15927,7 +15967,7 @@ fn infer_relation_statistics_call(
                     DIAG_TYPE,
                     format!("std.stats.{operation} requires (Instant, numeric) relation rows"),
                 ));
-                valid = false;
+                *valid = false;
             }
         },
         _ => {}
@@ -15946,7 +15986,7 @@ fn infer_relation_statistics_call(
                 DIAG_TYPE,
                 "std.stats.percentile probability must be numeric",
             ));
-            valid = false;
+            *valid = false;
         }
     }
     if operation == "percentile"
@@ -15957,7 +15997,7 @@ fn infer_relation_statistics_call(
             DIAG_TYPE,
             "std.stats.percentile interpolation must be Str",
         ));
-        valid = false;
+        *valid = false;
     }
     for (slot, base) in [(1, Type::Int), (2, Type::Text)] {
         let applies = matches!(
@@ -15973,7 +16013,7 @@ fn infer_relation_statistics_call(
                 DIAG_TYPE,
                 "statistics scale and rounding options have invalid types",
             ));
-            valid = false;
+            *valid = false;
         }
     }
     if operation == "percentile" {
@@ -15986,7 +16026,7 @@ fn infer_relation_statistics_call(
                     DIAG_TYPE,
                     "statistics scale and rounding options have invalid types",
                 ));
-                valid = false;
+                *valid = false;
             }
         }
     }
@@ -15999,7 +16039,7 @@ fn infer_relation_statistics_call(
                 DIAG_TYPE,
                 "std.stats.histogram bins must be a list of matching boundary pairs",
             ));
-            valid = false;
+            *valid = false;
         }
         if let Some(ty) = argument_type(2)
             && !matches!(ty, Type::Bool | Type::Error)
@@ -16008,11 +16048,10 @@ fn infer_relation_statistics_call(
                 DIAG_TYPE,
                 "std.stats.histogram include_final_upper must be Bool",
             ));
-            valid = false;
+            *valid = false;
         }
     }
-    effects.may_fail = true;
-    let result = match operation {
+    match operation {
         "sum" => element.clone(),
         "mode" => Type::List(Box::new(element.clone())),
         "histogram" => Type::List(Box::new(Type::Int)),
@@ -16035,11 +16074,7 @@ fn infer_relation_statistics_call(
             }))
         }
         _ => Type::Error,
-    };
-    Some(Inferred {
-        ty: if valid { result } else { Type::Error },
-        effects,
-    })
+    }
 }
 
 /// The result of a spread statistic over absolute affine values
