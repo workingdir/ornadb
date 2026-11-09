@@ -990,6 +990,20 @@ fn session_from_another_snapshot_is_revalidated_before_authorisation() {
 }
 
 #[test]
+fn each_epoch_scope_requires_exactly_the_matching_ladder_rung() {
+    for (scope, privilege) in [
+        (InspectEpochScope::Own, InspectPrivilege::OwnInvocation),
+        (
+            InspectEpochScope::Session,
+            InspectPrivilege::SessionInvocations,
+        ),
+        (InspectEpochScope::Foreign, InspectPrivilege::AnyInvocation),
+    ] {
+        assert_eq!(Some(scope.required_rung()), privilege.ladder_rank());
+    }
+}
+
+#[test]
 fn session_with_active_roles_is_revalidated_against_the_deciding_snapshot() {
     let first = SecuritySnapshot::new(
         REVISION,
@@ -2060,12 +2074,7 @@ fn privilege_grant_accessors_expose_grantee_class_and_object() {
 #[test]
 fn authorise_privilege_allows_when_the_class_is_granted() {
     assert_eq!(
-        authorise_privilege(
-            USER,
-            PrivilegeClass::Execute,
-            None,
-            &[PrivilegeClass::Execute]
-        ),
+        authorise_privilege(PrivilegeClass::Execute, None, &[PrivilegeClass::Execute]),
         PrivilegeDecision::Allowed {
             requested: PrivilegeClass::Execute,
         }
@@ -2073,7 +2082,6 @@ fn authorise_privilege_allows_when_the_class_is_granted() {
     // A class-wide grant covers an object-scoped request.
     assert_eq!(
         authorise_privilege(
-            USER,
             PrivilegeClass::Execute,
             Some(FUNCTION),
             &[PrivilegeClass::Execute],
@@ -2084,7 +2092,6 @@ fn authorise_privilege_allows_when_the_class_is_granted() {
     );
     assert_eq!(
         authorise_privilege(
-            USER,
             PrivilegeClass::SecurityAdmin,
             None,
             &[PrivilegeClass::SecurityAdmin],
@@ -2095,7 +2102,6 @@ fn authorise_privilege_allows_when_the_class_is_granted() {
     );
     assert_eq!(
         authorise_privilege(
-            USER,
             PrivilegeClass::Inspect(InspectPrivilege::OwnInvocation),
             None,
             &[PrivilegeClass::Inspect(InspectPrivilege::OwnInvocation)],
@@ -2114,14 +2120,13 @@ fn authorise_privilege_denies_when_the_class_is_not_granted() {
         PrivilegeClass::Inspect(InspectPrivilege::OwnInvocation),
     ] {
         assert_eq!(
-            authorise_privilege(USER, requested, None, &[]),
+            authorise_privilege(requested, None, &[]),
             PrivilegeDecision::Denied(PrivilegeDenial::MissingPrivilege { requested })
         );
     }
     // An unrelated granted class never covers another class.
     assert!(matches!(
         authorise_privilege(
-            USER,
             PrivilegeClass::SecurityAdmin,
             None,
             &[PrivilegeClass::Execute],
@@ -2130,7 +2135,6 @@ fn authorise_privilege_denies_when_the_class_is_not_granted() {
     ));
     assert!(matches!(
         authorise_privilege(
-            USER,
             PrivilegeClass::Execute,
             Some(FUNCTION),
             &[PrivilegeClass::Inspect(InspectPrivilege::OwnInvocation)],
@@ -2139,7 +2143,6 @@ fn authorise_privilege_denies_when_the_class_is_not_granted() {
     ));
     assert_eq!(
         authorise_privilege(
-            USER,
             PrivilegeClass::SecurityAdmin,
             Some(FUNCTION),
             &[PrivilegeClass::SecurityAdmin],
@@ -2155,7 +2158,6 @@ fn authorise_privilege_applies_the_inspect_ladder() {
     // A granted higher rung reaches a requested lower rung.
     assert_eq!(
         authorise_privilege(
-            USER,
             PrivilegeClass::Inspect(InspectPrivilege::OwnInvocation),
             None,
             &[PrivilegeClass::Inspect(
@@ -2168,7 +2170,6 @@ fn authorise_privilege_applies_the_inspect_ladder() {
     );
     assert_eq!(
         authorise_privilege(
-            USER,
             PrivilegeClass::Inspect(InspectPrivilege::SessionInvocations),
             None,
             &[PrivilegeClass::Inspect(InspectPrivilege::AnyInvocation)],
@@ -2180,7 +2181,6 @@ fn authorise_privilege_applies_the_inspect_ladder() {
     // A requested rung above the granted rung is denied.
     assert!(matches!(
         authorise_privilege(
-            USER,
             PrivilegeClass::Inspect(InspectPrivilege::AnyInvocation),
             None,
             &[PrivilegeClass::Inspect(
@@ -2196,7 +2196,6 @@ fn authorise_privilege_applies_the_inspect_classifier_matrix() {
     // A classifier request without any ladder rung is denied.
     assert!(matches!(
         authorise_privilege(
-            USER,
             PrivilegeClass::Inspect(InspectPrivilege::Values),
             None,
             &[PrivilegeClass::Inspect(InspectPrivilege::Values)],
@@ -2206,7 +2205,6 @@ fn authorise_privilege_applies_the_inspect_classifier_matrix() {
     // A ladder rung plus the same classifier allows the request.
     assert_eq!(
         authorise_privilege(
-            USER,
             PrivilegeClass::Inspect(InspectPrivilege::Values),
             None,
             &[
@@ -2221,7 +2219,6 @@ fn authorise_privilege_applies_the_inspect_classifier_matrix() {
     // A different classifier never covers the requested one.
     assert!(matches!(
         authorise_privilege(
-            USER,
             PrivilegeClass::Inspect(InspectPrivilege::Values),
             None,
             &[
@@ -2234,7 +2231,6 @@ fn authorise_privilege_applies_the_inspect_classifier_matrix() {
     // A classifier never grants a ladder rung.
     assert!(matches!(
         authorise_privilege(
-            USER,
             PrivilegeClass::Inspect(InspectPrivilege::AnyInvocation),
             None,
             &[PrivilegeClass::Inspect(InspectPrivilege::Values)],
@@ -2393,7 +2389,6 @@ fn security_admin_audit_decisions_record_operation_and_target() {
         .expect("active user session should bind");
 
     let decision = authorise_privilege(
-        USER,
         PrivilegeClass::SecurityAdmin,
         None,
         &[PrivilegeClass::SecurityAdmin],

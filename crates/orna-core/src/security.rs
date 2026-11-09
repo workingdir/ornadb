@@ -686,33 +686,61 @@ pub fn authorise_inspect(
     epoch_owner: Option<PrincipalId>,
     granted: &[InspectPrivilege],
 ) -> InspectDecision {
-    let (required_rung, epoch_scope) = match epoch_owner {
-        Some(owner) if owner == session_principal => (0, InspectEpochScope::Own),
-        Some(_) => (2, InspectEpochScope::Foreign),
-        None => (1, InspectEpochScope::Session),
+    let epoch_scope = match epoch_owner {
+        Some(owner) if owner == session_principal => InspectEpochScope::Own,
+        Some(_) => InspectEpochScope::Foreign,
+        None => InspectEpochScope::Session,
     };
-    let Some(granted_rung) = granted
-        .iter()
-        .filter_map(|privilege| privilege.ladder_rank())
-        .max()
-    else {
-        return InspectDecision::Denied(InspectDenial::MissingPrivilege);
-    };
-    let requested_rung = requested.ladder_rank().unwrap_or(0);
-    if granted_rung < required_rung || granted_rung < requested_rung {
-        return InspectDecision::Denied(InspectDenial::MissingPrivilege);
-    }
-    if let Some(classifier) = requested.classifier()
-        && !granted
-            .iter()
-            .any(|privilege| privilege.classifier() == Some(classifier))
-    {
+    if !inspect_privileges_cover(requested, epoch_scope, granted.iter().copied()) {
         return InspectDecision::Denied(InspectDenial::MissingPrivilege);
     }
     InspectDecision::Allowed {
         epoch_scope,
         requested,
     }
+}
+
+impl InspectEpochScope {
+    /// The ladder rung a granted privilege must reach to inspect an epoch of
+    /// this scope, on the scale of [`InspectPrivilege::ladder_rank`].
+    const fn required_rung(self) -> u8 {
+        match self {
+            Self::Own => 0,
+            Self::Session => 1,
+            Self::Foreign => 2,
+        }
+    }
+}
+
+/// Decides whether the granted INSPECT privileges cover `requested` for an
+/// epoch of `epoch_scope`.
+///
+/// The ladder and the classifiers are orthogonal: some granted ladder rung must
+/// reach both the epoch's required rung and the requested rung, and a requested
+/// classifier must itself be granted. A decision that involves no epoch passes
+/// [`InspectEpochScope::Own`], the weakest rung, so only the requested
+/// privilege constrains it.
+fn inspect_privileges_cover(
+    requested: InspectPrivilege,
+    epoch_scope: InspectEpochScope,
+    granted: impl Iterator<Item = InspectPrivilege> + Clone,
+) -> bool {
+    let Some(granted_rung) = granted
+        .clone()
+        .filter_map(InspectPrivilege::ladder_rank)
+        .max()
+    else {
+        return false;
+    };
+    let required_rung = epoch_scope
+        .required_rung()
+        .max(requested.ladder_rank().unwrap_or(0));
+    granted_rung >= required_rung
+        && requested.classifier().is_none_or(|classifier| {
+            granted
+                .clone()
+                .any(|privilege| privilege.classifier() == Some(classifier))
+        })
 }
 
 /// The closed privilege-class set of one privilege grant.
@@ -873,9 +901,7 @@ pub enum PrivilegeDecision {
 /// `granted` is the closed set of privilege classes the principal holds for
 /// `object`: a caller that resolves durable grants must first keep exactly
 /// the grants whose object is `None` or equals the requested object, then
-/// pass their classes here. `session_or_principal` names the principal
-/// being decided and is retained as decision evidence; the decision itself
-/// is closed over the granted set.
+/// pass their classes here. The decision is closed over the granted set.
 ///
 /// `Execute` is object-capable and `SecurityAdmin` is class-wide: a
 /// `SecurityAdmin` request naming an object is denied even when the class is
@@ -885,7 +911,6 @@ pub enum PrivilegeDecision {
 /// cover is denied with [`PrivilegeDenial::MissingPrivilege`] without
 /// exposing any grant or object content beyond the requested class.
 pub fn authorise_privilege(
-    session_or_principal: PrincipalId,
     requested: PrivilegeClass,
     object: Option<FunctionId>,
     granted: &[PrivilegeClass],
@@ -893,30 +918,15 @@ pub fn authorise_privilege(
     let covered = match requested {
         PrivilegeClass::Execute => granted.contains(&requested),
         PrivilegeClass::SecurityAdmin => object.is_none() && granted.contains(&requested),
-        PrivilegeClass::Inspect(requested_privilege) => {
-            let required_rung = requested_privilege.ladder_rank().unwrap_or(0);
-            let granted_rung = granted
-                .iter()
-                .filter_map(|class| match class {
-                    PrivilegeClass::Inspect(privilege) => privilege.ladder_rank(),
-                    _ => None,
-                })
-                .max();
-            let ladder_covered = granted_rung.is_some_and(|rung| rung >= required_rung);
-            let classifier_covered = match requested_privilege.classifier() {
-                None => true,
-                Some(classifier) => granted.iter().any(|class| {
-                    matches!(
-                        class,
-                        PrivilegeClass::Inspect(privilege)
-                            if privilege.classifier() == Some(classifier)
-                    )
-                }),
-            };
-            ladder_covered && classifier_covered
-        }
+        PrivilegeClass::Inspect(requested_privilege) => inspect_privileges_cover(
+            requested_privilege,
+            InspectEpochScope::Own,
+            granted.iter().filter_map(|class| match class {
+                PrivilegeClass::Inspect(privilege) => Some(*privilege),
+                PrivilegeClass::Execute | PrivilegeClass::SecurityAdmin => None,
+            }),
+        ),
     };
-    let _ = (session_or_principal, object);
     if covered {
         PrivilegeDecision::Allowed { requested }
     } else {
