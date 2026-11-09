@@ -17066,18 +17066,20 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
         }
 
         let database = [0x21; 16];
-        let owner_context = orna_value::Format3Context::from_persisted(
-            database,
-            orna_value::Snapshot::cwd(database, [0x22; 16], 0.into()).expect("format-3 snapshot"),
-            orna_value::GitHash::Sha1,
-            orna_value::NativeOid::from_bytes(&[0x23; 20]).unwrap(),
-            orna_value::NativeOid::from_bytes(&[0x24; 20]).unwrap(),
-            orna_value::AvailabilityState::Available,
-            orna_value::OwnerLifetime::new([0x25; 16]),
-            orna_value::Format3Quota::new(1024, 1 << 20).unwrap(),
-            Arc::new(EmptyResolver),
-        )
-        .expect("format-3 owner context");
+        let owner_context =
+            orna_value::Format3Context::from_persisted(orna_value::Format3ContextInputs {
+                database_uuid: database,
+                pin: orna_value::Snapshot::cwd(database, [0x22; 16], 0.into())
+                    .expect("format-3 snapshot"),
+                git_oid_algorithm: orna_value::GitHash::Sha1,
+                schema_root: orna_value::NativeOid::from_bytes(&[0x23; 20]).unwrap(),
+                store_root: orna_value::NativeOid::from_bytes(&[0x24; 20]).unwrap(),
+                availability: orna_value::AvailabilityState::Available,
+                owner: orna_value::OwnerLifetime::new([0x25; 16]),
+                quota: orna_value::Format3Quota::new(1024, 1 << 20).unwrap(),
+                resolver: Arc::new(EmptyResolver),
+            })
+            .expect("format-3 owner context");
         let reference = owner_context
             .reference(
                 orna_value::ContentIdentity::from_bytes(b"protected payload"),
@@ -17751,18 +17753,18 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
         }
 
         let context = |database: [u8; 16], base: u8| {
-            Format3Context::from_persisted(
-                database,
-                orna_value::Snapshot::cwd(database, [base; 16], 0.into())
+            Format3Context::from_persisted(orna_value::Format3ContextInputs {
+                database_uuid: database,
+                pin: orna_value::Snapshot::cwd(database, [base; 16], 0.into())
                     .expect("format-3 snapshot"),
-                orna_value::GitHash::Sha1,
-                orna_value::NativeOid::from_bytes(&[base + 1; 20]).unwrap(),
-                orna_value::NativeOid::from_bytes(&[base + 2; 20]).unwrap(),
-                orna_value::AvailabilityState::Available,
-                orna_value::OwnerLifetime::new([base + 3; 16]),
-                orna_value::Format3Quota::new(1024, 1 << 20).unwrap(),
-                Arc::new(EmptyResolver),
-            )
+                git_oid_algorithm: orna_value::GitHash::Sha1,
+                schema_root: orna_value::NativeOid::from_bytes(&[base + 1; 20]).unwrap(),
+                store_root: orna_value::NativeOid::from_bytes(&[base + 2; 20]).unwrap(),
+                availability: orna_value::AvailabilityState::Available,
+                owner: orna_value::OwnerLifetime::new([base + 3; 16]),
+                quota: orna_value::Format3Quota::new(1024, 1 << 20).unwrap(),
+                resolver: Arc::new(EmptyResolver),
+            })
             .expect("format-3 owner context")
         };
         let source_context = context([0x31; 16], 0x32);
@@ -17905,17 +17907,18 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
         }
 
         let database = [0x21; 16];
-        let context = Format3Context::from_persisted(
-            database,
-            orna_value::Snapshot::cwd(database, [0x22; 16], 0.into()).expect("format-3 snapshot"),
-            orna_value::GitHash::Sha1,
-            orna_value::NativeOid::from_bytes(&[0x23; 20]).unwrap(),
-            orna_value::NativeOid::from_bytes(&[0x24; 20]).unwrap(),
-            orna_value::AvailabilityState::Available,
-            orna_value::OwnerLifetime::new([0x25; 16]),
-            orna_value::Format3Quota::new(1024, 1 << 20).unwrap(),
-            Arc::new(EmptyResolver),
-        )
+        let context = Format3Context::from_persisted(orna_value::Format3ContextInputs {
+            database_uuid: database,
+            pin: orna_value::Snapshot::cwd(database, [0x22; 16], 0.into())
+                .expect("format-3 snapshot"),
+            git_oid_algorithm: orna_value::GitHash::Sha1,
+            schema_root: orna_value::NativeOid::from_bytes(&[0x23; 20]).unwrap(),
+            store_root: orna_value::NativeOid::from_bytes(&[0x24; 20]).unwrap(),
+            availability: orna_value::AvailabilityState::Available,
+            owner: orna_value::OwnerLifetime::new([0x25; 16]),
+            quota: orna_value::Format3Quota::new(1024, 1 << 20).unwrap(),
+            resolver: Arc::new(EmptyResolver),
+        })
         .expect("format-3 owner context");
         let identity = orna_value::ContentIdentity::from_bytes(b"protected payload");
         let reference = context
@@ -19632,17 +19635,17 @@ mod blob_equality_tests {
             reads: std::sync::atomic::AtomicUsize::new(0),
         });
         let resolver: std::sync::Arc<dyn orna_value::BlobResolver> = probe.clone();
-        let context = Format3Context::from_persisted(
-            database,
-            orna_value::Snapshot::cwd(database, [2; 16], 0.into()).unwrap(),
-            orna_value::GitHash::Sha1,
-            orna_value::NativeOid::from_bytes(&[9; 20]).unwrap(),
-            orna_value::NativeOid::from_bytes(&[8; 20]).unwrap(),
-            orna_value::AvailabilityState::Available,
-            orna_value::OwnerLifetime::new([3; 16]),
-            orna_value::Format3Quota::new(8 * 1024 * 1024, 1_u64 << 62).unwrap(),
+        let context = Format3Context::from_persisted(orna_value::Format3ContextInputs {
+            database_uuid: database,
+            pin: orna_value::Snapshot::cwd(database, [2; 16], 0.into()).unwrap(),
+            git_oid_algorithm: orna_value::GitHash::Sha1,
+            schema_root: orna_value::NativeOid::from_bytes(&[9; 20]).unwrap(),
+            store_root: orna_value::NativeOid::from_bytes(&[8; 20]).unwrap(),
+            availability: orna_value::AvailabilityState::Available,
+            owner: orna_value::OwnerLifetime::new([3; 16]),
+            quota: orna_value::Format3Quota::new(8 * 1024 * 1024, 1_u64 << 62).unwrap(),
             resolver,
-        )
+        })
         .unwrap();
         let reference = context
             .reference(
@@ -20095,17 +20098,17 @@ mod blob_equality_tests {
                 payload: payload.to_vec(),
                 reads: std::sync::atomic::AtomicUsize::new(0),
             });
-        Format3Context::from_persisted(
-            database,
-            orna_value::Snapshot::cwd(database, [2; 16], 0.into()).unwrap(),
-            orna_value::GitHash::Sha1,
-            orna_value::NativeOid::from_bytes(&[9; 20]).unwrap(),
-            orna_value::NativeOid::from_bytes(&[8; 20]).unwrap(),
-            orna_value::AvailabilityState::Available,
-            orna_value::OwnerLifetime::new([3; 16]),
-            orna_value::Format3Quota::new(8 * 1024 * 1024, 1_u64 << 62).unwrap(),
+        Format3Context::from_persisted(orna_value::Format3ContextInputs {
+            database_uuid: database,
+            pin: orna_value::Snapshot::cwd(database, [2; 16], 0.into()).unwrap(),
+            git_oid_algorithm: orna_value::GitHash::Sha1,
+            schema_root: orna_value::NativeOid::from_bytes(&[9; 20]).unwrap(),
+            store_root: orna_value::NativeOid::from_bytes(&[8; 20]).unwrap(),
+            availability: orna_value::AvailabilityState::Available,
+            owner: orna_value::OwnerLifetime::new([3; 16]),
+            quota: orna_value::Format3Quota::new(8 * 1024 * 1024, 1_u64 << 62).unwrap(),
             resolver,
-        )
+        })
         .unwrap()
     }
 

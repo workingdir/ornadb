@@ -8,7 +8,6 @@
 //! document) opens, changes, saves or closes.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -29,8 +28,8 @@ type Fingerprint = Vec<(String, i32)>;
 
 #[derive(Default)]
 pub(crate) struct Views {
-    /// Closed project modules by path: content hash and analysis.
-    closed: Mutex<HashMap<PathBuf, (u64, Arc<FileAnalysis>)>>,
+    /// Closed project modules by path, kept only while their content matches.
+    closed: Mutex<HashMap<PathBuf, Arc<FileAnalysis>>>,
     /// Captured standard libraries by the revision digest of their profile.
     standard: Mutex<HashMap<[u8; 32], Arc<StandardLibrary>>>,
     projects: Mutex<HashMap<PathBuf, (Fingerprint, Arc<Workspace>)>>,
@@ -210,18 +209,15 @@ impl Views {
         source: &str,
     ) -> Option<Arc<FileAnalysis>> {
         let path = project.root().join(logical_path);
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        source.hash(&mut hasher);
-        let hash = hasher.finish();
         let mut closed = lock(&self.closed);
-        if let Some((cached, file)) = closed.get(&path)
-            && *cached == hash
+        if let Some(cached) = closed.get(&path)
+            && cached.text() == source
         {
-            return Some(Arc::clone(file));
+            return Some(Arc::clone(cached));
         }
         let uri = project.module_uri(logical_path)?;
         let file = Arc::new(FileAnalysis::new(Document::new(uri, source.to_owned(), 0)));
-        closed.insert(path, (hash, Arc::clone(&file)));
+        closed.insert(path, Arc::clone(&file));
         Some(file)
     }
 }

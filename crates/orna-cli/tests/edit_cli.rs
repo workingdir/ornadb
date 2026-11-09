@@ -508,7 +508,7 @@ async fn edit_blob_replacement_updates_the_row_without_changing_its_pinned_snaps
         .unwrap()
         .expect("pinned snapshot contains image row");
     let descriptor_bytes = before_metadata.descriptor_oid().unwrap();
-    let algorithm = match descriptor_bytes.len() {
+    let algorithm = match descriptor_bytes.width() {
         20 => GitHashAlgorithm::Sha1,
         32 => GitHashAlgorithm::Sha256,
         _ => panic!("Blob descriptor has an unsupported OID width"),

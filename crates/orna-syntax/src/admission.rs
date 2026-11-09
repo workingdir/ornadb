@@ -41,10 +41,7 @@ pub fn admit_diagnostic(
         return Err(SyntaxAdmissionError::NotPinned);
     };
     let _ = admit_span(context, span)?;
-    let file_path = span
-        .file
-        .as_deref()
-        .ok_or(SyntaxAdmissionError::NotPinned)?;
+    let file_path = span.file().ok_or(SyntaxAdmissionError::NotPinned)?;
     let wire = DiagnosticSpan::new(
         context.snapshot.clone(),
         file_path,

@@ -666,21 +666,21 @@ pub fn persisted_format3_context(
         .unwrap()
         .as_bytes();
     let algorithm = GitHash::Sha1;
-    Format3Context::from_persisted(
-        database_id,
-        Snapshot::Commit {
+    Format3Context::from_persisted(orna_value::Format3ContextInputs {
+        database_uuid: database_id,
+        pin: Snapshot::Commit {
             database: database_id,
             algorithm,
             oid: git_oid_bytes(commit),
         },
-        algorithm,
-        NativeOid::from_bytes(&git_oid_bytes(schema_root)).unwrap(),
-        NativeOid::from_bytes(&git_oid_bytes(store_root)).unwrap(),
-        AvailabilityState::Available,
-        OwnerLifetime::new([0x66; 16]),
-        Format3Quota::new(16, 1 << 20).unwrap(),
-        Arc::new(UnreadableFixtureResolver),
-    )
+        git_oid_algorithm: algorithm,
+        schema_root: NativeOid::from_bytes(&git_oid_bytes(schema_root)).unwrap(),
+        store_root: NativeOid::from_bytes(&git_oid_bytes(store_root)).unwrap(),
+        availability: AvailabilityState::Available,
+        owner: OwnerLifetime::new([0x66; 16]),
+        quota: Format3Quota::new(16, 1 << 20).unwrap(),
+        resolver: Arc::new(UnreadableFixtureResolver),
+    })
     .unwrap()
 }
 
@@ -694,21 +694,21 @@ pub fn format3_context_for_snapshot(repository: &Repository, commit: &str) -> Fo
         .as_bytes();
     let algorithm = GitHash::Sha1;
     let root = NativeOid::from_bytes(&[0x55; 20]).unwrap();
-    Format3Context::from_persisted(
-        database_id,
-        Snapshot::Commit {
+    Format3Context::from_persisted(orna_value::Format3ContextInputs {
+        database_uuid: database_id,
+        pin: Snapshot::Commit {
             database: database_id,
             algorithm,
             oid: git_oid_bytes(commit),
         },
-        algorithm,
-        root.clone(),
-        root,
-        AvailabilityState::Available,
-        OwnerLifetime::new([0x66; 16]),
-        Format3Quota::new(16, 1 << 20).unwrap(),
-        Arc::new(UnreadableFixtureResolver),
-    )
+        git_oid_algorithm: algorithm,
+        schema_root: root.clone(),
+        store_root: root,
+        availability: AvailabilityState::Available,
+        owner: OwnerLifetime::new([0x66; 16]),
+        quota: Format3Quota::new(16, 1 << 20).unwrap(),
+        resolver: Arc::new(UnreadableFixtureResolver),
+    })
     .unwrap()
 }
 

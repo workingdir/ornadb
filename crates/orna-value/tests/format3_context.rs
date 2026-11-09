@@ -41,17 +41,17 @@ fn verified_context_exposes_lazy_references_to_external_crates() {
         bytes: bytes.to_vec(),
         reads: AtomicUsize::new(0),
     });
-    let context = Format3Context::from_persisted(
-        database,
-        Snapshot::cwd(database, [2; 16], 0.into()).unwrap(),
-        GitHash::Sha1,
-        NativeOid::from_bytes(&[9; 20]).unwrap(),
-        NativeOid::from_bytes(&[8; 20]).unwrap(),
-        AvailabilityState::Available,
-        OwnerLifetime::new([3; 16]),
-        Format3Quota::new(2, 1024).unwrap(),
-        resolver.clone(),
-    )
+    let context = Format3Context::from_persisted(orna_value::Format3ContextInputs {
+        database_uuid: database,
+        pin: Snapshot::cwd(database, [2; 16], 0.into()).unwrap(),
+        git_oid_algorithm: GitHash::Sha1,
+        schema_root: NativeOid::from_bytes(&[9; 20]).unwrap(),
+        store_root: NativeOid::from_bytes(&[8; 20]).unwrap(),
+        availability: AvailabilityState::Available,
+        owner: OwnerLifetime::new([3; 16]),
+        quota: Format3Quota::new(2, 1024).unwrap(),
+        resolver: resolver.clone(),
+    })
     .unwrap();
     let blob = Blob::from_reference_with_annotation(
         context

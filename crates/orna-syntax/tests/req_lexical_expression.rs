@@ -10,8 +10,8 @@ fn source_positions_keep_utf8_byte_spans_and_line_columns() {
     let Expr::Record { fields, span } = parsed.value else {
         panic!("expected row record")
     };
-    assert_eq!(span.file.as_deref(), Some("rows/item.orna"));
-    assert_eq!(span.start_position.unwrap().column, 1);
+    assert_eq!(span.file(), Some("rows/item.orna"));
+    assert_eq!(span.location.unwrap().start.column, 1);
     let value_span = fields[0].value.span();
     assert_eq!(value_span.start, 8);
     assert_eq!(value_span.end, 12);
@@ -24,7 +24,7 @@ fn source_positions_keep_utf8_byte_spans_and_line_columns() {
     let question = source
         .find('?')
         .expect("test source contains question mark");
-    assert_eq!(diagnostic.span.file.as_deref(), Some("src/diagnostic.orna"));
+    assert_eq!(diagnostic.span.file(), Some("src/diagnostic.orna"));
     assert_eq!(
         (diagnostic.span.start, diagnostic.span.end),
         (question, question + 1)
@@ -32,17 +32,17 @@ fn source_positions_keep_utf8_byte_spans_and_line_columns() {
     assert_eq!(
         diagnostic
             .span
-            .start_position
+            .location
             .as_ref()
-            .map(|position| (position.line, position.column)),
+            .map(|location| (location.start.line, location.start.column)),
         Some((2, 19))
     );
     assert_eq!(
         diagnostic
             .span
-            .end_position
+            .location
             .as_ref()
-            .map(|position| (position.line, position.column)),
+            .map(|location| (location.end.line, location.end.column)),
         Some((2, 20))
     );
 }

@@ -89,10 +89,8 @@ impl NativeOid {
         }
     }
 
-    /// Digest width in bytes. A `NativeOid` always holds a full digest, so the
-    /// width is never zero and there is no meaningful emptiness predicate.
-    #[allow(clippy::len_without_is_empty)]
-    pub const fn len(&self) -> usize {
+    /// Digest width in bytes.
+    pub const fn width(&self) -> usize {
         match self {
             Self::Sha1(_) => 20,
             Self::Sha256(_) => 32,
