@@ -16721,11 +16721,10 @@ fn infer_success_pipeline(
             effects,
         };
     }
-    if diagnostics.iter().any(|diagnostic| {
-        diagnostic
-            .message()
-            .starts_with("a durable consumer function may own only one checkpointed source root")
-    }) {
+    if diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code() == DIAG_DURABLE_CONSUMER_SOURCE_ROOTS)
+    {
         return Inferred::error_with(input.effects);
     }
     if matches!(&input.ty, Type::Relation(_))
