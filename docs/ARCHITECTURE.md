@@ -152,7 +152,9 @@ A deliberate raise is explicit: add or update a reviewed `[[raise]]` in
 with `path`, `new_limit`, `reason` and `bead`. The raise is the visible exception
 list, so no size grows silently; the budget file itself only moves down. A raise
 whose path has not landed yet is reserved for an in-flight PR and is reported as a
-note, never a failure.
+note, never a failure. A raise that is no longer needed (the code shrank back inside
+the record's tolerance) is also only a note; `--mode=budget --update` removes it in
+the same pass that lowers the budget.
 
 A pure split that moves code into new modules records each over-cap child as a
 raise with the split's bead, and `--mode=budget --update` lowers the parent's

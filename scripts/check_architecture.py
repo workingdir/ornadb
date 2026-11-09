@@ -23,8 +23,9 @@ Modes:
                     PR's good news. There is no crate-level line budget.
 
 With `--mode=budget --update` the budget file is rewritten downwards: entries that
-shrank are lowered or removed, and an entry that grew is left unchanged. The
-update never raises or adds an entry. A deliberate raise is a reviewed [[raise]]
+shrank are lowered or removed, an entry that grew is left unchanged, and raises
+that are no longer needed are dropped from scripts/architecture-budget-raises.toml.
+The update never raises or adds an entry. A deliberate raise is a reviewed [[raise]]
 in `scripts/architecture-budget-raises.toml` (path, new_limit, reason, bead); the
 raise is the visible exception and the budget file only moves down. The CI job
 never passes --update.
@@ -320,6 +321,41 @@ def load_raises(path: Path) -> dict[tuple[str, str, str], dict]:
             "bead": raw["bead"],
         }
     return raises
+
+
+RAISE_HEADER = re.compile(r"(?m)^\[\[raise\]\]\s*$")
+
+
+def remove_raises(path: Path, keys: set[tuple[str, str, str]]) -> list[str]:
+    """Drop the [[raise]] blocks whose resolved key is in `keys`.
+
+    Only obsolete blocks are removed; the header, reasons, order and comments of
+    the kept entries are preserved. A raise whose path is not in the workspace is
+    reserved for an in-flight PR and is never passed here.
+    """
+    if not keys or not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8")
+    starts = list(RAISE_HEADER.finditer(text))
+    if not starts:
+        return []
+    header = text[: starts[0].start()]
+    kept: list[str] = []
+    removed: list[str] = []
+    for index, match in enumerate(starts):
+        end = starts[index + 1].start() if index + 1 < len(starts) else len(text)
+        block = text[match.start():end]
+        path_match = re.search(r'(?m)^path\s*=\s*"([^"]+)"', block)
+        if path_match is None:
+            kept.append(block)
+            continue
+        if parse_raise_path(path, path_match.group(1)) in keys:
+            removed.append(path_match.group(1))
+        else:
+            kept.append(block)
+    if removed:
+        path.write_text(header + "".join(kept), encoding="utf-8")
+    return removed
 
 
 # --------------------------------------------------------------------------
@@ -753,9 +789,10 @@ def budget_limit(base: int | None, raise_spec: dict | None) -> int:
 
 def check_budget(
     workspace: Workspace, budget: dict, raises: dict[tuple[str, str, str], dict]
-) -> tuple[list[Violation], list[WarningEntry]]:
+) -> tuple[list[Violation], list[WarningEntry], set[tuple[str, str, str]]]:
     violations: list[Violation] = []
     notes: list[WarningEntry] = []
+    obsolete: set[tuple[str, str, str]] = set()
     limits = budget["limits"]
     recorded = budget["crates"]
 
@@ -810,10 +847,12 @@ def check_budget(
                 if spec is not None:
                     needed_above = (base + growth_tolerance(base)) if base is not None else cap
                     if now <= needed_above:
+                        obsolete.add((name, kind, key))
                         notes.append(WarningEntry(
                             f"unused-raise:{name}:{key}",
-                            f"{name}/{key}: raise to {spec['new_limit']} is not needed "
-                            f"(measured {now}); remove it from {RAISES_PATH}",
+                            f"{name}/{key}: raise to {spec['new_limit']} is no longer needed "
+                            f"(measured {now}); this is a note, not a failure, and "
+                            f"--mode=budget --update removes it",
                         ))
             for key, old in sorted(entries.items()):
                 if key not in measured:
@@ -841,7 +880,7 @@ def check_budget(
                 f"{spec['path']}: raise path is not present in the workspace; "
                 f"it is reserved for an in-flight PR and should be removed once stale",
             ))
-    return violations, notes
+    return violations, notes, obsolete
 
 
 # --------------------------------------------------------------------------
@@ -1009,7 +1048,14 @@ def run(args: argparse.Namespace) -> int:
             for change in changes:
                 print(f"[note] {change}")
             budget = load_budget(budget_path)
-        violations, notes = check_budget(workspace, budget, raises)
+        violations, notes, obsolete = check_budget(workspace, budget, raises)
+        if args.update and obsolete:
+            removed = remove_raises(raises_path, obsolete)
+            for raise_path in removed:
+                print(f"[note] dropped obsolete raise {raise_path}")
+            if removed:
+                raises = load_raises(raises_path)
+                violations, notes, obsolete = check_budget(workspace, budget, raises)
         for violation in violations:
             print(describe(violation))
         for note in notes:

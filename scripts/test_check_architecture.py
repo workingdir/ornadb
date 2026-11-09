@@ -553,6 +553,28 @@ class BudgetTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("reserved for an in-flight PR", result.stdout)
 
+    def test_obsolete_raise_is_a_note_and_update_drops_it(self) -> None:
+        fixture = self.fixture({"src/lib.rs": "// filler\n" * 500})
+        self.budget(fixture, files={"src/lib.rs": 500})
+        fixture.raises(
+            '[[raise]]\npath = "crates/demo-a/src/lib.rs"\nnew_limit = 600\n'
+            'reason = "obsolete"\nbead = "ornadb-test"\n'
+            '\n[[raise]]\npath = "crates/demo-a/src/gone.rs::gone"\nnew_limit = 200\n'
+            'reason = "reserved for an in-flight PR"\nbead = "ornadb-test"\n'
+        )
+        note = fixture.run("--mode=budget")
+        self.assertEqual(note.returncode, 0, note.stdout + note.stderr)
+        self.assertIn("is no longer needed", note.stdout)
+        self.assertIn("this is a note, not a failure", note.stdout)
+
+        update = fixture.run("--mode=budget", "--update")
+        self.assertEqual(update.returncode, 0, update.stdout + update.stderr)
+        self.assertIn("dropped obsolete raise crates/demo-a/src/lib.rs", update.stdout)
+        raises = (fixture.root / "scripts" / "architecture-budget-raises.toml").read_text(encoding="utf-8")
+        self.assertNotIn("crates/demo-a/src/lib.rs", raises)
+        self.assertIn("crates/demo-a/src/gone.rs::gone", raises)
+        self.assertEqual(fixture.run("--mode=budget").returncode, 0)
+
     def test_raise_with_missing_fields_is_a_config_error(self) -> None:
         fixture = self.fixture({"src/lib.rs": "a\nb\nc\n"})
         self.budget(fixture)
