@@ -14616,6 +14616,46 @@ fn infer_finite_list_helper_collection(
         ));
     }
 
+    let call = FiniteListCall {
+        operation,
+        values: &values,
+        slots: &slots,
+        arguments,
+        scope,
+        local,
+    };
+    let result = finite_list_helper_result(call, &mut effects, diagnostics);
+    Inferred {
+        ty: if malformed { Type::Error } else { result },
+        effects,
+    }
+}
+
+/// One finite-list helper call's bound arguments and the values they produced.
+struct FiniteListCall<'a> {
+    operation: &'a str,
+    values: &'a [Option<Type>],
+    slots: &'a [Option<usize>],
+    arguments: &'a [orna_syntax::Argument],
+    scope: &'a Scope,
+    local: &'a BTreeMap<String, Symbol>,
+}
+
+/// Types the operation's result from its bound argument values, checking each
+/// operation's own constraints.
+fn finite_list_helper_result(
+    call: FiniteListCall<'_>,
+    effects: &mut EffectSummary,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Type {
+    let FiniteListCall {
+        operation,
+        values,
+        slots,
+        arguments,
+        scope,
+        local,
+    } = call;
     let relation_input = matches!(
         values.first().and_then(Option::as_ref),
         Some(Type::Relation(_))
@@ -14642,7 +14682,7 @@ fn infer_finite_list_helper_collection(
         }
     };
     let first = list_element(0, "input", diagnostics);
-    let result = match operation {
+    match operation {
         "chunk" => {
             let size = values
                 .get(1)
@@ -14802,10 +14842,6 @@ fn infer_finite_list_helper_collection(
             container(Type::List(Box::new(first)))
         }
         _ => unreachable!("finite-list helper was checked"),
-    };
-    Inferred {
-        ty: if malformed { Type::Error } else { result },
-        effects,
     }
 }
 
