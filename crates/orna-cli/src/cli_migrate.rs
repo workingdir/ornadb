@@ -19,24 +19,52 @@ fn migration_source_admission_diagnostic(error: orna_repository::FormatContextEr
     }
 }
 
-#[allow(clippy::too_many_lines)]
+/// The diagnostics every `migrate` form shares.
+fn migrate_usage() -> Diagnostic {
+    Diagnostic::usage(
+        "E1002",
+        "unsupported `migrate` arguments",
+        "use `migrate copy DEST [--annotation-defaults N] --no-persistent-consumers` or `migrate abort DEST`",
+    )
+}
+
+/// The destination and flags one `migrate copy` invocation names.
+struct CopyArguments<'a> {
+    destination: &'a str,
+    annotation_defaults: Option<u32>,
+}
+
 pub(super) fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnostic> {
-    let usage = || {
-        Diagnostic::usage(
-            "E1002",
-            "unsupported `migrate` arguments",
-            "use `migrate copy DEST [--annotation-defaults N] --no-persistent-consumers` or `migrate abort DEST`",
+    let mut words = crate::cli_options::words(arguments);
+    match words.next() {
+        Some("abort") => return run_migrate_abort(endpoint, words),
+        Some("copy") => {}
+        _ => return Err(migrate_usage()),
+    }
+    let copy = parse_copy_arguments(&mut words)?;
+    let source = std::path::Path::new(local_project_path(endpoint)?);
+    let repository = orna_repository::Repository::discover(source).map_err(|error| {
+        Diagnostic::target_with_detail(
+            "E2100",
+            "legacy migration source could not be opened",
+            "run the command from a local format-1 or format-2 worktree",
+            format!("{error:?}"),
         )
-    };
-    let mut arguments = arguments.iter().map(String::as_str);
-    let subcommand = arguments.next();
-    if subcommand == Some("abort") {
-        return run_migrate_abort(endpoint, arguments);
-    }
-    if subcommand != Some("copy") {
-        return Err(usage());
-    }
-    let destination = arguments.next().ok_or_else(|| {
+    })?;
+    let prepared = prepare_migration_copy(
+        &repository,
+        std::path::Path::new(copy.destination),
+        copy.annotation_defaults,
+    )?;
+    print_prepared_copy(&prepared);
+    Ok(())
+}
+
+/// Parses the destination and flags after `migrate copy`.
+fn parse_copy_arguments<'a>(
+    words: &mut crate::cli_options::Words<'a>,
+) -> Result<CopyArguments<'a>, Diagnostic> {
+    let destination = words.next().ok_or_else(|| {
         Diagnostic::usage(
             "E1001",
             "`migrate copy` needs a destination",
@@ -45,10 +73,10 @@ pub(super) fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(
     })?;
     let mut annotation_defaults = None;
     let mut no_persistent_consumers = false;
-    while let Some(option) = arguments.next() {
+    while let Some(option) = words.next() {
         match option {
             "--annotation-defaults" if annotation_defaults.is_none() => {
-                let value = arguments.next().ok_or_else(|| {
+                let value = words.next().ok_or_else(|| {
                     Diagnostic::usage(
                         "E1001",
                         "`--annotation-defaults` needs a count",
@@ -66,7 +94,7 @@ pub(super) fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(
             "--no-persistent-consumers" if !no_persistent_consumers => {
                 no_persistent_consumers = true;
             }
-            _ => return Err(usage()),
+            _ => return Err(migrate_usage()),
         }
     }
     if !no_persistent_consumers {
@@ -76,22 +104,10 @@ pub(super) fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(
             "supply `--no-persistent-consumers` to acknowledge that persistent consumer checkpoints are carried under recorded identity correspondence",
         ));
     }
-    let source = std::path::Path::new(local_project_path(endpoint)?);
-    let repository = orna_repository::Repository::discover(source).map_err(|error| {
-        Diagnostic::target_with_detail(
-            "E2100",
-            "legacy migration source could not be opened",
-            "run the command from a local format-1 or format-2 worktree",
-            format!("{error:?}"),
-        )
-    })?;
-    let prepared = prepare_migration_copy(
-        &repository,
-        std::path::Path::new(destination),
+    Ok(CopyArguments {
+        destination,
         annotation_defaults,
-    )?;
-    print_prepared_copy(&prepared);
-    Ok(())
+    })
 }
 
 fn print_prepared_copy(prepared: &PreparedMigrationCopy) {
@@ -120,13 +136,40 @@ struct PreparedMigrationCopy {
 /// published here; activation is a separate step.
 // A declared count is an assertion against the count the decoded legacy rows
 // carry; an omitted one is the decoded count itself (ORNA-UPGRADE-004).
-#[allow(clippy::too_many_lines)]
 fn prepare_migration_copy(
     repository: &orna_repository::Repository,
     destination: &std::path::Path,
     annotation_defaults: Option<u32>,
 ) -> Result<PreparedMigrationCopy, Diagnostic> {
-    let declared_annotation_defaults = annotation_defaults
+    let declared = declared_annotation_defaults(annotation_defaults)?;
+    // A source whose runtime holds unpublished mutations has rows the copy would
+    // not receive, while its stream checkpoints may already cover them. Refuse
+    // before any destination is created so the source keeps its tail (ORNA-UPGRADE-006).
+    refuse_unpublished_tail(repository)?;
+    let source_runtime = migration_runtime()?;
+    let carry = read_stream_carry(&source_runtime, repository)?;
+    let continuity = carry.continuity_record().map_err(|error| {
+        Diagnostic::target_with_detail(
+            "E2100",
+            "migration consumer continuity could not be represented",
+            "retry with the migration continuity inventory available",
+            format!("{error:?}"),
+        )
+    })?;
+    let copy = prepare_copy(repository, destination, continuity, declared)?;
+    carry_stream_state(&source_runtime, &copy, &carry)?;
+    Ok(PreparedMigrationCopy {
+        copy,
+        checkpoints: carry.checkpoint_count(),
+        history: carry.history_count(),
+    })
+}
+
+/// The declared annotation-default count as a checked migration value.
+fn declared_annotation_defaults(
+    annotation_defaults: Option<u32>,
+) -> Result<Option<orna_repository::MigrationAnnotationDefaults>, Diagnostic> {
+    annotation_defaults
         .map(orna_repository::MigrationAnnotationDefaults::new)
         .transpose()
         .map_err(|error| {
@@ -136,16 +179,13 @@ fn prepare_migration_copy(
                 "supply the count derived from decoded legacy metadata, or omit the flag",
                 format!("{error:?}"),
             )
-        })?;
-    // A source whose runtime holds unpublished mutations has rows the copy would
-    // not receive, while its stream checkpoints may already cover them. Refuse
-    // before any destination is created so the source keeps its tail (ORNA-UPGRADE-006).
-    refuse_unpublished_tail(repository)?;
-    // Persistent stream checkpoints are carried into the prepared destination
-    // under the identity correspondence recorded there before any row is
-    // imported. Live per-attempt stream state is not carried: a source holding
-    // it refuses before a copy is built and its state is left unchanged.
-    let source_runtime = tokio::runtime::Builder::new_current_thread()
+        })
+}
+
+/// The runtime that reads the source carry and imports it into the destination;
+/// both are short blocking calls, so one current-thread runtime serves them.
+fn migration_runtime() -> Result<tokio::runtime::Runtime, Diagnostic> {
+    tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|_| {
@@ -154,8 +194,18 @@ fn prepare_migration_copy(
                 "migration source runtime could not be inspected",
                 "retry `migrate copy` once the local runtime can start",
             )
-        })?;
-    let carry = source_runtime
+        })
+}
+
+/// Persistent stream checkpoints are carried into the prepared destination
+/// under the identity correspondence recorded there before any row is imported.
+/// Live per-attempt stream state is not carried: a source holding it refuses
+/// before a copy is built and its state is left unchanged.
+fn read_stream_carry(
+    runtime: &tokio::runtime::Runtime,
+    repository: &orna_repository::Repository,
+) -> Result<orna_runtime::StreamCarry, Diagnostic> {
+    runtime
         .block_on(orna_runtime::read_stream_carry(repository))
         .map_err(|error| match error {
             orna_runtime::StreamCarryError::NotCarriable(tables) => {
@@ -172,16 +222,18 @@ fn prepare_migration_copy(
                 "retry `migrate copy` once the source runtime can be read; no copy was prepared",
                 format!("{error:?}"),
             ),
-        })?;
-    let continuity = carry.continuity_record().map_err(|error| {
-        Diagnostic::target_with_detail(
-            "E2100",
-            "migration consumer continuity could not be represented",
-            "retry with the migration continuity inventory available",
-            format!("{error:?}"),
-        )
-    })?;
-    let copy = orna_repository::migration_copy::prepare_format3_migration(
+        })
+}
+
+/// Builds (or recovers) the copy through the repository migration seam, with
+/// the staged store built from the source's own decoded rows.
+fn prepare_copy(
+    repository: &orna_repository::Repository,
+    destination: &std::path::Path,
+    continuity: orna_repository::MigrationContinuityRecord,
+    declared_annotation_defaults: Option<orna_repository::MigrationAnnotationDefaults>,
+) -> Result<orna_repository::migration_copy::MigratedCopy, Diagnostic> {
+    orna_repository::migration_copy::prepare_format3_migration(
         repository,
         destination,
         continuity,
@@ -217,7 +269,12 @@ fn prepare_migration_copy(
             Ok(store)
         },
     )
-    .map_err(|error| match error {
+    .map_err(migration_copy_error)
+}
+
+/// Names why preparing the copy was refused.
+fn migration_copy_error(error: orna_repository::RepositoryError) -> Diagnostic {
+    match error {
         orna_repository::RepositoryError::FormatContext(context) => {
             migration_source_admission_diagnostic(context)
         }
@@ -231,21 +288,30 @@ fn prepare_migration_copy(
             "format-2 source holds compact-storage-v2 tables, which have no decoder yet",
             "see MIGRATION.md and bead ornadb-5il1.486; no copy was prepared and the source is unchanged",
         ),
-        orna_repository::RepositoryError::MigrationAnnotationDefaultsMismatch { declared, decoded } => {
-            Diagnostic::target_with_detail(
-                "E2100",
-                "declared annotation defaults do not match the decoded legacy rows",
-                "remove `--annotation-defaults` to use the decoded count, or pass the decoded Blob count; no copy was prepared and the source is unchanged",
-                format!("declared={declared} decoded={decoded}"),
-            )
-        }
+        orna_repository::RepositoryError::MigrationAnnotationDefaultsMismatch {
+            declared,
+            decoded,
+        } => Diagnostic::target_with_detail(
+            "E2100",
+            "declared annotation defaults do not match the decoded legacy rows",
+            "remove `--annotation-defaults` to use the decoded count, or pass the decoded Blob count; no copy was prepared and the source is unchanged",
+            format!("declared={declared} decoded={decoded}"),
+        ),
         other => Diagnostic::target_with_detail(
             "E2100",
             "migration copy could not be prepared or recovered",
             "verify the source worktree and retry with the same migration coordinates",
             format!("{other:?}"),
         ),
-    })?;
+    }
+}
+
+/// Imports the carried checkpoints into the prepared destination runtime.
+fn carry_stream_state(
+    runtime: &tokio::runtime::Runtime,
+    copy: &orna_repository::migration_copy::MigratedCopy,
+    carry: &orna_runtime::StreamCarry,
+) -> Result<(), Diagnostic> {
     let destination_repository = orna_repository::Repository::discover(copy.destination())
         .map_err(|error| {
             Diagnostic::target_with_detail(
@@ -268,10 +334,10 @@ fn prepare_migration_copy(
     let recorded_continuity = recorded_journal
         .as_ref()
         .and_then(|journal| journal.migration_continuity());
-    source_runtime
+    runtime
         .block_on(orna_runtime::import_stream_carry(
             &destination_repository,
-            &carry,
+            carry,
             recorded_continuity,
         ))
         .map_err(|error| {
@@ -286,11 +352,7 @@ fn prepare_migration_copy(
     // command has not yet reported it. A restart re-imports the same carry,
     // which the import recognises as already present.
     orna_repository::publication_crash_barrier("migration-carried");
-    Ok(PreparedMigrationCopy {
-        copy,
-        checkpoints: carry.checkpoint_count(),
-        history: carry.history_count(),
-    })
+    Ok(())
 }
 
 fn run_migrate_abort<'a>(
