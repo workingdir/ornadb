@@ -1110,7 +1110,9 @@ fn module_intrinsic(name: &str) -> Option<orna_intrinsics::IntrinsicId> {
     let (module_path, leaf) = name.rsplit_once('.')?;
     let module = orna_intrinsics::Module::from_path(module_path)?;
     let intrinsic = orna_intrinsics::lookup(module, leaf)?;
-    if intrinsic.module != module {
+    // Re-exported core relation operators keep their root identity and bind
+    // natively; re-exported helper wrappers stay captured source.
+    if intrinsic.module != module && !intrinsic.id.name().starts_with("Core") {
         return None;
     }
     if intrinsic.dispatch == orna_intrinsics::Dispatch::SourceOnly

@@ -3231,9 +3231,9 @@ fn pinned_process_and_environment_modules_are_captured_and_typecheck() {
 #[test]
 fn qualified_relation_pipeline_stage_is_checked_as_a_named_callable() {
     // ORNA-PIPE-004: any callable may be a pipeline stage, so a qualified
-    // callee on a relation is checked as a named callable. std.query does not
-    // re-export `filter` (09-standard-library.md:9, optional), so the stage must
-    // fail as an unresolved member rather than as the unsupported-stage S022.
+    // callee on a relation is checked as a named callable. S4 re-exports the
+    // core relation operators from std.query with their root identities, so the
+    // stage resolves as the core filter rather than an unresolved member.
     let catalogue = reference_standard_catalogue_v1().expect("the standard module checks");
     let source = "use std.query as query_ops;\n\
                   pub table Note(id: Int) { value: Int, }\n\
@@ -3241,12 +3241,6 @@ fn qualified_relation_pipeline_stage_is_checked_as_a_named_callable() {
     let analysis = analyze_with_catalogue(&[ModuleInput::new("stage.orna", source)], &catalogue);
     let codes: Vec<&str> = analysis.diagnostics.iter().map(|d| d.code()).collect();
     assert!(!codes.contains(&"ORNA-S022-UNSUPPORTED"), "{codes:?}");
-    assert!(
-        analysis
-            .diagnostics
-            .iter()
-            .any(|d| d.code() == "ORNA-S012-UNRESOLVED"
-                && format!("{:?}", d.notes()).contains("unresolved member: std.query.filter")),
-        "{codes:?}"
-    );
+    assert!(!codes.contains(&"ORNA-S012-UNRESOLVED"), "{codes:?}");
+    assert!(analysis.is_ok(), "{codes:?}");
 }

@@ -1,6 +1,6 @@
 {
   "schema": "orna.std_intrinsics.v1",
-  "source_digest": "cb987967447effaf",
+  "source_digest": "fc911a31a01761bb",
   "intrinsics": [
     {
       "id": "CoreSome",
@@ -18,7 +18,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "CoreIntrinsic",
       "note": "constructs the core optional value; available without an import",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "CoreNow",
@@ -36,7 +36,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "CoreIntrinsic",
       "note": "reads the activation-scoped host clock through the effect boundary",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "CoreUuid7",
@@ -54,7 +54,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "CoreIntrinsic",
       "note": "reads the activation-scoped clock and entropy for a time-ordered UUID",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "CoreError",
@@ -72,7 +72,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "CoreIntrinsic",
       "note": "constructs the core Error value from a code and message",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "CoreFail",
@@ -90,7 +90,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "CoreIntrinsic",
       "note": "raises the core failure channel with a declared result type",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "CoreFilter",
@@ -108,7 +108,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "CoreIntrinsic",
       "note": "retains matching values in input order; the relation overload shares this id",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "CoreMap",
@@ -126,7 +126,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "CoreIntrinsic",
       "note": "maps one result per input in order; the relation overload shares this id",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "CoreFlatMap",
@@ -144,7 +144,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "CoreIntrinsic",
       "note": "concatenates each returned collection in order; the relation overload shares this id",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "CoreSortBy",
@@ -162,7 +162,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "CoreIntrinsic",
       "note": "stable ascending sort by key; the relation overload shares this id",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "CoreTake",
@@ -180,7 +180,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "CoreIntrinsic",
       "note": "keeps the first count values without enumerating the remainder",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "CoreDrop",
@@ -198,7 +198,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "CoreIntrinsic",
       "note": "drops the first count values without enumerating beyond the result",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "CoreDistinct",
@@ -216,7 +216,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "SuperlinearCanonicalKey",
       "note": "keeps the first value in each lawful equality class without quadratic source folding",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "CoreUnion",
@@ -234,7 +234,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "CoreIntrinsic",
       "note": "concatenates left then right, preserving duplicates",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "CoreCount",
@@ -252,7 +252,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "CoreIntrinsic",
       "note": "returns the exact finite count; the relation overload shares this id",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "CoreFirst",
@@ -270,7 +270,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "CoreIntrinsic",
       "note": "returns the first value without enumerating the remainder",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "CoreLast",
@@ -288,7 +288,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "CoreIntrinsic",
       "note": "returns the last value; spec example 06-expressions.md:146 uses it and section 9 omits it (D1)",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "CoreOne",
@@ -306,7 +306,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "CoreIntrinsic",
       "note": "requires exactly one matching value; zero and multiple matches are cardinality errors",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "CoreSum",
@@ -324,7 +324,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "CoreIntrinsic",
       "note": "exact addition with the additive zero for empty input",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "CoreMin",
@@ -342,7 +342,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "CoreIntrinsic",
       "note": "returns the least value under the canonical order",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "CoreMax",
@@ -360,7 +360,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "CoreIntrinsic",
       "note": "returns the greatest value under the canonical order",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "CoreEvery",
@@ -378,7 +378,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "CoreIntrinsic",
       "note": "true for empty input and short-circuits at the first false value",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "CoreExists",
@@ -396,7 +396,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "CoreIntrinsic",
       "note": "false for empty input and short-circuits at the first true value",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "CollectionChunk",
@@ -414,7 +414,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "SourceExpressible",
       "note": "consecutive nonempty chunks; the pinned source form is scheduled for the std repo",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "CollectionFlatten",
@@ -432,7 +432,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "SourceExpressible",
       "note": "one level of concatenation preserving outer and inner order",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "CollectionPartition",
@@ -450,7 +450,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "SourceExpressible",
       "note": "returns matching and remaining values in input order",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "CollectionZip",
@@ -468,7 +468,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "SourceExpressible",
       "note": "ordered pairs until the shorter input ends",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "CollectionZipExact",
@@ -486,7 +486,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "SourceExpressible",
       "note": "ordered pairs and a failure when the inputs differ in length",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "CollectionUnique",
@@ -504,7 +504,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "SourceExpressible",
       "note": "first-occurrence semantics identical to core distinct",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "CollectionPairs",
@@ -522,7 +522,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "SourceExpressible",
       "note": "adjacent overlapping pairs; length n produces max(0, n-1) pairs",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "CollectionWindow",
@@ -540,7 +540,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "SourceExpressible",
       "note": "complete positional windows only, with positive size and step",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "CollectionSplitWhen",
@@ -558,7 +558,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "SourceExpressible",
       "note": "starts a new group before a matching item and never inserts an empty group",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "CollectionRank",
@@ -576,7 +576,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "SourceExpressible",
       "note": "competition ranks over a stable key sort; the relation overload shares this id",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "CollectionGroupBy",
@@ -594,7 +594,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "SuperlinearCanonicalKey",
       "note": "groups in key order without quadratic source key folding",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "CollectionBucketBy",
@@ -612,7 +612,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "RepresentationAccess",
       "note": "calendar bucketing uses the pinned time-zone edition and never a host zone database",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "CollectionAsofJoin",
@@ -630,7 +630,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "SuperlinearCanonicalKey",
       "note": "chooses the latest right row at or before each left time within the equal by group",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "CollectionRecursiveCte",
@@ -648,7 +648,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "PlanOrStreamMachinery",
       "note": "breadth-first recursive query with a canonical identity fold; declared by the addendum (D2)",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "CollectionStrictlyOrderedTimeSeries",
@@ -666,7 +666,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "PlanOrStreamMachinery",
       "note": "iterative strict-order scan for sparse time series",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "CollectionWindowRate",
@@ -684,7 +684,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "PlanOrStreamMachinery",
       "note": "per-window endpoint rate over strictly ordered timestamps",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "CollectionWindowRateIntegrate",
@@ -702,7 +702,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "PlanOrStreamMachinery",
       "note": "paired per-window rate and integral in one sparse-timestamp pass",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "CollectionWindowDerivative",
@@ -720,7 +720,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "PlanOrStreamMachinery",
       "note": "per-window adjacent slopes timestamped at each right endpoint",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "CollectionWindowIntegrate",
@@ -738,7 +738,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "PlanOrStreamMachinery",
       "note": "per-window trapezoidal integration over strictly ordered timestamps",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "CollectionListLength",
@@ -864,7 +864,7 @@
       "dispatch": { "kind": "SourceOnly" },
       "justification": "SourceExpressible",
       "note": "pinned source implements exact successor; the unreachable Rust arm is deleted in S5",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "MathDecrement",
@@ -882,7 +882,7 @@
       "dispatch": { "kind": "SourceOnly" },
       "justification": "SourceExpressible",
       "note": "pinned source implements exact predecessor; the unreachable Rust arm is deleted in S5",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "MathIsZero",
@@ -900,7 +900,7 @@
       "dispatch": { "kind": "SourceOnly" },
       "justification": "SourceExpressible",
       "note": "pinned source reports exact zero; the unreachable Rust arm is deleted in S5",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "MathMin",
@@ -918,7 +918,7 @@
       "dispatch": { "kind": "SourceOnly" },
       "justification": "SourceExpressible",
       "note": "pinned source returns the lesser Int; the unreachable Rust arm widened the declared signature",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "MathMax",
@@ -936,7 +936,7 @@
       "dispatch": { "kind": "SourceOnly" },
       "justification": "SourceExpressible",
       "note": "pinned source returns the greater Int; the unreachable Rust arm widened the declared signature",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "MathClamp",
@@ -954,7 +954,7 @@
       "dispatch": { "kind": "SourceOnly" },
       "justification": "SourceExpressible",
       "note": "pinned source bounds the value and returns lower for reversed bounds",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "TextTrim",
@@ -972,7 +972,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "PinnedUnicodeData",
       "note": "trims the pinned Unicode 16.0.0 White_Space set; the Rust toolchain's tables are not a substitute",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "TextSplit",
@@ -990,7 +990,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "RepresentationAccess",
       "note": "splits on Unicode scalar boundaries and preserves empty fields at either edge",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "TextJoin",
@@ -1008,7 +1008,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "RepresentationAccess",
       "note": "recomposes Str without exposing its UTF-8 representation to source",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "TextStartsWith",
@@ -1026,7 +1026,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "MeasuredWorse",
       "note": "the source form must materialise a scalar list; the measured threshold keeps this native",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "TextEndsWith",
@@ -1044,7 +1044,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "MeasuredWorse",
       "note": "the source form must materialise a scalar list; the measured threshold keeps this native",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "TextContains",
@@ -1062,7 +1062,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "MeasuredWorse",
       "note": "the source form must materialise a scalar list; the measured threshold keeps this native",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "TextReplace",
@@ -1080,7 +1080,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "MeasuredWorse",
       "note": "replace is join(split(value, from), to); the measured threshold keeps this native",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "TextNormalise",
@@ -1098,7 +1098,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "PinnedUnicodeData",
       "note": "canonical NFC/NFD normalisation from the pinned Unicode 16.0.0 tables",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "TextLower",
@@ -1116,7 +1116,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "PinnedUnicodeData",
       "note": "full Unicode 16.0.0 lowercase from the pinned tables",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "TextUpper",
@@ -1134,7 +1134,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "PinnedUnicodeData",
       "note": "full Unicode 16.0.0 uppercase including Final_Sigma-adjacent expansions",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "BitsBitOr",
@@ -1152,7 +1152,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "RepresentationAccess",
       "note": "bitwise OR over the unbounded signed two's-complement Int model",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "BitsBitAnd",
@@ -1170,7 +1170,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "RepresentationAccess",
       "note": "bitwise AND over the unbounded signed two's-complement Int model",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "BitsBitXor",
@@ -1188,7 +1188,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "RepresentationAccess",
       "note": "bitwise XOR over the unbounded signed two's-complement Int model",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "BitsBitNot",
@@ -1206,7 +1206,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "RepresentationAccess",
       "note": "bit_not(x) = -x - 1 over the unbounded signed two's-complement model",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "BitsShiftLeft",
@@ -1224,7 +1224,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "RepresentationAccess",
       "note": "exact left shift with a nonnegative count and resource bounds",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "BitsShiftRight",
@@ -1242,7 +1242,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "RepresentationAccess",
       "note": "arithmetic right shift with a nonnegative count",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "StreamFromList",
@@ -1260,7 +1260,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "PlanOrStreamMachinery",
       "note": "constructs a replayable finite list-backed source with a captured typed identity",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "StreamFromProvider",
@@ -1278,7 +1278,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "PlanOrStreamMachinery",
       "note": "evaluator-only provider constructor; the pinned declaration is added in S4 (D3)",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "StreamForEach",
@@ -1296,7 +1296,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "PlanOrStreamMachinery",
       "note": "processes one item and checkpoint movement per activation",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "StreamBatch",
@@ -1314,7 +1314,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "PlanOrStreamMachinery",
       "note": "emits ordered positive-size batches and commits the final short batch",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "StreamBuffer",
@@ -1332,7 +1332,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "PlanOrStreamMachinery",
       "note": "bounded queue with default backpressure and no implicit drop",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "StreamMerge",
@@ -1350,7 +1350,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "PlanOrStreamMachinery",
       "note": "interleaves by observed arrival order while preserving each input's order",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "StreamThrottle",
@@ -1368,7 +1368,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "HostResource",
       "note": "elapsed-time throttling with an explicit caller-recorded drop policy",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "StreamDebounce",
@@ -1386,7 +1386,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "HostResource",
       "note": "retains the latest item until a positive quiet interval elapses",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "StreamRetry",
@@ -1404,7 +1404,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "PlanOrStreamMachinery",
       "note": "retries the same blocked delivery under a bounded provider contract",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "StreamRecover",
@@ -1422,7 +1422,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "PlanOrStreamMachinery",
       "note": "replaces a permitted source failure with one explicit value",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "ConcurrentParallel",
@@ -1440,7 +1440,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "HostResource",
       "note": "runs one owned child activation per callback and joins results in input order",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "ConcurrentRace",
@@ -1458,7 +1458,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "HostResource",
       "note": "returns the first observed success and cancels every losing child",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "ConcurrentTimeout",
@@ -1476,7 +1476,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "HostResource",
       "note": "runs one owned child under an elapsed-time deadline and joins it on expiry",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "UiNode",
@@ -1494,7 +1494,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "RepresentationAccess",
       "note": "constructs the core presentation tree without executing an action descriptor",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "StatsMean",
@@ -1512,7 +1512,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "MeasuredWorse",
       "note": "mean returns null for empty input and keeps exact inputs exact; the source form is measured worse",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "StatsMedian",
@@ -1530,7 +1530,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "MeasuredWorse",
       "note": "median uses total-order sorting and an explicitly rounded middle mean; the source form is measured worse",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "StatsPercentile",
@@ -1548,7 +1548,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "MeasuredWorse",
       "note": "percentile requires a probability in [0,1] and a named interpolation method",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "StatsSum",
@@ -1566,7 +1566,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "CoreIntrinsic",
       "note": "empty sum is the additive zero; affine absolute quantities are rejected",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "StatsMin",
@@ -1584,7 +1584,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "CoreIntrinsic",
       "note": "empty selection returns null and Float min uses the canonical NaN rule",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "StatsMax",
@@ -1602,7 +1602,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "CoreIntrinsic",
       "note": "empty selection returns null and Float max uses the canonical NaN rule",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "StatsRange",
@@ -1620,7 +1620,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "MeasuredWorse",
       "note": "range is max minus min and returns a delta for affine absolute quantities",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "StatsMode",
@@ -1638,7 +1638,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "SuperlinearCanonicalKey",
       "note": "every mode is returned once in first-appearance order without quadratic key folding",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "StatsVariance",
@@ -1656,7 +1656,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "RepresentationAccess",
       "note": "population variance with exact square roots and explicit rounding for inexact results",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "StatsStandardDeviation",
@@ -1674,7 +1674,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "RepresentationAccess",
       "note": "exact square roots are preserved and inexact results require explicit scale and rounding",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "StatsHistogram",
@@ -1692,7 +1692,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "MeasuredWorse",
       "note": "ordered nonoverlapping half-open bins except an explicitly closed final upper bound",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "StatsRate",
@@ -1710,7 +1710,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "MeasuredWorse",
       "note": "endpoint change per elapsed time over strictly increasing timestamps",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "StatsDerivative",
@@ -1728,7 +1728,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "MeasuredWorse",
       "note": "adjacent slopes timestamped at each right endpoint",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "StatsIntegrate",
@@ -1746,7 +1746,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "MeasuredWorse",
       "note": "trapezoidal integration with value-times-time units",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "TimeOffsetAt",
@@ -1764,7 +1764,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "HostResource",
       "note": "returns signed seconds east of UTC from the pinned IANA edition, including at a transition",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "TimeResolveLocal",
@@ -1782,7 +1782,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "HostResource",
       "note": "resolves a local timestamp against the pinned zone edition with explicit ambiguous and gap policies",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "TimeDurationCompactFormat",
@@ -1800,7 +1800,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "HostResource",
       "note": "compact elapsed form from the pinned English profile with an immutable validated context",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "TimeDurationClockFormat",
@@ -1818,7 +1818,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "HostResource",
       "note": "clock elapsed form from the pinned English profile with an immutable validated context",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "TimeDurationWordsFormat",
@@ -1836,7 +1836,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "HostResource",
       "note": "words elapsed form from the pinned English profile with an immutable validated context",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "TimeDurationIsoFormat",
@@ -1854,7 +1854,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "HostResource",
       "note": "ISO elapsed form from the pinned profile; calendar periods are not converted to fixed seconds",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "HashSha256",
@@ -1872,7 +1872,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "CanonicalFormat",
       "note": "SHA-256 over the complete Blob returning the 32-byte digest value",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "HashSha256Text",
@@ -1890,7 +1890,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "CanonicalFormat",
       "note": "hashes exact UTF-8 bytes without normalisation, case folding or locale conversion",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "HashDomainSha256",
@@ -1908,7 +1908,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "CanonicalFormat",
       "note": "computes SHA256(ASCII(domain) || 00 || payload) with a nonempty ASCII domain",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "HashToHex",
@@ -1926,7 +1926,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "RepresentationAccess",
       "note": "renders a Digest as exactly 64 lowercase hexadecimal characters",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "HashFromHex",
@@ -1944,7 +1944,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "RepresentationAccess",
       "note": "parses exactly 64 lowercase hexadecimal characters and returns null otherwise",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "RandomBytes",
@@ -1962,7 +1962,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "HostResource",
       "note": "returns exactly count bytes from the host cryptographically secure random source",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "RandomInteger",
@@ -1980,7 +1980,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "HostResource",
       "note": "uniform rejection sampling from a half-open interval without modulo bias",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "RandomChoose",
@@ -1998,7 +1998,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "HostResource",
       "note": "selects one list position uniformly and returns null for an empty list",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "RandomShuffle",
@@ -2016,7 +2016,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "HostResource",
       "note": "unbiased Fisher-Yates permutation retaining every input position exactly once",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "Base64Encode",
@@ -2034,7 +2034,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "CanonicalFormat",
       "note": "RFC 4648 standard alphabet with required padding and no inserted whitespace",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "Base64Decode",
@@ -2052,7 +2052,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "CanonicalFormat",
       "note": "rejects invalid characters, noncanonical padding and nonzero unused trailing bits",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "JsonEncode",
@@ -2070,7 +2070,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "CanonicalFormat",
       "note": "schema-directed encoding that fails on unsupported values instead of dropping fields",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "JsonDecode",
@@ -2088,7 +2088,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "CanonicalFormat",
       "note": "schema-directed decoding that rejects duplicate keys and distinguishes missing from null",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "JsonDecodeWithOptions",
@@ -2106,7 +2106,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "CanonicalFormat",
       "note": "unknown fields are ignored only when the caller opts in explicitly",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "OrnaCodecEncode",
@@ -2124,7 +2124,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "CanonicalFormat",
       "note": "canonical Orna text is schema directed and never executes declarations",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "OrnaCodecDecode",
@@ -2142,7 +2142,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "CanonicalFormat",
       "note": "accepts only the data subset for the supplied type and revalidates refinements",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "OvbCodecEncode",
@@ -2160,7 +2160,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "CanonicalFormat",
       "note": "OVB-1 uses shortest heads, definite lengths and deterministic map-key order",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "OvbCodecDecode",
@@ -2178,7 +2178,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "CanonicalFormat",
       "note": "strict OVB-1 decoding rejects duplicate keys, indefinite items and noncanonical aliases",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "MoneyQuantize",
@@ -2196,7 +2196,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "MeasuredWorse",
       "note": "exact minor-unit quantisation with an explicit rounding rule; the source form is measured worse",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "MoneyAllocate",
@@ -2214,7 +2214,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "MeasuredWorse",
       "note": "allocates exact minor units by descending fractional remainder with input-index ties",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
       "id": "MoneyFormat",
@@ -2232,7 +2232,7 @@
       "dispatch": { "kind": "Native" },
       "justification": "HostResource",
       "note": "symbols, grouping and decimal marks come from the captured locale profile",
-      "pins": { "since": "b3ce954c38483e2e1f9edbd9cc2a9906b94680df", "until": null }
+      "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     }
   ],
   "reexports": [
