@@ -4116,36 +4116,6 @@ fn reference_target_exists(
     ) {
         return true;
     }
-    if let DefinitionReferenceTarget::Field { owner, field } = target {
-        return catalogue
-            .object_type_by_id(owner)
-            .and_then(|object_type| object_type.field_by_id(field))
-            .is_some()
-            || catalogue
-                .record_value_type_by_id(owner)
-                .and_then(|record_value_type| record_value_type.field_by_id(field))
-                .is_some()
-            || standard.is_some_and(|standard| {
-                standard
-                    .object_type_by_id(owner)
-                    .and_then(|object_type| object_type.field_by_id(field))
-                    .is_some()
-                    || standard
-                        .record_value_type_by_id(owner)
-                        .and_then(|record_value_type| record_value_type.field_by_id(field))
-                        .is_some()
-            })
-            || parent.is_some_and(|parent| {
-                parent
-                    .object_type_by_id(owner)
-                    .and_then(|object_type| object_type.field_by_id(field))
-                    .is_some()
-                    || parent
-                        .record_value_type_by_id(owner)
-                        .and_then(|record_value_type| record_value_type.field_by_id(field))
-                        .is_some()
-            });
-    }
     let identity = target.into();
     definition_exists(catalogue, expression_ids, identity)
         || standard.is_some_and(|standard| definition_exists(standard, expression_ids, identity))
