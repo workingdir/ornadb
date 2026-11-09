@@ -875,7 +875,7 @@ fn retain_refused_scratch(
     error: DocumentCommitError,
 ) -> DocumentCommitError {
     let cause = error.cause();
-    draft_state.rejected_scratch.insert(
+    draft_state.put_scratch_refusal(
         inode,
         ScratchRefusal {
             cause,
@@ -892,7 +892,7 @@ fn retain_refused_scratch(
     });
     match retained {
         Ok(()) => {
-            if let Some(refusal) = draft_state.rejected_scratch.get_mut(&inode) {
+            if let Some(refusal) = draft_state.scratch_refusal_mut(inode) {
                 refusal.kept = true;
             }
             error
@@ -3724,31 +3724,427 @@ struct ScratchRefusal {
 /// same file is accepted.
 /// Replacement scratch drafts remain unresolved until their rename is accepted
 /// or the scratch is removed.
+///
+/// Every handle and every node owns one record instead of appearing in several
+/// maps at once: a handle's dirty, unresolved, owner and Blob fields are read
+/// and written together, so no two maps can disagree about it.
 #[derive(Default)]
 struct DraftState {
-    pending_truncates: HashMap<u64, u64>,
-    unresolved_handles: HashMap<u64, u64>,
-    retained_scratch: HashSet<u64>,
-    rejected_documents: HashMap<u64, DraftRefusal>,
-    /// Scratch files whose rename was refused, with the cause and whether the candidate was kept.
-    rejected_scratch: HashMap<u64, ScratchRefusal>,
-    quiescing: bool,
-    /// Handles whose latest write has not been accepted (per-handle dirty bit).
-    dirty_handles: HashSet<u64>,
-    /// Write-open Blob handles, keyed by handle number.
-    blob_handles: HashMap<u64, BlobHandle>,
-    /// Pid that opened each writable handle; a FLUSH from another process is not the writer's close.
-    writer_owners: HashMap<u64, u32>,
-    /// Source modules with a private write-intent candidate (ORNA-VFS-020), keyed by inode.
-    source_drafts: BTreeMap<u64, source_write::SourceDraft>,
+    phase: MountPhase,
+    /// Writable handles with state: dirty, unresolved, owner or Blob baseline.
+    handles: HashMap<u64, HandleDraft>,
+    /// Nodes with state: a pending truncate, scratch or document refusal,
+    /// retained scratch, or a source candidate.
+    nodes: HashMap<u64, NodeDraft>,
+}
+
+/// Whether the mount still accepts state changes, or is winding down for
+/// unmount after `sys.vfs.unmount-quiesce` (ORNA-VFS-015).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum MountPhase {
+    #[default]
+    Serving,
+    Quiescing,
+}
+
+/// One open writable handle's draft state.
+#[derive(Default)]
+struct HandleDraft {
+    /// Pid that opened the handle; a FLUSH from another process is not the writer's close.
+    writer: Option<u32>,
+    /// The handle's latest write has not been accepted (per-handle dirty bit).
+    dirty: bool,
+    /// The inode whose candidate this handle holds unresolved (ORNA-VFS-008).
+    unresolved: Option<u64>,
+    /// The candidate state of a write-open Blob handle (ORNA-VFS-011, ORNA-VFS-019).
+    blob: Option<BlobHandle>,
+}
+
+impl HandleDraft {
+    fn is_empty(&self) -> bool {
+        self.writer.is_none() && !self.dirty && self.unresolved.is_none() && self.blob.is_none()
+    }
+}
+
+/// One node's draft state.
+#[derive(Default)]
+struct NodeDraft {
+    /// A path truncate waiting for the writer whose candidate it cuts (ORNA-VFS-009).
+    pending_truncate: Option<u64>,
+    /// A scratch candidate whose bytes recovery storage keeps (ORNA-VFS-009).
+    retained_scratch: bool,
+    /// An unsynced or refused Document candidate (ORNA-VFS-008, ORNA-VFS-009).
+    document_refusal: Option<DraftRefusal>,
+    /// A replacement scratch whose rename was refused.
+    scratch_refusal: Option<ScratchRefusal>,
+    /// A source module's private candidate (ORNA-VFS-020).
+    source: Option<source_write::SourceDraft>,
+}
+
+impl NodeDraft {
+    fn is_empty(&self) -> bool {
+        self.pending_truncate.is_none()
+            && !self.retained_scratch
+            && self.document_refusal.is_none()
+            && self.scratch_refusal.is_none()
+            && self.source.is_none()
+    }
 }
 
 impl DraftState {
+    /// The errno a request that would change draft state reports while the
+    /// mount winds down for unmount; `None` while it serves.
+    fn quiescing_errno(&self) -> Option<Errno> {
+        match self.phase {
+            MountPhase::Serving => None,
+            MountPhase::Quiescing => Some(Errno::EBUSY),
+        }
+    }
+
+    /// Stops accepting request-time state changes before unmount.
+    fn quiesce(&mut self) {
+        self.phase = MountPhase::Quiescing;
+    }
+
+    /// Resumes serving state changes after a quiesce.
+    fn resume(&mut self) {
+        self.phase = MountPhase::Serving;
+    }
+
+    fn handle(&self, handle: u64) -> Option<&HandleDraft> {
+        self.handles.get(&handle)
+    }
+
+    fn handle_mut(&mut self, handle: u64) -> &mut HandleDraft {
+        self.handles.entry(handle).or_default()
+    }
+
+    /// Edits a handle's state, dropping its entry once every field is clear.
+    fn edit_handle(&mut self, handle: u64, edit: impl FnOnce(&mut HandleDraft)) {
+        let Some(draft) = self.handles.get_mut(&handle) else {
+            return;
+        };
+        edit(draft);
+        if draft.is_empty() {
+            self.handles.remove(&handle);
+        }
+    }
+
+    fn is_dirty(&self, handle: u64) -> bool {
+        self.handle(handle).is_some_and(|draft| draft.dirty)
+    }
+
+    fn mark_dirty(&mut self, handle: u64) {
+        self.handle_mut(handle).dirty = true;
+    }
+
+    fn clear_dirty(&mut self, handle: u64) {
+        self.edit_handle(handle, |draft| draft.dirty = false);
+    }
+
+    fn has_unresolved(&self, handle: u64) -> bool {
+        self.handle(handle)
+            .is_some_and(|draft| draft.unresolved.is_some())
+    }
+
+    fn mark_unresolved(&mut self, handle: u64, inode: u64) {
+        self.handle_mut(handle).unresolved = Some(inode);
+    }
+
+    fn clear_unresolved(&mut self, handle: u64) {
+        self.edit_handle(handle, |draft| draft.unresolved = None);
+    }
+
+    /// Ends `handle`'s unresolved state, returning the inode it held.
+    fn take_unresolved(&mut self, handle: u64) -> Option<u64> {
+        let mut taken = None;
+        self.edit_handle(handle, |draft| taken = draft.unresolved.take());
+        taken
+    }
+
+    /// Ends the unresolved state of every handle holding a candidate of `inode`.
+    fn clear_unresolved_inode(&mut self, inode: u64) {
+        for draft in self.handles.values_mut() {
+            if draft.unresolved == Some(inode) {
+                draft.unresolved = None;
+            }
+        }
+        self.handles.retain(|_, draft| !draft.is_empty());
+    }
+
+    /// Ends every handle's unresolved state; unmount retained each candidate.
+    fn clear_all_unresolved(&mut self) {
+        for draft in self.handles.values_mut() {
+            draft.unresolved = None;
+        }
+        self.handles.retain(|_, draft| !draft.is_empty());
+    }
+
+    fn unresolved_handles(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
+        self.handles
+            .iter()
+            .filter_map(|(handle, draft)| draft.unresolved.map(|inode| (*handle, inode)))
+    }
+
+    fn unresolved_inodes(&self) -> impl Iterator<Item = u64> + '_ {
+        self.handles.values().filter_map(|draft| draft.unresolved)
+    }
+
+    fn record_writer(&mut self, handle: u64, pid: u32) {
+        self.handle_mut(handle).writer = Some(pid);
+    }
+
+    /// Keeps the pid recorded at open; covers handles opened without one.
+    fn record_writer_if_absent(&mut self, handle: u64, pid: u32) {
+        self.handle_mut(handle).writer.get_or_insert(pid);
+    }
+
+    /// The pid that opened `handle`, when one was recorded.
+    fn writer(&self, handle: u64) -> Option<u32> {
+        self.handle(handle).and_then(|draft| draft.writer)
+    }
+
+    fn clear_writer(&mut self, handle: u64) {
+        self.edit_handle(handle, |draft| draft.writer = None);
+    }
+
+    fn hold_blob(&mut self, handle: u64, blob: BlobHandle) {
+        self.handle_mut(handle).blob = Some(blob);
+    }
+
+    fn blob(&self, handle: u64) -> Option<&BlobHandle> {
+        self.handle(handle).and_then(|draft| draft.blob.as_ref())
+    }
+
+    fn holds_blob(&self, handle: u64) -> bool {
+        self.blob(handle).is_some()
+    }
+
+    fn take_blob(&mut self, handle: u64) -> Option<BlobHandle> {
+        let mut blob = None;
+        self.edit_handle(handle, |draft| blob = draft.blob.take());
+        blob
+    }
+
+    fn node(&self, inode: u64) -> Option<&NodeDraft> {
+        self.nodes.get(&inode)
+    }
+
+    fn node_mut(&mut self, inode: u64) -> &mut NodeDraft {
+        self.nodes.entry(inode).or_default()
+    }
+
+    /// Edits a node's state, dropping its entry once every field is clear.
+    fn edit_node(&mut self, inode: u64, edit: impl FnOnce(&mut NodeDraft)) {
+        let Some(draft) = self.nodes.get_mut(&inode) else {
+            return;
+        };
+        edit(draft);
+        if draft.is_empty() {
+            self.nodes.remove(&inode);
+        }
+    }
+
+    fn pending_truncate(&self, inode: u64) -> Option<u64> {
+        self.node(inode).and_then(|draft| draft.pending_truncate)
+    }
+
+    fn set_pending_truncate(&mut self, inode: u64, size: u64) {
+        self.node_mut(inode).pending_truncate = Some(size);
+    }
+
+    fn clear_pending_truncate(&mut self, inode: u64) {
+        self.edit_node(inode, |draft| draft.pending_truncate = None);
+    }
+
+    /// Ends every node's pending path truncate; unmount retained each cut.
+    fn clear_all_pending_truncates(&mut self) {
+        for draft in self.nodes.values_mut() {
+            draft.pending_truncate = None;
+        }
+        self.nodes.retain(|_, draft| !draft.is_empty());
+    }
+
+    fn pending_truncates(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
+        self.nodes
+            .iter()
+            .filter_map(|(inode, draft)| draft.pending_truncate.map(|size| (*inode, size)))
+    }
+
+    fn has_retained_scratch(&self, inode: u64) -> bool {
+        self.node(inode).is_some_and(|draft| draft.retained_scratch)
+    }
+
+    fn mark_retained_scratch(&mut self, inode: u64) {
+        self.node_mut(inode).retained_scratch = true;
+    }
+
+    fn clear_retained_scratch(&mut self, inode: u64) {
+        self.edit_node(inode, |draft| draft.retained_scratch = false);
+    }
+
+    fn retained_scratch_inodes(&self) -> impl Iterator<Item = u64> + '_ {
+        self.nodes
+            .iter()
+            .filter(|(_, draft)| draft.retained_scratch)
+            .map(|(inode, _)| *inode)
+    }
+
+    fn document_refusal(&self, inode: u64) -> Option<&DraftRefusal> {
+        self.node(inode)
+            .and_then(|draft| draft.document_refusal.as_ref())
+    }
+
+    fn document_refusal_mut(&mut self, inode: u64) -> Option<&mut DraftRefusal> {
+        self.nodes
+            .get_mut(&inode)
+            .and_then(|draft| draft.document_refusal.as_mut())
+    }
+
+    fn take_document_refusal(&mut self, inode: u64) -> Option<DraftRefusal> {
+        let mut taken = None;
+        self.edit_node(inode, |draft| taken = draft.document_refusal.take());
+        taken
+    }
+
+    fn put_document_refusal(&mut self, inode: u64, refusal: DraftRefusal) {
+        self.node_mut(inode).document_refusal = Some(refusal);
+    }
+
+    /// Records `refusal` for `inode`, merging it with an earlier refusal that
+    /// still holds an unretained live source, so neither live draft is lost.
+    fn record_document_refusal(&mut self, inode: u64, refusal: DraftRefusal) {
+        let recorded = match self.node_mut(inode).document_refusal.take() {
+            Some(mut kept) if !kept.unretained.is_empty() => {
+                kept.unretained.extend(refusal.unretained);
+                kept.handle = refusal.handle;
+                kept.candidate = refusal.candidate;
+                if kept.draft.is_none() {
+                    kept.draft = refusal.draft;
+                }
+                kept
+            }
+            Some(_) | None => refusal,
+        };
+        self.put_document_refusal(inode, recorded);
+    }
+
+    fn document_refusals(&self) -> impl Iterator<Item = (u64, &DraftRefusal)> + '_ {
+        self.nodes.iter().filter_map(|(inode, draft)| {
+            draft
+                .document_refusal
+                .as_ref()
+                .map(|refusal| (*inode, refusal))
+        })
+    }
+
+    fn take_document_refusals(&mut self) -> Vec<(u64, DraftRefusal)> {
+        let mut taken = Vec::new();
+        for (inode, draft) in &mut self.nodes {
+            if let Some(refusal) = draft.document_refusal.take() {
+                taken.push((*inode, refusal));
+            }
+        }
+        self.nodes.retain(|_, draft| !draft.is_empty());
+        taken
+    }
+
+    /// Replaces every node's document refusal with `refusals`.
+    fn replace_document_refusals(&mut self, refusals: HashMap<u64, DraftRefusal>) {
+        for draft in self.nodes.values_mut() {
+            draft.document_refusal = None;
+        }
+        for (inode, refusal) in refusals {
+            self.put_document_refusal(inode, refusal);
+        }
+        self.nodes.retain(|_, draft| !draft.is_empty());
+    }
+
+    fn scratch_refusal(&self, inode: u64) -> Option<&ScratchRefusal> {
+        self.node(inode)
+            .and_then(|draft| draft.scratch_refusal.as_ref())
+    }
+
+    fn scratch_refusal_mut(&mut self, inode: u64) -> Option<&mut ScratchRefusal> {
+        self.nodes
+            .get_mut(&inode)
+            .and_then(|draft| draft.scratch_refusal.as_mut())
+    }
+
+    fn put_scratch_refusal(&mut self, inode: u64, refusal: ScratchRefusal) {
+        self.node_mut(inode).scratch_refusal = Some(refusal);
+    }
+
+    fn clear_scratch_refusal(&mut self, inode: u64) {
+        self.edit_node(inode, |draft| draft.scratch_refusal = None);
+    }
+
+    fn scratch_refusals(&self) -> impl Iterator<Item = (u64, &ScratchRefusal)> + '_ {
+        self.nodes.iter().filter_map(|(inode, draft)| {
+            draft
+                .scratch_refusal
+                .as_ref()
+                .map(|refusal| (*inode, refusal))
+        })
+    }
+
+    fn scratch_refusal_inodes(&self) -> impl Iterator<Item = u64> + '_ {
+        self.nodes
+            .iter()
+            .filter(|(_, draft)| draft.scratch_refusal.is_some())
+            .map(|(inode, _)| *inode)
+    }
+
+    /// Drops every scratch refusal for which `keep` returns false, returning
+    /// the inodes whose refusal was dropped.
+    fn retain_scratch_refusals(
+        &mut self,
+        mut keep: impl FnMut(u64, &ScratchRefusal) -> bool,
+    ) -> Vec<u64> {
+        let mut dropped = Vec::new();
+        for (inode, draft) in &mut self.nodes {
+            if let Some(refusal) = &draft.scratch_refusal
+                && !keep(*inode, refusal)
+            {
+                draft.scratch_refusal = None;
+                dropped.push(*inode);
+            }
+        }
+        self.nodes.retain(|_, draft| !draft.is_empty());
+        dropped
+    }
+
+    fn source_draft(&self, inode: u64) -> Option<&source_write::SourceDraft> {
+        self.node(inode).and_then(|draft| draft.source.as_ref())
+    }
+
+    fn source_draft_mut(&mut self, inode: u64) -> Option<&mut source_write::SourceDraft> {
+        self.nodes
+            .get_mut(&inode)
+            .and_then(|draft| draft.source.as_mut())
+    }
+
+    fn source_drafts(&self) -> impl Iterator<Item = (u64, &source_write::SourceDraft)> + '_ {
+        self.nodes
+            .iter()
+            .filter_map(|(inode, draft)| draft.source.as_ref().map(|source| (*inode, source)))
+    }
+
+    fn take_source_draft(&mut self, inode: u64) -> Option<source_write::SourceDraft> {
+        let mut taken = None;
+        self.edit_node(inode, |draft| taken = draft.source.take());
+        taken
+    }
+
+    fn put_source_draft(&mut self, inode: u64, source: source_write::SourceDraft) {
+        self.node_mut(inode).source = Some(source);
+    }
+
     /// A write or truncate by `handle` makes its candidate newer than the refused
     /// one, so the refusal no longer names that handle. An accepted save must not
     /// end the unresolved state of that newer candidate (ORNA-VFS-008).
     fn candidate_written(&mut self, handle: u64, inode: u64) {
-        if let Some(refusal) = self.rejected_documents.get_mut(&inode)
+        if let Some(refusal) = self.document_refusal_mut(inode)
             && refusal.handle == Some(handle)
         {
             refusal.handle = None;
@@ -3762,34 +4158,41 @@ impl DraftState {
     fn supersede_refusals(&mut self, inode: u64, path: &str) {
         let mut superseded = HashSet::new();
         let documents = self
-            .rejected_documents
-            .iter()
-            .filter(|(candidate, refusal)| **candidate == inode || refusal.path == path)
-            .map(|(candidate, _)| *candidate)
+            .document_refusals()
+            .filter(|(candidate, refusal)| *candidate == inode || refusal.path == path)
+            .map(|(candidate, _)| candidate)
             .collect::<Vec<_>>();
         for candidate in documents {
             if let Some(DraftRefusal {
                 handle: Some(refused),
                 ..
-            }) = self.rejected_documents.remove(&candidate)
+            }) = self.take_document_refusal(candidate)
             {
-                self.unresolved_handles.remove(&refused);
+                self.clear_unresolved(refused);
             }
             if candidate != inode {
                 superseded.insert(candidate);
             }
         }
-        self.rejected_scratch.retain(|candidate, refusal| {
-            let keep = *candidate != inode && refusal.path != path;
-            if !keep && *candidate != inode {
-                superseded.insert(*candidate);
+        for candidate in self.retain_scratch_refusals(|candidate, refusal| {
+            candidate != inode && refusal.path != path
+        }) {
+            if candidate != inode {
+                superseded.insert(candidate);
             }
-            keep
-        });
-        self.unresolved_handles
-            .retain(|_, candidate| !superseded.contains(candidate));
-        self.retained_scratch
-            .retain(|candidate| !superseded.contains(candidate));
+        }
+        for draft in self.handles.values_mut() {
+            if draft
+                .unresolved
+                .is_some_and(|inode| superseded.contains(&inode))
+            {
+                draft.unresolved = None;
+            }
+        }
+        self.handles.retain(|_, draft| !draft.is_empty());
+        for inode in superseded {
+            self.clear_retained_scratch(inode);
+        }
     }
 }
 
@@ -3813,13 +4216,13 @@ fn noncandidate_ack(
     handle: u64,
     operation: &str,
 ) -> Result<(), Errno> {
-    if draft_state.dirty_handles.contains(&handle) {
+    if draft_state.is_dirty(handle) {
         eprintln!(
             "{operation}: handle {handle} wrote a candidate that no commit found; refusing to acknowledge it (EIO)"
         );
         return Err(Errno::EIO);
     }
-    draft_state.unresolved_handles.remove(&handle);
+    draft_state.clear_unresolved(handle);
     Ok(())
 }
 
@@ -4246,13 +4649,15 @@ impl WorkspaceFilesystem {
             }
         }
 
+        let mut draft_state = DraftState::default();
+        for inode in retained_scratch {
+            draft_state.mark_retained_scratch(inode);
+        }
+
         Ok(Self {
             state: Mutex::new(builder),
             open_files: Mutex::new(HashMap::new()),
-            draft_state: Mutex::new(DraftState {
-                retained_scratch,
-                ..DraftState::default()
-            }),
+            draft_state: Mutex::new(draft_state),
             source_gate: Mutex::new(()),
             next_handle: AtomicU64::new(1),
         })
@@ -4507,7 +4912,7 @@ impl WorkspaceFilesystem {
         // A path truncate issued while this writer was open is recorded, not applied to
         // the draft. It is applied before the candidate is judged, so the accepted or
         // refused candidate reflects the cut (ORNA-VFS-009; POSIX arrival order).
-        if let Some(size) = draft_state.pending_truncates.get(&inode).copied() {
+        if let Some(size) = draft_state.pending_truncate(inode) {
             save.writer
                 .runtime
                 .block_on(draft.truncate(size))
@@ -4516,7 +4921,7 @@ impl WorkspaceFilesystem {
                         "candidate could not be cut to {size} bytes: {error:?}"
                     ))
                 })?;
-            draft_state.pending_truncates.remove(&inode);
+            draft_state.clear_pending_truncate(inode);
         }
         // The handle commits against the row it captured at open and advances only with its
         // own accepted candidate (ORNA-VFS-011), so a row another writer accepted since then
@@ -4602,8 +5007,8 @@ impl WorkspaceFilesystem {
         }
         let accepted_path = state.display_path(inode);
         drop(state);
-        draft_state.unresolved_handles.remove(&handle);
-        draft_state.dirty_handles.remove(&handle);
+        draft_state.clear_unresolved(handle);
+        draft_state.clear_dirty(handle);
         // The accepted save supersedes the refusals it replaces (ORNA-VFS-009, ORNA-VFS-024).
         draft_state.supersede_refusals(inode, &accepted_path);
         Ok(())
@@ -4628,7 +5033,7 @@ impl WorkspaceFilesystem {
                 self.accept_document(draft_state, handle, inode.0, &save, &draft, &opened)
             }
             Some(OpenFile::Temporary(save, target, scratch, Some(field)))
-                if draft_state.blob_handles.contains_key(&handle) =>
+                if draft_state.holds_blob(handle) =>
             {
                 self.commit_blob_candidate(draft_state, handle, &save, &target, &scratch, &field)
             }
@@ -4676,7 +5081,7 @@ impl WorkspaceFilesystem {
         scratch: &Arc<TemporarySave<RowMapSnapshot>>,
         field: &BlobField,
     ) -> Result<(), DocumentCommitError> {
-        let Some(blob) = draft_state.blob_handles.get(&handle) else {
+        let Some(blob) = draft_state.blob(handle) else {
             return Err(DocumentCommitError::Failed(
                 "open Blob candidate has no captured baseline".to_owned(),
             ));
@@ -4760,8 +5165,8 @@ impl WorkspaceFilesystem {
             }
         }
         // The accepted candidate is no longer draft state (same as an accepted rename).
-        draft_state.retained_scratch.remove(&inode);
-        draft_state.rejected_scratch.remove(&inode);
+        draft_state.clear_retained_scratch(inode);
+        draft_state.clear_scratch_refusal(inode);
         draft_state.supersede_refusals(inode, &path);
         // The next candidate starts from the accepted bytes, and its baseline is the accepted row.
         let accepted_baseline = save
@@ -4825,7 +5230,7 @@ impl WorkspaceFilesystem {
                     Some(field.clone()),
                 ),
             );
-        draft_state.blob_handles.insert(
+        draft_state.hold_blob(
             handle,
             BlobHandle {
                 generation,
@@ -4850,7 +5255,7 @@ impl WorkspaceFilesystem {
     ) {
         // A candidate already refused by fsync or flush keeps its refusal cause
         // (ORNA-VFS-009); only a candidate never refused is recorded as unsynced.
-        let cause = release_retention_cause(draft_state.rejected_documents.get(&inode));
+        let cause = release_retention_cause(draft_state.document_refusal(inode));
         self.retain_candidate(draft_state, inode, handle, save, draft, cause, false);
     }
 
@@ -4920,26 +5325,7 @@ impl WorkspaceFilesystem {
             draft: retained_draft,
             unretained,
         };
-        match draft_state.rejected_documents.entry(inode) {
-            std::collections::hash_map::Entry::Occupied(mut entry) => {
-                let kept = entry.get_mut();
-                if kept.unretained.is_empty() {
-                    *kept = refusal;
-                } else {
-                    // An earlier refusal of this inode still holds an unretained source: keep it
-                    // alongside this one rather than replacing it, so neither live draft is lost.
-                    kept.unretained.extend(refusal.unretained);
-                    kept.handle = refusal.handle;
-                    kept.candidate = refusal.candidate;
-                    if kept.draft.is_none() {
-                        kept.draft = refusal.draft;
-                    }
-                }
-            }
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                entry.insert(refusal);
-            }
-        }
+        draft_state.record_document_refusal(inode, refusal);
         if refresh {
             state.report_refresh(inode, save, &path);
         }
@@ -4964,11 +5350,11 @@ impl WorkspaceFilesystem {
         let mut unresolved: BTreeMap<u64, (&'static str, String, String)> = BTreeMap::new();
         // The path each refusal captured when recorded; the refused node may leave the tree first.
         let mut captured: HashMap<u64, String> = HashMap::new();
-        for (inode, refusal) in &draft_state.rejected_documents {
+        for (inode, refusal) in draft_state.document_refusals() {
             // Unmount refuses only drafts the mount can still resolve (profiles/vfs-1.md:144). A
             // candidate recovery storage kept whose document can no longer be opened is already
             // explicitly retained there, and the mount cannot serve its row to resolve it.
-            if for_unmount && refusal_is_unservable_retained(state, *inode, refusal) {
+            if for_unmount && refusal_is_unservable_retained(state, inode, refusal) {
                 continue;
             }
             let code = spec_code(refusal.cause)
@@ -4987,13 +5373,13 @@ impl WorkspaceFilesystem {
                     format!("not accepted ({}); candidate not retained", refusal.cause),
                 ),
             };
-            captured.insert(*inode, refusal.path.clone());
-            unresolved.insert(*inode, (code, draft, detail));
+            captured.insert(inode, refusal.path.clone());
+            unresolved.insert(inode, (code, draft, detail));
         }
-        for (inode, source) in &draft_state.source_drafts {
-            let Some(refusal) = &source.refusal else {
-                if source.dirty {
-                    unresolved.entry(*inode).or_insert_with(|| {
+        for (inode, source) in draft_state.source_drafts() {
+            let Some(refusal) = source.refusal() else {
+                if source.is_dirty() {
+                    unresolved.entry(inode).or_insert_with(|| {
                         (
                             "",
                             String::new(),
@@ -5005,7 +5391,7 @@ impl WorkspaceFilesystem {
             };
             // A candidate kept as a draft whose node left the mount has nothing left to resolve
             // (ORNA-VFS-009).
-            if refusal.draft.is_some() && state.path_of(*inode).is_none() {
+            if refusal.draft.is_some() && state.path_of(inode).is_none() {
                 continue;
             }
             let code = spec_code(refusal.cause)
@@ -5024,14 +5410,14 @@ impl WorkspaceFilesystem {
                     format!("not accepted ({}); candidate not retained", refusal.cause),
                 ),
             };
-            unresolved.entry(*inode).or_insert((code, draft, detail));
+            unresolved.entry(inode).or_insert((code, draft, detail));
         }
-        for (inode, refusal) in &draft_state.rejected_scratch {
-            captured.insert(*inode, refusal.path.clone());
+        for (inode, refusal) in draft_state.scratch_refusals() {
+            captured.insert(inode, refusal.path.clone());
             let code = spec_code(refusal.cause)
                 .or_else(|| refusal.kept.then_some(DRAFT_RETAINED))
                 .unwrap_or("");
-            unresolved.entry(*inode).or_insert_with(|| {
+            unresolved.entry(inode).or_insert_with(|| {
                 (
                     code,
                     String::new(),
@@ -5039,8 +5425,8 @@ impl WorkspaceFilesystem {
                 )
             });
         }
-        for inode in &draft_state.retained_scratch {
-            unresolved.entry(*inode).or_insert_with(|| {
+        for inode in draft_state.retained_scratch_inodes() {
+            unresolved.entry(inode).or_insert_with(|| {
                 (
                     DRAFT_RETAINED,
                     String::new(),
@@ -5048,8 +5434,8 @@ impl WorkspaceFilesystem {
                 )
             });
         }
-        for inode in draft_state.unresolved_handles.values() {
-            unresolved.entry(*inode).or_insert_with(|| {
+        for inode in draft_state.unresolved_inodes() {
+            unresolved.entry(inode).or_insert_with(|| {
                 (
                     "",
                     String::new(),
@@ -5057,8 +5443,8 @@ impl WorkspaceFilesystem {
                 )
             });
         }
-        for (inode, size) in &draft_state.pending_truncates {
-            unresolved.entry(*inode).or_insert_with(|| {
+        for (inode, size) in draft_state.pending_truncates() {
+            unresolved.entry(inode).or_insert_with(|| {
                 (
                     "",
                     String::new(),
@@ -5173,35 +5559,33 @@ impl WorkspaceFilesystem {
         // the record the draft is retained as, so the same draft's untruncated
         // copy is superseded and is not retained a second time.
         let mut truncations = Vec::new();
-        for (inode, size) in &draft_state.pending_truncates {
+        for (inode, size) in draft_state.pending_truncates() {
             if let Some(NodeKind::Document { save, .. }) =
-                state.nodes.get(inode).map(|node| &node.kind)
+                state.nodes.get(&inode).map(|node| &node.kind)
             {
                 // A path truncate cuts the newest writer draft: the open writer's,
                 // else the candidate a released writer's refusal still holds.
                 let latest = draft_state
-                    .unresolved_handles
-                    .iter()
-                    .filter(|(_, dirty_inode)| **dirty_inode == *inode)
-                    .filter_map(|(handle, _)| match open_files.get(handle) {
-                        Some(OpenFile::Document(_, draft, _)) => Some((*handle, Arc::clone(draft))),
+                    .unresolved_handles()
+                    .filter(|(_, dirty_inode)| *dirty_inode == inode)
+                    .filter_map(|(handle, _)| match open_files.get(&handle) {
+                        Some(OpenFile::Document(_, draft, _)) => Some((handle, Arc::clone(draft))),
                         _ => None,
                     })
                     .max_by_key(|(handle, _)| *handle)
                     .map(|(_, draft)| draft)
                     .or_else(|| {
                         draft_state
-                            .rejected_documents
-                            .get(inode)
+                            .document_refusal(inode)
                             .and_then(|refusal| refusal.candidate.clone())
                     });
-                truncations.push((*inode, *size, Arc::clone(save), latest));
+                truncations.push((inode, size, Arc::clone(save), latest));
             }
         }
-        for (handle, inode) in &draft_state.unresolved_handles {
-            if let Some(OpenFile::Document(save, draft, _)) = open_files.get(handle) {
+        for (handle, inode) in draft_state.unresolved_handles() {
+            if let Some(OpenFile::Document(save, draft, _)) = open_files.get(&handle) {
                 let cut_by_truncate = truncations.iter().any(|(truncated, _, _, latest)| {
-                    *truncated == *inode
+                    *truncated == inode
                         && latest
                             .as_ref()
                             .is_some_and(|latest| Arc::ptr_eq(latest, draft))
@@ -5210,8 +5594,8 @@ impl WorkspaceFilesystem {
                     continue;
                 }
                 candidates.push((
-                    *inode,
-                    Some(*handle),
+                    inode,
+                    Some(handle),
                     "unsynced",
                     Arc::clone(save),
                     CandidateSource::Draft(Arc::clone(draft)),
@@ -5233,7 +5617,7 @@ impl WorkspaceFilesystem {
         let mut unresolved: HashMap<u64, DraftRefusal> = HashMap::new();
         let mut refused: Option<Errno> = None;
         let mut superseded: HashMap<u64, (String, String)> = HashMap::new();
-        for (inode, refusal) in std::mem::take(&mut draft_state.rejected_documents) {
+        for (inode, refusal) in draft_state.take_document_refusals() {
             // A refusal whose candidate a path truncate cuts is superseded by the
             // truncated record once that record is retained.
             let cut_by_truncate = truncations.iter().any(|(truncated, _, _, latest)| {
@@ -5381,10 +5765,8 @@ impl WorkspaceFilesystem {
             }
         }
         let scratch = draft_state
-            .retained_scratch
-            .iter()
-            .chain(draft_state.rejected_scratch.keys())
-            .copied()
+            .retained_scratch_inodes()
+            .chain(draft_state.scratch_refusal_inodes())
             .collect::<std::collections::BTreeSet<_>>();
         // Scratch whose bytes could not be kept stays unresolved and keeps the mount up.
         let mut unkept_scratch = std::collections::HashSet::new();
@@ -5417,15 +5799,19 @@ impl WorkspaceFilesystem {
         for report in reports {
             eprintln!("{report}");
         }
-        draft_state.unresolved_handles.clear();
-        draft_state.pending_truncates.clear();
-        draft_state
-            .retained_scratch
-            .retain(|inode| unkept_scratch.contains(inode));
-        draft_state
-            .rejected_scratch
-            .retain(|inode, _| unkept_scratch.contains(inode));
-        draft_state.rejected_documents = unresolved;
+        draft_state.clear_all_unresolved();
+        draft_state.clear_all_pending_truncates();
+        for inode in draft_state.retained_scratch_inodes().collect::<Vec<_>>() {
+            if !unkept_scratch.contains(&inode) {
+                draft_state.clear_retained_scratch(inode);
+            }
+        }
+        for inode in draft_state.scratch_refusal_inodes().collect::<Vec<_>>() {
+            if !unkept_scratch.contains(&inode) {
+                draft_state.clear_scratch_refusal(inode);
+            }
+        }
+        draft_state.replace_document_refusals(unresolved);
         if let Some(errno) = source_refused {
             refused = worst_retention_errno(refused, errno);
         }
@@ -5489,13 +5875,13 @@ impl Filesystem for WorkspaceFilesystem {
                 reply.error(Errno::EINVAL);
                 return;
             }
-            let quiescing = self
+            let quiescing_errno = self
                 .draft_state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .quiescing;
-            if quiescing {
-                reply.error(Errno::EBUSY);
+                .quiescing_errno();
+            if let Some(errno) = quiescing_errno {
+                reply.error(errno);
                 return;
             }
             // Commit runs without the draft-state lock so it cannot deadlock
@@ -5542,7 +5928,7 @@ impl Filesystem for WorkspaceFilesystem {
                 reply.error(Errno::EINVAL);
                 return;
             }
-            draft_state.quiescing = true;
+            draft_state.quiesce();
             match self.retain_all_drafts(&mut draft_state) {
                 None => reply.ok(),
                 Some(errno) => reply.error(errno),
@@ -5556,10 +5942,10 @@ impl Filesystem for WorkspaceFilesystem {
                 reply.error(Errno::EBUSY);
                 return;
             }
-            draft_state.quiescing = true;
+            draft_state.quiesce();
             reply.ok();
         } else if value == b"0" {
-            draft_state.quiescing = false;
+            draft_state.resume();
             reply.ok();
         } else {
             reply.error(Errno::EINVAL);
@@ -5698,10 +6084,9 @@ impl Filesystem for WorkspaceFilesystem {
                     .draft_state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .unresolved_handles
-                    .iter()
-                    .filter(|(_, dirty_inode)| **dirty_inode == inode.0)
-                    .map(|(handle, _)| *handle)
+                    .unresolved_handles()
+                    .filter(|(_, dirty_inode)| *dirty_inode == inode.0)
+                    .map(|(handle, _)| handle)
                     .collect();
                 handles
                     .into_iter()
@@ -5772,8 +6157,8 @@ impl Filesystem for WorkspaceFilesystem {
             .draft_state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if draft_state.quiescing {
-            reply.error(Errno::EBUSY);
+        if let Some(errno) = draft_state.quiescing_errno() {
+            reply.error(errno);
             return;
         }
         if write_mode && self.is_source_module(inode.0) {
@@ -5955,30 +6340,30 @@ impl Filesystem for WorkspaceFilesystem {
             }
         };
         let handle = self.next_handle.fetch_add(1, Ordering::Relaxed);
-        let pending_truncate = draft_state.pending_truncates.get(&inode.0).copied();
+        let pending_truncate = draft_state.pending_truncate(inode.0);
         let truncate_size = if flags.0 & libc::O_TRUNC != 0 {
             Some(0)
         } else {
             pending_truncate
         };
         let is_scratch = scratch.is_some();
-        let had_retained_scratch = draft_state.retained_scratch.contains(&inode.0);
+        let had_retained_scratch = draft_state.has_retained_scratch(inode.0);
         // A read-only open views a pending path truncate but is not a writer: it holds no
         // candidate, so its release retains nothing and the truncate is retained once at stop.
         if write_mode && truncate_size.is_some() {
-            draft_state.unresolved_handles.insert(handle, inode.0);
+            draft_state.mark_unresolved(handle, inode.0);
             draft_state.candidate_written(handle, inode.0);
             if is_scratch {
-                draft_state.retained_scratch.insert(inode.0);
+                draft_state.mark_retained_scratch(inode.0);
             }
         }
         if let Some(scratch) = scratch {
             if let Some(size) = truncate_size {
                 let result = save.writer.runtime.block_on(scratch.truncate(size));
                 if result.is_err() {
-                    draft_state.unresolved_handles.remove(&handle);
+                    draft_state.clear_unresolved(handle);
                     if is_scratch && !had_retained_scratch {
-                        draft_state.retained_scratch.remove(&inode.0);
+                        draft_state.clear_retained_scratch(inode.0);
                     }
                     reply.error(draft_errno(&result));
                     return;
@@ -5991,9 +6376,9 @@ impl Filesystem for WorkspaceFilesystem {
                     Ok(identity) => identity,
                     Err(error) => {
                         eprintln!("mounted blob open could not capture the table schema: {error}");
-                        draft_state.unresolved_handles.remove(&handle);
+                        draft_state.clear_unresolved(handle);
                         if is_scratch && !had_retained_scratch {
-                            draft_state.retained_scratch.remove(&inode.0);
+                            draft_state.clear_retained_scratch(inode.0);
                         }
                         reply.error(Errno::EIO);
                         return;
@@ -6012,7 +6397,7 @@ impl Filesystem for WorkspaceFilesystem {
                     state.track_open(inode.0);
                     state.display_path(inode.0)
                 };
-                draft_state.blob_handles.insert(
+                draft_state.hold_blob(
                     handle,
                     BlobHandle {
                         generation: inode.0,
@@ -6030,10 +6415,10 @@ impl Filesystem for WorkspaceFilesystem {
                     OpenFile::Temporary(save, target, scratch, blob_field),
                 );
             if write_mode && truncate_size.is_some() {
-                draft_state.pending_truncates.remove(&inode.0);
+                draft_state.clear_pending_truncate(inode.0);
             }
             if write_mode {
-                draft_state.writer_owners.insert(handle, request.pid());
+                draft_state.record_writer(handle, request.pid());
             }
             reply.opened(fuser::FileHandle(handle), EDITABLE_OPEN_FLAGS);
             return;
@@ -6045,7 +6430,7 @@ impl Filesystem for WorkspaceFilesystem {
             Ok(identity) => identity,
             Err(error) => {
                 eprintln!("mounted document open could not capture the table schema: {error}");
-                draft_state.unresolved_handles.remove(&handle);
+                draft_state.clear_unresolved(handle);
                 reply.error(Errno::EIO);
                 return;
             }
@@ -6058,7 +6443,7 @@ impl Filesystem for WorkspaceFilesystem {
         if let Some(size) = truncate_size {
             let result = save.writer.runtime.block_on(draft.truncate(size));
             if result.is_err() {
-                draft_state.unresolved_handles.remove(&handle);
+                draft_state.clear_unresolved(handle);
                 reply.error(draft_errno(&result));
                 return;
             }
@@ -6076,10 +6461,10 @@ impl Filesystem for WorkspaceFilesystem {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .track_open(inode.0);
         if write_mode && truncate_size.is_some() {
-            draft_state.pending_truncates.remove(&inode.0);
+            draft_state.clear_pending_truncate(inode.0);
         }
         if write_mode {
-            draft_state.writer_owners.insert(handle, request.pid());
+            draft_state.record_writer(handle, request.pid());
         }
         reply.opened(fuser::FileHandle(handle), EDITABLE_OPEN_FLAGS);
     }
@@ -6102,8 +6487,8 @@ impl Filesystem for WorkspaceFilesystem {
             .draft_state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if draft_state.quiescing {
-            reply.error(Errno::EBUSY);
+        if let Some(errno) = draft_state.quiescing_errno() {
+            reply.error(errno);
             return;
         }
         let (attr, save, target, scratch, blob_field) = {
@@ -6207,7 +6592,7 @@ impl Filesystem for WorkspaceFilesystem {
             (attr, save, target, scratch, blob_field)
         };
         let handle = self.next_handle.fetch_add(1, Ordering::Relaxed);
-        draft_state.writer_owners.insert(handle, request.pid());
+        draft_state.record_writer(handle, request.pid());
         self.open_files
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -6246,8 +6631,8 @@ impl Filesystem for WorkspaceFilesystem {
             .draft_state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if draft_state.quiescing {
-            reply.error(Errno::EBUSY);
+        if let Some(errno) = draft_state.quiescing_errno() {
+            reply.error(errno);
             return;
         }
         if self.is_candidate_blob(parent.0, name) {
@@ -6437,7 +6822,7 @@ impl Filesystem for WorkspaceFilesystem {
         // destination, so that truncate is not retained against the replaced file (ORNA-VFS-024).
         // Cleared before the post-commit install steps, which can still refuse the reply with EIO:
         // the accepted row is durable, so its truncate must not outlive it.
-        draft_state.pending_truncates.remove(&destination_inode);
+        draft_state.clear_pending_truncate(destination_inode);
         let mut state = self
             .state
             .lock()
@@ -6546,21 +6931,19 @@ impl Filesystem for WorkspaceFilesystem {
             reply.error(Errno::EIO);
             return;
         }
-        draft_state
-            .unresolved_handles
-            .retain(|_, dirty_inode| *dirty_inode != source_inode);
-        draft_state.retained_scratch.remove(&source_inode);
-        draft_state.rejected_scratch.remove(&source_inode);
+        draft_state.clear_unresolved_inode(source_inode);
+        draft_state.clear_retained_scratch(source_inode);
+        draft_state.clear_scratch_refusal(source_inode);
         // The accepted replacement supersedes the refused candidate it replaces, so
         // the refusing handle no longer holds the destination unresolved (ORNA-VFS-024).
         if let Some(DraftRefusal {
             handle: Some(refused),
             ..
-        }) = draft_state.rejected_documents.remove(&destination_inode)
+        }) = draft_state.take_document_refusal(destination_inode)
         {
-            draft_state.unresolved_handles.remove(&refused);
+            draft_state.clear_unresolved(refused);
         }
-        draft_state.pending_truncates.remove(&source_inode);
+        draft_state.clear_pending_truncate(source_inode);
         state.nodes.remove(&source_inode);
         reply.ok();
     }
@@ -6574,8 +6957,8 @@ impl Filesystem for WorkspaceFilesystem {
             .draft_state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if draft_state.quiescing {
-            reply.error(Errno::EBUSY);
+        if let Some(errno) = draft_state.quiescing_errno() {
+            reply.error(errno);
             return;
         }
         if self.is_candidate_blob(parent.0, OsStr::new(name)) {
@@ -6615,9 +6998,8 @@ impl Filesystem for WorkspaceFilesystem {
             return;
         }
         if draft_state
-            .unresolved_handles
-            .values()
-            .any(|open| *open == inode)
+            .unresolved_handles()
+            .any(|(_, open)| open == inode)
         {
             reply.error(Errno::EBUSY);
             return;
@@ -6635,8 +7017,7 @@ impl Filesystem for WorkspaceFilesystem {
             return;
         };
         if let Some(cause) = draft_state
-            .rejected_scratch
-            .get(&inode)
+            .scratch_refusal(inode)
             .map(|refusal| refusal.cause)
         {
             // A refused replacement stays recoverable (ORNA-VFS-009): its
@@ -6672,8 +7053,8 @@ impl Filesystem for WorkspaceFilesystem {
             return;
         }
         state.nodes.remove(&inode);
-        draft_state.retained_scratch.remove(&inode);
-        draft_state.rejected_scratch.remove(&inode);
+        draft_state.clear_retained_scratch(inode);
+        draft_state.clear_scratch_refusal(inode);
         reply.ok();
     }
     #[allow(clippy::too_many_lines)]
@@ -6855,8 +7236,8 @@ impl Filesystem for WorkspaceFilesystem {
             .draft_state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if draft_state.quiescing {
-            reply.error(Errno::EBUSY);
+        if let Some(errno) = draft_state.quiescing_errno() {
+            reply.error(errno);
             return;
         }
         if let Some(source_inode) = self.source_handle_inode(handle.0) {
@@ -6873,8 +7254,8 @@ impl Filesystem for WorkspaceFilesystem {
             .get(&handle.0)
             .cloned();
         let is_scratch = matches!(&open_file, Some(OpenFile::Temporary(_, _, _, _)));
-        let had_unresolved_handle = draft_state.unresolved_handles.contains_key(&handle.0);
-        let had_retained_scratch = draft_state.retained_scratch.contains(&inode.0);
+        let had_unresolved_handle = draft_state.has_unresolved(handle.0);
+        let had_retained_scratch = draft_state.has_retained_scratch(inode.0);
         // A scratch unlinked or renamed away while this handle stayed open is no
         // longer in the namespace; writing through it is not draft state.
         let is_tracked = !is_scratch
@@ -6886,10 +7267,10 @@ impl Filesystem for WorkspaceFilesystem {
                 .contains_key(&inode.0);
         let writes_candidate = !data.is_empty() && is_tracked;
         if writes_candidate {
-            draft_state.unresolved_handles.insert(handle.0, inode.0);
+            draft_state.mark_unresolved(handle.0, inode.0);
             draft_state.candidate_written(handle.0, inode.0);
             if is_scratch {
-                draft_state.retained_scratch.insert(inode.0);
+                draft_state.mark_retained_scratch(inode.0);
             }
         }
         let (result, candidate_len) = match open_file {
@@ -6906,7 +7287,7 @@ impl Filesystem for WorkspaceFilesystem {
             }
             Some(OpenFile::Source(_)) | None => {
                 if !had_unresolved_handle {
-                    draft_state.unresolved_handles.remove(&handle.0);
+                    draft_state.clear_unresolved(handle.0);
                 }
                 reply.error(Errno::EBADF);
                 return;
@@ -6914,17 +7295,17 @@ impl Filesystem for WorkspaceFilesystem {
         };
         if result.is_err() {
             if !had_unresolved_handle {
-                draft_state.unresolved_handles.remove(&handle.0);
+                draft_state.clear_unresolved(handle.0);
             }
             if is_scratch && !had_retained_scratch {
-                draft_state.retained_scratch.remove(&inode.0);
+                draft_state.clear_retained_scratch(inode.0);
             }
             reply.error(draft_errno(&result));
         } else {
             if writes_candidate {
                 // Dirty means an accepted-or-refused candidate is pending. A failed
                 // write leaves no candidate, so it must not mark the handle dirty.
-                draft_state.dirty_handles.insert(handle.0);
+                draft_state.mark_dirty(handle.0);
             }
             if let Some(len) = candidate_len {
                 self.update_writable_len(inode.0, len);
@@ -6952,15 +7333,15 @@ impl Filesystem for WorkspaceFilesystem {
             .draft_state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if draft_state.quiescing {
-            reply.error(Errno::EBUSY);
+        if let Some(errno) = draft_state.quiescing_errno() {
+            reply.error(errno);
             return;
         }
         match self.commit_open_handle(&mut draft_state, inode, handle.0) {
             Ok(()) => {
                 // A successful fsync makes this handle's bytes durable; nothing is
                 // unresolved for it, so unlink must not wait on its RELEASE.
-                draft_state.unresolved_handles.remove(&handle.0);
+                draft_state.clear_unresolved(handle.0);
                 reply.ok();
             }
             Err(DocumentCommitError::NoCandidate) => {
@@ -6994,7 +7375,7 @@ impl Filesystem for WorkspaceFilesystem {
             .draft_state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !draft_state.unresolved_handles.contains_key(&handle.0) {
+        if !draft_state.has_unresolved(handle.0) {
             reply.ok();
             return;
         }
@@ -7002,8 +7383,8 @@ impl Filesystem for WorkspaceFilesystem {
         // closed by another process (exec(2) closes CLOEXEC fds through filp_close).
         // While quiescing, a FLUSH on a dirty handle fails with EBUSY from any
         // process, so the close reports that the draft was not accepted.
-        if draft_state.quiescing {
-            reply.error(Errno::EBUSY);
+        if let Some(errno) = draft_state.quiescing_errno() {
+            reply.error(errno);
             return;
         }
         // PR policy (not EDIT-1 step 5 text): a FLUSH from a process other than the
@@ -7011,9 +7392,8 @@ impl Filesystem for WorkspaceFilesystem {
         // opener's own close is the close-time commit. The opener pid is recorded at
         // open, so a later writer cannot move the gate to itself.
         if draft_state
-            .writer_owners
-            .get(&handle.0)
-            .is_some_and(|writer| *writer != request.pid())
+            .writer(handle.0)
+            .is_some_and(|writer| writer != request.pid())
         {
             reply.ok();
             return;
@@ -7028,7 +7408,7 @@ impl Filesystem for WorkspaceFilesystem {
         }
         match self.commit_open_handle(&mut draft_state, inode, handle.0) {
             Ok(()) => {
-                draft_state.unresolved_handles.remove(&handle.0);
+                draft_state.clear_unresolved(handle.0);
                 reply.ok();
             }
             // Same rule as fsync: a clean handle acknowledges; a dirty one fails closed.
@@ -7072,23 +7452,22 @@ impl Filesystem for WorkspaceFilesystem {
             .remove(&handle.0);
         if matches!(released, Some(OpenFile::Temporary(_, _, _, Some(_)))) {
             let generation = draft_state
-                .blob_handles
-                .remove(&handle.0)
+                .take_blob(handle.0)
                 .map_or(inode.0, |blob| blob.generation);
             self.state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .track_release(generation);
         }
-        draft_state.dirty_handles.remove(&handle.0);
-        draft_state.writer_owners.remove(&handle.0);
+        draft_state.clear_dirty(handle.0);
+        draft_state.clear_writer(handle.0);
         if let Some(OpenFile::Source(source_inode)) = &released {
             self.source_release(&mut draft_state, *source_inode);
         }
         let released_document = matches!(released, Some(OpenFile::Document(..)));
-        match (draft_state.unresolved_handles.remove(&handle.0), released) {
+        match (draft_state.take_unresolved(handle.0), released) {
             (Some(inode), Some(OpenFile::Temporary(_, _, _, _))) => {
-                draft_state.retained_scratch.insert(inode);
+                draft_state.mark_retained_scratch(inode);
             }
             // Release is cleanup only (EDIT-1 step 4): an unsynced document is
             // retained as a draft, never accepted here.
@@ -7134,8 +7513,8 @@ impl Filesystem for WorkspaceFilesystem {
                 .draft_state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if draft_state.quiescing {
-                reply.error(Errno::EBUSY);
+            if let Some(errno) = draft_state.quiescing_errno() {
+                reply.error(errno);
                 return;
             }
             let source = handle.and_then(|handle| {
@@ -7157,8 +7536,8 @@ impl Filesystem for WorkspaceFilesystem {
                     .get(&handle.0)
                     .cloned();
                 let is_scratch = matches!(&open_file, Some(OpenFile::Temporary(_, _, _, _)));
-                let had_unresolved_handle = draft_state.unresolved_handles.contains_key(&handle.0);
-                let had_retained_scratch = draft_state.retained_scratch.contains(&inode.0);
+                let had_unresolved_handle = draft_state.has_unresolved(handle.0);
+                let had_retained_scratch = draft_state.has_retained_scratch(inode.0);
                 let Some(open_file) = open_file else {
                     reply.error(Errno::EBADF);
                     return;
@@ -7173,14 +7552,11 @@ impl Filesystem for WorkspaceFilesystem {
                         .nodes
                         .contains_key(&inode.0);
                 // Keep the pid recorded at open(); or_insert covers handles without one.
-                draft_state
-                    .writer_owners
-                    .entry(handle.0)
-                    .or_insert(request.pid());
+                draft_state.record_writer_if_absent(handle.0, request.pid());
                 if is_tracked {
-                    draft_state.unresolved_handles.insert(handle.0, inode.0);
+                    draft_state.mark_unresolved(handle.0, inode.0);
                     if is_scratch {
-                        draft_state.retained_scratch.insert(inode.0);
+                        draft_state.mark_retained_scratch(inode.0);
                     }
                 }
                 let (result, candidate_len) = match open_file {
@@ -7201,10 +7577,10 @@ impl Filesystem for WorkspaceFilesystem {
                 };
                 if result.is_err() {
                     if !had_unresolved_handle {
-                        draft_state.unresolved_handles.remove(&handle.0);
+                        draft_state.clear_unresolved(handle.0);
                     }
                     if is_scratch && !had_retained_scratch {
-                        draft_state.retained_scratch.remove(&inode.0);
+                        draft_state.clear_retained_scratch(inode.0);
                     }
                     reply.error(draft_errno(&result));
                     return;
@@ -7228,7 +7604,7 @@ impl Filesystem for WorkspaceFilesystem {
                     reply.error(Errno::EDQUOT);
                     return;
                 }
-                draft_state.pending_truncates.insert(inode.0, size);
+                draft_state.set_pending_truncate(inode.0, size);
             }
         }
         match self.attr_of(inode.0) {
@@ -11675,7 +12051,7 @@ mod dirty_handle_ack_tests {
     #[test]
     fn dirty_handle_without_candidate_fails_closed_with_eio() {
         let mut draft_state = DraftState::default();
-        draft_state.dirty_handles.insert(7);
+        draft_state.mark_dirty(7);
         assert_eq!(
             noncandidate_ack(&mut draft_state, 7, "fsync"),
             Err(Errno::EIO)
