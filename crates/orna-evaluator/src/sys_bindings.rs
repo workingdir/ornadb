@@ -2467,7 +2467,7 @@ mod tests {
         // Known-answer vector: SHA-256 of the raw bytes "0123456789". Comparing
         // with the blob's own identity would pass by comparing a value to itself.
         assert_eq!(
-            crate::format_digest_hex(&digest),
+            crate::intrinsics::codecs::format_digest_hex(&digest),
             "84d89877f0d4041efb6bf91a16f0248f2fd573e6af05c19f96bedb9f882f7882"
         );
         assert!(matches!(
