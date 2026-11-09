@@ -70,18 +70,19 @@ jobs:
         run: python3 scripts/check_architecture.py --mode=budget
 
       # Pinned and hash-verified because a cargo-deny upgrade changes the
-      # dependency policy without any repository change.
+      # dependency policy without any repository change. `gh release download`
+      # goes through the API; the release asset redirect returned HTTP 504 on
+      # three attempts in a row from this network, while the API path succeeded.
       - name: Install pinned cargo-deny
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           version=0.20.2
           archive="cargo-deny-${version}-x86_64-unknown-linux-musl.tar.gz"
-          base="https://github.com/EmbarkStudios/cargo-deny/releases/download/${version}"
           for attempt in 1 2 3 4 5; do
-            if curl -sSfL --retry 2 --connect-timeout 30 \
-                -o "$RUNNER_TEMP/$archive" "$base/$archive" \
-              && curl -sSfL --retry 2 --connect-timeout 30 \
-                -o "$RUNNER_TEMP/$archive.sha256" "$base/$archive.sha256"; then
+            if gh release download "$version" --repo EmbarkStudios/cargo-deny \
+                --pattern "$archive*" --dir "$RUNNER_TEMP" --clobber; then
               break
             fi
             echo "::warning::cargo-deny download attempt $attempt failed"
