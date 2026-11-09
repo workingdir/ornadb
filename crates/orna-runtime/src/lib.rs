@@ -249,36 +249,7 @@ pub struct StagedTableActivation {
     effects: ActivationEffectReport,
 }
 
-/// The parts of a [`StagedTableActivation`], moved out once so the commit
-/// boundary takes ownership of the effect report.
-pub struct StagedTableParts {
-    pub context: RuntimeActivationContext,
-    pub mutations: Vec<TableMutation>,
-    pub next_digest: [u8; 32],
-    pub faults: Arc<dyn FaultInjector>,
-    pub effects: ActivationEffectReport,
-}
-
 impl StagedTableActivation {
-    /// Consumes the staged activation into its parts.
-    #[must_use]
-    pub fn into_parts(self) -> StagedTableParts {
-        let Self {
-            context,
-            mutations,
-            next_digest,
-            faults,
-            effects,
-        } = self;
-        StagedTableParts {
-            context,
-            mutations,
-            next_digest,
-            faults,
-            effects,
-        }
-    }
-
     pub fn from_source(
         context: RuntimeActivationContext,
         mutations: Vec<TableMutation>,
@@ -312,6 +283,11 @@ impl StagedTableActivation {
 
     pub fn faults(&self) -> &dyn FaultInjector {
         self.faults.as_ref()
+    }
+
+    /// Returns the effect report the commit boundary applies.
+    pub fn effects(&self) -> ActivationEffectReport {
+        self.effects.clone()
     }
 }
 
@@ -1364,26 +1340,19 @@ impl RuntimeState {
         lease: WriterLease,
         identity: RequestIdentity,
         fingerprint: [u8; 32],
-        staged: StagedTableActivation,
+        staged: &StagedTableActivation,
         outcome: TerminalOutcome,
     ) -> Result<RequestActivationCommit, RuntimeError> {
-        let StagedTableParts {
-            context,
-            mutations,
-            next_digest,
-            faults,
-            effects,
-        } = staged.into_parts();
         self.commit_table_request_activation(
             lease,
             identity,
             fingerprint,
-            &context,
-            &mutations,
-            next_digest,
+            staged.context(),
+            staged.mutations(),
+            staged.next_digest(),
             outcome,
-            faults.as_ref(),
-            effects,
+            staged.faults(),
+            staged.effects(),
         )
         .await
     }

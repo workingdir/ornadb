@@ -74,8 +74,8 @@ use orna_runtime::{
     FaultInjector, NoFault, PinnedCommittedRows, QueryObservationRegistration, RequestIdentity,
     RuntimeError, RuntimeIdentity, RuntimePublicationMetadataRows, RuntimeState,
     RuntimeTableActivationSnapshot, RuntimeTableIdentity, RuntimeTableRows, StagedTableActivation,
-    StagedTableParts, TableActivationError, TableObjectId, TerminalOutcome,
-    ValidatedTableRequestActivationCommit, WriterLease,
+    TableActivationError, TableObjectId, TerminalOutcome, ValidatedTableRequestActivationCommit,
+    WriterLease,
 };
 use orna_sys::{
     EnvironmentProvider, FilesystemProvider, RuntimeMode, StdSnapshotPin, SysHostContext,
@@ -3391,7 +3391,7 @@ fn run_repl_input(
         activation.mutations().to_vec(),
         activation.next_digest(),
         Arc::clone(&transactions.faults),
-        activation.into_parts().effects,
+        activation.effects(),
     ) else {
         return Err(unsettled_after_evaluation());
     };
@@ -3429,13 +3429,6 @@ fn run_repl_input(
                 )));
             }
         };
-        let StagedTableParts {
-            context,
-            mutations,
-            next_digest,
-            faults,
-            effects,
-        } = request_staged.into_parts();
         let committed =
             transactions
                 .runtime
@@ -3444,13 +3437,13 @@ fn run_repl_input(
                         writer,
                         identity: request,
                         fingerprint,
-                        context: &context,
-                        mutations: &mutations,
-                        next_digest,
+                        context: request_staged.context(),
+                        mutations: request_staged.mutations(),
+                        next_digest: request_staged.next_digest(),
                         outcome,
                         validator: &mut *validator,
-                        faults: faults.as_ref(),
-                        effects,
+                        faults: request_staged.faults(),
+                        effects: request_staged.effects(),
                     },
                 ));
         match committed {
@@ -3486,7 +3479,7 @@ fn run_repl_input(
                     writer,
                     request,
                     fingerprint,
-                    request_staged,
+                    &request_staged,
                     outcome,
                 ));
         if let Err(error) = committed {

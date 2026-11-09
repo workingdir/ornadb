@@ -40,9 +40,9 @@ use orna_runtime::{
     Component, ConsumerIdentity, FaultInjector, RecoveryDisposition, RequestIdentity, RequestOwner,
     RequestState as DurableRequestState, RequestStatus as DurableRequestStatus,
     RunObservationRegistration, RuntimeActivationContext, RuntimeError, RuntimeState,
-    StagedTableActivation, StagedTableParts, TableActivationCandidateValidator,
-    TableActivationError, TableMutation, TerminalOutcome, ValidatedTableRequestActivationCommit,
-    WriterLease, admin_invocation_id, with_terminal_admin_effect,
+    StagedTableActivation, TableActivationCandidateValidator, TableActivationError, TableMutation,
+    TerminalOutcome, ValidatedTableRequestActivationCommit, WriterLease, admin_invocation_id,
+    with_terminal_admin_effect,
 };
 use orna_security::{
     AttachOutcome, AttachmentId, BoundaryError, CredentialIssuer, OpaqueCredential, Origin,
@@ -4576,26 +4576,19 @@ impl LiveHost {
         let committed = match self.table_candidate_validator.as_ref() {
             Some(factory) => {
                 let mut validator = factory(staged.context())?;
-                let StagedTableParts {
-                    context,
-                    mutations,
-                    next_digest,
-                    faults,
-                    effects,
-                } = staged.into_parts();
                 runtime
                     .commit_validated_table_request_activation(
                         ValidatedTableRequestActivationCommit {
                             writer: lease,
                             identity,
                             fingerprint,
-                            context: &context,
-                            mutations: &mutations,
-                            next_digest,
+                            context: staged.context(),
+                            mutations: staged.mutations(),
+                            next_digest: staged.next_digest(),
                             outcome: terminal,
                             validator: &mut *validator,
-                            faults: faults.as_ref(),
-                            effects,
+                            faults: staged.faults(),
+                            effects: staged.effects(),
                         },
                     )
                     .await
@@ -4616,7 +4609,7 @@ impl LiveHost {
                     lease,
                     identity,
                     fingerprint,
-                    staged,
+                    &staged,
                     terminal,
                 )
                 .await

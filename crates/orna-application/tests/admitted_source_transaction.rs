@@ -266,7 +266,7 @@ fn admitted_source_table_mutation_commits_rolls_back_and_replays_terminally() {
         runtime.lease,
         failed_identity,
         failed_fingerprint,
-        failed_staged,
+        &failed_staged,
         TerminalOutcome::new(result_bytes(&failed_response)).unwrap(),
     ));
     assert!(matches!(
@@ -384,7 +384,7 @@ fn admitted_source_table_mutation_commits_rolls_back_and_replays_terminally() {
         runtime.lease,
         committed_identity,
         committed_fingerprint,
-        committed_staged,
+        &committed_staged,
         TerminalOutcome::new(committed_terminal_bytes.clone()).unwrap(),
     ))
     .unwrap();

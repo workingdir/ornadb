@@ -4036,7 +4036,7 @@ impl LiveApplication for ApplicationLiveAdapter {
                 let transaction = LiveEvalTransaction::new(
                     activation.mutations().to_vec(),
                     activation.next_digest(),
-                    activation.into_parts().effects,
+                    activation.effects(),
                     Arc::new(NoFault),
                 )
                 .for_request(identity)
@@ -4085,7 +4085,7 @@ impl LiveApplication for ApplicationLiveAdapter {
             let transaction = LiveEvalTransaction::new(
                 activation.mutations().to_vec(),
                 activation.next_digest(),
-                activation.into_parts().effects,
+                activation.effects(),
                 Arc::new(NoFault),
             )
             .for_request(RequestIdentity {
@@ -4171,7 +4171,7 @@ impl LiveApplication for ApplicationLiveAdapter {
                 let transaction = LiveEvalTransaction::new(
                     activation.mutations().to_vec(),
                     activation.next_digest(),
-                    activation.into_parts().effects,
+                    activation.effects(),
                     Arc::new(NoFault),
                 )
                 .for_request(RequestIdentity {
