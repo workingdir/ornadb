@@ -43,19 +43,7 @@ use crate::{
     RepositoryError, RuntimeGeneration, WorktreeState, test_support,
 };
 
-fn git(directory: &Path, arguments: &[&str]) -> String {
-    let output = Command::new("git")
-        .current_dir(directory)
-        .args(arguments)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "git {arguments:?}: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).unwrap().trim().to_owned()
-}
+use crate::test_support::git;
 
 fn repository() -> TempDir {
     let temp = TempDir::new().unwrap();

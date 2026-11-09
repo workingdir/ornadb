@@ -658,31 +658,14 @@ impl FromStr for DatabaseId {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        ffi::OsString,
-        fs,
-        path::{Path, PathBuf},
-        process::Command,
-    };
+    use std::{ffi::OsString, fs, path::PathBuf, process::Command};
 
     use super::{
         DATABASE_FILE, FORMAT_DIRECTORY, FORMAT_FILE, Repository, RepositoryInitError,
         initialize_repository, inspect_metadata,
     };
 
-    fn git(directory: &Path, arguments: &[&str]) -> String {
-        let output = Command::new("git")
-            .current_dir(directory)
-            .args(arguments)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "git {arguments:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8(output.stdout).unwrap().trim().to_owned()
-    }
+    use crate::test_support::git;
 
     #[test]
     fn initializes_canonical_records_and_reuses_the_database_identity() {

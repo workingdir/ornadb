@@ -1728,19 +1728,7 @@ mod tests {
         }
     }
 
-    fn git(directory: &Path, arguments: &[&str]) -> String {
-        let output = Command::new("git")
-            .current_dir(directory)
-            .args(arguments)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "git {arguments:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8(output.stdout).unwrap().trim().to_owned()
-    }
+    use crate::test_support::git;
 
     /// One table's allocator watermark ref, `refs/orna/ids/<table-object-id>`.
     const ALLOCATOR_REF: &str = "refs/orna/ids/00112233445566778899aabbccddeeff";

@@ -12040,19 +12040,7 @@ mod tests {
         assert_eq!(retried.departed_owners(), &[[4; 16]]);
     }
 
-    fn git(directory: &Path, arguments: &[&str]) -> String {
-        let output = Command::new("git")
-            .current_dir(directory)
-            .args(arguments)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "git {arguments:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8(output.stdout).unwrap().trim().to_owned()
-    }
+    use crate::test_support::git;
 
     #[test]
     fn index_candidate_refuses_to_overwrite_an_existing_path() {
