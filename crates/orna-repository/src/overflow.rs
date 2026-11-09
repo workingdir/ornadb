@@ -23,12 +23,13 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     blob_store::GearChunker,
+    cbor::head_len,
     native_graph::{
         CaptureIndexBuilder, CborValue, GraphError, MAX_GRAPH_HEIGHT, NativeGraphContext,
         NativeOid, NodeData, RepositoryReadScope, canonical_value_bytes, collect_row_dependencies,
         decode_canonical_content, direct_blob_reference_count, sov3_value,
     },
-    orp::{PageEntry, Partition, cbor_head_len},
+    orp::{PageEntry, Partition},
     row_store::{
         ROW_CANONICAL_LIMIT, ROW_INLINE_LIMIT, ROW_INLINE_REF_LIMIT, RowDependency, RowValue,
         ValueOverflowRef,
@@ -407,10 +408,10 @@ impl<'a, S: OverflowStore> OverflowWriter<'a, S> {
                     next.push(DependencyEntry { child: oid, last });
                     Ok(())
                 };
-                let mut partition = Partition::new(3 + cbor_head_len(u64::from(height)), height);
+                let mut partition = Partition::new(3 + head_len(u64::from(height)), height);
                 for entry in level {
                     let width = entry.child.as_bytes().len();
-                    let size = cbor_head_len(width as u64) + width;
+                    let size = head_len(width as u64) + width;
                     let refs = vec![entry.child.clone()];
                     partition.push(entry, size, refs, &mut emit)?;
                 }

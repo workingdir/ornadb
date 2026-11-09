@@ -1,10 +1,9 @@
 use std::collections::BTreeMap;
 
 use orna_sys::{
-    ExpressionRef, ObjectRef, PlanDetail, PlanNode, PlanNodeKind,
+    ExplainInputs, ExpressionRef, ObjectRef, PlanDetail, PlanNode, PlanNodeKind,
     QueryDecorrelatedSubqueryDescription, QueryJoinDescription, QueryPartialIndexDescription,
-    QueryPlanDescription, QuerySourceStatistics, SnapshotRef,
-    explain_query_with_partial_indexes_and_decorrelated_subqueries,
+    QueryPlanDescription, QuerySourceStatistics, SnapshotRef, explain_query_with,
 };
 
 const FIXTURE: &str =
@@ -116,10 +115,13 @@ fn explain(
     indexes: &[QueryPartialIndexDescription],
     subquery: &QueryDecorrelatedSubqueryDescription,
 ) -> orna_sys::ExplainedPlan {
-    explain_query_with_partial_indexes_and_decorrelated_subqueries(
+    explain_query_with(
         &query(order),
-        indexes,
-        std::slice::from_ref(subquery),
+        ExplainInputs {
+            partial_indexes: indexes,
+            decorrelated_subqueries: std::slice::from_ref(subquery),
+            ..ExplainInputs::default()
+        },
     )
     .expect("exact predicate and resolver-approved subquery produce a paired plan")
 }
@@ -177,8 +179,15 @@ fn explain_cascade(
     indexes: &[QueryPartialIndexDescription],
     subqueries: &[QueryDecorrelatedSubqueryDescription],
 ) -> orna_sys::ExplainedPlan {
-    explain_query_with_partial_indexes_and_decorrelated_subqueries(query, indexes, subqueries)
-        .expect("each exact resolver pair selects its own partial-index input")
+    explain_query_with(
+        query,
+        ExplainInputs {
+            partial_indexes: indexes,
+            decorrelated_subqueries: subqueries,
+            ..ExplainInputs::default()
+        },
+    )
+    .expect("each exact resolver pair selects its own partial-index input")
 }
 
 fn joins_by_label(plan: &orna_sys::ExplainedPlan) -> BTreeMap<&str, &PlanNode> {
@@ -468,16 +477,22 @@ fn changing_the_selected_index_rekeys_the_decorrelation_cost_fold_chain() {
     ordinary_orders.predicate = Some(expression("expr:ordinary-orders"));
 
     let subquery = subquery("subquery:orders-for-owner");
-    let baseline = explain_query_with_partial_indexes_and_decorrelated_subqueries(
+    let baseline = explain_query_with(
         &query,
-        &indexes_with_orders_index("index:owner-orders"),
-        std::slice::from_ref(&subquery),
+        ExplainInputs {
+            partial_indexes: &indexes_with_orders_index("index:owner-orders"),
+            decorrelated_subqueries: std::slice::from_ref(&subquery),
+            ..ExplainInputs::default()
+        },
     )
     .expect("the matching resolver predicate selects the exact partial index");
-    let changed = explain_query_with_partial_indexes_and_decorrelated_subqueries(
+    let changed = explain_query_with(
         &query,
-        &indexes_with_orders_index("index:owner-orders-v2"),
-        std::slice::from_ref(&subquery),
+        ExplainInputs {
+            partial_indexes: &indexes_with_orders_index("index:owner-orders-v2"),
+            decorrelated_subqueries: std::slice::from_ref(&subquery),
+            ..ExplainInputs::default()
+        },
     )
     .expect("a second exact index remains eligible for the same predicate");
     let baseline_joins = joins_by_label(&baseline);

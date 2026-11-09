@@ -2501,61 +2501,21 @@ impl DeployableRevision {
                     references,
                 },
         } = input;
-        reject_offline_check_catalogue_revision(
-            expected_base.catalogue(),
-            DurableCatalogueRevisionRole::DeployableExpectedBase,
-        )?;
-        reject_offline_check_catalogue_revision(
+        validate_deployable_parents(
+            &expected_base,
+            &source,
             parent_catalogue,
-            DurableCatalogueRevisionRole::DeployableParent,
+            &candidate,
+            parent,
         )?;
-        reject_offline_check_catalogue_revision(
-            candidate.revision(),
-            DurableCatalogueRevisionRole::DeployableCandidate,
+        let revision_evidence = select_function_revision_evidence(
+            &catalogue_hash_context,
+            &source,
+            &candidate,
+            &origins,
+            &new_function_revisions,
+            current_function_revisions.as_deref(),
         )?;
-        if source.parent() != Some(expected_base.source()) {
-            return Err(RevisionInvariantError::DeployableSourceParentMismatch {
-                expected: expected_base.source(),
-                actual: source.parent(),
-            });
-        }
-        if parent_catalogue != expected_base.catalogue() {
-            return Err(RevisionInvariantError::DeployableCatalogueParentMismatch {
-                expected: expected_base.catalogue(),
-                actual: parent_catalogue,
-            });
-        }
-        if let Some(parent) = parent
-            && parent.revision() != expected_base.catalogue()
-        {
-            return Err(RevisionInvariantError::DeployableCatalogueParentMismatch {
-                expected: expected_base.catalogue(),
-                actual: parent.revision(),
-            });
-        }
-        if candidate.revision() == parent_catalogue {
-            return Err(RevisionInvariantError::CatalogueRevisionSelfParent {
-                revision: candidate.revision(),
-            });
-        }
-        let revision_evidence = match (&catalogue_hash_context, &current_function_revisions) {
-            (CatalogueHashContext::Version1, None) => new_function_revisions.as_slice(),
-            (CatalogueHashContext::Version1, Some(current))
-            | (CatalogueHashContext::Version2 { .. }, Some(current)) => {
-                validate_function_revisions(
-                    &source,
-                    &candidate,
-                    &origins,
-                    current,
-                    FunctionRevisionSet::DeployableCurrent,
-                )?;
-                validate_new_function_revision_subset(&new_function_revisions, current)?;
-                current
-            }
-            (CatalogueHashContext::Version2 { .. }, None) => {
-                return Err(RevisionInvariantError::DeployableCurrentFunctionRevisionsRequired);
-            }
-        };
         validate_catalogue_hash_context_coherence(
             &catalogue_hash_context,
             &candidate,
@@ -2856,6 +2816,85 @@ fn validate_origins(
     Ok(())
 }
 
+/// Rejects a deployable revision whose expected base, parent or candidate
+/// identity cannot describe the supplied source and parent catalogue.
+fn validate_deployable_parents(
+    expected_base: &RevisionPair,
+    source: &StoredSourceRevision,
+    parent_catalogue: CatalogueRevisionId,
+    candidate: &CatalogueSnapshot,
+    parent: Option<&CatalogueSnapshot>,
+) -> Result<(), RevisionInvariantError> {
+    reject_offline_check_catalogue_revision(
+        expected_base.catalogue(),
+        DurableCatalogueRevisionRole::DeployableExpectedBase,
+    )?;
+    reject_offline_check_catalogue_revision(
+        parent_catalogue,
+        DurableCatalogueRevisionRole::DeployableParent,
+    )?;
+    reject_offline_check_catalogue_revision(
+        candidate.revision(),
+        DurableCatalogueRevisionRole::DeployableCandidate,
+    )?;
+    if source.parent() != Some(expected_base.source()) {
+        return Err(RevisionInvariantError::DeployableSourceParentMismatch {
+            expected: expected_base.source(),
+            actual: source.parent(),
+        });
+    }
+    if parent_catalogue != expected_base.catalogue() {
+        return Err(RevisionInvariantError::DeployableCatalogueParentMismatch {
+            expected: expected_base.catalogue(),
+            actual: parent_catalogue,
+        });
+    }
+    if let Some(parent) = parent
+        && parent.revision() != expected_base.catalogue()
+    {
+        return Err(RevisionInvariantError::DeployableCatalogueParentMismatch {
+            expected: expected_base.catalogue(),
+            actual: parent.revision(),
+        });
+    }
+    if candidate.revision() == parent_catalogue {
+        return Err(RevisionInvariantError::CatalogueRevisionSelfParent {
+            revision: candidate.revision(),
+        });
+    }
+    Ok(())
+}
+
+/// Chooses the function-revision evidence the candidate hash context requires,
+/// validating complete current evidence before it can be hashed.
+fn select_function_revision_evidence<'a>(
+    catalogue_hash_context: &CatalogueHashContext,
+    source: &StoredSourceRevision,
+    candidate: &CatalogueSnapshot,
+    origins: &[DefinitionOrigin],
+    new_function_revisions: &'a [FunctionRevisionRecord],
+    current_function_revisions: Option<&'a [FunctionRevisionRecord]>,
+) -> Result<&'a [FunctionRevisionRecord], RevisionInvariantError> {
+    match (catalogue_hash_context, current_function_revisions) {
+        (CatalogueHashContext::Version1, None) => Ok(new_function_revisions),
+        (CatalogueHashContext::Version1, Some(current))
+        | (CatalogueHashContext::Version2 { .. }, Some(current)) => {
+            validate_function_revisions(
+                source,
+                candidate,
+                origins,
+                current,
+                FunctionRevisionSet::DeployableCurrent,
+            )?;
+            validate_new_function_revision_subset(new_function_revisions, current)?;
+            Ok(current)
+        }
+        (CatalogueHashContext::Version2 { .. }, None) => {
+            Err(RevisionInvariantError::DeployableCurrentFunctionRevisionsRequired)
+        }
+    }
+}
+
 fn validate_function_revisions(
     source: &StoredSourceRevision,
     catalogue: &CatalogueSnapshot,
@@ -2887,50 +2926,72 @@ fn validate_function_revisions(
                 function: revision.function,
             });
         }
-        let function = catalogue.function_by_id(revision.function).ok_or(
-            RevisionInvariantError::FunctionRevisionFunctionNotInCatalogue {
-                function: revision.function,
-                revision: revision.id,
-            },
-        )?;
-        if function.current_revision() != revision.id {
-            return Err(RevisionInvariantError::FunctionRevisionNotCurrent {
-                function: revision.function,
-                expected: function.current_revision(),
-                actual: revision.id,
-            });
-        }
-        let expected_artifact_kind = match function.domain() {
-            FunctionDomain::Server => ExecutableArtifactKind::Server,
-            FunctionDomain::Client => ExecutableArtifactKind::Client,
-        };
-        if revision.artifact.kind() != expected_artifact_kind {
-            return Err(
-                RevisionInvariantError::FunctionRevisionArtifactDomainMismatch {
-                    function: revision.function,
-                    revision: revision.id,
-                    expected: expected_artifact_kind,
-                    actual: revision.artifact.kind(),
-                },
-            );
-        }
-        if set == FunctionRevisionSet::NewCandidate {
-            let identity = DefinitionIdentity::Function(revision.function);
-            let origin = origins
-                .iter()
-                .find(|origin| origin.identity == identity)
-                .ok_or(RevisionInvariantError::MissingDefinitionOrigin { identity })?;
-            if origin.source != revision.declaration_origin {
-                return Err(RevisionInvariantError::FunctionRevisionOriginMismatch {
-                    function: revision.function,
-                    revision: revision.id,
-                    definition_origin: origin.source,
-                    declaration_origin: revision.declaration_origin,
-                });
-            }
-        }
+        validate_function_revision_in_catalogue(catalogue, origins, revision, set)?;
     }
 
+    check_function_revision_coverage(catalogue, &function_ids, set)
+}
+
+/// Checks one supplied revision against the catalogue's current function and,
+/// for a new candidate, its declaration origin.
+fn validate_function_revision_in_catalogue(
+    catalogue: &CatalogueSnapshot,
+    origins: &[DefinitionOrigin],
+    revision: &FunctionRevisionRecord,
+    set: FunctionRevisionSet,
+) -> Result<(), RevisionInvariantError> {
+    let function = catalogue.function_by_id(revision.function).ok_or(
+        RevisionInvariantError::FunctionRevisionFunctionNotInCatalogue {
+            function: revision.function,
+            revision: revision.id,
+        },
+    )?;
+    if function.current_revision() != revision.id {
+        return Err(RevisionInvariantError::FunctionRevisionNotCurrent {
+            function: revision.function,
+            expected: function.current_revision(),
+            actual: revision.id,
+        });
+    }
+    let expected_artifact_kind = match function.domain() {
+        FunctionDomain::Server => ExecutableArtifactKind::Server,
+        FunctionDomain::Client => ExecutableArtifactKind::Client,
+    };
+    if revision.artifact.kind() != expected_artifact_kind {
+        return Err(
+            RevisionInvariantError::FunctionRevisionArtifactDomainMismatch {
+                function: revision.function,
+                revision: revision.id,
+                expected: expected_artifact_kind,
+                actual: revision.artifact.kind(),
+            },
+        );
+    }
+    if set == FunctionRevisionSet::NewCandidate {
+        let identity = DefinitionIdentity::Function(revision.function);
+        let origin = origins
+            .iter()
+            .find(|origin| origin.identity == identity)
+            .ok_or(RevisionInvariantError::MissingDefinitionOrigin { identity })?;
+        if origin.source != revision.declaration_origin {
+            return Err(RevisionInvariantError::FunctionRevisionOriginMismatch {
+                function: revision.function,
+                revision: revision.id,
+                definition_origin: origin.source,
+                declaration_origin: revision.declaration_origin,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Rejects a catalogue function the supplied revision set does not cover. Only
+/// a new candidate may omit functions that its own revision does not declare.
+fn check_function_revision_coverage(
+    catalogue: &CatalogueSnapshot,
+    function_ids: &HashSet<FunctionId>,
+    set: FunctionRevisionSet,
+) -> Result<(), RevisionInvariantError> {
     for function in catalogue.functions() {
         if function_ids.contains(&function.id()) {
             continue;
@@ -3878,67 +3939,14 @@ fn validate_standard_executables(
         .zip(executables.iter())
         .enumerate()
     {
-        if let Some(previous) = previous_function
-            && previous >= function.id()
-        {
-            return Err(
-                RevisionInvariantError::StandardExecutableCatalogueFunctionOrder {
-                    ordinal: index,
-                    previous,
-                    actual: function.id(),
-                },
-            );
-        }
+        validate_standard_executable(
+            function,
+            executable,
+            index,
+            previous_function,
+            &mut references,
+        )?;
         previous_function = Some(function.id());
-        if function.id() != executable.function() {
-            return Err(
-                RevisionInvariantError::StandardExecutableSequenceFunctionMismatch {
-                    ordinal: index,
-                    catalogue_function: function.id(),
-                    executable_function: executable.function(),
-                },
-            );
-        }
-        if executable.revision().semantic_hash_version() != FunctionSemanticHashVersion::Version2 {
-            return Err(
-                RevisionInvariantError::StandardExecutableSemanticHashVersionMismatch {
-                    function: executable.function(),
-                    revision: executable.revision().id(),
-                    version: executable.revision().semantic_hash_version(),
-                },
-            );
-        }
-        for (ordinal, reference) in executable.references().iter().enumerate() {
-            let expected = u32::try_from(ordinal).map_err(|_| {
-                RevisionInvariantError::StandardExecutableReferenceOrdinalOutOfRange {
-                    function: executable.function(),
-                    revision: executable.revision().id(),
-                }
-            })?;
-            if reference.ordinal() != expected {
-                return Err(
-                    RevisionInvariantError::StandardExecutableReferenceOrdinalOutOfSequence {
-                        function: executable.function(),
-                        revision: executable.revision().id(),
-                        expected,
-                        actual: reference.ordinal(),
-                    },
-                );
-            }
-            if reference.source_function() != executable.function()
-                || reference.source_revision() != executable.revision().id()
-            {
-                return Err(
-                    RevisionInvariantError::StandardExecutableReferenceOwnerMismatch {
-                        function: executable.function(),
-                        revision: executable.revision().id(),
-                        reference_function: reference.source_function(),
-                        reference_revision: reference.source_revision(),
-                    },
-                );
-            }
-            references.push(reference.clone());
-        }
     }
 
     validate_function_revisions(
@@ -3949,6 +3957,89 @@ fn validate_standard_executables(
         FunctionRevisionSet::NewCandidate,
     )?;
     validate_references(source, catalogue, None, None, &[], &revisions, &references)
+}
+
+/// Checks one standard executable against the catalogue function it covers and
+/// collects its references in sequence order.
+fn validate_standard_executable(
+    function: &FunctionDefinition,
+    executable: &StandardExecutable,
+    ordinal: usize,
+    previous_function: Option<FunctionId>,
+    references: &mut Vec<crate::revision::DefinitionReference>,
+) -> Result<(), RevisionInvariantError> {
+    if let Some(previous) = previous_function
+        && previous >= function.id()
+    {
+        return Err(
+            RevisionInvariantError::StandardExecutableCatalogueFunctionOrder {
+                ordinal,
+                previous,
+                actual: function.id(),
+            },
+        );
+    }
+    if function.id() != executable.function() {
+        return Err(
+            RevisionInvariantError::StandardExecutableSequenceFunctionMismatch {
+                ordinal,
+                catalogue_function: function.id(),
+                executable_function: executable.function(),
+            },
+        );
+    }
+    if executable.revision().semantic_hash_version() != FunctionSemanticHashVersion::Version2 {
+        return Err(
+            RevisionInvariantError::StandardExecutableSemanticHashVersionMismatch {
+                function: executable.function(),
+                revision: executable.revision().id(),
+                version: executable.revision().semantic_hash_version(),
+            },
+        );
+    }
+    for (reference_ordinal, reference) in executable.references().iter().enumerate() {
+        validate_standard_executable_reference(executable, reference, reference_ordinal)?;
+        references.push(reference.clone());
+    }
+    Ok(())
+}
+
+/// Checks that one collected reference carries its durable ordinal and names
+/// the executable's own function and revision as its source.
+fn validate_standard_executable_reference(
+    executable: &StandardExecutable,
+    reference: &crate::revision::DefinitionReference,
+    ordinal: usize,
+) -> Result<(), RevisionInvariantError> {
+    let expected = u32::try_from(ordinal).map_err(|_| {
+        RevisionInvariantError::StandardExecutableReferenceOrdinalOutOfRange {
+            function: executable.function(),
+            revision: executable.revision().id(),
+        }
+    })?;
+    if reference.ordinal() != expected {
+        return Err(
+            RevisionInvariantError::StandardExecutableReferenceOrdinalOutOfSequence {
+                function: executable.function(),
+                revision: executable.revision().id(),
+                expected,
+                actual: reference.ordinal(),
+            },
+        );
+    }
+    if reference.source_function() != executable.function()
+        || reference.source_revision() != executable.revision().id()
+    {
+        return Err(
+            RevisionInvariantError::StandardExecutableReferenceOwnerMismatch {
+                function: executable.function(),
+                revision: executable.revision().id(),
+                reference_function: reference.source_function(),
+                reference_revision: reference.source_revision(),
+            },
+        );
+    }
+    Ok(())
 }
 
 fn validate_source_origin(

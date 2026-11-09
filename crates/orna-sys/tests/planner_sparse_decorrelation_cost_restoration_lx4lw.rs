@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 
 use orna_sys::{
-    ExpressionRef, ObjectRef, PlanDetail, PlanNode, PlanNodeKind,
+    ExplainInputs, ExpressionRef, ObjectRef, PlanDetail, PlanNode, PlanNodeKind,
     QueryDecorrelatedSubqueryDescription, QueryJoinDescription, QueryJoinPairIdentityDescription,
     QueryPartialIndexDescription, QueryPlanDescription, QuerySourceStatistics, SnapshotRef,
-    explain_query_with_partial_indexes_and_decorrelated_subqueries_and_join_pair_identities,
+    explain_query_with,
 };
 
 const FIXTURE: &str =
@@ -122,11 +122,14 @@ fn explain(
         candidates.reverse();
         pair_descriptions.reverse();
     }
-    explain_query_with_partial_indexes_and_decorrelated_subqueries_and_join_pair_identities(
+    explain_query_with(
         &query(reverse_known_inputs),
-        &candidates,
-        &subqueries(),
-        &pair_descriptions,
+        ExplainInputs {
+            partial_indexes: &candidates,
+            decorrelated_subqueries: &subqueries(),
+            join_pair_identities: &pair_descriptions,
+            ..ExplainInputs::default()
+        },
     )
     .expect("paired route and decorrelation events restore through sparse cost folds")
 }

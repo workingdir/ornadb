@@ -96,14 +96,15 @@ jobs:
         include:
           - shard: cli
             packages: -p orna-cli
-            # Gate E evidence needs the editor, kernel, libfuse and media player versions.
+            # Gate E evidence needs the editor, kernel, libfuse and media player versions,
+            # and the save settings each real editor used (ORNA-EDITOR-SAVE lines in the log).
             # ORNA_REQUIRE_MEDIA_PLAYER makes the mpv leg of vfs_media_reader fail when mpv is absent.
             recorder: >-
               --input-env ORNA_REQUIRE_FUSE --input-env ORNA_REQUIRE_MEDIA_PLAYER
               --require-path /dev/fuse --require-command emacs --require-command mpv --require-command vim
+              --require-editor-save vim --require-editor-save emacs
               --tool-version 'uname -r' --tool-version 'fusermount3 -V' --tool-version 'fusermount -V'
-              --tool-version 'emacs --version' --tool-version 'vi --version'
-              --tool-version 'vim --version' --tool-version 'mpv --version'
+              --tool-version 'emacs --version' --tool-version 'vim --version' --tool-version 'mpv --version'
           - shard: evaluator
             packages: -p orna-evaluator
             recorder: ""

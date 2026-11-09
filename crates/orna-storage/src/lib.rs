@@ -1,20 +1,31 @@
 //! Orna storage: format-3 publication through the runtime publication
-//! coordinator, plus the retained readers for legacy compact segments.
+//! coordinator, plus the exact-key decoder for verified compact segments.
 //!
 //! Publication writes only the format-3 native row store. Format-1/2 commits
 //! keep their versioned readers, but their loose and compact row writers are
 //! retired (ORNA-UPGRADE-003, ORNA-ROW-013): publishing onto such a snapshot
 //! fails with [`Error::LegacyReadOnly`] until the repository is migrated.
+//!
+//! Format-1/2 compact histories are read by `orna-repository`'s verified
+//! reader (ORNA-ROW-013, ORNA-UPGRADE-002): it walks the committed manifest,
+//! shards and segments and resolves one authoritative row per key. This crate
+//! decodes key columns of segment bytes that reader has already verified; it
+//! walks no history and decodes no row.
 
 mod compact;
 mod compact_parquet;
+mod error;
 mod publication_policy;
+
+pub use error::{Error, RepositoryUnavailableCause};
+
+use error::{graph_operation_error, map_publication_repository_error, repository_format_error};
 
 pub use compact::{
     COMPACT_STORAGE_PROFILE, CompactBaseProjectionError, CompactBaseRow, CompactBaseState,
-    CompactEditableRekey, CompactExactKeyIndex, CompactExactKeySource, CompactHybridRekey,
-    CompactKeyError, CompactKeyIdentity, CompactLogicalKeyError, CompactLogicalReader,
-    CompactOvbProfile, EditableBaseRow, HybridBaseState, OVB_PROFILE, fold_compact_committed_base,
+    CompactExactKeyIndex, CompactExactKeySource, CompactKeyError, CompactKeyIdentity,
+    CompactLogicalKeyError, CompactLogicalReader, CompactOvbProfile, OVB_PROFILE,
+    fold_compact_committed_base,
 };
 // Retired compact and loose row writers. Nothing in production reaches them:
 // publication writes ORP rows and a legacy HEAD is refused before any freeze
@@ -22,9 +33,9 @@ pub use compact::{
 // base enable `compact-writer-fixtures`.
 #[cfg(any(test, feature = "compact-writer-fixtures"))]
 pub use compact::{
-    CompactHybridEvolution, CompactLoweringError, CompactWriterBatch, CompactWriterInput,
-    CompactWriterMutation, CompactWriterMutationState, CompactWriterRow,
-    apply_migration_plan_to_compact, lower_publication_freeze,
+    CompactLoweringError, CompactWriterBatch, CompactWriterInput, CompactWriterMutation,
+    CompactWriterMutationState, CompactWriterRow, apply_migration_plan_to_compact,
+    lower_publication_freeze,
 };
 pub use compact_parquet::{CompactParquetError, CompactParquetKeySource};
 pub use publication_policy::{
@@ -117,24 +128,34 @@ pub struct ProjectedRuntimeMutation {
 
 fn schema_descriptor_entry(schema: &SchemaDescriptor, number: i64) -> Result<&OvbRaw, Error> {
     let OvbRaw::Map(entries) = schema.raw() else {
-        return Err(Error::RepositoryUnavailable);
+        return Err(Error::repository_unavailable_reason(
+            "schema descriptor is not a map",
+        ));
     };
     let key = OvbRaw::Int(number.into());
     entries
         .iter()
         .find(|(candidate, _)| candidate == &key)
         .map(|(_, value)| value)
-        .ok_or(Error::RepositoryUnavailable)
+        .ok_or_else(|| {
+            Error::repository_unavailable_reason(format_args!(
+                "schema descriptor has no entry {number}"
+            ))
+        })
 }
 
 fn committed_projection_schema(
     descriptor: Cow<'_, SchemaDescriptor>,
 ) -> Result<CommittedProjectionSchema<'_>, Error> {
     let OvbRaw::Array(key_ids) = schema_descriptor_entry(&descriptor, 2)? else {
-        return Err(Error::RepositoryUnavailable);
+        return Err(Error::repository_unavailable_reason(
+            "schema key-id entry is not an array",
+        ));
     };
     let OvbRaw::Array(declared_fields) = schema_descriptor_entry(&descriptor, 3)? else {
-        return Err(Error::RepositoryUnavailable);
+        return Err(Error::repository_unavailable_reason(
+            "schema declared-fields entry is not an array",
+        ));
     };
     let text_primary_key = if key_ids.len() == 1 {
         let field = declared_fields
@@ -142,12 +163,23 @@ fn committed_projection_schema(
             .find(|candidate| {
                 matches!(candidate, OvbRaw::Array(parts) if parts.first() == key_ids.first())
             })
-            .ok_or(Error::RepositoryUnavailable)?;
+            .ok_or_else(|| {
+                Error::repository_unavailable_reason(
+                    "schema primary-key field is not declared",
+                )
+            })?;
         let OvbRaw::Array(parts) = field else {
-            return Err(Error::RepositoryUnavailable);
+            return Err(Error::repository_unavailable_reason(
+                "schema field declaration is not an array",
+            ));
         };
-        let OvbRaw::Array(type_node) = parts.get(2).ok_or(Error::RepositoryUnavailable)? else {
-            return Err(Error::RepositoryUnavailable);
+        let OvbRaw::Array(type_node) = parts.get(2).ok_or_else(|| {
+            Error::repository_unavailable_reason("schema primary-key type node is missing")
+        })?
+        else {
+            return Err(Error::repository_unavailable_reason(
+                "schema primary-key type node is not an array",
+            ));
         };
         matches!(
             type_node.as_slice(),
@@ -159,9 +191,13 @@ fn committed_projection_schema(
     };
     let stored_field_count = declared_fields.iter().try_fold(0usize, |count, field| {
         let OvbRaw::Array(parts) = field else {
-            return Err(Error::RepositoryUnavailable);
+            return Err(Error::repository_unavailable_reason(
+                "schema field declaration is not an array",
+            ));
         };
-        let role = parts.get(3).ok_or(Error::RepositoryUnavailable)?;
+        let role = parts.get(3).ok_or_else(|| {
+            Error::repository_unavailable_reason("schema field declaration has no role")
+        })?;
         Ok(count + usize::from(matches!(role, OvbRaw::Int(role) if role == &1.into())))
     })?;
     Ok(CommittedProjectionSchema {
@@ -182,17 +218,17 @@ fn project_runtime_key(
     bytes: &[u8],
 ) -> Result<Vec<u8>, Error> {
     let key = if schema.text_primary_key {
-        let text = std::str::from_utf8(bytes).map_err(|_| Error::RepositoryUnavailable)?;
+        let text = std::str::from_utf8(bytes).map_err(Error::repository_unavailable)?;
         TypedKey::Text(text.to_owned())
             .canonical_bytes()
-            .map_err(|_| Error::RepositoryUnavailable)?
+            .map_err(Error::repository_unavailable)?
     } else {
         bytes.to_vec()
     };
     schema
         .descriptor
         .validate_stored_key(relation_id, &key)
-        .map_err(|_| Error::RepositoryUnavailable)?;
+        .map_err(Error::repository_unavailable)?;
     Ok(key)
 }
 
@@ -221,7 +257,7 @@ fn project_runtime_mutation(
         .map(|bytes| {
             let row_key = rekey_to.as_deref().unwrap_or(key.as_slice());
             let decoded = ContextValue::decode_in_context(bytes, ValueFormat::Rov3, value_context)
-                .map_err(|_| Error::RepositoryUnavailable)?;
+                .map_err(Error::repository_unavailable)?;
             let fields = if schema
                 .descriptor
                 .validate_stored_row(relation_id, row_key, bytes)
@@ -235,14 +271,14 @@ fn project_runtime_mutation(
                     Raw::Array(vec![decoded.raw().clone()]),
                 )
                 .and_then(|value| value.encode())
-                .map_err(|_| Error::RepositoryUnavailable)?
+                .map_err(Error::repository_unavailable)?
             } else {
                 bytes.to_vec()
             };
             schema
                 .descriptor
                 .validate_stored_row(relation_id, row_key, &fields)
-                .map_err(|_| Error::RepositoryUnavailable)?;
+                .map_err(Error::repository_unavailable)?;
             Ok(fields)
         })
         .transpose()?;
@@ -321,9 +357,9 @@ impl NetRow {
     /// inserts and removes again needs none.
     fn index_mutations(self, key: &[u8]) -> Result<Vec<RowIndexMutation>, Error> {
         let delete =
-            || RowIndexMutation::delete_canonical(key).map_err(|_| Error::RepositoryUnavailable);
+            || RowIndexMutation::delete_canonical(key).map_err(Error::repository_unavailable);
         let insert = |value: &[u8]| {
-            RowIndexMutation::insert_canonical(key, value).map_err(|_| Error::RepositoryUnavailable)
+            RowIndexMutation::insert_canonical(key, value).map_err(Error::repository_unavailable)
         };
         match (self.committed, self.next) {
             (CommittedPresence::Absent, None) => Ok(Vec::new()),
@@ -422,9 +458,11 @@ fn build_frozen_publication_store_root(
 ) -> Result<FrozenStoreRoot, Error> {
     let format = repository
         .open_format_context_at_selector(expected_head.as_str())
-        .map_err(|_| Error::RepositoryUnavailable)?;
+        .map_err(Error::repository_unavailable)?;
     if format.repository_format() != RepositoryFormat::Format3 {
-        return Err(Error::RepositoryUnavailable);
+        return Err(Error::repository_unavailable_reason(
+            "publication snapshot is not format 3",
+        ));
     }
 
     let mut bases = BTreeMap::<[u8; 16], RelationBase>::new();
@@ -433,7 +471,9 @@ fn build_frozen_publication_store_root(
     for mutation in mutations {
         let relation_id = mutation
             .table_object_id()
-            .ok_or(Error::RepositoryUnavailable)?
+            .ok_or_else(|| {
+                Error::repository_unavailable_reason("runtime mutation has no table object id")
+            })?
             .bytes();
         let base = match bases.entry(relation_id) {
             std::collections::btree_map::Entry::Occupied(occupied) => occupied.into_mut(),
@@ -450,7 +490,7 @@ fn build_frozen_publication_store_root(
                     projected.key.clone(),
                     new_key.clone(),
                 )
-                .map_err(|_| Error::RepositoryUnavailable)?,
+                .map_err(Error::repository_unavailable)?,
             );
         }
         net_rows.fold(relation_id, projected, mutation.is_insert());
@@ -498,7 +538,7 @@ fn build_frozen_publication_store_root(
     let allocator_summary = if rows_changed {
         repository
             .allocator_summary_maintenance(expected_head)
-            .map_err(|_| Error::RepositoryUnavailable)?
+            .map_err(Error::repository_unavailable)?
     } else {
         None
     };
@@ -529,7 +569,7 @@ fn build_frozen_publication_store_root(
     }
     let store_root = repository
         .append_rekey_log(&format, &store_root, &logical_rekeys)
-        .map_err(|_| Error::RepositoryUnavailable)?;
+        .map_err(Error::repository_unavailable)?;
     Ok(FrozenStoreRoot {
         graph: first.graph,
         store_root,
@@ -667,7 +707,7 @@ impl RuntimePublicationCoordinator {
             .hold_maintenance_lease()
             .map_err(|error| match error {
                 RepositoryError::RepositoryBusy => Error::RepositoryBusy,
-                _ => Error::RepositoryUnavailable,
+                other => Error::repository_unavailable(other),
             })?;
         let format = writable_snapshot_context(repository, expected_head)?;
         let mutations = runtime
@@ -699,20 +739,19 @@ impl RuntimePublicationCoordinator {
         }
         let candidate = repository
             .build_private_commit_with_store_root(expected_head, &graph, &store_root, message)
-            .map_err(|_| Error::RepositoryUnavailable)?;
+            .map_err(Error::repository_unavailable)?;
         // Store-only candidates still need a durable journal anchor. Keep the
         // format metadata file unchanged rather than projecting row keys into
         // legacy loose paths.
         let marker =
-            ManagedPath::new(".orna/database.orna").map_err(|_| Error::RepositoryUnavailable)?;
+            ManagedPath::new(".orna/database.orna").map_err(Error::repository_unavailable)?;
         let paths = [marker.clone()];
         let captured = repository
             .capture_managed_publication_state(expected_head, &expected_index, &paths)
             .map_err(map_publication_repository_error)?;
-        let expected = captured
-            .into_iter()
-            .next()
-            .ok_or(Error::RepositoryUnavailable)?;
+        let expected = captured.into_iter().next().ok_or_else(|| {
+            Error::repository_unavailable_reason("publication capture returned no managed state")
+        })?;
         let entry = PublicationJournalEntry::new(marker, expected.clone(), expected);
         let base_index_tree = expected_index
             .tree()
@@ -727,7 +766,7 @@ impl RuntimePublicationCoordinator {
         )
         .and_then(|journal| journal.with_store_root(&store_root))
         .and_then(|journal| journal.with_logical_rekeys(logical_rekeys))
-        .map_err(|_| Error::RepositoryUnavailable)?;
+        .map_err(Error::repository_unavailable)?;
         let protected_source_mutations = mutations
             .iter()
             .filter(|mutation| !mutation.protected_content_transfers().is_empty())
@@ -816,7 +855,7 @@ impl RuntimePublicationCoordinator {
         orna_repository::publication_crash_barrier("runtime-complete");
         repository
             .mark_runtime_complete(freeze.intent_id, &mut self.journal)
-            .map_err(|_| Error::RepositoryUnavailable)?;
+            .map_err(Error::repository_unavailable)?;
         self.protected_source_mutations.clear();
         Ok(())
     }
@@ -879,7 +918,7 @@ impl RuntimePublicationCoordinator {
                 .map_err(|_| Error::RuntimeUnavailable)?;
             return repository
                 .recover_publication()
-                .map_err(|_| Error::RepositoryUnavailable);
+                .map_err(map_publication_repository_error);
         }
 
         match repository.recover_publication() {
@@ -907,11 +946,11 @@ impl RuntimePublicationCoordinator {
             .map_err(|_| Error::RuntimeUnavailable)?;
         repository
             .mark_runtime_complete(intent_id, &mut journal)
-            .map_err(|_| Error::RepositoryUnavailable)?;
+            .map_err(Error::repository_unavailable)?;
         repository
             .index_generation()
             .map(Some)
-            .map_err(|_| Error::RepositoryUnavailable)
+            .map_err(Error::repository_unavailable)
     }
 }
 
@@ -939,42 +978,6 @@ fn verify_reconciled_publication(
         .map_err(map_publication_repository_error)
 }
 
-fn map_publication_repository_error(error: RepositoryError) -> Error {
-    match error {
-        RepositoryError::InvalidPublicationJournal | RepositoryError::InvalidCompactManifest => {
-            Error::InvalidPublicationJournal
-        }
-        RepositoryError::StaleIndex { .. } => Error::RecoveryIndexConflict,
-        RepositoryError::StaleHead => Error::RefConflict,
-        RepositoryError::ManagedContentConflict => Error::ManagedWorktreeConflict,
-        RepositoryError::LegacyPathChanged(path) => Error::LegacyPathChanged { path },
-        RepositoryError::PublicationObjectUnavailable => Error::PublicationObjectUnavailable,
-        RepositoryError::PublicationPending => Error::PublicationPending,
-        RepositoryError::RuntimeCompletionRequired => Error::InvalidTransition,
-        _ => Error::RepositoryUnavailable,
-    }
-}
-
-/// Keeps a malformed native graph distinct from an unavailable one at the
-/// storage boundary; every other format fault stays `RepositoryUnavailable`.
-fn repository_format_error(error: orna_repository::FormatContextError) -> Error {
-    match error {
-        orna_repository::FormatContextError::GraphMalformed(_) => Error::RepositoryMalformed(error),
-        _ => Error::RepositoryUnavailable,
-    }
-}
-
-/// Keeps a malformed native graph distinct from an unavailable one for the
-/// graph operations a publication runs; every other graph fault, including
-/// quota, cancellation and missing objects, stays `RepositoryUnavailable`.
-fn graph_operation_error(error: orna_repository::GraphError) -> Error {
-    if error.is_malformed() {
-        Error::RepositoryMalformed(orna_repository::FormatContextError::GraphMalformed(error))
-    } else {
-        Error::RepositoryUnavailable
-    }
-}
-
 /// Opens the committed format context at `snapshot` only when that snapshot
 /// has a row writer. Format-1/2 commits keep their versioned readers, but the
 /// loose and compact row writers are retired (ORNA-UPGRADE-003, ORNA-ROW-013).
@@ -986,7 +989,7 @@ pub fn writable_snapshot_context(
 ) -> Result<HistoricalFormatContext, Error> {
     let context = repository
         .open_format_context_at_selector(snapshot.as_str())
-        .map_err(|_| Error::RepositoryUnavailable)?;
+        .map_err(Error::repository_unavailable)?;
     match context.repository_format() {
         RepositoryFormat::Format3 => Ok(context),
         legacy => Err(Error::LegacyReadOnly {
@@ -1015,80 +1018,6 @@ fn refuse_retired_writer_journal(
         _ => Ok(()),
     }
 }
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum Error {
-    InvalidTableRoot,
-    InvalidKey,
-    UnsafePath,
-    IncompleteStaging,
-    InvalidObjectId,
-    /// The publication target is a format-1/2 compatibility snapshot. It
-    /// remains readable, but it has no row writer until it is migrated to
-    /// format 3.
-    LegacyReadOnly {
-        format: u8,
-    },
-    RecoveryIndexConflict,
-    RefConflict,
-    ManagedWorktreeConflict,
-    /// A legacy loose row file the migration retires was edited after capture.
-    /// The file is kept on disk and named so the edit is not lost.
-    LegacyPathChanged {
-        path: String,
-    },
-    PublicationPending,
-    InvalidPublicationJournal,
-    InvalidTransition,
-    RuntimeUnavailable,
-    RepositoryUnavailable,
-    /// Another owner holds the declared maintenance boundary (ORNA-CAP-006).
-    RepositoryBusy,
-    /// A publish step names a candidate or base object that Git no longer
-    /// holds. The publish is refused before any ref or journal state changes
-    /// (ORNA-CAP-006, ORNA-GIT-010).
-    PublicationObjectUnavailable,
-    RepositoryMalformed(orna_repository::FormatContextError),
-}
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::InvalidTableRoot => "invalid table root",
-            Self::InvalidKey => "invalid loose row key",
-            Self::UnsafePath => "unsafe loose row path",
-            Self::IncompleteStaging => "incomplete publication staging",
-            Self::InvalidObjectId => "invalid object id",
-            Self::LegacyReadOnly { format } => {
-                return write!(
-                    f,
-                    "repository format {format} is a read-only legacy snapshot; migrate it to format 3 before publishing"
-                );
-            }
-            Self::RecoveryIndexConflict => "recovery index conflict",
-            Self::RefConflict => "publication ref conflict",
-            Self::ManagedWorktreeConflict => "managed worktree content conflict",
-            Self::LegacyPathChanged { path } => {
-                return write!(
-                    f,
-                    "legacy file {path} was edited after capture; the migration retires it and kept the edit on disk"
-                );
-            }
-            Self::PublicationPending => "publication remains pending before ref advance",
-            Self::InvalidPublicationJournal => "invalid publication journal",
-            Self::InvalidTransition => "invalid publication transition",
-            Self::RuntimeUnavailable => "runtime contract unavailable",
-            Self::RepositoryUnavailable => "repository projection is unavailable",
-            Self::RepositoryBusy => "repository maintenance boundary is held by another owner",
-            Self::PublicationObjectUnavailable => {
-                "a publication object is no longer held by the repository"
-            }
-            Self::RepositoryMalformed(error) => {
-                return write!(f, "repository projection is malformed: {error}");
-            }
-        })
-    }
-}
-impl std::error::Error for Error {}
 
 #[cfg(test)]
 mod tests {
@@ -1471,6 +1400,73 @@ mod tests {
         );
     }
 
+    /// ORNA-PUB-011 and the recovery row "Index or affected path differs from
+    /// both recorded states": once the runtime tail is consumed, an index that
+    /// moved after reconciliation is a typed index conflict. It keeps the
+    /// journal, the moved index and the edited file intact.
+    #[tokio::test]
+    async fn coordinator_recovery_after_runtime_completion_reports_a_moved_index() {
+        let (temp, repository) = repository();
+        let (runtime, freeze) = frozen_runtime(&repository).await;
+        let head = repository.head().unwrap().unwrap();
+        let index = repository.index_generation().unwrap();
+        let path = ManagedPath::new("generated/row.orna").unwrap();
+        let candidate = repository
+            .build_private_commit(
+                &head,
+                &[ManagedFileChange::new(path.clone(), Some(b"row".to_vec()))],
+                "orna: publish runtime data",
+            )
+            .unwrap();
+        let mut journal = PublicationJournal::new_with_runtime_intent(
+            head,
+            candidate.commit().clone(),
+            index.tree().unwrap().clone(),
+            freeze.intent_id,
+            vec![PublicationJournalEntry::new(
+                path.clone(),
+                None,
+                Some(b"row".to_vec()),
+            )],
+        )
+        .unwrap();
+        repository
+            .publish_candidate(&index, &candidate, &mut journal)
+            .unwrap();
+        let commit = publication_commit_id(journal.new_head()).unwrap();
+        runtime
+            .complete_publication(&freeze, &commit)
+            .await
+            .unwrap();
+        // Crash boundary after the RuntimeCompleted journal write and before
+        // the Complete write: recovery must finish the repository step.
+        journal
+            .advance(orna_repository::PublicationJournalStage::RuntimeCompleted)
+            .unwrap();
+        repository.write_publication_journal(&journal).unwrap();
+        fs::write(temp.path().join("generated/row.orna"), "edited\n").unwrap();
+        git(temp.path(), &["add", "generated/row.orna"]);
+        let moved_index = repository.index_generation().unwrap();
+
+        assert_eq!(
+            RuntimePublicationCoordinator::recover(&repository, &runtime).await,
+            Err(Error::RecoveryIndexConflict)
+        );
+        let journal = repository
+            .read_publication_journal()
+            .unwrap()
+            .expect("a typed index conflict keeps the journal");
+        assert_eq!(
+            journal.stage(),
+            orna_repository::PublicationJournalStage::RuntimeCompleted
+        );
+        assert_eq!(repository.index_generation().unwrap(), moved_index);
+        assert_eq!(
+            fs::read_to_string(temp.path().join("generated/row.orna")).unwrap(),
+            "edited\n"
+        );
+    }
+
     #[tokio::test]
     async fn coordinator_recovery_preserves_a_malformed_journal_read() {
         let (_temp, repository) = repository();
@@ -1745,12 +1741,30 @@ mod tests {
             GraphError::UnavailableObject,
             GraphError::GitCommandFailed,
         ] {
-            assert_eq!(
-                graph_operation_error(operational.clone()),
-                Error::RepositoryUnavailable,
+            let error = graph_operation_error(operational.clone());
+            assert!(
+                matches!(&error, Error::RepositoryUnavailable(_)),
                 "operational graph fault must stay unavailable: {operational:?}"
             );
+            assert_eq!(
+                std::error::Error::source(&error).map(ToString::to_string),
+                Some(operational.to_string()),
+                "the operational graph fault is kept as the source: {operational:?}"
+            );
         }
+    }
+
+    /// The CLI renders `RepositoryUnavailable` with its stable text and code,
+    /// so the cause belongs on the source chain, not in the message.
+    #[test]
+    fn repository_unavailable_keeps_its_cause_out_of_the_rendered_text() {
+        let error =
+            repository_format_error(orna_repository::FormatContextError::MetadataUnavailable);
+        assert_eq!(error.to_string(), "repository projection is unavailable");
+        assert_eq!(
+            std::error::Error::source(&error).map(ToString::to_string),
+            Some(orna_repository::FormatContextError::MetadataUnavailable.to_string())
+        );
     }
 
     fn text_key(text: &str) -> Vec<u8> {

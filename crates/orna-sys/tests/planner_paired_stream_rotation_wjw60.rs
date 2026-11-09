@@ -1,11 +1,10 @@
 use orna_sys::{
-    ExplainError, ExplainedPlan, ExpressionRef, MutableBranchSnapshot, ObjectRef, PlanDetail,
-    PlanNode, PlanNodeKind, QueryCheckpointGenerationDescription, QueryJoinDescription,
+    ExplainError, ExplainInputs, ExplainedPlan, ExpressionRef, MutableBranchSnapshot, ObjectRef,
+    PlanDetail, PlanNode, PlanNodeKind, QueryCheckpointGenerationDescription, QueryJoinDescription,
     QueryJoinPairIdentityDescription, QueryPairedCheckpointSpillRestoreChainDescription,
     QueryPairedCheckpointSpillRestoreOccurrenceDescription,
     QueryPairedStreamRotationChainDescription, QueryPairedStreamRotationOccurrenceDescription,
-    QueryPlanDescription, QuerySourceStatistics, SnapshotRef,
-    explain_query_with_partial_indexes_and_paired_checkpoint_stream_rotation_chains,
+    QueryPlanDescription, QuerySourceStatistics, SnapshotRef, explain_query_with,
 };
 
 const FIXTURE: &str = include_str!("fixtures/planner_paired_stream_rotation_wjw60.orna");
@@ -211,15 +210,18 @@ fn rotation_chains() -> Vec<QueryPairedStreamRotationChainDescription> {
 fn plan(
     chains: &[QueryPairedStreamRotationChainDescription],
 ) -> Result<ExplainedPlan, ExplainError> {
-    explain_query_with_partial_indexes_and_paired_checkpoint_stream_rotation_chains(
+    explain_query_with(
         &query(),
-        &[],
-        &pairs(),
-        &[],
-        &[],
-        &[],
-        &spill_chains(),
-        chains,
+        ExplainInputs {
+            partial_indexes: &[],
+            join_pair_identities: &pairs(),
+            checkpoint_compaction_chains: &[],
+            segment_rotation_chains: &[],
+            stream_compaction_chains: &[],
+            spill_restore_chains: &spill_chains(),
+            stream_rotation_chains: chains,
+            ..ExplainInputs::default()
+        },
     )
 }
 
