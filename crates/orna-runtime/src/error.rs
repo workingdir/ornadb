@@ -1,7 +1,7 @@
 //! Runtime error taxonomy and the deterministic fault-injection seam.
 
-use orna_foundation::CwdCapture;
 use orna_stream::SafeDiagnostic;
+use orna_value::CwdCapture;
 use std::fmt;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

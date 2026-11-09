@@ -18,7 +18,6 @@ use crate::stream_source::{
     StreamProviderFailure,
 };
 use libsql::{Connection, params};
-use orna_foundation::{AssertionRef, CwdCapture, ExpressionRef, ObjectRef, SafeText, SourceSpan};
 use orna_stream::Checkpoint as StreamCheckpoint;
 use orna_stream::{
     AssertionDiagnosticCode, AssertionDiagnosticDetail, AsyncCheckpointBackend,
@@ -27,6 +26,7 @@ use orna_stream::{
     FailureIdentity, FailureRecord, FailureStatus, LeasePurpose, ReplayGrant, SafeAssertionWitness,
     SafeDiagnostic, StreamFailurePayload, StreamStatus,
 };
+use orna_value::{AssertionRef, CwdCapture, ExpressionRef, ObjectRef, SafeText, SourceSpan};
 use std::future::Future;
 use std::pin::Pin;
 
@@ -913,12 +913,12 @@ async fn load_stream_failure_assertion_detail(
     let predicate = ExpressionRef::from_row_ref(decode_row_ref(
         row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?,
     )?);
-    let file = orna_foundation::FileRef::from_row_ref(decode_row_ref(
+    let file = orna_value::FileRef::from_row_ref(decode_row_ref(
         row.get(5).map_err(|_| RuntimeError::RecoveryInvalid)?,
     )?);
     let source_span = SourceSpan::new(
         file,
-        orna_foundation::SourceSpanExtent {
+        orna_value::SourceSpanExtent {
             start_byte: decode_nonnegative_bigint(
                 row.get(6).map_err(|_| RuntimeError::RecoveryInvalid)?,
             )?,

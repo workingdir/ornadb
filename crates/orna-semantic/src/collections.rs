@@ -2,9 +2,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use orna_foundation::Diagnostic;
 use orna_intrinsics::IntrinsicId;
 use orna_syntax::Expr;
+use orna_value::Diagnostic;
 
 use super::*;
 

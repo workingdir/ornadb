@@ -13,8 +13,8 @@ use std::{
 };
 
 use bytes::Bytes;
-use orna_foundation::{CanonicalValue, OvbRaw, SchemaDescriptor, compare_primary_keys};
 use orna_syntax::{Expr, LiteralKind, parse_row};
+use orna_value::{CanonicalValue, OvbRaw, SchemaDescriptor, compare_primary_keys};
 use parquet::{
     basic::{Compression, ConvertedType, Encoding, PageType, Type},
     column::{page::Page, reader::ColumnReader},

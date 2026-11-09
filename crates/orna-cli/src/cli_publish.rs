@@ -821,12 +821,11 @@ mod tests {
 
     #[test]
     fn canonical_string_mutation_key_matches_native_typed_key() {
-        let encoded_key = orna_foundation::CanonicalValue::new(orna_foundation::OvbRaw::Text(
-            "london".to_owned(),
-        ))
-        .unwrap()
-        .encode()
-        .expect("canonical source key encoding");
+        let encoded_key =
+            orna_value::CanonicalValue::new(orna_value::OvbRaw::Text("london".to_owned()))
+                .unwrap()
+                .encode()
+                .expect("canonical source key encoding");
         let mutation = TableMutation::new([1; 16], "Music", encoded_key, Some(vec![1]))
             .expect("bounded mutation key");
         let row_key = orna_repository::TypedKey::Text("london".to_owned());

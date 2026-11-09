@@ -1,12 +1,12 @@
 use std::{fs, path::Path, process::Command};
 
 use num_bigint::BigInt;
-use orna_foundation::{
+use orna_repository::Repository;
+use orna_syntax::parse_module;
+use orna_value::{
     CanonicalSnapshot, CwdCapture, GitHash, RowRef, SystemReferenceError, snapshot_reference,
     validate_snapshot_reference,
 };
-use orna_repository::Repository;
-use orna_syntax::parse_module;
 use tempfile::TempDir;
 
 const SNAPSHOT_SOURCE: &str = include_str!("fixtures/snapshot-round-trip.orna");
@@ -129,5 +129,5 @@ fn snapshot_encoders_reject_forged_generation_identities() {
     *id = [0xa5; 32];
 
     assert!(forged.encode().is_err());
-    assert!(RowRef::new([1; 16], [4; 16], orna_foundation::OvbRaw::Null, forged).is_err());
+    assert!(RowRef::new([1; 16], [4; 16], orna_value::OvbRaw::Null, forged).is_err());
 }

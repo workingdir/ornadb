@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use bytes::Bytes;
-use orna_foundation::{CanonicalValue, OvbRaw, SchemaDescriptor};
 use orna_repository::Uuid;
 use orna_storage::{CompactKeyError, CompactOvbProfile, CompactParquetKeySource};
+use orna_value::{CanonicalValue, OvbRaw, SchemaDescriptor};
 use parquet::{
     basic::{Compression, Encoding, Type},
     data_type::{ByteArray, ByteArrayType},

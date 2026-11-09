@@ -8,11 +8,11 @@ use crate::{
     RuntimeActivationContext, RuntimeState, TableActivationCandidateValidator, TableSchemaIdentity,
 };
 use libsql::{Connection, TransactionBehavior, params};
-use orna_foundation::CwdCapture;
 use orna_repository::{
     ContentIdentity, GitHashAlgorithm, NativeOid, OrpBlobBinding, ProtectedContentPin,
     ProtectedContentTransfer,
 };
+use orna_value::CwdCapture;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;

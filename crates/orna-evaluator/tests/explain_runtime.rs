@@ -16,14 +16,14 @@ use orna_evaluator::{
     RelationPage, StepBudget, evaluate_expression_ovb2_with_effects,
     invoke_named_with_context_effects, invoke_named_with_effects,
 };
-use orna_foundation::{
-    CanonicalSnapshot, CanonicalValue, FunctionRef, GitHash, OvbRaw, RowRef, Snapshot,
-    function_reference, object_reference, snapshot_reference,
-};
 use orna_syntax::{Expr, parse_expression};
 use orna_sys::{
     DependencyConfidence, DependencyInput, DependencyKind, FunctionPlanDescription, ObjectRef,
     QueryPlanDescription, SnapshotRef, explain_function, explain_query,
+};
+use orna_value::{
+    CanonicalSnapshot, CanonicalValue, FunctionRef, GitHash, OvbRaw, RowRef, Snapshot,
+    function_reference, object_reference, snapshot_reference,
 };
 use orna_value::{ContextValue, Raw, Value};
 

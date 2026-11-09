@@ -1,5 +1,4 @@
 use orna_evaluator::Limits;
-use orna_foundation::CanonicalValue;
 use orna_project_repl::AdmittedReplSession;
 use orna_semantic::{Catalogue, StandardDependencyProfile};
 use orna_standard_sources::{
@@ -7,6 +6,7 @@ use orna_standard_sources::{
     REFERENCE_STANDARD_PRELUDE_EXPORTS_V1, REFERENCE_STANDARD_PRELUDE_PATH_V1,
     REFERENCE_STANDARD_TEXT_PATH_V1, reference_standard_sources_v1,
 };
+use orna_value::CanonicalValue;
 use orna_value::Raw;
 
 fn bool_value(value: bool) -> CanonicalValue {

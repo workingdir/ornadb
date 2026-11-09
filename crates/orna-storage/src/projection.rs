@@ -1,9 +1,9 @@
 use std::borrow::Cow;
 
-use orna_foundation::{OvbRaw, SchemaDescriptor};
 use orna_repository::TypedKey;
 use orna_runtime::TableMutation;
 use orna_value::{ContextValue, Format3Context, Raw, ValueFormat};
+use orna_value::{OvbRaw, SchemaDescriptor};
 
 use crate::Error;
 

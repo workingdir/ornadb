@@ -3,9 +3,9 @@
 
 use std::process::Command;
 
-use orna_foundation::{OvbRaw, Value};
 use orna_repository::Repository;
 use orna_runtime::RuntimeState;
+use orna_value::{OvbRaw, Value};
 
 #[path = "support/format3.rs"]
 mod format3;

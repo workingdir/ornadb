@@ -12,7 +12,6 @@ orna-repository = { path = "../orna-repository" }
 orna-semantic = { path = "../orna-semantic" }
 orna-syntax = { path = "../orna-syntax" }
 orna-value = { path = "../orna-value" }
-orna-foundation = { path = "../orna-foundation" }
 num-bigint = "0.4.6"
 orna-runtime = { path = "../orna-runtime" }
 unicode-normalization = "=0.1.24"

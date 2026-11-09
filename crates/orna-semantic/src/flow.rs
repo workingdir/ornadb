@@ -2,10 +2,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use orna_foundation::Diagnostic;
 use orna_syntax::{
     ControlKind, Declaration, Expr, Item, Pattern, Statement, StringSegment, TypeExpr,
 };
+use orna_value::Diagnostic;
 
 use super::*;
 

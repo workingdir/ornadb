@@ -70,38 +70,79 @@ fn is_hfs_ignorable(character: char) -> bool {
 mod tests {
     use super::*;
 
+    // Both lists follow what `git fsck --strict` (Git 2.53) reports as
+    // `hasDotgit` for a tree entry with that name.
     #[test]
-    fn accepts_every_git_metadata_spelling() {
-        let names: &[&[u8]] = &[
-            b".git",
-            b".GIT",
-            b".git ",
-            b".git.",
-            b".git:x",
-            b"a\\.git",
-            b"git~1",
-            b"GIT~1.",
-            ".g\u{200c}it".as_bytes(),
-        ];
-        for name in names {
-            assert!(is_git_metadata_component(name), "{name:?}");
+    fn refuses_git_administration_names_in_every_spelling() {
+        for refused in [
+            ".git",
+            ".GIT",
+            ".Git",
+            ".gIt",
+            ".git.",
+            ".git..",
+            ".git ",
+            ".GIT. ",
+            "git~1",
+            "GIT~1",
+            "git~1.",
+            ".git:",
+            ".git:x",
+            ".git::$INDEX_ALLOCATION",
+            ".git\\config",
+            "a\\.git",
+            "a\\git~1.",
+            "x\\.GIT:y",
+            "a:b\\.git",
+            ".g\u{200C}it",
+            ".\u{FEFF}git",
+            ".gi\u{202E}t",
+            ".git\u{206F}",
+        ] {
+            assert!(
+                is_git_metadata_component(refused.as_bytes()),
+                "{refused:?} must be refused as git metadata"
+            );
         }
     }
 
     #[test]
-    fn refuses_ordinary_dot_git_lookalikes() {
-        let names: &[&[u8]] = &[
-            b".gitignore",
-            b".github",
-            b".gitmodules",
-            b"foo.git",
-            b"git~2",
-            b"git-notes.md",
-            ".g\u{0131}t".as_bytes(),
-            ".git\u{ff}".as_bytes(),
-        ];
-        for name in names {
-            assert!(!is_git_metadata_component(name), "{name:?}");
+    fn accepts_ordinary_names_that_only_resemble_git_metadata() {
+        for accepted in [
+            ".gitignore",
+            ".github",
+            "foo.git",
+            ".gitmodules",
+            "git-notes.md",
+            "git",
+            "git~2",
+            "digit",
+            "..",
+            ".",
+            "",
+            "gitx.",
+            "a.git.b",
+            "foo.git\\x",
+            "a\\.github",
+            ".gıt",
+            ".GİT",
+            "gıt~1",
+            ".g\u{200B}it",
+            ".g\u{200C}it.",
+            "git~\u{200C}1",
+            "a\\.g\u{200C}it",
+        ] {
+            assert!(
+                !is_git_metadata_component(accepted.as_bytes()),
+                "{accepted:?} must stay an ordinary name"
+            );
         }
+    }
+
+    #[test]
+    fn non_utf8_names_compare_bytes_only() {
+        assert!(is_git_metadata_component(b".GIT"));
+        assert!(is_git_metadata_component(b"\xFF\\.git"));
+        assert!(!is_git_metadata_component(b".git\xFF"));
     }
 }

@@ -39,11 +39,11 @@ impl<E: fmt::Display> fmt::Display for OrnaRepositoryAdapterError<E> {
     }
 }
 impl<E: std::error::Error + 'static> std::error::Error for OrnaRepositoryAdapterError<E> {}
-impl<S: orna_foundation::RuntimeIdentityStore> OrnaRepositoryAdapter<S> {
+impl<S: orna_value::RuntimeIdentityStore> OrnaRepositoryAdapter<S> {
     fn identity(
         &self,
-    ) -> Result<orna_foundation::RepositoryIdentity, OrnaRepositoryAdapterError<S::Error>> {
-        Ok(orna_foundation::RepositoryIdentity {
+    ) -> Result<orna_value::RepositoryIdentity, OrnaRepositoryAdapterError<S::Error>> {
+        Ok(orna_value::RepositoryIdentity {
             database_id: self
                 .runtime
                 .database_id()
@@ -54,7 +54,7 @@ impl<S: orna_foundation::RuntimeIdentityStore> OrnaRepositoryAdapter<S> {
                 .map_err(OrnaRepositoryAdapterError::Runtime)?,
         })
     }
-    fn cwd(&self) -> Result<orna_foundation::CwdCapture, OrnaRepositoryAdapterError<S::Error>> {
+    fn cwd(&self) -> Result<orna_value::CwdCapture, OrnaRepositoryAdapterError<S::Error>> {
         let _ = self
             .repository
             .cwd_generation(RuntimeGeneration::new(0))
@@ -68,7 +68,7 @@ impl<S: orna_foundation::RuntimeIdentityStore> OrnaRepositoryAdapter<S> {
     }
     fn validate_capture(
         &self,
-        capture: &orna_foundation::CwdCapture,
+        capture: &orna_value::CwdCapture,
     ) -> Result<(), OrnaRepositoryAdapterError<S::Error>> {
         let database_id = self
             .runtime
@@ -84,19 +84,17 @@ impl<S: orna_foundation::RuntimeIdentityStore> OrnaRepositoryAdapter<S> {
         Ok(())
     }
 }
-impl<S: orna_foundation::RuntimeIdentityStore> orna_foundation::RepositoryGenerationAdapter
+impl<S: orna_value::RuntimeIdentityStore> orna_value::RepositoryGenerationAdapter
     for OrnaRepositoryAdapter<S>
 {
     type Error = OrnaRepositoryAdapterError<S::Error>;
-    fn require_cwd(&self) -> Result<orna_foundation::RepositoryIdentity, Self::Error> {
+    fn require_cwd(&self) -> Result<orna_value::RepositoryIdentity, Self::Error> {
         self.identity()
     }
-    fn profile(&self) -> Result<orna_foundation::RepositoryProfile, Self::Error> {
-        Ok(orna_foundation::RepositoryProfile { bare: false })
+    fn profile(&self) -> Result<orna_value::RepositoryProfile, Self::Error> {
+        Ok(orna_value::RepositoryProfile { bare: false })
     }
-    fn committed_snapshot(
-        &self,
-    ) -> Result<Option<orna_foundation::CanonicalSnapshot>, Self::Error> {
+    fn committed_snapshot(&self) -> Result<Option<orna_value::CanonicalSnapshot>, Self::Error> {
         let Some(head) = self
             .repository
             .head()
@@ -107,15 +105,15 @@ impl<S: orna_foundation::RuntimeIdentityStore> orna_foundation::RepositoryGenera
         let oid =
             decode_object_id(head.as_str()).map_err(OrnaRepositoryAdapterError::Repository)?;
         let algorithm = match oid.len() {
-            20 => orna_foundation::GitHash::Sha1,
-            32 => orna_foundation::GitHash::Sha256,
+            20 => orna_value::GitHash::Sha1,
+            32 => orna_value::GitHash::Sha256,
             _ => {
                 return Err(OrnaRepositoryAdapterError::Repository(
                     RepositoryError::InvalidObjectId,
                 ));
             }
         };
-        Ok(Some(orna_foundation::CanonicalSnapshot::Commit {
+        Ok(Some(orna_value::CanonicalSnapshot::Commit {
             database: self
                 .runtime
                 .database_id()
@@ -126,8 +124,8 @@ impl<S: orna_foundation::RuntimeIdentityStore> orna_foundation::RepositoryGenera
     }
     fn capture_cwd(
         &self,
-        identity: orna_foundation::RepositoryIdentity,
-    ) -> Result<orna_foundation::CwdCapture, Self::Error> {
+        identity: orna_value::RepositoryIdentity,
+    ) -> Result<orna_value::CwdCapture, Self::Error> {
         if identity != self.identity()? {
             return Err(OrnaRepositoryAdapterError::Identity);
         }
@@ -135,10 +133,10 @@ impl<S: orna_foundation::RuntimeIdentityStore> orna_foundation::RepositoryGenera
     }
     fn compare_and_set_cwd(
         &self,
-        identity: orna_foundation::RepositoryIdentity,
-        expected: &orna_foundation::CwdCapture,
-        next: &orna_foundation::CwdCapture,
-    ) -> Result<orna_foundation::CwdCas, Self::Error> {
+        identity: orna_value::RepositoryIdentity,
+        expected: &orna_value::CwdCapture,
+        next: &orna_value::CwdCapture,
+    ) -> Result<orna_value::CwdCas, Self::Error> {
         if identity != self.identity()? {
             return Err(OrnaRepositoryAdapterError::Identity);
         }
@@ -146,7 +144,7 @@ impl<S: orna_foundation::RuntimeIdentityStore> orna_foundation::RepositoryGenera
         self.validate_capture(expected)?;
         self.validate_capture(next)?;
         if &current != expected {
-            return Ok(orna_foundation::CwdCas::Stale { current });
+            return Ok(orna_value::CwdCas::Stale { current });
         }
         if next.generation() <= expected.generation() {
             return Err(OrnaRepositoryAdapterError::NonMonotonicGeneration);

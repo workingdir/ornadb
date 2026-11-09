@@ -4,10 +4,10 @@ use std::collections::{BTreeMap, BTreeSet};
 #[cfg(feature = "system-host-bindings")]
 use std::sync::Arc;
 
-use orna_foundation::CanonicalValue;
 use orna_syntax::{
     AssignmentTarget, Declaration, Expr, Pattern, ReplInput, Statement, UseTail, parse_repl,
 };
+use orna_value::CanonicalValue;
 use orna_value::{ContextValue, Format3Context, Raw, ValueFormat};
 
 use crate::{
@@ -400,7 +400,7 @@ impl ReplSession {
         environment.insert(
             "$?".into(),
             self.last_status.clone().unwrap_or_else(|| {
-                CanonicalValue::new(orna_foundation::OvbRaw::Null).expect("null is canonical")
+                CanonicalValue::new(orna_value::OvbRaw::Null).expect("null is canonical")
             }),
         );
         let mut context = self.activation(effects, cancellation);
@@ -596,7 +596,7 @@ impl ReplSession {
             }
             self.environment.insert(
                 alias.into(),
-                CanonicalValue::new(orna_foundation::OvbRaw::Null).expect("null is canonical"),
+                CanonicalValue::new(orna_value::OvbRaw::Null).expect("null is canonical"),
             );
             self.table_bindings.insert(alias.into());
             return self.check_retained();
@@ -713,7 +713,7 @@ impl ReplSession {
             }
             self.environment.insert(
                 alias.clone(),
-                CanonicalValue::new(orna_foundation::OvbRaw::Null).expect("null is canonical"),
+                CanonicalValue::new(orna_value::OvbRaw::Null).expect("null is canonical"),
             );
             self.table_bindings.insert(alias.clone());
             self.wildcard_bindings.insert(alias, path.into());

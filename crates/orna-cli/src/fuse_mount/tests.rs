@@ -1,7 +1,7 @@
 #[test]
 fn orna_string_literal_round_trips_through_the_evaluator() {
     use orna_evaluator::{Limits, evaluate_expression};
-    use orna_foundation::CanonicalValue;
+    use orna_value::CanonicalValue;
     use orna_value::Raw;
     let value = "nul\0 quote\" back\\slash newline\n cr\r crlf\r\n tab\t brace{x} bell\u{7} astral\u{1F600}";
     let literal = super::orna_string_literal(value.as_bytes()).expect("literal is UTF-8");

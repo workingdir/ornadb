@@ -1,7 +1,7 @@
 use orna_evaluator::Limits;
-use orna_foundation::CanonicalValue;
 use orna_project_repl::AdmittedReplSession;
 use orna_semantic::{Catalogue, StandardDependencyProfile};
+use orna_value::CanonicalValue;
 use orna_value::Raw;
 
 const TIME_MODULES: [&str; 7] = [

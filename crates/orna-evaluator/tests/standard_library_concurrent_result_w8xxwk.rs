@@ -2,8 +2,8 @@ use orna_evaluator::{
     Environment, Functions, Limits, NominalDefinition, NominalDefinitions, NominalVariant,
     PureFunction, evaluate_with_functions_and_nominals,
 };
-use orna_foundation::CanonicalValue;
 use orna_syntax::{Declaration, parse_expression, parse_module};
+use orna_value::CanonicalValue;
 use orna_value::Raw;
 
 fn canonical(raw: Raw) -> CanonicalValue {

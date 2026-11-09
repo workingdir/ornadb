@@ -12,7 +12,6 @@ system-host-bindings = ["orna-evaluator/system-host-bindings"]
 
 [dependencies]
 orna-evaluator = { path = "../orna-evaluator" }
-orna-foundation = { path = "../orna-foundation" }
 orna-project = { path = "../orna-project" }
 orna-repository = { path = "../orna-repository" }
 orna-semantic = { path = "../orna-semantic" }

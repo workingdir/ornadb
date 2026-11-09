@@ -12,7 +12,7 @@ use std::{
     fmt,
 };
 
-pub use orna_foundation::CanonicalValue;
+pub use orna_value::CanonicalValue;
 
 /// Stable semantic identity (`sys.ObjectId`), deliberately distinct from a
 /// snapshot-local name.
@@ -191,19 +191,19 @@ fn canonical_key(table: ObjectId, key: &CanonicalValue) -> Result<Vec<u8>, Plann
     })
 }
 
-fn contains_float(value: &orna_foundation::OvbRaw) -> bool {
+fn contains_float(value: &orna_value::OvbRaw) -> bool {
     match value {
-        orna_foundation::OvbRaw::Float(_) => true,
-        orna_foundation::OvbRaw::Array(values) => values.iter().any(contains_float),
-        orna_foundation::OvbRaw::Map(entries) => entries
+        orna_value::OvbRaw::Float(_) => true,
+        orna_value::OvbRaw::Array(values) => values.iter().any(contains_float),
+        orna_value::OvbRaw::Map(entries) => entries
             .iter()
             .any(|(key, value)| contains_float(key) || contains_float(value)),
-        orna_foundation::OvbRaw::Tag(_, value) => contains_float(value),
-        orna_foundation::OvbRaw::Null
-        | orna_foundation::OvbRaw::Bool(_)
-        | orna_foundation::OvbRaw::Int(_)
-        | orna_foundation::OvbRaw::Bytes(_)
-        | orna_foundation::OvbRaw::Text(_) => false,
+        orna_value::OvbRaw::Tag(_, value) => contains_float(value),
+        orna_value::OvbRaw::Null
+        | orna_value::OvbRaw::Bool(_)
+        | orna_value::OvbRaw::Int(_)
+        | orna_value::OvbRaw::Bytes(_)
+        | orna_value::OvbRaw::Text(_) => false,
     }
 }
 
@@ -420,12 +420,12 @@ fn validate_schema(
 /// nominal authority with which to prove their membership.
 fn fallback_matches_field_type(value: &CanonicalValue, field_type: &FieldType) -> bool {
     match (field_type, value.raw()) {
-        (FieldType::Bool, orna_foundation::OvbRaw::Bool(_))
-        | (FieldType::Int, orna_foundation::OvbRaw::Int(_))
-        | (FieldType::Float, orna_foundation::OvbRaw::Float(_))
-        | (FieldType::Str, orna_foundation::OvbRaw::Text(_)) => true,
-        (FieldType::Uuid, orna_foundation::OvbRaw::Tag(37, payload)) => {
-            matches!(payload.as_ref(), orna_foundation::OvbRaw::Bytes(bytes) if bytes.len() == 16)
+        (FieldType::Bool, orna_value::OvbRaw::Bool(_))
+        | (FieldType::Int, orna_value::OvbRaw::Int(_))
+        | (FieldType::Float, orna_value::OvbRaw::Float(_))
+        | (FieldType::Str, orna_value::OvbRaw::Text(_)) => true,
+        (FieldType::Uuid, orna_value::OvbRaw::Tag(37, payload)) => {
+            matches!(payload.as_ref(), orna_value::OvbRaw::Bytes(bytes) if bytes.len() == 16)
         }
         (FieldType::Custom(_), _) | (_, _) => false,
     }
@@ -668,7 +668,7 @@ mod tests {
             role: FieldRole::Stored,
             optional: false,
             introduction_fallback: Some(
-                CanonicalValue::new(orna_foundation::OvbRaw::Text("GB".into())).unwrap(),
+                CanonicalValue::new(orna_value::OvbRaw::Text("GB".into())).unwrap(),
             ),
         }
     }
@@ -728,28 +728,26 @@ mod tests {
         let source = schema(table(true, vec![field(2, "name", false)]));
         let cases = [
             (
-                CanonicalValue::new(orna_foundation::OvbRaw::Float(1.0f64.to_bits())).unwrap(),
+                CanonicalValue::new(orna_value::OvbRaw::Float(1.0f64.to_bits())).unwrap(),
                 CanonicalValue::uuid([3; 16]),
             ),
             (
-                CanonicalValue::new(orna_foundation::OvbRaw::Array(vec![
-                    orna_foundation::OvbRaw::Text("region".into()),
-                    orna_foundation::OvbRaw::Array(vec![orna_foundation::OvbRaw::Float(
-                        2.0f64.to_bits(),
-                    )]),
+                CanonicalValue::new(orna_value::OvbRaw::Array(vec![
+                    orna_value::OvbRaw::Text("region".into()),
+                    orna_value::OvbRaw::Array(vec![orna_value::OvbRaw::Float(2.0f64.to_bits())]),
                 ]))
                 .unwrap(),
                 CanonicalValue::uuid([4; 16]),
             ),
             (
                 CanonicalValue::uuid([5; 16]),
-                CanonicalValue::new(orna_foundation::OvbRaw::Tag(
+                CanonicalValue::new(orna_value::OvbRaw::Tag(
                     60013,
-                    Box::new(orna_foundation::OvbRaw::Array(vec![
-                        orna_foundation::OvbRaw::Int(1.into()),
-                        orna_foundation::OvbRaw::Map(vec![(
-                            orna_foundation::OvbRaw::Text("component".into()),
-                            orna_foundation::OvbRaw::Float(3.0f64.to_bits()),
+                    Box::new(orna_value::OvbRaw::Array(vec![
+                        orna_value::OvbRaw::Int(1.into()),
+                        orna_value::OvbRaw::Map(vec![(
+                            orna_value::OvbRaw::Text("component".into()),
+                            orna_value::OvbRaw::Float(3.0f64.to_bits()),
                         )]),
                     ])),
                 ))
@@ -958,7 +956,7 @@ mod tests {
         let old = schema(table(true, vec![field_with_fallback(2, "country")]));
         let mut changed_field = field_with_fallback(2, "country");
         changed_field.introduction_fallback =
-            Some(CanonicalValue::new(orna_foundation::OvbRaw::Text("US".into())).unwrap());
+            Some(CanonicalValue::new(orna_value::OvbRaw::Text("US".into())).unwrap());
         let changed = schema(table(true, vec![changed_field]));
         let removed = schema(table(true, vec![field(2, "country", false)]));
         let added = schema(table(true, vec![field_with_fallback(2, "country")]));
@@ -1007,24 +1005,24 @@ mod tests {
         let mismatches = [
             (
                 FieldType::Bool,
-                CanonicalValue::new(orna_foundation::OvbRaw::Text("true".into())).unwrap(),
+                CanonicalValue::new(orna_value::OvbRaw::Text("true".into())).unwrap(),
             ),
             (
                 FieldType::Int,
-                CanonicalValue::new(orna_foundation::OvbRaw::Bool(true)).unwrap(),
+                CanonicalValue::new(orna_value::OvbRaw::Bool(true)).unwrap(),
             ),
             (FieldType::Float, CanonicalValue::uuid([3; 16])),
             (
                 FieldType::Str,
-                CanonicalValue::new(orna_foundation::OvbRaw::Int(7.into())).unwrap(),
+                CanonicalValue::new(orna_value::OvbRaw::Int(7.into())).unwrap(),
             ),
             (
                 FieldType::Uuid,
-                CanonicalValue::new(orna_foundation::OvbRaw::Text("not-a-uuid".into())).unwrap(),
+                CanonicalValue::new(orna_value::OvbRaw::Text("not-a-uuid".into())).unwrap(),
             ),
             (
                 FieldType::Custom("Country".into()),
-                CanonicalValue::new(orna_foundation::OvbRaw::Text("GB".into())).unwrap(),
+                CanonicalValue::new(orna_value::OvbRaw::Text("GB".into())).unwrap(),
             ),
         ];
 
@@ -1049,19 +1047,19 @@ mod tests {
         let cases = [
             (
                 FieldType::Bool,
-                CanonicalValue::new(orna_foundation::OvbRaw::Bool(true)).unwrap(),
+                CanonicalValue::new(orna_value::OvbRaw::Bool(true)).unwrap(),
             ),
             (
                 FieldType::Int,
-                CanonicalValue::new(orna_foundation::OvbRaw::Int(7.into())).unwrap(),
+                CanonicalValue::new(orna_value::OvbRaw::Int(7.into())).unwrap(),
             ),
             (
                 FieldType::Float,
-                CanonicalValue::new(orna_foundation::OvbRaw::Float(1.5f64.to_bits())).unwrap(),
+                CanonicalValue::new(orna_value::OvbRaw::Float(1.5f64.to_bits())).unwrap(),
             ),
             (
                 FieldType::Str,
-                CanonicalValue::new(orna_foundation::OvbRaw::Text("GB".into())).unwrap(),
+                CanonicalValue::new(orna_value::OvbRaw::Text("GB".into())).unwrap(),
             ),
             (FieldType::Uuid, CanonicalValue::uuid([3; 16])),
         ];

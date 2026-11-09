@@ -8,9 +8,9 @@
 #
 # The rule is: a crate may depend only on a crate in a lower layer. A same-layer
 # dependency must be written down in `allowed`; a lower-layer dependency does not
-# need an entry. Layer 0 is empty until stage 03 creates orna-base;
-# orna-foundation is parked at layer 1 until its split, because it already
-# depends on orna-value.
+# need an entry. Layer 0 is orna-base, the primitives crate; layer 1 holds
+# orna-value and the generated sys model. Stage 03 absorbed the former
+# orna-foundation into orna-base and orna-value.
 #
 # `role` is one of:
 #   production (default) - part of the shipped binary's closure
@@ -43,12 +43,6 @@ layer = 0
 [[crate]]
 name = "orna-value"
 layer = 1
-
-[[crate]]
-name = "orna-foundation"
-layer = 1
-allowed = ["orna-value"]
-warning = "single crate, no cohesive subject, 16 production dependents; absorbed by orna-base and orna-value (stage 03)"
 
 [[crate]]
 name = "orna-sys-model"

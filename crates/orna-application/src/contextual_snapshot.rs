@@ -13,9 +13,9 @@ use orna_evaluator::{
     ContextValueEffectHandler, ContextValueRelationPage, EffectHandler, EvaluationError,
     RelationReadScope, StepBudget, invoke_named_with_context_effects,
 };
-use orna_foundation::{CanonicalValue, compare_primary_keys};
 use orna_runtime::RuntimeTableRows;
 use orna_syntax::Expr;
+use orna_value::{CanonicalValue, compare_primary_keys};
 use orna_value::{ContextValue, Format3Context, ValueFormat};
 
 use crate::{AdmittedApplication, ApplicationError, SourceMutationEffectHandler};
@@ -26,7 +26,7 @@ use crate::{AdmittedApplication, ApplicationError, SourceMutationEffectHandler};
 /// debited once from `budget`, and a continuation is offered only while rows
 /// remain and the page is non-empty.
 pub(crate) fn page_table_rows<T: Clone>(
-    mut live: Vec<(orna_foundation::Value, T)>,
+    mut live: Vec<(orna_value::Value, T)>,
     after: Option<&[u8]>,
     limit: usize,
     budget: &mut StepBudget,
@@ -74,7 +74,7 @@ fn scan_context_table(
 ) -> Result<ContextValueRelationPage, EvaluationError> {
     let mut live = Vec::with_capacity(table.len());
     for (key, row) in table {
-        let logical = orna_foundation::Value::decode(key)
+        let logical = orna_value::Value::decode(key)
             .map_err(|_| SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-SNAPSHOT"))?;
         live.push((logical, row));
     }
@@ -161,7 +161,7 @@ pub fn evaluate_contextual_snapshot_read(
             .ok_or_else(|| ApplicationError::UnadmittedTable(table.clone()))?;
         let mut decoded = BTreeMap::new();
         for (key, value) in table_rows {
-            orna_foundation::Value::decode(key).map_err(|_| {
+            orna_value::Value::decode(key).map_err(|_| {
                 ApplicationError::Runtime("contextual snapshot row had an invalid key".into())
             })?;
             let row = ContextValue::decode_in_context(value, ValueFormat::Rov3, context).map_err(
@@ -269,7 +269,7 @@ pub fn evaluate_contextual_page_read(
     for (table, table_rows) in context_rows {
         let mut decoded = BTreeMap::new();
         for (key, row) in table_rows {
-            orna_foundation::Value::decode(&key).map_err(|_| {
+            orna_value::Value::decode(&key).map_err(|_| {
                 ApplicationError::Runtime("contextual table row had an invalid key".into())
             })?;
             if decoded.insert(key, row).is_some() {
@@ -383,7 +383,7 @@ mod tests {
     #[test]
     fn each_blob_table_page_dereferences_its_own_owner_descriptor() {
         let context = context();
-        let key = orna_foundation::Value::int(1.into())
+        let key = orna_value::Value::int(1.into())
             .encode()
             .expect("key bytes");
         let handler = ContextualSnapshotEffectHandler {
@@ -418,10 +418,10 @@ mod tests {
         }
         // Each entry reads one table. `Clip` holds two rows and `Media` one,
         // so a read of `Clip` served from the `Media` rows would count one.
-        let key_one = orna_foundation::Value::int(1.into())
+        let key_one = orna_value::Value::int(1.into())
             .encode()
             .expect("key bytes");
-        let key_two = orna_foundation::Value::int(2.into())
+        let key_two = orna_value::Value::int(2.into())
             .encode()
             .expect("key bytes");
         let context_rows = || {
@@ -459,10 +459,7 @@ mod tests {
                 context_rows(),
             )
             .expect("two-table contextual page read");
-            assert_eq!(
-                result.raw(),
-                orna_foundation::Value::int(expected.into()).raw()
-            );
+            assert_eq!(result.raw(), orna_value::Value::int(expected.into()).raw());
         }
     }
 
@@ -477,7 +474,7 @@ mod tests {
             .expect("owner-scoped reference");
         let blob = orna_value::Blob::from_reference(reference).expect("owner-scoped blob");
         let row = ContextValue::from_blob(&blob, ValueFormat::Rov3).expect("contextual row");
-        let key = orna_foundation::Value::int(1.into())
+        let key = orna_value::Value::int(1.into())
             .encode()
             .expect("key bytes");
         let handler = ContextualSnapshotEffectHandler {
@@ -524,7 +521,7 @@ mod tests {
     #[test]
     fn blob_table_page_is_read_from_its_owner_context_rows() {
         let context = context();
-        let key = orna_foundation::Value::int(1.into())
+        let key = orna_value::Value::int(1.into())
             .encode()
             .expect("key bytes");
         let result = evaluate_contextual_page_read(
@@ -540,7 +537,7 @@ mod tests {
             )]),
         )
         .expect("contextual page read");
-        assert_eq!(result.raw(), orna_foundation::Value::int(1.into()).raw());
+        assert_eq!(result.raw(), orna_value::Value::int(1.into()).raw());
 
         let handler = ContextualSnapshotEffectHandler {
             tables: BTreeMap::from([(
@@ -634,7 +631,7 @@ mod tests {
             .admit_module("main.orna", NOTE_SOURCE, "main")
             .expect("module admitted");
         // A non-empty table: one stored tuple, so the compared read sees a row.
-        let key = orna_foundation::Value::int(1.into())
+        let key = orna_value::Value::int(1.into())
             .encode()
             .expect("key bytes");
         let tuple = orna_value::encode_canonical_storage_value(&orna_value::Raw::Map(vec![
@@ -661,10 +658,7 @@ mod tests {
         let contextual =
             evaluate_contextual_page_read(&application, &BTreeMap::new(), rows, BTreeMap::new())
                 .expect("contextual read");
-        assert_eq!(
-            contextual.raw(),
-            orna_foundation::Value::int(1.into()).raw()
-        );
+        assert_eq!(contextual.raw(), orna_value::Value::int(1.into()).raw());
         let canonical_bytes =
             orna_value::encode_canonical_storage_value(staged.value().raw()).expect("bytes");
         let contextual_bytes =

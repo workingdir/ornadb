@@ -1,10 +1,10 @@
 //! Portable stream checkpoint watermark records and their bounded codec.
 
 use crate::error::RuntimeError;
-use orna_foundation::CwdCapture;
 use orna_repository::{CommittedTreeEntryKind, GitCommitRef, Repository};
 use orna_stream::Checkpoint as StreamCheckpoint;
 use orna_stream::{CheckpointKey, Component, ConsumerIdentity, Position};
+use orna_value::CwdCapture;
 use std::fmt;
 use std::path::Path;
 

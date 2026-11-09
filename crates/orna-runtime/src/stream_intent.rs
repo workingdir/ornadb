@@ -17,13 +17,13 @@ use crate::stream_store::{
     stream_pause_pending,
 };
 use libsql::{Connection, TransactionBehavior, params};
-use orna_foundation::CwdCapture;
 use orna_stream::{
     AssertionDiagnosticDetail, CancellationClassification, CheckpointKey, CheckpointPrecondition,
     CommitIntent, CommitResult, DeliveryIdentity, DeliveryLease, DiagnosticCode, FailureIdentity,
     FailureRecord, FailureStatus, LeasePurpose, Position, RejectReason, SafeDiagnostic,
     StreamState, StreamStatus,
 };
+use orna_value::CwdCapture;
 use std::ops::ControlFlow;
 
 pub(crate) async fn apply_stream_intent(

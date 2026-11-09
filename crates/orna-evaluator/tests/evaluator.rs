@@ -723,7 +723,7 @@ fn nominal_definitions(
     )])
 }
 
-fn nominal_parts(value: &orna_foundation::CanonicalValue) -> (&Raw, &[Raw]) {
+fn nominal_parts(value: &orna_value::CanonicalValue) -> (&Raw, &[Raw]) {
     let Raw::Tag(60009, body) = value.raw() else {
         panic!("expected nominal value, got {value:?}");
     };
@@ -736,12 +736,12 @@ fn nominal_parts(value: &orna_foundation::CanonicalValue) -> (&Raw, &[Raw]) {
     (type_id, fields.as_slice())
 }
 
-fn nominal_input(field_key: Raw) -> orna_foundation::CanonicalValue {
+fn nominal_input(field_key: Raw) -> orna_value::CanonicalValue {
     nominal_input_with_fields(vec![(field_key, Raw::Int(7.into()))])
 }
 
-fn nominal_input_with_fields(fields: Vec<(Raw, Raw)>) -> orna_foundation::CanonicalValue {
-    orna_foundation::CanonicalValue::new(Raw::Tag(
+fn nominal_input_with_fields(fields: Vec<(Raw, Raw)>) -> orna_value::CanonicalValue {
+    orna_value::CanonicalValue::new(Raw::Tag(
         60009,
         Box::new(Raw::Array(vec![
             type_id_raw("stable.Thing"),
@@ -820,7 +820,7 @@ fn nominal_field_selection_rejects_missing_unknown_and_ambiguous_metadata() {
 
     let unknown_type = BTreeMap::from([(
         "value".into(),
-        orna_foundation::CanonicalValue::new(Raw::Tag(
+        orna_value::CanonicalValue::new(Raw::Tag(
             60009,
             Box::new(Raw::Array(vec![
                 type_id_raw("stable.Unknown"),
@@ -946,7 +946,7 @@ fn nominal_admission_rejects_malformed_nominals_in_recursive_containers() {
         (field_id_raw("unknown"), Raw::Int(8.into())),
         (field_id_raw("value"), Raw::Int(7.into())),
     ]);
-    let nested = orna_foundation::CanonicalValue::new(Raw::Array(vec![Raw::Map(vec![(
+    let nested = orna_value::CanonicalValue::new(Raw::Array(vec![Raw::Map(vec![(
         Raw::Text("nested".into()),
         malformed.raw().clone(),
     )])]))
@@ -1384,7 +1384,7 @@ fn nominal_field_selection_uses_stable_field_identity_not_text_key() {
             vec![NominalField::public(stable_field_id, "value")],
         ),
     )]);
-    let input = orna_foundation::CanonicalValue::new(Raw::Tag(
+    let input = orna_value::CanonicalValue::new(Raw::Tag(
         60009,
         Box::new(Raw::Array(vec![
             type_id_raw("stable.Thing"),

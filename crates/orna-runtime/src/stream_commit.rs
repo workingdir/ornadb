@@ -21,11 +21,11 @@ use crate::table_store::{
     mutated_tables, table_rows_tx, validate_stream_mutations, validate_table_candidate_scope,
 };
 use libsql::{TransactionBehavior, params};
-use orna_foundation::CwdCapture;
 use orna_stream::{
     CheckpointPrecondition, CommitIntent, CommitResult, DeliveryLease, DiagnosticClass,
     DiagnosticCode, FailureStatus, RejectReason, ReplayGrant, SafeDiagnostic,
 };
+use orna_value::CwdCapture;
 use sha2::{Digest, Sha256};
 use std::ops::ControlFlow;
 use std::panic::{AssertUnwindSafe, catch_unwind};

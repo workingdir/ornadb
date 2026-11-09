@@ -11,11 +11,11 @@ use std::{cmp::Ordering, collections::BTreeMap, error::Error, fmt};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use bytes::Bytes;
-use orna_foundation::{CanonicalValue, OvbRaw, SchemaDescriptor, compare_primary_keys};
 use orna_repository::{
     CompactManifest, CompactManifestEntry, CompactSegmentRole, GitCommitRef, Repository,
     RepositoryError, Uuid, validate_compact_page_uncompressed_sizes,
 };
+use orna_value::{CanonicalValue, OvbRaw, SchemaDescriptor, compare_primary_keys};
 use parquet::{
     basic::{
         ColumnOrder, Compression, ConvertedType, Encoding, LogicalType, SortOrder, TimeUnit, Type,
@@ -1989,11 +1989,11 @@ fn hex_digest(bytes: [u8; 32]) -> String {
 mod tests {
     use super::*;
     use crate::compact::CompactLogicalKeyError;
-    use orna_foundation::SchemaDescriptor;
     use orna_repository::{
         COMPACT_MAX_UNCOMPRESSED_PAGE_BYTES, CompactManifest, CompactPublicationRequest,
         CompactSegment, CompactSegmentRecord, CompactSegmentRole, ManagedFileChange, ManagedPath,
     };
+    use orna_value::SchemaDescriptor;
     use parquet::{
         basic::{Compression, Encoding},
         data_type::{BoolType, ByteArray, ByteArrayType, DoubleType, Int32Type, Int64Type},

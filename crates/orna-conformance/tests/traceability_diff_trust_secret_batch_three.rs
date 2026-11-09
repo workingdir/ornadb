@@ -8,7 +8,6 @@ use orna_compat_v1::{
     catalogue::SchemaDefinition,
     catalogue_diff::{SemanticChange, catalogue_diff},
 };
-use orna_foundation::{CanonicalValue, OvbRaw, SchemaDescriptor};
 use orna_live::{
     Error as LiveError, Limits as LiveLimits, LiveCredentialIssuer, LiveHost, LiveSessionAuthority,
     LiveTransport, SessionMetadata, TransportLimits, WireRequest,
@@ -26,6 +25,7 @@ use orna_storage::{
 };
 use orna_syntax::parse_module;
 use orna_sys::{Diagnostic, DiagnosticField, TypeId, TypedValue};
+use orna_value::{CanonicalValue, OvbRaw, SchemaDescriptor};
 use tempfile::tempdir;
 
 const SOURCE: &str = include_str!("fixtures/traceability-diff-trust-secret.orna");

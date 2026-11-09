@@ -4,10 +4,10 @@ use orna_application::{
     AsyncApplicationEffectDispatcher,
 };
 use orna_evaluator::{Environment, Limits};
-use orna_foundation::{CanonicalValue, OvbRaw};
 use orna_repository::Repository;
 use orna_runtime::{RuntimeActivationContext, RuntimeIdentity, RuntimeState};
 use orna_semantic::Catalogue;
+use orna_value::{CanonicalValue, OvbRaw};
 use std::{
     fs,
     path::PathBuf,

@@ -5,12 +5,12 @@
 //! this activation. Nothing is defaulted here; an absent fact is reported by
 //! the host before the evaluator is reached.
 
-use orna_foundation::{CanonicalSnapshot, CanonicalValue, GitHash, snapshot_reference};
 use orna_sys::{
     BUILD_ID, IMPLEMENTATION_NAME, IMPLEMENTATION_VERSION, LANGUAGE_VERSION,
     PRESENTATION_PROTOCOL_VERSION, SUPPORTED_PROFILES, SYS_VERSION, StdSnapshotPin, SysEnum,
     SysFailureCode, SysHostContext,
 };
+use orna_value::{CanonicalSnapshot, CanonicalValue, GitHash, snapshot_reference};
 use orna_value::{OVB2_VERSION, Raw};
 
 use crate::{EvaluationError, TIMEZONE_DATASET_VERSION, Value, error};

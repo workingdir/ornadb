@@ -2,7 +2,7 @@ use orna_evolution::{
     CanonicalValue, EvolutionVersion, Field, FieldRole, FieldType, MigrationOperation, ObjectId,
     PlanningRequest, Schema, Table, VersionFence, plan,
 };
-use orna_foundation::OvbRaw;
+use orna_value::OvbRaw;
 use serde_json::Value;
 
 const CASES: &str = include_str!("fixtures/reference-schema-cases.json");

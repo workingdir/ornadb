@@ -6,9 +6,9 @@ use orna_evaluator::{
     StreamPage, StreamSourceCursor, evaluate_expression_with_functions_and_effects,
     evaluate_expression_with_functions_and_effects_and_cancellation,
 };
-use orna_foundation::{CanonicalValue, SafeText};
 use orna_syntax::{Expr, parse_expression};
 use orna_value::Raw;
+use orna_value::{CanonicalValue, SafeText};
 
 fn canonical(raw: Raw) -> CanonicalValue {
     CanonicalValue::new(raw).expect("fixture value is canonical")

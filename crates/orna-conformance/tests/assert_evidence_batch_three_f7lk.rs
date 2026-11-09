@@ -2,8 +2,8 @@ use orna_conformance::{
     ConformanceAdapter, SemanticAdapter, SourceUnit, StageOutcome, TransactionalEvaluator,
 };
 use orna_evaluator::Limits;
-use orna_foundation::Value;
 use orna_semantic::{AssertionOwner, Catalogue, ModuleInput, analyze, analyze_with_catalogue};
+use orna_value::Value;
 
 const COHERENT_CANDIDATE: &str =
     include_str!("fixtures/assert-evidence-batch-three/coherent-candidate.orna");

@@ -40,8 +40,8 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use orna_foundation::{CanonicalValue, OvbRaw, compare_primary_keys};
 use orna_repository::{Repository, RepositoryError, Uuid};
+use orna_value::{CanonicalValue, OvbRaw, compare_primary_keys};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 

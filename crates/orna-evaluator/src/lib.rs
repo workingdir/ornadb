@@ -16,7 +16,6 @@ use std::{
 use num_bigint::{BigInt, Sign};
 use num_integer::Integer;
 use num_traits::{Signed, ToPrimitive, Zero};
-use orna_foundation::{CanonicalValue, Diagnostic, DiagnosticSeverity, SafeText};
 use orna_semantic::StandardDependencyProfile;
 use orna_syntax::{
     AssignmentOperator, AssignmentTarget, ControlKind, Expr, LiteralKind, Parameter, Pattern,
@@ -28,6 +27,7 @@ use orna_value::{
     ROV3_BLOB_TAG, ROV3_OVERFLOW_TAG, Raw, SOV3_BLOB_TAG, ValueFormat, domain_digest, float_max,
     float_min, float_ordinary_eq, float_total_cmp, ovb2_blob_fingerprint,
 };
+use orna_value::{CanonicalValue, Diagnostic, DiagnosticSeverity, SafeText};
 use serde::{
     Deserialize,
     de::{self, MapAccess, Visitor},
@@ -8882,7 +8882,7 @@ impl Context<'_, '_> {
         let Some(context) = handler.value_context() else {
             return Ok(None);
         };
-        let reference = orna_foundation::materialization_reference(
+        let reference = orna_value::materialization_reference(
             context.database_uuid(),
             context.pin().clone(),
             *object,

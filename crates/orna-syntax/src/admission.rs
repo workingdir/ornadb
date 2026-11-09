@@ -1,6 +1,6 @@
 //! Explicit bridge from parser-local locations to pinned `sys` diagnostics.
 
-use orna_foundation::{CanonicalSnapshot, DiagnosticSpan, FileRef, SafeText, SourceSpan};
+use orna_value::{CanonicalSnapshot, DiagnosticSpan, FileRef, SafeText, SourceSpan};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SourceDocumentId {

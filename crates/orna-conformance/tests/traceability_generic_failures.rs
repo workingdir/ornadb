@@ -4,7 +4,7 @@ use orna_semantic::{Catalogue, ModuleInput, analyze_with_catalogue};
 
 const GENERIC_FAILURES: &str = include_str!("fixtures/traceability-generic-failures.orna");
 
-fn diagnostics() -> Vec<orna_foundation::Diagnostic> {
+fn diagnostics() -> Vec<orna_value::Diagnostic> {
     analyze_with_catalogue(
         &[ModuleInput::new("main.orna", GENERIC_FAILURES)],
         &Catalogue::authoritative_fixture(),
@@ -12,7 +12,7 @@ fn diagnostics() -> Vec<orna_foundation::Diagnostic> {
     .diagnostics
 }
 
-fn diagnostic_text(diagnostics: &[orna_foundation::Diagnostic]) -> String {
+fn diagnostic_text(diagnostics: &[orna_value::Diagnostic]) -> String {
     diagnostics
         .iter()
         .map(|diagnostic| format!("{}: {}", diagnostic.code(), diagnostic.message()))

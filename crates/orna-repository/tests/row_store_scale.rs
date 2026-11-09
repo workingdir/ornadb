@@ -9,8 +9,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use orna_foundation::{OvbRaw as Raw, SchemaDescriptor};
 use orna_repository::{KeyRange, Repository, RowIndexMutation, TypedKey};
+use orna_value::{OvbRaw as Raw, SchemaDescriptor};
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;

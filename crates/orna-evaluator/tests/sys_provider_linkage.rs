@@ -13,12 +13,12 @@ use orna_evaluator::{
     EffectHandler, Environment, EvaluationError, ExplainCatalogue, Functions, Limits, PureFunction,
     RelationPage, StepBudget, invoke_named_with_effects,
 };
-use orna_foundation::CanonicalValue;
 use orna_syntax::{Expr, parse_expression};
 use orna_sys::{
     ObjectRef, SnapshotRef, SystemProviderHost, SystemSurfaceMember, system_api_json,
     system_dispatch_table, system_provider_linkage,
 };
+use orna_value::CanonicalValue;
 
 /// A host catalogue that pins one relation source for `sys.explain(Query)`.
 #[derive(Debug)]

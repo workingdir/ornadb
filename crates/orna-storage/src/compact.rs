@@ -16,7 +16,6 @@ use std::{
 
 #[cfg(any(test, feature = "compact-writer-fixtures"))]
 use orna_evolution::{MigrationOperation, MigrationPlan};
-use orna_foundation::{CanonicalValue, OvbRaw, SchemaDescriptor, compare_primary_keys};
 use orna_repository::{
     CompactCommittedSegmentProjection, CompactManifest, CompactManifestEntry, CompactSegmentRole,
 };
@@ -24,6 +23,7 @@ use orna_repository::{
 use orna_runtime::{
     PublicationFreeze, PublicationMutationState, PublicationRowEncoding, PublicationValueEncoding,
 };
+use orna_value::{CanonicalValue, OvbRaw, SchemaDescriptor, compare_primary_keys};
 #[cfg(any(test, feature = "compact-writer-fixtures"))]
 use sha2::{Digest, Sha256};
 
@@ -1937,9 +1937,9 @@ fn validate_enum(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orna_foundation::OvbRaw;
     use orna_repository::Uuid;
     use orna_syntax::{Expr, LiteralKind, parse_row};
+    use orna_value::OvbRaw;
 
     const TABLE: [u8; 16] = [0x10; 16];
     const OTHER_TABLE: [u8; 16] = [0x11; 16];

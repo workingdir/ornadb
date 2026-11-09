@@ -28,10 +28,6 @@ use std::{
 };
 
 use orna_evaluator::ActivationEffectReport;
-use orna_foundation::{
-    CanonicalSnapshot, CanonicalValue, Diagnostic as FoundationDiagnostic, DiagnosticSeverity,
-    OvbRaw, SafeText, Value,
-};
 use orna_protocol::{
     Envelope, Limits as ProtocolLimits, Message, RequestState, ResultBody, ResultStatus,
     TargetKind, canonical_request_fingerprint,
@@ -51,6 +47,10 @@ use orna_security::{
 use orna_serving::{Error as ServingError, Origin as ServingOrigin, Serving};
 use orna_stream::{DiagnosticClass, DiagnosticCode, SafeDiagnostic};
 use orna_sys_id::SysFailureCode;
+use orna_value::{
+    CanonicalSnapshot, CanonicalValue, Diagnostic as FoundationDiagnostic, DiagnosticSeverity,
+    OvbRaw, SafeText, Value,
+};
 
 pub const SUBPROTOCOL: &str = "orna.present.v1";
 
@@ -9026,11 +9026,9 @@ fn sha1(input: &[u8]) -> [u8; 20] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orna_foundation::{
-        Diagnostic as FoundationDiagnostic, DiagnosticSeverity, SafeText, Value,
-    };
     use orna_repository::Repository;
     use orna_runtime::{FaultPoint, NoFault, RuntimeIdentity};
+    use orna_value::{Diagnostic as FoundationDiagnostic, DiagnosticSeverity, SafeText, Value};
     use std::{
         fs,
         process::Command,

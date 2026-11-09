@@ -2,11 +2,11 @@ use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Write as _;
 use std::io::{self, BufRead, Write};
 
-use orna_foundation::{CanonicalSnapshot, CanonicalValue, canonical_uuid_text};
 use orna_live::live_presentation::{LivePresentationUpdate, ResyncRequest, WatchPresentation};
 use orna_project_repl::{AdmittedReplSession, ReplDetail, ReplError};
 use orna_protocol::{Envelope, Limits, Message, PresentNode};
 use orna_sys_id::SysType;
+use orna_value::{CanonicalSnapshot, CanonicalValue, canonical_uuid_text};
 use orna_value::{ContextValue, Raw};
 
 const MAX_INPUT_BYTES: usize = 65_536;

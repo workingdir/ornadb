@@ -379,7 +379,7 @@ const REFERENCE_PROJECT_FILES: &[(&str, &str)] = &[
     ),
 ];
 
-fn diagnostics(diagnostics: &[orna_foundation::Diagnostic]) -> String {
+fn diagnostics(diagnostics: &[orna_value::Diagnostic]) -> String {
     diagnostics
         .iter()
         .map(|diagnostic| format!("{}: {}", diagnostic.code(), diagnostic.message()))

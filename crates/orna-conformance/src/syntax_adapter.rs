@@ -6,8 +6,8 @@
 //! observations, and the report must not disclose host paths or source text.
 
 use crate::{ConformanceAdapter, ProjectUnit, SourceUnit, StageOutcome};
-use orna_foundation::{Diagnostic, DiagnosticSeverity, SafeText};
 use orna_syntax::{SyntaxDiagnostic, parse_module, parse_row};
+use orna_value::{Diagnostic, DiagnosticSeverity, SafeText};
 
 /// Executes the syntax portion of conformance and explicitly leaves semantic
 /// and runtime stages for their future owning implementations.

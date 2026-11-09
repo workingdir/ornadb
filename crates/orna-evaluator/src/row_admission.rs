@@ -6,9 +6,9 @@
 
 use crate::{Limits, evaluate_parsed};
 use num_bigint::BigInt;
-use orna_foundation::{Diagnostic, DiagnosticSeverity, SafeText, Value};
 use orna_semantic::{Analysis, Namespace, TableSchema, Type};
 use orna_syntax::{Expr, parse_row};
+use orna_value::{Diagnostic, DiagnosticSeverity, SafeText, Value};
 use orna_value::{Raw, path_decode_key_components};
 use std::collections::{BTreeMap, BTreeSet};
 

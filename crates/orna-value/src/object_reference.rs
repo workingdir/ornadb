@@ -6,9 +6,10 @@
 //! coordinate to the read-only catalogue projection.  Semantic object IDs
 //! still come only from the catalogue producer.
 
-use crate::{
-    CanonicalSnapshot, CwdCapture, ObjectRef, OvbRaw, RowRef, SystemReferenceError, TypedRowRef,
+use crate::contract::{
+    CanonicalSnapshot, CwdCapture, ObjectRef, RowRef, SystemReferenceError, TypedRowRef,
 };
+use crate::raw::Raw as OvbRaw;
 
 /// Stable physical identity of the read-only `sys.Object` catalogue
 /// projection.  It is distinct from every `sys.Type` and `sys.Function`

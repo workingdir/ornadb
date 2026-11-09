@@ -4,8 +4,8 @@ use crate::RuntimeIdentity;
 use crate::error::RuntimeError;
 use libsql::Connection;
 use num_bigint::{BigInt, Sign};
-use orna_foundation::{CwdCapture, OvbRaw, RowRef, Snapshot, Value};
 use orna_stream::{AssertionOwnerKind, Component, ConsumerIdentity, Position};
+use orna_value::{CwdCapture, OvbRaw, RowRef, Snapshot, Value};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) fn validate_observation_text(value: &str) -> Result<(), RuntimeError> {

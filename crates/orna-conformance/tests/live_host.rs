@@ -1,11 +1,11 @@
 //! Reachability checks for the public live action-authority API.
 
-use orna_foundation::CanonicalValue;
 use orna_live::{
     ActionAuthority, ActionAuthorityRegistry, ActionBinding, ActionFuture, ActionHandler, Error,
     LiveApplicationWorkLease,
 };
 use orna_runtime::RuntimeActivationContext;
+use orna_value::CanonicalValue;
 
 struct RejectingActionHandler;
 

@@ -18,8 +18,8 @@ use crate::table_store::{
 };
 use crate::{RuntimeState, decode_request_execution_evidence, validate_request_execution_evidence};
 use libsql::{Connection, Transaction, params};
-use orna_foundation::CwdCapture;
 use orna_repository::{CompactRuntimeReceipt, GitHashAlgorithm, NativeOid};
+use orna_value::CwdCapture;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) async fn validate_historical_snapshot_tx(

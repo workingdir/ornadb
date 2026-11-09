@@ -15,7 +15,7 @@ use std::{
     process::Command,
 };
 
-use orna_foundation::{CanonicalValue, OvbRaw};
+use orna_value::{CanonicalValue, OvbRaw};
 use tempfile::TempDir;
 
 const BUNDLE: &str = "tests/fixtures/legacy-format1.bundle";

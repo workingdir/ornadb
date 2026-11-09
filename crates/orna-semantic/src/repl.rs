@@ -6,8 +6,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use orna_foundation::Diagnostic;
 use orna_syntax::{Declaration, EntryPoint, Item, ReplInput, SyntaxSpan, SyntaxTree};
+use orna_value::Diagnostic;
 
 use crate::{
     Analysis, Catalogue, DIAG_DUPLICATE, DIAG_UNSUPPORTED, EffectSummary, EnumVariantRows,

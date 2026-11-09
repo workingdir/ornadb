@@ -13,8 +13,8 @@ use orna_evaluator::{
     EffectHandler, Environment, EvaluationError, Functions, Limits, PureFunction, RelationPage,
     RelationReadScope, StepBudget, invoke_named_with_effects,
 };
-use orna_foundation::CanonicalValue;
 use orna_syntax::{Argument, Expr, LiteralKind, SyntaxSpan, parse_module};
+use orna_value::CanonicalValue;
 use orna_value::Raw;
 
 fn fixture_functions() -> Functions {

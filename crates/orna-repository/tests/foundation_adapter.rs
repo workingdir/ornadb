@@ -4,11 +4,11 @@ mod test_support;
 use std::{fmt, fs, path::Path, process::Command, sync::Mutex};
 
 use num_bigint::BigInt;
-use orna_foundation::{
+use orna_repository::{OrnaRepositoryAdapter, OrnaRepositoryAdapterError, Repository};
+use orna_value::{
     CanonicalSnapshot, CwdCapture, CwdCas, RepositoryGenerationAdapter, RepositoryIdentity,
     RuntimeIdentityStore,
 };
-use orna_repository::{OrnaRepositoryAdapter, OrnaRepositoryAdapterError, Repository};
 use tempfile::TempDir;
 
 fn git(directory: &Path, arguments: &[&str]) {
@@ -179,7 +179,7 @@ fn adapter_exposes_the_real_head_as_a_committed_snapshot() {
         panic!("expected a committed snapshot");
     };
     assert_eq!(database, [1; 16]);
-    assert_eq!(algorithm, orna_foundation::GitHash::Sha1);
+    assert_eq!(algorithm, orna_value::GitHash::Sha1);
     assert_eq!(oid.len(), 20);
 }
 
@@ -214,6 +214,6 @@ fn adapter_preserves_a_sha256_head_as_a_committed_snapshot() {
         panic!("expected a committed snapshot");
     };
     assert_eq!(database, [1; 16]);
-    assert_eq!(algorithm, orna_foundation::GitHash::Sha256);
+    assert_eq!(algorithm, orna_value::GitHash::Sha256);
     assert_eq!(oid.len(), 32);
 }

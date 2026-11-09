@@ -15,7 +15,6 @@ use orna_evaluator::{
     invoke_named_with_effects, invoke_named_with_sys_host_context, module_function_alias_key,
     reference_standard_profile, reference_standard_sources,
 };
-use orna_foundation::{CanonicalSnapshot, CanonicalValue, OvbRaw, SafeText};
 use orna_live::{
     Error as LiveError, FirstPartyEffectTrust, LiveAdminEffectDispatcher, LiveApplication,
     LiveApplicationWorkLease, LiveEvalResponse, LiveEvalTransaction,
@@ -49,6 +48,7 @@ use orna_syntax::{
     SyntaxTree, TableMember, UseTail, Visibility, parse_module_with_file, parse_repl,
 };
 use orna_sys_id::{SysFailureCode, SysFunction, SysGroupedHandle, SysRelation};
+use orna_value::{CanonicalSnapshot, CanonicalValue, OvbRaw, SafeText};
 use orna_value::{ContextValue, Format3Context, ValueFormat};
 use sha2::{Digest, Sha256};
 use std::{
@@ -2147,7 +2147,7 @@ impl SourceMutationEffectHandler {
             let Some(row) = row else {
                 continue;
             };
-            let logical = orna_foundation::Value::decode(key)
+            let logical = orna_value::Value::decode(key)
                 .map_err(|_| Self::effect_error("ORNA-EVAL-TABLE-SNAPSHOT"))?;
             live.push((logical, row));
         }
@@ -4608,10 +4608,9 @@ mod tests {
         let result = authority
             .evaluate(&admitted, &Environment::new())
             .expect("entry should execute");
-        let expected = orna_foundation::Value::new(orna_foundation::OvbRaw::Int(
-            num_bigint::BigInt::from(41_i64),
-        ))
-        .expect("canonical integer");
+        let expected =
+            orna_value::Value::new(orna_value::OvbRaw::Int(num_bigint::BigInt::from(41_i64)))
+                .expect("canonical integer");
         assert_eq!(result, expected);
     }
 
@@ -4655,11 +4654,9 @@ mod tests {
         }
     }
 
-    fn int_value(value: i64) -> orna_foundation::Value {
-        orna_foundation::Value::new(orna_foundation::OvbRaw::Int(num_bigint::BigInt::from(
-            value,
-        )))
-        .expect("canonical integer")
+    fn int_value(value: i64) -> orna_value::Value {
+        orna_value::Value::new(orna_value::OvbRaw::Int(num_bigint::BigInt::from(value)))
+            .expect("canonical integer")
     }
 
     #[test]
@@ -5055,10 +5052,8 @@ mod tests {
         assert_eq!(
             value,
             Some(
-                orna_foundation::Value::new(orna_foundation::OvbRaw::Int(
-                    num_bigint::BigInt::from(41_i64),
-                ))
-                .expect("canonical integer"),
+                orna_value::Value::new(orna_value::OvbRaw::Int(num_bigint::BigInt::from(41_i64),))
+                    .expect("canonical integer"),
             )
         );
     }
@@ -6266,23 +6261,22 @@ mod tests {
         let mutation = &staged.mutations()[0];
         assert_eq!(mutation.table(), "Note");
         assert!(mutation.is_insert());
-        let key = orna_foundation::Value::decode(mutation.key())
-            .expect("mutation key must be canonical OVB");
-        let expected_key = orna_foundation::Value::new(orna_foundation::OvbRaw::Int(
-            num_bigint::BigInt::from(7_i64),
-        ))
-        .expect("canonical integer");
+        let key =
+            orna_value::Value::decode(mutation.key()).expect("mutation key must be canonical OVB");
+        let expected_key =
+            orna_value::Value::new(orna_value::OvbRaw::Int(num_bigint::BigInt::from(7_i64)))
+                .expect("canonical integer");
         assert_eq!(key, expected_key);
-        let row = orna_foundation::Value::decode(mutation.value().expect("row payload"))
+        let row = orna_value::Value::decode(mutation.value().expect("row payload"))
             .expect("row payload must be canonical OVB");
-        let orna_foundation::OvbRaw::Map(fields) = row.raw() else {
+        let orna_value::OvbRaw::Map(fields) = row.raw() else {
             panic!("row payload must be a canonical record");
         };
         let text = fields.iter().find_map(|(key, value)| match key {
-            orna_foundation::OvbRaw::Text(name) if name == "text" => Some(value.clone()),
+            orna_value::OvbRaw::Text(name) if name == "text" => Some(value.clone()),
             _ => None,
         });
-        assert_eq!(text, Some(orna_foundation::OvbRaw::Text("once".into())));
+        assert_eq!(text, Some(orna_value::OvbRaw::Text("once".into())));
     }
 
     #[test]

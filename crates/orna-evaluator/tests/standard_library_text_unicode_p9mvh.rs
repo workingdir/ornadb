@@ -1,6 +1,6 @@
 use orna_evaluator::{Limits, reference_standard_profile, reference_standard_sources};
-use orna_foundation::CanonicalValue;
 use orna_project_repl::AdmittedReplSession;
+use orna_value::CanonicalValue;
 use orna_value::Raw;
 
 #[path = "support/pinned_time_text_std.rs"]

@@ -3,8 +3,8 @@ use orna_evaluator::{
     PureFunction, evaluate_expression, evaluate_expression_with_functions,
     evaluate_with_functions_and_nominals,
 };
-use orna_foundation::CanonicalValue;
 use orna_project_repl::AdmittedReplSession;
+use orna_value::CanonicalValue;
 use orna_value::Raw;
 
 fn bool_value(value: bool) -> CanonicalValue {

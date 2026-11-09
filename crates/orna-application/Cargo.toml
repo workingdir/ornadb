@@ -18,7 +18,6 @@ test-support = []
 orna-sys-id = { path = "../orna-sys-id" }
 orna-evaluator = { path = "../orna-evaluator" }
 orna-project-repl = { path = "../orna-project-repl" }
-orna-foundation = { path = "../orna-foundation" }
 orna-intrinsics = { path = "../orna-intrinsics" }
 orna-runtime = { path = "../orna-runtime" }
 orna-semantic = { path = "../orna-semantic" }

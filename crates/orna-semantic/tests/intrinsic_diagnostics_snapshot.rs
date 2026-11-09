@@ -68,7 +68,7 @@ fn corpus_files() -> Vec<(String, String)> {
 /// The binary encoding carries the spans as well, and unlike the JSON boundary
 /// projection it is not redacted: the snapshot must compare the diagnostic the
 /// checker produced, not a display projection of it.
-fn render_diagnostic(diagnostic: &orna_foundation::Diagnostic) -> String {
+fn render_diagnostic(diagnostic: &orna_value::Diagnostic) -> String {
     let encoded = diagnostic
         .encode_ovb()
         .expect("diagnostic encodes")

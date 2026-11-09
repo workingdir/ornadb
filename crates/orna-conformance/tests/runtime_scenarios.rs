@@ -7,7 +7,6 @@ use orna_conformance::{
     RuntimeAdapter, RuntimeEvaluator, Scenario, SourceUnit, StageOutcome,
 };
 use orna_evaluator::Limits;
-use orna_foundation::Value;
 use orna_protocol::{
     DatabaseContext, Envelope, Limits as ProtocolLimits, Message, PresentationContext,
     canonical_request_fingerprint,
@@ -15,6 +14,7 @@ use orna_protocol::{
 use orna_repository::Repository;
 use orna_runtime::{RequestIdentity, RequestState, RuntimeError, RuntimeIdentity, RuntimeState};
 use orna_storage::LoosePath;
+use orna_value::Value;
 use std::process::{Command, Stdio};
 use std::{
     fs,

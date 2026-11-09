@@ -10,7 +10,7 @@
 //! in reference §29 lines 65–80. No RevisionId is produced (§29 lines 146–148).
 
 use super::*;
-use orna_foundation::{OvbRaw as Raw, Value};
+use orna_value::{OvbRaw as Raw, Value};
 
 pub const SEMANTIC_PAYLOAD_DOMAIN: &str = "ornadb.semantic-declaration.v1";
 pub const SEMANTIC_PAYLOAD_VERSION: u32 = 1;

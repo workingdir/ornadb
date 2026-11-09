@@ -23,11 +23,10 @@ multiple-versions = "deny"
 wildcards = "allow"
 
 # The one hex implementation lives in orna-base; every other crate must not
-# re-implement or re-depend on it. Until stage 03 moves orna-value's identity
-# codecs, orna-value is the only permitted user.
+# re-implement or re-depend on it.
 [[bans.deny]]
 crate = "hex"
-wrappers = ["orna-value"]
+wrappers = ["orna-base"]
 use-instead = "orna-base::hex"
 
 # The embedded database is below the state layer only. Stage 09 renames

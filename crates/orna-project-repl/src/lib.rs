@@ -9,9 +9,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use orna_foundation::{
-    CanonicalValue, Diagnostic as FoundationDiagnostic, DiagnosticSeverity, SafeText,
-};
 use orna_project::{AttachedDatabaseSession, LoadedProject};
 use orna_semantic::StandardDependencyProfile;
 use orna_semantic::{
@@ -21,6 +18,9 @@ use orna_semantic::{
 use orna_syntax::{
     Declaration, ImportSegment, ReplInput, SyntaxDiagnostic, TokenKind, TypeMember,
     TypeRepresentation, UseTail, Visibility, lex, parse_module, parse_repl,
+};
+use orna_value::{
+    CanonicalValue, Diagnostic as FoundationDiagnostic, DiagnosticSeverity, SafeText,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -104,22 +104,22 @@ impl ReplError {
     }
 
     fn status_value(&self) -> CanonicalValue {
-        CanonicalValue::new(orna_foundation::OvbRaw::Map(vec![
+        CanonicalValue::new(orna_value::OvbRaw::Map(vec![
             (
-                orna_foundation::OvbRaw::Text("code".into()),
-                orna_foundation::OvbRaw::Text(self.code().into()),
+                orna_value::OvbRaw::Text("code".into()),
+                orna_value::OvbRaw::Text(self.code().into()),
             ),
             (
-                orna_foundation::OvbRaw::Text("message".into()),
-                orna_foundation::OvbRaw::Text("<redacted>".into()),
+                orna_value::OvbRaw::Text("message".into()),
+                orna_value::OvbRaw::Text("<redacted>".into()),
             ),
             (
-                orna_foundation::OvbRaw::Text("redacted".into()),
-                orna_foundation::OvbRaw::Bool(true),
+                orna_value::OvbRaw::Text("redacted".into()),
+                orna_value::OvbRaw::Bool(true),
             ),
             (
-                orna_foundation::OvbRaw::Text("severity".into()),
-                orna_foundation::OvbRaw::Text("error".into()),
+                orna_value::OvbRaw::Text("severity".into()),
+                orna_value::OvbRaw::Text("error".into()),
             ),
         ]))
         .expect("redacted status record is canonical")
@@ -419,7 +419,7 @@ impl AdmittedReplSession {
             return Err(self.publish_failure(ReplError::fixed("ORNA-REPL-COMMIT")));
         }
         runtime.set_last_status(
-            CanonicalValue::new(orna_foundation::OvbRaw::Null).expect("null is canonical"),
+            CanonicalValue::new(orna_value::OvbRaw::Null).expect("null is canonical"),
         );
         self.runtime = runtime;
         self.semantic = semantic;
@@ -456,7 +456,7 @@ impl AdmittedReplSession {
             return Err(self.publish_failure(ReplError::fixed("ORNA-REPL-COMMIT")));
         }
         runtime.set_last_status(
-            CanonicalValue::new(orna_foundation::OvbRaw::Null).expect("null is canonical"),
+            CanonicalValue::new(orna_value::OvbRaw::Null).expect("null is canonical"),
         );
         self.runtime = runtime;
         self.semantic = semantic;
@@ -501,7 +501,7 @@ impl AdmittedReplSession {
             .map_err(ReplError::runtime)?;
         staged.commit_semantic(&mut successor)?;
         successor.runtime.set_last_status(
-            CanonicalValue::new(orna_foundation::OvbRaw::Null).expect("null is canonical"),
+            CanonicalValue::new(orna_value::OvbRaw::Null).expect("null is canonical"),
         );
         Ok((value, successor))
     }
@@ -531,7 +531,7 @@ impl AdmittedReplSession {
             return Err(ReplError::fixed("ORNA-REPL-COMMIT"));
         }
         runtime.set_last_status(
-            CanonicalValue::new(orna_foundation::OvbRaw::Null).expect("null is canonical"),
+            CanonicalValue::new(orna_value::OvbRaw::Null).expect("null is canonical"),
         );
         candidate.runtime = runtime;
         candidate.semantic = semantic;
@@ -1026,7 +1026,7 @@ fn module_namespace(logical_path: &str) -> Option<String> {
     Some(components.join("."))
 }
 
-fn semantic_error(diagnostics: Vec<orna_foundation::Diagnostic>) -> ReplError {
+fn semantic_error(diagnostics: Vec<orna_value::Diagnostic>) -> ReplError {
     diagnostics.first().map_or_else(
         || ReplError::fixed("ORNA-REPL-SEMANTIC"),
         |diagnostic| ReplError::semantic(diagnostic.code()),
@@ -1138,7 +1138,7 @@ fn line_column(source: &str, offset: usize) -> (usize, usize) {
 
 fn stage_error(
     context: &ReplContext,
-    diagnostics: Vec<orna_foundation::Diagnostic>,
+    diagnostics: Vec<orna_value::Diagnostic>,
     source: &str,
 ) -> ReplError {
     let Some(first) = diagnostics.first() else {
@@ -2183,7 +2183,7 @@ mod tests {
         let mut session = AdmittedReplSession::new(Limits::default());
         assert_eq!(
             session.preview(include_str!("fixtures/repl-inline-source-3a7494a2.orna")),
-            Ok(CanonicalValue::new(orna_foundation::OvbRaw::Null).unwrap())
+            Ok(CanonicalValue::new(orna_value::OvbRaw::Null).unwrap())
         );
         let error = session
             .submit(include_str!(
@@ -2196,22 +2196,22 @@ mod tests {
             .expect("status value");
         assert_eq!(
             status.raw(),
-            &orna_foundation::OvbRaw::Map(vec![
+            &orna_value::OvbRaw::Map(vec![
                 (
-                    orna_foundation::OvbRaw::Text("code".into()),
-                    orna_foundation::OvbRaw::Text("ORNA-S021-TYPE".into()),
+                    orna_value::OvbRaw::Text("code".into()),
+                    orna_value::OvbRaw::Text("ORNA-S021-TYPE".into()),
                 ),
                 (
-                    orna_foundation::OvbRaw::Text("message".into()),
-                    orna_foundation::OvbRaw::Text("<redacted>".into()),
+                    orna_value::OvbRaw::Text("message".into()),
+                    orna_value::OvbRaw::Text("<redacted>".into()),
                 ),
                 (
-                    orna_foundation::OvbRaw::Text("redacted".into()),
-                    orna_foundation::OvbRaw::Bool(true),
+                    orna_value::OvbRaw::Text("redacted".into()),
+                    orna_value::OvbRaw::Bool(true),
                 ),
                 (
-                    orna_foundation::OvbRaw::Text("severity".into()),
-                    orna_foundation::OvbRaw::Text("error".into()),
+                    orna_value::OvbRaw::Text("severity".into()),
+                    orna_value::OvbRaw::Text("error".into()),
                 ),
             ])
         );
@@ -2225,22 +2225,22 @@ mod tests {
             .expect("status value");
         assert_eq!(
             status.raw(),
-            &orna_foundation::OvbRaw::Map(vec![
+            &orna_value::OvbRaw::Map(vec![
                 (
-                    orna_foundation::OvbRaw::Text("code".into()),
-                    orna_foundation::OvbRaw::Text("ORNA-S021-TYPE".into()),
+                    orna_value::OvbRaw::Text("code".into()),
+                    orna_value::OvbRaw::Text("ORNA-S021-TYPE".into()),
                 ),
                 (
-                    orna_foundation::OvbRaw::Text("message".into()),
-                    orna_foundation::OvbRaw::Text("<redacted>".into()),
+                    orna_value::OvbRaw::Text("message".into()),
+                    orna_value::OvbRaw::Text("<redacted>".into()),
                 ),
                 (
-                    orna_foundation::OvbRaw::Text("redacted".into()),
-                    orna_foundation::OvbRaw::Bool(true),
+                    orna_value::OvbRaw::Text("redacted".into()),
+                    orna_value::OvbRaw::Bool(true),
                 ),
                 (
-                    orna_foundation::OvbRaw::Text("severity".into()),
-                    orna_foundation::OvbRaw::Text("error".into()),
+                    orna_value::OvbRaw::Text("severity".into()),
+                    orna_value::OvbRaw::Text("error".into()),
                 ),
             ])
         );
@@ -2251,7 +2251,7 @@ mod tests {
         );
         assert_eq!(
             session.preview(include_str!("fixtures/repl-inline-source-3a7494a2.orna")),
-            Ok(CanonicalValue::new(orna_foundation::OvbRaw::Null).unwrap())
+            Ok(CanonicalValue::new(orna_value::OvbRaw::Null).unwrap())
         );
     }
 

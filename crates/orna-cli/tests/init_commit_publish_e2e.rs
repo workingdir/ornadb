@@ -11,7 +11,7 @@ use std::{
     process::{Command, Output, Stdio},
 };
 
-use orna_foundation::{OvbRaw, Value};
+use orna_value::{OvbRaw, Value};
 use tempfile::TempDir;
 
 const MUSIC_SOURCE: &str = "pub table Music(id: Str) { title: Str, }\n";

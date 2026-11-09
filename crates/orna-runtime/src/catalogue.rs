@@ -9,7 +9,7 @@
 use std::collections::BTreeSet;
 
 use libsql::{Connection, Transaction, params};
-use orna_foundation::{
+use orna_value::{
     FunctionRef, ObjectRef, Snapshot, TypeRef, Value, function_reference, object_reference,
     type_reference, validate_type_reference,
 };
@@ -38,7 +38,7 @@ pub enum CatalogueError {
     InvalidObservationReference,
     StorageUnavailable,
     StaleCapture {
-        current: Box<orna_foundation::CwdCapture>,
+        current: Box<orna_value::CwdCapture>,
     },
     RuntimeFailure,
 }
@@ -59,7 +59,7 @@ mod batch_tests {
     use crate::activation::{ActivationError, ActivationWork, run_table_activation};
     use crate::error::{FaultInjector, FaultPoint, NoFault, RuntimeError};
     use crate::table_store::TableMutation;
-    use orna_foundation::CwdCapture;
+    use orna_value::CwdCapture;
     use tempfile::tempdir;
 
     fn digest(value: u8) -> [u8; 32] {
@@ -900,7 +900,7 @@ mod module_tests {
     use crate::RuntimeIdentity;
     use crate::error::NoFault;
     use crate::table_store::TableMutation;
-    use orna_foundation::CwdCapture;
+    use orna_value::CwdCapture;
     use tempfile::tempdir;
 
     fn digest(value: u8) -> [u8; 32] {
@@ -1287,14 +1287,14 @@ pub struct CatalogueFunctionDeclaration {
 /// any new current-snapshot rows are made visible.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CatalogueAdmission {
-    pub predecessor_capture: Option<orna_foundation::CwdCapture>,
+    pub predecessor_capture: Option<orna_value::CwdCapture>,
     pub types: Vec<CatalogueTypeDeclaration>,
     pub functions: Vec<CatalogueFunctionDeclaration>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CatalogueAdmissionResult {
-    pub capture: orna_foundation::CwdCapture,
+    pub capture: orna_value::CwdCapture,
     pub types: Vec<CatalogueTypeHandle>,
     pub functions: Vec<CatalogueFunction>,
 }
@@ -1387,7 +1387,7 @@ impl CatalogueModule {
         &self.object.reference
     }
 
-    pub fn snapshot(&self) -> &orna_foundation::CanonicalSnapshot {
+    pub fn snapshot(&self) -> &orna_value::CanonicalSnapshot {
         &self.object.reference.as_row_ref().snapshot
     }
 }
@@ -1404,11 +1404,11 @@ pub struct CatalogueParameterHandle {
 /// source revision producer: revision witnesses remain caller-supplied facts.
 pub(crate) async fn admit_activation_catalogue_tx(
     transaction: &Transaction,
-    predecessor: &orna_foundation::CwdCapture,
-    capture: &orna_foundation::CwdCapture,
+    predecessor: &orna_value::CwdCapture,
+    capture: &orna_value::CwdCapture,
     admission: &CatalogueAdmission,
 ) -> Result<crate::table_store::Mutation, crate::error::RuntimeError> {
-    use orna_foundation::OvbRaw;
+    use orna_value::OvbRaw;
     use sha2::{Digest, Sha256};
 
     // The outer request boundary checks this before any candidate writes.
@@ -1496,7 +1496,7 @@ pub(crate) async fn admit_activation_catalogue_tx(
 
 async fn admit_catalogue_batch_tx(
     transaction: &Transaction,
-    capture: &orna_foundation::CwdCapture,
+    capture: &orna_value::CwdCapture,
     admission: &CatalogueAdmission,
 ) -> Result<CatalogueAdmissionResult, RuntimeError> {
     persist_capture_tx(transaction, capture).await?;
@@ -1632,7 +1632,7 @@ impl RuntimeState {
         mutations: &[crate::table_store::TableMutation],
         next_digest: [u8; 32],
         faults: &dyn crate::error::FaultInjector,
-    ) -> Result<orna_foundation::CwdCapture, crate::error::RuntimeError> {
+    ) -> Result<orna_value::CwdCapture, crate::error::RuntimeError> {
         crate::codec::validate_id(writer.owner_id)?;
         if writer.epoch == 0 {
             return Err(crate::error::RuntimeError::InvalidIdentity);
@@ -1660,7 +1660,7 @@ impl RuntimeState {
         }
         faults.check(crate::error::FaultPoint::BeforeTableWrite)?;
 
-        let next_capture = orna_foundation::CwdCapture::new(
+        let next_capture = orna_value::CwdCapture::new(
             Snapshot::cwd(
                 current.database_id(),
                 current.runtime_id(),
@@ -1712,8 +1712,8 @@ impl RuntimeState {
     /// predecessor. Its generation digest is retained and checked by the
     /// admission transaction; adapters must not reduce it to snapshot bytes.
     pub fn catalogue_predecessor_capture(
-        capture: &orna_foundation::CwdCapture,
-    ) -> orna_foundation::CwdCapture {
+        capture: &orna_value::CwdCapture,
+    ) -> orna_value::CwdCapture {
         capture.clone()
     }
 
@@ -1730,7 +1730,7 @@ impl RuntimeState {
     pub async fn admit_catalogue_at(
         &self,
         writer: crate::lease::WriterLease,
-        expected_capture: &orna_foundation::CwdCapture,
+        expected_capture: &orna_value::CwdCapture,
         admission: CatalogueAdmission,
     ) -> Result<CatalogueAdmissionResult, RuntimeError> {
         let transaction = self.catalogue_transaction().await?;
@@ -1757,8 +1757,8 @@ impl RuntimeState {
     pub async fn admit_catalogue_module_at(
         &self,
         writer: crate::lease::WriterLease,
-        expected_capture: &orna_foundation::CwdCapture,
-        predecessor_capture: Option<orna_foundation::CwdCapture>,
+        expected_capture: &orna_value::CwdCapture,
+        predecessor_capture: Option<orna_value::CwdCapture>,
         declaration: CatalogueModuleDeclaration,
     ) -> Result<CatalogueModule, RuntimeError> {
         let transaction = self.catalogue_transaction().await?;
@@ -1888,7 +1888,7 @@ impl RuntimeState {
     pub async fn catalogue_function_at(
         &self,
         qualified_name: &str,
-        capture: &orna_foundation::CwdCapture,
+        capture: &orna_value::CwdCapture,
     ) -> Result<Option<CatalogueFunction>, RuntimeError> {
         validate_observation_text(qualified_name)?;
         let transaction = self.catalogue_transaction_read().await?;
@@ -1912,7 +1912,7 @@ impl RuntimeState {
         &self,
         qualified_name: &str,
         form: CatalogueTypeForm,
-        capture: &orna_foundation::CwdCapture,
+        capture: &orna_value::CwdCapture,
     ) -> Result<Option<CatalogueTypeHandle>, RuntimeError> {
         validate_observation_text(qualified_name)?;
         let transaction = self.catalogue_transaction_read().await?;
@@ -1938,7 +1938,7 @@ impl RuntimeState {
     pub async fn catalogue_module_at(
         &self,
         qualified_name: &str,
-        capture: &orna_foundation::CwdCapture,
+        capture: &orna_value::CwdCapture,
     ) -> Result<Option<CatalogueModule>, RuntimeError> {
         validate_observation_text(qualified_name)?;
         let transaction = self.catalogue_transaction_read().await?;
@@ -1969,8 +1969,8 @@ impl RuntimeState {
 
 async fn replay_catalogue_tx(
     transaction: &Transaction,
-    capture: &orna_foundation::CwdCapture,
-    predecessor: Option<&orna_foundation::CwdCapture>,
+    capture: &orna_value::CwdCapture,
+    predecessor: Option<&orna_value::CwdCapture>,
     admission: &CatalogueAdmission,
 ) -> Result<CatalogueAdmissionResult, RuntimeError> {
     let mut names = std::collections::BTreeMap::new();
@@ -2110,7 +2110,7 @@ async fn replay_catalogue_tx(
 
 async fn validate_replay_rename_tx(
     transaction: &Transaction,
-    predecessor: Option<&orna_foundation::CwdCapture>,
+    predecessor: Option<&orna_value::CwdCapture>,
     rename_from: Option<&str>,
     object_id: [u8; 16],
 ) -> Result<(), RuntimeError> {
@@ -2132,8 +2132,8 @@ async fn validate_replay_rename_tx(
 
 async fn admit_object_tx(
     transaction: &Transaction,
-    capture: &orna_foundation::CwdCapture,
-    predecessor: Option<&orna_foundation::CwdCapture>,
+    capture: &orna_value::CwdCapture,
+    predecessor: Option<&orna_value::CwdCapture>,
     declaration: &CatalogueDeclaration,
 ) -> Result<[u8; 16], RuntimeError> {
     validate_observation_text(&declaration.qualified_name)?;
@@ -2275,7 +2275,7 @@ async fn validate_revision_identity_tx(
 
 pub(crate) async fn persist_capture_tx(
     transaction: &Connection,
-    capture: &orna_foundation::CwdCapture,
+    capture: &orna_value::CwdCapture,
 ) -> Result<(), RuntimeError> {
     let snapshot = capture_bytes(capture)?;
     transaction
@@ -2321,8 +2321,8 @@ pub(crate) async fn persist_capture_tx(
 /// existing runtime recovery error.
 pub(crate) async fn persist_capture_for_runtime_tx(
     connection: &Connection,
-    predecessor: &orna_foundation::CwdCapture,
-    capture: &orna_foundation::CwdCapture,
+    predecessor: &orna_value::CwdCapture,
+    capture: &orna_value::CwdCapture,
 ) -> Result<(), crate::error::RuntimeError> {
     persist_capture_tx(connection, predecessor)
         .await
@@ -2362,8 +2362,8 @@ fn map_catalogue_runtime_error(error: CatalogueError) -> crate::error::RuntimeEr
 
 async fn carry_forward_catalogue_tx(
     connection: &Connection,
-    predecessor: &orna_foundation::CwdCapture,
-    capture: &orna_foundation::CwdCapture,
+    predecessor: &orna_value::CwdCapture,
+    capture: &orna_value::CwdCapture,
 ) -> Result<(), RuntimeError> {
     let predecessor_snapshot = capture_bytes(predecessor)?;
     let snapshot = capture_bytes(capture)?;
@@ -2503,7 +2503,7 @@ async fn copy_catalogue_relation_tx(
 
 async fn catalogue_admission_exists_tx(
     transaction: &Transaction,
-    capture: &orna_foundation::CwdCapture,
+    capture: &orna_value::CwdCapture,
 ) -> Result<bool, RuntimeError> {
     let mut rows = transaction
         .query(
@@ -2516,7 +2516,7 @@ async fn catalogue_admission_exists_tx(
 
 async fn clear_catalogue_snapshot_tx(
     transaction: &Transaction,
-    capture: &orna_foundation::CwdCapture,
+    capture: &orna_value::CwdCapture,
 ) -> Result<(), RuntimeError> {
     let snapshot = capture_bytes(capture)?;
     for table in [
@@ -2537,7 +2537,7 @@ async fn clear_catalogue_snapshot_tx(
 
 async fn validate_complete_batch_tx(
     transaction: &Transaction,
-    capture: &orna_foundation::CwdCapture,
+    capture: &orna_value::CwdCapture,
     expected: &std::collections::BTreeMap<String, CatalogueObjectKind>,
 ) -> Result<(), RuntimeError> {
     let mut rows = transaction
@@ -2565,8 +2565,8 @@ async fn validate_complete_batch_tx(
 
 async fn validate_predecessor_capture_tx(
     transaction: &Transaction,
-    predecessor: &orna_foundation::CwdCapture,
-    current: &orna_foundation::CwdCapture,
+    predecessor: &orna_value::CwdCapture,
+    current: &orna_value::CwdCapture,
 ) -> Result<(), RuntimeError> {
     let snapshot = capture_bytes(predecessor)?;
     validate_predecessor_snapshot(&snapshot, current)?;
@@ -2605,7 +2605,7 @@ async fn validate_predecessor_capture_tx(
 /// immediately preceding one (ORNA-SYS-019).
 async fn retained_capture_row_tx(
     transaction: &Transaction,
-    capture: &orna_foundation::CwdCapture,
+    capture: &orna_value::CwdCapture,
 ) -> Result<Vec<u8>, RuntimeError> {
     let snapshot = capture_bytes(capture)?;
     let mut rows = transaction
@@ -2634,7 +2634,7 @@ async fn retained_capture_row_tx(
 
 async fn ensure_revision_row_tx(
     transaction: &Transaction,
-    capture: &orna_foundation::CwdCapture,
+    capture: &orna_value::CwdCapture,
     object_id: [u8; 16],
     declaration: &CatalogueDeclaration,
 ) -> Result<(), RuntimeError> {
@@ -2686,7 +2686,7 @@ fn resolve_type_spec(
 
 async fn insert_type_tx(
     transaction: &Transaction,
-    capture: &orna_foundation::CwdCapture,
+    capture: &orna_value::CwdCapture,
     object_id: [u8; 16],
     form: CatalogueTypeForm,
 ) -> Result<(), RuntimeError> {
@@ -2717,7 +2717,7 @@ async fn insert_type_tx(
 
 async fn validate_type_references_tx(
     transaction: &Transaction,
-    capture: &orna_foundation::CwdCapture,
+    capture: &orna_value::CwdCapture,
 ) -> Result<(), RuntimeError> {
     let mut rows = transaction
         .query(
@@ -2739,7 +2739,7 @@ async fn validate_type_references_tx(
 
 async fn insert_function_tx(
     transaction: &Transaction,
-    capture: &orna_foundation::CwdCapture,
+    capture: &orna_value::CwdCapture,
     object_id: [u8; 16],
     result_type: [u8; 16],
     parameters: &[CatalogueParameterDeclaration],
@@ -2796,7 +2796,7 @@ async fn insert_function_tx(
 
 async fn load_function_tx(
     transaction: &Transaction,
-    capture: &orna_foundation::CwdCapture,
+    capture: &orna_value::CwdCapture,
     id: [u8; 16],
 ) -> Result<CatalogueFunction, RuntimeError> {
     let object = load_object_tx(transaction, capture, id).await?;
@@ -2820,7 +2820,7 @@ async fn load_function_tx(
 
 async fn load_module_tx(
     transaction: &Transaction,
-    capture: &orna_foundation::CwdCapture,
+    capture: &orna_value::CwdCapture,
     id: [u8; 16],
 ) -> Result<CatalogueModule, RuntimeError> {
     let object = load_object_tx(transaction, capture, id).await?;
@@ -2832,8 +2832,8 @@ async fn load_module_tx(
 
 async fn admit_module_object_tx(
     transaction: &Transaction,
-    capture: &orna_foundation::CwdCapture,
-    predecessor: Option<&orna_foundation::CwdCapture>,
+    capture: &orna_value::CwdCapture,
+    predecessor: Option<&orna_value::CwdCapture>,
     declaration: &CatalogueModuleDeclaration,
 ) -> Result<[u8; 16], RuntimeError> {
     let declaration = declaration.as_catalogue_declaration();
@@ -2909,7 +2909,7 @@ async fn admit_module_object_tx(
 
 async fn module_admission_exists_tx(
     transaction: &Transaction,
-    capture: &orna_foundation::CwdCapture,
+    capture: &orna_value::CwdCapture,
     object_id: [u8; 16],
 ) -> Result<bool, RuntimeError> {
     let mut rows = transaction
@@ -2924,7 +2924,7 @@ async fn module_admission_exists_tx(
 
 async fn mark_module_admission_tx(
     transaction: &Transaction,
-    capture: &orna_foundation::CwdCapture,
+    capture: &orna_value::CwdCapture,
     object_id: [u8; 16],
 ) -> Result<(), RuntimeError> {
     transaction
@@ -2939,8 +2939,8 @@ async fn mark_module_admission_tx(
 
 async fn is_carried_forward_module_tx(
     transaction: &Transaction,
-    capture: &orna_foundation::CwdCapture,
-    predecessor: Option<&orna_foundation::CwdCapture>,
+    capture: &orna_value::CwdCapture,
+    predecessor: Option<&orna_value::CwdCapture>,
     object_id: [u8; 16],
     qualified_name: &str,
 ) -> Result<bool, RuntimeError> {
@@ -2961,7 +2961,7 @@ async fn is_carried_forward_module_tx(
 
 async fn module_revision_facts_tx(
     transaction: &Transaction,
-    capture: &orna_foundation::CwdCapture,
+    capture: &orna_value::CwdCapture,
     object_id: [u8; 16],
 ) -> Result<Option<([u8; 32], [u8; 32])>, RuntimeError> {
     let mut rows = transaction
@@ -2986,7 +2986,7 @@ async fn module_revision_facts_tx(
 
 async fn reject_separate_module_rows_tx(
     transaction: &Transaction,
-    capture: &orna_foundation::CwdCapture,
+    capture: &orna_value::CwdCapture,
 ) -> Result<(), RuntimeError> {
     let mut rows = transaction
         .query(
@@ -3003,7 +3003,7 @@ async fn reject_separate_module_rows_tx(
 
 async fn clear_module_revision_tx(
     transaction: &Transaction,
-    capture: &orna_foundation::CwdCapture,
+    capture: &orna_value::CwdCapture,
     object_id: [u8; 16],
 ) -> Result<(), RuntimeError> {
     transaction
@@ -3059,7 +3059,7 @@ async fn object_kind_tx(
 
 async fn lookup_object_id(
     transaction: &Transaction,
-    capture: &orna_foundation::CwdCapture,
+    capture: &orna_value::CwdCapture,
     name: &str,
     kind: CatalogueObjectKind,
 ) -> Result<Option<[u8; 16]>, RuntimeError> {
@@ -3068,7 +3068,7 @@ async fn lookup_object_id(
 
 async fn lookup_current_object_id(
     transaction: &Transaction,
-    capture: &orna_foundation::CwdCapture,
+    capture: &orna_value::CwdCapture,
     name: &str,
     kind: CatalogueObjectKind,
 ) -> Result<Option<[u8; 16]>, RuntimeError> {
@@ -3104,7 +3104,7 @@ async fn lookup_snapshot_object_id(
 
 async fn current_object_revision_exists(
     transaction: &Transaction,
-    capture: &orna_foundation::CwdCapture,
+    capture: &orna_value::CwdCapture,
     id: [u8; 16],
 ) -> Result<bool, RuntimeError> {
     let mut rows = transaction
@@ -3119,7 +3119,7 @@ async fn current_object_revision_exists(
 
 fn validate_predecessor_snapshot(
     snapshot: &[u8],
-    capture: &orna_foundation::CwdCapture,
+    capture: &orna_value::CwdCapture,
 ) -> Result<(), RuntimeError> {
     let value = Value::decode(snapshot).map_err(|_| RuntimeError::CataloguePredecessorInvalid)?;
     let snapshot =
@@ -3144,7 +3144,7 @@ fn validate_predecessor_snapshot(
 
 async fn load_object_tx(
     transaction: &Transaction,
-    capture: &orna_foundation::CwdCapture,
+    capture: &orna_value::CwdCapture,
     id: [u8; 16],
 ) -> Result<CatalogueObject, RuntimeError> {
     let mut rows = transaction
@@ -3184,7 +3184,7 @@ async fn load_object_tx(
 
 async fn load_type_form_tx(
     transaction: &Transaction,
-    capture: &orna_foundation::CwdCapture,
+    capture: &orna_value::CwdCapture,
     id: [u8; 16],
 ) -> Result<CatalogueTypeForm, RuntimeError> {
     let mut rows = transaction
@@ -3203,7 +3203,7 @@ async fn load_type_form_tx(
 
 async fn load_type_handle_tx(
     transaction: &Transaction,
-    capture: &orna_foundation::CwdCapture,
+    capture: &orna_value::CwdCapture,
     id: [u8; 16],
 ) -> Result<CatalogueTypeHandle, RuntimeError> {
     let object = load_object_tx(transaction, capture, id).await?;
@@ -3225,7 +3225,7 @@ async fn load_type_handle_tx(
 
 async fn load_result_type_id_tx(
     transaction: &Transaction,
-    capture: &orna_foundation::CwdCapture,
+    capture: &orna_value::CwdCapture,
     id: [u8; 16],
 ) -> Result<[u8; 16], RuntimeError> {
     let mut rows = transaction
@@ -3243,7 +3243,7 @@ async fn load_result_type_id_tx(
 
 async fn load_parameters_tx(
     transaction: &Transaction,
-    capture: &orna_foundation::CwdCapture,
+    capture: &orna_value::CwdCapture,
     id: [u8; 16],
 ) -> Result<Vec<CatalogueParameterHandle>, RuntimeError> {
     let mut rows = transaction
@@ -3284,7 +3284,7 @@ fn validate_function_shape(declaration: &CatalogueFunctionDeclaration) -> Result
     Ok(())
 }
 
-fn capture_bytes(capture: &orna_foundation::CwdCapture) -> Result<Vec<u8>, RuntimeError> {
+fn capture_bytes(capture: &orna_value::CwdCapture) -> Result<Vec<u8>, RuntimeError> {
     Ok(crate::codec::encode_capture(capture)?)
 }
 
@@ -3294,7 +3294,7 @@ mod tests {
     use crate::RuntimeIdentity;
     use crate::error::NoFault;
     use crate::table_store::TableMutation;
-    use orna_foundation::CwdCapture;
+    use orna_value::CwdCapture;
     use tempfile::Builder;
 
     fn digest(value: u8) -> [u8; 32] {

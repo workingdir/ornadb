@@ -5,10 +5,10 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use orna_foundation::Value;
 use orna_protocol::{
     CanonicalSnapshot, Envelope, Error as ProtocolError, Limits, Message, PatchList, PresentNode,
 };
+use orna_value::Value;
 
 static NEXT_LIFECYCLE_NONCE: AtomicU64 = AtomicU64::new(1);
 

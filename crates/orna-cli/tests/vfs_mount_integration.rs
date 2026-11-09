@@ -5673,7 +5673,7 @@ async fn cwd_mount_text_round_trips_special_characters_through_document() {
     .expect("the inline title literal evaluates");
     assert_eq!(
         evaluated.raw(),
-        &orna_foundation::OvbRaw::Text(special.to_owned()),
+        &orna_value::OvbRaw::Text(special.to_owned()),
         "the literal evaluates back to the written text: {literal}"
     );
     row.unmount();

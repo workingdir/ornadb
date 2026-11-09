@@ -19,16 +19,16 @@ use crate::stream_store::{
 };
 use crate::{RuntimeState, opaque_reference_key, row_reference_raw};
 use libsql::{Connection, TransactionBehavior, params};
-use orna_foundation::{
+use orna_stream::{
+    CheckpointKey, CommitResult, ConsumerIdentity, DeliveryIdentity, FailureIdentity,
+    FailureRecord, SafeDiagnostic, StreamStatus,
+};
+use orna_value::{
     CheckpointRef, CwdCapture, FailureRef, InvocationRef, OvbRaw, RowRef, RunRef, SYS_RUN_TABLE_ID,
     SYS_STREAM_TABLE_ID, SnapshotRef, StreamRef, Value, checkpoint_reference, failure_reference,
     invocation_reference, snapshot_reference, validate_checkpoint_reference,
     validate_failure_reference, validate_invocation_reference, validate_run_reference,
     validate_stream_reference,
-};
-use orna_stream::{
-    CheckpointKey, CommitResult, ConsumerIdentity, DeliveryIdentity, FailureIdentity,
-    FailureRecord, SafeDiagnostic, StreamStatus,
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;

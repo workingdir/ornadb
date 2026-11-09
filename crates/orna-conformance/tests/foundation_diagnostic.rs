@@ -1,6 +1,6 @@
 use num_bigint::BigInt;
 use orna_conformance::{StageOutcome, shared_diagnostic_outcome};
-use orna_foundation::{
+use orna_value::{
     CanonicalSnapshot, Diagnostic, DiagnosticSeverity, DiagnosticSpan, GitHash, SafeText,
 };
 

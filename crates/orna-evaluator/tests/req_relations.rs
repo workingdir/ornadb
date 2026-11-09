@@ -2,8 +2,8 @@ use orna_evaluator::{
     EffectHandler, Environment, EvaluationError, Functions, Limits, PureFunction, RelationPage,
     StepBudget, evaluate_expression_with_effects, invoke_named_with_effects,
 };
-use orna_foundation::CanonicalValue;
 use orna_syntax::{Expr, LambdaParameter, LiteralKind, Pattern, SyntaxSpan};
+use orna_value::CanonicalValue;
 use orna_value::{Raw, Value};
 
 struct OrderedRows {

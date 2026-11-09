@@ -6,13 +6,13 @@
 //! activation makes that capture stale before the administrative call runs.
 use std::{future::Future, path::PathBuf, process::Command};
 
-use orna_foundation::{CanonicalValue, CwdCapture};
 use orna_repository::Repository;
 use orna_runtime::{
     CheckpointKey, Component, ConsumerIdentity, Mutation, NoFault, RequestIdentity,
     RunObservationRegistration, RuntimeError, RuntimeIdentity, RuntimeState,
     StreamAdministrationOutcome, StreamObservationRegistration, WriterLease,
 };
+use orna_value::{CanonicalValue, CwdCapture};
 use sha2::{Digest, Sha256};
 use tempfile::{Builder, TempDir};
 

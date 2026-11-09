@@ -8,7 +8,6 @@ use std::{
 };
 
 use fs2::FileExt;
-use orna_foundation::{GitHash, OvbRaw, SchemaDescriptor};
 use orna_repository::{
     CheckoutTarget, CommittedTreeEntryKind, CompactManifest, GitDeclaredObjectSetState,
     GitObjectKind, GitObjectState, GitRepositoryMode, IndexGeneration, LegacyAnnotationCandidate,
@@ -18,6 +17,7 @@ use orna_repository::{
     RepositoryError, RequiredInternalRef, RuntimeGeneration, StreamCheckpointIdentityPredecessor,
     WorktreeState,
 };
+use orna_value::{GitHash, OvbRaw, SchemaDescriptor};
 
 use sha2::{Digest, Sha256};
 #[cfg(unix)]

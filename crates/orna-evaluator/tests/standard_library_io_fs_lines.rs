@@ -2,8 +2,8 @@
 mod pinned_io_std;
 
 use orna_evaluator::SysHostBindingRegistry;
-use orna_foundation::CanonicalValue;
 use orna_sys::{EnvironmentProvider, FilesystemProvider};
+use orna_value::CanonicalValue;
 use orna_value::Raw;
 
 fn verify_io_snapshot() {

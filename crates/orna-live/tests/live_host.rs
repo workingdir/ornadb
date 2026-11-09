@@ -2,10 +2,6 @@ use futures::{
     executor::block_on,
     io::{AsyncRead, AsyncWrite, Cursor},
 };
-use orna_foundation::{
-    CanonicalSnapshot, CanonicalValue, Diagnostic as FoundationDiagnostic, DiagnosticSeverity,
-    OvbRaw, SafeText, Value,
-};
 use orna_live::{
     ActionAuthority, ActionAuthorityRegistry, ActionBinding, ActionFuture, ActionHandler,
     CreateRequest, DeleteRequest, Error, FirstPartyEffectTrust, Frame, FrameOutcome, HttpBody,
@@ -33,6 +29,10 @@ use orna_security::{
     SessionBoundary, SessionDeletionAdapter,
 };
 use orna_serving::{Limits as ServingLimits, Serving};
+use orna_value::{
+    CanonicalSnapshot, CanonicalValue, Diagnostic as FoundationDiagnostic, DiagnosticSeverity,
+    OvbRaw, SafeText, Value,
+};
 use std::{
     collections::BTreeMap,
     fs,

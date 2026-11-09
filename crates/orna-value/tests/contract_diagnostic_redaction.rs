@@ -1,4 +1,4 @@
-use orna_foundation::{
+use orna_value::{
     Diagnostic, DiagnosticSeverity, DiagnosticSpan, GitHash, OvbRaw, SafeText, Snapshot, Value,
 };
 
@@ -61,7 +61,7 @@ fn admitted_root_message_does_not_disclose_notes_or_nested_causes() {
 
 #[test]
 fn diagnostic_debug_redacts_fixture_payloads_without_explicit_redaction() {
-    let fixture = include_str!("fixtures/secret-surface.orna").trim();
+    let fixture = include_str!("fixtures/contract/secret-surface.orna").trim();
     let cause = Diagnostic::new(
         SafeText::new(fixture).unwrap(),
         DiagnosticSeverity::Warning,
@@ -99,7 +99,7 @@ fn diagnostic_debug_redacts_fixture_payloads_without_explicit_redaction() {
 
 #[test]
 fn composed_json_and_codec_projections_redact_fixture_tails() {
-    let fixture = include_str!("fixtures/secret-surface.orna").trim();
+    let fixture = include_str!("fixtures/contract/secret-surface.orna").trim();
     let cause = Diagnostic::new(
         SafeText::new("ORNA-E-CHILD").unwrap(),
         DiagnosticSeverity::Warning,
@@ -175,7 +175,7 @@ fn composed_json_and_codec_projections_redact_fixture_tails() {
 
 #[test]
 fn local_message_admission_does_not_transfer_to_nested_diagnostics() {
-    let fixture = include_str!("fixtures/secret-surface.orna").trim();
+    let fixture = include_str!("fixtures/contract/secret-surface.orna").trim();
     let admitted_cause = Diagnostic::new(
         SafeText::new("ORNA-E-ADMITTED-CAUSE").unwrap(),
         DiagnosticSeverity::Warning,
@@ -216,7 +216,7 @@ fn local_message_admission_does_not_transfer_to_nested_diagnostics() {
 
 #[test]
 fn local_trust_stays_on_root_across_cause_composition_orders() {
-    let fixture = include_str!("fixtures/secret-surface.orna").trim();
+    let fixture = include_str!("fixtures/contract/secret-surface.orna").trim();
     let admitted_grandchild = Diagnostic::new(
         SafeText::new("ORNA-E-ADMITTED-GRANDCHILD").unwrap(),
         DiagnosticSeverity::Warning,
@@ -286,7 +286,7 @@ fn local_trust_stays_on_root_across_cause_composition_orders() {
 
 #[test]
 fn explicit_redaction_revokes_admission_before_clone_composition() {
-    let fixture = include_str!("fixtures/secret-surface.orna").trim();
+    let fixture = include_str!("fixtures/contract/secret-surface.orna").trim();
     let admitted = Diagnostic::new(
         SafeText::new("ORNA-E-REVOKED-ROOT").unwrap(),
         DiagnosticSeverity::Error,
@@ -331,7 +331,7 @@ fn explicit_redaction_revokes_admission_before_clone_composition() {
 
 #[test]
 fn redacting_one_clone_preserves_sibling_local_admission() {
-    let fixture = include_str!("fixtures/secret-surface.orna").trim();
+    let fixture = include_str!("fixtures/contract/secret-surface.orna").trim();
     let fixture_credential = fixture.split('"').nth(1).unwrap();
     let admitted = Diagnostic::new(
         SafeText::new("ORNA-E-CLONED-ADMISSION").unwrap(),
@@ -376,7 +376,7 @@ fn redacting_one_clone_preserves_sibling_local_admission() {
 
 #[test]
 fn clone_from_replaces_diagnostic_trust_with_source_state() {
-    let fixture = include_str!("fixtures/secret-surface.orna").trim();
+    let fixture = include_str!("fixtures/contract/secret-surface.orna").trim();
     let fixture_credential = fixture.split('"').nth(1).unwrap();
     let admitted = Diagnostic::new(
         SafeText::new("ORNA-E-CLONE-FROM").unwrap(),
@@ -424,7 +424,7 @@ fn clone_from_replaces_diagnostic_trust_with_source_state() {
 
 #[test]
 fn clone_from_tree_keeps_admission_at_root_only_at_projection() {
-    let fixture = include_str!("fixtures/secret-surface.orna").trim();
+    let fixture = include_str!("fixtures/contract/secret-surface.orna").trim();
     let fixture_credential = fixture.split('"').nth(1).unwrap();
     let admitted_grandchild = Diagnostic::new(
         SafeText::new("ORNA-E-CLONE-GRANDCHILD").unwrap(),
@@ -510,7 +510,7 @@ fn clone_from_tree_keeps_admission_at_root_only_at_projection() {
 
 #[test]
 fn clone_from_cause_vector_size_changes_redact_or_drop_secret_tails() {
-    let fixture = include_str!("fixtures/secret-surface.orna").trim();
+    let fixture = include_str!("fixtures/contract/secret-surface.orna").trim();
     let fixture_credential = fixture.split('"').nth(1).unwrap();
     let admitted_cause = |code: &str| {
         Diagnostic::new(
@@ -615,7 +615,7 @@ fn clone_from_cause_vector_size_changes_redact_or_drop_secret_tails() {
 
 #[test]
 fn clone_from_nested_cause_vectors_resize_without_secret_tails() {
-    let fixture = include_str!("fixtures/secret-surface.orna").trim();
+    let fixture = include_str!("fixtures/contract/secret-surface.orna").trim();
     let fixture_credential = fixture.split('"').nth(1).unwrap();
     let admitted_leaf = |code: &str| {
         Diagnostic::new(
@@ -781,7 +781,7 @@ fn clone_from_nested_cause_vectors_resize_without_secret_tails() {
 
 #[test]
 fn clone_from_nested_same_length_mixed_trust_slots_redacts_all_causes() {
-    let fixture = include_str!("fixtures/secret-surface.orna").trim();
+    let fixture = include_str!("fixtures/contract/secret-surface.orna").trim();
     let fixture_credential = fixture.split('"').nth(1).unwrap();
     let diagnostic = |code: &str, admitted: bool| {
         let diagnostic = Diagnostic::new(
@@ -862,7 +862,7 @@ fn clone_from_nested_same_length_mixed_trust_slots_redacts_all_causes() {
 
 #[test]
 fn root_readmission_after_clone_from_does_not_regrant_nested_slots() {
-    let fixture = include_str!("fixtures/secret-surface.orna").trim();
+    let fixture = include_str!("fixtures/contract/secret-surface.orna").trim();
     let fixture_credential = fixture.split('"').nth(1).unwrap();
     let diagnostic = |code: &str, admitted: bool| {
         let diagnostic = Diagnostic::new(
@@ -941,7 +941,7 @@ fn root_readmission_after_clone_from_does_not_regrant_nested_slots() {
 
 #[test]
 fn post_clone_admission_stays_local_through_nested_cause_composition() {
-    let fixture = include_str!("fixtures/secret-surface.orna").trim();
+    let fixture = include_str!("fixtures/contract/secret-surface.orna").trim();
     let fixture_credential = fixture.split('"').nth(1).unwrap();
     let diagnostic = |code: &str, admitted: bool| {
         let diagnostic = Diagnostic::new(
@@ -1063,7 +1063,7 @@ fn post_clone_admission_stays_local_through_nested_cause_composition() {
 
 #[test]
 fn clone_from_readmission_keeps_root_sibling_when_clone_is_a_cause() {
-    let fixture = include_str!("fixtures/secret-surface.orna").trim();
+    let fixture = include_str!("fixtures/contract/secret-surface.orna").trim();
     let fixture_credential = fixture.split('"').nth(1).unwrap();
     let source = Diagnostic::new(
         SafeText::new("ORNA-E-LOCALITY-SOURCE").unwrap(),
@@ -1165,7 +1165,7 @@ fn clone_from_readmission_keeps_root_sibling_when_clone_is_a_cause() {
 
 #[test]
 fn clone_from_replacement_revokes_only_that_post_clone_sibling() {
-    let fixture = include_str!("fixtures/secret-surface.orna").trim();
+    let fixture = include_str!("fixtures/contract/secret-surface.orna").trim();
     let fixture_credential = fixture.split('"').nth(1).unwrap();
     let source = Diagnostic::new(
         SafeText::new("ORNA-E-REPLACEMENT-SOURCE").unwrap(),
@@ -1278,7 +1278,7 @@ fn clone_from_replacement_revokes_only_that_post_clone_sibling() {
 
 #[test]
 fn clone_from_grant_and_revoke_stay_local_at_cause_boundaries() {
-    let fixture = include_str!("fixtures/secret-surface.orna").trim();
+    let fixture = include_str!("fixtures/contract/secret-surface.orna").trim();
     let fixture_credential = fixture.split('"').nth(1).unwrap();
     let admitted_source = Diagnostic::new(
         SafeText::new("ORNA-E-ADMISSION-REPLACE-SOURCE").unwrap(),
@@ -1402,7 +1402,7 @@ fn clone_from_grant_and_revoke_stay_local_at_cause_boundaries() {
 
 #[test]
 fn sequential_clone_from_replacements_keep_admission_snapshots_local() {
-    let fixture = include_str!("fixtures/secret-surface.orna").trim();
+    let fixture = include_str!("fixtures/contract/secret-surface.orna").trim();
     let fixture_credential = fixture.split('"').nth(1).unwrap();
     let diagnostic = |code: &str| {
         Diagnostic::new(
@@ -1553,7 +1553,7 @@ fn sequential_clone_from_replacements_keep_admission_snapshots_local() {
 
 #[test]
 fn forked_clone_from_replacements_do_not_mutate_snapshot_siblings() {
-    let fixture = include_str!("fixtures/secret-surface.orna").trim();
+    let fixture = include_str!("fixtures/contract/secret-surface.orna").trim();
     let fixture_credential = fixture.split('"').nth(1).unwrap();
     let diagnostic = |code: &str| {
         Diagnostic::new(
@@ -1707,7 +1707,7 @@ fn forked_clone_from_replacements_do_not_mutate_snapshot_siblings() {
 
 #[test]
 fn parent_replacement_preserves_forked_nested_cause_snapshots() {
-    let fixture = include_str!("fixtures/secret-surface.orna").trim();
+    let fixture = include_str!("fixtures/contract/secret-surface.orna").trim();
     let fixture_credential = fixture.split('"').nth(1).unwrap();
     let diagnostic = |code: &str| {
         Diagnostic::new(
@@ -1873,7 +1873,7 @@ fn parent_replacement_preserves_forked_nested_cause_snapshots() {
 
 #[test]
 fn nested_replacement_preserves_parent_child_and_leaf_snapshots() {
-    let fixture = include_str!("fixtures/secret-surface.orna").trim();
+    let fixture = include_str!("fixtures/contract/secret-surface.orna").trim();
     let fixture_credential = fixture.split('"').nth(1).unwrap();
     let diagnostic = |code: &str| {
         Diagnostic::new(
@@ -2068,7 +2068,7 @@ fn nested_replacement_preserves_parent_child_and_leaf_snapshots() {
 
 #[test]
 fn nested_vector_shrink_and_growth_preserve_held_tail_snapshots() {
-    let fixture = include_str!("fixtures/secret-surface.orna").trim();
+    let fixture = include_str!("fixtures/contract/secret-surface.orna").trim();
     let fixture_credential = fixture.split('"').nth(1).unwrap();
     let admitted = |code: &str, message: &str| {
         Diagnostic::new(
@@ -2254,7 +2254,7 @@ fn nested_vector_shrink_and_growth_preserve_held_tail_snapshots() {
 
 #[test]
 fn composed_cause_snapshot_keeps_original_tree_after_source_resizes() {
-    let fixture = include_str!("fixtures/secret-surface.orna").trim();
+    let fixture = include_str!("fixtures/contract/secret-surface.orna").trim();
     let fixture_credential = fixture.split('"').nth(1).unwrap();
     let admitted = |code: &str, message: &str| {
         Diagnostic::new(
@@ -2459,7 +2459,7 @@ fn composed_cause_snapshot_keeps_original_tree_after_source_resizes() {
 
 #[test]
 fn pre_resize_composed_projection_is_stable_after_source_mutation() {
-    let fixture = include_str!("fixtures/secret-surface.orna").trim();
+    let fixture = include_str!("fixtures/contract/secret-surface.orna").trim();
     let fixture_credential = fixture.split('"').nth(1).unwrap();
     let admitted = |code: &str, message: &str| {
         Diagnostic::new(
@@ -2557,7 +2557,7 @@ fn pre_resize_composed_projection_is_stable_after_source_mutation() {
 
 #[test]
 fn pre_resize_snapshot_keeps_its_slot_when_later_sizes_are_composed() {
-    let fixture = include_str!("fixtures/secret-surface.orna").trim();
+    let fixture = include_str!("fixtures/contract/secret-surface.orna").trim();
     let fixture_credential = fixture.split('"').nth(1).unwrap();
     let admitted = |code: &str, message: &str| {
         Diagnostic::new(
@@ -2693,7 +2693,7 @@ fn pre_resize_snapshot_keeps_its_slot_when_later_sizes_are_composed() {
 
 #[test]
 fn nested_pre_resize_composition_survives_late_recomposition() {
-    let fixture = include_str!("fixtures/secret-surface.orna").trim();
+    let fixture = include_str!("fixtures/contract/secret-surface.orna").trim();
     let fixture_credential = fixture.split('"').nth(1).unwrap();
     let admitted = |code: &str, message: &str| {
         Diagnostic::new(
@@ -2829,7 +2829,7 @@ fn nested_pre_resize_composition_survives_late_recomposition() {
 
 #[test]
 fn pre_resize_composition_snapshot_survives_parent_vector_replacement() {
-    let fixture = include_str!("fixtures/secret-surface.orna").trim();
+    let fixture = include_str!("fixtures/contract/secret-surface.orna").trim();
     let fixture_credential = fixture.split('"').nth(1).unwrap();
     let admitted = |code: &str, message: &str| {
         Diagnostic::new(
@@ -2961,7 +2961,7 @@ fn pre_resize_composition_snapshot_survives_parent_vector_replacement() {
 
 #[test]
 fn pre_resize_parent_vector_clone_from_keeps_secret_admission_local() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -3087,7 +3087,7 @@ fn pre_resize_parent_vector_clone_from_keeps_secret_admission_local() {
 
 #[test]
 fn pre_resize_parent_vector_empty_round_trip_keeps_snapshots_isolated() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -3264,7 +3264,7 @@ fn pre_resize_parent_vector_empty_round_trip_keeps_snapshots_isolated() {
 
 #[test]
 fn pre_resize_parent_vector_nonempty_resize_keeps_closure_snapshots() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -3471,7 +3471,7 @@ fn pre_resize_parent_vector_nonempty_resize_keeps_closure_snapshots() {
 
 #[test]
 fn parent_replacement_closures_keep_captured_diagnostic_snapshots_local() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -3669,7 +3669,7 @@ fn parent_replacement_closures_keep_captured_diagnostic_snapshots_local() {
 
 #[test]
 fn closure_replacement_sources_restore_parent_snapshots_after_resize() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -3939,7 +3939,7 @@ fn closure_replacement_sources_restore_parent_snapshots_after_resize() {
 
 #[test]
 fn same_length_closure_sources_keep_replaced_parent_snapshots_local() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -4169,7 +4169,7 @@ fn same_length_closure_sources_keep_replaced_parent_snapshots_local() {
 
 #[test]
 fn same_length_closure_replacement_keeps_mixed_slot_admission_local() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -4403,7 +4403,7 @@ fn same_length_closure_replacement_keeps_mixed_slot_admission_local() {
 
 #[test]
 fn mixed_trust_closure_sources_keep_sibling_replacements_independent() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -4609,7 +4609,7 @@ fn mixed_trust_closure_sources_keep_sibling_replacements_independent() {
 
 #[test]
 fn mixed_trust_sibling_closures_cross_restore_captured_generations() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -4820,7 +4820,7 @@ fn mixed_trust_sibling_closures_cross_restore_captured_generations() {
 
 #[test]
 fn mixed_trust_sibling_closures_restore_resized_generations() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -5085,7 +5085,7 @@ fn mixed_trust_sibling_closures_restore_resized_generations() {
 
 #[test]
 fn mixed_trust_sibling_parent_closures_restore_resized_cause_generations() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -5324,7 +5324,7 @@ fn mixed_trust_sibling_parent_closures_restore_resized_cause_generations() {
 
 #[test]
 fn mixed_trust_sibling_closures_restore_nested_cause_generations() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -5582,7 +5582,7 @@ fn mixed_trust_sibling_closures_restore_nested_cause_generations() {
 
 #[test]
 fn mixed_trust_parent_closures_restore_resized_sibling_causes() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -5835,7 +5835,7 @@ fn mixed_trust_parent_closures_restore_resized_sibling_causes() {
 
 #[test]
 fn mixed_trust_parent_closures_restore_empty_sibling_cause_edges() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -6078,7 +6078,7 @@ fn mixed_trust_parent_closures_restore_empty_sibling_cause_edges() {
 
 #[test]
 fn mixed_trust_parent_closures_restore_zero_cause_generations() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -6297,7 +6297,7 @@ fn mixed_trust_parent_closures_restore_zero_cause_generations() {
 
 #[test]
 fn mixed_trust_empty_cause_closures_preserve_sibling_generation_admission() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -6505,7 +6505,7 @@ fn mixed_trust_empty_cause_closures_preserve_sibling_generation_admission() {
 
 #[test]
 fn mixed_trust_parent_closures_preserve_empty_sibling_admission() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -6719,7 +6719,7 @@ fn mixed_trust_parent_closures_preserve_empty_sibling_admission() {
 
 #[test]
 fn mixed_trust_empty_sibling_cause_closures_preserve_admission() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -6960,7 +6960,7 @@ fn mixed_trust_empty_sibling_cause_closures_preserve_admission() {
 
 #[test]
 fn mixed_trust_empty_cause_closures_preserve_pre_revocation_admission() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -7148,7 +7148,7 @@ fn mixed_trust_empty_cause_closures_preserve_pre_revocation_admission() {
 
 #[test]
 fn mixed_trust_empty_cause_closures_keep_pre_revocation_admission_after_readmission() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -7321,7 +7321,7 @@ fn mixed_trust_empty_cause_closures_keep_pre_revocation_admission_after_readmiss
 
 #[test]
 fn mixed_trust_empty_cause_closures_preserve_readmission_before_second_revocation() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -7510,7 +7510,7 @@ fn mixed_trust_empty_cause_closures_preserve_readmission_before_second_revocatio
 
 #[test]
 fn readmitted_cause_closure_survives_second_revocation_of_its_parent() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -7706,7 +7706,7 @@ fn readmitted_cause_closure_survives_second_revocation_of_its_parent() {
 
 #[test]
 fn recursive_revocation_closure_preserves_nested_parent_snapshots() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -7912,7 +7912,7 @@ fn recursive_revocation_closure_preserves_nested_parent_snapshots() {
 
 #[test]
 fn revoked_nested_snapshots_survive_cause_vector_shrink_and_regrowth() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -8112,7 +8112,7 @@ fn revoked_nested_snapshots_survive_cause_vector_shrink_and_regrowth() {
 
 #[test]
 fn closure_snapshots_survive_nested_parent_and_cause_vector_resize() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -8322,7 +8322,7 @@ fn closure_snapshots_survive_nested_parent_and_cause_vector_resize() {
 
 #[test]
 fn closure_snapshots_survive_empty_nested_vector_growth_and_revocation() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -8543,7 +8543,7 @@ fn closure_snapshots_survive_empty_nested_vector_growth_and_revocation() {
 
 #[test]
 fn successive_nested_growth_closures_preserve_each_snapshot_after_revocation() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -8767,7 +8767,7 @@ fn successive_nested_growth_closures_preserve_each_snapshot_after_revocation() {
 
 #[test]
 fn staged_growth_closures_keep_replaced_nested_tail_snapshots() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -9036,7 +9036,7 @@ fn staged_growth_closures_keep_replaced_nested_tail_snapshots() {
 
 #[test]
 fn untrusted_nested_tail_replacement_keeps_admitted_closure_snapshot() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -9300,7 +9300,7 @@ fn untrusted_nested_tail_replacement_keeps_admitted_closure_snapshot() {
 
 #[test]
 fn decoded_chain_tail_recovers_after_resize_without_inheriting_admission() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -9458,7 +9458,7 @@ fn decoded_chain_tail_recovers_after_resize_without_inheriting_admission() {
 
 #[test]
 fn decoded_chain_roundtrip_keeps_replaced_tail_closure_generations() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -9683,7 +9683,7 @@ fn decoded_chain_roundtrip_keeps_replaced_tail_closure_generations() {
 
 #[test]
 fn decoded_empty_chain_tail_can_be_recovered_without_phantom_causes() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -9865,7 +9865,7 @@ fn decoded_empty_chain_tail_can_be_recovered_without_phantom_causes() {
 
 #[test]
 fn diagnostic_decode_redacts_untrusted_and_composed_payloads() {
-    let fixture = include_str!("fixtures/secret-surface.orna").trim();
+    let fixture = include_str!("fixtures/contract/secret-surface.orna").trim();
     let raw_cause = raw_diagnostic("ORNA-E-CAUSE", fixture, vec![], false);
     let raw_root = raw_diagnostic("ORNA-E-ROOT", fixture, vec![raw_cause], false);
     let decoded = Diagnostic::decode_ovb(&Value::new(raw_root).unwrap().encode().unwrap()).unwrap();
@@ -10109,7 +10109,7 @@ fn diagnostic_decode_rejects_invalid_utf8_in_a_span_path() {
 
 #[test]
 fn decoded_empty_parent_replacement_restores_chain_closure_snapshots() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -10255,7 +10255,7 @@ fn decoded_empty_parent_replacement_restores_chain_closure_snapshots() {
 
 #[test]
 fn decoded_deeper_parent_chain_recovery_keeps_parent_and_tail_identity() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -10491,7 +10491,7 @@ fn decoded_deeper_parent_chain_recovery_keeps_parent_and_tail_identity() {
 
 #[test]
 fn decoded_deep_nested_parent_tail_recovery_keeps_closure_generations() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -10710,7 +10710,7 @@ fn decoded_deep_nested_parent_tail_recovery_keeps_closure_generations() {
 
 #[test]
 fn decoded_parent_chains_cross_empty_sibling_replacements_without_tail_leaks() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -10918,7 +10918,7 @@ fn decoded_parent_chains_cross_empty_sibling_replacements_without_tail_leaks() {
 
 #[test]
 fn decoded_nested_parent_tail_recovery_keeps_empty_and_replaced_generations() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -11134,7 +11134,7 @@ fn decoded_nested_parent_tail_recovery_keeps_empty_and_replaced_generations() {
 
 #[test]
 fn deep_parent_sibling_recovery_preserves_crossed_closure_edges() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -11421,7 +11421,7 @@ fn deep_parent_sibling_recovery_preserves_crossed_closure_edges() {
 
 #[test]
 fn shared_deep_parent_codes_preserve_unequal_tail_recovery_generations() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -11684,7 +11684,7 @@ fn shared_deep_parent_codes_preserve_unequal_tail_recovery_generations() {
 
 #[test]
 fn reused_decoded_deep_recovery_tail_survives_parent_replacements() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -11953,7 +11953,7 @@ fn reused_decoded_deep_recovery_tail_survives_parent_replacements() {
 
 #[test]
 fn duplicate_reused_deep_tail_edges_survive_sibling_recovery() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -12246,7 +12246,7 @@ fn duplicate_reused_deep_tail_edges_survive_sibling_recovery() {
 
 #[test]
 fn duplicate_closures_keep_same_deep_recovery_across_parent_replacements() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -12502,7 +12502,7 @@ fn duplicate_closures_keep_same_deep_recovery_across_parent_replacements() {
 
 #[test]
 fn duplicate_deep_recoveries_redact_local_snapshot_admission() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -12603,7 +12603,7 @@ fn duplicate_deep_recoveries_redact_local_snapshot_admission() {
 
 #[test]
 fn empty_duplicate_sibling_counts_follow_order_with_duplicate_terminals() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -12754,7 +12754,7 @@ fn empty_duplicate_sibling_counts_follow_order_with_duplicate_terminals() {
 
 #[test]
 fn duplicate_deep_snapshots_preserve_repeated_tail_order() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -12848,7 +12848,7 @@ fn duplicate_deep_snapshots_preserve_repeated_tail_order() {
 
 #[test]
 fn repeated_deep_recovery_cycles_keep_tail_multiplicity() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -12949,7 +12949,7 @@ fn repeated_deep_recovery_cycles_keep_tail_multiplicity() {
 
 #[test]
 fn repeated_recovery_tails_survive_empty_replacements() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -13117,7 +13117,7 @@ fn repeated_recovery_tails_survive_empty_replacements() {
 
 #[test]
 fn repeated_error_tails_keep_order_and_severity_after_recovery() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -13246,7 +13246,7 @@ fn repeated_error_tails_keep_order_and_severity_after_recovery() {
 
 #[test]
 fn repeated_error_tails_survive_empty_snapshot_replacements() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -13446,7 +13446,7 @@ fn repeated_error_tails_survive_empty_snapshot_replacements() {
 
 #[test]
 fn error_tail_replay_preserves_repeated_entries_after_empty_recovery() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -13675,7 +13675,7 @@ fn error_tail_replay_preserves_repeated_entries_after_empty_recovery() {
 
 #[test]
 fn replayed_error_snapshots_keep_repeated_tail_order() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -13853,7 +13853,7 @@ fn replayed_error_snapshots_keep_repeated_tail_order() {
 
 #[test]
 fn error_tail_order_survives_crossed_snapshot_replay() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -14004,7 +14004,7 @@ fn error_tail_order_survives_crossed_snapshot_replay() {
 
 #[test]
 fn replayed_error_tail_order_is_stable_between_siblings() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -14183,7 +14183,7 @@ fn replayed_error_tail_order_is_stable_between_siblings() {
 
 #[test]
 fn replayed_error_tail_order_survives_an_interposed_error_sibling() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -14383,7 +14383,7 @@ fn replayed_error_tail_order_survives_an_interposed_error_sibling() {
 
 #[test]
 fn replayed_duplicate_error_tail_order_keeps_nested_shapes() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -14550,7 +14550,7 @@ fn replayed_duplicate_error_tail_order_keeps_nested_shapes() {
 
 #[test]
 fn replayed_duplicate_error_tails_keep_nested_child_order() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -14746,7 +14746,7 @@ fn replayed_duplicate_error_tails_keep_nested_child_order() {
 
 #[test]
 fn nested_duplicate_error_tail_cardinality_edges_survive_replay() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -14956,7 +14956,7 @@ fn nested_duplicate_error_tail_cardinality_edges_survive_replay() {
 
 #[test]
 fn nested_duplicate_tails_keep_interposed_sibling_order_on_replay() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -15145,7 +15145,7 @@ fn nested_duplicate_tails_keep_interposed_sibling_order_on_replay() {
 
 #[test]
 fn nested_duplicate_tail_empty_child_shape_survives_replay() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -15320,7 +15320,7 @@ fn nested_duplicate_tail_empty_child_shape_survives_replay() {
 
 #[test]
 fn empty_nested_duplicate_tails_keep_multiplicity_across_replay() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -15508,7 +15508,7 @@ fn empty_nested_duplicate_tails_keep_multiplicity_across_replay() {
 
 #[test]
 fn empty_nested_duplicate_tails_stay_local_to_sibling_on_replay() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -15679,7 +15679,7 @@ fn empty_nested_duplicate_tails_stay_local_to_sibling_on_replay() {
 
 #[test]
 fn empty_duplicate_sibling_tails_keep_owner_across_replay() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -15841,7 +15841,7 @@ fn empty_duplicate_sibling_tails_keep_owner_across_replay() {
 
 #[test]
 fn empty_duplicate_sibling_order_keeps_nested_tail_owners_on_replay() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -16013,7 +16013,7 @@ fn empty_duplicate_sibling_order_keeps_nested_tail_owners_on_replay() {
 
 #[test]
 fn duplicate_sibling_tail_groups_survive_reversed_nested_replay() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -16246,7 +16246,7 @@ fn duplicate_sibling_tail_groups_survive_reversed_nested_replay() {
 
 #[test]
 fn duplicate_sibling_tail_child_shapes_follow_order_on_replay() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -16439,7 +16439,7 @@ fn duplicate_sibling_tail_child_shapes_follow_order_on_replay() {
 
 #[test]
 fn shorthand_redaction_preserves_duplicate_sibling_tail_shapes_on_replay() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -16652,7 +16652,7 @@ fn shorthand_redaction_preserves_duplicate_sibling_tail_shapes_on_replay() {
 
 #[test]
 fn pre_redacted_duplicate_tails_keep_sibling_order_on_replay() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -16848,7 +16848,7 @@ fn pre_redacted_duplicate_tails_keep_sibling_order_on_replay() {
 
 #[test]
 fn shorthand_redacted_siblings_keep_duplicate_tail_shapes_when_composed() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -17045,7 +17045,7 @@ fn shorthand_redacted_siblings_keep_duplicate_tail_shapes_when_composed() {
 
 #[test]
 fn shorthand_redacted_terminals_keep_duplicate_sibling_tail_shapes() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -17244,7 +17244,7 @@ fn shorthand_redacted_terminals_keep_duplicate_sibling_tail_shapes() {
 
 #[test]
 fn shorthand_after_clone_replacement_keeps_duplicate_sibling_tails() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -17443,7 +17443,7 @@ fn shorthand_after_clone_replacement_keeps_duplicate_sibling_tails() {
 
 #[test]
 fn cloned_alias_siblings_retain_their_duplicate_tail_additions() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -17647,7 +17647,7 @@ fn cloned_alias_siblings_retain_their_duplicate_tail_additions() {
 
 #[test]
 fn cloned_alias_tails_keep_distinct_appends_across_siblings() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -17839,7 +17839,7 @@ fn cloned_alias_tails_keep_distinct_appends_across_siblings() {
 
 #[test]
 fn nested_duplicate_children_stay_with_cloned_alias_tails() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -18099,7 +18099,7 @@ fn nested_duplicate_children_stay_with_cloned_alias_tails() {
 
 #[test]
 fn nested_cloned_alias_tails_keep_duplicate_inner_tail_ownership() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -18302,7 +18302,7 @@ fn nested_cloned_alias_tails_keep_duplicate_inner_tail_ownership() {
 
 #[test]
 fn empty_nested_tails_remain_with_cloned_alias_groups() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -18540,7 +18540,7 @@ fn empty_nested_tails_remain_with_cloned_alias_groups() {
 
 #[test]
 fn empty_nested_clones_keep_duplicate_tail_counts_on_replay() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -18666,7 +18666,7 @@ fn empty_nested_clones_keep_duplicate_tail_counts_on_replay() {
 
 #[test]
 fn nested_empty_alias_tails_survive_deep_clone_growth_replay() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -18805,7 +18805,7 @@ fn nested_empty_alias_tails_survive_deep_clone_growth_replay() {
 
 #[test]
 fn deepest_empty_alias_tail_growth_stays_with_its_cloned_chain() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -18964,7 +18964,7 @@ fn deepest_empty_alias_tail_growth_stays_with_its_cloned_chain() {
 
 #[test]
 fn deepest_empty_alias_tail_duplicates_survive_four_clone_levels() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -19150,7 +19150,7 @@ fn deepest_empty_alias_tail_duplicates_survive_four_clone_levels() {
 
 #[test]
 fn deepest_empty_alias_tail_duplicates_survive_five_clone_levels() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -19374,7 +19374,7 @@ fn deepest_empty_alias_tail_duplicates_survive_five_clone_levels() {
 
 #[test]
 fn zero_cause_leaf_aliases_stay_empty_across_five_clone_levels() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -19540,7 +19540,7 @@ fn zero_cause_leaf_aliases_stay_empty_across_five_clone_levels() {
 
 #[test]
 fn zero_cause_five_level_aliases_isolate_two_independent_growth_tails() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -19722,7 +19722,7 @@ fn zero_cause_five_level_aliases_isolate_two_independent_growth_tails() {
 
 #[test]
 fn zero_cause_five_level_alias_growth_isolated_to_one_leaf_path() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -19857,7 +19857,7 @@ fn zero_cause_five_level_alias_growth_isolated_to_one_leaf_path() {
 
 #[test]
 fn zero_cause_five_level_aliases_isolate_different_leaf_tail_counts() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -19994,7 +19994,7 @@ fn zero_cause_five_level_aliases_isolate_different_leaf_tail_counts() {
 
 #[test]
 fn zero_cause_five_level_aliases_keep_distinct_leaf_tail_identity() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -20127,7 +20127,7 @@ fn zero_cause_five_level_aliases_keep_distinct_leaf_tail_identity() {
 
 #[test]
 fn zero_cause_five_level_aliases_preserve_distinct_leaf_tail_order() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -20265,7 +20265,7 @@ fn zero_cause_five_level_aliases_preserve_distinct_leaf_tail_order() {
 
 #[test]
 fn clone_from_preserves_ordered_distinct_zero_cause_five_level_aliases() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -20447,7 +20447,7 @@ fn clone_from_preserves_ordered_distinct_zero_cause_five_level_aliases() {
 
 #[test]
 fn shrinking_clone_from_keeps_ordered_zero_cause_five_level_tails() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -20594,7 +20594,7 @@ fn shrinking_clone_from_keeps_ordered_zero_cause_five_level_tails() {
 
 #[test]
 fn growing_clone_from_keeps_ordered_zero_cause_five_level_tails() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -20712,7 +20712,7 @@ fn growing_clone_from_keeps_ordered_zero_cause_five_level_tails() {
 
 #[test]
 fn decoded_clone_from_keeps_ordered_zero_cause_tail_siblings() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -20802,7 +20802,7 @@ fn decoded_clone_from_keeps_ordered_zero_cause_tail_siblings() {
 
 #[test]
 fn composed_decoded_aliases_keep_ordered_zero_cause_siblings() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -20924,7 +20924,7 @@ fn composed_decoded_aliases_keep_ordered_zero_cause_siblings() {
 
 #[test]
 fn composed_decoded_empty_roots_keep_ordered_tail_sibling() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -21026,7 +21026,7 @@ fn composed_decoded_empty_roots_keep_ordered_tail_sibling() {
 
 #[test]
 fn composed_decoded_clone_keeps_appended_zero_cause_tail_local() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -21124,7 +21124,7 @@ fn composed_decoded_clone_keeps_appended_zero_cause_tail_local() {
 
 #[test]
 fn composed_decoded_clone_tails_remain_isolated_between_siblings() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -21224,7 +21224,7 @@ fn composed_decoded_clone_tails_remain_isolated_between_siblings() {
 
 #[test]
 fn composed_decoded_duplicate_tail_counts_stay_local() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -21320,7 +21320,7 @@ fn composed_decoded_duplicate_tail_counts_stay_local() {
 
 #[test]
 fn composed_decoded_ordered_tail_stays_contained_in_its_branch() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -21423,7 +21423,7 @@ fn composed_decoded_ordered_tail_stays_contained_in_its_branch() {
 
 #[test]
 fn composed_decoded_deep_empty_tails_stay_contained() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -21539,7 +21539,7 @@ fn composed_decoded_deep_empty_tails_stay_contained() {
 
 #[test]
 fn deep_decoded_tail_containment_keeps_the_middle_empty() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -21650,7 +21650,7 @@ fn deep_decoded_tail_containment_keeps_the_middle_empty() {
 
 #[test]
 fn composed_deep_decoded_branches_keep_opposite_tails_contained() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -21780,7 +21780,7 @@ fn composed_deep_decoded_branches_keep_opposite_tails_contained() {
 
 #[test]
 fn clone_from_decoded_opposite_tails_keeps_source_branch_order() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -21883,7 +21883,7 @@ fn clone_from_decoded_opposite_tails_keeps_source_branch_order() {
 
 #[test]
 fn repeated_decoded_opposite_tail_replacements_follow_each_source() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -22020,7 +22020,7 @@ fn repeated_decoded_opposite_tail_replacements_follow_each_source() {
 
 #[test]
 fn third_decoded_opposite_tail_replacement_keeps_its_generation_order() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -22152,7 +22152,7 @@ fn third_decoded_opposite_tail_replacement_keeps_its_generation_order() {
 
 #[test]
 fn decoded_three_cause_opposite_tails_keep_their_order() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -22250,7 +22250,7 @@ fn decoded_three_cause_opposite_tails_keep_their_order() {
 
 #[test]
 fn decoded_three_tail_replacements_preserve_each_opposite_order() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -22383,7 +22383,7 @@ fn decoded_three_tail_replacements_preserve_each_opposite_order() {
 
 #[test]
 fn decoded_repeated_diagnostic_references_keep_alias_slot_order() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -22495,7 +22495,7 @@ fn decoded_repeated_diagnostic_references_keep_alias_slot_order() {
 
 #[test]
 fn decoded_alias_replacement_keeps_sibling_snapshot_order() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -22614,7 +22614,7 @@ fn decoded_alias_replacement_keeps_sibling_snapshot_order() {
 
 #[test]
 fn decoded_diagnostic_reload_preserves_alias_order_and_is_atomic() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -22739,7 +22739,7 @@ fn decoded_diagnostic_reload_preserves_alias_order_and_is_atomic() {
 
 #[test]
 fn diagnostic_reload_rebinds_reused_alias_slots_in_wire_order() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -22881,7 +22881,7 @@ fn diagnostic_reload_rebinds_reused_alias_slots_in_wire_order() {
 
 #[test]
 fn diagnostic_reload_storm_keeps_latest_alias_bindings_in_wire_order() {
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_credentials = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))
@@ -23128,7 +23128,7 @@ fn diagnostic_concurrent_reloads_follow_serialized_alias_rebind_order() {
         }
     }
 
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let rounds = [
         vec![Some(0x11), Some(0x22), Some(0x11)],
         vec![Some(0x22), Some(0x11), Some(0x22)],
@@ -23286,7 +23286,7 @@ fn diagnostic_alias_storms_keep_each_synchronized_reload_snapshot_ordered() {
         }
     }
 
-    let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
+    let fixture = include_str!("fixtures/contract/diagnostic-parent-replacement.orna").trim();
     let fixture_markers = fixture
         .lines()
         .filter_map(|line| line.split_once('=')?.1.trim().strip_suffix(';'))

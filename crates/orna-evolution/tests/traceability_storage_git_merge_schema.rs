@@ -6,8 +6,8 @@ use orna_evolution::{
     CanonicalValue, EvolutionVersion, Field, FieldRole, FieldType, MigrationOperation, ObjectId,
     PlanningError, PlanningRequest, Schema, Table, VersionFence, plan,
 };
-use orna_foundation::OvbRaw;
 use orna_syntax::parse_module;
+use orna_value::OvbRaw;
 
 const BASE: &str = include_str!("fixtures/traceability-schema-base.orna");
 const RENAMED: &str = include_str!("fixtures/traceability-schema-renamed.orna");

@@ -1,4 +1,3 @@
-use orna_foundation::{CanonicalValue, OvbRaw, SchemaDescriptor};
 use orna_runtime::{
     Checkpoint, PublicationEquivalenceWitness, PublicationFreeze, PublicationFreezeMutation,
     PublicationMutationState, PublicationRowEncoding, PublicationValueEncoding,
@@ -7,6 +6,7 @@ use orna_storage::{
     CompactKeyError, CompactLoweringError, CompactOvbProfile, CompactWriterMutationState,
     lower_publication_freeze,
 };
+use orna_value::{CanonicalValue, OvbRaw, SchemaDescriptor};
 use sha2::{Digest, Sha256};
 
 const TABLE: [u8; 16] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
