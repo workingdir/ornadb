@@ -35,7 +35,7 @@ sha2 = "0.10"
 
 [dev-dependencies]
 orna-live = { path = "../orna-live" }
-orna-core = { path = "../orna-core" }
+orna-compat-v1 = { path = "../archive/orna-compat-v1" }
 orna-security = { path = "../orna-security" }
 orna-serving = { path = "../orna-serving" }
 tempfile = "3.23.0"

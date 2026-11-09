@@ -5,7 +5,7 @@
 //! or from the engine-private inventory in `catalogue/engine-1.1.0.json`. Names exist
 //! only at the parse and print boundaries; production code matches on the enums.
 //!
-//! The crate has no runtime dependencies so that both `orna-core` (below it) and
+//! The crate has no runtime dependencies so that both `orna-compat-v1` (below it) and
 //! `orna-sys` (above it) can depend on it without a cycle. `serde_json` is a build and
 //! test dependency only.
 //!

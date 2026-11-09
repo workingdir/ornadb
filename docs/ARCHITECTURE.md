@@ -44,16 +44,18 @@ the unit tests assert the two agree.
 | 12 | presentation | orna-protocol, orna-serving, orna-live |
 | 13 | engine | orna-application |
 | 14 | edges | orna-cli, orna-lsp, orna-conformance, orna-traceability, orna-table |
-| 15 | archive | orna-core |
+| 15 | archive | orna-compat-v1 |
 
 The numbers are the target architecture's. `orna-foundation` is parked at layer 1
 until its split because it already depends on `orna-value`; layer 0 is empty until
 `orna-base` exists. The target names replace the current ones as the split stages
 land; a rename changes the `name` in `layers.toml` in the same PR.
 
-`orna-core` is layer 15, the 1.0.0 archive: nothing may depend on it. The archive
-role and the layer number are the structural half of the archive decision; the
-rename to `orna-compat-v1` follows separately.
+`orna-compat-v1` is layer 15, the archived 1.0.0 compatibility reference model:
+nothing may depend on it and it is `publish = false`. It lives under
+`crates/archive/`; the archive role and the layer number keep it out of the
+shipped closure, and its only consumer is the conformance harness's
+compatibility and traceability tests.
 
 ### Same-layer edges that are recorded today
 
@@ -202,14 +204,14 @@ by the stage that fixes it. A stale entry is printed as a warning.
 | V4 | `orna-traceability -> orna-conformance`: a standalone tool depends on the harness | corpus facade |
 | V6 | `orna-evaluator -> orna-repository` is optional | stage 05a (`HostPort`) |
 | V7 | `orna-evaluator -> orna-sys` is optional | stage 05a (`HostPort`) |
-| V8 | `orna-core`: production in-degree 0, role not archive | stage 02 (`orna-compat-v1`) |
 | V9 | `orna-lsp`: production in-degree 0, role not tool | the LSP is its own binary |
 | V10 | `orna-traceability`: production in-degree 0, role not tool | moves under `tools/` with no production dependent |
 | V11 | `orna-sys-id`: production in-degree 0, no adopter yet | stage 06 (`orna-sys` and `orna-eval` adopt it) |
 | W1 | `orna-foundation`: no cohesive subject, 16 production dependents | stage 03 (`orna-base`) |
 
-The IDs are stable labels; V5 was fixed by the evaluator refactor and its entry
-deleted, so the list has a gap.
+The IDs are stable labels; V5 was fixed by the evaluator refactor and V8 by
+stage 02 (the `orna-compat-v1` archive), and both entries are deleted, so the
+list has gaps.
 
 ### External dependency policy
 
@@ -295,7 +297,7 @@ vectors, the committed `api/sys.json` export and `orna --help` / `orna status
 | `orna-lsp` language server | `orna-lsp` | no, its own binary |
 | conformance harness | `orna-conformance` | no, must leave by stage 10 |
 | citation/scope tool | `orna-traceability` | no |
-| 1.0.0 archive | `orna-core` | no, nothing may link it |
+| 1.0.0 archive | `orna-compat-v1` | no, nothing may link it |
 
 ## 9. Glossary
 

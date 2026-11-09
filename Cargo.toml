@@ -2,7 +2,7 @@
 members = [
     "crates/orna-application",
     "crates/orna-cli",
-    "crates/orna-core",
+    "crates/archive/orna-compat-v1",
     "crates/orna-foundation",
     "crates/orna-intrinsics",
     "crates/orna-conformance",

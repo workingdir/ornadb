@@ -6,7 +6,7 @@
 //! `api/inspect.md`. This module is the pure, backend-independent model
 //! slice: the epoch, its projection row sets, the trace stream, and the
 //! closed capture options. It imports neither `orna-protocol` nor
-//! `orna-standard`, exactly like the rest of orna-core.
+//! `orna-standard`, exactly like the rest of orna-compat-v1.
 //!
 //! A snapshot is an immutable inspection epoch, modeled after the existing
 //! `VerifiedStandardLibrarySnapshot` pattern (verified, Arc-immutable, pinned

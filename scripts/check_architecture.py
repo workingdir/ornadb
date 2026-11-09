@@ -64,6 +64,8 @@ ROOT = Path(__file__).resolve().parent.parent
 LAYERS_PATH = Path("docs/design/layers.toml")
 BUDGET_PATH = Path("scripts/architecture-budget.toml")
 RAISES_PATH = Path("scripts/architecture-budget-raises.toml")
+# Archived crates sit one group directory deeper than live crates.
+ARCHIVE_DIRECTORY = "archive"
 
 BUDGET_HEADER = """\
 # Size budgets for the OrnaDB workspace.
@@ -266,7 +268,7 @@ def load_budget(path: Path) -> dict:
 
 
 def parse_raise_path(path: Path, text: str) -> tuple[str, str, str]:
-    """Split `crates/<crate>/<relative>[::<function>]` into its budget key."""
+    """Split `crates/[archive/]<crate>/<relative>[::<function>]` into its budget key."""
     if not isinstance(text, str) or not text:
         raise ConfigError(f"{path}: every [[raise]] needs a path")
     if "::" in text:
@@ -280,12 +282,19 @@ def parse_raise_path(path: Path, text: str) -> tuple[str, str, str]:
     parts = prefix.split("/")
     if len(parts) < 3 or parts[0] != "crates" or not parts[1]:
         raise ConfigError(f"{path}: raise path {text!r} must start with crates/<crate>/")
-    relative = "/".join(parts[2:])
+    if parts[1] == ARCHIVE_DIRECTORY:
+        if len(parts) < 4 or not parts[2]:
+            raise ConfigError(f"{path}: raise path {text!r} must name the archived crate")
+        crate = parts[2]
+        relative = "/".join(parts[3:])
+    else:
+        crate = parts[1]
+        relative = "/".join(parts[2:])
     if not relative:
         raise ConfigError(f"{path}: raise path {text!r} has no file part")
     if kind == "functions":
-        return parts[1], kind, f"{relative}::{key}"
-    return parts[1], kind, relative
+        return crate, kind, f"{relative}::{key}"
+    return crate, kind, relative
 
 
 def load_raises(path: Path) -> dict[tuple[str, str, str], dict]:

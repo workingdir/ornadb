@@ -1,4 +1,4 @@
-use orna_core::{
+use orna_compat_v1::{
     CatalogueRevisionId, FieldId, FunctionId, SchemaId, TypeId,
     catalogue::{
         CatalogueSnapshot, FieldDefinition, ObjectTypeDefinition, QualifiedSemanticName,
@@ -154,13 +154,13 @@ fn semantic_diff_reports_catalogue_rows_results_dependencies_and_storage() {
     let report = semantic_snapshot_diff(&base, &candidate);
 
     assert!(report.catalogue().changes().iter().any(
-        |change| matches!(change, orna_core::catalogue_diff::SemanticChange::FieldAdded { id, .. } if *id == STATUS_FIELD)
+        |change| matches!(change, orna_compat_v1::catalogue_diff::SemanticChange::FieldAdded { id, .. } if *id == STATUS_FIELD)
     ));
     assert!(report.catalogue().changes().iter().any(
-        |change| matches!(change, orna_core::catalogue_diff::SemanticChange::SchemaAdded { name, .. } if name == "archive")
+        |change| matches!(change, orna_compat_v1::catalogue_diff::SemanticChange::SchemaAdded { name, .. } if name == "archive")
     ));
     assert!(report.catalogue().changes().iter().any(
-        |change| matches!(change, orna_core::catalogue_diff::SemanticChange::ObjectTypeAdded { id, .. } if *id == ADDED_TYPE)
+        |change| matches!(change, orna_compat_v1::catalogue_diff::SemanticChange::ObjectTypeAdded { id, .. } if *id == ADDED_TYPE)
     ));
     assert_eq!(report.rows().len(), 3);
     assert!(
