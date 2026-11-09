@@ -35,10 +35,11 @@ use std::sync::Arc;
 use fs2::FileExt;
 use sha2::{Digest, Sha256};
 
-use crate::init::format_context::{
+use crate::format_context::{
     FORMAT_CONTEXT_MAX_METADATA_BYTES, LEGACY_FORMAT_PATH, RepositoryFormatContext,
     canonical_database_bytes,
 };
+use crate::hex::hex_encode;
 use crate::native_graph::NativeOid;
 use crate::relation_admission::{
     AllocatorWatermarks, RelationAdmissionError, RelationCandidateContent, StagedRelation,
@@ -677,9 +678,9 @@ pub fn activate_prepared_format3_migration(
                 .map_err(RepositoryError::FormatContext)?
                 .repository_format();
             let message = candidate_message(source_format, annotation_defaults, &continuity);
-            let intent_hex = hex(&intent);
+            let intent_hex = hex_encode(&intent);
             let commit = confirmed.as_str();
-            let message_digest_hex = hex(Sha256::digest(message.as_bytes()).as_slice());
+            let message_digest_hex = hex_encode(Sha256::digest(message.as_bytes()).as_slice());
             let record = format!("{intent_hex}\n{message_digest_hex}\n{commit}");
             let result_path = copy
                 .runtime_paths()
@@ -837,7 +838,7 @@ fn require_reviewed_result(
         .candidate_journal
         .runtime_intent_id()
         .ok_or(RepositoryError::PublicationRecoveryConflict)?;
-    let intent_hex = hex(&intent);
+    let intent_hex = hex_encode(&intent);
     let message = candidate_message(
         verified.source_format,
         verified.annotation_defaults,
@@ -845,7 +846,7 @@ fn require_reviewed_result(
     );
     let expected = format!(
         "{intent_hex}\n{}\n{}",
-        hex(Sha256::digest(message.as_bytes()).as_slice()),
+        hex_encode(Sha256::digest(message.as_bytes()).as_slice()),
         verified.candidate_journal.new_head().as_str()
     );
     let result_path = copy
@@ -1653,7 +1654,7 @@ fn candidate_database_id(
     }
     let database = candidate_file(repository, tree, ".orna/database.orna")?
         .ok_or(RepositoryError::InvalidFormatMigration)?;
-    crate::init::format_context::parse_canonical_database(&database)
+    crate::format_context::parse_canonical_database(&database)
         .map_err(|()| RepositoryError::InvalidFormatMigration)
 }
 
@@ -1973,7 +1974,7 @@ fn candidate_message(
         "explicit format {} to {} migration: {} rows take the {} default annotation, {} stream \
          checkpoint identities carried\n\n{}: {}",
         source_format.number(),
-        crate::init::format_context::FINAL_REPOSITORY_FORMAT,
+        crate::format_context::FINAL_REPOSITORY_FORMAT,
         annotation_defaults.entry_count(),
         LEGACY_ANNOTATION_DEFAULT_FORMAT,
         continuity.predecessors().len(),
@@ -1987,7 +1988,7 @@ pub fn migration_marker(source_format: RepositoryFormat) -> String {
     format!(
         "format-{}-to-{}",
         source_format.number(),
-        crate::init::format_context::FINAL_REPOSITORY_FORMAT
+        crate::format_context::FINAL_REPOSITORY_FORMAT
     )
 }
 
@@ -2685,9 +2686,9 @@ fn migration_record(
          payload_inspected: {inspected},\n    continuity_predecessors: {predecessors},\n    \
          stage: \"prepared\",\n}}\n",
         source_format = source_format.number(),
-        target_format = crate::init::format_context::FINAL_REPOSITORY_FORMAT,
+        target_format = crate::format_context::FINAL_REPOSITORY_FORMAT,
         commit = source_commit.as_str(),
-        tree = hex(source_tree_identity),
+        tree = hex_encode(source_tree_identity),
         annotation = LEGACY_ANNOTATION_DEFAULT_FORMAT,
         count = annotation_defaults.entry_count(),
         inspected = annotation_defaults.payload_inspected(),
@@ -2708,15 +2709,6 @@ fn git_command(directory: &Path) -> Command {
     crate::scrub_git_routing_environment(&mut command);
     crate::bind_git_ceiling_above(&mut command, directory);
     command
-}
-
-fn hex(bytes: &[u8]) -> String {
-    let mut text = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        text.push(char::from_digit(u32::from(byte >> 4), 16).unwrap_or('0'));
-        text.push(char::from_digit(u32::from(byte & 0x0f), 16).unwrap_or('0'));
-    }
-    text
 }
 
 #[cfg(test)]

@@ -174,6 +174,15 @@ pub enum TargetClass {
     VerifiedStandard,
 }
 
+/// The immutable standard-library pin of a verified-standard function: the
+/// exact standard snapshot revision and the exact executable function revision
+/// inside it. The two are only meaningful together, so they travel as one value.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+struct StandardPin {
+    standard_revision: StandardLibraryRevisionId,
+    executable_revision: FunctionRevisionId,
+}
+
 /// One function in the closed two-class `EXECUTE` target union.
 ///
 /// The canonical security snapshot is the identity-ordered union of the
@@ -186,9 +195,9 @@ pub enum TargetClass {
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SecurityFunctionTarget {
     function: FunctionId,
-    class: TargetClass,
-    standard_revision: Option<StandardLibraryRevisionId>,
-    executable_revision: Option<FunctionRevisionId>,
+    /// `None` is an application-catalogue function; `Some` is a
+    /// verified-standard function and its pin.
+    standard: Option<StandardPin>,
 }
 
 impl SecurityFunctionTarget {
@@ -196,9 +205,7 @@ impl SecurityFunctionTarget {
     pub const fn application(function: FunctionId) -> Self {
         Self {
             function,
-            class: TargetClass::Application,
-            standard_revision: None,
-            executable_revision: None,
+            standard: None,
         }
     }
 
@@ -211,9 +218,10 @@ impl SecurityFunctionTarget {
     ) -> Self {
         Self {
             function,
-            class: TargetClass::VerifiedStandard,
-            standard_revision: Some(standard_revision),
-            executable_revision: Some(executable_revision),
+            standard: Some(StandardPin {
+                standard_revision,
+                executable_revision,
+            }),
         }
     }
 
@@ -224,17 +232,26 @@ impl SecurityFunctionTarget {
 
     /// Returns the closed target class.
     pub const fn class(self) -> TargetClass {
-        self.class
+        match self.standard {
+            None => TargetClass::Application,
+            Some(_) => TargetClass::VerifiedStandard,
+        }
     }
 
     /// Returns the exact standard snapshot revision that pins this target.
     pub const fn standard_revision(self) -> Option<StandardLibraryRevisionId> {
-        self.standard_revision
+        match self.standard {
+            Some(pin) => Some(pin.standard_revision),
+            None => None,
+        }
     }
 
     /// Returns the exact pinned executable function revision.
     pub const fn executable_revision(self) -> Option<FunctionRevisionId> {
-        self.executable_revision
+        match self.standard {
+            Some(pin) => Some(pin.executable_revision),
+            None => None,
+        }
     }
 }
 
@@ -243,9 +260,9 @@ impl SecurityFunctionTarget {
 pub struct InvocationTarget {
     function: FunctionId,
     revision: RevisionPair,
-    class: Option<TargetClass>,
-    standard_revision: Option<StandardLibraryRevisionId>,
-    executable_revision: Option<FunctionRevisionId>,
+    /// `None` names only an application-catalogue function; `Some` pins one
+    /// verified-standard executable.
+    standard: Option<StandardPin>,
 }
 
 impl InvocationTarget {
@@ -260,9 +277,7 @@ impl InvocationTarget {
         Self {
             function,
             revision,
-            class: None,
-            standard_revision: None,
-            executable_revision: None,
+            standard: None,
         }
     }
 
@@ -277,9 +292,10 @@ impl InvocationTarget {
         Self {
             function,
             revision,
-            class: Some(TargetClass::VerifiedStandard),
-            standard_revision: Some(standard_revision),
-            executable_revision: Some(executable_revision),
+            standard: Some(StandardPin {
+                standard_revision,
+                executable_revision,
+            }),
         }
     }
 
@@ -295,17 +311,26 @@ impl InvocationTarget {
 
     /// Returns the closed target class when the caller pinned one.
     pub const fn class(self) -> Option<TargetClass> {
-        self.class
+        match self.standard {
+            Some(_) => Some(TargetClass::VerifiedStandard),
+            None => None,
+        }
     }
 
     /// Returns the exact verified standard snapshot revision pin, when present.
     pub const fn standard_revision(self) -> Option<StandardLibraryRevisionId> {
-        self.standard_revision
+        match self.standard {
+            Some(pin) => Some(pin.standard_revision),
+            None => None,
+        }
     }
 
     /// Returns the exact pinned executable function revision, when present.
     pub const fn executable_revision(self) -> Option<FunctionRevisionId> {
-        self.executable_revision
+        match self.standard {
+            Some(pin) => Some(pin.executable_revision),
+            None => None,
+        }
     }
 }
 
@@ -661,33 +686,61 @@ pub fn authorise_inspect(
     epoch_owner: Option<PrincipalId>,
     granted: &[InspectPrivilege],
 ) -> InspectDecision {
-    let (required_rung, epoch_scope) = match epoch_owner {
-        Some(owner) if owner == session_principal => (0, InspectEpochScope::Own),
-        Some(_) => (2, InspectEpochScope::Foreign),
-        None => (1, InspectEpochScope::Session),
+    let epoch_scope = match epoch_owner {
+        Some(owner) if owner == session_principal => InspectEpochScope::Own,
+        Some(_) => InspectEpochScope::Foreign,
+        None => InspectEpochScope::Session,
     };
-    let Some(granted_rung) = granted
-        .iter()
-        .filter_map(|privilege| privilege.ladder_rank())
-        .max()
-    else {
-        return InspectDecision::Denied(InspectDenial::MissingPrivilege);
-    };
-    let requested_rung = requested.ladder_rank().unwrap_or(0);
-    if granted_rung < required_rung || granted_rung < requested_rung {
-        return InspectDecision::Denied(InspectDenial::MissingPrivilege);
-    }
-    if let Some(classifier) = requested.classifier()
-        && !granted
-            .iter()
-            .any(|privilege| privilege.classifier() == Some(classifier))
-    {
+    if !inspect_privileges_cover(requested, epoch_scope, granted.iter().copied()) {
         return InspectDecision::Denied(InspectDenial::MissingPrivilege);
     }
     InspectDecision::Allowed {
         epoch_scope,
         requested,
     }
+}
+
+impl InspectEpochScope {
+    /// The ladder rung a granted privilege must reach to inspect an epoch of
+    /// this scope, on the scale of [`InspectPrivilege::ladder_rank`].
+    const fn required_rung(self) -> u8 {
+        match self {
+            Self::Own => 0,
+            Self::Session => 1,
+            Self::Foreign => 2,
+        }
+    }
+}
+
+/// Decides whether the granted INSPECT privileges cover `requested` for an
+/// epoch of `epoch_scope`.
+///
+/// The ladder and the classifiers are orthogonal: some granted ladder rung must
+/// reach both the epoch's required rung and the requested rung, and a requested
+/// classifier must itself be granted. A decision that involves no epoch passes
+/// [`InspectEpochScope::Own`], the weakest rung, so only the requested
+/// privilege constrains it.
+fn inspect_privileges_cover(
+    requested: InspectPrivilege,
+    epoch_scope: InspectEpochScope,
+    granted: impl Iterator<Item = InspectPrivilege> + Clone,
+) -> bool {
+    let Some(granted_rung) = granted
+        .clone()
+        .filter_map(InspectPrivilege::ladder_rank)
+        .max()
+    else {
+        return false;
+    };
+    let required_rung = epoch_scope
+        .required_rung()
+        .max(requested.ladder_rank().unwrap_or(0));
+    granted_rung >= required_rung
+        && requested.classifier().is_none_or(|classifier| {
+            granted
+                .clone()
+                .any(|privilege| privilege.classifier() == Some(classifier))
+        })
 }
 
 /// The closed privilege-class set of one privilege grant.
@@ -848,9 +901,7 @@ pub enum PrivilegeDecision {
 /// `granted` is the closed set of privilege classes the principal holds for
 /// `object`: a caller that resolves durable grants must first keep exactly
 /// the grants whose object is `None` or equals the requested object, then
-/// pass their classes here. `session_or_principal` names the principal
-/// being decided and is retained as decision evidence; the decision itself
-/// is closed over the granted set.
+/// pass their classes here. The decision is closed over the granted set.
 ///
 /// `Execute` is object-capable and `SecurityAdmin` is class-wide: a
 /// `SecurityAdmin` request naming an object is denied even when the class is
@@ -860,7 +911,6 @@ pub enum PrivilegeDecision {
 /// cover is denied with [`PrivilegeDenial::MissingPrivilege`] without
 /// exposing any grant or object content beyond the requested class.
 pub fn authorise_privilege(
-    session_or_principal: PrincipalId,
     requested: PrivilegeClass,
     object: Option<FunctionId>,
     granted: &[PrivilegeClass],
@@ -868,30 +918,15 @@ pub fn authorise_privilege(
     let covered = match requested {
         PrivilegeClass::Execute => granted.contains(&requested),
         PrivilegeClass::SecurityAdmin => object.is_none() && granted.contains(&requested),
-        PrivilegeClass::Inspect(requested_privilege) => {
-            let required_rung = requested_privilege.ladder_rank().unwrap_or(0);
-            let granted_rung = granted
-                .iter()
-                .filter_map(|class| match class {
-                    PrivilegeClass::Inspect(privilege) => privilege.ladder_rank(),
-                    _ => None,
-                })
-                .max();
-            let ladder_covered = granted_rung.is_some_and(|rung| rung >= required_rung);
-            let classifier_covered = match requested_privilege.classifier() {
-                None => true,
-                Some(classifier) => granted.iter().any(|class| {
-                    matches!(
-                        class,
-                        PrivilegeClass::Inspect(privilege)
-                            if privilege.classifier() == Some(classifier)
-                    )
-                }),
-            };
-            ladder_covered && classifier_covered
-        }
+        PrivilegeClass::Inspect(requested_privilege) => inspect_privileges_cover(
+            requested_privilege,
+            InspectEpochScope::Own,
+            granted.iter().filter_map(|class| match class {
+                PrivilegeClass::Inspect(privilege) => Some(*privilege),
+                PrivilegeClass::Execute | PrivilegeClass::SecurityAdmin => None,
+            }),
+        ),
     };
-    let _ = (session_or_principal, object);
     if covered {
         PrivilegeDecision::Allowed { requested }
     } else {
@@ -2212,7 +2247,25 @@ impl SecuritySnapshot {
         mut active_roles: Vec<PrincipalId>,
     ) -> Result<AuthenticatedSession, SessionBindingError> {
         active_roles.sort_unstable();
-        if active_roles.windows(2).any(|roles| roles[0] == roles[1]) {
+        self.check_session(principal, &active_roles)?;
+        Ok(AuthenticatedSession {
+            principal,
+            active_roles,
+            binding: AuthenticatedSessionBinding::new(),
+        })
+    }
+
+    /// Checks that `principal` may hold a session with `sorted_active_roles`
+    /// (canonical order) in this snapshot, without minting a session binding.
+    fn check_session(
+        &self,
+        principal: PrincipalId,
+        sorted_active_roles: &[PrincipalId],
+    ) -> Result<(), SessionBindingError> {
+        if sorted_active_roles
+            .windows(2)
+            .any(|roles| roles[0] == roles[1])
+        {
             return Err(SessionBindingError::DuplicateActiveRole);
         }
 
@@ -2226,8 +2279,11 @@ impl SecuritySnapshot {
         if session_principal.kind == PrincipalKind::Role {
             return Err(SessionBindingError::RoleCannotAuthenticate);
         }
+        if sorted_active_roles.is_empty() {
+            return Ok(());
+        }
         let reachable_roles = self.reachable_roles(principal);
-        for active_role in &active_roles {
+        for active_role in sorted_active_roles {
             let role = self
                 .principals
                 .get(active_role)
@@ -2242,12 +2298,7 @@ impl SecuritySnapshot {
                 return Err(SessionBindingError::UnreachableActiveRole);
             }
         }
-
-        Ok(AuthenticatedSession {
-            principal,
-            active_roles,
-            binding: AuthenticatedSessionBinding::new(),
-        })
+        Ok(())
     }
 
     fn reachable_roles(&self, principal: PrincipalId) -> HashSet<PrincipalId> {
@@ -2301,14 +2352,10 @@ impl SecuritySnapshot {
         let Some(function_target) = self.function_targets.get(&target.function) else {
             return ExecuteDecision::Denied(ExecuteDenial::UnknownFunction);
         };
-        let target_class = target.class().unwrap_or(TargetClass::Application);
-        if function_target.class != target_class {
-            return ExecuteDecision::Denied(ExecuteDenial::UnknownFunction);
-        }
-        if target_class == TargetClass::VerifiedStandard
-            && (function_target.executable_revision != target.executable_revision()
-                || function_target.standard_revision != target.standard_revision())
-        {
+        // A class-less target is an application target, so the pins must match
+        // exactly: the same class and, for a standard function, the same
+        // immutable standard snapshot and executable revision.
+        if function_target.standard != target.standard {
             return ExecuteDecision::Denied(ExecuteDenial::UnknownFunction);
         }
         let has_execute_grant = |grantee| {
@@ -2373,10 +2420,7 @@ impl SecuritySnapshot {
         session: &AuthenticatedSession,
         target: InvocationTarget,
     ) -> ExecuteDecision {
-        if target.class.is_some()
-            || target.standard_revision.is_some()
-            || target.executable_revision.is_some()
-        {
+        if target.standard.is_some() {
             return ExecuteDecision::Denied(ExecuteDenial::UnknownFunction);
         }
         if system_function_by_id(target.function).is_none() {
@@ -2408,7 +2452,9 @@ impl SecuritySnapshot {
         session: &AuthenticatedSession,
         target: InvocationTarget,
     ) -> Result<(), ExecuteDenial> {
-        self.bind_authenticated_session(session.principal, session.active_roles.clone())
+        // A session binds only in canonical role order, so the retained roles
+        // can be re-checked in place against this snapshot.
+        self.check_session(session.principal, &session.active_roles)
             .map_err(|_| ExecuteDenial::InvalidSession)?;
         if target.revision != self.revision {
             return Err(ExecuteDenial::RevisionMismatch);

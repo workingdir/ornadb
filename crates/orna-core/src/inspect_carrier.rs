@@ -32,30 +32,17 @@ pub enum InspectProjection {
 }
 
 impl InspectProjection {
+    /// Returns the wire tag, which is the tag of the matching carrier kind.
     pub const fn tag(self) -> u8 {
-        match self {
-            Self::InvocationNodes => 2,
-            Self::Calls => 3,
-            Self::Resources => 4,
-            Self::StateCells => 5,
-            Self::UiNodes => 6,
-            Self::PresentationCandidates => 7,
-            Self::RuntimeBindings => 8,
-            Self::SecurityDecisions => 9,
-        }
+        self.carrier_kind().tag()
     }
 
+    /// Returns the projection with this wire tag; the snapshot tag and every
+    /// unassigned tag are not projections.
     pub const fn from_tag(tag: u8) -> Option<Self> {
-        match tag {
-            2 => Some(Self::InvocationNodes),
-            3 => Some(Self::Calls),
-            4 => Some(Self::Resources),
-            5 => Some(Self::StateCells),
-            6 => Some(Self::UiNodes),
-            7 => Some(Self::PresentationCandidates),
-            8 => Some(Self::RuntimeBindings),
-            9 => Some(Self::SecurityDecisions),
-            _ => None,
+        match InspectCarrierKind::from_tag(tag) {
+            Some(kind) => kind.projection(),
+            None => None,
         }
     }
 
@@ -141,10 +128,21 @@ impl InspectCarrierKind {
         }
     }
 
+    /// Every carrier kind in wire-tag order.
+    const ALL: [Self; 9] = [
+        Self::Snapshot,
+        Self::InvocationNodes,
+        Self::Calls,
+        Self::Resources,
+        Self::StateCells,
+        Self::UiNodes,
+        Self::PresentationCandidates,
+        Self::RuntimeBindings,
+        Self::SecurityDecisions,
+    ];
+
     pub fn from_type_id(id: TypeId) -> Option<Self> {
-        (1..=9)
-            .filter_map(Self::from_tag)
-            .find(|kind| kind.type_id() == id)
+        Self::ALL.into_iter().find(|kind| kind.type_id() == id)
     }
 
     pub const fn projection(self) -> Option<InspectProjection> {
@@ -496,6 +494,17 @@ fn validate_rows(rows: &[Vec<u8>]) -> Result<(), InspectCarrierError> {
     Ok(())
 }
 
+/// Reads the big-endian `u32` at `offset`, or `None` when fewer than four bytes
+/// remain there.
+fn be_u32_at(bytes: &[u8], offset: usize) -> Option<u32> {
+    let end = offset.checked_add(4)?;
+    bytes
+        .get(offset..end)?
+        .try_into()
+        .ok()
+        .map(u32::from_be_bytes)
+}
+
 fn validate_orv5_value(bytes: &[u8], depth: usize) -> Result<(), InspectRowError> {
     if bytes.len() < ORV5_HEADER_BYTES {
         return Err(InspectRowError::TruncatedHeader {
@@ -506,9 +515,14 @@ fn validate_orv5_value(bytes: &[u8], depth: usize) -> Result<(), InspectRowError
         return Err(InspectRowError::InvalidMarker);
     }
     let tag = bytes[4];
-    let type_id = TypeId::from_bytes(bytes[5..21].try_into().expect("ORV5 header width"));
-    let declared =
-        u32::from_be_bytes(bytes[21..25].try_into().expect("ORV5 header width")) as usize;
+    let type_id = TypeId::from_bytes(bytes[5..21].try_into().map_err(|_| {
+        InspectRowError::TruncatedHeader {
+            actual: bytes.len(),
+        }
+    })?);
+    let declared = be_u32_at(bytes, 21).ok_or(InspectRowError::TruncatedHeader {
+        actual: bytes.len(),
+    })? as usize;
     if declared > ORV5_PAYLOAD_LIMIT {
         return Err(InspectRowError::PayloadTooLarge {
             actual: declared,
@@ -572,12 +586,9 @@ fn require_fixed(tag: u8, payload: &[u8], expected: usize) -> Result<(), Inspect
 }
 
 fn validate_record_payload(payload: &[u8], depth: usize) -> Result<(), InspectRowError> {
-    if payload.len() < 4 {
-        return Err(InspectRowError::TruncatedRecord {
-            actual: payload.len(),
-        });
-    }
-    let count = u32::from_be_bytes(payload[..4].try_into().expect("record count width")) as usize;
+    let count = be_u32_at(payload, 0).ok_or(InspectRowError::TruncatedRecord {
+        actual: payload.len(),
+    })? as usize;
     let mut cursor = 4;
     let mut field_identities = HashSet::new();
     let mut previous_field_identity: Option<&[u8]> = None;
@@ -589,11 +600,9 @@ fn validate_record_payload(payload: &[u8], depth: usize) -> Result<(), InspectRo
         }
         let field_identity = &payload[cursor..cursor + 16];
         cursor += 16;
-        let length = u32::from_be_bytes(
-            payload[cursor..cursor + 4]
-                .try_into()
-                .expect("record field length width"),
-        ) as usize;
+        let length = be_u32_at(payload, cursor).ok_or(InspectRowError::TruncatedRecord {
+            actual: payload.len().saturating_sub(cursor),
+        })? as usize;
         cursor += 4;
         let remaining = payload.len().saturating_sub(cursor);
         if length < ORV5_HEADER_BYTES || length > remaining {
@@ -622,13 +631,16 @@ fn validate_record_payload(payload: &[u8], depth: usize) -> Result<(), InspectRo
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// The outer constructor of one constructed-value descriptor. Child
+/// descriptors are checked while parsing and then dropped: the carrier checks
+/// only the ORV5 shape of each child value, never its declared type.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Descriptor {
     Named,
     Reference,
-    List(Box<Self>),
-    Map(Box<Self>, Box<Self>),
-    Option(Box<Self>),
+    List,
+    Map,
+    Option,
 }
 
 fn validate_constructed_payload(
@@ -663,7 +675,7 @@ fn validate_constructed_payload(
     if matches!(descriptor, Descriptor::Named | Descriptor::Reference) {
         return Err(InspectRowError::UnsupportedConstructedRoot);
     }
-    validate_constructor_content(&descriptor, &payload[descriptor_end..], depth + 1)
+    validate_constructor_content(descriptor, &payload[descriptor_end..], depth + 1)
 }
 
 fn parse_descriptor(
@@ -693,26 +705,25 @@ fn parse_descriptor(
                 Descriptor::Reference
             })
         }
-        0x02 => Ok(Descriptor::List(Box::new(parse_descriptor(
-            bytes,
-            cursor,
-            depth + 1,
-        )?))),
-        0x03 => Ok(Descriptor::Map(
-            Box::new(parse_descriptor(bytes, cursor, depth + 1)?),
-            Box::new(parse_descriptor(bytes, cursor, depth + 1)?),
-        )),
-        0x04 => Ok(Descriptor::Option(Box::new(parse_descriptor(
-            bytes,
-            cursor,
-            depth + 1,
-        )?))),
+        0x02 => {
+            parse_descriptor(bytes, cursor, depth + 1)?;
+            Ok(Descriptor::List)
+        }
+        0x03 => {
+            parse_descriptor(bytes, cursor, depth + 1)?;
+            parse_descriptor(bytes, cursor, depth + 1)?;
+            Ok(Descriptor::Map)
+        }
+        0x04 => {
+            parse_descriptor(bytes, cursor, depth + 1)?;
+            Ok(Descriptor::Option)
+        }
         _ => Err(InspectRowError::UnknownDescriptorTag { tag }),
     }
 }
 
 fn validate_constructor_content(
-    descriptor: &Descriptor,
+    descriptor: Descriptor,
     content: &[u8],
     depth: usize,
 ) -> Result<(), InspectRowError> {
@@ -720,14 +731,15 @@ fn validate_constructor_content(
         return Err(InspectRowError::ConstructedDepthExceeded);
     }
     match descriptor {
-        Descriptor::Option(_child) => {
+        Descriptor::Option => {
             let Some(&presence) = content.first() else {
                 return Err(InspectRowError::TruncatedConstructedContent);
             };
             match presence {
                 0 if content.len() == 1 => Ok(()),
                 1 if content.len() >= 5 => {
-                    let length = u32::from_be_bytes(content[1..5].try_into().expect("child length"))
+                    let length = be_u32_at(content, 1)
+                        .ok_or(InspectRowError::TruncatedConstructedContent)?
                         as usize;
                     if length != content.len() - 5 {
                         return Err(InspectRowError::InvalidNestedLength {
@@ -740,44 +752,28 @@ fn validate_constructor_content(
                 _ => Err(InspectRowError::InvalidOptionPresence { value: presence }),
             }
         }
-        Descriptor::List(child) => validate_repeated_content(child, content, depth),
-        Descriptor::Map(key, value) => {
-            if content.len() < 4 {
-                return Err(InspectRowError::TruncatedConstructedContent);
-            }
-            let count = u32::from_be_bytes(content[..4].try_into().expect("map count")) as usize;
-            let mut cursor = 4;
-            for _ in 0..count {
-                cursor = validate_child_at(content, cursor, depth, key)?;
-                cursor = validate_child_at(content, cursor, depth, value)?;
-            }
-            if cursor == content.len() {
-                Ok(())
-            } else {
-                Err(InspectRowError::TrailingBytes {
-                    declared: cursor,
-                    actual: content.len(),
-                })
-            }
-        }
+        Descriptor::List => validate_repeated_content(content, depth, 1),
+        Descriptor::Map => validate_repeated_content(content, depth, 2),
         Descriptor::Named | Descriptor::Reference => {
             Err(InspectRowError::UnsupportedConstructedRoot)
         }
     }
 }
 
+/// Validates a `u32` count followed by `count * children_per_item`
+/// length-prefixed ORV5 children (a list element, or a map key and value), which
+/// must consume all of `content`.
 fn validate_repeated_content(
-    child: &Descriptor,
     content: &[u8],
     depth: usize,
+    children_per_item: usize,
 ) -> Result<(), InspectRowError> {
-    if content.len() < 4 {
-        return Err(InspectRowError::TruncatedConstructedContent);
-    }
-    let count = u32::from_be_bytes(content[..4].try_into().expect("list count")) as usize;
+    let count = be_u32_at(content, 0).ok_or(InspectRowError::TruncatedConstructedContent)? as usize;
     let mut cursor = 4;
     for _ in 0..count {
-        cursor = validate_child_at(content, cursor, depth, child)?;
+        for _ in 0..children_per_item {
+            cursor = validate_child_at(content, cursor, depth)?;
+        }
     }
     if cursor == content.len() {
         Ok(())
@@ -793,16 +789,9 @@ fn validate_child_at(
     content: &[u8],
     cursor: usize,
     depth: usize,
-    _descriptor: &Descriptor,
 ) -> Result<usize, InspectRowError> {
-    if content.len().saturating_sub(cursor) < 4 {
-        return Err(InspectRowError::TruncatedConstructedContent);
-    }
-    let length = u32::from_be_bytes(
-        content[cursor..cursor + 4]
-            .try_into()
-            .expect("child length width"),
-    ) as usize;
+    let length =
+        be_u32_at(content, cursor).ok_or(InspectRowError::TruncatedConstructedContent)? as usize;
     let value_start = cursor + 4;
     let remaining = content.len().saturating_sub(value_start);
     if length < ORV5_HEADER_BYTES || length > remaining {
@@ -833,17 +822,19 @@ impl<'a> Reader<'a> {
         self.position = end;
         Ok(value)
     }
+    fn array<const N: usize>(&mut self) -> Result<[u8; N], InspectCarrierError> {
+        self.take(N)?
+            .try_into()
+            .map_err(|_| InspectCarrierError::Truncated)
+    }
     fn u8(&mut self) -> Result<u8, InspectCarrierError> {
-        Ok(self.take(1)?[0])
+        Ok(u8::from_be_bytes(self.array()?))
     }
     fn u16(&mut self) -> Result<u16, InspectCarrierError> {
-        Ok(u16::from_be_bytes(self.take(2)?.try_into().expect("width")))
+        Ok(u16::from_be_bytes(self.array()?))
     }
     fn u32(&mut self) -> Result<u32, InspectCarrierError> {
-        Ok(u32::from_be_bytes(self.take(4)?.try_into().expect("width")))
-    }
-    fn array<const N: usize>(&mut self) -> Result<[u8; N], InspectCarrierError> {
-        Ok(self.take(N)?.try_into().expect("width"))
+        Ok(u32::from_be_bytes(self.array()?))
     }
     fn remaining(&self) -> usize {
         self.bytes.len() - self.position

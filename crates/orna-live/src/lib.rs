@@ -21,10 +21,10 @@ use std::{
     net::{Ipv4Addr, SocketAddr, TcpListener},
     pin::Pin,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, MutexGuard,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    task::Waker,
+    task::{Poll, Waker},
 };
 
 use orna_foundation::{
@@ -214,12 +214,56 @@ struct ApplicationWorkState {
     sessions: BTreeMap<[u8; 16], ApplicationSessionWork>,
 }
 
+impl ApplicationWorkState {
+    /// The work record of `session`, created on first use. A new session is
+    /// refused once `MAX_APPLICATION_SESSIONS` are tracked.
+    fn session_entry(&mut self, session: [u8; 16]) -> Result<&mut ApplicationSessionWork> {
+        if !self.sessions.contains_key(&session) && self.sessions.len() >= MAX_APPLICATION_SESSIONS
+        {
+            return Err(Error::Limit);
+        }
+        Ok(self
+            .sessions
+            .entry(session)
+            .or_insert_with(ApplicationSessionWork::new))
+    }
+}
+
 struct ApplicationSessionWork {
     phase: ApplicationWorkPhase,
     work: BTreeMap<u64, ApplicationWorkEntry>,
-    failed: bool,
+    /// Requests whose lease was dropped without acknowledging its terminal
+    /// boundary. A session with any such request cannot be joined or retired
+    /// as successfully drained.
     failed_requests: BTreeSet<[u8; 16]>,
     waiters: Vec<Waker>,
+}
+
+impl ApplicationSessionWork {
+    fn new() -> Self {
+        Self {
+            phase: ApplicationWorkPhase::Open,
+            work: BTreeMap::new(),
+            failed_requests: BTreeSet::new(),
+            waiters: Vec::new(),
+        }
+    }
+
+    fn has_failed(&self) -> bool {
+        !self.failed_requests.is_empty()
+    }
+
+    /// Parks `waker` until the next release, unless it is already parked.
+    /// Fails when `MAX_APPLICATION_JOIN_WAITERS` distinct tasks already wait.
+    fn park(&mut self, waker: &Waker) -> Result<()> {
+        if !self.waiters.iter().any(|waiter| waiter.will_wake(waker)) {
+            if self.waiters.len() >= MAX_APPLICATION_JOIN_WAITERS {
+                return Err(Error::Limit);
+            }
+            self.waiters.push(waker.clone());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -234,6 +278,18 @@ struct ApplicationWorkEntry {
     parent: Option<u64>,
     cancellation: Option<oneshot::Sender<()>>,
     cancelled: Arc<AtomicBool>,
+}
+
+impl ApplicationWorkEntry {
+    /// Marks the work cancelled and wakes its cancellation receiver once.
+    fn cancel(&mut self) {
+        self.cancelled.store(true, Ordering::Release);
+        if let Some(cancellation) = self.cancellation.take() {
+            // A send fails only when the receiver is gone, which means the
+            // work has nothing left to cancel.
+            let _ = cancellation.send(());
+        }
+    }
 }
 
 fn request_work_ids(session_work: &ApplicationSessionWork, request: [u8; 16]) -> BTreeSet<u64> {
@@ -261,6 +317,33 @@ const MAX_APPLICATION_SESSIONS: usize = 4096;
 const MAX_APPLICATION_WORK_PER_SESSION: usize = 4096;
 const MAX_APPLICATION_JOIN_WAITERS: usize = 8;
 
+fn lock_work_state(state: &Mutex<ApplicationWorkState>) -> MutexGuard<'_, ApplicationWorkState> {
+    state.lock().expect("application work state poisoned")
+}
+
+/// Resolves once `finished` yields a result for the session's work record; the
+/// polling task is parked until then. Fails with [`Error::Closed`] when the
+/// session record is gone.
+fn join_session<T: 'static>(
+    state: Arc<Mutex<ApplicationWorkState>>,
+    session: [u8; 16],
+    finished: impl Fn(&ApplicationSessionWork) -> Option<Result<T>> + 'static,
+) -> Pin<Box<dyn Future<Output = Result<T>>>> {
+    Box::pin(futures::future::poll_fn(move |context| {
+        let mut state = lock_work_state(&state);
+        let Some(session_work) = state.sessions.get_mut(&session) else {
+            return Poll::Ready(Err(Error::Closed));
+        };
+        if let Some(result) = finished(session_work) {
+            return Poll::Ready(result);
+        }
+        match session_work.park(context.waker()) {
+            Ok(()) => Poll::Pending,
+            Err(error) => Poll::Ready(Err(error)),
+        }
+    }))
+}
+
 /// A lease held by one admitted application callback or descendant.
 pub struct LiveApplicationWorkLease {
     supervisor: LiveApplicationWorkSupervisor,
@@ -283,6 +366,10 @@ impl LiveApplicationWorkSupervisor {
         }
     }
 
+    fn lock(&self) -> MutexGuard<'_, ApplicationWorkState> {
+        lock_work_state(&self.state)
+    }
+
     /// Admits a root application callback for a session.
     ///
     /// # Errors
@@ -299,25 +386,10 @@ impl LiveApplicationWorkSupervisor {
         request: [u8; 16],
         parent: Option<u64>,
     ) -> Result<LiveApplicationWorkLease> {
-        let mut state = self.state.lock().expect("application work state poisoned");
-        if !state.sessions.contains_key(&session)
-            && state.sessions.len() >= MAX_APPLICATION_SESSIONS
-        {
-            return Err(Error::Limit);
-        }
+        let mut state = self.lock();
         let id = state.next_id;
-        state.next_id = state.next_id.checked_add(1).ok_or(Error::Limit)?;
-        let session_work =
-            state
-                .sessions
-                .entry(session)
-                .or_insert_with(|| ApplicationSessionWork {
-                    phase: ApplicationWorkPhase::Open,
-                    work: BTreeMap::new(),
-                    failed: false,
-                    failed_requests: BTreeSet::new(),
-                    waiters: Vec::new(),
-                });
+        state.next_id = id.checked_add(1).ok_or(Error::Limit)?;
+        let session_work = state.session_entry(session)?;
         if session_work.phase != ApplicationWorkPhase::Open
             || parent.is_some_and(|parent| {
                 session_work
@@ -376,42 +448,20 @@ impl LiveApplicationWorkSupervisor {
         session: [u8; 16],
         request: [u8; 16],
     ) -> Pin<Box<dyn Future<Output = Result<bool>>>> {
-        let found = self.begin_request_cancellation(session, request);
-        let state = Arc::clone(&self.state);
-        Box::pin(async move {
-            if !found {
-                return Ok(false);
-            }
-            futures::future::poll_fn(move |context| {
-                let mut state = state.lock().expect("application work state poisoned");
-                let Some(session_work) = state.sessions.get_mut(&session) else {
-                    return std::task::Poll::Ready(Err(Error::Closed));
-                };
-                if request_work_ids(session_work, request).is_empty() {
-                    return std::task::Poll::Ready(
-                        (!session_work.failed_requests.contains(&request))
-                            .then_some(true)
-                            .ok_or(Error::DeletionFailed),
-                    );
-                }
-                if !session_work
-                    .waiters
-                    .iter()
-                    .any(|waiter| waiter.will_wake(context.waker()))
-                {
-                    if session_work.waiters.len() >= MAX_APPLICATION_JOIN_WAITERS {
-                        return std::task::Poll::Ready(Err(Error::Limit));
-                    }
-                    session_work.waiters.push(context.waker().clone());
-                }
-                std::task::Poll::Pending
+        if !self.begin_request_cancellation(session, request) {
+            return Box::pin(std::future::ready(Ok(false)));
+        }
+        join_session(Arc::clone(&self.state), session, move |session_work| {
+            request_work_ids(session_work, request).is_empty().then(|| {
+                (!session_work.failed_requests.contains(&request))
+                    .then_some(true)
+                    .ok_or(Error::DeletionFailed)
             })
-            .await
         })
     }
 
     fn begin_request_cancellation(&self, session: [u8; 16], request: [u8; 16]) -> bool {
-        let mut state = self.state.lock().expect("application work state poisoned");
+        let mut state = self.lock();
         let Some(session_work) = state.sessions.get_mut(&session) else {
             return false;
         };
@@ -421,10 +471,7 @@ impl LiveApplicationWorkSupervisor {
         }
         for id in pending {
             if let Some(entry) = session_work.work.get_mut(&id) {
-                entry.cancelled.store(true, Ordering::Release);
-                if let Some(cancellation) = entry.cancellation.take() {
-                    let _ = cancellation.send(());
-                }
+                entry.cancel();
             }
         }
         true
@@ -439,54 +486,21 @@ impl LiveApplicationWorkSupervisor {
     /// drain or while polling the join.
     #[must_use]
     pub fn cancel_and_join(&self, session: [u8; 16]) -> Pin<Box<dyn Future<Output = Result<()>>>> {
-        let result = self.begin_draining(session);
-        let state = Arc::clone(&self.state);
-        Box::pin(async move {
-            result?;
-            futures::future::poll_fn(move |context| {
-                let mut state = state.lock().expect("application work state poisoned");
-                let session_work = state.sessions.get_mut(&session).ok_or(Error::Closed)?;
-                if session_work.work.is_empty() {
-                    return std::task::Poll::Ready(
-                        (!session_work.failed)
-                            .then_some(())
-                            .ok_or(Error::DeletionFailed),
-                    );
-                }
-                if !session_work
-                    .waiters
-                    .iter()
-                    .any(|waiter| waiter.will_wake(context.waker()))
-                {
-                    if session_work.waiters.len() >= MAX_APPLICATION_JOIN_WAITERS {
-                        return std::task::Poll::Ready(Err(Error::Limit));
-                    }
-                    session_work.waiters.push(context.waker().clone());
-                }
-                std::task::Poll::Pending
+        if let Err(error) = self.begin_draining(session) {
+            return Box::pin(std::future::ready(Err(error)));
+        }
+        join_session(Arc::clone(&self.state), session, |session_work| {
+            session_work.work.is_empty().then(|| {
+                (!session_work.has_failed())
+                    .then_some(())
+                    .ok_or(Error::DeletionFailed)
             })
-            .await
         })
     }
 
     fn begin_draining(&self, session: [u8; 16]) -> Result<()> {
-        let mut state = self.state.lock().expect("application work state poisoned");
-        if !state.sessions.contains_key(&session)
-            && state.sessions.len() >= MAX_APPLICATION_SESSIONS
-        {
-            return Err(Error::Limit);
-        }
-        let session_work =
-            state
-                .sessions
-                .entry(session)
-                .or_insert_with(|| ApplicationSessionWork {
-                    phase: ApplicationWorkPhase::Open,
-                    work: BTreeMap::new(),
-                    failed: false,
-                    failed_requests: BTreeSet::new(),
-                    waiters: Vec::new(),
-                });
+        let mut state = self.lock();
+        let session_work = state.session_entry(session)?;
         if session_work.phase == ApplicationWorkPhase::Deleted {
             return Ok(());
         }
@@ -505,10 +519,7 @@ impl LiveApplicationWorkSupervisor {
                 continue;
             }
             if let Some(entry) = session_work.work.get_mut(&id) {
-                entry.cancelled.store(true, Ordering::Release);
-                if let Some(cancellation) = entry.cancellation.take() {
-                    let _ = cancellation.send(());
-                }
+                entry.cancel();
             }
             pending.extend(
                 session_work
@@ -530,24 +541,9 @@ impl LiveApplicationWorkSupervisor {
     ///
     /// Panics if the supervisor state mutex is poisoned.
     pub fn retire(&self, session: [u8; 16]) -> Result<()> {
-        let mut state = self.state.lock().expect("application work state poisoned");
-        if !state.sessions.contains_key(&session)
-            && state.sessions.len() >= MAX_APPLICATION_SESSIONS
-        {
-            return Err(Error::Limit);
-        }
-        let session_work =
-            state
-                .sessions
-                .entry(session)
-                .or_insert_with(|| ApplicationSessionWork {
-                    phase: ApplicationWorkPhase::Open,
-                    work: BTreeMap::new(),
-                    failed: false,
-                    failed_requests: BTreeSet::new(),
-                    waiters: Vec::new(),
-                });
-        if session_work.work.is_empty() && !session_work.failed {
+        let mut state = self.lock();
+        let session_work = state.session_entry(session)?;
+        if session_work.work.is_empty() && !session_work.has_failed() {
             session_work.phase = ApplicationWorkPhase::Deleted;
             Ok(())
         } else {
@@ -563,7 +559,7 @@ impl LiveApplicationWorkSupervisor {
     ///
     /// Panics if the supervisor state mutex is poisoned.
     pub fn forget(&self, session: [u8; 16]) {
-        let mut state = self.state.lock().expect("application work state poisoned");
+        let mut state = self.lock();
         if state.sessions.get(&session).is_some_and(|session_work| {
             session_work.phase == ApplicationWorkPhase::Deleted && session_work.work.is_empty()
         }) {
@@ -581,14 +577,7 @@ impl LiveApplicationWorkSupervisor {
     /// drain or joining sessions.
     #[must_use]
     pub fn cancel_and_join_all(&self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
-        let sessions = self
-            .state
-            .lock()
-            .expect("application work state poisoned")
-            .sessions
-            .keys()
-            .copied()
-            .collect::<Vec<_>>();
+        let sessions = self.lock().sessions.keys().copied().collect::<Vec<_>>();
         let mut admission_error = None;
         for session in &sessions {
             if let Err(error) = self.begin_draining(*session)
@@ -611,15 +600,15 @@ impl LiveApplicationWorkSupervisor {
         })
     }
 
+    /// Whether the session no longer admits new work or still has admitted
+    /// work in flight.
     ///
     /// # Panics
     ///
     /// Panics if the supervisor state mutex is poisoned.
     #[must_use]
     pub fn is_draining_or_active(&self, session: [u8; 16]) -> bool {
-        self.state
-            .lock()
-            .expect("application work state poisoned")
+        self.lock()
             .sessions
             .get(&session)
             .is_some_and(|session_work| {
@@ -628,7 +617,7 @@ impl LiveApplicationWorkSupervisor {
     }
 
     fn release(&self, session: [u8; 16], id: u64) {
-        let mut state = self.state.lock().expect("application work state poisoned");
+        let mut state = self.lock();
         if let Some(session_work) = state.sessions.get_mut(&session) {
             session_work.work.remove(&id);
             let waiters = std::mem::take(&mut session_work.waiters);
@@ -638,26 +627,14 @@ impl LiveApplicationWorkSupervisor {
             }
         }
     }
-
-    fn complete(&self, session: [u8; 16], id: u64) {
-        self.release(session, id);
-    }
 }
 
 impl Drop for LiveApplicationWorkLease {
     fn drop(&mut self) {
-        if !self.completed {
-            let mut state = self
-                .supervisor
-                .state
-                .lock()
-                .expect("application work state poisoned");
-            if let Some(session_work) = state.sessions.get_mut(&self.session) {
-                session_work.failed = true;
-                if let Some(entry) = session_work.work.get(&self.id) {
-                    session_work.failed_requests.insert(entry.request);
-                }
-            }
+        if !self.completed
+            && let Some(session_work) = self.supervisor.lock().sessions.get_mut(&self.session)
+        {
+            session_work.failed_requests.insert(self.request);
         }
         self.supervisor.release(self.session, self.id);
     }
@@ -675,9 +652,7 @@ impl LiveApplicationWorkLease {
         self.cancelled.load(Ordering::Acquire)
             || self
                 .supervisor
-                .state
                 .lock()
-                .expect("application work state poisoned")
                 .sessions
                 .get(&self.session)
                 .is_none_or(|session_work| session_work.phase != ApplicationWorkPhase::Open)
@@ -711,7 +686,7 @@ impl LiveApplicationWorkLease {
     pub fn complete(&mut self) {
         if !self.completed {
             self.completed = true;
-            self.supervisor.complete(self.session, self.id);
+            self.supervisor.release(self.session, self.id);
         }
     }
 
@@ -732,6 +707,7 @@ impl Default for LiveApplicationWorkSupervisor {
         Self::new()
     }
 }
+
 /// A staged, Orna-controlled table activation returned by a transactional
 /// remote Eval adapter. The host supplies the admitted CWD context and owns
 /// the writer-fenced commit; application code never commits a wire result
@@ -1493,6 +1469,17 @@ impl LiveSessionChildren for LiveApplicationWorkSupervisor {
     }
 }
 
+/// What a `Cancel` frame asks to cancel, as it stood at admission.
+#[derive(Clone, Copy)]
+struct CancelTarget {
+    id: [u8; 16],
+    kind: TargetKind,
+    /// Whether the target request was still running or the target watch open.
+    active: bool,
+    /// Whether the target is a request tracked by the durable runtime.
+    durable: bool,
+}
+
 /// Work admitted by the transport before application execution. The ticket
 /// owns the application lease and is therefore not complete until the
 /// application task explicitly acknowledges its terminal boundary.
@@ -1511,7 +1498,9 @@ pub struct LiveApplicationTicket {
     work: LiveApplicationWorkLease,
     invoke_callback: bool,
     resync_revisions: usize,
-    cancel_target: Option<([u8; 16], TargetKind, bool, bool)>,
+    /// Whether the target of a `Cancel` frame was still active at admission.
+    /// Always false for any other message.
+    cancel_target_active: bool,
 }
 
 /// Result returned by the application task to the transport actor.
@@ -2816,7 +2805,12 @@ impl LiveHost {
             let durable_request = *target_kind == TargetKind::Request && self.runtime.is_some();
             invoke_callback =
                 target_active && (*target_kind == TargetKind::Watch || !durable_request);
-            cancel_target = Some((*target, *target_kind, target_active, durable_request));
+            cancel_target = Some(CancelTarget {
+                id: *target,
+                kind: *target_kind,
+                active: target_active,
+                durable: durable_request,
+            });
         } else if let Message::Unsubscribe = &envelope.message {
             let watch = envelope.watch.ok_or(Error::InvalidMessage)?;
             invoke_callback = self.watches.contains(&(session, watch));
@@ -2908,8 +2902,12 @@ impl LiveHost {
                 as Arc<dyn LiveAdminEffectDispatcher>),
             _ => None,
         };
-        if let Some((target, target_kind, target_active, durable_request)) = cancel_target
-            && target_active
+        if let Some(CancelTarget {
+            id: target,
+            kind: target_kind,
+            durable: durable_request,
+            ..
+        }) = cancel_target.filter(|cancel| cancel.active)
         {
             let target_cancelled = if target_kind == TargetKind::Request {
                 if let Err(error) = self
@@ -2953,7 +2951,7 @@ impl LiveHost {
             work,
             invoke_callback,
             resync_revisions,
-            cancel_target,
+            cancel_target_active: cancel_target.is_some_and(|cancel| cancel.active),
         }))
     }
     /// Validates and publishes a completed application ticket after the actor
@@ -2982,7 +2980,7 @@ impl LiveHost {
             activation_lease: _,
             work,
             resync_revisions,
-            cancel_target,
+            cancel_target_active,
             ..
         } = ticket;
         let message = *message;
@@ -3166,10 +3164,7 @@ impl LiveHost {
                     response,
                     self.limits.protocol,
                 )?;
-                if let Some((_, _, target_active, _)) = cancel_target
-                    && target_active
-                    && *target_kind == TargetKind::Watch
-                {
+                if cancel_target_active && *target_kind == TargetKind::Watch {
                     close_watch = Some(*target);
                 }
                 DispatchOutcome {
@@ -3360,12 +3355,17 @@ impl LiveHost {
         Ok(mismatch)
     }
 
-    #[allow(clippy::too_many_lines)]
+    /// Dispatches one inbound frame to completion in a single call: protocol
+    /// admission, the application callback and the terminal response, with the
+    /// transport borrowed throughout. Use [`Self::prepare_application_frame`]
+    /// and [`Self::complete_application`] when the application work must run
+    /// without borrowing the transport.
     ///
     /// # Errors
     ///
     /// Returns attachment, security, serving, and response validation errors
     /// as produced by the frame pipeline; see `Self::complete`.
+    #[allow(clippy::too_many_lines)]
     pub async fn dispatch_frame(
         &mut self,
         attachment: [u8; 16],

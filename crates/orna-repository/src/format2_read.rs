@@ -23,7 +23,7 @@ use crate::format2_ogb::{
 };
 use crate::format2_orr::{Orr2BlobField, Orr2DecodeError, decode_orr2_blob_field};
 use crate::format2_rov::{Rov2Blob, Rov2DecodeError, decode_rov2_blob};
-use crate::native_graph::{hex_decode, hex_encode};
+use crate::hex::{hex_decode, hex_encode};
 use crate::object_reader::{ObjectKind, ObjectReader, TreeEntry, TreeEntryMode};
 use crate::{FormatContextError, RepositoryFormat};
 use crate::{GitCommitRef, Repository, RepositoryError};

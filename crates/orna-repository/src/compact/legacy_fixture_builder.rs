@@ -103,6 +103,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use super::{compact_date_value, legacy_fixture_writer::with_page_checksums};
+use crate::hex::hex_encode;
 
 const TABLE_NAMESPACE: u64 = 0x018f_0000_0000_7100;
 const FIELD_NAMESPACE: u64 = 0x018f_0000_0000_7200;
@@ -312,7 +313,7 @@ impl Column {
             KeyValue::new("orna.table".to_owned(), Some(table.to_string())),
             KeyValue::new(
                 "orna.schema.sha256".to_owned(),
-                Some(hex_digest(&schema_fingerprint(schema))),
+                Some(hex_encode(&schema_fingerprint(schema))),
             ),
             KeyValue::new(
                 "orna.schema.ovb".to_owned(),
@@ -765,12 +766,12 @@ fn shard_record(schema: &[u8; 32], entries: &[EntryRecord]) -> String {
         output.push_str(&format!(
             "{{segment_id: \"{}\", role: \"data\", generation: {GENERATION}, schema_id: \"{}\", profile_version: 1, encoder_version: \"{ENCODER}\", relative_path: \"{}\", git_object_id: \"{}\", sha256: \"{}\", min_key: \"{}\", max_key: \"{}\", min_event_time: null, max_event_time: null, row_count: {}, compressed_bytes: {}, columns: \"{}\", row_group_index: true, bloom: false}}",
             entry.segment_id,
-            hex_digest(schema),
+            hex_encode(schema),
             entry.relative_path,
             entry.git_object_id,
-            hex_digest(&entry.sha256),
-            hex_digest(&entry.min_key),
-            hex_digest(&entry.max_key),
+            hex_encode(&entry.sha256),
+            hex_encode(&entry.min_key),
+            hex_encode(&entry.max_key),
             entry.row_count,
             entry.compressed_bytes,
             orna_value::base64_encode(&entry.columns),
@@ -790,10 +791,10 @@ fn manifest_record(
 ) -> String {
     format!(
         "{{profile: \"{PROFILE}\", table: \"{table}\", schema: \"{}\", next_generation: {NEXT_GENERATION}, shards: [{{number: {SHARD_NUMBER}, min_key: \"{}\", max_key: \"{}\", entries: {entries}, file: \"{SHARD_FILE}\", hash: \"{}\"}}]}}\n",
-        hex_digest(schema),
-        hex_digest(min_key),
-        hex_digest(max_key),
-        hex_digest(shard_sha256),
+        hex_encode(schema),
+        hex_encode(min_key),
+        hex_encode(max_key),
+        hex_encode(shard_sha256),
     )
 }
 
@@ -926,10 +927,6 @@ fn schema_fingerprint(schema: &SchemaDescriptor) -> [u8; 32] {
     digest.update(b"orna.schema.v1\0");
     digest.update(schema.encode().expect("schema encoding"));
     digest.finalize().into()
-}
-
-fn hex_digest(digest: &[u8]) -> String {
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// Runs git with fixed author/committer times so bundle bytes are reproducible.

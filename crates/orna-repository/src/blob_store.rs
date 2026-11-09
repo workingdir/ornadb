@@ -1,21 +1,13 @@
 //! OGB-2 Blob/content primitives for the format-3 native graph.
 //!
-//! These types carry immutable content identity, chunk spans, native byte
-//! index references, and streamed digest state.  They do not hydrate media
-//! when metadata is inspected, and they do not provide a second object store
-//! or a legacy loose/compact/Parquet writer.
+//! These types carry immutable content identity, chunk spans, and streamed
+//! digest state.  They do not hydrate media when metadata is inspected, and
+//! they do not provide a second object store or a legacy
+//! loose/compact/Parquet writer.
 
-// The format-3 Blob descriptor and byte-index types below describe the store
-// surface the writer path has not reached yet: the module exposes them, and the
-// publication code still uses the older representation. The allow is scoped to
-// this module so a new dead item elsewhere is still reported.
-#![allow(dead_code)]
-
-use std::{cell::Cell, fmt, io::Read};
+use std::{cell::Cell, fmt};
 
 use sha2::{Digest, Sha256};
-
-use crate::native_graph::{GraphError, MAX_GRAPH_HEIGHT, MAX_REFS, NativeObjectId};
 
 pub const MAX_BLOB_LENGTH: u64 = i64::MAX as u64;
 pub const GEAR_MINIMUM: usize = 65_536;
@@ -45,86 +37,6 @@ impl ContentIdentity {
 
     pub const fn sha256(self) -> [u8; 32] {
         self.sha256
-    }
-}
-
-/// The one format-3 Blob descriptor.  A nonempty descriptor always uses a
-/// native byte graph root; an empty descriptor is the single canonical empty
-/// form with no root.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BlobDescriptor {
-    identity: ContentIdentity,
-    byte_root: Option<NativeObjectId>,
-}
-
-impl BlobDescriptor {
-    pub fn empty() -> Self {
-        Self {
-            identity: ContentIdentity {
-                length: 0,
-                sha256: sha256_bytes(&[]),
-            },
-            byte_root: None,
-        }
-    }
-
-    pub fn new(
-        identity: ContentIdentity,
-        byte_root: Option<NativeObjectId>,
-    ) -> Result<Self, BlobStoreError> {
-        if (identity.length() == 0) != byte_root.is_none() {
-            return Err(BlobStoreError::InvalidEmptyDescriptor);
-        }
-        if identity.length() == 0 && identity.sha256() != sha256_bytes(&[]) {
-            return Err(BlobStoreError::InvalidEmptyDescriptor);
-        }
-        Ok(Self {
-            identity,
-            byte_root,
-        })
-    }
-
-    /// Verifies the complete raw payload against this descriptor.  Native Git
-    /// object IDs are checked separately and never substituted for this hash.
-    pub fn verify_full_bytes(&self, bytes: &[u8]) -> Result<(), BlobStoreError> {
-        if bytes.len() as u64 != self.identity.length()
-            || sha256_bytes(bytes) != self.identity.sha256()
-        {
-            return Err(BlobStoreError::ContentIdentityMismatch);
-        }
-        Ok(())
-    }
-
-    pub const fn identity(&self) -> ContentIdentity {
-        self.identity
-    }
-
-    pub fn byte_root(&self) -> Option<&NativeObjectId> {
-        self.byte_root.as_ref()
-    }
-
-    pub fn metadata(&self) -> BlobMetadata {
-        BlobMetadata {
-            identity: self.identity,
-            has_payload_graph: self.byte_root.is_some(),
-        }
-    }
-}
-
-/// Metadata-only projection: no chunk or media payload is present here.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct BlobMetadata {
-    identity: ContentIdentity,
-    has_payload_graph: bool,
-}
-
-impl BlobMetadata {
-    pub const fn identity(self) -> ContentIdentity {
-        self.identity
-    }
-
-    pub const fn has_payload_graph(self) -> bool {
-        self.has_payload_graph
     }
 }
 
@@ -159,130 +71,6 @@ impl ChunkSpan {
 
     pub const fn sha256(&self) -> [u8; 32] {
         self.sha256
-    }
-
-    pub fn verify_bytes(&self, bytes: &[u8]) -> Result<(), BlobStoreError> {
-        if bytes.len() as u64 != self.length || sha256_bytes(bytes) != self.sha256 {
-            return Err(BlobStoreError::ChunkDigestMismatch);
-        }
-        Ok(())
-    }
-}
-
-/// One byte-index entry.  Leaf entries point to raw Git blobs and carry a
-/// chunk hash; higher-level entries point to byte-index trees and carry no
-/// chunk hash.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ByteIndexEntry {
-    span_length: u64,
-    target: NativeObjectId,
-    chunk_sha256: Option<[u8; 32]>,
-}
-
-impl ByteIndexEntry {
-    pub fn leaf(span: &ChunkSpan, target: NativeObjectId) -> Result<Self, BlobStoreError> {
-        Ok(Self {
-            span_length: span.length(),
-            target,
-            chunk_sha256: Some(span.sha256()),
-        })
-    }
-
-    pub fn branch(span_length: u64, target: NativeObjectId) -> Result<Self, BlobStoreError> {
-        if span_length == 0 || span_length > MAX_BLOB_LENGTH {
-            return Err(BlobStoreError::InvalidChunkSpan);
-        }
-        Ok(Self {
-            span_length,
-            target,
-            chunk_sha256: None,
-        })
-    }
-
-    pub const fn span_length(&self) -> u64 {
-        self.span_length
-    }
-
-    pub fn target(&self) -> &NativeObjectId {
-        &self.target
-    }
-
-    pub const fn chunk_sha256(&self) -> Option<[u8; 32]> {
-        self.chunk_sha256
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ByteIndexNode {
-    height: u8,
-    total_length: u64,
-    entries: Vec<ByteIndexEntry>,
-}
-
-impl ByteIndexNode {
-    pub fn leaf(entries: Vec<ByteIndexEntry>, total_length: u64) -> Result<Self, BlobStoreError> {
-        Self::new(0, entries, total_length)
-    }
-
-    pub fn branch(
-        height: u8,
-        entries: Vec<ByteIndexEntry>,
-        total_length: u64,
-    ) -> Result<Self, BlobStoreError> {
-        if height == 0 {
-            return Err(BlobStoreError::InvalidHeight);
-        }
-        Self::new(height, entries, total_length)
-    }
-
-    fn new(
-        height: u8,
-        entries: Vec<ByteIndexEntry>,
-        total_length: u64,
-    ) -> Result<Self, BlobStoreError> {
-        if height > MAX_GRAPH_HEIGHT || entries.len() > MAX_REFS {
-            return Err(BlobStoreError::BoundsExceeded);
-        }
-        if total_length > MAX_BLOB_LENGTH {
-            return Err(BlobStoreError::LengthExceeded(total_length));
-        }
-        if entries.is_empty() {
-            return Err(BlobStoreError::InvalidByteIndex);
-        }
-        let leaf = height == 0;
-        let algorithm = entries.first().map(|entry| entry.target.algorithm());
-        let mut sum = 0u64;
-        for entry in &entries {
-            if entry.span_length == 0
-                || entry.chunk_sha256.is_some() != leaf
-                || Some(entry.target.algorithm()) != algorithm
-            {
-                return Err(BlobStoreError::InvalidByteIndex);
-            }
-            sum = sum
-                .checked_add(entry.span_length)
-                .ok_or(BlobStoreError::InvalidByteIndex)?;
-        }
-        if sum != total_length || (total_length == 0 && !entries.is_empty()) {
-            return Err(BlobStoreError::InvalidByteIndex);
-        }
-        Ok(Self {
-            height,
-            total_length,
-            entries,
-        })
-    }
-
-    pub const fn height(&self) -> u8 {
-        self.height
-    }
-
-    pub const fn total_length(&self) -> u64 {
-        self.total_length
-    }
-
-    pub fn entries(&self) -> &[ByteIndexEntry] {
-        &self.entries
     }
 }
 
@@ -418,20 +206,6 @@ impl ContentDigest {
     }
 }
 
-pub fn digest_reader(reader: &mut impl Read) -> Result<ContentIdentity, BlobStoreError> {
-    let mut digest = ContentDigest::new();
-    let mut buffer = [0u8; 64 * 1024];
-    loop {
-        let read = reader
-            .read(&mut buffer)
-            .map_err(|_| BlobStoreError::ReadFailed)?;
-        if read == 0 {
-            return Ok(digest.finish());
-        }
-        digest.update(&buffer[..read])?;
-    }
-}
-
 pub fn digest_bytes(bytes: &[u8]) -> ContentIdentity {
     let mut digest = ContentDigest::new();
     digest.update(bytes).expect("slice length is bounded");
@@ -453,47 +227,19 @@ fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BlobStoreError {
     LengthExceeded(u64),
-    InvalidEmptyDescriptor,
     InvalidChunkSpan,
-    InvalidHeight,
-    BoundsExceeded,
-    InvalidByteIndex,
-    ContentIdentityMismatch,
-    ChunkDigestMismatch,
-    ReadFailed,
-    Native(GraphError),
 }
 
 impl fmt::Display for BlobStoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::LengthExceeded(length) => write!(f, "Blob length {length} exceeds 2^63-1"),
-            Self::InvalidEmptyDescriptor => f.write_str("empty descriptor must have no byte root"),
             Self::InvalidChunkSpan => f.write_str("invalid chunk span"),
-            Self::InvalidHeight => f.write_str("invalid byte-index height"),
-            Self::BoundsExceeded => {
-                f.write_str("byte-index fanout or height exceeds format bounds")
-            }
-            Self::InvalidByteIndex => f.write_str("byte-index spans do not match total length"),
-            Self::ContentIdentityMismatch => {
-                f.write_str("full Blob bytes do not match descriptor length or SHA-256")
-            }
-            Self::ChunkDigestMismatch => {
-                f.write_str("chunk bytes do not match span length or SHA-256")
-            }
-            Self::ReadFailed => f.write_str("content read failed"),
-            Self::Native(error) => error.fmt(f),
         }
     }
 }
 
 impl std::error::Error for BlobStoreError {}
-
-impl From<GraphError> for BlobStoreError {
-    fn from(error: GraphError) -> Self {
-        Self::Native(error)
-    }
-}
 
 #[cfg(test)]
 mod tests {

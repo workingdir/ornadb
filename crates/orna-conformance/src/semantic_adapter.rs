@@ -1021,8 +1021,7 @@ impl RuntimeEvaluator for BoundedEvaluator {
         }
     }
 
-    fn validate_rows(&mut self, project: &ProjectUnit) -> StageOutcome<Diagnostic> {
-        let _ = project;
+    fn validate_rows(&mut self, _: &ProjectUnit) -> StageOutcome<Diagnostic> {
         StageOutcome::Skipped {
             reason: "row validation requires resolved table schemas and path-derived keys".into(),
         }
@@ -2465,14 +2464,16 @@ impl DurableTransactionalEvaluator {
         .is_ok()
     }
 
+    #[cfg(test)]
     fn record_activation_time(&self, activation_time: SystemTime) {
-        #[cfg(test)]
         if let Some(observer) = &self.activation_time_observer {
             *observer.lock().expect("activation observer lock") = Some(activation_time);
         }
-        #[cfg(not(test))]
-        let _ = activation_time;
     }
+
+    /// Only tests observe the activation instant.
+    #[cfg(not(test))]
+    fn record_activation_time(&self, _: SystemTime) {}
 
     /// Executes one admitted source activation against durable committed rows.
     /// Failed source evaluation never reaches the durable commit boundary.
@@ -8227,29 +8228,7 @@ fn lower_relation_expression_with_resolution(
     })
     .or_else(|| relation_lookup(expression, table_keys, functions, namespace, shadowed))
     .or_else(|| {
-        relation_filter_first(
-            expression,
-            table_keys,
-            float_fields,
-            table_fields,
-            functions,
-            namespace,
-            shadowed,
-        )
-    })
-    .or_else(|| {
-        relation_filtered_one(
-            expression,
-            table_keys,
-            float_fields,
-            table_fields,
-            functions,
-            namespace,
-            shadowed,
-        )
-    })
-    .or_else(|| {
-        relation_filter_count(
+        relation_filter_terminal(
             expression,
             table_keys,
             float_fields,
@@ -9126,142 +9105,6 @@ fn relation_count_target(
     name == "count" && root_relation_intrinsic_is_unshadowed(name, functions, namespace, shadowed)
 }
 
-fn relation_filter_first(
-    expression: &Expr,
-    table_keys: &TableKeys,
-    float_fields: &TableFloatFields,
-    table_fields: &TableFields,
-    functions: &Functions,
-    namespace: Option<&str>,
-    shadowed: &BTreeSet<String>,
-) -> Option<Expr> {
-    let Expr::Binary { lhs, op, rhs, .. } = expression else {
-        return None;
-    };
-    if op != "|"
-        || !relation_first_target(rhs)
-        || !root_relation_intrinsic_is_unshadowed("first", functions, namespace, shadowed)
-    {
-        return None;
-    }
-    let Expr::Binary {
-        lhs: table,
-        op: filter_op,
-        rhs: filter,
-        ..
-    } = lhs.as_ref()
-    else {
-        return None;
-    };
-    let Expr::Name {
-        text: table,
-        span: table_span,
-    } = table.as_ref()
-    else {
-        return None;
-    };
-    if filter_op != "|"
-        || shadowed.contains(table)
-        || !table_keys.contains_key(table)
-        || !table_fields.contains_key(table)
-        || !root_relation_intrinsic_is_unshadowed("filter", functions, namespace, shadowed)
-    {
-        return None;
-    }
-    let Expr::Call {
-        callee, arguments, ..
-    } = filter.as_ref()
-    else {
-        return None;
-    };
-    if !matches!(callee.as_ref(), Expr::Name { text, .. } if text == "filter")
-        || !root_relation_intrinsic_is_unshadowed("filter", functions, namespace, shadowed)
-    {
-        return None;
-    }
-    let [argument] = arguments.as_slice() else {
-        return None;
-    };
-    let Expr::Lambda {
-        parameters, body, ..
-    } = &argument.value
-    else {
-        return None;
-    };
-    let [parameter] = parameters.as_slice() else {
-        return None;
-    };
-    let Pattern::Name(binding, _) = &parameter.pattern else {
-        return None;
-    };
-    let Expr::Binary {
-        lhs: predicate_lhs,
-        op: predicate_op,
-        rhs: predicate_rhs,
-        ..
-    } = body.as_ref()
-    else {
-        return None;
-    };
-    if predicate_op != "==" {
-        return None;
-    }
-    let (field_expr, field, expected) = match (predicate_lhs.as_ref(), predicate_rhs.as_ref()) {
-        (Expr::Field { base, name, .. }, expected) if matches!(base.as_ref(), Expr::Name { text, .. } if text == binding) => {
-            (predicate_lhs.as_ref(), name, expected)
-        }
-        (expected, Expr::Field { base, name, .. }) if matches!(base.as_ref(), Expr::Name { text, .. } if text == binding) => {
-            (predicate_rhs.as_ref(), name, expected)
-        }
-        _ => return None,
-    };
-    if !table_fields
-        .get(table)
-        .is_some_and(|fields| fields.contains(field))
-        || !float_fields.contains_decimal(table, field)
-    {
-        return None;
-    }
-    let table = Expr::Literal {
-        text: format!("{table:?}"),
-        kind: orna_syntax::LiteralKind::String,
-        span: table_span.clone(),
-    };
-    let field = Expr::Literal {
-        text: format!("{field:?}"),
-        kind: orna_syntax::LiteralKind::String,
-        span: field_expr.span(),
-    };
-    Some(Expr::Call {
-        callee: Box::new(Expr::Field {
-            base: Box::new(Expr::ReplBinding {
-                text: "$__orna_relation".into(),
-                span: expression.span(),
-            }),
-            name: "filtered_first".into(),
-            span: expression.span(),
-        }),
-        arguments: vec![
-            orna_syntax::Argument {
-                name: None,
-                span: table.span(),
-                value: table,
-            },
-            orna_syntax::Argument {
-                name: None,
-                span: field.span(),
-                value: field,
-            },
-            orna_syntax::Argument {
-                name: None,
-                span: expected.span(),
-                value: expected.clone(),
-            },
-        ],
-        span: expression.span(),
-    })
-}
-
 fn relation_first_target(expression: &Expr) -> bool {
     matches!(
         expression,
@@ -9274,27 +9117,103 @@ fn relation_first_target(expression: &Expr) -> bool {
     )
 }
 
-fn relation_filter_count(
-    expression: &Expr,
+/// The terminal operation of a lowered equality-filter lookup.
+#[derive(Clone, Copy)]
+enum FilteredTerminal {
+    First,
+    One,
+    Count,
+}
+
+impl FilteredTerminal {
+    /// The terminal `rhs` names (`first`, `one()` or `count`), unless a
+    /// binding shadows the root intrinsic.
+    fn detect(
+        rhs: &Expr,
+        functions: &Functions,
+        namespace: Option<&str>,
+        shadowed: &BTreeSet<String>,
+    ) -> Option<Self> {
+        let unshadowed = |name: &str| {
+            root_relation_intrinsic_is_unshadowed(name, functions, namespace, shadowed)
+        };
+        if relation_first_target(rhs) && unshadowed("first") {
+            Some(Self::First)
+        } else if relation_one_target(rhs) && unshadowed("one") {
+            Some(Self::One)
+        } else if relation_count_target(rhs, functions, namespace, shadowed) {
+            Some(Self::Count)
+        } else {
+            None
+        }
+    }
+
+    /// The `$__orna_relation` method the effect boundary serves this terminal
+    /// with.
+    fn method(self) -> &'static str {
+        match self {
+            Self::First => "filtered_first",
+            Self::One => "filtered_one",
+            Self::Count => "filtered_count",
+        }
+    }
+
+    /// Whether the compared field can be served by this lowering. A first-match
+    /// scan needs a stored decimal field. A count or a cardinality-checked
+    /// `one` also accepts a key field, and a comparison written value-first
+    /// still needs a decimal field.
+    fn accepts_field(
+        self,
+        filter: &EqualityFilter<'_>,
+        table_keys: &TableKeys,
+        table_fields: &TableFields,
+        float_fields: &TableFloatFields,
+    ) -> bool {
+        let stored = table_fields
+            .get(filter.table)
+            .is_some_and(|fields| fields.contains(filter.field));
+        let decimal = float_fields.contains_decimal(filter.table, filter.field);
+        match self {
+            Self::First => stored && decimal,
+            Self::One | Self::Count => {
+                let keyed = table_keys
+                    .get(filter.table)
+                    .is_some_and(|key| key.fields.iter().any(|name| name == filter.field));
+                (stored || keyed) && (!filter.reversed || decimal)
+            }
+        }
+    }
+}
+
+/// The `<Table> | filter(|row| row.field == value)` shape that every filtered
+/// relation lowering recognises.
+struct EqualityFilter<'a> {
+    table: &'a String,
+    table_span: &'a orna_syntax::SyntaxSpan,
+    field: &'a String,
+    /// The `row.field` side of the comparison, for its span.
+    field_expr: &'a Expr,
+    expected: &'a Expr,
+    /// The expected value was written first: `value == row.field`.
+    reversed: bool,
+}
+
+/// Recognises `<Table> | filter(|row| row.field == value)` over a known,
+/// unshadowed table, with the comparison written in either operand order.
+fn equality_filter<'a>(
+    source: &'a Expr,
     table_keys: &TableKeys,
-    float_fields: &TableFloatFields,
     table_fields: &TableFields,
     functions: &Functions,
     namespace: Option<&str>,
     shadowed: &BTreeSet<String>,
-) -> Option<Expr> {
-    let Expr::Binary { lhs, op, rhs, .. } = expression else {
-        return None;
-    };
-    if op != "|" || !relation_count_target(rhs, functions, namespace, shadowed) {
-        return None;
-    }
+) -> Option<EqualityFilter<'a>> {
     let Expr::Binary {
         lhs: table,
         op: filter_op,
         rhs: filter,
         ..
-    } = lhs.as_ref()
+    } = source
     else {
         return None;
     };
@@ -9309,6 +9228,7 @@ fn relation_filter_count(
         || shadowed.contains(table)
         || !table_keys.contains_key(table)
         || !table_fields.contains_key(table)
+        || !root_relation_intrinsic_is_unshadowed("filter", functions, namespace, shadowed)
     {
         return None;
     }
@@ -9318,9 +9238,7 @@ fn relation_filter_count(
     else {
         return None;
     };
-    if !matches!(callee.as_ref(), Expr::Name { text, .. } if text == "filter")
-        || !root_relation_intrinsic_is_unshadowed("filter", functions, namespace, shadowed)
-    {
+    if !matches!(callee.as_ref(), Expr::Name { text, .. } if text == "filter") {
         return None;
     }
     let [argument] = arguments.as_slice() else {
@@ -9350,73 +9268,36 @@ fn relation_filter_count(
     if predicate_op != "==" {
         return None;
     }
+    let row_field = |operand: &'a Expr| match operand {
+        Expr::Field { base, name, .. } if matches!(base.as_ref(), Expr::Name { text, .. } if text == binding) => {
+            Some(name)
+        }
+        _ => None,
+    };
     let (field_expr, field, expected, reversed) = match (
-        predicate_lhs.as_ref(),
-        predicate_rhs.as_ref(),
+        row_field(predicate_lhs.as_ref()),
+        row_field(predicate_rhs.as_ref()),
     ) {
-        (Expr::Field { base, name, .. }, expected) if matches!(base.as_ref(), Expr::Name { text, .. } if text == binding) => {
-            (predicate_lhs.as_ref(), name, expected, false)
-        }
-        (expected, Expr::Field { base, name, .. }) if matches!(base.as_ref(), Expr::Name { text, .. } if text == binding) => {
-            (predicate_rhs.as_ref(), name, expected, true)
-        }
-        _ => return None,
+        (Some(field), _) => (predicate_lhs.as_ref(), field, predicate_rhs.as_ref(), false),
+        (None, Some(field)) => (predicate_rhs.as_ref(), field, predicate_lhs.as_ref(), true),
+        (None, None) => return None,
     };
-    if !(table_fields
-        .get(table)
-        .is_some_and(|fields| fields.contains(field))
-        || table_keys
-            .get(table)
-            .is_some_and(|key| key.fields.iter().any(|name| name == field)))
-        || (reversed && !float_fields.contains_decimal(table, field))
-    {
-        return None;
-    }
-    let table = Expr::Literal {
-        text: format!("{table:?}"),
-        kind: orna_syntax::LiteralKind::String,
-        span: table_span.clone(),
-    };
-    let field = Expr::Literal {
-        text: format!("{field:?}"),
-        kind: orna_syntax::LiteralKind::String,
-        span: field_expr.span(),
-    };
-    Some(Expr::Call {
-        callee: Box::new(Expr::Field {
-            base: Box::new(Expr::ReplBinding {
-                text: "$__orna_relation".into(),
-                span: expression.span(),
-            }),
-            name: "filtered_count".into(),
-            span: expression.span(),
-        }),
-        arguments: vec![
-            orna_syntax::Argument {
-                name: None,
-                span: table.span(),
-                value: table,
-            },
-            orna_syntax::Argument {
-                name: None,
-                span: field.span(),
-                value: field,
-            },
-            orna_syntax::Argument {
-                name: None,
-                span: expected.span(),
-                value: expected.clone(),
-            },
-        ],
-        span: expression.span(),
+    Some(EqualityFilter {
+        table,
+        table_span,
+        field,
+        field_expr,
+        expected,
+        reversed,
     })
 }
 
-/// Lowers the one equality-filter form that cannot be replaced by a primary
-/// key lookup.  It retains the candidate relation's canonical order so the
-/// effect boundary can stop after observing a second match and distinguish
-/// zero from multiple cardinality failures.
-fn relation_filtered_one(
+/// Lowers `<Table> | filter(|row| row.field == value) | first`, `| one()` and
+/// `| count` to one effect-boundary lookup that keeps the filtered relation's
+/// canonical scan order. The boundary can then stop after the first match, or
+/// after a second one to tell a zero-match from a multiple-match cardinality
+/// failure.
+fn relation_filter_terminal(
     expression: &Expr,
     table_keys: &TableKeys,
     float_fields: &TableFloatFields,
@@ -9428,133 +9309,56 @@ fn relation_filtered_one(
     let Expr::Binary { lhs, op, rhs, .. } = expression else {
         return None;
     };
-    if op != "|"
-        || !relation_one_target(rhs)
-        || !root_relation_intrinsic_is_unshadowed("one", functions, namespace, shadowed)
-    {
+    if op != "|" {
         return None;
     }
-    let Expr::Binary {
-        lhs: table,
-        op: filter_op,
-        rhs: filter,
-        ..
-    } = lhs.as_ref()
-    else {
-        return None;
+    let terminal = FilteredTerminal::detect(rhs, functions, namespace, shadowed)?;
+    let filter = equality_filter(
+        lhs,
+        table_keys,
+        table_fields,
+        functions,
+        namespace,
+        shadowed,
+    )?;
+    terminal
+        .accepts_field(&filter, table_keys, table_fields, float_fields)
+        .then(|| filtered_relation_call(terminal.method(), &filter, expression))
+}
+
+/// `$__orna_relation.<method>("Table", "field", expected)`.
+fn filtered_relation_call(method: &str, filter: &EqualityFilter<'_>, expression: &Expr) -> Expr {
+    let positional = |value: Expr| orna_syntax::Argument {
+        name: None,
+        span: value.span(),
+        value,
     };
-    let Expr::Name {
-        text: table,
-        span: table_span,
-    } = table.as_ref()
-    else {
-        return None;
-    };
-    if filter_op != "|"
-        || shadowed.contains(table)
-        || !table_keys.contains_key(table)
-        || !table_fields.contains_key(table)
-    {
-        return None;
-    }
-    let Expr::Call {
-        callee, arguments, ..
-    } = filter.as_ref()
-    else {
-        return None;
-    };
-    if !matches!(callee.as_ref(), Expr::Name { text, .. } if text == "filter")
-        || !root_relation_intrinsic_is_unshadowed("filter", functions, namespace, shadowed)
-    {
-        return None;
-    }
-    let [argument] = arguments.as_slice() else {
-        return None;
-    };
-    let Expr::Lambda {
-        parameters, body, ..
-    } = &argument.value
-    else {
-        return None;
-    };
-    let [parameter] = parameters.as_slice() else {
-        return None;
-    };
-    let Pattern::Name(binding, _) = &parameter.pattern else {
-        return None;
-    };
-    let Expr::Binary {
-        lhs: predicate_lhs,
-        op: predicate_op,
-        rhs: predicate_rhs,
-        ..
-    } = body.as_ref()
-    else {
-        return None;
-    };
-    if predicate_op != "==" {
-        return None;
-    }
-    let (field_expr, field, expected, reversed) = match (
-        predicate_lhs.as_ref(),
-        predicate_rhs.as_ref(),
-    ) {
-        (Expr::Field { base, name, .. }, expected) if matches!(base.as_ref(), Expr::Name { text, .. } if text == binding) => {
-            (predicate_lhs.as_ref(), name, expected, false)
-        }
-        (expected, Expr::Field { base, name, .. }) if matches!(base.as_ref(), Expr::Name { text, .. } if text == binding) => {
-            (predicate_rhs.as_ref(), name, expected, true)
-        }
-        _ => return None,
-    };
-    if !(table_fields
-        .get(table)
-        .is_some_and(|fields| fields.contains(field))
-        || table_keys
-            .get(table)
-            .is_some_and(|key| key.fields.iter().any(|name| name == field)))
-        || (reversed && !float_fields.contains_decimal(table, field))
-    {
-        return None;
-    }
     let table = Expr::Literal {
-        text: format!("{table:?}"),
+        text: format!("{:?}", filter.table),
         kind: orna_syntax::LiteralKind::String,
-        span: table_span.clone(),
+        span: filter.table_span.clone(),
     };
     let field = Expr::Literal {
-        text: format!("{field:?}"),
+        text: format!("{:?}", filter.field),
         kind: orna_syntax::LiteralKind::String,
-        span: field_expr.span(),
+        span: filter.field_expr.span(),
     };
-    Some(Expr::Call {
+    Expr::Call {
         callee: Box::new(Expr::Field {
             base: Box::new(Expr::ReplBinding {
                 text: "$__orna_relation".into(),
                 span: expression.span(),
             }),
-            name: "filtered_one".into(),
+            name: method.into(),
             span: expression.span(),
         }),
         arguments: vec![
-            orna_syntax::Argument {
-                name: None,
-                span: table.span(),
-                value: table,
-            },
-            orna_syntax::Argument {
-                name: None,
-                span: field.span(),
-                value: field,
-            },
-            orna_syntax::Argument {
-                name: None,
-                span: expected.span(),
-                value: expected.clone(),
-            },
+            positional(table),
+            positional(field),
+            positional(filter.expected.clone()),
         ],
         span: expression.span(),
-    })
+    }
 }
 
 fn relation_one_target(expression: &Expr) -> bool {
@@ -11194,7 +10998,7 @@ mod transaction_admission_tests {
         assert_eq!(value_for("id"), Some(&OvbRaw::Text("note-7".into())));
     }
 
-    #[allow(dead_code)]
+    #[test]
     fn same_key_rekey_reports_duplicate_without_mutating_the_committed_row() {
         let mut evaluator = TransactionalEvaluator::new("main", Limits::default());
         assert!(matches!(

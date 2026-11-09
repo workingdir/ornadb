@@ -1901,25 +1901,7 @@ pub fn planner_metadata(
     }
     validate_limits(limits)?;
     let functions = Functions::new();
-    let mut context = Context {
-        limits,
-        steps: 0,
-        calls: 0,
-        functions: &functions,
-        aliases: None,
-        session_functions: None,
-        repl_bindings: false,
-        restrict_function_names: false,
-        reject_unhandled_field_calls: false,
-        effects: None,
-        namespace: None,
-        transfer: None,
-        materializations: Vec::new(),
-        materialization_clock_unavailable: false,
-        reuse: CallReuse::default(),
-        sys_host: None,
-        cancellation: None,
-    };
+    let mut context = Context::new(limits, &functions);
     let mut scope = Scope::from_environment(environment, &mut context)?;
     let value = context.evaluate(&parsed.value, &mut scope, 0)?;
     if context.transfer.is_some() {
@@ -2042,23 +2024,9 @@ fn evaluate_expression_ovb2_with_optional_effects(
         .as_mut()
         .map(|adapter| adapter as &mut dyn EffectHandler);
     let mut context = Context {
-        limits,
-        steps: 0,
-        calls: 0,
-        functions: &functions,
-        aliases: None,
-        session_functions: None,
-        repl_bindings: false,
-        restrict_function_names: false,
-        reject_unhandled_field_calls: false,
         effects,
-        namespace: None,
-        transfer: None,
-        materializations: Vec::new(),
-        materialization_clock_unavailable: false,
-        reuse: CallReuse::default(),
-        sys_host: None,
         cancellation,
+        ..Context::new(limits, &functions)
     };
     let mut scope = Scope::from_ovb2_environment(environment, &mut context)?;
     let value = context.evaluate(&parsed.value, &mut scope, 0)?;
@@ -2156,23 +2124,9 @@ pub fn evaluate_expression_with_functions_and_effects_and_cancellation(
     }
     validate_limits(limits)?;
     let mut context = Context {
-        limits,
-        steps: 0,
-        calls: 0,
-        functions,
-        aliases: None,
-        session_functions: None,
-        repl_bindings: false,
-        restrict_function_names: false,
-        reject_unhandled_field_calls: false,
         effects: Some(effects),
-        namespace: None,
-        transfer: None,
-        materializations: Vec::new(),
-        materialization_clock_unavailable: false,
-        reuse: CallReuse::default(),
-        sys_host: None,
         cancellation,
+        ..Context::new(limits, functions)
     };
     context.items(functions.own_len())?;
     let mut scope = Scope::from_environment(environment, &mut context)?;
@@ -2298,23 +2252,8 @@ fn evaluate_with_functions_and_nominals_and_budget(
 ) -> Result<CanonicalValue, EvaluationError> {
     validate_limits(limits)?;
     let mut context = Context {
-        limits,
         steps: limits.max_steps.saturating_sub(budget.remaining()),
-        calls: 0,
-        functions,
-        aliases: None,
-        session_functions: None,
-        repl_bindings: false,
-        restrict_function_names: false,
-        reject_unhandled_field_calls: false,
-        effects: None,
-        namespace: None,
-        transfer: None,
-        materializations: Vec::new(),
-        materialization_clock_unavailable: false,
-        reuse: CallReuse::default(),
-        sys_host: None,
-        cancellation: None,
+        ..Context::new(limits, functions)
     };
     let result = (|| {
         context.items(functions.own_len())?;
@@ -2343,25 +2282,7 @@ pub fn evaluate_function(
 ) -> Result<CanonicalValue, EvaluationError> {
     validate_limits(limits)?;
     let functions = Functions::new();
-    let mut context = Context {
-        limits,
-        steps: 0,
-        calls: 0,
-        functions: &functions,
-        aliases: None,
-        session_functions: None,
-        repl_bindings: false,
-        restrict_function_names: false,
-        reject_unhandled_field_calls: false,
-        effects: None,
-        namespace: None,
-        transfer: None,
-        materializations: Vec::new(),
-        materialization_clock_unavailable: false,
-        reuse: CallReuse::default(),
-        sys_host: None,
-        cancellation: None,
-    };
+    let mut context = Context::new(limits, &functions);
     let supplied = supplied_arguments(arguments, &NominalDefinitions::new(), &mut context)?;
     let captured = Scope::from_environment(environment, &mut context)?;
     invoke_pure(&mut context, parameters, body, captured, supplied, 0).and_then(Value::canonical)
@@ -2437,23 +2358,9 @@ fn invoke_named_with_host(
 ) -> Result<CanonicalValue, EvaluationError> {
     validate_limits(limits)?;
     let mut context = Context {
-        limits,
-        steps: 0,
-        calls: 0,
-        functions,
-        aliases: None,
-        session_functions: None,
-        repl_bindings: false,
-        restrict_function_names: false,
-        reject_unhandled_field_calls: false,
-        effects: None,
         namespace: function_namespace(name),
-        transfer: None,
-        materializations: Vec::new(),
-        materialization_clock_unavailable: false,
-        reuse: CallReuse::default(),
         sys_host,
-        cancellation: None,
+        ..Context::new(limits, functions)
     };
     context.items(functions.own_len())?;
     let function = functions
@@ -2556,23 +2463,10 @@ fn invoke_named_with_effects_and_reuse(
 ) -> Result<(CanonicalValue, CallReuseStats), EvaluationError> {
     validate_limits(limits)?;
     let mut context = Context {
-        limits,
         steps: limits.max_steps.saturating_sub(budget.remaining()),
-        calls: 0,
-        functions,
-        aliases: None,
-        session_functions: None,
-        repl_bindings: false,
-        restrict_function_names: false,
-        reject_unhandled_field_calls: false,
         effects: Some(effects),
         namespace: function_namespace(name),
-        transfer: None,
-        materializations: Vec::new(),
-        materialization_clock_unavailable: false,
-        cancellation: None,
-        reuse: CallReuse::default(),
-        sys_host: None,
+        ..Context::new(limits, functions)
     };
     let result = (|| {
         context.items(functions.own_len())?;
@@ -2648,23 +2542,10 @@ pub fn invoke_named_with_context_effects(
     };
     let (result, steps) = {
         let mut context = Context {
-            limits,
             steps: limits.max_steps.saturating_sub(budget.remaining()),
-            calls: 0,
-            functions,
-            aliases: None,
-            session_functions: None,
-            repl_bindings: false,
-            restrict_function_names: false,
-            reject_unhandled_field_calls: false,
             effects: Some(&mut profiled_effects),
             namespace: function_namespace(name),
-            transfer: None,
-            materializations: Vec::new(),
-            materialization_clock_unavailable: false,
-            reuse: CallReuse::default(),
-            sys_host: None,
-            cancellation: None,
+            ..Context::new(limits, functions)
         };
         let result = (|| {
             context.items(functions.own_len())?;
@@ -4839,6 +4720,27 @@ type ActivationSysHost<'a> = Option<&'a SysHostAttachment>;
 #[cfg(not(feature = "system-host-bindings"))]
 type ActivationSysHost<'a> = Option<&'a std::convert::Infallible>;
 
+/// How an activation resolves callable names and treats calls it cannot route.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ActivationMode {
+    /// A pure expression or an admitted module activation: source functions
+    /// resolve by their qualified names and an unclaimed field call takes the
+    /// ordinary field-callee path.
+    Module,
+    /// An interactive REPL session. Names resolve only through the session's
+    /// own aliases and admitted bindings, so a spelling nothing admitted is
+    /// unsupported rather than served from captured source, an unclaimed field
+    /// call fails closed, and a nullable statistic returns `T?` as an Option
+    /// value (ORNA-TYPE-001).
+    Repl,
+}
+
+impl ActivationMode {
+    const fn is_repl(self) -> bool {
+        matches!(self, Self::Repl)
+    }
+}
+
 struct Context<'functions, 'effects> {
     limits: Limits,
     steps: u64,
@@ -4848,9 +4750,11 @@ struct Context<'functions, 'effects> {
     functions: &'functions Functions,
     aliases: Option<&'functions BTreeMap<String, String>>,
     session_functions: Option<&'functions BTreeSet<String>>,
+    /// Whether the code now running is session-owned and may read the REPL's
+    /// `$_` and `$?` bindings. It flips while a REPL session calls into an
+    /// admitted module function, which must never observe them.
     repl_bindings: bool,
-    restrict_function_names: bool,
-    reject_unhandled_field_calls: bool,
+    mode: ActivationMode,
     effects: Option<&'effects mut dyn EffectHandler>,
     namespace: Option<String>,
     transfer: Option<Transfer>,
@@ -4859,6 +4763,31 @@ struct Context<'functions, 'effects> {
     cancellation: Option<&'functions CancellationToken>,
     reuse: CallReuse,
     sys_host: ActivationSysHost<'functions>,
+}
+
+impl<'functions, 'effects> Context<'functions, 'effects> {
+    /// A module-mode activation with no effects, aliases or cancellation.
+    /// Callers override only what differs, with struct update syntax.
+    fn new(limits: Limits, functions: &'functions Functions) -> Self {
+        Self {
+            limits,
+            steps: 0,
+            calls: 0,
+            functions,
+            aliases: None,
+            session_functions: None,
+            repl_bindings: false,
+            mode: ActivationMode::Module,
+            effects: None,
+            namespace: None,
+            transfer: None,
+            materializations: Vec::new(),
+            materialization_clock_unavailable: false,
+            cancellation: None,
+            reuse: CallReuse::default(),
+            sys_host: None,
+        }
+    }
 }
 
 impl Context<'_, '_> {
@@ -4979,18 +4908,50 @@ enum RelationRow {
     End,
 }
 
+/// What one stage of a running relation plan remembers between rows.
+#[derive(Default)]
+struct RelationStageState {
+    /// Rows a `Drop` stage has skipped or a `Take` stage has passed on.
+    count: usize,
+    /// The rows a `Distinct` stage has kept.
+    distinct: DistinctValueFold,
+    /// The previous row of a `Pairs` stage.
+    previous: Option<Value>,
+    /// The open windows of a `Window` stage.
+    window: Option<RelationWindowState>,
+}
+
+impl RelationStageState {
+    /// Fresh state for each of `stage_count` stages. A state is indexed by its
+    /// stage's absolute position in the plan, so a stage keeps its state when
+    /// the plan is split around a sort or bucket stage.
+    fn for_stages(stage_count: usize) -> Vec<Self> {
+        (0..stage_count).map(|_| Self::default()).collect()
+    }
+}
+
+/// Whether some `Take` stage of `stages` has already passed on everything it
+/// will take. `stage_offset` is the absolute position of `stages[0]`.
+fn take_exhausted(
+    stages: &[RelationStage],
+    states: &[RelationStageState],
+    stage_offset: usize,
+) -> bool {
+    stages.iter().enumerate().any(|(offset, stage)| {
+        matches!(stage, RelationStage::Take(count) if states[stage_offset + offset].count >= *count)
+    })
+}
+
 /// A downstream stage can reject a value after an earlier `take` has already
 /// emitted its full result. Preserve the rejection while also closing the
 /// source scan so the next page is not read just to rediscover that bound.
 fn rejected_relation_rows(
     stages: &[RelationStage],
-    counters: &[usize],
+    states: &[RelationStageState],
     stage_offset: usize,
 ) -> Vec<RelationRow> {
     let mut rows = vec![RelationRow::Skip];
-    if stages.iter().enumerate().any(|(offset, stage)| {
-        matches!(stage, RelationStage::Take(count) if counters[stage_offset + offset] >= *count)
-    }) {
+    if take_exhausted(stages, states, stage_offset) {
         rows.push(RelationRow::End);
     }
     rows
@@ -5015,47 +4976,42 @@ fn stream_elapsed_nanoseconds(later: Instant, earlier: Instant) -> Option<BigInt
     Some(seconds * BigInt::from(1_000_000_000u64) + nanoseconds)
 }
 
-/// these from the plan they are walking.
-/// One relation stage's rows, counters and visitor: the stage callers pass
-#[allow(clippy::too_many_arguments)]
-/// Runs one task callback on a worker thread. The child starts with the
-/// owner's active calls, so recursion through task combinators stays within
-/// `Limits::max_depth`.
+/// The parts of a parent activation that every forked task callback inherits.
+/// A child starts with the owner's active call count, so recursion through task
+/// combinators stays within `Limits::max_depth`.
+#[derive(Clone, Copy)]
+struct TaskEnvironment<'a> {
+    functions: &'a Functions,
+    aliases: Option<&'a BTreeMap<String, String>>,
+    session_functions: Option<&'a BTreeSet<String>>,
+    limits: Limits,
+    mode: ActivationMode,
+    repl_bindings: bool,
+    sys_host: ActivationSysHost<'a>,
+    active_calls: usize,
+}
+
+/// Runs one task callback on a worker thread under `environment`.
 fn invoke_task_callback(
     callback: Value,
-    functions: &Functions,
-    aliases: Option<&BTreeMap<String, String>>,
-    session_functions: Option<&BTreeSet<String>>,
-    limits: Limits,
+    environment: TaskEnvironment<'_>,
     cancellation: CancellationToken,
-    repl_bindings: bool,
-    restrict_function_names: bool,
-    reject_unhandled_field_calls: bool,
-    sys_host: ActivationSysHost<'_>,
-    active_calls: usize,
     mut effects: Option<Box<dyn EffectHandler + Send>>,
     materializations: &MaterializationSink,
 ) -> Result<Value, EvaluationError> {
     let mut context = Context {
-        limits,
-        steps: 0,
-        calls: active_calls,
-        functions,
-        aliases,
-        session_functions,
-        repl_bindings,
-        restrict_function_names,
-        reject_unhandled_field_calls,
+        calls: environment.active_calls,
+        aliases: environment.aliases,
+        session_functions: environment.session_functions,
+        repl_bindings: environment.repl_bindings,
+        mode: environment.mode,
         effects: effects
             .as_deref_mut()
             .map(|handler| handler as &mut dyn EffectHandler),
-        namespace: None,
-        transfer: None,
-        materializations: Vec::new(),
-        materialization_clock_unavailable: false,
         reuse: CallReuse::disabled(),
-        sys_host,
+        sys_host: environment.sys_host,
         cancellation: Some(&cancellation),
+        ..Context::new(environment.limits, environment.functions)
     };
     let result = context.invoke_callable(&callback, Vec::new(), 0);
     materializations
@@ -5065,48 +5021,52 @@ fn invoke_task_callback(
     result
 }
 
-/// One worker-pool run: per-task outcomes, an optional aggregate value and the
-/// materialisation records each task produced.
-type TaskMaterialization = (
-    Vec<Option<Result<Value, EvaluationError>>>,
-    Option<Value>,
-    Vec<Vec<MaterializationRecord>>,
-);
+/// How a worker-pool run reacts when a child finishes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TaskPolicy {
+    /// `parallel`: the first ordinary failure cancels the unfinished siblings.
+    Parallel,
+    /// `race`: the first success cancels the unfinished siblings and wins.
+    Race,
+}
 
-/// Run finite callback lists with a bounded number of owned worker threads.
-/// A first ordinary failure stops admission for `parallel`; a first success
-/// stops admission for `race`. In-flight children observe the shared token,
-#[allow(clippy::too_many_arguments)]
-/// and `thread::scope` joins every worker before the owner returns.
+/// One callback's outcome. `None` means admission stopped before it started.
+type TaskOutcome = Option<Result<Value, EvaluationError>>;
+
+/// What one worker-pool run produced.
+struct TaskRun {
+    /// One slot per callback, in callback order.
+    outcomes: Vec<TaskOutcome>,
+    /// The first successful value; recorded only under [`TaskPolicy::Race`].
+    winner: Option<Value>,
+    /// The materialisation records each callback produced, in callback order.
+    records: Vec<Vec<MaterializationRecord>>,
+}
+
+/// Runs finite callback lists with a bounded number of owned worker threads.
+/// `policy` decides which first result stops admission. In-flight children
+/// observe the shared token, and `thread::scope` joins every worker before the
+/// owner returns.
 fn run_task_callbacks(
     callbacks: &[Value],
-    mut child_effects: Vec<Option<Box<dyn EffectHandler + Send>>>,
-    active_calls: usize,
+    child_effects: Vec<Option<Box<dyn EffectHandler + Send>>>,
     parent: Option<CancellationToken>,
-    functions: &Functions,
-    aliases: Option<&BTreeMap<String, String>>,
-    session_functions: Option<&BTreeSet<String>>,
-    limits: Limits,
-    repl_bindings: bool,
-    restrict_function_names: bool,
-    reject_unhandled_field_calls: bool,
-    sys_host: ActivationSysHost<'_>,
-    cancel_after_failure: bool,
-    cancel_after_success: bool,
-) -> TaskMaterialization {
+    environment: TaskEnvironment<'_>,
+    policy: TaskPolicy,
+) -> TaskRun {
     const MAX_TASK_WORKERS: usize = 32;
     let available = std::thread::available_parallelism().map_or(1, usize::from);
     let worker_count = callbacks.len().clamp(1, available.min(MAX_TASK_WORKERS));
     let next = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let shared_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let child_effects = Arc::new(std::sync::Mutex::new(std::mem::take(&mut child_effects)));
+    let child_effects = Arc::new(std::sync::Mutex::new(child_effects));
 
     let sinks: Arc<Vec<MaterializationSink>> = Arc::new(
         (0..callbacks.len())
             .map(|_| Arc::new(std::sync::Mutex::new(Vec::new())))
             .collect(),
     );
-    let (results, winner) = std::thread::scope(|scope| {
+    let (outcomes, winner) = std::thread::scope(|scope| {
         let (sender, receiver) = std::sync::mpsc::channel();
         for _ in 0..worker_count {
             let sender = sender.clone();
@@ -5136,27 +5096,20 @@ fn run_task_callbacks(
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         invoke_task_callback(
                             callback,
-                            functions,
-                            aliases,
-                            session_functions,
-                            limits,
+                            environment,
                             cancellation,
-                            repl_bindings,
-                            restrict_function_names,
-                            reject_unhandled_field_calls,
-                            sys_host,
-                            active_calls,
                             effects,
                             &sinks[index],
                         )
                     }))
                     .unwrap_or_else(|_| Err(error("ORNA-EVAL-ERROR")));
-                    if (cancel_after_failure
-                        && result
+                    let stops_siblings = match policy {
+                        TaskPolicy::Parallel => result
                             .as_ref()
-                            .is_err_and(|failure| failure.code() != "ORNA-EVAL-CANCELLED"))
-                        || (cancel_after_success && result.is_ok())
-                    {
+                            .is_err_and(|failure| failure.code() != "ORNA-EVAL-CANCELLED"),
+                        TaskPolicy::Race => result.is_ok(),
+                    };
+                    if stops_siblings {
                         shared_cancel.store(true, std::sync::atomic::Ordering::Release);
                     }
                     let _ = sender.send((index, result));
@@ -5164,22 +5117,76 @@ fn run_task_callbacks(
             });
         }
         drop(sender);
-        let mut results = (0..callbacks.len()).map(|_| None).collect::<Vec<_>>();
+        let mut outcomes = (0..callbacks.len()).map(|_| None).collect::<Vec<_>>();
         let mut winner = None;
         while let Ok((index, result)) = receiver.recv() {
-            if cancel_after_success
+            if policy == TaskPolicy::Race
                 && winner.is_none()
                 && let Ok(value) = &result
             {
                 winner = Some(value.clone());
                 shared_cancel.store(true, std::sync::atomic::Ordering::Release);
             }
-            results[index] = Some(result);
+            outcomes[index] = Some(result);
         }
-        (results, winner)
+        (outcomes, winner)
     });
     let records = sinks.iter().map(take_materializations).collect();
-    (results, winner, records)
+    TaskRun {
+        outcomes,
+        winner,
+        records,
+    }
+}
+
+impl<'functions> Context<'functions, '_> {
+    /// What a forked task callback inherits from this activation.
+    fn task_environment(&self) -> TaskEnvironment<'functions> {
+        TaskEnvironment {
+            functions: self.functions,
+            aliases: self.aliases,
+            session_functions: self.session_functions,
+            limits: self.limits,
+            mode: self.mode,
+            repl_bindings: self.repl_bindings,
+            sys_host: self.sys_host,
+            active_calls: self.calls,
+        }
+    }
+
+    /// Forks every callback onto the worker pool and joins them. The parent
+    /// stops reusing call results for the rest of the activation, because the
+    /// children run concurrently with it and may write. Returns each
+    /// callback's outcome and the race winner, and fails with
+    /// `ORNA-EVAL-CANCELLED` when the owner's own cancellation was requested.
+    fn fork_task_callbacks(
+        &mut self,
+        callbacks: &[Value],
+        policy: TaskPolicy,
+    ) -> Result<(Vec<TaskOutcome>, Option<Value>), EvaluationError> {
+        self.check_call_room()?;
+        let parent = self.cancellation.cloned();
+        self.disable_call_reuse_for_fork();
+        let child_effects: Vec<Option<Box<dyn EffectHandler + Send>>> =
+            match self.effects.as_deref_mut() {
+                Some(effects) => (0..callbacks.len())
+                    .map(|index| effects.fork_task_child(index))
+                    .collect(),
+                None => (0..callbacks.len()).map(|_| None).collect(),
+            };
+        let run = run_task_callbacks(
+            callbacks,
+            child_effects,
+            parent.clone(),
+            self.task_environment(),
+            policy,
+        );
+        self.absorb_materializations(run.records)?;
+        if parent.as_ref().is_some_and(CancellationToken::is_requested) {
+            return Err(error("ORNA-EVAL-CANCELLED"));
+        }
+        Ok((run.outcomes, run.winner))
+    }
 }
 
 impl Context<'_, '_> {
@@ -5368,19 +5375,15 @@ impl Context<'_, '_> {
         }
 
         self.invalidate_call_reuse();
-        let remaining = self.limits.max_steps.saturating_sub(self.steps);
-        let mut budget = StepBudget::new(remaining);
         let target = self
-            .effects
-            .as_deref_mut()
-            .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?
-            .resolve_reference_with_budget(reference, &mut budget);
-        let debited = remaining.saturating_sub(budget.remaining());
-        self.steps = self
-            .steps
-            .checked_add(debited)
-            .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
-        let target = target?.ok_or_else(|| error("ORNA-EVAL-FIELD"))?;
+            .with_effect_budget(|context, budget| {
+                context
+                    .effects
+                    .as_deref_mut()
+                    .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?
+                    .resolve_reference_with_budget(reference, budget)
+            })?
+            .ok_or_else(|| error("ORNA-EVAL-FIELD"))?;
         match Value::from_canonical(&target, self, 0)? {
             Value::Record(fields) => fields
                 .get(name)
@@ -6313,7 +6316,7 @@ impl Context<'_, '_> {
         if scope.0.contains_key(root) {
             return None;
         }
-        if !self.restrict_function_names && self.functions.contains_key(&path) {
+        if !self.mode.is_repl() && self.functions.contains_key(&path) {
             return None;
         }
         if self
@@ -7033,7 +7036,7 @@ impl Context<'_, '_> {
             callee,
             resolved.as_deref(),
             scope,
-            !self.restrict_function_names,
+            !self.mode.is_repl(),
             function_name(callee).is_some_and(|name| self.functions.contains_key(&name)),
             self.functions,
         ) || resolved
@@ -7310,52 +7313,27 @@ impl Context<'_, '_> {
             else {
                 unreachable!("sort_by returns a list");
             };
-            let mut distinct_seen = vec![DistinctValueFold::default(); plan.stages.len()];
-            let mut pair_previous = vec![None; plan.stages.len()];
-            let mut window_states = (0..plan.stages.len())
-                .map(|_| None)
-                .collect::<Vec<Option<RelationWindowState>>>();
+            let mut states = RelationStageState::for_stages(plan.stages.len());
             return self.for_each_buffered_relation(
                 sorted.into_vec(),
                 &suffix[sort_pos + 1..],
                 bucket_index + sort_pos + 2,
                 depth,
-                &mut distinct_seen,
-                &mut pair_previous,
-                &mut window_states,
+                &mut states,
                 visit,
             );
         }
-        let mut counters = vec![0usize; plan.stages.len()];
-        let mut distinct_seen = vec![DistinctValueFold::default(); plan.stages.len()];
-        let mut pair_previous = vec![None; plan.stages.len()];
-        let mut window_states = (0..plan.stages.len())
-            .map(|_| None)
-            .collect::<Vec<Option<RelationWindowState>>>();
+        let mut states = RelationStageState::for_stages(plan.stages.len());
         let mut emit =
             |context: &mut Self, bucket: RelationBucket| -> Result<bool, EvaluationError> {
                 let rows = context.apply_relation_stages(
                     Value::list(bucket.values),
                     suffix,
-                    &mut counters,
-                    &mut distinct_seen,
-                    &mut pair_previous,
-                    &mut window_states,
+                    &mut states,
                     bucket_index + 1,
                     depth + 1,
                 )?;
-                for row in rows {
-                    match row {
-                        RelationRow::Skip => {}
-                        RelationRow::End => return Ok(false),
-                        RelationRow::Yield(value) => {
-                            if !visit(context, *value)? {
-                                return Ok(false);
-                            }
-                        }
-                    }
-                }
-                Ok(true)
+                context.deliver_relation_rows(rows, &mut *visit)
             };
         let mut ended = false;
         self.for_each_sorted_relation(&prefix, depth, |context, value| {
@@ -7717,38 +7695,14 @@ impl Context<'_, '_> {
             self.validate_relation_plan_sources(plan)?;
             return Ok(());
         }
-        let mut counters = vec![0usize; plan.stages.len()];
-        let mut distinct_seen = vec![DistinctValueFold::default(); plan.stages.len()];
-        let mut pair_previous = vec![None; plan.stages.len()];
-        let mut window_states = (0..plan.stages.len())
-            .map(|_| None)
-            .collect::<Vec<Option<RelationWindowState>>>();
+        let mut states = RelationStageState::for_stages(plan.stages.len());
         // A04-05: a scan charges every streamed row one step. Only values that
         // a stage or terminal retains count against `max_collection_items`.
         self.for_each_relation_source_value(plan, depth, page_limit, &mut |context, value| {
             context.step()?;
-            let rows = context.apply_relation_stages(
-                value,
-                &plan.stages,
-                &mut counters,
-                &mut distinct_seen,
-                &mut pair_previous,
-                &mut window_states,
-                0,
-                depth + 1,
-            )?;
-            for row in rows {
-                match row {
-                    RelationRow::Skip => {}
-                    RelationRow::End => return Ok(false),
-                    RelationRow::Yield(value) => {
-                        if !visit(context, *value)? {
-                            return Ok(false);
-                        }
-                    }
-                }
-            }
-            Ok(true)
+            let rows =
+                context.apply_relation_stages(value, &plan.stages, &mut states, 0, depth + 1)?;
+            context.deliver_relation_rows(rows, &mut visit)
         })
     }
 
@@ -7843,17 +7797,38 @@ impl Context<'_, '_> {
         Ok(true)
     }
 
-    /// these from the plan they are walking.
-    /// One relation stage's rows, counters and visitor: the stage callers pass
-    #[allow(clippy::too_many_arguments)]
+    /// Hands one stage run's rows to `visit`. Returns `false` once the run is
+    /// over: a stage ended it or `visit` asked to stop.
+    fn deliver_relation_rows<V>(
+        &mut self,
+        rows: Vec<RelationRow>,
+        visit: &mut V,
+    ) -> Result<bool, EvaluationError>
+    where
+        V: FnMut(&mut Self, Value) -> Result<bool, EvaluationError> + ?Sized,
+    {
+        for row in rows {
+            match row {
+                RelationRow::Skip => {}
+                RelationRow::End => return Ok(false),
+                RelationRow::Yield(value) => {
+                    if !visit(self, *value)? {
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    /// Runs one value through `stages` and returns the rows to hand on.
+    /// `stage_offset` is the absolute position of `stages[0]`, which indexes
+    /// `states`.
     fn apply_relation_stages(
         &mut self,
         mut value: Value,
         stages: &[RelationStage],
-        counters: &mut [usize],
-        distinct_seen: &mut [DistinctValueFold],
-        pair_previous: &mut [Option<Value>],
-        window_states: &mut [Option<RelationWindowState>],
+        states: &mut [RelationStageState],
         stage_offset: usize,
         depth: usize,
     ) -> Result<Vec<RelationRow>, EvaluationError> {
@@ -7862,13 +7837,13 @@ impl Context<'_, '_> {
             match stage {
                 RelationStage::Filter(predicates) => {
                     if !self.relation_filter_passes(&value, predicates.iter(), depth + 1)? {
-                        return Ok(rejected_relation_rows(stages, counters, stage_offset));
+                        return Ok(rejected_relation_rows(stages, states, stage_offset));
                     }
                 }
                 RelationStage::SharedFilter(batch) => {
                     let predicates = batch.chunks().iter().flat_map(|chunk| chunk.iter());
                     if !self.relation_filter_passes(&value, predicates, depth + 1)? {
-                        return Ok(rejected_relation_rows(stages, counters, stage_offset));
+                        return Ok(rejected_relation_rows(stages, states, stage_offset));
                     }
                 }
                 RelationStage::Map(transform) => {
@@ -7877,57 +7852,52 @@ impl Context<'_, '_> {
                 RelationStage::FlatMap(transform) => {
                     self.step()?;
                     let mapped = self.invoke_predicate(transform, value, depth + 1)?;
-                    let suffix = &stages[local_index + 1..];
                     return self.apply_relation_flat_map(
                         mapped,
                         stages,
-                        suffix,
-                        counters,
-                        distinct_seen,
-                        pair_previous,
-                        window_states,
+                        local_index,
+                        states,
                         stage_offset,
-                        index + 1,
                         depth + 1,
                     );
                 }
                 RelationStage::BucketBy(_) => return Err(error("ORNA-EVAL-UNSUPPORTED")),
                 RelationStage::Distinct => {
-                    let seen = &mut distinct_seen[index];
+                    let seen = &mut states[index].distinct;
                     if !seen.insert(value.clone())? {
-                        return Ok(rejected_relation_rows(stages, counters, stage_offset));
+                        return Ok(rejected_relation_rows(stages, states, stage_offset));
                     }
                     self.items(seen.len())?;
                 }
                 RelationStage::Pairs => {
-                    let Some(previous) = pair_previous[index].replace(value.clone()) else {
-                        return Ok(rejected_relation_rows(stages, counters, stage_offset));
+                    let Some(previous) = states[index].previous.replace(value.clone()) else {
+                        return Ok(rejected_relation_rows(stages, states, stage_offset));
                     };
                     self.items(2)?;
                     value = Value::Tuple(vec![previous, value]);
                 }
                 RelationStage::Window(size, step) => {
-                    let state = window_states[index].get_or_insert_with(|| {
+                    let state = states[index].window.get_or_insert_with(|| {
                         RelationWindowState::try_new(*size, *step)
                             .expect("window stage parameters are validated")
                     });
                     self.items(state.next_item_bound())?;
                     let Some(window) = state.push(value) else {
-                        return Ok(rejected_relation_rows(stages, counters, stage_offset));
+                        return Ok(rejected_relation_rows(stages, states, stage_offset));
                     };
                     value = Value::list(window);
                 }
                 RelationStage::Drop(count) => {
-                    if counters[index] < *count {
-                        counters[index] += 1;
-                        return Ok(rejected_relation_rows(stages, counters, stage_offset));
+                    if states[index].count < *count {
+                        states[index].count += 1;
+                        return Ok(rejected_relation_rows(stages, states, stage_offset));
                     }
                 }
                 RelationStage::Take(count) => {
-                    if counters[index] >= *count {
+                    if states[index].count >= *count {
                         return Ok(vec![RelationRow::End]);
                     }
-                    counters[index] += 1;
+                    states[index].count += 1;
                 }
                 RelationStage::SortBy(_) => {
                     return Err(error("ORNA-EVAL-UNSUPPORTED"));
@@ -7935,30 +7905,25 @@ impl Context<'_, '_> {
             }
         }
         let mut rows = vec![RelationRow::Yield(Box::new(value))];
-        if stages.iter().enumerate().any(|(offset, stage)| {
-            matches!(stage, RelationStage::Take(count) if counters[stage_offset + offset] >= *count)
-        }) {
+        if take_exhausted(stages, states, stage_offset) {
             rows.push(RelationRow::End);
         }
         Ok(rows)
     }
 
-    /// these from the plan they are walking.
-    /// One relation stage's rows, counters and visitor: the stage callers pass
-    #[allow(clippy::too_many_arguments)]
+    /// Feeds every inner row of a `flat_map` result through the stages after
+    /// the `flat_map` at `stages[flat_map_index]`.
     fn apply_relation_flat_map(
         &mut self,
         mapped: Value,
         stages: &[RelationStage],
-        suffix: &[RelationStage],
-        counters: &mut [usize],
-        distinct_seen: &mut [DistinctValueFold],
-        pair_previous: &mut [Option<Value>],
-        window_states: &mut [Option<RelationWindowState>],
+        flat_map_index: usize,
+        states: &mut [RelationStageState],
         stage_offset: usize,
-        suffix_offset: usize,
         depth: usize,
     ) -> Result<Vec<RelationRow>, EvaluationError> {
+        let suffix = &stages[flat_map_index + 1..];
+        let suffix_offset = stage_offset + flat_map_index + 1;
         let mut rows = Vec::new();
         match mapped {
             Value::List(inner) => {
@@ -7971,10 +7936,7 @@ impl Context<'_, '_> {
                     let inner_rows = self.apply_relation_stages(
                         inner_value,
                         suffix,
-                        counters,
-                        distinct_seen,
-                        pair_previous,
-                        window_states,
+                        states,
                         suffix_offset,
                         depth + 1,
                     )?;
@@ -7997,10 +7959,7 @@ impl Context<'_, '_> {
                     let inner_rows = context.apply_relation_stages(
                         inner_value,
                         suffix,
-                        counters,
-                        distinct_seen,
-                        pair_previous,
-                        window_states,
+                        states,
                         suffix_offset,
                         depth + 1,
                     )?;
@@ -8013,9 +7972,7 @@ impl Context<'_, '_> {
             _ => return Err(error("ORNA-EVAL-TYPE")),
         }
         if !rows.iter().any(|row| matches!(row, RelationRow::End))
-            && stages.iter().enumerate().any(|(offset, stage)| {
-                matches!(stage, RelationStage::Take(count) if counters[stage_offset + offset] >= *count)
-            })
+            && take_exhausted(stages, states, stage_offset)
         {
             rows.push(RelationRow::End);
         }
@@ -8068,35 +8025,26 @@ impl Context<'_, '_> {
             unreachable!("sort_by returns a list")
         };
         let suffix = &plan.stages[sort_index + 1..];
-        let mut distinct_seen = vec![DistinctValueFold::default(); plan.stages.len()];
-        let mut pair_previous = vec![None; plan.stages.len()];
-        let mut window_states = (0..plan.stages.len())
-            .map(|_| None)
-            .collect::<Vec<Option<RelationWindowState>>>();
+        let mut states = RelationStageState::for_stages(plan.stages.len());
         self.for_each_buffered_relation(
             sorted.into_vec(),
             suffix,
             sort_index + 1,
             depth,
-            &mut distinct_seen,
-            &mut pair_previous,
-            &mut window_states,
+            &mut states,
             visit,
         )
     }
 
-    /// these from the plan they are walking.
-    /// One relation stage's rows, counters and visitor: the stage callers pass
-    #[allow(clippy::too_many_arguments)]
+    /// Runs buffered `values` through `stages`, sorting at each `SortBy`
+    /// stage. `stage_offset` is the absolute position of `stages[0]`.
     fn for_each_buffered_relation(
         &mut self,
         values: Vec<Value>,
         stages: &[RelationStage],
         stage_offset: usize,
         depth: usize,
-        distinct_seen: &mut [DistinctValueFold],
-        pair_previous: &mut [Option<Value>],
-        window_states: &mut [Option<RelationWindowState>],
+        states: &mut [RelationStageState],
         visit: impl FnMut(&mut Self, Value) -> Result<bool, EvaluationError>,
     ) -> Result<(), EvaluationError> {
         let Some(sort_index) = stages
@@ -8108,9 +8056,7 @@ impl Context<'_, '_> {
                 stages,
                 stage_offset,
                 depth,
-                distinct_seen,
-                pair_previous,
-                window_states,
+                states,
                 visit,
             );
         };
@@ -8121,9 +8067,7 @@ impl Context<'_, '_> {
             prefix,
             stage_offset,
             depth,
-            distinct_seen,
-            pair_previous,
-            window_states,
+            states,
             |context, value| {
                 upstream.push(value);
                 context.items(upstream.len())?;
@@ -8142,25 +8086,19 @@ impl Context<'_, '_> {
             &stages[sort_index + 1..],
             stage_offset + sort_index + 1,
             depth,
-            distinct_seen,
-            pair_previous,
-            window_states,
+            states,
             visit,
         )
     }
 
-    /// these from the plan they are walking.
-    /// One relation stage's rows, counters and visitor: the stage callers pass
-    #[allow(clippy::too_many_arguments)]
+    /// Runs buffered `values` through sort-free `stages`.
     fn for_each_buffered_stages(
         &mut self,
         values: Vec<Value>,
         stages: &[RelationStage],
         stage_offset: usize,
         depth: usize,
-        distinct_seen: &mut [DistinctValueFold],
-        pair_previous: &mut [Option<Value>],
-        window_states: &mut [Option<RelationWindowState>],
+        states: &mut [RelationStageState],
         mut visit: impl FnMut(&mut Self, Value) -> Result<bool, EvaluationError>,
     ) -> Result<(), EvaluationError> {
         if stages
@@ -8169,32 +8107,15 @@ impl Context<'_, '_> {
         {
             return Ok(());
         }
-        let mut counters = vec![0usize; stage_offset + stages.len()];
         for value in values {
             // Buffered relation stages can run without a predicate or visitor
             // that performs its own evaluator step. Keep this materialized
             // path as cancellation-aware as the paged source path.
             self.step()?;
-            let rows = self.apply_relation_stages(
-                value,
-                stages,
-                &mut counters,
-                distinct_seen,
-                pair_previous,
-                window_states,
-                stage_offset,
-                depth + 1,
-            )?;
-            for row in rows {
-                match row {
-                    RelationRow::Skip => {}
-                    RelationRow::End => return Ok(()),
-                    RelationRow::Yield(value) => {
-                        if !visit(self, *value)? {
-                            return Ok(());
-                        }
-                    }
-                }
+            let rows =
+                self.apply_relation_stages(value, stages, states, stage_offset, depth + 1)?;
+            if !self.deliver_relation_rows(rows, &mut visit)? {
+                return Ok(());
             }
         }
         Ok(())
@@ -8216,20 +8137,15 @@ impl Context<'_, '_> {
         }
 
         self.invalidate_call_reuse();
-        let remaining = self.limits.max_steps.saturating_sub(self.steps);
-        let mut budget = StepBudget::new(remaining);
-        let result = self
-            .effects
-            .as_deref_mut()
-            .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))
-            .and_then(|effects| {
+        let page = self
+            .with_effect_budget(|context, budget| {
+                let effects = context
+                    .effects
+                    .as_deref_mut()
+                    .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
                 let contextual = if let Some(handler) = effects.ovb2_binding() {
                     handler.scan_context_relation_page_scoped(
-                        source,
-                        scope,
-                        after,
-                        page_limit,
-                        &mut budget,
+                        source, scope, after, page_limit, budget,
                     )?
                 } else {
                     None
@@ -8238,16 +8154,11 @@ impl Context<'_, '_> {
                     Ok(Some(SourcePage::Contextual(page)))
                 } else {
                     effects
-                        .scan_relation_page_scoped(source, scope, after, page_limit, &mut budget)
+                        .scan_relation_page_scoped(source, scope, after, page_limit, budget)
                         .map(|page| page.map(SourcePage::Canonical))
                 }
-            });
-        let debited = remaining.saturating_sub(budget.remaining());
-        self.steps = self
-            .steps
-            .checked_add(debited)
-            .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
-        let page = result?.ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
+            })?
+            .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
         let page_size = match &page {
             SourcePage::Canonical(page) => page.rows.len(),
             SourcePage::Contextual(page) => page.rows.len(),
@@ -8428,48 +8339,32 @@ impl Context<'_, '_> {
         Ok((rows, next))
     }
 
-    /// Reads the activation clock through the effect boundary, debiting the
-    /// activation's step budget. `None` means no handler resolved `now`; the
-    /// evaluator never supplies a clock itself.
-    fn activation_now(&mut self, callee: &Expr) -> Result<Option<Value>, EvaluationError> {
-        let remaining = self.limits.max_steps.saturating_sub(self.steps);
-        let mut budget = StepBudget::new(remaining);
-        let result = self.resolve_now(callee, &mut budget);
-        let debited = remaining - budget.remaining();
-        self.steps = self
-            .steps
-            .checked_add(debited)
-            .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
-        result
+    /// Calls a no-argument root intrinsic (`now`, `uuid7`) through the effect
+    /// boundary, debiting the activation's step budget. `None` means no
+    /// handler resolved it; the evaluator never supplies a clock or a random
+    /// source itself.
+    fn activation_intrinsic(&mut self, callee: &Expr) -> Result<Option<Value>, EvaluationError> {
+        self.with_effect_budget(|context, budget| context.resolve_intrinsic(callee, budget))
     }
 
-    /// Dispatches a `now` call to the OVB-2 handler when present, otherwise to
-    /// the plain effect handler, and converts the answer to a value. The caller
-    /// owns the step budget.
-    fn resolve_now(
+    /// Dispatches a no-argument intrinsic call to the OVB-2 handler when
+    /// present, otherwise to the plain effect handler, and converts the answer
+    /// to a value. The caller owns the step budget.
+    fn resolve_intrinsic(
         &mut self,
         callee: &Expr,
         budget: &mut StepBudget,
     ) -> Result<Option<Value>, EvaluationError> {
-        if self.effects.is_none() {
-            return Ok(None);
-        }
-        if self.has_ovb2_effects() {
-            let result = self
-                .ovb2_effects()
-                .expect("checked OVB-2 effect handler")
-                .handle_with_budget(callee, &[], budget)?;
-            return match result {
+        if let Some(handler) = self.ovb2_effects() {
+            return match handler.handle_with_budget(callee, &[], budget)? {
                 Some(value) => self.ovb2_effect_value(&value).map(Some),
                 None => Ok(None),
             };
         }
-        let result = self
-            .effects
-            .as_deref_mut()
-            .expect("checked effect handler")
-            .handle_with_budget(callee, &[], budget)?;
-        match result {
+        let Some(effects) = self.effects.as_deref_mut() else {
+            return Ok(None);
+        };
+        match effects.handle_with_budget(callee, &[], budget)? {
             Some(value) => self.effect_value(&value).map(Some),
             None => Ok(None),
         }
@@ -8493,7 +8388,7 @@ impl Context<'_, '_> {
             return Ok(None);
         }
         let mut budget = StepBudget::new(self.limits.max_steps);
-        let clock = match self.resolve_now(&materialization_clock_callee(), &mut budget) {
+        let clock = match self.resolve_intrinsic(&materialization_clock_callee(), &mut budget) {
             Ok(Some(instant @ Value::Instant { .. })) => Some(instant),
             Err(failure) if failure.code() == "ORNA-EVAL-CANCELLED" => return Err(failure),
             _ => None,
@@ -8927,17 +8822,117 @@ impl Context<'_, '_> {
         ContextValue::new(ValueFormat::Ovb2, raw).map_err(|_| error("ORNA-EVAL-TYPE"))
     }
 
+    /// Runs one call across the effect boundary under the activation's
+    /// remaining step budget and debits what it spent, even when the call
+    /// fails, so effect work counts against `Limits::max_steps`.
+    fn with_effect_budget<T>(
+        &mut self,
+        operation: impl FnOnce(&mut Self, &mut StepBudget) -> Result<T, EvaluationError>,
+    ) -> Result<T, EvaluationError> {
+        let remaining = self.limits.max_steps.saturating_sub(self.steps);
+        let mut budget = StepBudget::new(remaining);
+        let result = operation(self, &mut budget);
+        let debited = remaining.saturating_sub(budget.remaining());
+        self.steps = self
+            .steps
+            .checked_add(debited)
+            .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+        result
+    }
+
+    /// An empty argument list in the value profile the activation's effect
+    /// handler speaks.
+    fn effect_arguments(&self, capacity: usize) -> EffectArguments {
+        if self.has_ovb2_effects() {
+            EffectArguments::Context(Vec::with_capacity(capacity))
+        } else {
+            EffectArguments::Canonical(Vec::with_capacity(capacity))
+        }
+    }
+
+    /// Converts one evaluated argument across the effect boundary and appends it.
+    fn push_effect_argument(
+        &mut self,
+        values: &mut EffectArguments,
+        value: Value,
+    ) -> Result<(), EvaluationError> {
+        match values {
+            EffectArguments::Canonical(values) => values.push(value.canonical()?),
+            EffectArguments::Context(values) => values.push(self.effect_context_value(value)?),
+        }
+        Ok(())
+    }
+
+    /// Offers one call to the activation's effect handler under the step
+    /// budget. `registered` is the admitted operation name when the call
+    /// resolved to a registered host operation. `None` means no handler
+    /// claimed the call.
+    fn dispatch_effect(
+        &mut self,
+        callee: &Expr,
+        registered: Option<&str>,
+        arguments: &EffectArguments,
+    ) -> Result<Option<Value>, EvaluationError> {
+        self.invalidate_call_reuse();
+        let cancellation = self.cancellation;
+        match arguments {
+            EffectArguments::Context(arguments) => {
+                let handled = self.with_effect_budget(|context, budget| {
+                    let handler = context
+                        .ovb2_effects()
+                        .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
+                    match registered {
+                        Some(operation) => handler.handle_registered_with_cancellation_and_budget(
+                            operation,
+                            callee,
+                            arguments,
+                            budget,
+                            cancellation,
+                        ),
+                        None => handler.handle_with_budget(callee, arguments, budget),
+                    }
+                })?;
+                handled
+                    .map(|value| self.ovb2_effect_value(&value))
+                    .transpose()
+            }
+            EffectArguments::Canonical(arguments) => {
+                let handled = self.with_effect_budget(|context, budget| {
+                    let handler = context
+                        .effects
+                        .as_deref_mut()
+                        .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
+                    match registered {
+                        Some(operation) => handler.handle_registered_with_cancellation_and_budget(
+                            operation,
+                            callee,
+                            arguments,
+                            budget,
+                            cancellation,
+                        ),
+                        None => handler.handle_with_budget(callee, arguments, budget),
+                    }
+                })?;
+                handled.map(|value| self.effect_value(&value)).transpose()
+            }
+        }
+    }
+
+    /// Evaluates one call expression. Resolution order: the `.divide` method
+    /// on a decimal, `decode`, `std.ui.action`, the root intrinsics, relation
+    /// sources and relation pipelines, the system host (`sys.*` and registered
+    /// host operations), then either a source function or a native operation.
     fn call(
         &mut self,
         callee: &Expr,
         arguments: &[orna_syntax::Argument],
-        input: Option<Value>,
+        mut input: Option<Value>,
         scope: &mut Scope,
         depth: usize,
     ) -> Result<Value, EvaluationError> {
-        let resolved_name = self.resolve_function_name(callee, scope);
+        let resolved = self.resolve_function_name(callee, scope);
         let mut pre_evaluated_callee = None;
-        if resolved_name.is_none()
+        if resolved.is_none()
             && input.is_none()
             && let Expr::Field { base, name, .. } = callee
             && name == "divide"
@@ -8956,7 +8951,7 @@ impl Context<'_, '_> {
             }
         }
         if let Some((codec, supports_options)) =
-            resolved_name.as_deref().and_then(codec_decode_operation)
+            resolved.as_deref().and_then(codec_decode_operation)
         {
             return self.decode_with_type_witness(
                 codec,
@@ -8967,155 +8962,23 @@ impl Context<'_, '_> {
                 depth,
             );
         }
-        if function_name(callee).as_deref() == Some("std.ui.action") {
+        let site = CallSite {
+            callee,
+            arguments,
+            resolved,
+            spelled: function_name(callee),
+        };
+        if site.spelled.as_deref() == Some("std.ui.action") {
             if input.is_some() {
                 return Err(error("ORNA-EVAL-ARGUMENT"));
             }
             return self.ui_action(arguments, scope, depth);
         }
-        // `Some(value)` constructs the language's core Optional value. It is
-        // available without importing std and remains shadowable by an
-        // explicit lexical or admitted function binding.
-        if matches!(callee, Expr::Name { text, .. } if text == "Some")
-            && !scope.0.contains_key("Some")
-            && self.resolve_function_name(callee, scope).is_none()
+        if let Some(intrinsic) = self.root_intrinsic(&site, scope)
+            && let Some(value) =
+                self.call_root_intrinsic(intrinsic, &site, input.is_some(), scope, depth)?
         {
-            if input.is_some() || arguments.len() != 1 || arguments[0].name.is_some() {
-                return Err(error("ORNA-EVAL-ARGUMENT"));
-            }
-            let value = self.evaluate(&arguments[0].value, scope, depth + 1)?;
-            if self.transfer.is_some() {
-                return Ok(Value::Null);
-            }
-            return Ok(Value::Option(Some(Box::new(value))));
-        }
-        // `now()` is an activation-scoped intrinsic. It is deliberately
-        // offered only through the existing effect boundary so the evaluator
-        // never reads a wall clock and callers without an activation handler
-        // fail closed as unsupported. A lexical/function binding named
-        // `now` retains precedence and therefore shadows this intrinsic.
-        if matches!(callee, Expr::Name { text, .. } if text == "now")
-            && !scope.0.contains_key("now")
-            && self.resolve_function_name(callee, scope).is_none()
-            && self.effects.is_some()
-        {
-            if input.is_some() || !arguments.is_empty() {
-                return Err(error("ORNA-EVAL-ARGUMENT"));
-            }
-            self.invalidate_call_reuse();
-            if let Some(value) = self.activation_now(callee)? {
-                return Ok(value);
-            }
-        }
-        // `uuid7()` is an activation-scoped intrinsic. Like `now()`, it is
-        // available only through the effect boundary: the evaluator never
-        // supplies a clock or random fallback. Lexical and admitted function
-        // bindings retain precedence over the root intrinsic.
-        if matches!(callee, Expr::Name { text, .. } if text == "uuid7")
-            && !scope.0.contains_key("uuid7")
-            && self.resolve_function_name(callee, scope).is_none()
-            && self.effects.is_some()
-        {
-            if input.is_some() || !arguments.is_empty() {
-                return Err(error("ORNA-EVAL-ARGUMENT"));
-            }
-            self.invalidate_call_reuse();
-            let remaining = self.limits.max_steps.saturating_sub(self.steps);
-            let mut budget = StepBudget::new(remaining);
-            if self.has_ovb2_effects() {
-                let result = self
-                    .ovb2_effects()
-                    .expect("checked OVB-2 effect handler")
-                    .handle_with_budget(callee, &[], &mut budget);
-                let debited = remaining - budget.remaining();
-                self.steps = self
-                    .steps
-                    .checked_add(debited)
-                    .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
-                if let Some(value) = result? {
-                    return self.ovb2_effect_value(&value);
-                }
-            } else {
-                let result = self
-                    .effects
-                    .as_deref_mut()
-                    .expect("checked effect handler")
-                    .handle_with_budget(callee, &[], &mut budget);
-                let debited = remaining - budget.remaining();
-                self.steps = self
-                    .steps
-                    .checked_add(debited)
-                    .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
-                if let Some(value) = result? {
-                    return self.effect_value(&value);
-                }
-            }
-        }
-        if matches!(callee, Expr::Name { text, .. } if text == "error")
-            && !scope.0.contains_key("error")
-            && self.resolve_function_name(callee, scope).is_none()
-        {
-            if input.is_some() || arguments.iter().any(|argument| argument.name.is_none()) {
-                return Err(error("ORNA-EVAL-ARGUMENT"));
-            }
-            let mut supplied = BTreeMap::new();
-            for argument in arguments {
-                let name = argument
-                    .name
-                    .as_ref()
-                    .expect("unnamed arguments rejected above");
-                if !matches!(name.as_str(), "code" | "message" | "cause")
-                    || supplied.contains_key(name)
-                {
-                    return Err(error("ORNA-EVAL-ARGUMENT"));
-                }
-                let value = self.evaluate(&argument.value, scope, depth + 1)?;
-                if self.transfer.is_some() {
-                    return Ok(Value::Null);
-                }
-                supplied.insert(name.clone(), value);
-            }
-            let Value::String(code) = supplied
-                .remove("code")
-                .ok_or_else(|| error("ORNA-EVAL-ARGUMENT"))?
-            else {
-                return Err(error("ORNA-EVAL-TYPE"));
-            };
-            let Value::String(message) = supplied
-                .remove("message")
-                .ok_or_else(|| error("ORNA-EVAL-ARGUMENT"))?
-            else {
-                return Err(error("ORNA-EVAL-TYPE"));
-            };
-            let causes = match supplied.remove("cause") {
-                None => Vec::new(),
-                Some(Value::Error(cause)) => vec![cause.handler_error()?],
-                Some(_) => return Err(error("ORNA-EVAL-TYPE")),
-            };
-            let value = CanonicalErrorValue::new(code, message, causes, BTreeMap::new())
-                .map_err(|_| error("ORNA-EVAL-VALUE"))?;
-            return Ok(Value::Error(EvaluationError::from_canonical(value)));
-        }
-
-        // `fail(error_value)` is an abrupt intrinsic, not an ordinary
-        // callable. Error values only exist while a recovery handler is
-        // running, so re-emitting one preserves the original diagnostic and
-        // lets the surrounding `|?` boundary decide whether to handle it.
-        if matches!(callee, Expr::Name { text, .. } if text == "fail")
-            && !scope.0.contains_key("fail")
-            && self.resolve_function_name(callee, scope).is_none()
-        {
-            if input.is_some() || arguments.len() != 1 {
-                return Err(error("ORNA-EVAL-ARGUMENT"));
-            }
-            let value = self.evaluate(&arguments[0].value, scope, depth + 1)?;
-            if self.transfer.is_some() {
-                return Ok(Value::Null);
-            }
-            return match value {
-                Value::Error(failure) => Err(failure),
-                _ => Err(error("ORNA-EVAL-TYPE")),
-            };
+            return Ok(value);
         }
         if is_relation_source(callee) {
             if input.is_some() || arguments.len() != 1 {
@@ -9130,22 +8993,167 @@ impl Context<'_, '_> {
         if let Some(result) = self.relation_call(callee, arguments, input.clone(), scope, depth) {
             return result;
         }
-        let root_collection =
-            root_collection_name(callee).filter(|name| !scope.0.contains_key(*name));
-        let resolved_function = self.resolve_function_name(callee, scope);
-        let source_function_name = function_name(callee);
+        if let Some(value) = self.call_system_host(&site, &mut input, scope, depth)? {
+            return Ok(value);
+        }
+        match self.route_call(&site, input.as_ref(), scope)? {
+            CallRoute::Source => {
+                self.call_source_function(&site, input, pre_evaluated_callee, scope, depth)
+            }
+            CallRoute::Native(target) => self.call_native(&site, target, input, scope, depth),
+        }
+    }
+
+    /// The root intrinsic `site` names, unless something shadows it. A lexical
+    /// or admitted function binding of the same name takes precedence. `now`
+    /// and `uuid7` exist only through the effect boundary, so without an
+    /// effect handler they are ordinary names and fail like any unknown one.
+    fn root_intrinsic(&self, site: &CallSite<'_>, scope: &Scope) -> Option<RootIntrinsic> {
+        let Expr::Name { text, .. } = site.callee else {
+            return None;
+        };
+        let intrinsic = match text.as_str() {
+            "Some" => RootIntrinsic::OptionSome,
+            "now" => RootIntrinsic::Now,
+            "uuid7" => RootIntrinsic::Uuid7,
+            "error" => RootIntrinsic::Error,
+            "fail" => RootIntrinsic::Fail,
+            _ => return None,
+        };
+        let shadowed = scope.0.contains_key(text.as_str()) || site.resolved.is_some();
+        let needs_effects = matches!(intrinsic, RootIntrinsic::Now | RootIntrinsic::Uuid7);
+        (!shadowed && (!needs_effects || self.effects.is_some())).then_some(intrinsic)
+    }
+
+    /// Evaluates a root intrinsic. `Ok(None)` means the effect handler did not
+    /// resolve `now` or `uuid7`, and the call continues down the ordinary path.
+    fn call_root_intrinsic(
+        &mut self,
+        intrinsic: RootIntrinsic,
+        site: &CallSite<'_>,
+        has_input: bool,
+        scope: &mut Scope,
+        depth: usize,
+    ) -> Result<Option<Value>, EvaluationError> {
+        let arguments = site.arguments;
+        match intrinsic {
+            // `Some(value)` constructs the language's core Optional value. It
+            // is available without importing std and remains shadowable by an
+            // explicit lexical or admitted function binding.
+            RootIntrinsic::OptionSome => {
+                if has_input || arguments.len() != 1 || arguments[0].name.is_some() {
+                    return Err(error("ORNA-EVAL-ARGUMENT"));
+                }
+                let value = self.evaluate(&arguments[0].value, scope, depth + 1)?;
+                if self.transfer.is_some() {
+                    return Ok(Some(Value::Null));
+                }
+                Ok(Some(Value::Option(Some(Box::new(value)))))
+            }
+            // `now()` and `uuid7()` are activation-scoped intrinsics. They are
+            // deliberately offered only through the existing effect boundary
+            // so the evaluator never reads a wall clock or a random source and
+            // callers without an activation handler fail closed as
+            // unsupported. A lexical or function binding of the same name
+            // retains precedence and therefore shadows the intrinsic.
+            RootIntrinsic::Now | RootIntrinsic::Uuid7 => {
+                if has_input || !arguments.is_empty() {
+                    return Err(error("ORNA-EVAL-ARGUMENT"));
+                }
+                self.invalidate_call_reuse();
+                self.activation_intrinsic(site.callee)
+            }
+            RootIntrinsic::Error => {
+                if has_input {
+                    return Err(error("ORNA-EVAL-ARGUMENT"));
+                }
+                let names = arguments
+                    .iter()
+                    .map(|argument| argument.name.as_ref())
+                    .collect::<Option<Vec<_>>>()
+                    .ok_or_else(|| error("ORNA-EVAL-ARGUMENT"))?;
+                let mut supplied = BTreeMap::new();
+                for (argument, name) in arguments.iter().zip(names) {
+                    if !matches!(name.as_str(), "code" | "message" | "cause")
+                        || supplied.contains_key(name)
+                    {
+                        return Err(error("ORNA-EVAL-ARGUMENT"));
+                    }
+                    let value = self.evaluate(&argument.value, scope, depth + 1)?;
+                    if self.transfer.is_some() {
+                        return Ok(Some(Value::Null));
+                    }
+                    supplied.insert(name.clone(), value);
+                }
+                let Value::String(code) = supplied
+                    .remove("code")
+                    .ok_or_else(|| error("ORNA-EVAL-ARGUMENT"))?
+                else {
+                    return Err(error("ORNA-EVAL-TYPE"));
+                };
+                let Value::String(message) = supplied
+                    .remove("message")
+                    .ok_or_else(|| error("ORNA-EVAL-ARGUMENT"))?
+                else {
+                    return Err(error("ORNA-EVAL-TYPE"));
+                };
+                let causes = match supplied.remove("cause") {
+                    None => Vec::new(),
+                    Some(Value::Error(cause)) => vec![cause.handler_error()?],
+                    Some(_) => return Err(error("ORNA-EVAL-TYPE")),
+                };
+                let value = CanonicalErrorValue::new(code, message, causes, BTreeMap::new())
+                    .map_err(|_| error("ORNA-EVAL-VALUE"))?;
+                Ok(Some(Value::Error(EvaluationError::from_canonical(value))))
+            }
+            // `fail(error_value)` is an abrupt intrinsic, not an ordinary
+            // callable. Error values only exist while a recovery handler is
+            // running, so re-emitting one preserves the original diagnostic
+            // and lets the surrounding `|?` boundary decide whether to handle
+            // it.
+            RootIntrinsic::Fail => {
+                if has_input || arguments.len() != 1 {
+                    return Err(error("ORNA-EVAL-ARGUMENT"));
+                }
+                let value = self.evaluate(&arguments[0].value, scope, depth + 1)?;
+                if self.transfer.is_some() {
+                    return Ok(Some(Value::Null));
+                }
+                match value {
+                    Value::Error(failure) => Err(failure),
+                    _ => Err(error("ORNA-EVAL-TYPE")),
+                }
+            }
+        }
+    }
+
+    /// Serves calls that resolve to the system host: `sys.explain`,
+    /// `sys.rt.info`, Blob operations and registered host operations.
+    /// `Ok(None)` means the call is not the host's to serve; `input` is then
+    /// untouched, because a registered host operation takes no piped input.
+    #[cfg(feature = "system-host-bindings")]
+    fn call_system_host(
+        &mut self,
+        site: &CallSite<'_>,
+        input: &mut Option<Value>,
+        scope: &mut Scope,
+        depth: usize,
+    ) -> Result<Option<Value>, EvaluationError> {
+        let (callee, arguments) = (site.callee, site.arguments);
+        let spelled = site.spelled.as_deref();
+        let sys_unshadowed = !scope.0.contains_key("sys");
         // Every `sys.explain` overload is evaluated natively against the host
         // catalogue, never by a provider invoke. An unshadowed call therefore
         // stays on this path.
-        #[cfg(feature = "system-host-bindings")]
-        if source_function_name.as_deref() == Some("sys.explain") && !scope.0.contains_key("sys") {
-            return self.call_sys_explain(arguments, input, scope, depth);
+        if spelled == Some("sys.explain") && sys_unshadowed {
+            return self
+                .call_sys_explain(arguments, input.take(), scope, depth)
+                .map(Some);
         }
         // `sys.rt.info()` reports the activation the host attached. Like
         // `sys.explain`, it is lowered here, never by a provider invoke.
-        #[cfg(feature = "system-host-bindings")]
-        if source_function_name.as_deref() == Some("sys.rt.info") && !scope.0.contains_key("sys") {
-            return self.call_sys_rt_info(arguments, input);
+        if spelled == Some("sys.rt.info") && sys_unshadowed {
+            return self.call_sys_rt_info(arguments, input.take()).map(Some);
         }
 
         // A portable Blob call is admitted only when the generated typed
@@ -9153,584 +9161,486 @@ impl Context<'_, '_> {
         // declaration was reachable; an unresolved, unshadowed source-level
         // `sys.blob.*` call is accepted so the generated declarations stay
         // callable, and a resolved non-Blob function never falls through.
-        #[cfg(feature = "system-host-bindings")]
-        let declared = match resolved_function.as_deref() {
-            Some(name) if crate::sys_bindings::is_blob_host_operation(name) => {
-                Some(name.to_owned())
-            }
+        let declared = match site.resolved.as_deref() {
+            Some(name) if crate::sys_bindings::is_blob_host_operation(name) => Some(name),
             Some(_) => None,
-            None => source_function_name
-                .as_deref()
-                .filter(|name| {
-                    !scope.0.contains_key("sys")
-                        && crate::sys_bindings::is_blob_host_operation(name)
-                })
-                .map(str::to_owned),
+            None => spelled
+                .filter(|name| sys_unshadowed && crate::sys_bindings::is_blob_host_operation(name)),
         }
         .filter(|name| orna_sys::system_dispatch_table().operation(name).is_some());
-        #[cfg(feature = "system-host-bindings")]
         if let Some(operation) = declared {
-            return self.call_blob_operation(&operation, arguments, input, scope, depth);
+            return self
+                .call_blob_operation(operation, arguments, input.take(), scope, depth)
+                .map(Some);
         }
-        #[cfg(feature = "system-host-bindings")]
-        if let Some(operation_name) = resolved_function.as_deref()
-            && let Some(operation) =
-                orna_sys::system_host_operation_registry().operation(operation_name)
-        {
-            if self.effects.is_none() {
-                return Err(error("ORNA-EVAL-UNSUPPORTED"));
-            }
-            if input.is_some() || arguments.len() != operation.parameters.len() {
-                return Err(error("ORNA-EVAL-ARGUMENT"));
-            }
-            let positional = arguments.iter().all(|argument| argument.name.is_none());
-            let ordered_arguments = if positional {
-                arguments.iter().collect::<Vec<_>>()
-            } else {
-                let mut ordered = Vec::with_capacity(arguments.len());
-                for parameter in &operation.parameters {
-                    let mut matches = arguments
-                        .iter()
-                        .filter(|argument| argument.name.as_deref() == Some(parameter.as_str()));
-                    let Some(argument) = matches.next() else {
-                        return Err(error("ORNA-EVAL-ARGUMENT"));
-                    };
-                    if matches.next().is_some() {
-                        return Err(error("ORNA-EVAL-ARGUMENT"));
-                    }
-                    ordered.push(argument);
-                }
-                if ordered.len() != arguments.len() {
-                    return Err(error("ORNA-EVAL-ARGUMENT"));
-                }
-                ordered
-            };
-            if self.has_ovb2_effects() {
-                let values = ordered_arguments
-                    .iter()
-                    .map(|argument| {
-                        let value = self.evaluate(&argument.value, scope, depth + 1)?;
-                        self.effect_context_value(value)
-                    })
-                    .collect::<Result<Vec<_>, EvaluationError>>()?;
-                self.invalidate_call_reuse();
-                let remaining = self.limits.max_steps.saturating_sub(self.steps);
-                let mut budget = StepBudget::new(remaining);
-                let cancellation = self.cancellation;
-                let result = self
-                    .ovb2_effects()
-                    .expect("checked OVB-2 effect handler")
-                    .handle_registered_with_cancellation_and_budget(
-                        operation_name,
-                        callee,
-                        &values,
-                        &mut budget,
-                        cancellation,
-                    );
-                let debited = remaining - budget.remaining();
-                self.steps = self
-                    .steps
-                    .checked_add(debited)
-                    .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
-                if let Some(value) = result? {
-                    return self.ovb2_effect_value(&value);
-                }
-            } else {
-                // Keep the legacy conversion and dispatch order intact for
-                // every existing EffectHandler caller.
-                let values = ordered_arguments
-                    .iter()
-                    .map(|argument| {
-                        self.evaluate(&argument.value, scope, depth + 1)?
-                            .canonical()
-                    })
-                    .collect::<Result<Vec<_>, EvaluationError>>()?;
-                self.invalidate_call_reuse();
-                let remaining = self.limits.max_steps.saturating_sub(self.steps);
-                let mut budget = StepBudget::new(remaining);
-                let result = self
-                    .effects
-                    .as_deref_mut()
-                    .expect("host effects were checked above")
-                    .handle_registered_with_cancellation_and_budget(
-                        operation_name,
-                        callee,
-                        &values,
-                        &mut budget,
-                        self.cancellation,
-                    );
-                let debited = remaining - budget.remaining();
-                self.steps = self
-                    .steps
-                    .checked_add(debited)
-                    .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
-                if let Some(value) = result? {
-                    return self.effect_value(&value);
-                }
-            }
+        let Some(operation_name) = site.resolved.as_deref() else {
+            return Ok(None);
+        };
+        let Some(operation) = orna_sys::system_host_operation_registry().operation(operation_name)
+        else {
+            return Ok(None);
+        };
+        if self.effects.is_none() {
+            return Err(error("ORNA-EVAL-UNSUPPORTED"));
         }
-        let source_export_available =
-            function_name(callee).is_some_and(|name| self.functions.contains_key(&name));
+        if input.is_some() || arguments.len() != operation.parameters.len() {
+            return Err(error("ORNA-EVAL-ARGUMENT"));
+        }
+        let ordered_arguments = ordered_host_arguments(arguments, &operation.parameters)?;
+        let mut values = self.effect_arguments(ordered_arguments.len());
+        for argument in ordered_arguments {
+            let value = self.evaluate(&argument.value, scope, depth + 1)?;
+            self.push_effect_argument(&mut values, value)?;
+        }
+        self.dispatch_effect(callee, Some(operation_name), &values)
+    }
+
+    /// Without the `system-host-bindings` feature no host can attach.
+    #[cfg(not(feature = "system-host-bindings"))]
+    fn call_system_host(
+        &mut self,
+        _site: &CallSite<'_>,
+        _input: &mut Option<Value>,
+        _scope: &mut Scope,
+        _depth: usize,
+    ) -> Result<Option<Value>, EvaluationError> {
+        Ok(None)
+    }
+
+    /// Decides whether a call evaluates a source function or runs a native
+    /// operation. A call runs natively when a registered binding, a root
+    /// stream or collection intrinsic, or an unresolved qualified standard
+    /// spelling claims it; otherwise the resolved or first-class function
+    /// runs from its Orna body.
+    fn route_call<'s>(
+        &self,
+        site: &'s CallSite<'_>,
+        input: Option<&Value>,
+        scope: &Scope,
+    ) -> Result<CallRoute<'s>, EvaluationError> {
+        let callee = site.callee;
+        let resolved = site.resolved.as_deref();
+        let repl = self.mode.is_repl();
+        let source_export_available = site
+            .spelled
+            .as_ref()
+            .is_some_and(|name| self.functions.contains_key(name));
         let native_binding = registered_standard_binding(
             callee,
-            resolved_function.as_deref(),
+            resolved,
             scope,
-            !self.restrict_function_names,
+            !repl,
             source_export_available,
             captured_timezone_snapshot_matches(self.functions),
             self.functions,
         );
-        let native_math = native_binding
-            .filter(|binding| binding.kind == StandardBindingKind::Math)
-            .map(|binding| binding.operation);
-        let native_text = native_binding
-            .filter(|binding| binding.kind == StandardBindingKind::Text)
-            .map(|binding| binding.operation);
-        let native_bits = native_binding
-            .filter(|binding| binding.kind == StandardBindingKind::Bits)
-            .map(|binding| binding.operation);
-        let native_stream = native_binding
-            .filter(|binding| binding.kind == StandardBindingKind::Stream)
-            .map(|binding| binding.operation);
-        let native_concurrent = native_binding
-            .filter(|binding| binding.kind == StandardBindingKind::Concurrent)
-            .map(|binding| binding.operation);
-        let native_ui = native_binding
-            .filter(|binding| binding.kind == StandardBindingKind::Ui)
-            .map(|binding| binding.operation);
-        let native_stats = native_binding
-            .filter(|binding| binding.kind == StandardBindingKind::Stats)
-            .map(|binding| binding.operation);
-        let native_time = native_binding
-            .filter(|binding| binding.kind == StandardBindingKind::Time)
-            .map(|binding| binding.operation);
-        let root_stream = root_stream_name(callee);
-        let root_stream_operation = match (root_stream, input.as_ref()) {
-            (Some("from_list"), None) => Some("from_list"),
-            (Some("for_each"), Some(Value::Stream { .. })) => Some("for_each"),
-            _ => None,
+        let bound = |kind: StandardBindingKind| -> Option<&'s str> {
+            native_binding
+                .filter(|binding| binding.kind == kind)
+                .map(|binding| binding.operation)
         };
-        let native_hash = native_binding
-            .filter(|binding| binding.kind == StandardBindingKind::Hash)
-            .map(|binding| binding.operation);
-        let native_random = native_binding
-            .filter(|binding| binding.kind == StandardBindingKind::Random)
-            .map(|binding| binding.operation);
-        let native_base64 = native_binding
-            .filter(|binding| binding.kind == StandardBindingKind::Base64)
-            .map(|binding| binding.operation);
-        let native_json = native_binding
-            .filter(|binding| binding.kind == StandardBindingKind::Json)
-            .map(|binding| binding.operation);
-        let native_orna_codec = native_binding
-            .filter(|binding| binding.kind == StandardBindingKind::OrnaCodec)
-            .map(|binding| binding.operation);
-        let native_ovb_codec = native_binding
-            .filter(|binding| binding.kind == StandardBindingKind::OvbCodec)
-            .map(|binding| binding.operation);
-        let native_money = native_binding
-            .filter(|binding| binding.kind == StandardBindingKind::Money)
-            .map(|binding| binding.operation);
-        let qualified_math = (!scope.0.contains_key("std"))
-            .then(|| math_name(callee))
-            .flatten();
-        let qualified_text = (!scope.0.contains_key("std"))
-            .then(|| text_name(callee))
-            .flatten();
-        let qualified_bits = (!scope.0.contains_key("std"))
-            .then(|| bits_name(callee))
-            .flatten();
-        let qualified_stats = (!scope.0.contains_key("std"))
-            .then(|| stats_name(callee))
-            .flatten();
-        let qualified_time = (!scope.0.contains_key("std"))
-            .then(|| time_name(callee))
-            .flatten();
-        if self.restrict_function_names
-            && resolved_function.is_none()
-            && ((qualified_math.is_some() && native_math.is_none())
-                || (qualified_text.is_some() && native_text.is_none())
-                || (qualified_bits.is_some() && native_bits.is_none())
-                || (qualified_stats.is_some() && native_stats.is_none())
-                || (qualified_time.is_some() && native_time.is_none()))
+        let std_unshadowed = !scope.0.contains_key("std");
+        let qualified_math = std_unshadowed.then(|| math_name(callee)).flatten();
+        let qualified_text = std_unshadowed.then(|| text_name(callee)).flatten();
+        let qualified_bits = std_unshadowed.then(|| bits_name(callee)).flatten();
+        let qualified_stats = std_unshadowed.then(|| stats_name(callee)).flatten();
+        let qualified_time = std_unshadowed.then(|| time_name(callee)).flatten();
+        if repl
+            && resolved.is_none()
+            && ((qualified_math.is_some() && bound(StandardBindingKind::Math).is_none())
+                || (qualified_text.is_some() && bound(StandardBindingKind::Text).is_none())
+                || (qualified_bits.is_some() && bound(StandardBindingKind::Bits).is_none())
+                || (qualified_stats.is_some() && bound(StandardBindingKind::Stats).is_none())
+                || (qualified_time.is_some() && bound(StandardBindingKind::Time).is_none()))
         {
             return Err(error("ORNA-EVAL-UNSUPPORTED"));
         }
+        let portable_collection = portable_collection_operation(callee, resolved);
         let native_collection = native_binding.is_some_and(|binding| {
             binding.kind == StandardBindingKind::Collection
                 && captured_collection_binding_is_native(binding.operation, self.functions)
         });
         let native_asof_join = portable_collection_name(callee) == Some("asof_join")
-            && !self.restrict_function_names
-            && !scope.0.contains_key("std")
-            && resolved_function.is_none();
-        if portable_collection_operation(callee, resolved_function.as_deref()).is_some()
-            && self.restrict_function_names
-            && resolved_function.is_none()
+            && !repl
+            && std_unshadowed
+            && resolved.is_none();
+        if portable_collection.is_some()
+            && repl
+            && resolved.is_none()
             && !native_asof_join
             && !native_collection
         {
             return Err(error("ORNA-EVAL-UNSUPPORTED"));
         }
+        let root_stream_operation = match (root_stream_name(callee), input) {
+            (Some("from_list"), None) => Some("from_list"),
+            (Some("for_each"), Some(Value::Stream { .. })) => Some("for_each"),
+            _ => None,
+        };
+        let root_collection =
+            root_collection_name(callee).filter(|name| !scope.0.contains_key(*name));
         // Portable collection/query exports and selected exact arithmetic
         // leaves are admitted by their captured source declarations. Public
         // functions execute their Orna bodies; `map` and private leaves use
         // bounded primitives so callbacks retain the evaluator's captured
         // namespace and module-pin context.
-        if !native_asof_join
-            && !native_collection
-            && root_stream_operation.is_none()
-            && native_math.is_none()
-            && native_text.is_none()
-            && native_bits.is_none()
-            && native_stream.is_none()
-            && native_concurrent.is_none()
-            && native_stats.is_none()
-            && native_time.is_none()
-            && native_hash.is_none()
-            && native_random.is_none()
-            && native_base64.is_none()
-            && native_json.is_none()
-            && native_orna_codec.is_none()
-            && native_ovb_codec.is_none()
-            && native_money.is_none()
-            && native_ui.is_none()
-            && (qualified_math.is_none()
-                && qualified_bits.is_none()
-                && qualified_text.is_none()
-                && qualified_stats.is_none()
-                && qualified_time.is_none()
-                && native_stream.is_none()
-                && native_concurrent.is_none()
-                && portable_collection_operation(callee, resolved_function.as_deref()).is_none()
-                && root_collection.is_none()
-                || resolved_function.is_some())
+        let bound_elsewhere =
+            native_binding.is_some_and(|binding| binding.kind != StandardBindingKind::Collection);
+        let spelled_natively = qualified_math.is_some()
+            || qualified_bits.is_some()
+            || qualified_text.is_some()
+            || qualified_stats.is_some()
+            || qualified_time.is_some()
+            || portable_collection.is_some()
+            || root_collection.is_some();
+        if !(native_asof_join
+            || native_collection
+            || root_stream_operation.is_some()
+            || bound_elsewhere
+            || (resolved.is_none() && spelled_natively))
         {
-            // Only an unresolved, statically rooted field path is an effect
-            // dispatch candidate. Dynamic field callees must be evaluated by
-            // the ordinary call path first, otherwise their argument effects
-            // would run before the callee (for example,
-            // `make().field(effectful_arg)`).
-            let static_effect_path = is_static_effect_path(callee, scope);
-            if static_effect_path && self.effects.is_some() {
-                self.items(arguments.len() + usize::from(input.is_some()))?;
-                let mut values = input.clone().into_iter().collect::<Vec<_>>();
-                for argument in arguments {
-                    values.push(self.evaluate(&argument.value, scope, depth + 1)?);
-                    if self.transfer.is_some() {
-                        return Ok(Value::Null);
-                    }
-                }
-                if self.has_ovb2_effects() {
-                    let values = values
-                        .into_iter()
-                        .map(|value| self.effect_context_value(value))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    self.invalidate_call_reuse();
-                    let remaining = self.limits.max_steps.saturating_sub(self.steps);
-                    let mut budget = StepBudget::new(remaining);
-                    let result = self
-                        .ovb2_effects()
-                        .expect("checked OVB-2 effect handler")
-                        .handle_with_budget(callee, &values, &mut budget);
-                    let debited = remaining - budget.remaining();
-                    self.steps = self
-                        .steps
-                        .checked_add(debited)
-                        .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
-                    if let Some(value) = result? {
-                        return self.ovb2_effect_value(&value);
-                    }
-                } else {
-                    let values = values
-                        .into_iter()
-                        .map(Value::canonical)
-                        .collect::<Result<Vec<_>, _>>()?;
-                    self.invalidate_call_reuse();
-                    let remaining = self.limits.max_steps.saturating_sub(self.steps);
-                    let mut budget = StepBudget::new(remaining);
-                    let result = self
-                        .effects
-                        .as_deref_mut()
-                        .expect("checked effect handler")
-                        .handle_with_budget(callee, &values, &mut budget);
-                    let debited = remaining - budget.remaining();
-                    self.steps = self
-                        .steps
-                        .checked_add(debited)
-                        .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
-                    let handled = result?;
-                    if let Some(value) = handled {
-                        return self.effect_value(&value);
-                    }
-                }
+            return Ok(CallRoute::Source);
+        }
+        // The first family with an operation wins; the order is the dispatch
+        // priority. A REPL never falls back to a qualified spelling that no
+        // binding admitted.
+        let unbound = |qualified: Option<&'s str>| if repl { None } else { qualified };
+        let candidates = [
+            (
+                StandardBindingKind::Math,
+                bound(StandardBindingKind::Math).or(unbound(qualified_math)),
+            ),
+            (
+                StandardBindingKind::Bits,
+                bound(StandardBindingKind::Bits).or(unbound(qualified_bits)),
+            ),
+            (
+                StandardBindingKind::Text,
+                bound(StandardBindingKind::Text).or(unbound(qualified_text)),
+            ),
+            (
+                StandardBindingKind::Stats,
+                bound(StandardBindingKind::Stats).or(unbound(qualified_stats)),
+            ),
+            (StandardBindingKind::Time, bound(StandardBindingKind::Time)),
+            (
+                StandardBindingKind::Stream,
+                bound(StandardBindingKind::Stream).or(root_stream_operation),
+            ),
+            (
+                StandardBindingKind::Concurrent,
+                bound(StandardBindingKind::Concurrent),
+            ),
+            (StandardBindingKind::Ui, bound(StandardBindingKind::Ui)),
+            (StandardBindingKind::Hash, bound(StandardBindingKind::Hash)),
+            (
+                StandardBindingKind::Random,
+                bound(StandardBindingKind::Random),
+            ),
+            (
+                StandardBindingKind::Base64,
+                bound(StandardBindingKind::Base64),
+            ),
+            (StandardBindingKind::Json, bound(StandardBindingKind::Json)),
+            (
+                StandardBindingKind::OrnaCodec,
+                bound(StandardBindingKind::OrnaCodec),
+            ),
+            (
+                StandardBindingKind::OvbCodec,
+                bound(StandardBindingKind::OvbCodec),
+            ),
+            (
+                StandardBindingKind::Money,
+                bound(StandardBindingKind::Money),
+            ),
+            (
+                StandardBindingKind::Collection,
+                portable_collection.or(root_collection),
+            ),
+        ];
+        candidates
+            .into_iter()
+            .find_map(|(kind, operation)| {
+                operation.map(|operation| CallRoute::Native(NativeTarget { kind, operation }))
+            })
+            .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))
+    }
+
+    /// Offers a statically rooted, unresolved field path to the effect handler
+    /// before any source function is considered. Only such a path is an effect
+    /// dispatch candidate: a dynamic field callee must be evaluated by the
+    /// ordinary call path first, otherwise its argument effects would run
+    /// before the callee (for example `make().field(effectful_arg)`).
+    /// `Ok(None)` means no handler claimed the call.
+    fn call_static_effect(
+        &mut self,
+        site: &CallSite<'_>,
+        input: Option<&Value>,
+        scope: &mut Scope,
+        depth: usize,
+    ) -> Result<Option<Value>, EvaluationError> {
+        if !is_static_effect_path(site.callee, scope) || self.effects.is_none() {
+            return Ok(None);
+        }
+        self.items(site.arguments.len() + usize::from(input.is_some()))?;
+        let mut evaluated = input.cloned().into_iter().collect::<Vec<_>>();
+        for argument in site.arguments {
+            evaluated.push(self.evaluate(&argument.value, scope, depth + 1)?);
+            if self.transfer.is_some() {
+                return Ok(Some(Value::Null));
             }
-            if self.reject_unhandled_field_calls
-                && matches!(callee, Expr::Field { .. })
-                && self.resolve_function_name(callee, scope).is_none()
-            {
-                return Err(error("ORNA-EVAL-UNSUPPORTED"));
+        }
+        let mut values = self.effect_arguments(evaluated.len());
+        for value in evaluated {
+            self.push_effect_argument(&mut values, value)?;
+        }
+        self.dispatch_effect(site.callee, None, &values)
+    }
+
+    /// Calls the admitted function or first-class closure the callee names,
+    /// binding the piped input and the arguments by position and name.
+    fn call_source_function(
+        &mut self,
+        site: &CallSite<'_>,
+        input: Option<Value>,
+        pre_evaluated_callee: Option<Value>,
+        scope: &mut Scope,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        let (callee, arguments) = (site.callee, site.arguments);
+        if let Some(value) = self.call_static_effect(site, input.as_ref(), scope, depth)? {
+            return Ok(value);
+        }
+        if self.mode.is_repl() && matches!(callee, Expr::Field { .. }) && site.resolved.is_none() {
+            return Err(error("ORNA-EVAL-UNSUPPORTED"));
+        }
+        // A qualified module function is a callable path, not a record field
+        // lookup. Resolve it only when the complete path was explicitly
+        // admitted in the function environment; ordinary record fields retain
+        // their existing semantics.
+        let callable = if let Some(name) = &site.resolved {
+            Value::Function {
+                name: name.clone(),
+                nominal_definitions: scope.3.clone(),
             }
-            // A qualified module function is a callable path, not a record
-            // field lookup. Resolve it only when the complete path was
-            // explicitly admitted in the function environment; ordinary
-            // record fields retain their existing semantics.
-            let callable = if let Some(name) = self.resolve_function_name(callee, scope) {
-                Value::Function {
-                    name,
-                    nominal_definitions: scope.3.clone(),
-                }
-            } else if let Some(callable) = pre_evaluated_callee {
-                callable
-            } else {
-                self.evaluate(callee, scope, depth + 1)?
+        } else if let Some(callable) = pre_evaluated_callee {
+            callable
+        } else {
+            self.evaluate(callee, scope, depth + 1)?
+        };
+        if self.transfer.is_some() {
+            return Ok(Value::Null);
+        }
+        let functions = self.functions;
+        let (parameters, body, mut captured, session_owned, namespace) = match &callable {
+            Value::Function {
+                name,
+                nominal_definitions,
+            } => {
+                let function = functions.get(name).ok_or_else(|| error("ORNA-EVAL-NAME"))?;
+                (
+                    &function.parameters,
+                    &function.body,
+                    Scope::from_environment_with_nominals(
+                        &function.environment,
+                        nominal_definitions,
+                        self,
+                    )?,
+                    self.session_functions
+                        .is_some_and(|functions| functions.contains(name)),
+                    function_namespace(name),
+                )
+            }
+            Value::Closure(closure) => (
+                &closure.parameters,
+                &closure.body,
+                closure.captured.clone(),
+                self.repl_bindings,
+                closure.namespace.clone(),
+            ),
+            _ => return Err(error("ORNA-EVAL-TYPE")),
+        };
+        captured.2.extend(
+            scope
+                .2
+                .iter()
+                .filter(|name| captured.0.contains_key(*name))
+                .cloned(),
+        );
+        for (name, definition) in &scope.3 {
+            captured
+                .3
+                .entry(name.clone())
+                .or_insert_with(|| definition.clone());
+        }
+        self.check_call_room()?;
+        self.items(arguments.len() + usize::from(input.is_some()))?;
+        let mut supplied = BTreeMap::new();
+        let mut positional = 0;
+        if let Some(input) = input {
+            let Some(parameter) = parameters.first() else {
+                return Err(error("ORNA-EVAL-ARGUMENT"));
             };
+            supplied.insert(parameter_key(parameter, 0), input);
+            positional = 1;
+        }
+        let mut named_started = false;
+        for argument in arguments {
+            let key = if let Some(name) = &argument.name {
+                named_started = true;
+                ArgumentKey::Name(name.clone())
+            } else {
+                if named_started {
+                    return Err(error("ORNA-EVAL-ARGUMENT"));
+                }
+                let Some(parameter) = parameters.get(positional) else {
+                    return Err(error("ORNA-EVAL-ARGUMENT"));
+                };
+                let key = parameter_key(parameter, positional);
+                positional += 1;
+                key
+            };
+            if supplied.contains_key(&key) {
+                return Err(error("ORNA-EVAL-ARGUMENT"));
+            }
+            let value = self.evaluate(&argument.value, scope, depth + 1)?;
             if self.transfer.is_some() {
                 return Ok(Value::Null);
             }
-            let functions = self.functions;
-            let (parameters, body, mut captured, session_owned, namespace) = match &callable {
-                Value::Function {
-                    name,
-                    nominal_definitions,
-                } => {
-                    let function = functions.get(name).ok_or_else(|| error("ORNA-EVAL-NAME"))?;
-                    (
-                        &function.parameters,
-                        &function.body,
-                        Scope::from_environment_with_nominals(
-                            &function.environment,
-                            nominal_definitions,
-                            self,
-                        )?,
-                        self.session_functions
-                            .is_some_and(|functions| functions.contains(name)),
-                        function_namespace(name),
-                    )
-                }
-                Value::Closure(closure) => (
-                    &closure.parameters,
-                    &closure.body,
-                    closure.captured.clone(),
-                    self.repl_bindings,
-                    closure.namespace.clone(),
-                ),
-                _ => return Err(error("ORNA-EVAL-TYPE")),
-            };
-            captured.2.extend(
-                scope
-                    .2
-                    .iter()
-                    .filter(|name| captured.0.contains_key(*name))
-                    .cloned(),
-            );
-            for (name, definition) in &scope.3 {
-                captured
-                    .3
-                    .entry(name.clone())
-                    .or_insert_with(|| definition.clone());
-            }
-            self.check_call_room()?;
-            self.items(arguments.len() + usize::from(input.is_some()))?;
-            let mut supplied = BTreeMap::new();
-            let mut positional = 0;
-            if let Some(input) = input {
-                let Some(parameter) = parameters.first() else {
-                    return Err(error("ORNA-EVAL-ARGUMENT"));
-                };
-                supplied.insert(parameter_key(parameter, 0), input);
-                positional = 1;
-            }
-            let mut named_started = false;
-            for argument in arguments {
-                let key = if let Some(name) = &argument.name {
-                    named_started = true;
-                    ArgumentKey::Name(name.clone())
-                } else {
-                    if named_started {
-                        return Err(error("ORNA-EVAL-ARGUMENT"));
-                    }
-                    let Some(parameter) = parameters.get(positional) else {
-                        return Err(error("ORNA-EVAL-ARGUMENT"));
-                    };
-                    let key = parameter_key(parameter, positional);
-                    positional += 1;
-                    key
-                };
-                if supplied.contains_key(&key) {
-                    return Err(error("ORNA-EVAL-ARGUMENT"));
-                }
-                let value = self.evaluate(&argument.value, scope, depth + 1)?;
-                if self.transfer.is_some() {
-                    return Ok(Value::Null);
-                }
-                supplied.insert(key, value);
-            }
-            let previous_repl_bindings = self.repl_bindings;
-            self.repl_bindings = session_owned;
-            let previous_namespace = self.namespace.clone();
-            self.namespace = namespace;
-            let result = self.invoke_pure_reusing(
-                &callable,
-                parameters,
-                body,
-                captured,
-                supplied,
-                depth + 1,
-            );
-            self.namespace = previous_namespace;
-            self.repl_bindings = previous_repl_bindings;
-            return result;
+            supplied.insert(key, value);
         }
-        let math = native_math.or_else(|| {
-            (!self.restrict_function_names)
-                .then_some(qualified_math)
-                .flatten()
-        });
-        let bits = native_bits.or_else(|| {
-            (!self.restrict_function_names)
-                .then_some(qualified_bits)
-                .flatten()
-        });
-        let text = native_text.or_else(|| {
-            (!self.restrict_function_names)
-                .then_some(qualified_text)
-                .flatten()
-        });
-        let stats = native_stats.or_else(|| {
-            (!self.restrict_function_names)
-                .then_some(qualified_stats)
-                .flatten()
-        });
-        let time = native_time;
-        let stream = native_stream.or(root_stream_operation);
-        let concurrent = native_concurrent;
-        let base64 = native_base64;
-        let json = native_json;
-        let orna_codec = native_orna_codec;
-        let ovb_codec = native_ovb_codec;
-        let money = native_money;
-        let collection =
-            portable_collection_operation(callee, resolved_function.as_deref()).or(root_collection);
-        let name = math
-            .or(bits)
-            .or(text)
-            .or(stats)
-            .or(time)
-            .or(stream)
-            .or(concurrent)
-            .or(native_ui)
-            .or(native_hash)
-            .or(native_random)
-            .or(base64)
-            .or(json)
-            .or(orna_codec)
-            .or(ovb_codec)
-            .or(money)
-            .or(collection)
-            .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
+        let previous_repl_bindings = self.repl_bindings;
+        self.repl_bindings = session_owned;
+        let previous_namespace = self.namespace.clone();
+        self.namespace = namespace;
+        let result =
+            self.invoke_pure_reusing(&callable, parameters, body, captured, supplied, depth + 1);
+        self.namespace = previous_namespace;
+        self.repl_bindings = previous_repl_bindings;
+        result
+    }
+
+    /// Evaluates the arguments of a native operation and runs it in its family.
+    fn call_native(
+        &mut self,
+        site: &CallSite<'_>,
+        target: NativeTarget<'_>,
+        input: Option<Value>,
+        scope: &mut Scope,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        let (callee, arguments) = (site.callee, site.arguments);
+        let NativeTarget {
+            kind,
+            operation: name,
+        } = target;
         let implicit = usize::from(input.is_some());
         self.items(arguments.len() + implicit)?;
-        let mut values = input.into_iter().collect::<Vec<_>>();
-        let mut explicit = Vec::with_capacity(arguments.len());
+        let mut values = Vec::with_capacity(implicit + arguments.len());
+        values.extend(input);
         for argument in arguments {
-            let shorthand = stats.is_some()
-                && argument
-                    .name
-                    .as_deref()
-                    .is_some_and(|name| matches!(name, "rounding" | "interpolation" | "method"))
-                && matches!(
-                    argument.value,
-                    Expr::Name { ref text, .. } if matches!(text.as_str(), "half_even" | "linear" | "lower" | "higher" | "nearest" | "midpoint")
-                );
-            explicit.push(if shorthand {
-                let Expr::Name { text, .. } = &argument.value else {
-                    unreachable!("stats shorthand was checked above");
-                };
-                Value::String(text.clone())
-            } else {
-                self.evaluate(&argument.value, scope, depth + 1)?
+            // Statistics accept their option keywords as bare names.
+            let keyword = match &argument.value {
+                Expr::Name { text, .. }
+                    if kind == StandardBindingKind::Stats
+                        && argument.name.as_deref().is_some_and(|name| {
+                            matches!(name, "rounding" | "interpolation" | "method")
+                        })
+                        && matches!(
+                            text.as_str(),
+                            "half_even" | "linear" | "lower" | "higher" | "nearest" | "midpoint"
+                        ) =>
+                {
+                    Some(text)
+                }
+                _ => None,
+            };
+            values.push(match keyword {
+                Some(text) => Value::String(text.clone()),
+                None => self.evaluate(&argument.value, scope, depth + 1)?,
             });
             if self.transfer.is_some() {
                 return Ok(Value::Null);
             }
         }
-        values.extend(explicit);
-        let binding_name = match native_binding.map(|binding| binding.kind) {
-            Some(StandardBindingKind::Hash) => format!("hash.{name}"),
-            Some(StandardBindingKind::Random) => {
-                format!("random.{}", name.strip_prefix("__").unwrap_or(name))
+        let binding_name: std::borrow::Cow<'_, str> = match kind {
+            StandardBindingKind::Hash => format!("hash.{name}").into(),
+            StandardBindingKind::Random => {
+                format!("random.{}", name.strip_prefix("__").unwrap_or(name)).into()
             }
-            Some(StandardBindingKind::Base64) => {
-                format!("base64.{}", name.strip_prefix("__").unwrap_or(name))
+            StandardBindingKind::Base64 => {
+                format!("base64.{}", name.strip_prefix("__").unwrap_or(name)).into()
             }
-            Some(StandardBindingKind::Money) => {
-                format!("money.{}", name.strip_prefix("__").unwrap_or(name))
+            StandardBindingKind::Money => {
+                format!("money.{}", name.strip_prefix("__").unwrap_or(name)).into()
             }
-            _ => name.to_owned(),
+            StandardBindingKind::Collection
+            | StandardBindingKind::Math
+            | StandardBindingKind::Text
+            | StandardBindingKind::Bits
+            | StandardBindingKind::Stream
+            | StandardBindingKind::Concurrent
+            | StandardBindingKind::Ui
+            | StandardBindingKind::Stats
+            | StandardBindingKind::Time
+            | StandardBindingKind::Json
+            | StandardBindingKind::OrnaCodec
+            | StandardBindingKind::OvbCodec => name.into(),
         };
         let values = named_arguments(
             &binding_name,
             arguments,
             values,
             implicit,
-            collection.is_some() || stream.is_some(),
+            matches!(
+                kind,
+                StandardBindingKind::Collection | StandardBindingKind::Stream
+            ),
         )?;
-        if math.is_some() {
-            self.math(name, values)
-        } else if bits.is_some() {
-            self.bits(name, values)
-        } else if text.is_some() {
-            self.text(name, values)
-        } else if stats.is_some() {
-            let value = self.stats(name, values)?;
-            let nullable = matches!(
-                name,
-                "__mean"
-                    | "__median"
-                    | "__percentile"
-                    | "__min"
-                    | "__max"
-                    | "__range"
-                    | "__variance"
-                    | "__standard_deviation"
-                    | "__rate"
-                    | "__integrate"
-            );
-            if self.restrict_function_names && nullable {
-                // ORNA-TYPE-001: `T?` is Option<T>; absence is Option none, not a bare null.
-                Ok(match value {
-                    Value::Null => Value::Option(None),
-                    Value::Option(_) => value,
-                    value => Value::Option(Some(Box::new(value))),
-                })
-            } else {
-                Ok(value)
+        match kind {
+            StandardBindingKind::Math => self.math(name, values),
+            StandardBindingKind::Bits => self.bits(name, values),
+            StandardBindingKind::Text => self.text(name, values),
+            StandardBindingKind::Stats => {
+                let value = self.stats(name, values)?;
+                let nullable = matches!(
+                    name,
+                    "__mean"
+                        | "__median"
+                        | "__percentile"
+                        | "__min"
+                        | "__max"
+                        | "__range"
+                        | "__variance"
+                        | "__standard_deviation"
+                        | "__rate"
+                        | "__integrate"
+                );
+                if self.mode.is_repl() && nullable {
+                    // ORNA-TYPE-001: `T?` is Option<T>; absence is Option none,
+                    // not a bare null.
+                    Ok(match value {
+                        Value::Null => Value::Option(None),
+                        Value::Option(_) => value,
+                        value => Value::Option(Some(Box::new(value))),
+                    })
+                } else {
+                    Ok(value)
+                }
             }
-        } else if time.is_some() {
-            self.time(name, values)
-        } else if stream.is_some() {
-            self.stream(name, values, depth)
-        } else if concurrent.is_some() {
-            self.concurrent(name, values)
-        } else if native_ui.is_some() {
-            self.ui_node(values)
-        } else if native_hash.is_some() {
-            self.hash(name, values)
-        } else if native_random.is_some() {
-            self.random(name, values, callee)
-        } else if base64.is_some() {
-            self.base64(name, values)
-        } else if json.is_some() {
-            self.json_codec(name, values, &scope.3)
-        } else if orna_codec.is_some() {
-            self.orna_codec(name, values)
-        } else if ovb_codec.is_some() {
-            self.ovb_codec(name, values)
-        } else if money.is_some() {
-            self.money(name, values)
-        } else {
-            self.collection(name, values, depth)
+            StandardBindingKind::Time => self.time(name, values),
+            StandardBindingKind::Stream => self.stream(name, values, depth),
+            StandardBindingKind::Concurrent => self.concurrent(name, values),
+            StandardBindingKind::Ui => self.ui_node(values),
+            StandardBindingKind::Hash => self.hash(name, values),
+            StandardBindingKind::Random => self.random(name, values, callee),
+            StandardBindingKind::Base64 => self.base64(name, values),
+            StandardBindingKind::Json => self.json_codec(name, values, &scope.3),
+            StandardBindingKind::OrnaCodec => self.orna_codec(name, values),
+            StandardBindingKind::OvbCodec => self.ovb_codec(name, values),
+            StandardBindingKind::Money => self.money(name, values),
+            StandardBindingKind::Collection => self.collection(name, values, depth),
         }
     }
     /// Bare (unqualified) names resolve to top-level functions only outside named
@@ -9741,7 +9651,7 @@ impl Context<'_, '_> {
             .namespace
             .as_deref()
             .is_some_and(|namespace| namespace == "std" || namespace.starts_with("std."));
-        !self.restrict_function_names && !in_standard
+        !self.mode.is_repl() && !in_standard
     }
     /// Resolves an import alias key. The REPL's session aliases apply first. A
     /// bare key is the admitted module's own import and is visible only outside
@@ -10064,19 +9974,11 @@ impl Context<'_, '_> {
         ) -> Result<T, EvaluationError>,
     ) -> Result<T, EvaluationError> {
         self.invalidate_call_reuse();
-        let remaining = self.limits.max_steps.saturating_sub(self.steps);
-        let mut budget = StepBudget::new(remaining);
         let cancellation = self.cancellation;
-        let result = match self.effects.as_deref_mut() {
-            Some(effects) => operation(effects, &mut budget, cancellation),
+        self.with_effect_budget(|context, budget| match context.effects.as_deref_mut() {
+            Some(effects) => operation(effects, budget, cancellation),
             None => Err(error("ORNA-EVAL-UNSUPPORTED")),
-        };
-        let debited = remaining - budget.remaining();
-        self.steps = self
-            .steps
-            .checked_add(debited)
-            .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
-        result
+        })
     }
 
     fn provider_stream(
@@ -11100,49 +11002,19 @@ impl Context<'_, '_> {
                 if callbacks.is_empty() {
                     return Ok(Value::list(Vec::new()));
                 }
-                self.check_call_room()?;
-                let parent = self.cancellation.cloned();
-                let mut child_effects = Vec::with_capacity(callbacks.len());
-                self.disable_call_reuse_for_fork();
-                if let Some(effects) = self.effects.as_deref_mut() {
-                    for index in 0..callbacks.len() {
-                        child_effects.push(effects.fork_task_child(index));
-                    }
-                } else {
-                    child_effects.resize_with(callbacks.len(), || None);
-                }
-                let (results, _, records) = run_task_callbacks(
-                    callbacks,
-                    child_effects,
-                    self.calls,
-                    parent.clone(),
-                    self.functions,
-                    self.aliases,
-                    self.session_functions,
-                    self.limits,
-                    self.repl_bindings,
-                    self.restrict_function_names,
-                    self.reject_unhandled_field_calls,
-                    self.sys_host,
-                    true,
-                    false,
-                );
-                self.absorb_materializations(records)?;
-                if parent.as_ref().is_some_and(CancellationToken::is_requested) {
-                    return Err(error("ORNA-EVAL-CANCELLED"));
-                }
-                let failures = results
+                let (outcomes, _) = self.fork_task_callbacks(callbacks, TaskPolicy::Parallel)?;
+                let failures = outcomes
                     .iter()
-                    .filter_map(|result| result.as_ref()?.as_ref().err())
+                    .filter_map(|outcome| outcome.as_ref()?.as_ref().err())
                     .filter(|failure| failure.code() != "ORNA-EVAL-CANCELLED")
                     .cloned()
                     .collect::<Vec<_>>();
                 if !failures.is_empty() {
                     return Err(aggregate_task_failures(&failures));
                 }
-                let mut output = Vec::with_capacity(results.len());
-                for result in results {
-                    match result {
+                let mut output = Vec::with_capacity(outcomes.len());
+                for outcome in outcomes {
+                    match outcome {
                         Some(Ok(value)) => output.push(value),
                         Some(Err(failure)) => return Err(failure),
                         None => return Err(error("ORNA-EVAL-CANCELLED")),
@@ -11155,44 +11027,14 @@ impl Context<'_, '_> {
                 if callbacks.is_empty() {
                     return Err(error("ORNA-EVAL-VALUE"));
                 }
-                self.check_call_room()?;
-                let parent = self.cancellation.cloned();
-                let mut child_effects = Vec::with_capacity(callbacks.len());
-                self.disable_call_reuse_for_fork();
-                if let Some(effects) = self.effects.as_deref_mut() {
-                    for index in 0..callbacks.len() {
-                        child_effects.push(effects.fork_task_child(index));
-                    }
-                } else {
-                    child_effects.resize_with(callbacks.len(), || None);
-                }
-                let (results, winner, records) = run_task_callbacks(
-                    callbacks,
-                    child_effects,
-                    self.calls,
-                    parent.clone(),
-                    self.functions,
-                    self.aliases,
-                    self.session_functions,
-                    self.limits,
-                    self.repl_bindings,
-                    self.restrict_function_names,
-                    self.reject_unhandled_field_calls,
-                    self.sys_host,
-                    false,
-                    true,
-                );
-                self.absorb_materializations(records)?;
-                if parent.as_ref().is_some_and(CancellationToken::is_requested) {
-                    return Err(error("ORNA-EVAL-CANCELLED"));
-                }
+                let (outcomes, winner) = self.fork_task_callbacks(callbacks, TaskPolicy::Race)?;
                 if let Some(winner) = winner {
                     return Ok(winner);
                 }
-                results
+                outcomes
                     .into_iter()
-                    .find_map(|result| {
-                        result.and_then(|result| match result {
+                    .find_map(|outcome| {
+                        outcome.and_then(|result| match result {
                             Err(failure) if failure.code() != "ORNA-EVAL-CANCELLED" => {
                                 Some(Err(failure))
                             }
@@ -11219,15 +11061,7 @@ impl Context<'_, '_> {
                 let timeout = std::time::Duration::new(seconds, *nanosecond);
                 let shared_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let parent = self.cancellation.cloned();
-                let functions = self.functions;
-                let aliases = self.aliases;
-                let session_functions = self.session_functions;
-                let limits = self.limits;
-                let repl_bindings = self.repl_bindings;
-                let restrict_function_names = self.restrict_function_names;
-                let reject_unhandled_field_calls = self.reject_unhandled_field_calls;
-                let sys_host = self.sys_host;
-                let active_calls = self.calls;
+                let environment = self.task_environment();
                 self.disable_call_reuse_for_fork();
                 let child_effects = self
                     .effects
@@ -11247,16 +11081,8 @@ impl Context<'_, '_> {
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             invoke_task_callback(
                                 callback,
-                                functions,
-                                aliases,
-                                session_functions,
-                                limits,
+                                environment,
                                 cancellation,
-                                repl_bindings,
-                                restrict_function_names,
-                                reject_unhandled_field_calls,
-                                sys_host,
-                                active_calls,
                                 child_effects,
                                 &sink_for_task,
                             )
@@ -11571,66 +11397,57 @@ impl Context<'_, '_> {
     }
 
     fn random_entropy(&mut self, callee: &Expr, count: usize) -> Result<Vec<u8>, EvaluationError> {
-        let expected_count = count;
         self.invalidate_call_reuse();
-        let remaining = self.limits.max_steps.saturating_sub(self.steps);
-        let mut budget = StepBudget::new(remaining);
         let cancellation = self.cancellation;
         let value_raw = if self.has_ovb2_effects() {
             let arguments = [self.effect_context_value(Value::Int(BigInt::from(count)))?];
-            let result = self
-                .ovb2_effects()
-                .expect("checked OVB-2 effect handler")
-                .handle_registered_with_cancellation_and_budget(
-                    "std.random.entropy",
-                    callee,
-                    &arguments,
-                    &mut budget,
-                    cancellation,
-                );
-            let debited = remaining - budget.remaining();
-            self.steps = self
-                .steps
-                .checked_add(debited)
-                .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
-            let value = result?.ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
+            let value = self
+                .with_effect_budget(|context, budget| {
+                    context
+                        .ovb2_effects()
+                        .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?
+                        .handle_registered_with_cancellation_and_budget(
+                            "std.random.entropy",
+                            callee,
+                            &arguments,
+                            budget,
+                            cancellation,
+                        )
+                })?
+                .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
             if value.format() != ValueFormat::Ovb2 {
                 return Err(error("ORNA-EVAL-VALUE"));
             }
             value.raw().clone()
         } else {
-            let count = CanonicalValue::new(Raw::Int(BigInt::from(count)))
+            let count_value = CanonicalValue::new(Raw::Int(BigInt::from(count)))
                 .map_err(|_| error("ORNA-EVAL-VALUE"))?;
-            let arguments = [count];
-            let result = self
-                .effects
-                .as_deref_mut()
-                .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?
-                .handle_registered_with_cancellation_and_budget(
-                    "std.random.entropy",
-                    callee,
-                    &arguments,
-                    &mut budget,
-                    cancellation,
-                );
-            let debited = remaining - budget.remaining();
-            self.steps = self
-                .steps
-                .checked_add(debited)
-                .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
-            result?
-                .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?
-                .raw()
-                .clone()
+            let arguments = [count_value];
+            self.with_effect_budget(|context, budget| {
+                context
+                    .effects
+                    .as_deref_mut()
+                    .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?
+                    .handle_registered_with_cancellation_and_budget(
+                        "std.random.entropy",
+                        callee,
+                        &arguments,
+                        budget,
+                        cancellation,
+                    )
+            })?
+            .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?
+            .raw()
+            .clone()
         };
         let Raw::Bytes(bytes) = value_raw else {
             return Err(error("ORNA-EVAL-TYPE"));
         };
-        if bytes.len() != expected_count {
+        if bytes.len() != count {
             return Err(error("ORNA-EVAL-VALUE"));
         }
         self.items(bytes.len())?;
-        Ok(bytes.clone())
+        Ok(bytes)
     }
 
     fn hash(&mut self, name: &str, values: Vec<Value>) -> Result<Value, EvaluationError> {
@@ -15243,6 +15060,81 @@ struct RegisteredStandardBinding {
     operation: &'static str,
 }
 
+/// The syntax of one call being evaluated and how its callee is named.
+struct CallSite<'a> {
+    callee: &'a Expr,
+    arguments: &'a [orna_syntax::Argument],
+    /// The admitted function the callee resolves to, when one is visible.
+    resolved: Option<String>,
+    /// The callee's dotted source spelling, when it is a plain path.
+    spelled: Option<String>,
+}
+
+/// A root name the language itself provides: `Some`, `error` and `fail` need no
+/// import, and `now` and `uuid7` exist through the effect boundary.
+#[derive(Clone, Copy)]
+enum RootIntrinsic {
+    OptionSome,
+    Now,
+    Uuid7,
+    Error,
+    Fail,
+}
+
+/// A bounded native operation a call runs, and the family that runs it.
+#[derive(Clone, Copy)]
+struct NativeTarget<'a> {
+    kind: StandardBindingKind,
+    operation: &'a str,
+}
+
+/// Where a call goes once it is not a root intrinsic, a relation or a host
+/// operation.
+enum CallRoute<'a> {
+    /// Evaluate the callee and invoke the function or closure it names.
+    Source,
+    /// Run a native operation.
+    Native(NativeTarget<'a>),
+}
+
+/// Arguments for one effect-handler call, in the value profile the handler
+/// speaks: canonical values for a legacy handler, context values for an OVB-2
+/// handler.
+enum EffectArguments {
+    Canonical(Vec<CanonicalValue>),
+    Context(Vec<ContextValue>),
+}
+
+/// Orders the arguments of a host operation call to match its declared
+/// parameters. Named arguments may come in any order, but each parameter must
+/// be named exactly once.
+#[cfg(feature = "system-host-bindings")]
+fn ordered_host_arguments<'a>(
+    arguments: &'a [orna_syntax::Argument],
+    parameters: &[String],
+) -> Result<Vec<&'a orna_syntax::Argument>, EvaluationError> {
+    if arguments.iter().all(|argument| argument.name.is_none()) {
+        return Ok(arguments.iter().collect());
+    }
+    let mut ordered = Vec::with_capacity(arguments.len());
+    for parameter in parameters {
+        let mut matches = arguments
+            .iter()
+            .filter(|argument| argument.name.as_deref() == Some(parameter.as_str()));
+        let Some(argument) = matches.next() else {
+            return Err(error("ORNA-EVAL-ARGUMENT"));
+        };
+        if matches.next().is_some() {
+            return Err(error("ORNA-EVAL-ARGUMENT"));
+        }
+        ordered.push(argument);
+    }
+    if ordered.len() != arguments.len() {
+        return Err(error("ORNA-EVAL-ARGUMENT"));
+    }
+    Ok(ordered)
+}
+
 // The registry connects pinned source identities to bounded evaluator
 // intrinsics. System host effects use their separate generated registry.
 const STANDARD_BINDING_MODULES: &[StandardBindingModule] = &[
@@ -17156,25 +17048,7 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
     }
 
     fn test_context<'functions>(functions: &'functions Functions) -> Context<'functions, 'static> {
-        Context {
-            limits: Limits::default(),
-            steps: 0,
-            calls: 0,
-            functions,
-            aliases: None,
-            session_functions: None,
-            repl_bindings: false,
-            restrict_function_names: false,
-            reject_unhandled_field_calls: false,
-            effects: None,
-            namespace: None,
-            transfer: None,
-            materializations: Vec::new(),
-            materialization_clock_unavailable: false,
-            reuse: CallReuse::default(),
-            sys_host: None,
-            cancellation: None,
-        }
+        Context::new(Limits::default(), functions)
     }
 
     #[test]
@@ -18637,25 +18511,7 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
         let parsed = parse_expression(source);
         assert!(parsed.is_ok(), "{source} should parse");
         let functions = Functions::new();
-        let mut context = Context {
-            limits: Limits::default(),
-            steps: 0,
-            calls: 0,
-            functions: &functions,
-            aliases: None,
-            session_functions: None,
-            repl_bindings: false,
-            restrict_function_names: false,
-            reject_unhandled_field_calls: false,
-            effects: None,
-            namespace: None,
-            transfer: None,
-            materializations: Vec::new(),
-            materialization_clock_unavailable: false,
-            reuse: CallReuse::default(),
-            sys_host: None,
-            cancellation: None,
-        };
+        let mut context = Context::new(Limits::default(), &functions);
         let mut scope = Scope(
             BTreeMap::new(),
             BTreeSet::new(),
@@ -18716,23 +18572,8 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
         assert!(parsed.is_ok(), "{source} should parse");
         let functions = Functions::new();
         let mut context = Context {
-            limits: Limits::default(),
-            steps: 0,
-            calls: 0,
-            functions: &functions,
-            aliases: None,
-            session_functions: None,
-            repl_bindings: false,
-            restrict_function_names: false,
-            reject_unhandled_field_calls: false,
             effects: Some(effects),
-            namespace: None,
-            transfer: None,
-            materializations: Vec::new(),
-            materialization_clock_unavailable: false,
-            reuse: CallReuse::default(),
-            sys_host: None,
-            cancellation: None,
+            ..Context::new(Limits::default(), &functions)
         };
         let mut scope = Scope(
             BTreeMap::new(),
@@ -18870,23 +18711,9 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
         assert!(parsed.is_ok(), "{source} should parse");
         let functions = Functions::new();
         let mut context = Context {
-            limits: Limits::default(),
-            steps: 0,
-            calls: 0,
-            functions: &functions,
-            aliases: None,
-            session_functions: None,
-            repl_bindings: false,
-            restrict_function_names: false,
-            reject_unhandled_field_calls: false,
             effects: Some(effects),
-            namespace: None,
-            transfer: None,
-            materializations: Vec::new(),
-            materialization_clock_unavailable: false,
-            reuse: CallReuse::default(),
-            sys_host: None,
             cancellation,
+            ..Context::new(Limits::default(), &functions)
         };
         let mut scope = Scope(
             BTreeMap::new(),
@@ -19019,23 +18846,10 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
         let functions = Functions::new();
         let mut effects = RelationEffects { calls: 0 };
         let mut context = Context {
-            limits: Limits::default(),
-            steps: 0,
-            calls: 0,
-            functions: &functions,
-            aliases: None,
-            session_functions: None,
+            mode: ActivationMode::Repl,
             repl_bindings: true,
-            restrict_function_names: true,
-            reject_unhandled_field_calls: true,
             effects: Some(&mut effects),
-            namespace: None,
-            transfer: None,
-            materializations: Vec::new(),
-            materialization_clock_unavailable: false,
-            reuse: CallReuse::default(),
-            sys_host: None,
-            cancellation: None,
+            ..Context::new(Limits::default(), &functions)
         };
         let mut scope = Scope(
             BTreeMap::new(),
@@ -19058,23 +18872,10 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
         let functions = Functions::new();
         let mut effects = NonAdvancingRelationEffects;
         let mut context = Context {
-            limits: Limits::default(),
-            steps: 0,
-            calls: 0,
-            functions: &functions,
-            aliases: None,
-            session_functions: None,
+            mode: ActivationMode::Repl,
             repl_bindings: true,
-            restrict_function_names: true,
-            reject_unhandled_field_calls: true,
             effects: Some(&mut effects),
-            namespace: None,
-            transfer: None,
-            materializations: Vec::new(),
-            materialization_clock_unavailable: false,
-            reuse: CallReuse::default(),
-            sys_host: None,
-            cancellation: None,
+            ..Context::new(Limits::default(), &functions)
         };
         let plan = RelationPlan::new("Note".into());
         let mut callbacks = 0;
@@ -19528,23 +19329,11 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
         cancellation.request_after_checks(1);
         let mut effects = NonAdvancingRelationEffects;
         let mut context = Context {
-            limits: Limits::default(),
-            steps: 0,
-            calls: 0,
-            functions: &functions,
-            aliases: None,
-            session_functions: None,
+            mode: ActivationMode::Repl,
             repl_bindings: true,
-            restrict_function_names: true,
-            reject_unhandled_field_calls: true,
             effects: Some(&mut effects),
-            namespace: None,
-            transfer: None,
-            materializations: Vec::new(),
-            materialization_clock_unavailable: false,
-            reuse: CallReuse::default(),
-            sys_host: None,
             cancellation: Some(&cancellation),
+            ..Context::new(Limits::default(), &functions)
         };
         let plan = RelationPlan::new("Note".into());
         let mut callbacks = 0;
@@ -19565,23 +19354,11 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
         cancellation.request_after_checks(2);
         let mut effects = NonAdvancingRelationEffects;
         let mut context = Context {
-            limits: Limits::default(),
-            steps: 0,
-            calls: 0,
-            functions: &functions,
-            aliases: None,
-            session_functions: None,
+            mode: ActivationMode::Repl,
             repl_bindings: true,
-            restrict_function_names: true,
-            reject_unhandled_field_calls: true,
             effects: Some(&mut effects),
-            namespace: None,
-            transfer: None,
-            materializations: Vec::new(),
-            materialization_clock_unavailable: false,
-            reuse: CallReuse::default(),
-            sys_host: None,
             cancellation: Some(&cancellation),
+            ..Context::new(Limits::default(), &functions)
         };
         let plan = RelationPlan::new("Note".into());
         let mut callbacks = 0;
@@ -19601,37 +19378,20 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
         let cancellation = CancellationToken::new();
         cancellation.request_after_checks(2);
         let mut context = Context {
-            limits: Limits::default(),
-            steps: 0,
-            calls: 0,
-            functions: &functions,
-            aliases: None,
-            session_functions: None,
+            mode: ActivationMode::Repl,
             repl_bindings: true,
-            restrict_function_names: true,
-            reject_unhandled_field_calls: true,
-            effects: None,
-            namespace: None,
-            transfer: None,
-            materializations: Vec::new(),
-            materialization_clock_unavailable: false,
-            reuse: CallReuse::default(),
-            sys_host: None,
             cancellation: Some(&cancellation),
+            ..Context::new(Limits::default(), &functions)
         };
         let mut callbacks = 0;
-        let mut distinct_seen = Vec::new();
-        let mut pair_previous = Vec::new();
-        let mut window_states = Vec::new();
+        let mut states = Vec::new();
 
         let result = context.for_each_buffered_stages(
             vec![Value::Int(1.into()), Value::Int(2.into())],
             &[],
             0,
             0,
-            &mut distinct_seen,
-            &mut pair_previous,
-            &mut window_states,
+            &mut states,
             |_, _| {
                 callbacks += 1;
                 Ok(true)
@@ -19766,25 +19526,7 @@ mod table_reference_value_tests {
     use super::*;
 
     fn context(functions: &Functions) -> Context<'_, '_> {
-        Context {
-            limits: Limits::default(),
-            steps: 0,
-            calls: 0,
-            functions,
-            aliases: None,
-            session_functions: None,
-            repl_bindings: false,
-            restrict_function_names: false,
-            reject_unhandled_field_calls: false,
-            effects: None,
-            namespace: None,
-            transfer: None,
-            materializations: Vec::new(),
-            materialization_clock_unavailable: false,
-            reuse: CallReuse::default(),
-            sys_host: None,
-            cancellation: None,
-        }
+        Context::new(Limits::default(), functions)
     }
 
     #[test]
@@ -20509,23 +20251,9 @@ mod blob_equality_tests {
         .unwrap();
         let functions = Functions::new();
         let mut context = Context {
-            limits: Limits::default(),
-            steps: 0,
-            calls: 0,
-            functions: &functions,
-            aliases: None,
-            session_functions: None,
+            mode: ActivationMode::Repl,
             repl_bindings: true,
-            restrict_function_names: true,
-            reject_unhandled_field_calls: true,
-            effects: None,
-            namespace: None,
-            transfer: None,
-            materializations: Vec::new(),
-            materialization_clock_unavailable: false,
-            reuse: CallReuse::default(),
-            sys_host: None,
-            cancellation: None,
+            ..Context::new(Limits::default(), &functions)
         };
         match Value::from_context_value(&overflow, &mut context, 0) {
             Err(error) => assert_eq!(error.code(), "ORNA-EVAL-UNSUPPORTED"),

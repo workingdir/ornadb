@@ -29,7 +29,7 @@ use crate::{
         FunctionVolatility, QualifiedSemanticName, TypeDefinition, TypeLookupName,
         ValueTypeDefinition, ValueTypeKind, ValueTypeMutability, ValueTypePersistence,
     },
-    system::{INVOCATION_CARRIERS, SYSTEM_FUNCTIONS},
+    system::{INVOCATION_CARRIERS, SYSTEM_FUNCTIONS, is_sealed_inspect_type_id},
     types::{ResolvedType, StandardScalar, TypeDescriptor, TypeDescriptorKind},
 };
 mod error;
@@ -4100,24 +4100,6 @@ fn definition_exists(
     }
 }
 
-fn is_sealed_inspect_type_id(type_id: TypeId) -> bool {
-    matches!(
-        type_id,
-        crate::system::SYS_INSPECT_INVOCATION_TYPE_ID
-            | crate::system::SYS_INSPECT_SNAPSHOT_TYPE_ID
-            | crate::system::SYS_INSPECT_SNAPSHOT_OPTIONS_TYPE_ID
-            | crate::system::SYS_INSPECT_TRACE_EVENT_TYPE_ID
-            | crate::system::SYS_INSPECT_INVOCATION_NODES_TYPE_ID
-            | crate::system::SYS_INSPECT_CALLS_TYPE_ID
-            | crate::system::SYS_INSPECT_RESOURCES_TYPE_ID
-            | crate::system::SYS_INSPECT_STATE_CELLS_TYPE_ID
-            | crate::system::SYS_INSPECT_UI_NODES_TYPE_ID
-            | crate::system::SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID
-            | crate::system::SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID
-            | crate::system::SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID
-    )
-}
-
 fn reference_target_exists(
     catalogue: &CatalogueSnapshot,
     standard: Option<&CatalogueSnapshot>,
@@ -4133,36 +4115,6 @@ fn reference_target_exists(
                 || type_id == crate::system::SYS_SOURCE_FUNCTION_TYPE_ID
     ) {
         return true;
-    }
-    if let DefinitionReferenceTarget::Field { owner, field } = target {
-        return catalogue
-            .object_type_by_id(owner)
-            .and_then(|object_type| object_type.field_by_id(field))
-            .is_some()
-            || catalogue
-                .record_value_type_by_id(owner)
-                .and_then(|record_value_type| record_value_type.field_by_id(field))
-                .is_some()
-            || standard.is_some_and(|standard| {
-                standard
-                    .object_type_by_id(owner)
-                    .and_then(|object_type| object_type.field_by_id(field))
-                    .is_some()
-                    || standard
-                        .record_value_type_by_id(owner)
-                        .and_then(|record_value_type| record_value_type.field_by_id(field))
-                        .is_some()
-            })
-            || parent.is_some_and(|parent| {
-                parent
-                    .object_type_by_id(owner)
-                    .and_then(|object_type| object_type.field_by_id(field))
-                    .is_some()
-                    || parent
-                        .record_value_type_by_id(owner)
-                        .and_then(|record_value_type| record_value_type.field_by_id(field))
-                        .is_some()
-            });
     }
     let identity = target.into();
     definition_exists(catalogue, expression_ids, identity)

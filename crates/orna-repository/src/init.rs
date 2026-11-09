@@ -19,10 +19,9 @@ use fs2::FileExt;
 use tempfile::TempDir;
 use uuid::{Uuid, Version};
 
-use crate::{Repository, RepositoryError, scrub_git_routing_environment, valid_branch_name};
-
-#[path = "format_context.rs"]
-pub(crate) mod format_context;
+use crate::{
+    Repository, RepositoryError, format_context, scrub_git_routing_environment, valid_branch_name,
+};
 
 const FORMAT_DIRECTORY: &str = ".orna";
 const FORMAT_FILE: &str = "format.orna";

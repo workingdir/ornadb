@@ -51,36 +51,35 @@ fn active_nested_record_revision_with_standard_and_seed(
         .iter()
         .map(|field| field.id())
         .collect::<Vec<_>>();
-    let catalogue = CatalogueSnapshot::new_with_record_value_types(
+    let catalogue = CatalogueSnapshot::from_definitions(
         catalogue_revision,
-        vec![SchemaDefinition::new(
-            application_schema,
-            QualifiedSemanticName::new(["crm"]).unwrap(),
-        )],
-        vec![],
-        vec![],
-        vec![],
-        vec![
-            RecordValueTypeDefinition::new(
-                inner_type,
-                QualifiedSemanticName::new(["crm", "inner"]).unwrap(),
-                child_fields,
-            ),
-            RecordValueTypeDefinition::new(
-                outer_type,
-                QualifiedSemanticName::new(["crm", "outer"]).unwrap(),
-                vec![
-                    RecordValueFieldDefinition::try_new_descriptor(
-                        outer_field,
-                        "payload",
-                        0,
-                        TypeDescriptor::named(inner_type),
-                    )
-                    .unwrap(),
-                ],
-            ),
-        ],
-        vec![],
+        CatalogueDefinitions {
+            schemas: vec![SchemaDefinition::new(
+                application_schema,
+                QualifiedSemanticName::new(["crm"]).unwrap(),
+            )],
+            record_value_types: vec![
+                RecordValueTypeDefinition::new(
+                    inner_type,
+                    QualifiedSemanticName::new(["crm", "inner"]).unwrap(),
+                    child_fields,
+                ),
+                RecordValueTypeDefinition::new(
+                    outer_type,
+                    QualifiedSemanticName::new(["crm", "outer"]).unwrap(),
+                    vec![
+                        RecordValueFieldDefinition::try_new_descriptor(
+                            outer_field,
+                            "payload",
+                            0,
+                            TypeDescriptor::named(inner_type),
+                        )
+                        .unwrap(),
+                    ],
+                ),
+            ],
+            ..CatalogueDefinitions::default()
+        },
     )
     .unwrap();
     let context = CatalogueHashContext::version_two(standard);
@@ -184,17 +183,16 @@ fn active_record_chain_revision() -> ActiveDatabaseRevision {
             ],
         ));
     }
-    let catalogue = CatalogueSnapshot::new_with_record_value_types(
+    let catalogue = CatalogueSnapshot::from_definitions(
         catalogue_revision,
-        vec![SchemaDefinition::new(
-            application_schema,
-            QualifiedSemanticName::new(["crm"]).unwrap(),
-        )],
-        vec![],
-        vec![],
-        vec![],
-        records,
-        vec![],
+        CatalogueDefinitions {
+            schemas: vec![SchemaDefinition::new(
+                application_schema,
+                QualifiedSemanticName::new(["crm"]).unwrap(),
+            )],
+            record_value_types: records,
+            ..CatalogueDefinitions::default()
+        },
     )
     .unwrap();
     let context = CatalogueHashContext::version_two(standard);
@@ -345,7 +343,7 @@ fn runtime_type_preserves_every_flat_runtime_variant() {
             ResolvedType::scalar(StandardScalar::BigInt),
         ),
         (
-            RuntimeValue::Float(RuntimeFloat::new(9.5).unwrap()),
+            RuntimeValue::Float(RuntimeFloat::new(9.5)),
             ResolvedType::scalar(StandardScalar::Float),
         ),
         (
@@ -1270,23 +1268,23 @@ fn verified_map_standard() -> VerifiedStandardLibrarySnapshot {
     .unwrap();
     let standard_schema = SchemaId::from_bytes([0x53; 16]);
     let standard_types_schema = SchemaId::from_bytes([0x54; 16]);
-    let standard_catalogue = CatalogueSnapshot::new_with_record_value_types(
+    let standard_catalogue = CatalogueSnapshot::from_definitions(
         CatalogueRevisionId::from_bytes([0x5b; 16]),
-        vec![
-            SchemaDefinition::new(
-                standard_schema,
-                QualifiedSemanticName::new(["std"]).unwrap(),
-            ),
-            SchemaDefinition::new(
-                standard_types_schema,
-                QualifiedSemanticName::new(["std", "types"]).unwrap(),
-            ),
-        ],
-        vec![],
-        value_types.clone(),
-        enum_types.clone(),
-        vec![],
-        vec![],
+        CatalogueDefinitions {
+            schemas: vec![
+                SchemaDefinition::new(
+                    standard_schema,
+                    QualifiedSemanticName::new(["std"]).unwrap(),
+                ),
+                SchemaDefinition::new(
+                    standard_types_schema,
+                    QualifiedSemanticName::new(["std", "types"]).unwrap(),
+                ),
+            ],
+            value_types: value_types.clone(),
+            enum_types: enum_types.clone(),
+            ..CatalogueDefinitions::default()
+        },
     )
     .unwrap();
     let mut standard_origins = vec![
@@ -1344,99 +1342,100 @@ fn active_map_revision() -> ActiveDatabaseRevision {
     let standard = verified_map_standard();
     let application_schema = SchemaId::from_bytes([0x91; 16]);
     let catalogue_revision = CatalogueRevisionId::from_bytes([0x92; 16]);
-    let catalogue = CatalogueSnapshot::new_with_record_value_types(
+    let catalogue = CatalogueSnapshot::from_definitions(
         catalogue_revision,
-        vec![SchemaDefinition::new(
-            application_schema,
-            QualifiedSemanticName::new(["app"]).unwrap(),
-        )],
-        vec![ObjectTypeDefinition::new(
-            MAP_OBJECT,
-            QualifiedSemanticName::new(["app", "item"]).unwrap(),
-            vec![],
-        )],
-        vec![],
-        vec![EnumTypeDefinition::new(
-            MAP_APP_ENUM,
-            QualifiedSemanticName::new(["app", "stage"]).unwrap(),
-            ["low", "high"],
-        )],
-        vec![
-            RecordValueTypeDefinition::new(
-                MAP_FLAT,
-                QualifiedSemanticName::new(["app", "flat"]).unwrap(),
-                vec![
-                    RecordValueFieldDefinition::try_new_descriptor(
-                        MAP_A_FIELD,
-                        "a",
-                        0,
-                        TypeDescriptor::named(MAP_BOOLEAN),
-                    )
-                    .unwrap(),
-                    RecordValueFieldDefinition::try_new_descriptor(
-                        MAP_B_FIELD,
-                        "b",
-                        1,
-                        TypeDescriptor::named(MAP_INTEGER),
-                    )
-                    .unwrap(),
-                ],
-            ),
-            RecordValueTypeDefinition::new(
-                MAP_INNER,
-                QualifiedSemanticName::new(["app", "inner"]).unwrap(),
-                vec![
-                    RecordValueFieldDefinition::try_new_descriptor(
-                        MAP_LEAF_FIELD,
-                        "leaf",
-                        0,
-                        TypeDescriptor::named(MAP_BOOLEAN),
-                    )
-                    .unwrap(),
-                ],
-            ),
-            RecordValueTypeDefinition::new(
-                MAP_OUTER,
-                QualifiedSemanticName::new(["app", "outer"]).unwrap(),
-                vec![
-                    RecordValueFieldDefinition::try_new_descriptor(
-                        MAP_FIRST_FIELD,
-                        "first",
-                        0,
-                        TypeDescriptor::named(MAP_INNER),
-                    )
-                    .unwrap(),
-                    RecordValueFieldDefinition::try_new_descriptor(
-                        MAP_TAIL_FIELD,
-                        "tail",
-                        1,
-                        TypeDescriptor::named(MAP_INTEGER),
-                    )
-                    .unwrap(),
-                ],
-            ),
-            RecordValueTypeDefinition::new(
-                MAP_STD_ENUM_RECORD,
-                QualifiedSemanticName::new(["app", "standard_enum_record"]).unwrap(),
-                vec![
-                    RecordValueFieldDefinition::try_new_descriptor(
-                        MAP_STD_ENUM_ENABLED_FIELD,
-                        "enabled",
-                        0,
-                        TypeDescriptor::named(MAP_BOOLEAN),
-                    )
-                    .unwrap(),
-                    RecordValueFieldDefinition::try_new_descriptor(
-                        MAP_STD_ENUM_FIELD,
-                        "mode",
-                        1,
-                        TypeDescriptor::named(MAP_STD_ENUM),
-                    )
-                    .unwrap(),
-                ],
-            ),
-        ],
-        vec![],
+        CatalogueDefinitions {
+            schemas: vec![SchemaDefinition::new(
+                application_schema,
+                QualifiedSemanticName::new(["app"]).unwrap(),
+            )],
+            object_types: vec![ObjectTypeDefinition::new(
+                MAP_OBJECT,
+                QualifiedSemanticName::new(["app", "item"]).unwrap(),
+                vec![],
+            )],
+            enum_types: vec![EnumTypeDefinition::new(
+                MAP_APP_ENUM,
+                QualifiedSemanticName::new(["app", "stage"]).unwrap(),
+                ["low", "high"],
+            )],
+            record_value_types: vec![
+                RecordValueTypeDefinition::new(
+                    MAP_FLAT,
+                    QualifiedSemanticName::new(["app", "flat"]).unwrap(),
+                    vec![
+                        RecordValueFieldDefinition::try_new_descriptor(
+                            MAP_A_FIELD,
+                            "a",
+                            0,
+                            TypeDescriptor::named(MAP_BOOLEAN),
+                        )
+                        .unwrap(),
+                        RecordValueFieldDefinition::try_new_descriptor(
+                            MAP_B_FIELD,
+                            "b",
+                            1,
+                            TypeDescriptor::named(MAP_INTEGER),
+                        )
+                        .unwrap(),
+                    ],
+                ),
+                RecordValueTypeDefinition::new(
+                    MAP_INNER,
+                    QualifiedSemanticName::new(["app", "inner"]).unwrap(),
+                    vec![
+                        RecordValueFieldDefinition::try_new_descriptor(
+                            MAP_LEAF_FIELD,
+                            "leaf",
+                            0,
+                            TypeDescriptor::named(MAP_BOOLEAN),
+                        )
+                        .unwrap(),
+                    ],
+                ),
+                RecordValueTypeDefinition::new(
+                    MAP_OUTER,
+                    QualifiedSemanticName::new(["app", "outer"]).unwrap(),
+                    vec![
+                        RecordValueFieldDefinition::try_new_descriptor(
+                            MAP_FIRST_FIELD,
+                            "first",
+                            0,
+                            TypeDescriptor::named(MAP_INNER),
+                        )
+                        .unwrap(),
+                        RecordValueFieldDefinition::try_new_descriptor(
+                            MAP_TAIL_FIELD,
+                            "tail",
+                            1,
+                            TypeDescriptor::named(MAP_INTEGER),
+                        )
+                        .unwrap(),
+                    ],
+                ),
+                RecordValueTypeDefinition::new(
+                    MAP_STD_ENUM_RECORD,
+                    QualifiedSemanticName::new(["app", "standard_enum_record"]).unwrap(),
+                    vec![
+                        RecordValueFieldDefinition::try_new_descriptor(
+                            MAP_STD_ENUM_ENABLED_FIELD,
+                            "enabled",
+                            0,
+                            TypeDescriptor::named(MAP_BOOLEAN),
+                        )
+                        .unwrap(),
+                        RecordValueFieldDefinition::try_new_descriptor(
+                            MAP_STD_ENUM_FIELD,
+                            "mode",
+                            1,
+                            TypeDescriptor::named(MAP_STD_ENUM),
+                        )
+                        .unwrap(),
+                    ],
+                ),
+            ],
+            ..CatalogueDefinitions::default()
+        },
     )
     .unwrap();
     let context = CatalogueHashContext::version_two(standard);
@@ -1963,13 +1962,11 @@ fn named_float_map_keys_fail_at_descriptor_preflight_for_all_attempted_values() 
     let active = active_map_revision();
     let float_descriptor = TypeDescriptor::named(MAP_FLOAT);
     let attempted_keys = [
-        RuntimeValue::Float(RuntimeFloat::new(1.5).unwrap()),
-        RuntimeValue::Float(RuntimeFloat::new(-0.0).unwrap()),
-        // Deliberately bypass the finite-only constructor: descriptor preflight
-        // must reject the named Float key before inspecting this attempted key.
-        // SAFETY: the source and destination types are both 64-bit and bit
-        // patterns are preserved for every f64, including NaN.
-        RuntimeValue::Float(unsafe { std::mem::transmute::<f64, RuntimeFloat>(f64::NAN) }),
+        RuntimeValue::Float(RuntimeFloat::new(1.5)),
+        RuntimeValue::Float(RuntimeFloat::new(-0.0)),
+        // A non-finite FLOAT is a valid value: descriptor preflight must reject
+        // the named Float key before inspecting any attempted key.
+        RuntimeValue::Float(RuntimeFloat::new(f64::NAN)),
     ];
 
     for attempted_key in attempted_keys {
@@ -2003,7 +2000,7 @@ fn float_map_values_remain_accepted_under_an_integer_key_descriptor() {
         descriptor,
         vec![(
             RuntimeValue::Integer(7),
-            RuntimeValue::Float(RuntimeFloat::new(3.5).unwrap()),
+            RuntimeValue::Float(RuntimeFloat::new(3.5)),
         )],
     )
     .unwrap();
@@ -2017,7 +2014,7 @@ fn float_map_values_remain_accepted_under_an_integer_key_descriptor() {
         entries,
         &[(
             RuntimeValue::Integer(7),
-            RuntimeValue::Float(RuntimeFloat::new(3.5).unwrap()),
+            RuntimeValue::Float(RuntimeFloat::new(3.5)),
         )]
     );
 }
@@ -2136,21 +2133,20 @@ fn active_object_opaque_collision_revision() -> ActiveDatabaseRevision {
     ]);
     let application_schema = SchemaId::from_bytes([0x57; 16]);
     let catalogue_revision = CatalogueRevisionId::from_bytes([0x58; 16]);
-    let catalogue = CatalogueSnapshot::new_with_record_value_types(
+    let catalogue = CatalogueSnapshot::from_definitions(
         catalogue_revision,
-        vec![SchemaDefinition::new(
-            application_schema,
-            QualifiedSemanticName::new(["crm"]).unwrap(),
-        )],
-        vec![ObjectTypeDefinition::new(
-            OPAQUE_TYPE,
-            QualifiedSemanticName::new(["crm", "item"]).unwrap(),
-            vec![],
-        )],
-        vec![],
-        vec![],
-        vec![],
-        vec![],
+        CatalogueDefinitions {
+            schemas: vec![SchemaDefinition::new(
+                application_schema,
+                QualifiedSemanticName::new(["crm"]).unwrap(),
+            )],
+            object_types: vec![ObjectTypeDefinition::new(
+                OPAQUE_TYPE,
+                QualifiedSemanticName::new(["crm", "item"]).unwrap(),
+                vec![],
+            )],
+            ..CatalogueDefinitions::default()
+        },
     )
     .unwrap();
     let context = CatalogueHashContext::version_two(standard);
@@ -2220,20 +2216,20 @@ fn enum_with_record_identity_is_rejected_as_a_field_type_mismatch() {
         )
         .unwrap(),
     ]);
-    let identity_catalogue = CatalogueSnapshot::new_with_enum_types(
+    let identity_catalogue = CatalogueSnapshot::from_definitions(
         CatalogueRevisionId::from_bytes([0x44; 16]),
-        vec![SchemaDefinition::new(
-            SchemaId::from_bytes([0x45; 16]),
-            QualifiedSemanticName::new(["crm"]).unwrap(),
-        )],
-        vec![],
-        vec![],
-        vec![EnumTypeDefinition::new(
-            INNER_TYPE,
-            QualifiedSemanticName::new(["crm", "inner"]).unwrap(),
-            ["lead"],
-        )],
-        vec![],
+        CatalogueDefinitions {
+            schemas: vec![SchemaDefinition::new(
+                SchemaId::from_bytes([0x45; 16]),
+                QualifiedSemanticName::new(["crm"]).unwrap(),
+            )],
+            enum_types: vec![EnumTypeDefinition::new(
+                INNER_TYPE,
+                QualifiedSemanticName::new(["crm", "inner"]).unwrap(),
+                ["lead"],
+            )],
+            ..CatalogueDefinitions::default()
+        },
     )
     .unwrap();
     let identity_enum =
@@ -2282,20 +2278,20 @@ fn legacy_typed_null_precedes_type_mismatch_at_the_same_list_element() {
 #[test]
 fn enum_nominal_mismatch_precedes_label_inactivity_at_the_same_element() {
     let active = active_record_revision();
-    let wrong_id_catalogue = CatalogueSnapshot::new_with_enum_types(
+    let wrong_id_catalogue = CatalogueSnapshot::from_definitions(
         CatalogueRevisionId::from_bytes([0x44; 16]),
-        vec![SchemaDefinition::new(
-            SchemaId::from_bytes([0x45; 16]),
-            QualifiedSemanticName::new(["crm"]).unwrap(),
-        )],
-        vec![],
-        vec![],
-        vec![EnumTypeDefinition::new(
-            TypeId::from_bytes([0x6d; 16]),
-            QualifiedSemanticName::new(["crm", "other"]).unwrap(),
-            ["retired"],
-        )],
-        vec![],
+        CatalogueDefinitions {
+            schemas: vec![SchemaDefinition::new(
+                SchemaId::from_bytes([0x45; 16]),
+                QualifiedSemanticName::new(["crm"]).unwrap(),
+            )],
+            enum_types: vec![EnumTypeDefinition::new(
+                TypeId::from_bytes([0x6d; 16]),
+                QualifiedSemanticName::new(["crm", "other"]).unwrap(),
+                ["retired"],
+            )],
+            ..CatalogueDefinitions::default()
+        },
     )
     .unwrap();
     let wrong_enum = RuntimeValue::Enum(
@@ -2761,17 +2757,16 @@ fn deep_record_chain_revision_error() -> crate::canonical_hash::CanonicalHashErr
             ],
         ));
     }
-    let catalogue = CatalogueSnapshot::new_with_record_value_types(
+    let catalogue = CatalogueSnapshot::from_definitions(
         catalogue_revision,
-        vec![SchemaDefinition::new(
-            application_schema,
-            QualifiedSemanticName::new(["crm"]).unwrap(),
-        )],
-        vec![],
-        vec![],
-        vec![],
-        records,
-        vec![],
+        CatalogueDefinitions {
+            schemas: vec![SchemaDefinition::new(
+                application_schema,
+                QualifiedSemanticName::new(["crm"]).unwrap(),
+            )],
+            record_value_types: records,
+            ..CatalogueDefinitions::default()
+        },
     )
     .unwrap();
     let context = CatalogueHashContext::version_two(standard);
@@ -3033,7 +3028,7 @@ fn admitted_leaf_values_construct_in_option_list_and_map() {
         (TypeDescriptor::named(MAP_BIGINT), RuntimeValue::BigInt(2)),
         (
             TypeDescriptor::named(MAP_FLOAT),
-            RuntimeValue::Float(RuntimeFloat::new(3.5).unwrap()),
+            RuntimeValue::Float(RuntimeFloat::new(3.5)),
         ),
         (
             TypeDescriptor::named(MAP_TEXT),

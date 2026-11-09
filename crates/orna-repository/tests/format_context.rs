@@ -1,6 +1,8 @@
 use std::{fs, path::Path, process::Command};
 
-use orna_repository::{FormatContextError as RepositoryFormatContextError, Repository};
+use orna_repository::{
+    FormatContextError as RepositoryFormatContextError, MountError, MountView, Repository,
+};
 use tempfile::TempDir;
 
 const DATABASE_ID: &str = "9f237b7e-6844-4498-bcd5-d24641c07449";
@@ -1073,4 +1075,114 @@ fn reopens_old_and_new_mounts_of_one_migrated_repository_together() {
         new_mount.database_id(),
         "the capability names the new mount database"
     );
+}
+
+/// Attaches a read-only view of the fixture's committed snapshot at a fresh,
+/// empty mountpoint.
+fn attached_view(repository: &Repository) -> (TempDir, MountView) {
+    let mountpoint = TempDir::new().expect("create mountpoint");
+    let view = attached_view_at(repository, mountpoint.path());
+    (mountpoint, view)
+}
+
+fn attached_view_at(repository: &Repository, mountpoint: &Path) -> MountView {
+    MountView::attach(repository, mountpoint, "HEAD").expect("attach mount view")
+}
+
+/// The directory holding one view's accepted-row baselines.
+fn baseline_directory(repository: &Repository) -> std::path::PathBuf {
+    let baselines = repository.runtime_paths().root().join("mount-baselines");
+    let mut views = fs::read_dir(baselines).expect("list baseline directories");
+    let view = views.next().expect("a view recorded a baseline");
+    assert!(views.next().is_none(), "only one view recorded a baseline");
+    view.expect("read baseline directory entry").path()
+}
+
+#[test]
+fn view_ids_that_are_not_hex_are_refused_instead_of_panicking() {
+    let directory = repository(None, Some(ORNADB_1_0_FORMAT_ONE), false);
+    let repository = Repository::discover(directory.path()).expect("discover repository");
+    // The first id is 64 bytes whose two-digit slices used to straddle a
+    // two-byte character (a panic); `+1` pairs used to parse as valid digits.
+    for id in [
+        format!("a{}a", "\u{e9}".repeat(31)),
+        "\u{e9}".repeat(32),
+        "g".repeat(64),
+        "+1".repeat(32),
+        "ab".repeat(31),
+        String::new(),
+    ] {
+        assert!(
+            matches!(
+                repository.open_mount_view_by_id(&id),
+                Err(MountError::RecordInvalid)
+            ),
+            "view id {id:?} must be refused as an invalid record"
+        );
+    }
+}
+
+#[test]
+fn unmounting_a_view_forgets_its_accepted_row_baselines() {
+    let directory = repository(None, Some(ORNADB_1_0_FORMAT_ONE), false);
+    let repository = Repository::discover(directory.path()).expect("discover repository");
+    let (mountpoint, view) = attached_view(&repository);
+    view.row_baselines()
+        .record_accepted_row("Music", b"key", b"row")
+        .expect("record a baseline");
+
+    repository
+        .unmount_view(mountpoint.path())
+        .expect("unmount the view");
+
+    // The same mountpoint and snapshot name the same view identity again, so
+    // a baseline left behind would be inherited by this attachment.
+    let reattached = attached_view_at(&repository, mountpoint.path());
+    assert_eq!(
+        reattached
+            .row_baselines()
+            .accepted_row("Music", b"key")
+            .expect("read the baseline"),
+        None
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_view_whose_baselines_cannot_be_removed_stays_registered_until_they_can() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = repository(None, Some(ORNADB_1_0_FORMAT_ONE), false);
+    let repository = Repository::discover(directory.path()).expect("discover repository");
+    let (mountpoint, view) = attached_view(&repository);
+    view.row_baselines()
+        .record_accepted_row("Music", b"key", b"row")
+        .expect("record a baseline");
+    let baselines = baseline_directory(&repository);
+    let restore = |mode: u32| fs::set_permissions(&baselines, fs::Permissions::from_mode(mode));
+
+    // Entries cannot be removed from a directory that cannot be written.
+    restore(0o500).expect("make the baseline directory read-only");
+    if fs::File::create(baselines.join("probe")).is_ok() {
+        // Running with privileges that ignore directory permissions: there is
+        // no failure to provoke.
+        restore(0o700).expect("restore permissions");
+        return;
+    }
+
+    assert!(matches!(view.detach(), Err(MountError::HostFilesystem)));
+    assert_eq!(
+        repository.mount_status().expect("report mounts").len(),
+        1,
+        "a release that could not finish leaves the view registered"
+    );
+
+    restore(0o700).expect("restore permissions");
+    repository
+        .open_mount_view(mountpoint.path())
+        .expect("the registered view still opens")
+        .detach()
+        .expect("the retried release finishes");
+    assert!(repository.mount_status().expect("report mounts").is_empty());
+    assert!(!baselines.exists());
 }

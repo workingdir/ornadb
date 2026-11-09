@@ -24,9 +24,21 @@ pub(super) const ACTION_DOMAIN_CLIENT: u8 = 1;
 const ACTION_DOMAIN_SERVER: u8 = 2;
 pub(super) const ACTION_IDENTITY_BYTES: usize = 16;
 const ACTION_IDENTITY_FIELDS: usize = 5;
-const ACTION_BODY_PREFIX_BYTES: usize = 1 + (ACTION_IDENTITY_FIELDS * ACTION_IDENTITY_BYTES) + 4;
-const ORV3_HEADER_BYTES: usize = 25;
+/// Bytes in the fixed header shared by ORV3 and ORV5 value frames: a four-byte
+/// marker, a one-byte tag, a sixteen-byte type identity, and a big-endian
+/// `u32` body length.
+const ORV_HEADER_BYTES: usize = 4 + 1 + 16 + 4;
 const ORV3_MARKER: &[u8; 4] = b"ORV3";
+const ORV5_MARKER: &[u8; 4] = b"ORV5";
+/// The deepest nesting of ORV5 values and descriptors a Rows cell may carry.
+const ROWS_MAX_VALUE_DEPTH: usize = 32;
+/// The fewest bytes one Rows column definition occupies: a `u32` name length,
+/// a one-byte minimum name, the type form, the sixteen-byte type identity and
+/// the nullable flag.
+const ROWS_MIN_COLUMN_BYTES: usize = 4 + 1 + 1 + 16 + 1;
+/// The fewest bytes one ORV5 record field occupies: its sixteen-byte identity
+/// and the `u32` length of its nested value.
+const ROWS_RECORD_FIELD_HEADER_BYTES: usize = 16 + 4;
 
 /// The largest accepted framed-codec magic prefix length in bytes.
 const MAX_OPAQUE_CODEC_MAGIC_LENGTH: usize = 64;
@@ -60,60 +72,43 @@ enum OpaquePayloadContract {
         /// The exact payload length.
         payload_length: usize,
     },
-    /// `MAGIC <len:u32 be> <utf-8 bytes>`: a fixed ASCII magic prefix, then a
-    /// big-endian `u32` body length, then exactly that many UTF-8 bytes and no
-    /// trailing bytes.
-    LengthPrefixedUtf8 {
+    /// `MAGIC <body>`: a fixed ASCII magic prefix followed by a body in one of
+    /// the closed framings.
+    Framed {
         /// The exact ASCII magic prefix, including any separating space.
         magic: String,
+        /// The framing of the bytes that follow the magic prefix.
+        body: FramedBody,
     },
-    /// `MAGIC <len:u32 be> <utf-8 bytes>` with the terminal-document text
+}
+
+/// The closed set of body framings that follow a framed codec's magic prefix.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FramedBody {
+    /// `<len:u32 be> <utf-8 bytes>` with exactly `len` UTF-8 bytes and no
+    /// trailing bytes.
+    Utf8,
+    /// `<len:u32 be> <utf-8 bytes>` with the terminal-document text
     /// invariants: a final newline and no control codes except line feeds.
-    TerminalDocument {
-        /// The exact ASCII magic prefix, including any separating space.
-        magic: String,
-    },
-    /// `MAGIC <len:u32 be> <bytes>`: a fixed ASCII magic prefix, then a
-    /// big-endian `u32` body length, then exactly that many bytes and no
-    /// trailing bytes.
-    LengthPrefixedBytes {
-        /// The exact ASCII magic prefix, including any separating space.
-        magic: String,
-    },
-    /// `MAGIC <len:u32 be> <canonical ORNA-ACTION/1 descriptor>`: a fixed
-    /// ASCII magic prefix, an exact body length, and one structurally valid
-    /// action descriptor. Target and catalogue semantics remain client-owned.
-    Action {
-        /// The exact ASCII magic prefix, including any separating space.
-        magic: String,
-    },
-    /// `MAGIC <len:u32 be> <canonical JSON UTF-8 bytes>`: a fixed ASCII magic
-    /// prefix, then a big-endian `u32` body length, then exactly that many
-    /// canonical JSON UTF-8 bytes and no trailing bytes.
-    LengthPrefixedCanonicalJson {
-        /// The exact ASCII magic prefix, including any separating space.
-        magic: String,
-    },
+    TerminalDocument,
+    /// `<len:u32 be> <bytes>` with exactly `len` bytes and no trailing bytes.
+    Bytes,
+    /// `<len:u32 be> <canonical ORNA-ACTION/1 descriptor>`: an exact body
+    /// length and one structurally valid action descriptor. Target and
+    /// catalogue semantics remain client-owned.
+    Action,
+    /// `<len:u32 be> <canonical JSON UTF-8 bytes>` with exactly `len` bytes
+    /// and no trailing bytes.
+    CanonicalJson,
+    /// `<len:u32 be> <canonical std.ui.UI JSON UTF-8 bytes>` representing one
+    /// closed UI value.
+    UiValue,
     /// `ORNA-ROWS/1` with bounded ordered column metadata and cell framing.
-    Rows {
-        /// The exact ASCII magic prefix, including its trailing space.
-        magic: String,
-    },
-    /// `MAGIC <len:u32 be> <canonical std.ui.UI JSON UTF-8 bytes>`: a fixed
-    /// ASCII magic prefix, then a big-endian `u32` body length, then exactly
-    /// that many canonical JSON UTF-8 bytes representing one closed UI value.
-    LengthPrefixedUiValue {
-        /// The exact ASCII magic prefix, including any separating space.
-        magic: String,
-    },
-    /// `MAGIC <media-type-len:u32 be> <media-type> <len:u32 be> <bytes>`: a
-    /// fixed ASCII magic prefix, a big-endian `u32` media-type length, the
-    /// non-empty media-type bytes, a big-endian `u32` body length, then
-    /// exactly that many bytes and no trailing bytes.
-    MediaTypeFramed {
-        /// The exact ASCII magic prefix, including any separating space.
-        magic: String,
-    },
+    Rows,
+    /// `<media-type-len:u32 be> <media-type> <len:u32 be> <bytes>`: the
+    /// non-empty media-type bytes, then exactly `len` body bytes and no
+    /// trailing bytes.
+    MediaType,
 }
 
 /// One checked-in identity codec registration for an opaque standard value type.
@@ -162,19 +157,18 @@ impl OpaqueCodecRegistration {
     ) -> Result<Self, OpaqueCodecRegistryError> {
         let magic = magic.into();
         let representation_contract = representation_contract.into();
-        validate_codec_magic(opaque_type, &magic)?;
-        let contract =
-            if is_terminal_document_codec(&semantic_name, &representation_contract, &magic) {
-                OpaquePayloadContract::TerminalDocument { magic }
-            } else {
-                OpaquePayloadContract::LengthPrefixedUtf8 { magic }
-            };
-        Ok(Self {
+        let body = if is_terminal_document_codec(&semantic_name, &representation_contract, &magic) {
+            FramedBody::TerminalDocument
+        } else {
+            FramedBody::Utf8
+        };
+        Self::framed(
             opaque_type,
             semantic_name,
             representation_contract,
-            contract,
-        })
+            magic,
+            body,
+        )
     }
 
     /// Declares a framed codec whose canonical form is
@@ -186,14 +180,13 @@ impl OpaqueCodecRegistration {
         representation_contract: impl Into<String>,
         magic: impl Into<String>,
     ) -> Result<Self, OpaqueCodecRegistryError> {
-        let magic = magic.into();
-        validate_codec_magic(opaque_type, &magic)?;
-        Ok(Self {
+        Self::framed(
             opaque_type,
             semantic_name,
-            representation_contract: representation_contract.into(),
-            contract: OpaquePayloadContract::LengthPrefixedBytes { magic },
-        })
+            representation_contract.into(),
+            magic.into(),
+            FramedBody::Bytes,
+        )
     }
 
     /// Declares a structurally checked `ORNA-ACTION/1` descriptor codec.
@@ -207,14 +200,13 @@ impl OpaqueCodecRegistration {
         representation_contract: impl Into<String>,
         magic: impl Into<String>,
     ) -> Result<Self, OpaqueCodecRegistryError> {
-        let magic = magic.into();
-        validate_codec_magic(opaque_type, &magic)?;
-        Ok(Self {
+        Self::framed(
             opaque_type,
             semantic_name,
-            representation_contract: representation_contract.into(),
-            contract: OpaquePayloadContract::Action { magic },
-        })
+            representation_contract.into(),
+            magic.into(),
+            FramedBody::Action,
+        )
     }
 
     /// Declares a framed codec whose canonical form is
@@ -225,14 +217,13 @@ impl OpaqueCodecRegistration {
         representation_contract: impl Into<String>,
         magic: impl Into<String>,
     ) -> Result<Self, OpaqueCodecRegistryError> {
-        let magic = magic.into();
-        validate_codec_magic(opaque_type, &magic)?;
-        Ok(Self {
+        Self::framed(
             opaque_type,
             semantic_name,
-            representation_contract: representation_contract.into(),
-            contract: OpaquePayloadContract::MediaTypeFramed { magic },
-        })
+            representation_contract.into(),
+            magic.into(),
+            FramedBody::MediaType,
+        )
     }
 
     /// Declares a framed codec whose canonical form is
@@ -245,20 +236,21 @@ impl OpaqueCodecRegistration {
         magic: impl Into<String>,
     ) -> Result<Self, OpaqueCodecRegistryError> {
         let magic = magic.into();
-        validate_codec_magic(opaque_type, &magic)?;
         let representation_contract = representation_contract.into();
-        let contract = if is_ui_value_codec(&semantic_name, &representation_contract, &magic) {
-            OpaquePayloadContract::LengthPrefixedUiValue { magic }
+        let body = if is_ui_value_codec(&semantic_name, &representation_contract, &magic) {
+            FramedBody::UiValue
         } else {
-            OpaquePayloadContract::LengthPrefixedCanonicalJson { magic }
+            FramedBody::CanonicalJson
         };
-        Ok(Self {
+        Self::framed(
             opaque_type,
             semantic_name,
             representation_contract,
-            contract,
-        })
+            magic,
+            body,
+        )
     }
+
     /// Declares a bounded `ORNA-ROWS/1` opaque codec.
     ///
     /// Structural framing is validated by the core registration; active
@@ -269,13 +261,30 @@ impl OpaqueCodecRegistration {
         representation_contract: impl Into<String>,
         magic: impl Into<String>,
     ) -> Result<Self, OpaqueCodecRegistryError> {
-        let magic = magic.into();
+        Self::framed(
+            opaque_type,
+            semantic_name,
+            representation_contract.into(),
+            magic.into(),
+            FramedBody::Rows,
+        )
+    }
+
+    /// Builds a framed registration after the magic-prefix check every framed
+    /// codec shares.
+    fn framed(
+        opaque_type: TypeId,
+        semantic_name: QualifiedSemanticName,
+        representation_contract: String,
+        magic: String,
+        body: FramedBody,
+    ) -> Result<Self, OpaqueCodecRegistryError> {
         validate_codec_magic(opaque_type, &magic)?;
         Ok(Self {
             opaque_type,
             semantic_name,
-            representation_contract: representation_contract.into(),
-            contract: OpaquePayloadContract::Rows { magic },
+            representation_contract,
+            contract: OpaquePayloadContract::Framed { magic, body },
         })
     }
 }
@@ -440,31 +449,95 @@ fn validate_opaque_payload(
             }
             Ok(())
         }
-        OpaquePayloadContract::LengthPrefixedUtf8 { magic } => {
-            validate_length_prefixed_utf8(opaque_type, magic.as_bytes(), payload)
-        }
-        OpaquePayloadContract::TerminalDocument { magic } => {
-            validate_terminal_document(opaque_type, magic.as_bytes(), payload)
-        }
-        OpaquePayloadContract::LengthPrefixedBytes { magic } => {
-            validate_length_prefixed_bytes(opaque_type, magic.as_bytes(), payload)
-        }
-        OpaquePayloadContract::Action { magic } => {
-            validate_action_frame(opaque_type, magic.as_bytes(), payload)
-        }
-        OpaquePayloadContract::LengthPrefixedCanonicalJson { magic } => {
-            validate_length_prefixed_canonical_json(opaque_type, magic.as_bytes(), payload)
-        }
-        OpaquePayloadContract::LengthPrefixedUiValue { magic } => {
-            validate_length_prefixed_ui_value(opaque_type, magic.as_bytes(), payload)
-        }
-        OpaquePayloadContract::MediaTypeFramed { magic } => {
-            validate_media_type_framed(opaque_type, magic.as_bytes(), payload)
-        }
-        OpaquePayloadContract::Rows { magic } => {
-            validate_rows_payload(opaque_type, magic.as_bytes(), payload)
+        OpaquePayloadContract::Framed { magic, body } => {
+            let magic = magic.as_bytes();
+            match body {
+                FramedBody::Utf8 => validate_length_prefixed_utf8(opaque_type, magic, payload),
+                FramedBody::TerminalDocument => {
+                    validate_terminal_document(opaque_type, magic, payload)
+                }
+                FramedBody::Bytes => validate_length_prefixed_bytes(opaque_type, magic, payload),
+                FramedBody::Action => validate_action_frame(opaque_type, magic, payload),
+                FramedBody::CanonicalJson => {
+                    validate_length_prefixed_canonical_json(opaque_type, magic, payload)
+                }
+                FramedBody::UiValue => {
+                    validate_length_prefixed_ui_value(opaque_type, magic, payload)
+                }
+                FramedBody::MediaType => validate_media_type_framed(opaque_type, magic, payload),
+                FramedBody::Rows => validate_rows_payload(opaque_type, magic, payload),
+            }
         }
     }
+}
+
+/// A forward-only reader over a big-endian length-prefixed byte layout. Every
+/// read is bounds checked and yields `None` rather than panicking, and a failed
+/// read consumes nothing.
+struct Reader<'a> {
+    bytes: &'a [u8],
+    position: usize,
+}
+
+impl<'a> Reader<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, position: 0 }
+    }
+
+    fn take(&mut self, length: usize) -> Option<&'a [u8]> {
+        let end = self.position.checked_add(length)?;
+        let taken = self.bytes.get(self.position..end)?;
+        self.position = end;
+        Some(taken)
+    }
+
+    fn u8(&mut self) -> Option<u8> {
+        self.take(1)?.first().copied()
+    }
+
+    fn u16(&mut self) -> Option<u16> {
+        self.take(2)?.try_into().ok().map(u16::from_be_bytes)
+    }
+
+    fn u32(&mut self) -> Option<u32> {
+        self.take(4)?.try_into().ok().map(u32::from_be_bytes)
+    }
+
+    /// Reads a big-endian `u32` length or count as a `usize`.
+    fn length(&mut self) -> Option<usize> {
+        usize::try_from(self.u32()?).ok()
+    }
+
+    fn remaining(&self) -> usize {
+        self.bytes.len() - self.position
+    }
+
+    fn is_empty(&self) -> bool {
+        self.remaining() == 0
+    }
+
+    fn rest(&self) -> &'a [u8] {
+        &self.bytes[self.position..]
+    }
+}
+
+/// Splits `MAGIC <len:u32 be> <body>` into its body, requiring exactly `len`
+/// body bytes, no trailing bytes, and a body no larger than the codec bound.
+fn framed_body<'a>(
+    opaque_type: TypeId,
+    magic: &[u8],
+    payload: &'a [u8],
+) -> Result<&'a [u8], OpaqueValueError> {
+    let after_magic = payload
+        .strip_prefix(magic)
+        .ok_or(OpaqueValueError::InvalidMagic { opaque_type })?;
+    let mut reader = Reader::new(after_magic);
+    let invalid_length = || OpaqueValueError::InvalidFrameLength { opaque_type };
+    let body_length = reader.length().ok_or_else(invalid_length)?;
+    if body_length > MAX_OPAQUE_CODEC_PAYLOAD_LENGTH || reader.remaining() != body_length {
+        return Err(invalid_length());
+    }
+    Ok(reader.rest())
 }
 fn validate_rows_payload(
     opaque_type: TypeId,
@@ -472,57 +545,47 @@ fn validate_rows_payload(
     payload: &[u8],
 ) -> Result<(), OpaqueValueError> {
     let invalid = || OpaqueValueError::InvalidRowsFrame { opaque_type };
-    if payload.len() > MAX_ROWS_PAYLOAD_LENGTH || !payload.starts_with(magic) {
+    if payload.len() > MAX_ROWS_PAYLOAD_LENGTH {
         return Err(invalid());
     }
-
-    let mut cursor = magic.len();
-    let version = take_rows_u16(payload, &mut cursor).ok_or_else(invalid)?;
-    if version != ROWS_FRAME_VERSION {
+    let after_magic = payload.strip_prefix(magic).ok_or_else(invalid)?;
+    let mut reader = Reader::new(after_magic);
+    if reader.u16().ok_or_else(invalid)? != ROWS_FRAME_VERSION {
         return Err(invalid());
     }
-    let column_count = take_rows_u32(payload, &mut cursor)
-        .and_then(|count| usize::try_from(count).ok())
-        .ok_or_else(invalid)?;
+    let column_count = reader.length().ok_or_else(invalid)?;
     if !(1..=MAX_ROWS_COLUMNS).contains(&column_count) {
         return Err(invalid());
     }
+    // The column definitions and the `u32` row count that follows them must
+    // fit in what remains, which bounds the allocation made for the name set.
     let minimum_columns = column_count
-        .checked_mul(23)
+        .checked_mul(ROWS_MIN_COLUMN_BYTES)
         .and_then(|bytes| bytes.checked_add(4));
-    if minimum_columns.is_none_or(|minimum| payload.len().saturating_sub(cursor) < minimum) {
+    if minimum_columns.is_none_or(|minimum| reader.remaining() < minimum) {
         return Err(invalid());
     }
 
     let mut names = HashSet::with_capacity(column_count);
     for _ in 0..column_count {
-        let name_length = take_rows_u32(payload, &mut cursor)
-            .and_then(|length| usize::try_from(length).ok())
-            .ok_or_else(invalid)?;
-        let name = take_rows_bytes(payload, &mut cursor, name_length).ok_or_else(invalid)?;
+        let name_length = reader.length().ok_or_else(invalid)?;
+        let name = reader.take(name_length).ok_or_else(invalid)?;
         if std::str::from_utf8(name).is_err() || name.is_empty() || !names.insert(name) {
             return Err(invalid());
         }
-        let type_form = take_rows_bytes(payload, &mut cursor, 1)
-            .and_then(|bytes| bytes.first().copied())
-            .ok_or_else(invalid)?;
-        let type_id = take_rows_bytes(payload, &mut cursor, 16).ok_or_else(invalid)?;
+        let type_form = reader.u8().ok_or_else(invalid)?;
+        let type_id = reader.take(16).ok_or_else(invalid)?;
         if !(0x01..=0x04).contains(&type_form)
             || (type_form == 0x01 && !is_rows_standard_scalar_type_id(type_id))
         {
             return Err(invalid());
         }
-        let nullable = take_rows_bytes(payload, &mut cursor, 1)
-            .and_then(|bytes| bytes.first().copied())
-            .ok_or_else(invalid)?;
-        if nullable > 1 {
+        if reader.u8().ok_or_else(invalid)? > 1 {
             return Err(invalid());
         }
     }
 
-    let row_count = take_rows_u32(payload, &mut cursor)
-        .and_then(|count| usize::try_from(count).ok())
-        .ok_or_else(invalid)?;
+    let row_count = reader.length().ok_or_else(invalid)?;
     if row_count > MAX_ROWS_ROWS
         || row_count
             .checked_mul(column_count)
@@ -532,160 +595,121 @@ fn validate_rows_payload(
     }
 
     for _ in 0..row_count {
-        let cell_count = take_rows_u32(payload, &mut cursor)
-            .and_then(|count| usize::try_from(count).ok())
-            .ok_or_else(invalid)?;
-        if cell_count != column_count {
+        if reader.length().ok_or_else(invalid)? != column_count {
             return Err(invalid());
         }
-        for _ in 0..cell_count {
-            let length = take_rows_u32(payload, &mut cursor)
-                .and_then(|length| usize::try_from(length).ok())
-                .ok_or_else(invalid)?;
+        for _ in 0..column_count {
+            let length = reader.length().ok_or_else(invalid)?;
             if length > MAX_ROWS_PAYLOAD_LENGTH {
                 return Err(invalid());
             }
-            let cell = take_rows_bytes(payload, &mut cursor, length).ok_or_else(invalid)?;
+            let cell = reader.take(length).ok_or_else(invalid)?;
             if validate_rows_orv5_value(cell, 0).is_err() {
                 return Err(invalid());
             }
         }
     }
 
-    if cursor == payload.len() {
+    if reader.is_empty() {
         Ok(())
     } else {
         Err(invalid())
     }
 }
 
-fn take_rows_bytes<'a>(payload: &'a [u8], cursor: &mut usize, length: usize) -> Option<&'a [u8]> {
-    let end = cursor.checked_add(length)?;
-    let bytes = payload.get(*cursor..end)?;
-    *cursor = end;
-    Some(bytes)
-}
-
-fn take_rows_u16(payload: &[u8], cursor: &mut usize) -> Option<u16> {
-    Some(u16::from_be_bytes(
-        take_rows_bytes(payload, cursor, 2)?.try_into().ok()?,
-    ))
-}
-
-fn take_rows_u32(payload: &[u8], cursor: &mut usize) -> Option<u32> {
-    Some(u32::from_be_bytes(
-        take_rows_bytes(payload, cursor, 4)?.try_into().ok()?,
-    ))
-}
 fn is_rows_standard_scalar_type_id(type_id: &[u8]) -> bool {
     type_id.len() == 16
         && type_id[..15].iter().all(|byte| *byte == 0)
         && matches!(type_id[15], 0x01 | 0x02 | 0x03 | 0x04 | 0x06 | 0x07)
 }
+
 fn is_rows_standard_scalar_type_id_for_tag(type_id: &[u8], tag: u8) -> bool {
     is_rows_standard_scalar_type_id(type_id) && type_id[15] == tag
 }
+
+fn ensure(condition: bool) -> Result<(), ()> {
+    if condition { Ok(()) } else { Err(()) }
+}
+
 fn validate_rows_orv5_value(bytes: &[u8], depth: usize) -> Result<(), ()> {
-    const HEADER: usize = 25;
-    const MARKER: &[u8; 4] = b"ORV5";
-    if depth > 32 {
-        return Err(());
-    }
-    if bytes.len() < HEADER || &bytes[..4] != MARKER {
+    if depth > ROWS_MAX_VALUE_DEPTH
+        || bytes.len() < ORV_HEADER_BYTES
+        || !bytes.starts_with(ORV5_MARKER)
+    {
         return Err(());
     }
     let tag = bytes[4];
-    let declared = u32::from_be_bytes(bytes[21..25].try_into().map_err(|_| ())?) as usize;
-    if declared > MAX_OPAQUE_CODEC_PAYLOAD_LENGTH {
-        return Err(());
-    }
-    let actual = bytes.len() - HEADER;
-    if declared != actual {
-        return Err(());
-    }
     let type_identity = &bytes[5..21];
+    let declared = Reader::new(&bytes[21..ORV_HEADER_BYTES])
+        .length()
+        .ok_or(())?;
+    let payload = &bytes[ORV_HEADER_BYTES..];
+    if declared > MAX_OPAQUE_CODEC_PAYLOAD_LENGTH || declared != payload.len() {
+        return Err(());
+    }
     let has_type_identity = type_identity.iter().any(|byte| *byte != 0);
-    let payload = &bytes[HEADER..];
     match tag {
-        0x00 | 0x01 | 0x09 => payload.is_empty().then_some(()).ok_or(()),
-        0x02 => (payload.len() == 1 && matches!(payload[0], 0 | 1))
-            .then_some(())
-            .ok_or(()),
-        0x03 => (payload.len() == 4).then_some(()).ok_or(()),
-        0x04 | 0x05 => (payload.len() == 8).then_some(()).ok_or(()),
-        0x06 => (is_rows_standard_scalar_type_id_for_tag(type_identity, 0x06)
-            && std::str::from_utf8(payload).is_ok())
-        .then_some(())
-        .ok_or(()),
-        0x07 => is_rows_standard_scalar_type_id_for_tag(type_identity, 0x07)
-            .then_some(())
-            .ok_or(()),
-        0x0a => (has_type_identity && std::str::from_utf8(payload).is_ok())
-            .then_some(())
-            .ok_or(()),
-        0x0c => Err(()),
-        0x08 => (payload.len() == 16).then_some(()).ok_or(()),
-        0x0b => validate_rows_record_payload(payload, depth),
-        0x0d => validate_rows_constructed_payload(
-            bytes[5..21].try_into().map_err(|_| ())?,
-            payload,
-            depth,
+        0x00 | 0x01 | 0x09 => ensure(payload.is_empty()),
+        0x02 => ensure(payload.len() == 1 && matches!(payload[0], 0 | 1)),
+        0x03 => ensure(payload.len() == 4),
+        0x04 | 0x05 => ensure(payload.len() == 8),
+        0x06 => ensure(
+            is_rows_standard_scalar_type_id_for_tag(type_identity, 0x06)
+                && std::str::from_utf8(payload).is_ok(),
         ),
+        0x07 => ensure(is_rows_standard_scalar_type_id_for_tag(type_identity, 0x07)),
+        0x0a => ensure(has_type_identity && std::str::from_utf8(payload).is_ok()),
+        0x0c => Err(()),
+        0x08 => ensure(payload.len() == 16),
+        0x0b => validate_rows_record_payload(payload, depth),
+        0x0d => validate_rows_constructed_payload(type_identity, payload, depth),
         _ => Err(()),
     }
 }
+
 fn validate_rows_record_payload(payload: &[u8], depth: usize) -> Result<(), ()> {
-    if depth > 32 {
+    if depth > ROWS_MAX_VALUE_DEPTH {
         return Err(());
     }
-    let mut cursor = 0;
-    let count = take_rows_u32(payload, &mut cursor)
-        .and_then(|count| usize::try_from(count).ok())
-        .ok_or(())?;
-    if count > payload.len().saturating_sub(cursor) / 20 {
+    let mut reader = Reader::new(payload);
+    let count = reader.length().ok_or(())?;
+    if count > reader.remaining() / ROWS_RECORD_FIELD_HEADER_BYTES {
         return Err(());
     }
     let mut field_ids = HashSet::with_capacity(count);
     let mut previous = None;
     for _ in 0..count {
-        let field_id = take_rows_bytes(payload, &mut cursor, 16).ok_or(())?;
+        let field_id = reader.take(16).ok_or(())?;
         if !field_ids.insert(field_id) || previous.is_some_and(|prior: &[u8]| prior >= field_id) {
             return Err(());
         }
         previous = Some(field_id);
-        let length = take_rows_u32(payload, &mut cursor)
-            .and_then(|length| usize::try_from(length).ok())
-            .ok_or(())?;
-        let nested = take_rows_bytes(payload, &mut cursor, length).ok_or(())?;
+        let length = reader.length().ok_or(())?;
+        let nested = reader.take(length).ok_or(())?;
         validate_rows_orv5_value(nested, depth + 1)?;
     }
-    (cursor == payload.len()).then_some(()).ok_or(())
+    ensure(reader.is_empty())
 }
 
 fn validate_rows_constructed_payload(
-    type_id: [u8; 16],
+    type_id: &[u8],
     payload: &[u8],
     depth: usize,
 ) -> Result<(), ()> {
-    if type_id != [0; 16] || depth >= 32 {
+    if type_id.iter().any(|byte| *byte != 0) || depth >= ROWS_MAX_VALUE_DEPTH {
         return Err(());
     }
-    let mut cursor = 0;
-    let descriptor_length = usize::from(u16::from_be_bytes(
-        take_rows_bytes(payload, &mut cursor, 2)
-            .ok_or(())?
-            .try_into()
-            .map_err(|_| ())?,
-    ));
+    let mut reader = Reader::new(payload);
+    let descriptor_length = usize::from(reader.u16().ok_or(())?);
     if descriptor_length == 0 {
         return Err(());
     }
-    let descriptor_bytes = take_rows_bytes(payload, &mut cursor, descriptor_length).ok_or(())?;
+    let descriptor_bytes = reader.take(descriptor_length).ok_or(())?;
     let (descriptor, consumed) = validate_rows_descriptor(descriptor_bytes, 0, 0)?;
     if consumed != descriptor_bytes.len() {
         return Err(());
     }
-    validate_rows_constructor_content(descriptor, &payload[cursor..], depth + 1)
+    validate_rows_constructor_content(descriptor, reader.rest(), depth + 1)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -702,7 +726,7 @@ fn validate_rows_descriptor(
     offset: usize,
     depth: usize,
 ) -> Result<(RowsDescriptor, usize), ()> {
-    if depth > 32 {
+    if depth > ROWS_MAX_VALUE_DEPTH {
         return Err(());
     }
     let tag = *bytes.get(offset).ok_or(())?;
@@ -713,30 +737,25 @@ fn validate_rows_descriptor(
             if end > bytes.len() {
                 return Err(());
             }
-            Ok((
-                if tag == 0 {
-                    RowsDescriptor::Named
-                } else {
-                    RowsDescriptor::Reference
-                },
-                end,
-            ))
-        }
-        2..=4 => {
-            let (_child, end) = validate_rows_descriptor(bytes, cursor, depth + 1)?;
-            if tag == 3 {
-                let (_value, end) = validate_rows_descriptor(bytes, end, depth + 1)?;
-                Ok((RowsDescriptor::Map, end))
+            let descriptor = if tag == 0 {
+                RowsDescriptor::Named
             } else {
-                Ok((
-                    match tag {
-                        2 => RowsDescriptor::List,
-                        4 => RowsDescriptor::Option,
-                        _ => unreachable!(),
-                    },
-                    end,
-                ))
-            }
+                RowsDescriptor::Reference
+            };
+            Ok((descriptor, end))
+        }
+        2 => {
+            let (_child, end) = validate_rows_descriptor(bytes, cursor, depth + 1)?;
+            Ok((RowsDescriptor::List, end))
+        }
+        3 => {
+            let (_key, key_end) = validate_rows_descriptor(bytes, cursor, depth + 1)?;
+            let (_value, end) = validate_rows_descriptor(bytes, key_end, depth + 1)?;
+            Ok((RowsDescriptor::Map, end))
+        }
+        4 => {
+            let (_child, end) = validate_rows_descriptor(bytes, cursor, depth + 1)?;
+            Ok((RowsDescriptor::Option, end))
         }
         _ => Err(()),
     }
@@ -747,65 +766,47 @@ fn validate_rows_constructor_content(
     content: &[u8],
     depth: usize,
 ) -> Result<(), ()> {
-    if depth > 32 {
+    if depth > ROWS_MAX_VALUE_DEPTH {
         return Err(());
     }
+    let mut reader = Reader::new(content);
     match descriptor {
-        RowsDescriptor::Option => {
-            let presence = *content.first().ok_or(())?;
-            match presence {
-                0 if content.len() == 1 => Ok(()),
-                1 => {
-                    let mut cursor = 1;
-                    let length = take_rows_u32(content, &mut cursor)
-                        .and_then(|length| usize::try_from(length).ok())
-                        .ok_or(())?;
-                    let nested = take_rows_bytes(content, &mut cursor, length).ok_or(())?;
-                    if cursor != content.len() {
-                        return Err(());
-                    }
-                    validate_rows_orv5_value(nested, depth)
-                }
-                _ => Err(()),
+        RowsDescriptor::Option => match reader.u8().ok_or(())? {
+            0 => ensure(reader.is_empty()),
+            1 => {
+                let nested = take_rows_child(&mut reader)?;
+                ensure(reader.is_empty())?;
+                validate_rows_orv5_value(nested, depth)
             }
-        }
-        RowsDescriptor::List => validate_rows_repeated_content(content, depth),
-        RowsDescriptor::Map => {
-            let mut cursor = 0;
-            let count = take_rows_u32(content, &mut cursor)
-                .and_then(|count| usize::try_from(count).ok())
-                .ok_or(())?;
-            for _ in 0..count {
-                let key_length = take_rows_u32(content, &mut cursor)
-                    .and_then(|length| usize::try_from(length).ok())
-                    .ok_or(())?;
-                let key = take_rows_bytes(content, &mut cursor, key_length).ok_or(())?;
-                validate_rows_orv5_value(key, depth)?;
-                let value_length = take_rows_u32(content, &mut cursor)
-                    .and_then(|length| usize::try_from(length).ok())
-                    .ok_or(())?;
-                let value = take_rows_bytes(content, &mut cursor, value_length).ok_or(())?;
-                validate_rows_orv5_value(value, depth)?;
-            }
-            (cursor == content.len()).then_some(()).ok_or(())
-        }
+            _ => Err(()),
+        },
+        RowsDescriptor::List => validate_rows_repeated_content(&mut reader, depth, 1),
+        RowsDescriptor::Map => validate_rows_repeated_content(&mut reader, depth, 2),
         RowsDescriptor::Named | RowsDescriptor::Reference => Err(()),
     }
 }
 
-fn validate_rows_repeated_content(content: &[u8], depth: usize) -> Result<(), ()> {
-    let mut cursor = 0;
-    let count = take_rows_u32(content, &mut cursor)
-        .and_then(|count| usize::try_from(count).ok())
-        .ok_or(())?;
+/// Validates a `u32` count followed by `count * children_per_item`
+/// length-prefixed ORV5 children (one for a list element, a key and a value for
+/// a map entry), consuming the whole reader.
+fn validate_rows_repeated_content(
+    reader: &mut Reader<'_>,
+    depth: usize,
+    children_per_item: usize,
+) -> Result<(), ()> {
+    let count = reader.length().ok_or(())?;
     for _ in 0..count {
-        let length = take_rows_u32(content, &mut cursor)
-            .and_then(|length| usize::try_from(length).ok())
-            .ok_or(())?;
-        let nested = take_rows_bytes(content, &mut cursor, length).ok_or(())?;
-        validate_rows_orv5_value(nested, depth)?;
+        for _ in 0..children_per_item {
+            validate_rows_orv5_value(take_rows_child(reader)?, depth)?;
+        }
     }
-    (cursor == content.len()).then_some(()).ok_or(())
+    ensure(reader.is_empty())
+}
+
+/// Takes one `<len:u32 be> <bytes>` child.
+fn take_rows_child<'a>(reader: &mut Reader<'a>) -> Result<&'a [u8], ()> {
+    let length = reader.length().ok_or(())?;
+    reader.take(length).ok_or(())
 }
 
 /// Parses and validates one canonical JSON frame, returning its body value for
@@ -815,27 +816,7 @@ fn canonical_json_body(
     magic: &[u8],
     payload: &[u8],
 ) -> Result<serde_json::Value, OpaqueValueError> {
-    let prefix_length = magic
-        .len()
-        .checked_add(4)
-        .ok_or(OpaqueValueError::InvalidFrameLength { opaque_type })?;
-    if payload.len() < prefix_length || !payload.starts_with(magic) {
-        return Err(if payload.starts_with(magic) {
-            OpaqueValueError::InvalidFrameLength { opaque_type }
-        } else {
-            OpaqueValueError::InvalidMagic { opaque_type }
-        });
-    }
-    let body_length = u32::from_be_bytes(
-        payload[magic.len()..prefix_length]
-            .try_into()
-            .expect("the length prefix is exactly four bytes"),
-    ) as usize;
-    if body_length > MAX_OPAQUE_CODEC_PAYLOAD_LENGTH || payload.len() != prefix_length + body_length
-    {
-        return Err(OpaqueValueError::InvalidFrameLength { opaque_type });
-    }
-    let body = &payload[prefix_length..];
+    let body = framed_body(opaque_type, magic, payload)?;
     if std::str::from_utf8(body).is_err() {
         return Err(OpaqueValueError::InvalidUtf8Body { opaque_type });
     }
@@ -1049,27 +1030,7 @@ fn validate_terminal_document(
     magic: &[u8],
     payload: &[u8],
 ) -> Result<(), OpaqueValueError> {
-    let prefix_length = magic
-        .len()
-        .checked_add(4)
-        .ok_or(OpaqueValueError::InvalidFrameLength { opaque_type })?;
-    if payload.len() < prefix_length || !payload.starts_with(magic) {
-        return Err(if payload.starts_with(magic) {
-            OpaqueValueError::InvalidFrameLength { opaque_type }
-        } else {
-            OpaqueValueError::InvalidMagic { opaque_type }
-        });
-    }
-    let body_length = u32::from_be_bytes(
-        payload[magic.len()..prefix_length]
-            .try_into()
-            .expect("the length prefix is exactly four bytes"),
-    ) as usize;
-    if body_length > MAX_OPAQUE_CODEC_PAYLOAD_LENGTH || payload.len() != prefix_length + body_length
-    {
-        return Err(OpaqueValueError::InvalidFrameLength { opaque_type });
-    }
-    let body = &payload[prefix_length..];
+    let body = framed_body(opaque_type, magic, payload)?;
     let text =
         std::str::from_utf8(body).map_err(|_| OpaqueValueError::InvalidUtf8Body { opaque_type })?;
     if !body.ends_with(b"\n") || text.chars().any(is_document_control) {
@@ -1084,27 +1045,7 @@ fn validate_length_prefixed_utf8(
     magic: &[u8],
     payload: &[u8],
 ) -> Result<(), OpaqueValueError> {
-    let prefix_length = magic
-        .len()
-        .checked_add(4)
-        .ok_or(OpaqueValueError::InvalidFrameLength { opaque_type })?;
-    if payload.len() < prefix_length || !payload.starts_with(magic) {
-        return Err(if payload.starts_with(magic) {
-            OpaqueValueError::InvalidFrameLength { opaque_type }
-        } else {
-            OpaqueValueError::InvalidMagic { opaque_type }
-        });
-    }
-    let body_length = u32::from_be_bytes(
-        payload[magic.len()..prefix_length]
-            .try_into()
-            .expect("the length prefix is exactly four bytes"),
-    ) as usize;
-    if body_length > MAX_OPAQUE_CODEC_PAYLOAD_LENGTH || payload.len() != prefix_length + body_length
-    {
-        return Err(OpaqueValueError::InvalidFrameLength { opaque_type });
-    }
-    let body = &payload[prefix_length..];
+    let body = framed_body(opaque_type, magic, payload)?;
     if std::str::from_utf8(body).is_err() {
         return Err(OpaqueValueError::InvalidUtf8Body { opaque_type });
     }
@@ -1118,98 +1059,60 @@ fn validate_action_frame(
     magic: &[u8],
     payload: &[u8],
 ) -> Result<(), OpaqueValueError> {
-    let prefix_length = magic
-        .len()
-        .checked_add(4)
-        .ok_or(OpaqueValueError::InvalidFrameLength { opaque_type })?;
-    if payload.len() < prefix_length || !payload.starts_with(magic) {
-        return Err(if payload.starts_with(magic) {
-            OpaqueValueError::InvalidFrameLength { opaque_type }
-        } else {
-            OpaqueValueError::InvalidMagic { opaque_type }
-        });
-    }
-    let body_length = u32::from_be_bytes(
-        payload[magic.len()..prefix_length]
-            .try_into()
-            .expect("the length prefix is exactly four bytes"),
-    ) as usize;
-    let body_end = prefix_length
-        .checked_add(body_length)
-        .ok_or(OpaqueValueError::InvalidFrameLength { opaque_type })?;
-    if body_length > MAX_OPAQUE_CODEC_PAYLOAD_LENGTH
-        || payload.len() > MAX_OPAQUE_CODEC_PAYLOAD_LENGTH
-        || payload.len() != body_end
-    {
+    let invalid_action = || OpaqueValueError::InvalidActionFrame { opaque_type };
+    let body = framed_body(opaque_type, magic, payload)?;
+    // The generic frame check bounds only the body; an action descriptor also
+    // bounds the complete payload.
+    if payload.len() > MAX_OPAQUE_CODEC_PAYLOAD_LENGTH {
         return Err(OpaqueValueError::InvalidFrameLength { opaque_type });
     }
 
-    let body = &payload[prefix_length..body_end];
-    if body.len() < ACTION_BODY_PREFIX_BYTES {
-        return Err(OpaqueValueError::InvalidActionFrame { opaque_type });
+    let mut reader = Reader::new(body);
+    if !matches!(
+        reader.u8().ok_or_else(invalid_action)?,
+        ACTION_DOMAIN_CLIENT | ACTION_DOMAIN_SERVER
+    ) {
+        return Err(invalid_action());
     }
-    if !matches!(body[0], ACTION_DOMAIN_CLIENT | ACTION_DOMAIN_SERVER) {
-        return Err(OpaqueValueError::InvalidActionFrame { opaque_type });
-    }
-    for identity_index in 0..ACTION_IDENTITY_FIELDS {
-        let identity_start = 1 + (identity_index * ACTION_IDENTITY_BYTES);
-        let identity_end = identity_start + ACTION_IDENTITY_BYTES;
-        if body[identity_start..identity_end]
-            .iter()
-            .all(|byte| *byte == 0)
-        {
-            return Err(OpaqueValueError::InvalidActionFrame { opaque_type });
+    for _ in 0..ACTION_IDENTITY_FIELDS {
+        let identity = reader
+            .take(ACTION_IDENTITY_BYTES)
+            .ok_or_else(invalid_action)?;
+        if is_zero_identity(identity) {
+            return Err(invalid_action());
         }
     }
-
-    let mut offset = ACTION_BODY_PREFIX_BYTES;
-    let argument_count = u32::from_be_bytes(
-        body[offset - 4..offset]
-            .try_into()
-            .expect("the action argument count is exactly four bytes"),
-    ) as usize;
+    let argument_count = reader.length().ok_or_else(invalid_action)?;
     if argument_count > MAX_OPAQUE_CODEC_ACTION_ARGUMENTS {
-        return Err(OpaqueValueError::InvalidActionFrame { opaque_type });
+        return Err(invalid_action());
     }
 
     let mut previous_parameter: Option<&[u8]> = None;
     for _ in 0..argument_count {
-        let parameter_end = offset
-            .checked_add(ACTION_IDENTITY_BYTES)
-            .ok_or(OpaqueValueError::InvalidActionFrame { opaque_type })?;
-        let frame_length_end = parameter_end
-            .checked_add(4)
-            .ok_or(OpaqueValueError::InvalidActionFrame { opaque_type })?;
-        if frame_length_end > body.len() {
-            return Err(OpaqueValueError::InvalidActionFrame { opaque_type });
-        }
-        let parameter = &body[offset..parameter_end];
-        if parameter.iter().all(|byte| *byte == 0) {
-            return Err(OpaqueValueError::InvalidActionFrame { opaque_type });
-        }
-        if previous_parameter.is_some_and(|previous| previous >= parameter) {
-            return Err(OpaqueValueError::InvalidActionFrame { opaque_type });
+        let parameter = reader
+            .take(ACTION_IDENTITY_BYTES)
+            .ok_or_else(invalid_action)?;
+        if is_zero_identity(parameter)
+            || previous_parameter.is_some_and(|previous| previous >= parameter)
+        {
+            return Err(invalid_action());
         }
         previous_parameter = Some(parameter);
 
-        let frame_length = u32::from_be_bytes(
-            body[parameter_end..frame_length_end]
-                .try_into()
-                .expect("the action argument frame length is exactly four bytes"),
-        ) as usize;
-        let frame_start = frame_length_end;
-        let frame_end = frame_start
-            .checked_add(frame_length)
-            .ok_or(OpaqueValueError::InvalidActionFrame { opaque_type })?;
-        if frame_end > body.len() || validate_orv3_frame(&body[frame_start..frame_end]).is_err() {
-            return Err(OpaqueValueError::InvalidActionFrame { opaque_type });
+        let frame_length = reader.length().ok_or_else(invalid_action)?;
+        let frame = reader.take(frame_length).ok_or_else(invalid_action)?;
+        if validate_orv3_frame(frame).is_err() {
+            return Err(invalid_action());
         }
-        offset = frame_end;
     }
-    if offset != body.len() {
-        return Err(OpaqueValueError::InvalidActionFrame { opaque_type });
+    if !reader.is_empty() {
+        return Err(invalid_action());
     }
     Ok(())
+}
+
+fn is_zero_identity(identity: &[u8]) -> bool {
+    identity.iter().all(|byte| *byte == 0)
 }
 
 /// Validates one complete canonical ORV3 active-value frame without resolving
@@ -1221,16 +1124,14 @@ fn validate_orv3_frame(encoded: &[u8]) -> Result<(), ()> {
     let mut pending = vec![encoded];
     let mut node_count = 0usize;
     while let Some(frame) = pending.pop() {
-        if frame.len() < ORV3_HEADER_BYTES || !frame.starts_with(ORV3_MARKER) {
+        if frame.len() < ORV_HEADER_BYTES || !frame.starts_with(ORV3_MARKER) {
             return Err(());
         }
-        let declared = u32::from_be_bytes(
-            frame[21..25]
-                .try_into()
-                .expect("the ORV3 header is exactly twenty-five bytes"),
-        ) as usize;
-        let frame_end = ORV3_HEADER_BYTES.checked_add(declared).ok_or(())?;
-        if declared > MAX_OPAQUE_CODEC_PAYLOAD_LENGTH || frame.len() != frame_end {
+        let declared = Reader::new(&frame[21..ORV_HEADER_BYTES])
+            .length()
+            .ok_or(())?;
+        if declared > MAX_OPAQUE_CODEC_PAYLOAD_LENGTH || frame.len() - ORV_HEADER_BYTES != declared
+        {
             return Err(());
         }
         node_count = node_count.checked_add(1).ok_or(())?;
@@ -1238,17 +1139,15 @@ fn validate_orv3_frame(encoded: &[u8]) -> Result<(), ()> {
             return Err(());
         }
         let tag = frame[4];
-        let body = &frame[ORV3_HEADER_BYTES..];
+        let body = &frame[ORV_HEADER_BYTES..];
         match tag {
             0x00 | 0x01 | 0x09 if body.is_empty() => {}
             0x02 if body.len() == 1 && matches!(body[0], 0 | 1) => {}
             0x03 if body.len() == 4 => {}
             0x04 if body.len() == 8 => {}
             0x05 if body.len() == 8 => {
-                let bits =
-                    u64::from_be_bytes(body.try_into().expect("float payload is eight bytes"));
-                let value = f64::from_bits(bits);
-                if bits == (-0.0_f64).to_bits() || !value.is_finite() {
+                let bits = u64::from_be_bytes(body.try_into().map_err(|_| ())?);
+                if bits == (-0.0_f64).to_bits() || !f64::from_bits(bits).is_finite() {
                     return Err(());
                 }
             }
@@ -1256,54 +1155,31 @@ fn validate_orv3_frame(encoded: &[u8]) -> Result<(), ()> {
             0x07 => {}
             0x08 if body.len() == ACTION_IDENTITY_BYTES => {}
             0x0b => {
-                if body.len() < 4 {
-                    return Err(());
-                }
-                let field_count = u32::from_be_bytes(
-                    body[..4]
-                        .try_into()
-                        .expect("the record field count is exactly four bytes"),
-                ) as usize;
+                let mut reader = Reader::new(body);
+                let field_count = reader.length().ok_or(())?;
                 if field_count >= MAX_RUNTIME_VALUE_NODES {
                     return Err(());
                 }
+                // Each field needs its identity, a length and a minimal frame.
                 let minimum = field_count
-                    .checked_mul(ACTION_IDENTITY_BYTES + 4 + ORV3_HEADER_BYTES)
-                    .and_then(|length| 4usize.checked_add(length))
+                    .checked_mul(ACTION_IDENTITY_BYTES + 4 + ORV_HEADER_BYTES)
                     .ok_or(())?;
-                if minimum > body.len() {
+                if minimum > reader.remaining() {
                     return Err(());
                 }
-                let mut cursor = 4usize;
-                let mut field_identities: HashSet<[u8; ACTION_IDENTITY_BYTES]> = HashSet::new();
+                let mut field_identities: HashSet<&[u8]> = HashSet::new();
                 for _ in 0..field_count {
-                    let length_start = cursor.checked_add(ACTION_IDENTITY_BYTES).ok_or(())?;
-                    if length_start > body.len() {
+                    let identity = reader.take(ACTION_IDENTITY_BYTES).ok_or(())?;
+                    if !field_identities.insert(identity) {
                         return Err(());
                     }
-                    let field_identity: [u8; ACTION_IDENTITY_BYTES] = body[cursor..length_start]
-                        .try_into()
-                        .expect("the record field identity is sixteen bytes");
-                    if !field_identities.insert(field_identity) {
+                    let length = reader.length().ok_or(())?;
+                    if length < ORV_HEADER_BYTES {
                         return Err(());
                     }
-                    let frame_start = length_start.checked_add(4).ok_or(())?;
-                    if frame_start > body.len() {
-                        return Err(());
-                    }
-                    let length = u32::from_be_bytes(
-                        body[length_start..frame_start]
-                            .try_into()
-                            .expect("the record field frame length is exactly four bytes"),
-                    ) as usize;
-                    let frame_end = frame_start.checked_add(length).ok_or(())?;
-                    if length < ORV3_HEADER_BYTES || frame_end > body.len() {
-                        return Err(());
-                    }
-                    pending.push(&body[frame_start..frame_end]);
-                    cursor = frame_end;
+                    pending.push(reader.take(length).ok_or(())?);
                 }
-                if cursor != body.len() {
+                if !reader.is_empty() {
                     return Err(());
                 }
             }
@@ -1319,27 +1195,7 @@ fn validate_length_prefixed_bytes(
     magic: &[u8],
     payload: &[u8],
 ) -> Result<(), OpaqueValueError> {
-    let prefix_length = magic
-        .len()
-        .checked_add(4)
-        .ok_or(OpaqueValueError::InvalidFrameLength { opaque_type })?;
-    if payload.len() < prefix_length || !payload.starts_with(magic) {
-        return Err(if payload.starts_with(magic) {
-            OpaqueValueError::InvalidFrameLength { opaque_type }
-        } else {
-            OpaqueValueError::InvalidMagic { opaque_type }
-        });
-    }
-    let body_length = u32::from_be_bytes(
-        payload[magic.len()..prefix_length]
-            .try_into()
-            .expect("the length prefix is exactly four bytes"),
-    ) as usize;
-    if body_length > MAX_OPAQUE_CODEC_PAYLOAD_LENGTH || payload.len() != prefix_length + body_length
-    {
-        return Err(OpaqueValueError::InvalidFrameLength { opaque_type });
-    }
-    Ok(())
+    framed_body(opaque_type, magic, payload).map(|_| ())
 }
 
 /// Validates
@@ -1349,43 +1205,19 @@ fn validate_media_type_framed(
     magic: &[u8],
     payload: &[u8],
 ) -> Result<(), OpaqueValueError> {
-    let magic_end = magic
-        .len()
-        .checked_add(4)
-        .ok_or(OpaqueValueError::InvalidFrameLength { opaque_type })?;
-    if payload.len() < magic_end || !payload.starts_with(magic) {
-        return Err(if payload.starts_with(magic) {
-            OpaqueValueError::InvalidFrameLength { opaque_type }
-        } else {
-            OpaqueValueError::InvalidMagic { opaque_type }
-        });
-    }
-    let media_type_length = u32::from_be_bytes(
-        payload[magic.len()..magic_end]
-            .try_into()
-            .expect("the length prefix is exactly four bytes"),
-    ) as usize;
+    let invalid_length = || OpaqueValueError::InvalidFrameLength { opaque_type };
+    let after_magic = payload
+        .strip_prefix(magic)
+        .ok_or(OpaqueValueError::InvalidMagic { opaque_type })?;
+    let mut reader = Reader::new(after_magic);
+    let media_type_length = reader.length().ok_or_else(invalid_length)?;
     if media_type_length == 0 {
         return Err(OpaqueValueError::InvalidMediaType { opaque_type });
     }
-    let media_type_end = magic_end
-        .checked_add(media_type_length)
-        .ok_or(OpaqueValueError::InvalidFrameLength { opaque_type })?;
-    let body_length_start = media_type_end
-        .checked_add(4)
-        .ok_or(OpaqueValueError::InvalidFrameLength { opaque_type })?;
-    if payload.len() < body_length_start {
-        return Err(OpaqueValueError::InvalidFrameLength { opaque_type });
-    }
-    let body_length = u32::from_be_bytes(
-        payload[media_type_end..body_length_start]
-            .try_into()
-            .expect("the length prefix is exactly four bytes"),
-    ) as usize;
-    if body_length > MAX_OPAQUE_CODEC_PAYLOAD_LENGTH
-        || payload.len() != body_length_start + body_length
-    {
-        return Err(OpaqueValueError::InvalidFrameLength { opaque_type });
+    reader.take(media_type_length).ok_or_else(invalid_length)?;
+    let body_length = reader.length().ok_or_else(invalid_length)?;
+    if body_length > MAX_OPAQUE_CODEC_PAYLOAD_LENGTH || reader.remaining() != body_length {
+        return Err(invalid_length());
     }
     Ok(())
 }
@@ -1932,5 +1764,27 @@ mod tests {
 
         let too_many_cells = rows_prefix(1_001, 1_000);
         assert_invalid_rows(&too_many_cells);
+    }
+
+    #[test]
+    fn action_frames_bound_the_complete_payload_while_plain_frames_bound_only_the_body() {
+        // The body is within the shared bound, but magic and length prefix push
+        // the complete payload past it: only the action codec rejects that.
+        let magic = b"ORNA-ACTION/1 ";
+        let body_length = MAX_OPAQUE_CODEC_PAYLOAD_LENGTH - 1;
+        let mut payload = magic.to_vec();
+        push_u32(&mut payload, body_length);
+        payload.resize(magic.len() + 4 + body_length, 0);
+
+        assert_eq!(
+            validate_action_frame(TEST_OPAQUE_TYPE, magic, &payload),
+            Err(OpaqueValueError::InvalidFrameLength {
+                opaque_type: TEST_OPAQUE_TYPE
+            })
+        );
+        assert_eq!(
+            validate_length_prefixed_bytes(TEST_OPAQUE_TYPE, magic, &payload),
+            Ok(())
+        );
     }
 }
