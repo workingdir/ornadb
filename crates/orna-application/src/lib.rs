@@ -3287,9 +3287,7 @@ fn module_namespace(logical_path: &str) -> Namespace {
 impl From<ApplicationError> for LiveError {
     fn from(error: ApplicationError) -> Self {
         match error {
-            ApplicationError::SourceEffectFailed(SysFailureCode::AdminBusy) => {
-                Self::AdminBusy
-            }
+            ApplicationError::SourceEffectFailed(SysFailureCode::AdminBusy) => Self::AdminBusy,
             _ => Self::ApplicationRejected,
         }
     }
