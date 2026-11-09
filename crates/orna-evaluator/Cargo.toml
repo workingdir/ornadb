@@ -11,7 +11,9 @@ crate-type = ["rlib", "cdylib"]
 
 [features]
 default = ["system-host-bindings"]
-system-host-bindings = ["dep:orna-sys", "dep:orna-repository", "dep:orna-runtime"]
+system-host-bindings = ["dep:orna-sys", "dep:orna-repository"]
+# Unstable test seam: exposes EffectGate::admit_unbound_for_test to dependent test suites.
+test-evidence = []
 browser-wasm = ["getrandom/wasm_js", "dep:uuid", "uuid/js"]
 # Unstable test seam for orna-project-repl: exposes CancellationToken::request_after_checks.
 cancellation-test-hooks = []
@@ -29,7 +31,6 @@ serde_json = { version = "1.0.151", features = ["arbitrary_precision", "raw_valu
 stacker = "0.1.25"
 orna-foundation = { path = "../orna-foundation" }
 orna-repository = { path = "../orna-repository", optional = true }
-orna-runtime = { path = "../orna-runtime", optional = true }
 orna-standard-sources = { path = "../orna-standard-sources" }
 orna-semantic = { path = "../orna-semantic" }
 orna-sys = { path = "../orna-sys", optional = true }

@@ -37,6 +37,7 @@ use crate::table_store::{
 use ed25519_dalek::SigningKey;
 use libsql::{Builder, Connection, TransactionBehavior, params};
 use num_bigint::BigInt;
+use orna_evaluator::{ActivationEffectReport, ControlledEffectToken};
 use orna_foundation::{CanonicalSnapshot, CwdCapture, OvbRaw, RowRef, Snapshot};
 use orna_repository::{
     CwdGeneration, ProtectedContentPin, ProtectedContentTransfer, Repository, RepositoryError,
@@ -234,89 +235,6 @@ pub struct RuntimeActivationContext {
     committed_rows: Option<Arc<PinnedCommittedRows>>,
 }
 
-/// Proof that an evaluation was admitted through [`EffectGate`] with no
-/// external reach (REQUEST-1 step 5, ORNA-CAP-005). It is not verification:
-/// the runtime cannot observe the effects a caller performs, so the gate
-/// decides from the external-state evidence it is given. The private field
-/// keeps struct literals outside this module impossible, and no public
-/// constructor exists; [`EffectGate::admit`] is the only minter.
-///
-/// ```compile_fail,E0603
-/// // Outside the gate the marker cannot be minted: the field is private.
-/// let _ = orna_runtime::ControlledEffectToken(());
-/// ```
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ControlledEffectToken(());
-
-/// Evidence that an evaluation may reach state outside Orna's table transaction
-/// (REQUEST-1 step 5, ORNA-CAP-005). [`EffectGate::admit`] reads only this
-/// answer. The evaluator implements it for the host objects an evaluation is
-/// bound to; that implementation is the sole first-party producer.
-///
-/// Trust: the gate cannot verify an implementation. An implementation that
-/// returns `false` for an evaluation that reaches external state defeats the
-/// gate, so the marker is only as trustworthy as the implementations linked
-/// into the process. No crate in this workspace other than `orna-evaluator`
-/// implements this trait for production admission.
-pub trait ExternalStateEvidence {
-    /// Returns `true` when the evaluation may reach external state.
-    fn may_reach_external_state(&self) -> bool;
-}
-
-#[cfg(test)]
-/// Test double for an evaluation bound to no host object (ORNA-CAP-005).
-pub(crate) struct UnboundEvaluation;
-
-#[cfg(test)]
-impl ExternalStateEvidence for UnboundEvaluation {
-    fn may_reach_external_state(&self) -> bool {
-        false
-    }
-}
-
-#[cfg(test)]
-/// Test double for an evaluation bound to an external-reaching host object.
-pub(crate) struct ReachesExternalState;
-
-#[cfg(test)]
-impl ExternalStateEvidence for ReachesExternalState {
-    fn may_reach_external_state(&self) -> bool {
-        true
-    }
-}
-
-/// The admission gate for the Orna-controlled effect token (REQUEST-1 step 5,
-/// ORNA-CAP-005). It is the only place the positive controlled marker is
-/// minted. An evaluation whose evidence reports possible external reach is
-/// admitted as `ExternalPossible`; only an evaluation reported to have none is
-/// admitted as `ControlledOnly`. A third-party application that does not pass
-/// its evaluation through this gate has no path to the controlled marker.
-#[derive(Debug)]
-pub struct EffectGate;
-
-impl EffectGate {
-    /// Admits an evaluation under its external-state evidence.
-    #[must_use]
-    pub fn admit(evidence: &dyn ExternalStateEvidence) -> ActivationEffectReport {
-        if evidence.may_reach_external_state() {
-            ActivationEffectReport::ExternalPossible
-        } else {
-            ActivationEffectReport::ControlledOnly(ControlledEffectToken(()))
-        }
-    }
-}
-
-/// The effect report every table-request activation presents to the runtime
-/// commit boundary. There is no default: an evaluation is admitted through
-/// [`EffectGate`], which yields a [`ControlledEffectToken`] only when no
-/// external reach is bound. The positive controlled marker is written only for
-/// the former; the latter stays conservatively uncertain on recovery.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ActivationEffectReport {
-    ControlledOnly(ControlledEffectToken),
-    ExternalPossible,
-}
-
 /// Reusable source-derived work for one captured table activation.
 ///
 /// The live layer may carry this owned plan across asynchronous callback
@@ -351,11 +269,6 @@ impl StagedTableActivation {
         })
     }
 
-    /// Returns the effect report the commit boundary applies.
-    pub fn effects(&self) -> ActivationEffectReport {
-        self.effects.clone()
-    }
-
     pub fn context(&self) -> &RuntimeActivationContext {
         &self.context
     }
@@ -370,6 +283,11 @@ impl StagedTableActivation {
 
     pub fn faults(&self) -> &dyn FaultInjector {
         self.faults.as_ref()
+    }
+
+    /// Returns the effect report the commit boundary applies.
+    pub fn effects(&self) -> ActivationEffectReport {
+        self.effects.clone()
     }
 }
 
@@ -648,17 +566,9 @@ impl RuntimeState {
         let system_dispatch = orna_sys::system_dispatch_table();
         let system_provider_roles = orna_sys::ProviderRoleRegistry::from_baked_abi(system_dispatch)
             .map_err(|_| RuntimeError::SystemProviderAbiInvalid)?;
-        let database = Builder::new_local(path)
-            .build()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let connection = database
-            .connect()
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        connection
-            .execute_batch(SCHEMA)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let database = Builder::new_local(path).build().await?;
+        let connection = database.connect()?;
+        connection.execute_batch(SCHEMA).await?;
         migrate_accepted_content_pin_checkpoint(&connection).await?;
         migrate_admin_checkpoint_reset_receipts(&connection).await?;
         Self::initialize_runtime_meta(&connection, identity, initial_digest).await?;
@@ -837,11 +747,7 @@ impl RuntimeState {
     ) -> Result<RunningTableRequestContinuation, RuntimeError> {
         validate_request_identity(identity)?;
         validate_writer_lease(lease)?;
-        let transaction = self
-            .connection
-            .transaction()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let transaction = self.connection.transaction().await?;
         let request = request_status_tx(&transaction, identity)
             .await?
             .ok_or(RuntimeError::RequestUnknown)?;
@@ -876,10 +782,7 @@ impl RuntimeState {
             table_object_ids,
             committed_rows: None,
         };
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction.commit().await?;
         Ok(RunningTableRequestContinuation {
             identity,
             fingerprint,
@@ -980,8 +883,7 @@ impl RuntimeState {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let capture = capture_tx(&transaction).await?;
         if expected_capture.is_some_and(|expected| *expected != capture) {
             return Err(RuntimeError::StaleCapture {
@@ -997,10 +899,7 @@ impl RuntimeState {
         )
         .await?;
         let table_rows = table_rows_tx(&transaction, tables, &table_object_ids, &base).await?;
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction.commit().await?;
         Ok(RuntimeTableActivationSnapshot {
             context: RuntimeActivationContext {
                 capture,
@@ -1058,8 +957,7 @@ impl RuntimeState {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         // The capture comparison belongs inside the writer transaction. A
         // pre-transaction check could otherwise race a competing activation
         // that commits between the observation and durable publication.
@@ -1077,9 +975,7 @@ impl RuntimeState {
         }
         let next =
             append_mutations_tx(&tx, context.capture(), &encoded, next_digest, faults).await?;
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        tx.commit().await?;
         faults.check(FaultPoint::AfterCommit)?;
         orna_repository::publication_crash_barrier("row-commit");
         Ok(next)
@@ -1387,7 +1283,7 @@ impl RuntimeState {
                 next_digest,
                 outcome,
                 faults,
-                effects,
+                &effects,
                 None,
                 None,
             )
@@ -1494,7 +1390,7 @@ impl RuntimeState {
                 next_digest,
                 outcome,
                 faults,
-                effects,
+                &effects,
                 Some(validator),
                 admission,
             )
@@ -1549,7 +1445,7 @@ impl RuntimeState {
         next_digest: [u8; 32],
         outcome: TerminalOutcome,
         faults: &dyn FaultInjector,
-        effects: ActivationEffectReport,
+        effects: &ActivationEffectReport,
         mut validator: Option<&mut dyn TableActivationCandidateValidator>,
         admission: Option<&catalogue::CatalogueAdmission>,
     ) -> Result<RequestActivationCommit, RequestActivationTransactionError> {
@@ -1564,7 +1460,7 @@ impl RuntimeState {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .map_err(RuntimeError::from)?;
         let current = request_status_tx(&transaction, identity)
             .await?
             .ok_or(RuntimeError::RequestUnknown)?;
@@ -1574,10 +1470,7 @@ impl RuntimeState {
 
         if current.state.is_terminal() {
             let capture = capture_tx(&transaction).await?;
-            transaction
-                .commit()
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            transaction.commit().await.map_err(RuntimeError::from)?;
             return Ok(RequestActivationCommit {
                 capture,
                 request: current,
@@ -1767,10 +1660,7 @@ impl RuntimeState {
         if let Err(error) = faults.check(FaultPoint::AfterTerminalClaim) {
             return Err(request_activation_rollback(transaction, error).await?);
         }
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction.commit().await.map_err(RuntimeError::from)?;
         // The row, terminal claim and capture are already durable. A crash
         // probe here must not report a rollback it did not perform.
         faults.check(FaultPoint::AfterCommit)?;
@@ -1792,13 +1682,8 @@ impl RuntimeState {
                 "SELECT database_id, repository_id FROM runtime_meta WHERE singleton = 1",
                 (),
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let row = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-            .ok_or(RuntimeError::RecoveryInvalid)?;
+            .await?;
+        let row = rows.next().await?.ok_or(RuntimeError::RecoveryInvalid)?;
         Ok(RuntimeIdentity {
             database_id: fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
             repository_id: fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
@@ -1806,12 +1691,8 @@ impl RuntimeState {
     }
 
     pub async fn capture(&self) -> Result<CwdCapture, RuntimeError> {
-        let mut rows = self.connection.query("SELECT database_id, runtime_id, generation, generation_digest FROM runtime_meta WHERE singleton = 1", ()).await.map_err(|_| RuntimeError::StorageUnavailable)?;
-        let row = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-            .ok_or(RuntimeError::RecoveryInvalid)?;
+        let mut rows = self.connection.query("SELECT database_id, runtime_id, generation, generation_digest FROM runtime_meta WHERE singleton = 1", ()).await?;
+        let row = rows.next().await?.ok_or(RuntimeError::RecoveryInvalid)?;
         let database_id = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
         let runtime_id = fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
         let generation: i64 = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
@@ -1846,8 +1727,7 @@ impl RuntimeState {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         self.require_owner(&tx, owner).await?;
         let current = request_status_tx(&tx, identity)
             .await?
@@ -1864,9 +1744,7 @@ impl RuntimeState {
             return Err(RuntimeError::RequestStateConflict);
         }
         record_controlled_transaction_marker_tx(&tx, identity, fingerprint, owner).await?;
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)
+        tx.commit().await.map_err(RuntimeError::from)
     }
 
     /// Records that the caller reported no external effect for an activation
@@ -1895,8 +1773,7 @@ impl RuntimeState {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         let current = match request_status_tx(&tx, identity).await {
             Ok(Some(current)) => current,
             Ok(None) => return Ok(()),
@@ -1920,9 +1797,7 @@ impl RuntimeState {
             return defer_to_activation(error);
         }
         record_controlled_transaction_marker_tx(&tx, identity, fingerprint, lease).await?;
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)
+        tx.commit().await.map_err(RuntimeError::from)
     }
 
     /// Records the activation's mandatory effect report before its table
@@ -1938,7 +1813,7 @@ impl RuntimeState {
         lease: WriterLease,
         identity: RequestIdentity,
         fingerprint: [u8; 32],
-        effects: ActivationEffectReport,
+        effects: &ActivationEffectReport,
     ) -> Result<(), RuntimeError> {
         match effects {
             ActivationEffectReport::ControlledOnly(_) => {
@@ -1986,8 +1861,7 @@ impl RuntimeState {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         self.require_owner(&tx, owner).await?;
         let current = request_status_tx(&tx, identity)
             .await?
@@ -2006,9 +1880,7 @@ impl RuntimeState {
             // before their table transaction, so `None` is not expected
             // here; absent evidence is never promoted to a receipt.
             None | Some(EffectEvidence::ExternalPossible) => {
-                tx.commit()
-                    .await
-                    .map_err(|_| RuntimeError::StorageUnavailable)?;
+                tx.commit().await?;
                 return Ok(());
             }
         }
@@ -2038,14 +1910,11 @@ impl RuntimeState {
                     i64::try_from(owner.epoch).map_err(|_| RuntimeError::RecoveryInvalid)?
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         if changed != 1 {
             return Err(RuntimeError::RequestOwnerConflict);
         }
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)
+        tx.commit().await.map_err(RuntimeError::from)
     }
 
     async fn record_effect_evidence(
@@ -2063,8 +1932,7 @@ impl RuntimeState {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         self.require_owner(&tx, owner).await?;
         let current = request_status_tx(&tx, identity)
             .await?
@@ -2105,14 +1973,11 @@ impl RuntimeState {
                     i64::from(downgrade_controlled),
                 ],
             )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         if changed != 1 {
             return Err(RuntimeError::RecoveryInvalid);
         }
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)
+        tx.commit().await.map_err(RuntimeError::from)
     }
 
     /// Fences a known-lost activation and retains a non-replayable orphaned
@@ -2160,8 +2025,7 @@ impl RuntimeState {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         self.require_recovery_owner(&tx, fence).await?;
         let current = request_status_tx(&tx, identity)
             .await?
@@ -2184,9 +2048,7 @@ impl RuntimeState {
         )
         .await?;
         self.settle_takeover_barrier(&tx, fence).await?;
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        tx.commit().await?;
         Ok(RecoveredRequest {
             status: RequestStatus {
                 identity,
@@ -2217,8 +2079,7 @@ impl RuntimeState {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            .await?;
         self.require_recovery_owner(&tx, fence).await?;
         let current = request_status_tx(&tx, identity)
             .await?
@@ -2239,9 +2100,7 @@ impl RuntimeState {
         let (disposition, outcome) =
             orphan_running_request_tx(&tx, &current, evidence, outcome.clone(), outcome).await?;
         self.settle_takeover_barrier(&tx, fence).await?;
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        tx.commit().await?;
         Ok(RecoveredRequest {
             status: RequestStatus {
                 identity,
@@ -2296,13 +2155,8 @@ async fn request_execution_evidence_tx(
              FROM request_ledger WHERE session_id = ?1 AND request_id = ?2",
             params![identity.session_id.to_vec(), identity.request_id.to_vec()],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    let row = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-        .ok_or(RuntimeError::RequestUnknown)?;
+        .await?;
+    let row = rows.next().await?.ok_or(RuntimeError::RequestUnknown)?;
     decode_request_execution_evidence(&row, 0)
 }
 
@@ -2539,14 +2393,9 @@ async fn orphan_fenced_running_requests_tx(connection: &Connection) -> Result<()
              ORDER BY session_id, request_id",
             params![RequestState::Running.code()],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     let mut running = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    {
+    while let Some(row) = rows.next().await? {
         let status = decode_request_status(&row).map_err(|_| RuntimeError::RecoveryInvalid)?;
         let evidence = decode_request_execution_evidence(&row, 5)?;
         validate_request_execution_evidence(&status, evidence)?;
@@ -2627,8 +2476,7 @@ async fn orphan_running_request_tx(
                 owner_epoch,
             ],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     if changed != 1 {
         return Err(RuntimeError::RequestOwnerConflict);
     }
@@ -2663,8 +2511,7 @@ async fn record_controlled_transaction_marker_tx(
                 i64::try_from(owner.epoch).map_err(|_| RuntimeError::RecoveryInvalid)?,
             ],
         )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        .await?;
     if changed != 1 {
         return Err(RuntimeError::RecoveryInvalid);
     }
@@ -2689,10 +2536,7 @@ async fn request_activation_rollback(
     transaction: libsql::Transaction,
     error: RuntimeError,
 ) -> Result<RequestActivationTransactionError, RuntimeError> {
-    transaction
-        .rollback()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    transaction.rollback().await?;
     Ok(RequestActivationTransactionError::RolledBack(error))
 }
 
@@ -2700,10 +2544,7 @@ async fn request_activation_validation_rollback(
     transaction: libsql::Transaction,
     diagnostic: SafeDiagnostic,
 ) -> Result<RequestActivationTransactionError, RuntimeError> {
-    transaction
-        .rollback()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    transaction.rollback().await?;
     Ok(RequestActivationTransactionError::RolledBackValidation(
         diagnostic,
     ))
@@ -2834,8 +2675,8 @@ mod tests {
         table_mutations_already_durable_tx,
     };
     use crate::{
-        ActivationEffectReport, ControlledEffectToken, EffectGate, RuntimeActivationContext,
-        RuntimeIdentity, RuntimeState, StagedTableActivation, TableActivationCandidateValidator,
+        ActivationEffectReport, ControlledEffectToken, RuntimeActivationContext, RuntimeIdentity,
+        RuntimeState, StagedTableActivation, TableActivationCandidateValidator,
         TableSchemaIdentity, ValidatedTableActivationCommit, ValidatedTableRequestActivationCommit,
         controlled_rollback_proof, controlled_transaction_marker, current_graph_repository_id,
         row_reference_raw,
@@ -3343,11 +3184,12 @@ mod tests {
         // system-host attachment nor an external-reaching binding receives the
         // controlled marker.
         assert!(matches!(
-            EffectGate::admit(&crate::UnboundEvaluation),
+            orna_evaluator::EffectGate::admit_unbound_for_test(),
             ActivationEffectReport::ControlledOnly(_)
         ));
+        let registry = orna_evaluator::SysHostBindingRegistry::default();
         assert!(matches!(
-            EffectGate::admit(&crate::ReachesExternalState),
+            orna_evaluator::EffectGate::admit_sys_host(None, Some(&registry)),
             ActivationEffectReport::ExternalPossible
         ));
     }
@@ -3362,7 +3204,7 @@ mod tests {
         TerminalOutcome::new(vec![value]).unwrap()
     }
     fn controlled_token() -> ControlledEffectToken {
-        match EffectGate::admit(&crate::UnboundEvaluation) {
+        match orna_evaluator::EffectGate::admit_unbound_for_test() {
             ActivationEffectReport::ControlledOnly(token) => token,
             ActivationEffectReport::ExternalPossible => {
                 unreachable!("an unbound evaluation is admitted as controlled")
@@ -5362,7 +5204,7 @@ mod tests {
                         outcome: outcome(90),
                         validator: &mut validator,
                         faults: &NoFault,
-                        effects: EffectGate::admit(&crate::UnboundEvaluation),
+                        effects: orna_evaluator::EffectGate::admit_unbound_for_test(),
                     },
                     &admission,
                 )
@@ -5428,7 +5270,7 @@ mod tests {
                         outcome: outcome(99),
                         validator: &mut rejecting,
                         faults: &Fail(FaultPoint::BeforeTableWrite),
-                        effects: EffectGate::admit(&crate::UnboundEvaluation),
+                        effects: orna_evaluator::EffectGate::admit_unbound_for_test(),
                     },
                     &activation_catalogue(None, 199),
                 )
@@ -5520,7 +5362,7 @@ mod tests {
                         outcome: outcome(105),
                         validator: &mut validator,
                         faults: &Fail(point),
-                        effects: EffectGate::admit(&crate::UnboundEvaluation),
+                        effects: orna_evaluator::EffectGate::admit_unbound_for_test(),
                     },
                     &admission,
                 )
@@ -5569,7 +5411,7 @@ mod tests {
                     outcome: outcome(105),
                     validator: &mut rejecting,
                     faults: &NoFault,
-                    effects: EffectGate::admit(&crate::UnboundEvaluation),
+                    effects: orna_evaluator::EffectGate::admit_unbound_for_test(),
                 },
                 &admission,
             )
@@ -5605,7 +5447,7 @@ mod tests {
                         outcome: outcome(105),
                         validator: &mut validator,
                         faults: &NoFault,
-                        effects: EffectGate::admit(&crate::UnboundEvaluation),
+                        effects: orna_evaluator::EffectGate::admit_unbound_for_test(),
                     },
                     &admission,
                 )
@@ -5628,7 +5470,7 @@ mod tests {
                     outcome: outcome(105),
                     validator: &mut validator,
                     faults: &NoFault,
-                    effects: EffectGate::admit(&crate::UnboundEvaluation),
+                    effects: orna_evaluator::EffectGate::admit_unbound_for_test(),
                 },
                 &invalid,
             )
@@ -5655,7 +5497,7 @@ mod tests {
                     outcome: outcome(105),
                     validator: &mut validator,
                     faults: &NoFault,
-                    effects: EffectGate::admit(&crate::UnboundEvaluation),
+                    effects: orna_evaluator::EffectGate::admit_unbound_for_test(),
                 },
                 &admission,
             )
@@ -5682,7 +5524,7 @@ mod tests {
                     outcome: outcome(105),
                     validator: &mut validator,
                     faults: &NoFault,
-                    effects: EffectGate::admit(&crate::UnboundEvaluation),
+                    effects: orna_evaluator::EffectGate::admit_unbound_for_test(),
                 },
                 &invalid_batch,
             )
@@ -28197,7 +28039,7 @@ mod tests {
                 digest(44),
                 outcome(45),
                 &NoFault,
-                EffectGate::admit(&crate::UnboundEvaluation),
+                orna_evaluator::EffectGate::admit_unbound_for_test(),
             )
             .await
             .unwrap();
@@ -28237,7 +28079,7 @@ mod tests {
                 outcome: outcome(51),
                 validator: &mut validator,
                 faults: &NoFault,
-                effects: EffectGate::admit(&crate::UnboundEvaluation),
+                effects: orna_evaluator::EffectGate::admit_unbound_for_test(),
             })
             .await
             .unwrap();
@@ -28292,7 +28134,7 @@ mod tests {
                 outcome: outcome(57),
                 validator: &mut validator,
                 faults: &NoFault,
-                effects: EffectGate::admit(&crate::UnboundEvaluation),
+                effects: orna_evaluator::EffectGate::admit_unbound_for_test(),
             })
             .await;
 
@@ -28445,7 +28287,7 @@ mod tests {
                 digest(62),
                 outcome(63),
                 &NoFault,
-                EffectGate::admit(&crate::UnboundEvaluation),
+                orna_evaluator::EffectGate::admit_unbound_for_test(),
             )
             .await
             .unwrap();
@@ -28509,7 +28351,7 @@ mod tests {
                         digest(10),
                         outcome(11),
                         &Fail(point),
-                        EffectGate::admit(&crate::UnboundEvaluation),
+                        orna_evaluator::EffectGate::admit_unbound_for_test(),
                     )
                     .await,
                 Err(RuntimeError::FaultInjected(point))
@@ -28576,7 +28418,7 @@ mod tests {
                     digest(10),
                     outcome(11),
                     &Fail(FaultPoint::AfterTerminalClaim),
-                    EffectGate::admit(&crate::UnboundEvaluation),
+                    orna_evaluator::EffectGate::admit_unbound_for_test(),
                 )
                 .await,
             Err(RuntimeError::FaultInjected(FaultPoint::AfterTerminalClaim))
@@ -28691,7 +28533,7 @@ mod tests {
                     digest(10),
                     outcome(11),
                     &Fail(FaultPoint::BeforeTerminalClaim),
-                    EffectGate::admit(&crate::UnboundEvaluation),
+                    orna_evaluator::EffectGate::admit_unbound_for_test(),
                 )
                 .await,
             Err(RuntimeError::FaultInjected(FaultPoint::BeforeTerminalClaim))
@@ -28776,7 +28618,7 @@ mod tests {
                     digest(10),
                     outcome(11),
                     &Fail(FaultPoint::AfterTableWrite),
-                    EffectGate::admit(&crate::UnboundEvaluation),
+                    orna_evaluator::EffectGate::admit_unbound_for_test(),
                 )
                 .await,
             Err(RuntimeError::FaultInjected(FaultPoint::AfterTableWrite))
@@ -28998,7 +28840,7 @@ mod tests {
                     digest(10),
                     outcome(11),
                     &Fail(FaultPoint::BeforeTableWrite),
-                    EffectGate::admit(&crate::UnboundEvaluation),
+                    orna_evaluator::EffectGate::admit_unbound_for_test(),
                 )
                 .await,
             Err(RuntimeError::FaultInjected(FaultPoint::BeforeTableWrite))
@@ -29045,7 +28887,7 @@ mod tests {
                 digest(10),
                 outcome(11),
                 &NoFault,
-                EffectGate::admit(&crate::UnboundEvaluation),
+                orna_evaluator::EffectGate::admit_unbound_for_test(),
             )
             .await
             .unwrap();
@@ -29093,7 +28935,7 @@ mod tests {
                     digest(10),
                     outcome(11),
                     &NoFault,
-                    EffectGate::admit(&crate::UnboundEvaluation),
+                    orna_evaluator::EffectGate::admit_unbound_for_test(),
                 )
                 .await,
             Err(RuntimeError::EmptyMutationBatch)
@@ -29123,7 +28965,7 @@ mod tests {
                     digest(10),
                     outcome(11),
                     &Fail(FaultPoint::BeforeTableWrite),
-                    EffectGate::admit(&crate::UnboundEvaluation),
+                    orna_evaluator::EffectGate::admit_unbound_for_test(),
                 )
                 .await,
             Err(RuntimeError::FaultInjected(FaultPoint::BeforeTableWrite))
@@ -29145,7 +28987,7 @@ mod tests {
                     digest(10),
                     outcome(11),
                     &Fail(FaultPoint::BeforeTableWrite),
-                    EffectGate::admit(&crate::UnboundEvaluation),
+                    orna_evaluator::EffectGate::admit_unbound_for_test(),
                 )
                 .await,
             Err(RuntimeError::FaultInjected(FaultPoint::BeforeTableWrite))
@@ -29219,7 +29061,7 @@ mod tests {
                     digest(10),
                     outcome(11),
                     &NoFault,
-                    EffectGate::admit(&crate::UnboundEvaluation),
+                    orna_evaluator::EffectGate::admit_unbound_for_test(),
                 )
                 .await,
             Err(RuntimeError::OwnerLost)
@@ -29274,7 +29116,7 @@ mod tests {
                 digest(10),
                 outcome(11),
                 &NoFault,
-                EffectGate::admit(&crate::UnboundEvaluation),
+                orna_evaluator::EffectGate::admit_unbound_for_test(),
             )
             .await
             .unwrap();
@@ -29329,7 +29171,7 @@ mod tests {
                 digest(10),
                 outcome(11),
                 &NoFault,
-                EffectGate::admit(&crate::UnboundEvaluation),
+                orna_evaluator::EffectGate::admit_unbound_for_test(),
             )
             .await
             .unwrap();
@@ -29361,7 +29203,7 @@ mod tests {
                 digest(14),
                 outcome(15),
                 &NoFault,
-                EffectGate::admit(&crate::UnboundEvaluation),
+                orna_evaluator::EffectGate::admit_unbound_for_test(),
             )
             .await
             .unwrap();
@@ -30752,12 +30594,6 @@ mod tests {
             .await
             .unwrap();
         let capability = capability.expect("fresh owner-bound capability");
-        assert_eq!(
-            state
-                .start_request_with_owner(registration.request, fingerprint, owner)
-                .await,
-            Err(RuntimeError::RequestStateConflict)
-        );
         let started = state
             .begin_observed_request_with_admission(
                 registration.clone(),
@@ -32469,7 +32305,7 @@ mod tests {
                     digest(10),
                     outcome(11),
                     &Fail(FaultPoint::AfterTerminalClaim),
-                    EffectGate::admit(&crate::UnboundEvaluation),
+                    orna_evaluator::EffectGate::admit_unbound_for_test(),
                 )
                 .await,
             Err(RuntimeError::FaultInjected(FaultPoint::AfterTerminalClaim))
@@ -32592,7 +32428,7 @@ mod tests {
         let state = open_state(&repo).await;
         let identity = request(4, 5);
         let fingerprint = digest(6);
-        let owner = state.acquire_lease(id(7)).await.unwrap();
+        state.acquire_lease(id(7)).await.unwrap();
         state.reserve_request(identity, fingerprint).await.unwrap();
 
         assert_eq!(
@@ -32607,12 +32443,6 @@ mod tests {
                 .unwrap()
                 .state,
             RequestState::Reserved
-        );
-        assert_eq!(
-            state
-                .start_request_with_owner(identity, fingerprint, owner)
-                .await,
-            Err(RuntimeError::RequestStateConflict)
         );
     }
     #[tokio::test]
@@ -33213,7 +33043,7 @@ mod tests {
                 digest(176),
                 outcome(177),
                 &NoFault,
-                EffectGate::admit(&crate::UnboundEvaluation),
+                orna_evaluator::EffectGate::admit_unbound_for_test(),
             )
             .await
             .unwrap();
@@ -35407,7 +35237,7 @@ mod tests {
             mutations.clone(),
             digest(8),
             Arc::new(NoFault),
-            EffectGate::admit(&crate::UnboundEvaluation),
+            orna_evaluator::EffectGate::admit_unbound_for_test(),
         )
         .unwrap();
 
@@ -35420,7 +35250,7 @@ mod tests {
                 Vec::new(),
                 digest(8),
                 Arc::new(NoFault),
-                EffectGate::admit(&crate::UnboundEvaluation),
+                orna_evaluator::EffectGate::admit_unbound_for_test(),
             ),
             Err(RuntimeError::EmptyMutationBatch)
         ));

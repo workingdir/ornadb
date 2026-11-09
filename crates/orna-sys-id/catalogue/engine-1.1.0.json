@@ -1,0 +1,568 @@
+{
+  "title": "OrnaDB engine-private sys identity for Orna 1.1.0",
+  "status": "Derived from the shipped 1.1.0 engine; names are durable and must not be renamed.",
+  "spec_version": "1.1.0",
+  "origin": "engine",
+  "sealed_functions": [
+    {
+      "name": "sys.catalog.health",
+      "name_parts": [
+        "sys",
+        "catalog",
+        "health"
+      ],
+      "function_id": "00000000000000000000000000000001",
+      "signature": {
+        "kind": "health"
+      }
+    },
+    {
+      "name": "sys.invoke",
+      "name_parts": [
+        "sys",
+        "invoke"
+      ],
+      "function_id": "00000000000000000000000000000002",
+      "signature": {
+        "kind": "invocation",
+        "parameter_id": "00000000000000000000000000000003",
+        "parameter_name": "p_request",
+        "request_type": "000000000000000000000000000000f1",
+        "request_required": true,
+        "request_non_null": true,
+        "event_stream_item_type": "000000000000000000000000000000f2"
+      }
+    },
+    {
+      "name": "sys.source.current",
+      "name_parts": [
+        "sys",
+        "source",
+        "current"
+      ],
+      "function_id": "00000000000000000000000000000030",
+      "signature": {
+        "kind": "source_introspection"
+      }
+    },
+    {
+      "name": "sys.inspect.snapshot",
+      "name_parts": [
+        "sys",
+        "inspect",
+        "snapshot"
+      ],
+      "function_id": "00000000000000000000000000000003",
+      "signature": {
+        "kind": "inspect",
+        "parameter_count": 2,
+        "parameter_types": [
+          "000000000000000000000000000000f3",
+          "000000000000000000000000000000f5"
+        ],
+        "result_type": "000000000000000000000000000000f4",
+        "stream_item_type": null
+      }
+    },
+    {
+      "name": "sys.inspect.invocation_nodes",
+      "name_parts": [
+        "sys",
+        "inspect",
+        "invocation_nodes"
+      ],
+      "function_id": "00000000000000000000000000000004",
+      "signature": {
+        "kind": "inspect",
+        "parameter_count": 1,
+        "parameter_types": [
+          "000000000000000000000000000000f4"
+        ],
+        "result_type": "000000000000000000000000000000f8",
+        "stream_item_type": null
+      }
+    },
+    {
+      "name": "sys.inspect.calls",
+      "name_parts": [
+        "sys",
+        "inspect",
+        "calls"
+      ],
+      "function_id": "00000000000000000000000000000005",
+      "signature": {
+        "kind": "inspect",
+        "parameter_count": 1,
+        "parameter_types": [
+          "000000000000000000000000000000f4"
+        ],
+        "result_type": "000000000000000000000000000000f9",
+        "stream_item_type": null
+      }
+    },
+    {
+      "name": "sys.inspect.resources",
+      "name_parts": [
+        "sys",
+        "inspect",
+        "resources"
+      ],
+      "function_id": "00000000000000000000000000000006",
+      "signature": {
+        "kind": "inspect",
+        "parameter_count": 1,
+        "parameter_types": [
+          "000000000000000000000000000000f4"
+        ],
+        "result_type": "000000000000000000000000000000fa",
+        "stream_item_type": null
+      }
+    },
+    {
+      "name": "sys.inspect.state_cells",
+      "name_parts": [
+        "sys",
+        "inspect",
+        "state_cells"
+      ],
+      "function_id": "00000000000000000000000000000007",
+      "signature": {
+        "kind": "inspect",
+        "parameter_count": 1,
+        "parameter_types": [
+          "000000000000000000000000000000f4"
+        ],
+        "result_type": "000000000000000000000000000000fb",
+        "stream_item_type": null
+      }
+    },
+    {
+      "name": "sys.inspect.ui_nodes",
+      "name_parts": [
+        "sys",
+        "inspect",
+        "ui_nodes"
+      ],
+      "function_id": "00000000000000000000000000000008",
+      "signature": {
+        "kind": "inspect",
+        "parameter_count": 1,
+        "parameter_types": [
+          "000000000000000000000000000000f4"
+        ],
+        "result_type": "000000000000000000000000000000fc",
+        "stream_item_type": null
+      }
+    },
+    {
+      "name": "sys.inspect.presentation_candidates",
+      "name_parts": [
+        "sys",
+        "inspect",
+        "presentation_candidates"
+      ],
+      "function_id": "00000000000000000000000000000009",
+      "signature": {
+        "kind": "inspect",
+        "parameter_count": 1,
+        "parameter_types": [
+          "000000000000000000000000000000f4"
+        ],
+        "result_type": "000000000000000000000000000000fd",
+        "stream_item_type": null
+      }
+    },
+    {
+      "name": "sys.inspect.runtime_bindings",
+      "name_parts": [
+        "sys",
+        "inspect",
+        "runtime_bindings"
+      ],
+      "function_id": "0000000000000000000000000000000a",
+      "signature": {
+        "kind": "inspect",
+        "parameter_count": 1,
+        "parameter_types": [
+          "000000000000000000000000000000f4"
+        ],
+        "result_type": "000000000000000000000000000000fe",
+        "stream_item_type": null
+      }
+    },
+    {
+      "name": "sys.inspect.security_decisions",
+      "name_parts": [
+        "sys",
+        "inspect",
+        "security_decisions"
+      ],
+      "function_id": "0000000000000000000000000000000b",
+      "signature": {
+        "kind": "inspect",
+        "parameter_count": 1,
+        "parameter_types": [
+          "000000000000000000000000000000f4"
+        ],
+        "result_type": "000000000000000000000000000000ff",
+        "stream_item_type": null
+      }
+    },
+    {
+      "name": "sys.inspect.trace",
+      "name_parts": [
+        "sys",
+        "inspect",
+        "trace"
+      ],
+      "function_id": "0000000000000000000000000000000c",
+      "signature": {
+        "kind": "inspect",
+        "parameter_count": 2,
+        "parameter_types": [
+          "000000000000000000000000000000f3",
+          "00000000000000000000000000000003"
+        ],
+        "result_type": null,
+        "stream_item_type": "000000000000000000000000000000f6"
+      }
+    },
+    {
+      "name": "sys.security.session_principal",
+      "name_parts": [
+        "sys",
+        "security",
+        "session_principal"
+      ],
+      "function_id": "00000000000000000000000000000040",
+      "signature": {
+        "kind": "security",
+        "parameter_count": 0,
+        "returns_set": false,
+        "returns_ref_principal": true,
+        "returns_boolean": false,
+        "stream_item_type": null
+      }
+    },
+    {
+      "name": "sys.security.effective_principal",
+      "name_parts": [
+        "sys",
+        "security",
+        "effective_principal"
+      ],
+      "function_id": "00000000000000000000000000000041",
+      "signature": {
+        "kind": "security",
+        "parameter_count": 0,
+        "returns_set": false,
+        "returns_ref_principal": true,
+        "returns_boolean": false,
+        "stream_item_type": null
+      }
+    },
+    {
+      "name": "sys.security.active_roles",
+      "name_parts": [
+        "sys",
+        "security",
+        "active_roles"
+      ],
+      "function_id": "00000000000000000000000000000042",
+      "signature": {
+        "kind": "security",
+        "parameter_count": 0,
+        "returns_set": true,
+        "returns_ref_principal": true,
+        "returns_boolean": false,
+        "stream_item_type": null
+      }
+    },
+    {
+      "name": "sys.security.create_principal",
+      "name_parts": [
+        "sys",
+        "security",
+        "create_principal"
+      ],
+      "function_id": "00000000000000000000000000000043",
+      "signature": {
+        "kind": "security",
+        "parameter_count": 2,
+        "returns_set": false,
+        "returns_ref_principal": false,
+        "returns_boolean": false,
+        "stream_item_type": null
+      }
+    },
+    {
+      "name": "sys.security.disable_principal",
+      "name_parts": [
+        "sys",
+        "security",
+        "disable_principal"
+      ],
+      "function_id": "00000000000000000000000000000044",
+      "signature": {
+        "kind": "security",
+        "parameter_count": 1,
+        "returns_set": false,
+        "returns_ref_principal": false,
+        "returns_boolean": false,
+        "stream_item_type": null
+      }
+    },
+    {
+      "name": "sys.security.create_role",
+      "name_parts": [
+        "sys",
+        "security",
+        "create_role"
+      ],
+      "function_id": "00000000000000000000000000000045",
+      "signature": {
+        "kind": "security",
+        "parameter_count": 1,
+        "returns_set": false,
+        "returns_ref_principal": false,
+        "returns_boolean": false,
+        "stream_item_type": null
+      }
+    },
+    {
+      "name": "sys.security.grant_role",
+      "name_parts": [
+        "sys",
+        "security",
+        "grant_role"
+      ],
+      "function_id": "00000000000000000000000000000046",
+      "signature": {
+        "kind": "security",
+        "parameter_count": 2,
+        "returns_set": false,
+        "returns_ref_principal": false,
+        "returns_boolean": false,
+        "stream_item_type": null
+      }
+    },
+    {
+      "name": "sys.security.revoke_role",
+      "name_parts": [
+        "sys",
+        "security",
+        "revoke_role"
+      ],
+      "function_id": "00000000000000000000000000000047",
+      "signature": {
+        "kind": "security",
+        "parameter_count": 2,
+        "returns_set": false,
+        "returns_ref_principal": false,
+        "returns_boolean": false,
+        "stream_item_type": null
+      }
+    },
+    {
+      "name": "sys.security.grant_privilege",
+      "name_parts": [
+        "sys",
+        "security",
+        "grant_privilege"
+      ],
+      "function_id": "00000000000000000000000000000048",
+      "signature": {
+        "kind": "security",
+        "parameter_count": 3,
+        "returns_set": false,
+        "returns_ref_principal": false,
+        "returns_boolean": false,
+        "stream_item_type": null
+      }
+    },
+    {
+      "name": "sys.security.revoke_privilege",
+      "name_parts": [
+        "sys",
+        "security",
+        "revoke_privilege"
+      ],
+      "function_id": "00000000000000000000000000000049",
+      "signature": {
+        "kind": "security",
+        "parameter_count": 3,
+        "returns_set": false,
+        "returns_ref_principal": false,
+        "returns_boolean": false,
+        "stream_item_type": null
+      }
+    },
+    {
+      "name": "sys.security.can_execute",
+      "name_parts": [
+        "sys",
+        "security",
+        "can_execute"
+      ],
+      "function_id": "0000000000000000000000000000004a",
+      "signature": {
+        "kind": "security",
+        "parameter_count": 2,
+        "returns_set": false,
+        "returns_ref_principal": false,
+        "returns_boolean": true,
+        "stream_item_type": null
+      }
+    },
+    {
+      "name": "sys.security.has_privilege",
+      "name_parts": [
+        "sys",
+        "security",
+        "has_privilege"
+      ],
+      "function_id": "0000000000000000000000000000004b",
+      "signature": {
+        "kind": "security",
+        "parameter_count": 3,
+        "returns_set": false,
+        "returns_ref_principal": false,
+        "returns_boolean": true,
+        "stream_item_type": null
+      }
+    },
+    {
+      "name": "sys.state.load_user_state",
+      "name_parts": [
+        "sys",
+        "state",
+        "load_user_state"
+      ],
+      "function_id": "0000000000000000000000000000004c",
+      "signature": {
+        "kind": "state",
+        "parameter_count": 3,
+        "returns_set": true
+      }
+    },
+    {
+      "name": "sys.state.write_user_state",
+      "name_parts": [
+        "sys",
+        "state",
+        "write_user_state"
+      ],
+      "function_id": "0000000000000000000000000000004d",
+      "signature": {
+        "kind": "state",
+        "parameter_count": 1,
+        "returns_set": true
+      }
+    }
+  ],
+  "engine_only_functions": [
+    {
+      "name": "sys.blob.annotate_all",
+      "function_id": null,
+      "note": "Admitted by orna-semantic but absent from api/sys.json."
+    },
+    {
+      "name": "sys.admin.pause_stream_with_reason",
+      "function_id": null,
+      "note": "Runtime stream-admin function absent from api/sys.json."
+    }
+  ],
+  "engine_only_types": [
+    {
+      "name": "sys.inspect.invocation",
+      "type_id": "000000000000000000000000000000f3",
+      "representation_contract": "orna.sys.inspect.invocation@1"
+    },
+    {
+      "name": "sys.inspect.snapshot_options",
+      "type_id": "000000000000000000000000000000f5",
+      "representation_contract": "orna.sys.inspect.snapshot_options@1"
+    },
+    {
+      "name": "sys.inspect.trace_event",
+      "type_id": "000000000000000000000000000000f6",
+      "representation_contract": "orna.sys.inspect.trace_event@1"
+    },
+    {
+      "name": "sys.security.principal",
+      "type_id": "000000000000000000000000000000f7",
+      "representation_contract": "orna.sys.security.principal@1"
+    }
+  ],
+  "retired_functions": [
+    {
+      "name": "sys.admin.set_storage_preference",
+      "since": "1.0.0",
+      "signature": "fn sys.admin.set_storage_preference(table: sys.TableRef, preference: sys.StoragePreference): sys.Storage",
+      "reason": "No new-format row placement mode; migrate source explicitly."
+    },
+    {
+      "name": "sys.admin.rewrite_storage",
+      "since": "1.0.0",
+      "signature": "fn sys.admin.rewrite_storage(table: sys.TableRef, to: sys.StorageRewriteTarget): sys.StorageRewriteResult",
+      "reason": "No new-format row placement mode; migrate source explicitly."
+    }
+  ],
+  "failure_codes": [
+    "sys.abi.argument_count_mismatch",
+    "sys.abi.argument_type_mismatch",
+    "sys.abi.duplicate_role_contract",
+    "sys.abi.duplicate_role_provider",
+    "sys.abi.effect_incompatible",
+    "sys.abi.precondition_failed",
+    "sys.abi.provider_failed",
+    "sys.abi.provider_not_executable",
+    "sys.abi.provider_not_selected",
+    "sys.abi.result_type_mismatch",
+    "sys.abi.role_unavailable",
+    "sys.abi.role_version_mismatch",
+    "sys.abi.unavailable",
+    "sys.abi.undeclared_failure",
+    "sys.abi.unknown_operation",
+    "sys.abi.unknown_role",
+    "sys.database.missing",
+    "sys.dependencies.conflicting_duplicate",
+    "sys.dependencies.invalid_object",
+    "sys.dependencies.invalid_snapshot",
+    "sys.dependencies.invalid_span",
+    "sys.dependencies.limit",
+    "sys.dependencies.object_unavailable",
+    "sys.dependencies.unknown_endpoint",
+    "sys.failure.not_declared",
+    "sys.invoke.cancelled",
+    "sys.invoke.malformed_completion",
+    "sys.invoke.orphaned",
+    "sys.invoke.source_mismatch",
+    "sys.invoke.start_mode",
+    "sys.invoke.target",
+    "sys.meta.invalid_metadata",
+    "sys.meta.type_unavailable",
+    "sys.runtime.unavailable"
+  ],
+  "test_fixture_names": [
+    "sys.admin.fixture",
+    "sys.binding.stub",
+    "sys.callback.rejected",
+    "sys.conformance.dispatch_error",
+    "sys.conformance.registry_precondition",
+    "sys.conformance.registry_provider_failure",
+    "sys.conformance.variadic_map_error",
+    "sys.cont23.duplicate_probe",
+    "sys.fixture.failure",
+    "sys.fixture.first",
+    "sys.fixture.missing",
+    "sys.fixture.operation",
+    "sys.fixture.second",
+    "sys.secret.denied",
+    "sys.test.consume_blob",
+    "sys.test.first",
+    "sys.test.replace_blob",
+    "sys.test.second",
+    "sys.vendor.future_code"
+  ]
+}
