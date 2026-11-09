@@ -1045,15 +1045,16 @@ fn root_collection_intrinsic(name: &str) -> Option<orna_intrinsics::IntrinsicId>
     })
 }
 
+/// Binds one admitted declaration name to the intrinsic it implements.
+///
+/// The name is the qualified key of a function admitted into the local table,
+/// so a standard declaration and its private leaf are both reachable here.
 fn local_intrinsic(name: &str) -> Option<orna_intrinsics::IntrinsicId> {
     if let Some(id) = legacy_intrinsic(name) {
         return Some(id);
     }
-    let (module_path, leaf) = name.rsplit_once('.')?;
-    if leaf.starts_with("__") {
-        return orna_intrinsics::Module::from_path(module_path)
-            .and_then(|module| orna_intrinsics::lookup(module, leaf))
-            .map(|intrinsic| intrinsic.id);
+    if let Some(id) = module_intrinsic(name) {
+        return Some(id);
     }
     // A `std.time` export is its native operation. The clock helpers forward to
     // private leaves that call them back, so leaving the public name as source
@@ -1062,6 +1063,23 @@ fn local_intrinsic(name: &str) -> Option<orna_intrinsics::IntrinsicId> {
     // (`duration.compact.format`) no module-path split reaches.
     let relative = name.strip_prefix("std.time.")?;
     orna_intrinsics::lookup(orna_intrinsics::Module::Time, relative).map(|intrinsic| intrinsic.id)
+}
+
+/// Binds a `std.<module>.<leaf>` declaration through its module path.
+///
+/// One rule covers every admission path (`docs/design/std-native.md:3.4-3.5`):
+/// the spelling's module path must name a catalogue module, the leaf (the
+/// public export or the private implementation leaf) must be registered, the
+/// entry must be native rather than `SourceOnly`, and its pins must cover the
+/// current standard pin. A declaration that fails any clause is ordinary
+/// source and runs its Orna body.
+fn module_intrinsic(name: &str) -> Option<orna_intrinsics::IntrinsicId> {
+    let (module_path, leaf) = name.rsplit_once('.')?;
+    let module = orna_intrinsics::Module::from_path(module_path)?;
+    let intrinsic = orna_intrinsics::lookup(module, leaf)?;
+    (intrinsic.dispatch != orna_intrinsics::Dispatch::SourceOnly
+        && intrinsic.pins.contains(orna_intrinsics::CURRENT_STD_PIN))
+    .then_some(intrinsic.id)
 }
 
 fn legacy_intrinsic(name: &str) -> Option<orna_intrinsics::IntrinsicId> {
