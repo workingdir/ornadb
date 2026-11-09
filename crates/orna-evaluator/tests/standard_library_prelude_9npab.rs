@@ -1,6 +1,6 @@
+use orna_check::{Catalogue, StandardDependencyProfile};
 use orna_evaluator::Limits;
 use orna_project_repl::AdmittedReplSession;
-use orna_semantic::{Catalogue, StandardDependencyProfile};
 use orna_standard_sources::{
     REFERENCE_STANDARD_COLLECTION_PATH_V1, REFERENCE_STANDARD_OPTION_PATH_V1,
     REFERENCE_STANDARD_PRELUDE_EXPORTS_V1, REFERENCE_STANDARD_PRELUDE_PATH_V1,

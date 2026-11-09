@@ -1,6 +1,7 @@
 #[path = "../src/test_support.rs"]
 mod test_support;
 
+use orna_check::{Catalogue, ModuleInput, Namespace, Type, analyze_with_catalogue};
 use orna_conformance::{
     BoundedEvaluator, ConformanceAdapter, Corpus, EvidenceClass, EvidenceStatus, Harness,
     ProjectEnvironment, ProjectExpectations, ProjectUnit, RuntimeAdapter, RuntimeEvaluator,
@@ -12,7 +13,6 @@ use orna_runtime::{
     NoFault, RequestIdentity, RequestState, RunObservationStatus, RuntimeIdentity, RuntimeState,
     StreamObservationStatus, StreamRunControl, TableMutation,
 };
-use orna_semantic::{Catalogue, ModuleInput, Namespace, Type, analyze_with_catalogue};
 use orna_stream::{DiagnosticClass, DiagnosticCode};
 use orna_value::{Diagnostic, OvbRaw, Value};
 use sha2::Digest;
@@ -294,7 +294,7 @@ fn semantic_adapter_typechecks_imported_generic_sys_meta_with_declared_metadata(
     ));
     assert_eq!(
         read.effects.effects,
-        std::collections::BTreeSet::from([orna_semantic::EffectKind::TableRead])
+        std::collections::BTreeSet::from([orna_check::EffectKind::TableRead])
     );
     assert!(read.effects.may_fail);
 }
@@ -470,7 +470,7 @@ fn semantic_project_adapter_admits_sys_resolve_string_as_object_ref_read() {
     ));
     assert_eq!(
         lookup.effects.effects,
-        std::collections::BTreeSet::from([orna_semantic::EffectKind::TableRead])
+        std::collections::BTreeSet::from([orna_check::EffectKind::TableRead])
     );
     assert!(lookup.effects.may_fail);
 }
@@ -515,7 +515,7 @@ fn semantic_project_adapter_admits_sys_snapshot_string_as_pinned_read() {
     ));
     assert_eq!(
         before_change.effects.effects,
-        std::collections::BTreeSet::from([orna_semantic::EffectKind::TableRead])
+        std::collections::BTreeSet::from([orna_check::EffectKind::TableRead])
     );
     assert!(before_change.effects.may_fail);
 }
@@ -607,7 +607,7 @@ fn semantic_project_adapter_admits_sys_database_cwd_as_snapshot_ref_read() {
     assert!(
         cwd.effects
             .effects
-            .contains(&orna_semantic::EffectKind::TableRead),
+            .contains(&orna_check::EffectKind::TableRead),
         "{:?}",
         cwd.effects
     );
@@ -640,7 +640,7 @@ fn semantic_project_adapter_admits_sys_database_writable_as_bool_read() {
         writable
             .effects
             .effects
-            .contains(&orna_semantic::EffectKind::TableRead),
+            .contains(&orna_check::EffectKind::TableRead),
         "{:?}",
         writable.effects
     );
@@ -689,7 +689,7 @@ fn semantic_project_adapter_admits_sys_runtime_info_with_read_effect() {
     ));
     assert_eq!(
         runtime_info.effects.effects,
-        std::collections::BTreeSet::from([orna_semantic::EffectKind::TableRead])
+        std::collections::BTreeSet::from([orna_check::EffectKind::TableRead])
     );
     assert!(runtime_info.effects.may_fail);
 }
@@ -1940,7 +1940,7 @@ impl RuntimeEvaluator for ResolvedRowsRuntime {
     fn validate_resolved_rows(
         &mut self,
         _: &ProjectUnit,
-        analysis: &orna_semantic::Analysis,
+        analysis: &orna_check::Analysis,
     ) -> StageOutcome<Diagnostic> {
         self.resolved_rows += analysis.modules.len();
         StageOutcome::Passed
@@ -2385,7 +2385,7 @@ fn bounded_evaluator_executes_only_profile_verified_pure_standard_sources() {
     let source = include_str!("fixtures/bounded-evaluator-standard-math.orna");
     let unverified_source =
         include_str!("fixtures/bounded-evaluator-standard-math-unverified.orna");
-    let profile = orna_semantic::StandardDependencyProfile::from_sources(
+    let profile = orna_check::StandardDependencyProfile::from_sources(
         "std-snapshot-1",
         [("std/math.orna".into(), source.into())],
     )

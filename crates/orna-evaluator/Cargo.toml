@@ -32,7 +32,7 @@ stacker = "0.1.25"
 orna-intrinsics = { path = "../orna-intrinsics" }
 orna-repository = { path = "../orna-repository", optional = true }
 orna-standard-sources = { path = "../orna-standard-sources" }
-orna-semantic = { path = "../orna-semantic" }
+orna-check = { path = "../orna-check" }
 orna-sys = { path = "../orna-sys", optional = true }
 orna-syntax = { path = "../orna-syntax" }
 orna-value = { path = "../orna-value" }

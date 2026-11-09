@@ -61,12 +61,12 @@ fn unvalidated(cause: &str) -> CandidateAssertionRefusal {
 /// analysed or two admitted tables share a name.
 pub(crate) fn admitted_tables_of(
     project: &orna_project::LoadedProject,
-) -> Result<(Vec<String>, BTreeMap<String, orna_semantic::TableSchema>), &'static str> {
+) -> Result<(Vec<String>, BTreeMap<String, orna_check::TableSchema>), &'static str> {
     let catalogue = semantic_catalogue(project).map_err(|_| "project has no semantic catalogue")?;
-    let analysis = orna_semantic::analyze_with_providers(
+    let analysis = orna_check::analyze_with_providers(
         project.modules(),
         &catalogue,
-        orna_semantic::SystemProviders::Production,
+        orna_check::SystemProviders::Production,
     );
     if !analysis.is_ok() {
         return Err("project failed semantic analysis");

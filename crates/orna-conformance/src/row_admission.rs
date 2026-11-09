@@ -6,11 +6,11 @@
 //! yet; production admission wiring is not yet present.
 
 use crate::ProjectUnit;
+use orna_check::Analysis;
 use orna_evaluator::{
     Limits,
     row_admission::{self, RowSource},
 };
-use orna_semantic::Analysis;
 
 pub use orna_evaluator::row_admission::{
     AdmittedLooseRow, RowAdmissionIdentity, RowResult, TableOwner,

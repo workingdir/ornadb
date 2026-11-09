@@ -12,13 +12,13 @@ use std::{
 };
 
 use num_bigint::BigInt;
+use orna_check::{
+    Analysis, ModuleInput, Namespace, SourceUnitIdentity, Symbol, SymbolKind, TableAdmission,
+    TableSchema, Type, declared_type,
+};
 use orna_repository::{
     GitCommitRef, PrivateCommit, Repository, RepositoryError, Uuid,
     relation_admission::{RelationAdmissionError, StagedCandidate, StoredObjectIdentity},
-};
-use orna_semantic::{
-    Analysis, ModuleInput, Namespace, SourceUnitIdentity, Symbol, SymbolKind, TableAdmission,
-    TableSchema, Type, declared_type,
 };
 use orna_syntax::{
     Argument, AssignmentTarget, Declaration, EnumVariant, Expr, FieldInitializer, ImplMember,
@@ -3211,7 +3211,7 @@ mod tests {
             "main.orna",
             include_str!("../tests/fixtures/vfs-blob-mib.orna"),
         );
-        let analysis = orna_semantic::analyze(std::slice::from_ref(&source));
+        let analysis = orna_check::analyze(std::slice::from_ref(&source));
         assert!(analysis.is_ok(), "{:?}", analysis.diagnostics);
         let unit = analysis
             .source_units
@@ -3375,7 +3375,7 @@ pub table Contact(
         ObjectIdentityManifest,
         Result<SourceTableSchemaArtifact, SourceTableSchemaError>,
     ) {
-        let analysis = orna_semantic::analyze(modules);
+        let analysis = orna_check::analyze(modules);
         assert!(analysis.is_ok(), "{:?}", analysis.diagnostics);
         let manifest = ObjectIdentityManifest::reconcile(modules, None).unwrap();
         let module_name = module_namespace(source_path).unwrap();
@@ -4154,7 +4154,7 @@ pub table Invoice(id: Str) {
             );
         }
 
-        let analysis = orna_semantic::analyze(&modules);
+        let analysis = orna_check::analyze(&modules);
         assert_eq!(
             ObjectIdentityManifest::default().source_table_schema(
                 &modules,
@@ -4175,7 +4175,7 @@ pub table Invoice(id: Str) {
             "main.orna",
             "pub table Contact(id: Int) { relation: Relation<Int>, }",
         )];
-        let analysis = orna_semantic::analyze(&relation);
+        let analysis = orna_check::analyze(&relation);
         assert_eq!(
             analysis
                 .diagnostics
@@ -4183,7 +4183,7 @@ pub table Invoice(id: Str) {
                 .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
                 .collect::<Vec<_>>(),
             [(
-                orna_semantic::DIAG_TYPE,
+                orna_check::DIAG_TYPE,
                 "stored table field type must be serialisable"
             )]
         );
@@ -4325,7 +4325,7 @@ pub table Invoice(id: Str) {
             "main.orna",
             include_str!("../tests/fixtures/vfs-blob-mib.orna"),
         );
-        let analysis = orna_semantic::analyze(std::slice::from_ref(&source));
+        let analysis = orna_check::analyze(std::slice::from_ref(&source));
         assert!(analysis.is_ok(), "{:?}", analysis.diagnostics);
         let schema = manifest
             .source_table_schema(

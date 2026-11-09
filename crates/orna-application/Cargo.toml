@@ -21,7 +21,7 @@ orna-evaluator = { path = "../orna-evaluator" }
 orna-project-repl = { path = "../orna-project-repl" }
 orna-intrinsics = { path = "../orna-intrinsics" }
 orna-runtime = { path = "../orna-runtime" }
-orna-semantic = { path = "../orna-semantic" }
+orna-check = { path = "../orna-check" }
 orna-value = { path = "../orna-value" }
 orna-syntax = { path = "../orna-syntax" }
 orna-live = { path = "../orna-live", features = ["first-party-effect-trust"] }

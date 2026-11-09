@@ -1,8 +1,8 @@
+use orna_check::{AssertionOwner, Catalogue, ModuleInput, analyze, analyze_with_catalogue};
 use orna_conformance::{
     ConformanceAdapter, SemanticAdapter, SourceUnit, StageOutcome, TransactionalEvaluator,
 };
 use orna_evaluator::Limits;
-use orna_semantic::{AssertionOwner, Catalogue, ModuleInput, analyze, analyze_with_catalogue};
 use orna_value::Value;
 
 const COHERENT_CANDIDATE: &str =
@@ -126,7 +126,7 @@ fn assert_025_module_assertion_rejects_a_forbidden_network_effect() {
         analysis
             .diagnostics
             .iter()
-            .any(|diagnostic| { diagnostic.code() == orna_semantic::DIAG_ASSERTION_EFFECT }),
+            .any(|diagnostic| { diagnostic.code() == orna_check::DIAG_ASSERTION_EFFECT }),
         "expected forbidden network effect diagnostic, got {:?}",
         analysis.diagnostics
     );

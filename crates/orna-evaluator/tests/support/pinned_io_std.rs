@@ -1,6 +1,6 @@
+use orna_check::{Catalogue, StandardDependencyProfile};
 use orna_evaluator::Limits;
 use orna_project_repl::AdmittedReplSession;
-use orna_semantic::{Catalogue, StandardDependencyProfile};
 
 pub fn sources() -> Vec<(String, String)> {
     orna_standard_sources::reference_standard_sources_v1()

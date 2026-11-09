@@ -20,7 +20,7 @@ orna-protocol = { path = "../orna-protocol" }
 orna-project = { path = "../orna-project" }
 orna-repository = { path = "../orna-repository" }
 orna-security = { path = "../orna-security" }
-orna-semantic = { path = "../orna-semantic" }
+orna-check = { path = "../orna-check" }
 orna-syntax = { path = "../orna-syntax" }
 orna-runtime = { path = "../orna-runtime" }
 orna-stream = { path = "../orna-stream" }

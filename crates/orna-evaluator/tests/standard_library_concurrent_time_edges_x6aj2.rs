@@ -1,6 +1,6 @@
+use orna_check::StandardDependencyProfile;
 use orna_evaluator::{Limits, SysHostBindingRegistry};
 use orna_project_repl::AdmittedReplSession;
-use orna_semantic::StandardDependencyProfile;
 use orna_sys::ClockProvider;
 use orna_value::CanonicalValue;
 use orna_value::Raw;

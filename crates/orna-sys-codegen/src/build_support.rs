@@ -1112,6 +1112,9 @@ fn is_doc_heading(lines: &[String]) -> bool {
 }
 
 pub fn parse_role_version(value: &str) -> Result<(&str, u16, u16), String> {
+    value
+        .parse::<orna_sys_id::VersionedId>()
+        .map_err(|error| format!("semantic role is not a versioned identifier: {error}"))?;
     let (name, version) = value
         .rsplit_once('@')
         .ok_or_else(|| "semantic role requires an explicit `@major.minor` version".to_owned())?;

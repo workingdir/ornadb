@@ -1,10 +1,10 @@
 use std::{fs, path::Path, process::Command};
 
+use orna_check::{Catalogue, StandardDependencyProfile, analyze_with_catalogue};
 use orna_project::{
     LoadedProject, ProjectLimits, ProjectLoadError, ProjectLoadMode, ProjectLoader,
 };
 use orna_repository::{FormatContextError, ManagedFileChange, ManagedPath, Repository};
-use orna_semantic::{Catalogue, StandardDependencyProfile, analyze_with_catalogue};
 use tempfile::TempDir;
 
 fn repository(files: &[(&str, &str)]) -> (TempDir, Repository) {

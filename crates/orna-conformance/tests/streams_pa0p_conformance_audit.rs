@@ -56,12 +56,12 @@ mod test_support;
 
 use std::{fs, path::Path, process::Command};
 
+use orna_check::{Catalogue, ModuleInput, analyze_with_catalogue};
 use orna_conformance::{DurableTransactionalEvaluator, SourceUnit, StageOutcome};
 use orna_evaluator::Limits;
 use orna_project::ProjectLoader;
 use orna_repository::Repository;
 use orna_runtime::{RuntimeIdentity, RuntimeState};
-use orna_semantic::{Catalogue, ModuleInput, analyze_with_catalogue};
 use orna_stream::{CheckpointKey, Component, ConsumerIdentity};
 use orna_value::Raw;
 use orna_value::Value;

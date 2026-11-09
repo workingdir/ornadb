@@ -1,6 +1,6 @@
+use orna_check::{Catalogue, StandardDependencyProfile};
 use orna_evaluator::{Limits, TIMEZONE_DATASET_VERSION};
 use orna_project_repl::AdmittedReplSession;
-use orna_semantic::{Catalogue, StandardDependencyProfile};
 use orna_value::CanonicalValue;
 use orna_value::Raw;
 

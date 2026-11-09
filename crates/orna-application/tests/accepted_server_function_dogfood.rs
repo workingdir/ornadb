@@ -1,6 +1,6 @@
 use orna_application::ApplicationAuthority;
+use orna_check::Catalogue;
 use orna_evaluator::{Environment, Limits};
-use orna_semantic::Catalogue;
 use orna_value::OvbRaw;
 
 const SOURCE: &str = include_str!("fixtures/server-function-dogfood.orna");

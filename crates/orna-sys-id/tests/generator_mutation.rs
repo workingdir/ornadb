@@ -51,7 +51,12 @@ fn the_unmutated_catalogues_generate() {
     assert!(generated.tables.contains("SYS_FUNCTION_DESCRIPTORS"));
     assert!(generated.dispatch.contains("pub trait SysFunctionHost"));
     assert!(generated.dispatch.contains("pub enum SysFunctionBinding"));
-    assert_eq!(generated.files().len(), 7);
+    assert!(
+        generated
+            .engine_functions
+            .contains("pub enum EngineFunction")
+    );
+    assert_eq!(generated.files().len(), 8);
 }
 
 #[test]

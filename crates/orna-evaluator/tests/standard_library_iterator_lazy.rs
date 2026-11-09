@@ -1,9 +1,9 @@
+use orna_check::{Catalogue, StandardDependencyProfile};
 use orna_evaluator::{
     Environment, Functions, Limits, NominalDefinition, NominalDefinitions, NominalField,
     PureFunction, evaluate_expression_with_functions, evaluate_with_functions_and_nominals,
 };
 use orna_project_repl::AdmittedReplSession;
-use orna_semantic::{Catalogue, StandardDependencyProfile};
 use orna_value::CanonicalValue;
 use orna_value::Raw;
 

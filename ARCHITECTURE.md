@@ -33,7 +33,7 @@ into `orna-base` and `orna-value` in stage 03.
 | 1 | value | orna-value, orna-sys-model |
 | 2 | syntax | orna-syntax, orna-intrinsics, orna-sys-codegen |
 | 3 | identity | orna-sys-id, orna-standard-sources, orna-sys-macros |
-| 4 | analysis | orna-semantic |
+| 4 | analysis | orna-check |
 | 5 | evaluation | orna-evaluator |
 | 6 | hosts (I/O) | orna-sys, orna-security |
 | 7 | formats and planning | orna-evolution, orna-stream |

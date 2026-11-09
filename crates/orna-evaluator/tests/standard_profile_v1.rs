@@ -1,6 +1,4 @@
-use orna_semantic::{
-    Catalogue, ModuleInput, StandardDependencyProfile, Type, analyze_with_catalogue,
-};
+use orna_check::{Catalogue, ModuleInput, StandardDependencyProfile, Type, analyze_with_catalogue};
 use orna_standard_sources::{
     REFERENCE_STANDARD_TEXT_LINES_PATH_V1, REFERENCE_STANDARD_TEXT_SLICING_PATH_V1,
 };
@@ -60,7 +58,7 @@ fn reference_standard_profile_v1() -> StandardDependencyProfile {
 }
 
 /// Builds the semantic catalogue from the pinned Orna 1.0.0 source.
-fn reference_standard_catalogue_v1() -> Result<Catalogue, orna_semantic::StandardCatalogueError> {
+fn reference_standard_catalogue_v1() -> Result<Catalogue, orna_check::StandardCatalogueError> {
     Catalogue::from_standard_sources(
         &reference_standard_profile_v1(),
         reference_standard_sources_v1(),
@@ -1797,7 +1795,7 @@ fn pinned_calendar_arithmetic_source_typechecks_against_core() {
     assert!(parsed.is_ok(), "{:#?}", parsed.diagnostics);
     let analysis = analyze_with_catalogue(
         &[ModuleInput::new("calendar.orna", source)],
-        &orna_semantic::Catalogue::authoritative_core(),
+        &orna_check::Catalogue::authoritative_core(),
     );
     assert!(
         analysis.is_ok(),
@@ -1921,7 +1919,7 @@ fn pinned_test_module_resolves_against_core_without_importing_optional_std() {
     assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
     let analysis = analyze_with_catalogue(
         &[ModuleInput::new("test.orna", source)],
-        &orna_semantic::Catalogue::authoritative_core(),
+        &orna_check::Catalogue::authoritative_core(),
     );
     assert!(
         analysis.is_ok(),
@@ -2786,7 +2784,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     }
     let option_module_analysis = analyze_with_catalogue(
         &[ModuleInput::new("option.orna", &sources[11].1)],
-        &orna_semantic::Catalogue::authoritative_core(),
+        &orna_check::Catalogue::authoritative_core(),
     );
     assert!(
         option_module_analysis.is_ok(),
@@ -2800,7 +2798,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     );
     let concurrent_module_analysis = analyze_with_catalogue(
         &[ModuleInput::new("concurrent.orna", &sources[18].1)],
-        &orna_semantic::Catalogue::authoritative_core(),
+        &orna_check::Catalogue::authoritative_core(),
     );
     assert!(
         concurrent_module_analysis.is_ok(),
@@ -2819,7 +2817,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
             .verify_source(path, source)
             .expect("the exact 1.0 source is pinned");
     }
-    let semantic_catalogue = orna_semantic::Catalogue::authoritative_core()
+    let semantic_catalogue = orna_check::Catalogue::authoritative_core()
         .with_standard_sources(&profile, sources.clone());
     assert!(
         semantic_catalogue.is_ok(),
@@ -3057,7 +3055,7 @@ fn pinned_filesystem_effect_is_visible_to_consumers_and_forbidden_in_assertions(
         reads
             .effects
             .effects
-            .contains(&orna_semantic::EffectKind::Filesystem)
+            .contains(&orna_check::EffectKind::Filesystem)
     );
     assert!(reads.effects.may_fail);
 }

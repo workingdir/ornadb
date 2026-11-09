@@ -17,7 +17,7 @@ use orna_evaluator::{
 };
 use orna_intrinsics::{Dispatch, catalogue};
 use orna_project_repl::AdmittedReplSession;
-use orna_semantic::{Catalogue, ModuleInput};
+use orna_check::{Catalogue, ModuleInput};
 use orna_syntax::{Declaration, parse_module_with_file};
 use orna_value::{CanonicalValue, Raw};
 

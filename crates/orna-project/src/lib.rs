@@ -13,6 +13,12 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+use orna_check::{
+    Analysis, Catalogue, ModuleInput, Namespace, RowKeySpelling, RowUnitInput,
+    StandardBodyDiagnostic, StandardCatalogueError, StandardDependencyProfile,
+    StandardProfileError, SymbolKind, SystemProviders, analyze, analyze_with_catalogue,
+    check_standard_sources, lower_data_expression, lower_row_unit_with_key_spelling,
+};
 use orna_repository::{
     CommittedTableBinding, CommittedTableBindingRequest, CommittedTreeEntry,
     CommittedTreeEntryKind, FINAL_REPOSITORY_FORMAT, FormatContextError, GitCommitRef,
@@ -21,12 +27,6 @@ use orna_repository::{
 };
 use orna_runtime::vfs::{VfsComponent, project_key_component, unproject_component};
 use orna_runtime::{TableMutation, TableObjectId};
-use orna_semantic::{
-    Analysis, Catalogue, ModuleInput, Namespace, RowKeySpelling, RowUnitInput,
-    StandardBodyDiagnostic, StandardCatalogueError, StandardDependencyProfile,
-    StandardProfileError, SymbolKind, SystemProviders, analyze, analyze_with_catalogue,
-    check_standard_sources, lower_data_expression, lower_row_unit_with_key_spelling,
-};
 use orna_syntax::{
     Declaration, Expr, FieldInitializer, TableMember, parse_module, parse_module_with_file,
     parse_row, parse_row_with_file,

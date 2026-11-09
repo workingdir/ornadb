@@ -18,6 +18,7 @@
 
 pub mod descriptor;
 pub mod dispatch;
+pub mod engine;
 pub mod error_code;
 pub mod function;
 pub mod host_operation;
@@ -37,6 +38,7 @@ pub use descriptor::{
     SysSingletonDescriptor, SysTypeDescriptor,
 };
 pub use dispatch::{SysFunctionBinding, SysFunctionHost, dispatch};
+pub use engine::{ENGINE_FUNCTION_COUNT, EngineFunction};
 pub use error_code::{PORTABLE_FAILURE_CODE_COUNT, SYS_FAILURE_CODE_COUNT, SysFailureCode};
 pub use function::{AmbiguousPath, SYS_FUNCTION_COUNT, SysFunction};
 pub use host_operation::{

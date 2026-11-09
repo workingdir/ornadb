@@ -2,7 +2,7 @@
 //!
 //! This crate is the single declaration site for the native operations the
 //! evaluator and the semantic checker share. It depends on nothing from
-//! `orna-semantic` or `orna-evaluator`: the closed [`SigType`] language is
+//! `orna-check` or `orna-evaluator`: the closed [`SigType`] language is
 //! mapped to the checker's `Type` by the checker itself.
 //!
 //! The catalogue is proved complete against the historical
