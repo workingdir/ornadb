@@ -2645,7 +2645,6 @@ async fn orp1_production_writer_ten_rows() {
         &head,
         index,
         &freeze,
-        |_| Err(orna_storage::Error::InvalidKey),
         "orna: publish production writer rows",
     )
     .await
@@ -2825,7 +2824,6 @@ async fn race_frozen_prefix(
         &head,
         index.clone(),
         freeze,
-        |_| Err(StorageError::InvalidKey),
         "orna: publish race left",
     )
     .await
@@ -2837,7 +2835,6 @@ async fn race_frozen_prefix(
         &head,
         index,
         freeze,
-        |_| Err(StorageError::InvalidKey),
         "orna: publish race right",
     )
     .await

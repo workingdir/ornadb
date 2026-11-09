@@ -621,7 +621,6 @@ impl RuntimePublicationCoordinator {
         expected_head: &GitCommitRef,
         expected_index: IndexGeneration,
         freeze: &PublicationFreeze,
-        path_for: impl Fn(&TableMutation) -> Result<LoosePath, Error>,
         message: &str,
     ) -> Result<Self, Error> {
         Self::prepare_allow_noop(
@@ -630,7 +629,6 @@ impl RuntimePublicationCoordinator {
             expected_head,
             expected_index,
             freeze,
-            path_for,
             message,
         )
         .await?
@@ -647,16 +645,12 @@ impl RuntimePublicationCoordinator {
     /// unchanged from the committed snapshot has no visible change: the caller
     /// completes the frozen intent without a commit instead of preparing an
     /// empty publication.
-    ///
-    /// `_path_for` is unused because format-3 rows have no loose path; it
-    /// remains only while existing callers still supply one.
     pub async fn prepare_allow_noop(
         repository: &Repository,
         runtime: &RuntimeState,
         expected_head: &GitCommitRef,
         expected_index: IndexGeneration,
         freeze: &PublicationFreeze,
-        _path_for: impl Fn(&TableMutation) -> Result<LoosePath, Error>,
         message: &str,
     ) -> Result<Option<Self>, Error> {
         // ORNA-CAP-006: candidate objects written below stay unreferenced until
@@ -1587,8 +1581,6 @@ mod tests {
             let head = repository.head().unwrap().unwrap();
             let before = publication_state(temp.path(), &repository);
             let pending = runtime.pending().await.unwrap();
-            let path_for =
-                |mutation: &TableMutation| LoosePath::for_key(mutation.table(), &["Alice".into()]);
 
             assert_eq!(
                 RuntimePublicationCoordinator::prepare_allow_noop(
@@ -1597,7 +1589,6 @@ mod tests {
                     &head,
                     repository.index_generation().unwrap(),
                     &freeze,
-                    path_for,
                     "orna: publish runtime data",
                 )
                 .await,
@@ -1610,7 +1601,6 @@ mod tests {
                     &head,
                     repository.index_generation().unwrap(),
                     &freeze,
-                    path_for,
                     "orna: publish runtime data",
                 )
                 .await,

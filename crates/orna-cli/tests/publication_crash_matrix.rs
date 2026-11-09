@@ -442,7 +442,6 @@ async fn format3_publication_recovers_when_gc_prunes_candidate_before_publish() 
         &old_head,
         expected_index,
         &freeze,
-        |_| panic!("Format-3 store-only publication must not request a legacy path"),
         "test format-3 publication",
     )
     .await
@@ -496,7 +495,6 @@ async fn format3_publication_recovers_when_gc_prunes_candidate_before_publish() 
         &old_head,
         retry_index,
         &retry_freeze,
-        |_| panic!("Format-3 store-only retry must not request a legacy path"),
         "retry format-3 publication",
     )
     .await
@@ -626,7 +624,6 @@ async fn coordinator_recovery_discards_a_pre_ref_journal_and_keeps_the_batch_pen
         &head,
         index.clone(),
         &freeze,
-        |_| panic!("Format-3 store-only publication must not request a legacy path"),
         "orna: publish runtime data",
     )
     .await
@@ -663,7 +660,6 @@ async fn coordinator_recovery_preserves_a_candidate_byte_binding_failure() {
         &head,
         index.clone(),
         &freeze,
-        |_| panic!("Format-3 store-only publication must not request a legacy path"),
         "orna: publish runtime data",
     )
     .await

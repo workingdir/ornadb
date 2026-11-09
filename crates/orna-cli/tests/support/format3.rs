@@ -18,7 +18,6 @@ use orna_conformance::DurableTransactionalEvaluator;
 use orna_evaluator::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
 use orna_repository::{AdmittedRow, KeyRange, Repository, TypedKey};
 use orna_runtime::{RuntimeIdentity, RuntimeState, RuntimeTableIdentity, TableObjectId};
-use orna_storage::LoosePath;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
@@ -145,24 +144,21 @@ pub async fn publish_media_row(
         .await
         .unwrap()
         .expect("a committed row leaves a checkpoint");
-    let logical_key = key.to_owned();
     DurableTransactionalEvaluator::default()
         .publish_pending(
             repository,
             state,
             [ordinal; 16],
             &checkpoint,
-            |mutation| LoosePath::for_key(mutation.table(), std::slice::from_ref(&logical_key)),
             &format!("orna: publish {key}"),
         )
         .await
         .expect("the explicit publication boundary succeeds");
 }
-/// Publishes every source row by its canonical mutation key and committed path.
+/// Publishes every source row by its canonical mutation key.
 pub async fn publish_source_rows(
     repository: &Repository,
     state: &RuntimeState,
-    paths_by_key: &std::collections::BTreeMap<Vec<u8>, LoosePath>,
     publish_id: [u8; 16],
 ) {
     let checkpoint = state
@@ -176,12 +172,6 @@ pub async fn publish_source_rows(
             state,
             publish_id,
             &checkpoint,
-            |mutation| {
-                Ok(paths_by_key
-                    .get(mutation.key())
-                    .expect("each source mutation has a committed path")
-                    .clone())
-            },
             "orna: publish source rows",
         )
         .await

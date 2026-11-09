@@ -538,8 +538,6 @@ async fn publish_frozen_range(
         &head,
         index,
         &freeze,
-        // Format-3 rows have no loose path, so the coordinator never asks.
-        |_| Err(orna_storage::Error::InvalidKey),
         message,
     )
     .await
