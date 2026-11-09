@@ -4067,9 +4067,8 @@ mod tests {
         NodeData::decode_canonical(&bytes, GitHashAlgorithm::Sha1).expect("the descriptor decodes")
     }
 
-    /// An empty migration blob writes the null byte root that
-    /// `BlobDescriptor::empty()` names: zero length, the empty SHA-256 and no
-    /// byte index.
+    /// An empty migration blob writes the canonical empty descriptor: zero
+    /// length, the empty SHA-256 and a null byte root (no byte index).
     #[test]
     fn empty_migration_blob_has_the_null_byte_root() {
         let (directory, repository) = initialized_repository();
@@ -4088,10 +4087,8 @@ mod tests {
         else {
             panic!("the written node is a blob descriptor");
         };
-        let expected = crate::blob_store::BlobDescriptor::empty();
         assert_eq!(length, 0);
         assert_eq!(raw_sha256, empty.sha256());
-        assert_eq!(byte_root.as_ref(), expected.byte_root());
         assert!(byte_root.is_none());
     }
 

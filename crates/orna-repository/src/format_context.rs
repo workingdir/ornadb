@@ -407,8 +407,9 @@ impl crate::GitCommitRef {
 #[derive(Clone, Debug)]
 pub struct SchemaRootPin {
     snapshot: RepositorySnapshotPin,
-    /// Dead code: no caller yet; kept for the store surface it specifies.
-    #[allow(dead_code)]
+    /// The pinned blob, which only tests compare against Git's own answer;
+    /// production needs the proof of presence, not the identifier.
+    #[cfg(test)]
     oid: NativeOid,
 }
 
@@ -547,7 +548,8 @@ impl RepositoryFormatContext {
         &self.snapshot
     }
 
-    /// Pins the committed `main.orna` source root by its native blob OID.
+    /// Proves the committed `main.orna` source root is present as a regular
+    /// native blob.
     ///
     /// The source bytes are not read here. Store format 3 bounds only
     /// `database.orna` at 64 KiB (store-format-3 §1); a module source is
@@ -557,7 +559,7 @@ impl RepositoryFormatContext {
     pub fn validate_schema_root(&self) -> Result<SchemaRootPin, FormatContextError> {
         self.require_format3()?;
         let algorithm = repository_hash_algorithm(&self.repository)?;
-        let oid = committed_path_oid(
+        let _oid = committed_path_oid(
             &self.repository,
             &self.snapshot.commit,
             algorithm,
@@ -572,7 +574,8 @@ impl RepositoryFormatContext {
         })?;
         Ok(SchemaRootPin {
             snapshot: self.snapshot.clone(),
-            oid,
+            #[cfg(test)]
+            oid: _oid,
         })
     }
 

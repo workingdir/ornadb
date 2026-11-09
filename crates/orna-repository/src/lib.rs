@@ -83,8 +83,8 @@ pub use native_graph::{
     AdmittedBlobReference, AdmittedRowField, AdmittedRowFields, CapturedBlobCandidate,
     GitHashAlgorithm, GraphError, IndexMaintenance, NativeGraphContext, NativeObjectKind,
     NativeOid, OrpBlobBinding, OrpGraphCandidate, ProtectedBlobMetadata, ProtectedContentPin,
-    ProtectedContentTransfer, Pub3ReleaseReceipt, RangeVerification, RepositoryCaptureCapability,
-    RepositoryReadScope, RowIndexMutation, VerifiedBlobRange,
+    ProtectedContentTransfer, RangeVerification, RepositoryCaptureCapability, RepositoryReadScope,
+    RowIndexMutation, VerifiedBlobRange,
 };
 pub use orna_value::BlobMetadata;
 pub use publication_transaction::{
