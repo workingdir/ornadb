@@ -301,6 +301,14 @@ jobs:
           --out "$RUNNER_TEMP/gate-evidence"
           -- python3 scripts/check_product_claims.py prune-expire
 
+      - name: Check the typed client drafts product claim
+        if: ${{ !cancelled() }}
+        run: >-
+          python3 scripts/gate_evidence.py run --check client-drafts
+          --record claims-client-drafts --title "product claim: typed client drafts"
+          --out "$RUNNER_TEMP/gate-evidence"
+          -- python3 scripts/check_product_claims.py client-drafts
+
       - name: Check the shipped crate carries no retired row writer
         if: ${{ !cancelled() }}
         run: >-
