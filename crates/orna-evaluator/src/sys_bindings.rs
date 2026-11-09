@@ -25,6 +25,128 @@ use crate::{
 
 const MAX_RANDOM_BYTES: usize = 1_048_576;
 
+/// The filesystem operation an admitted descriptor names.
+///
+/// Every admitted operation repeats the last component of its name as its
+/// `implementation`; classifying once keeps the dispatch exhaustive, so a new
+/// registry operation is a compile error here instead of a silent
+/// `ORNA-EVAL-UNSUPPORTED`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FilesystemOperation {
+    ReadText,
+    WriteText,
+    AppendText,
+    Exists,
+    IsDirectory,
+    List,
+    Metadata,
+    SymlinkMetadata,
+    CreateDir,
+    RemoveFile,
+    CopyFile,
+    MoveFile,
+}
+
+impl FilesystemOperation {
+    fn from_descriptor(operation: &HostOperationDescriptor) -> Option<Self> {
+        let name = operation.name.as_str();
+        if operation.implementation != name.rsplit('.').next().unwrap_or("") {
+            return None;
+        }
+        Some(match name {
+            "std.io.fs.read_text" => Self::ReadText,
+            "std.io.fs.write_text" => Self::WriteText,
+            "std.io.fs.append_text" => Self::AppendText,
+            "std.io.fs.exists" => Self::Exists,
+            "std.io.fs.is_directory" => Self::IsDirectory,
+            "std.io.fs.list" => Self::List,
+            "std.io.fs.metadata" => Self::Metadata,
+            "std.io.fs.symlink_metadata" => Self::SymlinkMetadata,
+            "std.io.fs.create_dir" => Self::CreateDir,
+            "std.io.fs.remove_file" => Self::RemoveFile,
+            "std.io.fs.copy_file" => Self::CopyFile,
+            "std.io.fs.move_file" => Self::MoveFile,
+            _ => return None,
+        })
+    }
+}
+
+/// The decoded arguments of one `std.io.process.run` call.
+struct ProcessRequest<'a> {
+    executable: &'a str,
+    args: Vec<String>,
+    working_directory: &'a str,
+    environment: Vec<(String, String)>,
+    input: Option<&'a [u8]>,
+    timeout: Option<std::time::Duration>,
+    output_limit: usize,
+}
+
+/// Decodes the seven portable arguments before any provider work starts, so a
+/// mistyped argument never reaches the host process boundary.
+fn process_request(arguments: &[CanonicalValue]) -> Result<ProcessRequest<'_>, EvaluationError> {
+    let [
+        executable,
+        args,
+        working_directory,
+        environment,
+        input,
+        timeout,
+        output_limit,
+    ] = arguments
+    else {
+        return Err(redacted_error("ORNA-EVAL-ARGUMENT"));
+    };
+    let executable = raw_text(executable.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
+    let working_directory =
+        raw_text(working_directory.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
+    let args = raw_text_array(args.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
+    let environment =
+        raw_text_pairs(environment.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
+    let input = match optional_raw(input.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))? {
+        None | Some(OvbRaw::Null) => None,
+        Some(OvbRaw::Bytes(bytes)) => Some(bytes.as_slice()),
+        Some(_) => return Err(redacted_error("ORNA-EVAL-TYPE")),
+    };
+    let timeout =
+        match optional_raw(timeout.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))? {
+            None | Some(OvbRaw::Null) => None,
+            Some(OvbRaw::Tag(60005, value)) => {
+                Some(raw_duration(value).ok_or_else(|| redacted_error("ORNA-EVAL-VALUE"))?)
+            }
+            Some(_) => return Err(redacted_error("ORNA-EVAL-TYPE")),
+        };
+    let OvbRaw::Int(output_limit) = output_limit.raw() else {
+        return Err(redacted_error("ORNA-EVAL-TYPE"));
+    };
+    let output_limit = output_limit
+        .to_usize()
+        .ok_or_else(|| redacted_error("ORNA-EVAL-VALUE"))?;
+    Ok(ProcessRequest {
+        executable,
+        args,
+        working_directory,
+        environment,
+        input,
+        timeout,
+        output_limit,
+    })
+}
+
+/// Encodes a process exit as the result tuple's status field.
+fn process_exit_status(status: Option<i32>) -> OvbRaw {
+    match status {
+        Some(status) => OvbRaw::Tag(
+            60013,
+            Box::new(OvbRaw::Array(vec![
+                OvbRaw::Int(1.into()),
+                OvbRaw::Int(status.into()),
+            ])),
+        ),
+        None => OvbRaw::Tag(60013, Box::new(OvbRaw::Array(vec![OvbRaw::Int(0.into())]))),
+    }
+}
+
 /// Evaluator-facing registration of built-in sys host providers.
 ///
 /// Operations are selected from the build-generated sys registry. Environment
@@ -278,170 +400,260 @@ impl SysHostBindingRegistry {
             .filesystem
             .as_ref()
             .ok_or_else(|| redacted_error("ORNA-EVAL-UNSUPPORTED"))?;
-        let value = match operation.name.as_str() {
-            "std.io.fs.read_text" if operation.implementation == "read_text" => {
-                let [root, path] = arguments else {
-                    return Err(redacted_error("ORNA-EVAL-ARGUMENT"));
-                };
-                let root = raw_text(root.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
-                let path = raw_text(path.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
-                OvbRaw::Text(
-                    provider
-                        .read_text(root, path)
-                        .map_err(|failure| self.failure(operation, failure.code()))?,
-                )
+        let value = match FilesystemOperation::from_descriptor(operation) {
+            Some(FilesystemOperation::ReadText) => {
+                self.filesystem_read_text(operation, provider, arguments)?
             }
-            "std.io.fs.write_text" if operation.implementation == "write_text" => {
-                let [root, path, contents, overwrite] = arguments else {
-                    return Err(redacted_error("ORNA-EVAL-ARGUMENT"));
-                };
-                let root = raw_text(root.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
-                let path = raw_text(path.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
-                let contents =
-                    raw_text(contents.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
-                let overwrite =
-                    raw_bool(overwrite.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
-                provider
-                    .write_text(root, path, contents, overwrite)
-                    .map_err(|failure| self.failure(operation, failure.code()))?;
-                OvbRaw::Null
+            Some(FilesystemOperation::WriteText) => {
+                self.filesystem_write_text(operation, provider, arguments)?
             }
-            "std.io.fs.append_text" if operation.implementation == "append_text" => {
-                let [root, path, contents] = arguments else {
-                    return Err(redacted_error("ORNA-EVAL-ARGUMENT"));
-                };
-                let root = raw_text(root.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
-                let path = raw_text(path.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
-                let contents =
-                    raw_text(contents.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
-                provider
-                    .append_text(root, path, contents)
-                    .map_err(|failure| self.failure(operation, failure.code()))?;
-                OvbRaw::Null
+            Some(FilesystemOperation::AppendText) => {
+                self.filesystem_append_text(operation, provider, arguments)?
             }
-            "std.io.fs.exists" if operation.implementation == "exists" => {
-                let [root, path] = arguments else {
-                    return Err(redacted_error("ORNA-EVAL-ARGUMENT"));
-                };
-                let root = raw_text(root.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
-                let path = raw_text(path.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
-                OvbRaw::Bool(
-                    provider
-                        .exists(root, path)
-                        .map_err(|failure| self.failure(operation, failure.code()))?,
-                )
+            Some(FilesystemOperation::Exists) => {
+                self.filesystem_exists(operation, provider, arguments)?
             }
-            "std.io.fs.is_directory" if operation.implementation == "is_directory" => {
-                let [root, path] = arguments else {
-                    return Err(redacted_error("ORNA-EVAL-ARGUMENT"));
-                };
-                let root = raw_text(root.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
-                let path = raw_text(path.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
-                OvbRaw::Bool(
-                    provider
-                        .is_directory(root, path)
-                        .map_err(|failure| self.failure(operation, failure.code()))?,
-                )
+            Some(FilesystemOperation::IsDirectory) => {
+                self.filesystem_is_directory(operation, provider, arguments)?
             }
-            "std.io.fs.list" if operation.implementation == "list" => {
-                let [root, path] = arguments else {
-                    return Err(redacted_error("ORNA-EVAL-ARGUMENT"));
-                };
-                let root = raw_text(root.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
-                let path = raw_text(path.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
-                OvbRaw::Array(
-                    provider
-                        .list(root, path)
-                        .map_err(|failure| self.failure(operation, failure.code()))?
-                        .into_iter()
-                        .map(OvbRaw::Text)
-                        .collect(),
-                )
+            Some(FilesystemOperation::List) => {
+                self.filesystem_list(operation, provider, arguments)?
             }
-            "std.io.fs.metadata" | "std.io.fs.symlink_metadata"
-                if operation.implementation == operation.name.rsplit('.').next().unwrap_or("") =>
-            {
-                let [root, path] = arguments else {
-                    return Err(redacted_error("ORNA-EVAL-ARGUMENT"));
-                };
-                let root = raw_text(root.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
-                let path = raw_text(path.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
-                let metadata = if operation.name == "std.io.fs.metadata" {
-                    provider.metadata(root, path)
-                } else {
-                    provider.symlink_metadata(root, path)
-                }
-                .map_err(|failure| self.failure(operation, failure.code()))?;
-                OvbRaw::Array(vec![
-                    OvbRaw::Text(metadata.kind),
-                    optional_value(metadata.size.map(|size| OvbRaw::Int(size.into()))),
-                    optional_value(metadata.modified.and_then(system_time_raw)),
-                    optional_value(metadata.created.and_then(system_time_raw)),
-                ])
+            Some(FilesystemOperation::Metadata) => {
+                self.filesystem_metadata(operation, provider, arguments, true)?
             }
-            "std.io.fs.create_dir" if operation.implementation == "create_dir" => {
-                let [root, path, parents, exist_ok] = arguments else {
-                    return Err(redacted_error("ORNA-EVAL-ARGUMENT"));
-                };
-                let root = raw_text(root.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
-                let path = raw_text(path.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
-                let parents =
-                    raw_bool(parents.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
-                let exist_ok =
-                    raw_bool(exist_ok.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
-                provider
-                    .create_dir(root, path, parents, exist_ok)
-                    .map_err(|failure| self.failure(operation, failure.code()))?;
-                OvbRaw::Null
+            Some(FilesystemOperation::SymlinkMetadata) => {
+                self.filesystem_metadata(operation, provider, arguments, false)?
             }
-            "std.io.fs.remove_file" if operation.implementation == "remove_file" => {
-                let [root, path] = arguments else {
-                    return Err(redacted_error("ORNA-EVAL-ARGUMENT"));
-                };
-                let root = raw_text(root.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
-                let path = raw_text(path.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
-                provider
-                    .remove_file(root, path)
-                    .map_err(|failure| self.failure(operation, failure.code()))?;
-                OvbRaw::Null
+            Some(FilesystemOperation::CreateDir) => {
+                self.filesystem_create_dir(operation, provider, arguments)?
             }
-            "std.io.fs.copy_file" if operation.implementation == "copy_file" => {
-                let [root, source, destination, overwrite] = arguments else {
-                    return Err(redacted_error("ORNA-EVAL-ARGUMENT"));
-                };
-                let root = raw_text(root.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
-                let source =
-                    raw_text(source.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
-                let destination =
-                    raw_text(destination.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
-                let overwrite =
-                    raw_bool(overwrite.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
-                provider
-                    .copy_file(root, source, destination, overwrite)
-                    .map_err(|failure| self.failure(operation, failure.code()))?;
-                OvbRaw::Null
+            Some(FilesystemOperation::RemoveFile) => {
+                self.filesystem_remove_file(operation, provider, arguments)?
             }
-            "std.io.fs.move_file" if operation.implementation == "move_file" => {
-                let [root, source, destination, overwrite] = arguments else {
-                    return Err(redacted_error("ORNA-EVAL-ARGUMENT"));
-                };
-                let root = raw_text(root.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
-                let source =
-                    raw_text(source.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
-                let destination =
-                    raw_text(destination.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
-                let overwrite =
-                    raw_bool(overwrite.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
-                provider
-                    .move_file(root, source, destination, overwrite)
-                    .map_err(|failure| self.failure(operation, failure.code()))?;
-                OvbRaw::Null
+            Some(FilesystemOperation::CopyFile) => {
+                self.filesystem_copy_file(operation, provider, arguments)?
             }
-            _ => return Err(redacted_error("ORNA-EVAL-UNSUPPORTED")),
+            Some(FilesystemOperation::MoveFile) => {
+                self.filesystem_move_file(operation, provider, arguments)?
+            }
+            None => return Err(redacted_error("ORNA-EVAL-UNSUPPORTED")),
         };
         CanonicalValue::new(value)
             .map(Some)
             .map_err(|_| redacted_error("ORNA-EVAL-VALUE"))
+    }
+
+    fn filesystem_read_text(
+        &self,
+        operation: &HostOperationDescriptor,
+        provider: &FilesystemProvider,
+        arguments: &[CanonicalValue],
+    ) -> Result<OvbRaw, EvaluationError> {
+        let [root, path] = arguments else {
+            return Err(redacted_error("ORNA-EVAL-ARGUMENT"));
+        };
+        let root = raw_text(root.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
+        let path = raw_text(path.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
+        Ok(OvbRaw::Text(provider.read_text(root, path).map_err(
+            |failure| self.failure(operation, failure.code()),
+        )?))
+    }
+
+    fn filesystem_write_text(
+        &self,
+        operation: &HostOperationDescriptor,
+        provider: &FilesystemProvider,
+        arguments: &[CanonicalValue],
+    ) -> Result<OvbRaw, EvaluationError> {
+        let [root, path, contents, overwrite] = arguments else {
+            return Err(redacted_error("ORNA-EVAL-ARGUMENT"));
+        };
+        let root = raw_text(root.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
+        let path = raw_text(path.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
+        let contents = raw_text(contents.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
+        let overwrite =
+            raw_bool(overwrite.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
+        provider
+            .write_text(root, path, contents, overwrite)
+            .map_err(|failure| self.failure(operation, failure.code()))?;
+        Ok(OvbRaw::Null)
+    }
+
+    fn filesystem_append_text(
+        &self,
+        operation: &HostOperationDescriptor,
+        provider: &FilesystemProvider,
+        arguments: &[CanonicalValue],
+    ) -> Result<OvbRaw, EvaluationError> {
+        let [root, path, contents] = arguments else {
+            return Err(redacted_error("ORNA-EVAL-ARGUMENT"));
+        };
+        let root = raw_text(root.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
+        let path = raw_text(path.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
+        let contents = raw_text(contents.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
+        provider
+            .append_text(root, path, contents)
+            .map_err(|failure| self.failure(operation, failure.code()))?;
+        Ok(OvbRaw::Null)
+    }
+
+    fn filesystem_exists(
+        &self,
+        operation: &HostOperationDescriptor,
+        provider: &FilesystemProvider,
+        arguments: &[CanonicalValue],
+    ) -> Result<OvbRaw, EvaluationError> {
+        let [root, path] = arguments else {
+            return Err(redacted_error("ORNA-EVAL-ARGUMENT"));
+        };
+        let root = raw_text(root.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
+        let path = raw_text(path.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
+        Ok(OvbRaw::Bool(provider.exists(root, path).map_err(
+            |failure| self.failure(operation, failure.code()),
+        )?))
+    }
+
+    fn filesystem_is_directory(
+        &self,
+        operation: &HostOperationDescriptor,
+        provider: &FilesystemProvider,
+        arguments: &[CanonicalValue],
+    ) -> Result<OvbRaw, EvaluationError> {
+        let [root, path] = arguments else {
+            return Err(redacted_error("ORNA-EVAL-ARGUMENT"));
+        };
+        let root = raw_text(root.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
+        let path = raw_text(path.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
+        Ok(OvbRaw::Bool(provider.is_directory(root, path).map_err(
+            |failure| self.failure(operation, failure.code()),
+        )?))
+    }
+
+    fn filesystem_list(
+        &self,
+        operation: &HostOperationDescriptor,
+        provider: &FilesystemProvider,
+        arguments: &[CanonicalValue],
+    ) -> Result<OvbRaw, EvaluationError> {
+        let [root, path] = arguments else {
+            return Err(redacted_error("ORNA-EVAL-ARGUMENT"));
+        };
+        let root = raw_text(root.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
+        let path = raw_text(path.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
+        Ok(OvbRaw::Array(
+            provider
+                .list(root, path)
+                .map_err(|failure| self.failure(operation, failure.code()))?
+                .into_iter()
+                .map(OvbRaw::Text)
+                .collect(),
+        ))
+    }
+
+    /// Encodes metadata, following symbolic links only when `follow` is set.
+    fn filesystem_metadata(
+        &self,
+        operation: &HostOperationDescriptor,
+        provider: &FilesystemProvider,
+        arguments: &[CanonicalValue],
+        follow: bool,
+    ) -> Result<OvbRaw, EvaluationError> {
+        let [root, path] = arguments else {
+            return Err(redacted_error("ORNA-EVAL-ARGUMENT"));
+        };
+        let root = raw_text(root.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
+        let path = raw_text(path.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
+        let metadata = if follow {
+            provider.metadata(root, path)
+        } else {
+            provider.symlink_metadata(root, path)
+        }
+        .map_err(|failure| self.failure(operation, failure.code()))?;
+        Ok(OvbRaw::Array(vec![
+            OvbRaw::Text(metadata.kind),
+            optional_value(metadata.size.map(|size| OvbRaw::Int(size.into()))),
+            optional_value(metadata.modified.and_then(system_time_raw)),
+            optional_value(metadata.created.and_then(system_time_raw)),
+        ]))
+    }
+
+    fn filesystem_create_dir(
+        &self,
+        operation: &HostOperationDescriptor,
+        provider: &FilesystemProvider,
+        arguments: &[CanonicalValue],
+    ) -> Result<OvbRaw, EvaluationError> {
+        let [root, path, parents, exist_ok] = arguments else {
+            return Err(redacted_error("ORNA-EVAL-ARGUMENT"));
+        };
+        let root = raw_text(root.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
+        let path = raw_text(path.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
+        let parents = raw_bool(parents.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
+        let exist_ok = raw_bool(exist_ok.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
+        provider
+            .create_dir(root, path, parents, exist_ok)
+            .map_err(|failure| self.failure(operation, failure.code()))?;
+        Ok(OvbRaw::Null)
+    }
+
+    fn filesystem_remove_file(
+        &self,
+        operation: &HostOperationDescriptor,
+        provider: &FilesystemProvider,
+        arguments: &[CanonicalValue],
+    ) -> Result<OvbRaw, EvaluationError> {
+        let [root, path] = arguments else {
+            return Err(redacted_error("ORNA-EVAL-ARGUMENT"));
+        };
+        let root = raw_text(root.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
+        let path = raw_text(path.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
+        provider
+            .remove_file(root, path)
+            .map_err(|failure| self.failure(operation, failure.code()))?;
+        Ok(OvbRaw::Null)
+    }
+
+    fn filesystem_copy_file(
+        &self,
+        operation: &HostOperationDescriptor,
+        provider: &FilesystemProvider,
+        arguments: &[CanonicalValue],
+    ) -> Result<OvbRaw, EvaluationError> {
+        let [root, source, destination, overwrite] = arguments else {
+            return Err(redacted_error("ORNA-EVAL-ARGUMENT"));
+        };
+        let root = raw_text(root.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
+        let source = raw_text(source.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
+        let destination =
+            raw_text(destination.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
+        let overwrite =
+            raw_bool(overwrite.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
+        provider
+            .copy_file(root, source, destination, overwrite)
+            .map_err(|failure| self.failure(operation, failure.code()))?;
+        Ok(OvbRaw::Null)
+    }
+
+    fn filesystem_move_file(
+        &self,
+        operation: &HostOperationDescriptor,
+        provider: &FilesystemProvider,
+        arguments: &[CanonicalValue],
+    ) -> Result<OvbRaw, EvaluationError> {
+        let [root, source, destination, overwrite] = arguments else {
+            return Err(redacted_error("ORNA-EVAL-ARGUMENT"));
+        };
+        let root = raw_text(root.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
+        let source = raw_text(source.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
+        let destination =
+            raw_text(destination.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
+        let overwrite =
+            raw_bool(overwrite.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
+        provider
+            .move_file(root, source, destination, overwrite)
+            .map_err(|failure| self.failure(operation, failure.code()))?;
+        Ok(OvbRaw::Null)
     }
 
     fn dispatch_http(
@@ -578,67 +790,19 @@ impl SysHostBindingRegistry {
             .process
             .as_ref()
             .ok_or_else(|| redacted_error("ORNA-EVAL-UNSUPPORTED"))?;
-        let [
-            executable,
-            args,
-            working_directory,
-            environment,
-            input,
-            timeout,
-            output_limit,
-        ] = arguments
-        else {
-            return Err(redacted_error("ORNA-EVAL-ARGUMENT"));
-        };
-        let executable =
-            raw_text(executable.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
-        let working_directory =
-            raw_text(working_directory.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
-        let args = raw_text_array(args.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
-        let environment =
-            raw_text_pairs(environment.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
-        let input = optional_raw(input.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
-        let input = match input {
-            None | Some(OvbRaw::Null) => None,
-            Some(OvbRaw::Bytes(bytes)) => Some(bytes.as_slice()),
-            Some(_) => return Err(redacted_error("ORNA-EVAL-TYPE")),
-        };
-        let timeout =
-            optional_raw(timeout.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
-        let timeout = match timeout {
-            None | Some(OvbRaw::Null) => None,
-            Some(OvbRaw::Tag(60005, value)) => {
-                Some(raw_duration(value).ok_or_else(|| redacted_error("ORNA-EVAL-VALUE"))?)
-            }
-            Some(_) => return Err(redacted_error("ORNA-EVAL-TYPE")),
-        };
-        let OvbRaw::Int(output_limit) = output_limit.raw() else {
-            return Err(redacted_error("ORNA-EVAL-TYPE"));
-        };
-        let output_limit = output_limit
-            .to_usize()
-            .ok_or_else(|| redacted_error("ORNA-EVAL-VALUE"))?;
+        let request = process_request(arguments)?;
         let output = provider
             .run(
-                executable,
-                &args,
-                working_directory,
-                &environment,
-                input,
-                timeout,
-                output_limit,
+                request.executable,
+                &request.args,
+                request.working_directory,
+                &request.environment,
+                request.input,
+                request.timeout,
+                request.output_limit,
             )
             .map_err(|failure| self.failure(operation, failure.code()))?;
-        let exit_status = match output.exit_status {
-            Some(status) => OvbRaw::Tag(
-                60013,
-                Box::new(OvbRaw::Array(vec![
-                    OvbRaw::Int(1.into()),
-                    OvbRaw::Int(status.into()),
-                ])),
-            ),
-            None => OvbRaw::Tag(60013, Box::new(OvbRaw::Array(vec![OvbRaw::Int(0.into())]))),
-        };
+        let exit_status = process_exit_status(output.exit_status);
         CanonicalValue::new(OvbRaw::Tag(
             60015,
             Box::new(OvbRaw::Array(vec![
