@@ -540,3 +540,21 @@ path = "crates/orna-semantic/src/system_calls.rs::infer_start_system_call"
 new_limit = 132
 reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
 bead = "ornadb-rkn8m"
+
+[[raise]]
+path = "crates/orna-runtime/src/publication.rs"
+new_limit = 1445
+reason = "recorded on main before this branch: publication.rs was already 1445 lines when it merged; re-keying the inherited entry only"
+bead = "ornadb-7603h.1"
+
+[[raise]]
+path = "crates/orna-runtime/src/lib.rs::replaying_a_published_vfs_save_keeps_the_durable_generation"
+new_limit = 122
+reason = "recorded on main before this branch: the VFS replay test landed at 122 lines without a budget entry"
+bead = "ornadb-7603h.1"
+
+[[raise]]
+path = "crates/orna-runtime/src/lib.rs::replaying_a_published_vfs_save_reports_the_idempotent_outcome"
+new_limit = 124
+reason = "recorded on main before this branch: the VFS replay test landed at 124 lines without a budget entry"
+bead = "ornadb-7603h.1"
