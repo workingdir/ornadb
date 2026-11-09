@@ -22,6 +22,7 @@ mod editor_ranges;
 mod formatting;
 mod hierarchy;
 mod hover;
+mod identity_rename;
 mod inlay;
 mod names;
 mod project;
