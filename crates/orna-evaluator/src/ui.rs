@@ -111,51 +111,9 @@ impl Context<'_, '_> {
             self.string(type_name.clone())?;
         }
 
-        let mut action_map = BTreeMap::new();
-        for action in actions {
-            let Value::Tuple(pair) = action else {
-                return Err(error("ORNA-EVAL-TYPE"));
-            };
-            let [Value::String(name), descriptor] = pair.as_slice() else {
-                return Err(error("ORNA-EVAL-TYPE"));
-            };
-            if name.is_empty() || !is_ui_action_descriptor(descriptor) {
-                return Err(error("ORNA-EVAL-ARGUMENT"));
-            }
-            self.string(name.clone())?;
-            if action_map
-                .insert(name.clone(), descriptor.clone())
-                .is_some()
-            {
-                return Err(error("ORNA-EVAL-ARGUMENT"));
-            }
-        }
+        let action_map = self.ui_action_map(actions)?;
 
-        if kind == "input" {
-            let Value::Record(descriptor) = action_map
-                .get("change")
-                .ok_or_else(|| error("ORNA-EVAL-ARGUMENT"))?
-            else {
-                return Err(error("ORNA-EVAL-ARGUMENT"));
-            };
-            let Some(Value::String(input_type)) = descriptor.get("input_type") else {
-                return Err(error("ORNA-EVAL-ARGUMENT"));
-            };
-            match properties.get("value") {
-                Some(Value::Option(Some(value)))
-                    if ui_value_type_name(value) != input_type.as_str() =>
-                {
-                    return Err(error("ORNA-EVAL-ARGUMENT"));
-                }
-                Some(Value::Option(None) | Value::Null) => {
-                    type_overrides
-                        .entry("value".into())
-                        .or_insert_with(|| format!("std.option<{input_type}>"));
-                }
-                Some(Value::Option(Some(_))) => {}
-                _ => return Err(error("ORNA-EVAL-TYPE")),
-            }
-        }
+        Self::ui_check_input(kind, properties, &action_map, &mut type_overrides)?;
 
         // A relation-valued property (a table node's rows) is materialised to a
         // list of records first: `canonical()` refuses a relation, and a node
@@ -221,6 +179,70 @@ impl Context<'_, '_> {
         node.insert("slots".into(), Value::Record(slots));
         node.insert("actions".into(), Value::Record(action_map));
         Ok(Value::Record(node))
+    }
+
+    /// Validates the action slots of one node: a non-empty unique name paired
+    /// with a canonical action descriptor.
+    fn ui_action_map(
+        &mut self,
+        actions: &List,
+    ) -> Result<BTreeMap<String, Value>, EvaluationError> {
+        let mut action_map = BTreeMap::new();
+        for action in actions {
+            let Value::Tuple(pair) = action else {
+                return Err(error("ORNA-EVAL-TYPE"));
+            };
+            let [Value::String(name), descriptor] = pair.as_slice() else {
+                return Err(error("ORNA-EVAL-TYPE"));
+            };
+            if name.is_empty() || !is_ui_action_descriptor(descriptor) {
+                return Err(error("ORNA-EVAL-ARGUMENT"));
+            }
+            self.string(name.clone())?;
+            if action_map
+                .insert(name.clone(), descriptor.clone())
+                .is_some()
+            {
+                return Err(error("ORNA-EVAL-ARGUMENT"));
+            }
+        }
+        Ok(action_map)
+    }
+
+    /// An input node's `value` property must agree with the `change` action's
+    /// declared input type; an empty value gains that optional type.
+    fn ui_check_input(
+        kind: &str,
+        properties: &BTreeMap<String, Value>,
+        action_map: &BTreeMap<String, Value>,
+        type_overrides: &mut BTreeMap<String, String>,
+    ) -> Result<(), EvaluationError> {
+        if kind == "input" {
+            let Value::Record(descriptor) = action_map
+                .get("change")
+                .ok_or_else(|| error("ORNA-EVAL-ARGUMENT"))?
+            else {
+                return Err(error("ORNA-EVAL-ARGUMENT"));
+            };
+            let Some(Value::String(input_type)) = descriptor.get("input_type") else {
+                return Err(error("ORNA-EVAL-ARGUMENT"));
+            };
+            match properties.get("value") {
+                Some(Value::Option(Some(value)))
+                    if ui_value_type_name(value) != input_type.as_str() =>
+                {
+                    return Err(error("ORNA-EVAL-ARGUMENT"));
+                }
+                Some(Value::Option(None) | Value::Null) => {
+                    type_overrides
+                        .entry("value".into())
+                        .or_insert_with(|| format!("std.option<{input_type}>"));
+                }
+                Some(Value::Option(Some(_))) => {}
+                _ => return Err(error("ORNA-EVAL-TYPE")),
+            }
+        }
+        Ok(())
     }
 }
 

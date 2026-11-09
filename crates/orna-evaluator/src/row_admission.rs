@@ -6,7 +6,7 @@
 
 use crate::{Limits, evaluate_parsed};
 use num_bigint::BigInt;
-use orna_semantic::{Analysis, Namespace, TableSchema, Type};
+use orna_semantic::{Analysis, Namespace, TableAdmission, TableSchema, Type};
 use orna_syntax::{Expr, parse_row};
 use orna_value::{Diagnostic, DiagnosticSeverity, SafeText, Value};
 use orna_value::{Raw, path_decode_key_components};
@@ -170,30 +170,7 @@ fn admit_row(
     source: &str,
     limits: Limits,
 ) -> RowResult<AdmittedLooseRow> {
-    let admission = schema.admission.as_ref().ok_or_else(|| {
-        row_error(
-            "ORNA-CONFORMANCE-ROW-SCHEMA",
-            "table declaration lacks row admission metadata",
-        )
-    })?;
-    let key_text = path_decode_key_components(&encoded_key).map_err(|_| {
-        row_error(
-            "ORNA-CONFORMANCE-ROW-PATH",
-            "loose row path does not decode to the declared key schema",
-        )
-    })?;
-    if key_text.len() != admission.keys.len() {
-        return Err(row_error(
-            "ORNA-CONFORMANCE-ROW-PATH",
-            "loose row path does not decode to the declared key schema",
-        ));
-    }
-    let key = admission
-        .keys
-        .iter()
-        .zip(key_text)
-        .map(|((_, ty), text)| decode_key(&text, ty))
-        .collect::<Result<Vec<_>, _>>()?;
+    let (key, admission) = admitted_key(&encoded_key, schema)?;
 
     let parsed = parse_row(source);
     if !parsed.is_ok() {
@@ -268,6 +245,50 @@ fn admit_row(
             "loose row body is not a record",
         ));
     };
+    let body = admitted_body(schema, &expressions, fields)?;
+    Ok(AdmittedLooseRow { owner, key, body })
+}
+
+/// Decodes the declared primary key from the loose row path, rejecting paths
+/// that do not match the key arity or key types.
+fn admitted_key<'a>(
+    encoded_key: &[String],
+    schema: &'a TableSchema,
+) -> RowResult<(Vec<Value>, &'a TableAdmission)> {
+    let admission = schema.admission.as_ref().ok_or_else(|| {
+        row_error(
+            "ORNA-CONFORMANCE-ROW-SCHEMA",
+            "table declaration lacks row admission metadata",
+        )
+    })?;
+    let key_text = path_decode_key_components(encoded_key).map_err(|_| {
+        row_error(
+            "ORNA-CONFORMANCE-ROW-PATH",
+            "loose row path does not decode to the declared key schema",
+        )
+    })?;
+    if key_text.len() != admission.keys.len() {
+        return Err(row_error(
+            "ORNA-CONFORMANCE-ROW-PATH",
+            "loose row path does not decode to the declared key schema",
+        ));
+    }
+    let key = admission
+        .keys
+        .iter()
+        .zip(key_text)
+        .map(|((_, ty), text)| decode_key(&text, ty))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((key, admission))
+}
+
+/// Converts the evaluated row map into typed stored fields, rejecting unknown,
+/// unsupported or mismatched fields.
+fn admitted_body(
+    schema: &TableSchema,
+    expressions: &BTreeMap<&str, &Expr>,
+    fields: &[(Raw, Raw)],
+) -> RowResult<BTreeMap<String, Value>> {
     let mut body = BTreeMap::new();
     for (name, value) in fields {
         let Raw::Text(name) = name else {
@@ -308,7 +329,7 @@ fn admit_row(
         }
         body.insert(name.clone(), value);
     }
-    Ok(AdmittedLooseRow { owner, key, body })
+    Ok(body)
 }
 
 fn validate_stored_references(raw: &Raw, identity: &RowAdmissionIdentity) -> RowResult<()> {

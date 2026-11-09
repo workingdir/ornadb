@@ -160,13 +160,9 @@ name = "orna-evaluator"
 "src/repl.rs" = 1766
 "src/sys_bindings.rs" = 2392
 [crate.functions]
-"src/lib.rs::concurrent" = 134
 "src/lib.rs::context_named_invocation_adopts_effect_result_owner_context" = 163
 "src/lib.rs::context_named_invocation_preserves_owner_context_after_ovb2_effects" = 147
-"src/lib.rs::extreme" = 139
-"src/row_admission.rs::admit_row" = 147
 "src/sys_bindings.rs::rov3_descriptor_only_is_unavailable_and_self_equal" = 159
-"src/ui.rs::ui_node" = 152
 
 [[crate]]
 name = "orna-evolution"
