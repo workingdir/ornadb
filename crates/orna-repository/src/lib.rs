@@ -73,13 +73,9 @@ mod wire;
 
 pub use adapter::{OrnaRepositoryAdapter, OrnaRepositoryAdapterError};
 pub use blob_store::{ContentIdentity, raw_content_bytes_digested};
-pub use checkout::{
-    CheckoutGitSubplan, CheckoutPlanToken, CheckoutPreflight, CheckoutTarget, CwdGeneration,
-    IndexGeneration, RuntimeGeneration, ValidatedCheckoutDiscard, WorktreeState,
-};
 pub(crate) use checkout::{
-    CheckoutRecoveryJournal, CheckoutRecoveryState, CheckoutRecoveryStep, CachedFileDigest,
-    CONTENT_RACY_WINDOW, ManagedFileStamp, ManagedStamp, ScannedWorktreePath, WorktreeScan,
+    CONTENT_RACY_WINDOW, CachedFileDigest, CheckoutRecoveryJournal, CheckoutRecoveryState,
+    CheckoutRecoveryStep, ManagedFileStamp, ManagedStamp, ScannedWorktreePath, WorktreeScan,
     case_folded_path_collides, is_loose_path_components, managed_candidate_recheck_race,
     record_case_folded_path_components, sorted_paths,
 };
@@ -87,13 +83,17 @@ pub(crate) use checkout::{
 pub(crate) use checkout::{
     CONTENT_READS, MANAGED_CANDIDATE_RECHECK_RACE, ManagedCandidateRecheckRace,
 };
+pub use checkout::{
+    CheckoutGitSubplan, CheckoutPlanToken, CheckoutPreflight, CheckoutTarget, CwdGeneration,
+    IndexGeneration, RuntimeGeneration, ValidatedCheckoutDiscard, WorktreeState,
+};
+#[cfg(test)]
+pub(crate) use commit::{AcceptAllAssertions, AcceptAllCheckoutAssertions};
 pub use commit::{
     CandidateAssertionGate, CandidateAssertionRefusal, CheckoutAssertionGate, CommittedBranch,
     CommittedLogEntry, CommittedRevisionSnapshot, CommittedTreeEntry, CommittedTreeEntryKind,
     GitCommitRef, IndexTreeRef, ManagedFileChange, PrivateCommit, ReviewedCandidateReview,
 };
-#[cfg(test)]
-pub(crate) use commit::{AcceptAllAssertions, AcceptAllCheckoutAssertions};
 pub(crate) use commit::{
     MAX_COMMITTED_REVISION_WALK, commit_gate_refusal, reviewed_candidate_runtime_intent_id,
     reviewed_candidate_token, split_committed_revision_record,
@@ -148,7 +148,6 @@ pub use row_store::{
     RowDependency, RowMapSnapshot, RowMapVersion, RowValue, SchemaGeneration, TypedKey,
 };
 pub use transport::{FetchError, FetchReport, FetchRequest, FetchedRef, PushRequest, RequestedRef};
-
 
 const JOURNAL_MAGIC: &[u8] = b"ORNA-PUB-JOURNAL\0";
 const CHECKOUT_JOURNAL_MAGIC: &[u8] = b"ORNA-CHECKOUT-JOURNAL\0";
@@ -1523,9 +1522,6 @@ impl PublicationJournal {
         Ok(())
     }
 }
-
-
-
 
 /// A normal Git repository and its selected worktree.
 ///
@@ -9912,8 +9908,6 @@ fn valid_branch_name(name: &str) -> bool {
                 || matches!(byte, b'~' | b'^' | b':' | b'?' | b'*' | b'[' | b'\\')
         })
 }
-
-
 
 #[cfg(test)]
 mod tests {

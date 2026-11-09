@@ -382,7 +382,10 @@ impl CheckoutRecoveryJournal {
             && self.before() == Some(&discard.preflight.cwd)
     }
 
-    pub(crate) fn record_discarded(&mut self, discarded: CwdGeneration) -> Result<(), RepositoryError> {
+    pub(crate) fn record_discarded(
+        &mut self,
+        discarded: CwdGeneration,
+    ) -> Result<(), RepositoryError> {
         let CheckoutRecoveryState::Prepared { before } = &self.state else {
             return Err(RepositoryError::InvalidCheckoutJournal);
         };
