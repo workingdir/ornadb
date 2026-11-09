@@ -1592,33 +1592,48 @@ impl fmt::Display for ExplainError {
 
 impl std::error::Error for ExplainError {}
 
-/// Every optional input a query explanation can fold. An absent input is
-/// empty (and `disjunct_count` is 1); each public `explain_query_with_*` entry
-/// point fills in only the inputs it accepts.
-#[derive(Clone, Copy)]
-struct ExplainInputs<'a> {
-    disjunct_count: u64,
-    conjunct_count: Option<u64>,
-    conjunct_count_per_disjunct: Option<u64>,
-    nested_input_limits: &'a [u64],
-    nested_branch_limits: &'a [u64],
-    limits_between_disjunct_and_conjunct: &'a [u64],
-    post_expansion_conjunct: Option<&'a ExpressionRef>,
-    additional_limits: &'a [u64],
-    disjunct_storms: &'a [DisjunctStormDescription],
-    disjunct_storm_cascades: &'a [DisjunctStormCascadeDescription],
-    partial_indexes: &'a [QueryPartialIndexDescription],
-    decorrelated_subqueries: &'a [QueryDecorrelatedSubqueryDescription],
-    window_aggregates: &'a [QueryWindowAggregatePushdownDescription],
-    join_pair_identities: &'a [QueryJoinPairIdentityDescription],
-    input_limit_pushdowns: &'a [QueryLimitPushdownDescription],
-    window_spills: &'a [QueryWindowSpillDescription],
-    checkpoint_compaction_chains: &'a [QueryPairedCheckpointSegmentCompactionChainDescription],
-    segment_rotation_chains: &'a [QueryPairedSegmentRotationChainDescription],
-    stream_compaction_chains: &'a [QueryPairedStreamCompactionChainDescription],
-    spill_restore_chains: &'a [QueryPairedCheckpointSpillRestoreChainDescription],
-    stream_rotation_chains: &'a [QueryPairedStreamRotationChainDescription],
-    wal_rotation_chains: &'a [QueryPairedWalRotationChainDescription],
+/// Every optional input a query explanation can fold.
+///
+/// Absent inputs are empty: `disjunct_count` is 1, the optional counts are
+/// unset, and chains the resolver did not supply are `None`. A `Some` chain
+/// selects a planning shape whose model requires at least one stage, so an
+/// empty `Some` chain is rejected instead of being silently treated as
+/// absent. Shapes that merely permit an absent chain record it through
+/// [`ExplainInputs::modelled`].
+#[derive(Clone, Copy, Debug)]
+pub struct ExplainInputs<'a> {
+    pub disjunct_count: u64,
+    pub conjunct_count: Option<u64>,
+    pub conjunct_count_per_disjunct: Option<u64>,
+    pub nested_input_limits: Option<&'a [u64]>,
+    pub nested_branch_limits: Option<&'a [u64]>,
+    pub limits_between_disjunct_and_conjunct: Option<&'a [u64]>,
+    pub post_expansion_conjunct: Option<&'a ExpressionRef>,
+    pub additional_limits: &'a [u64],
+    pub disjunct_storms: Option<&'a [DisjunctStormDescription]>,
+    pub disjunct_storm_cascades: Option<&'a [DisjunctStormCascadeDescription]>,
+    pub partial_indexes: &'a [QueryPartialIndexDescription],
+    pub decorrelated_subqueries: &'a [QueryDecorrelatedSubqueryDescription],
+    pub window_aggregates: &'a [QueryWindowAggregatePushdownDescription],
+    pub join_pair_identities: &'a [QueryJoinPairIdentityDescription],
+    pub input_limit_pushdowns: &'a [QueryLimitPushdownDescription],
+    pub window_spills: &'a [QueryWindowSpillDescription],
+    pub checkpoint_compaction_chains:
+        &'a [QueryPairedCheckpointSegmentCompactionChainDescription],
+    pub segment_rotation_chains: &'a [QueryPairedSegmentRotationChainDescription],
+    pub stream_compaction_chains: &'a [QueryPairedStreamCompactionChainDescription],
+    pub spill_restore_chains: &'a [QueryPairedCheckpointSpillRestoreChainDescription],
+    pub stream_rotation_chains: &'a [QueryPairedStreamRotationChainDescription],
+    pub wal_rotation_chains: &'a [QueryPairedWalRotationChainDescription],
+}
+
+impl<'a> ExplainInputs<'a> {
+    /// Records a chain the resolved shape permits but does not require: an
+    /// empty slice stays absent so it cannot trip the non-empty rule that a
+    /// required chain model enforces.
+    pub fn modelled<T>(values: &'a [T]) -> Option<&'a [T]> {
+        (!values.is_empty()).then_some(values)
+    }
 }
 
 impl Default for ExplainInputs<'_> {
@@ -1627,13 +1642,13 @@ impl Default for ExplainInputs<'_> {
             disjunct_count: 1,
             conjunct_count: None,
             conjunct_count_per_disjunct: None,
-            nested_input_limits: &[],
-            nested_branch_limits: &[],
-            limits_between_disjunct_and_conjunct: &[],
+            nested_input_limits: None,
+            nested_branch_limits: None,
+            limits_between_disjunct_and_conjunct: None,
             post_expansion_conjunct: None,
             additional_limits: &[],
-            disjunct_storms: &[],
-            disjunct_storm_cascades: &[],
+            disjunct_storms: None,
+            disjunct_storm_cascades: None,
             partial_indexes: &[],
             decorrelated_subqueries: &[],
             window_aggregates: &[],
@@ -1650,12 +1665,32 @@ impl Default for ExplainInputs<'_> {
     }
 }
 
-/// Plans a resolved query without changing how it is evaluated. A scan remains
-/// the reference fallback; materialization is shown only when explicitly
-/// requested. Statistics are estimates supplied by the snapshot adapter, and
-/// actual fields remain absent because explain does not execute the query.
+/// Resolves a chain model that the selected shape requires. `None` means the
+/// shape does not model the chain at all and is therefore empty; `Some` must
+/// carry at least one stage because the shape selected that chain.
+fn required_chain<T>(chain: Option<&[T]>) -> Result<&[T], ExplainError> {
+    match chain {
+        None => Ok(&[]),
+        Some([]) => Err(ExplainError::InvalidExpression),
+        Some(values) => Ok(values),
+    }
+}
+
+/// Plans a resolved query from the optional folds its resolver supplied.
+/// A scan remains the reference fallback; materialization is shown only when
+/// explicitly requested. Statistics are estimates supplied by the snapshot
+/// adapter, and actual fields remain absent because explain does not execute
+/// the query.
+pub fn explain_query_with(
+    query: &QueryPlanDescription,
+    inputs: ExplainInputs<'_>,
+) -> Result<ExplainedPlan, ExplainError> {
+    explain_with_inputs(query, &inputs)
+}
+
+/// Plans a resolved query without changing how it is evaluated.
 pub fn explain_query(query: &QueryPlanDescription) -> Result<ExplainedPlan, ExplainError> {
-    explain_with_inputs(query, &ExplainInputs::default())
+    explain_query_with(query, ExplainInputs::default())
 }
 
 /// Explains a query while folding resolver-approved correlated subqueries into
@@ -2278,7 +2313,7 @@ pub fn explain_query_with_disjunct_branch_limit_conjunct_cascade(
         &ExplainInputs {
             disjunct_count,
             conjunct_count_per_disjunct: Some(conjunct_count_per_disjunct),
-            nested_branch_limits,
+            nested_branch_limits: Some(nested_branch_limits),
             additional_limits,
             ..ExplainInputs::default()
         },
@@ -2317,7 +2352,7 @@ pub fn explain_query_with_disjunct_storm_chain(
         query,
         &ExplainInputs {
             additional_limits,
-            disjunct_storms: storms,
+            disjunct_storms: Some(storms),
             ..ExplainInputs::default()
         },
     )
@@ -2365,7 +2400,7 @@ pub fn explain_query_with_disjunct_storm_branch_limit_chains(
         query,
         &ExplainInputs {
             additional_limits,
-            disjunct_storm_cascades: storms,
+            disjunct_storm_cascades: Some(storms),
             ..ExplainInputs::default()
         },
     )
@@ -2393,7 +2428,7 @@ pub fn explain_query_with_input_limit_disjunct_chain(
         query,
         &ExplainInputs {
             disjunct_count,
-            nested_input_limits,
+            nested_input_limits: ExplainInputs::modelled(nested_input_limits),
             additional_limits,
             ..ExplainInputs::default()
         },
@@ -2429,7 +2464,7 @@ pub fn explain_query_with_input_limit_conjunct_disjunct_chain(
         &ExplainInputs {
             disjunct_count,
             conjunct_count_per_disjunct: Some(conjunct_count_per_disjunct),
-            nested_input_limits,
+            nested_input_limits: Some(nested_input_limits),
             additional_limits,
             ..ExplainInputs::default()
         },
@@ -2468,7 +2503,7 @@ pub fn explain_query_with_input_limit_disjunct_conjunct_chain(
         &ExplainInputs {
             disjunct_count,
             conjunct_count: Some(conjunct_count),
-            nested_input_limits,
+            nested_input_limits: Some(nested_input_limits),
             post_expansion_conjunct: Some(&conjunct_predicate),
             additional_limits,
             ..ExplainInputs::default()
@@ -2513,8 +2548,8 @@ pub fn explain_query_with_input_disjunct_limit_conjunct_chain(
         &ExplainInputs {
             disjunct_count,
             conjunct_count: Some(conjunct_count),
-            nested_input_limits,
-            limits_between_disjunct_and_conjunct: nested_disjunct_limits,
+            nested_input_limits: Some(nested_input_limits),
+            limits_between_disjunct_and_conjunct: Some(nested_disjunct_limits),
             post_expansion_conjunct: Some(&conjunct_predicate),
             additional_limits,
             ..ExplainInputs::default()
@@ -2565,8 +2600,8 @@ pub fn explain_query_with_input_limit_conjunct_disjunct_limit_conjunct_chain(
             disjunct_count,
             conjunct_count: Some(conjunct_count),
             conjunct_count_per_disjunct: Some(conjunct_count_per_disjunct),
-            nested_input_limits,
-            limits_between_disjunct_and_conjunct: nested_disjunct_limits,
+            nested_input_limits: Some(nested_input_limits),
+            limits_between_disjunct_and_conjunct: Some(nested_disjunct_limits),
             post_expansion_conjunct: Some(&conjunct_predicate),
             additional_limits,
             ..ExplainInputs::default()
@@ -2606,7 +2641,7 @@ pub fn explain_query_with_disjunct_limit_conjunct_chain(
         &ExplainInputs {
             disjunct_count,
             conjunct_count: Some(conjunct_count),
-            limits_between_disjunct_and_conjunct: nested_limits,
+            limits_between_disjunct_and_conjunct: Some(nested_limits),
             post_expansion_conjunct: Some(&conjunct_predicate),
             additional_limits,
             ..ExplainInputs::default()
@@ -2704,6 +2739,12 @@ fn explain_with_inputs(
         stream_rotation_chains,
         wal_rotation_chains,
     } = *inputs;
+    let nested_input_limits = required_chain(nested_input_limits)?;
+    let nested_branch_limits = required_chain(nested_branch_limits)?;
+    let limits_between_disjunct_and_conjunct =
+        required_chain(limits_between_disjunct_and_conjunct)?;
+    let disjunct_storms = required_chain(disjunct_storms)?;
+    let disjunct_storm_cascades = required_chain(disjunct_storm_cascades)?;
     if query
         .joins
         .len()
@@ -2926,6 +2967,12 @@ fn explain_with_inputs(
             || conjunct_count_per_disjunct.is_some())
             && query.predicate.is_none())
         || (!disjunct_storm_cascades.is_empty() && query.predicate.is_some())
+        || (!disjunct_storms.is_empty() && query.predicate.is_some())
+        || disjunct_storms.iter().any(|storm| {
+            storm.disjunct_count == 0
+                || storm.nested_branch_limits.is_empty()
+                || storm.conjunct_count_per_disjunct == 0
+        })
         || (!limits_between_disjunct_and_conjunct.is_empty() && post_expansion_conjunct.is_none())
         || (post_expansion_conjunct.is_some() && conjunct_count.is_none())
         || (post_expansion_conjunct.is_none()
@@ -2933,6 +2980,11 @@ fn explain_with_inputs(
             && conjunct_count_per_disjunct.is_some())
     {
         return Err(ExplainError::InvalidExpression);
+    }
+    if conjunct_count_per_disjunct.is_some_and(|per_disjunct| {
+        disjunct_count.saturating_mul(per_disjunct) > MAX_PLAN_EXPRESSIONS as u64
+    }) {
+        return Err(ExplainError::TooManyExpressions);
     }
     if invalid_reference(query.snapshot.as_str()) {
         return Err(ExplainError::InvalidSnapshot);
