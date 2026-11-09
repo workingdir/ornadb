@@ -8,6 +8,7 @@
 //! supervisor below only provides a bounded execution and await seam for
 //! admitted work.
 
+pub use orna_sys_id::SysFunction;
 pub use orna_sys_model::abi_version::AbiVersion;
 pub use orna_sys_model::host_registry_model::{
     HostBindingDeclaration, HostOperationDescriptor, HostProviderRole, SystemHostOperationRegistry,
@@ -132,11 +133,8 @@ pub mod format_api_selection;
 /// repository's verified recorded format/profile. The descriptor is static
 /// metadata and does not grant invocation or administrative authority.
 pub fn system_function_descriptor(name: &str) -> Option<&'static SystemFunctionDescriptor> {
-    let context = format_api_selection::SystemFormatContext::from_recorded_pair(
-        format_api_selection::RepositoryFormat::Final3,
-        format_api_selection::ReaderContext::Final20261005,
-    )?;
-    format_api_selection::system_function_descriptor_for(context, name)
+    let function = orna_sys_id::SysFunction::from_label(name)?;
+    Some(&system_api::SYSTEM_FUNCTION_DESCRIPTORS[function.index()])
 }
 
 #[cfg(test)]

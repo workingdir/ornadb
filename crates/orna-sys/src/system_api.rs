@@ -11,8 +11,10 @@
 
 use std::{collections::BTreeSet, sync::LazyLock};
 
-use super::{SystemEffect, SystemFunctionDescriptor, system_function_descriptor};
+use orna_sys_id::{SYS_FUNCTION_COUNT, SysEffect as CatalogueEffect, SysFunction};
 use orna_sys_macros::ornasys;
+
+use super::{SystemEffect, SystemFunctionDescriptor, system_function_descriptor};
 
 const GENERATED_SYSTEM_API: &str = include_str!(concat!(env!("OUT_DIR"), "/api_sys.json"));
 const GENERATED_SYSTEM_SCHEMA: &str =
@@ -60,66 +62,37 @@ static EMBEDDED_SYS_SCHEMA_CHECK: LazyLock<()> = LazyLock::new(|| {
     assert_eq!(api_fields, required_fields);
 });
 
-/// Runtime descriptors are parsed from the same canonical artifact emitted
-/// from method attributes; build.rs does not emit a second Rust descriptor table.
-pub static SYSTEM_FUNCTION_DESCRIPTORS: LazyLock<Vec<SystemFunctionDescriptor>> =
-    LazyLock::new(|| {
-        #[derive(serde::Deserialize)]
-        struct Api<'a> {
-            #[serde(borrow)]
-            functions: Vec<Function<'a>>,
-        }
+/// Projects one generated catalogue identity into this crate's descriptor type.
+fn descriptor_from_catalogue(function: SysFunction) -> SystemFunctionDescriptor {
+    let descriptor = function.descriptor();
+    SystemFunctionDescriptor {
+        function: Some(function),
+        name: descriptor.label,
+        effect: match descriptor.effect {
+            CatalogueEffect::Read => SystemEffect::Read,
+            CatalogueEffect::Invoke => SystemEffect::Invoke,
+            CatalogueEffect::Admin => SystemEffect::Admin,
+        },
+        signature: descriptor.signature,
+        purpose: descriptor.purpose,
+        since: descriptor.since,
+        // `api/sys.json` publishes no extended documentation member for any
+        // callable; extended prose lives only in source-comment build input.
+        documentation: None,
+        contract: descriptor.contract,
+        preconditions: descriptor.preconditions,
+        ownership: descriptor.ownership,
+        snapshot_rule: descriptor.snapshot_rule,
+    }
+}
 
-        #[derive(serde::Deserialize)]
-        struct Function<'a> {
-            #[serde(borrow)]
-            name: &'a str,
-            #[serde(borrow)]
-            effect: &'a str,
-            #[serde(borrow)]
-            signature: &'a str,
-            #[serde(borrow)]
-            purpose: &'a str,
-            #[serde(borrow)]
-            since: Option<&'a str>,
-            #[serde(borrow)]
-            documentation: Option<&'a str>,
-            #[serde(borrow)]
-            contract: Option<&'a str>,
-            #[serde(borrow)]
-            preconditions: Option<&'a str>,
-            #[serde(borrow)]
-            ownership: Option<&'a str>,
-            #[serde(borrow)]
-            snapshot_rule: Option<&'a str>,
-        }
-
-        let api: Api<'static> = serde_json::from_str(GENERATED_SYSTEM_API)
-            .expect("build-validated generated system API JSON");
-        api.functions
-            .into_iter()
-            .map(|function| {
-                let effect = match function.effect {
-                    "read" => SystemEffect::Read,
-                    "invoke" => SystemEffect::Invoke,
-                    "admin" => SystemEffect::Admin,
-                    _ => unreachable!("build validation rejects unknown system effects"),
-                };
-                SystemFunctionDescriptor {
-                    name: function.name,
-                    effect,
-                    signature: function.signature,
-                    purpose: function.purpose,
-                    since: function.since,
-                    documentation: function.documentation,
-                    contract: function.contract,
-                    preconditions: function.preconditions,
-                    ownership: function.ownership,
-                    snapshot_rule: function.snapshot_rule,
-                }
-            })
-            .collect()
-    });
+/// Runtime descriptors indexed by [`SysFunction`] discriminant.
+///
+/// The table is the generated catalogue itself; no JSON is parsed at runtime.
+/// `api_sys.json` remains the published artifact and the build-time parity
+/// fixture, not an initialization input.
+pub static SYSTEM_FUNCTION_DESCRIPTORS: LazyLock<[SystemFunctionDescriptor; SYS_FUNCTION_COUNT]> =
+    LazyLock::new(|| SysFunction::ALL.map(descriptor_from_catalogue));
 
 /// Returns the deterministic build-time projection of the annotated system API methods.
 pub fn system_api_json() -> String {

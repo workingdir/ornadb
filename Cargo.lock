@@ -1771,6 +1771,7 @@ dependencies = [
  "orna-security",
  "orna-syntax",
  "orna-sys-codegen",
+ "orna-sys-id",
  "orna-sys-macros",
  "orna-sys-model",
  "reqwest",

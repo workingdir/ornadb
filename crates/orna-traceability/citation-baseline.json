@@ -25,6 +25,7 @@
     "orna-sys-macros",
     "orna-sys",
     "orna-sys-codegen",
+    "orna-sys-id",
     "orna-sys-model",
     "orna-table",
     "orna-traceability",
