@@ -264,24 +264,6 @@ impl RuntimeState {
         Ok(observations)
     }
 
-    /// Reads one durable query observation without changing runtime state.
-    pub async fn query_observation(
-        &self,
-        id: [u8; 16],
-    ) -> Result<Option<QueryObservation>, RuntimeError> {
-        validate_id(id)?;
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Deferred)
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let observation = load_query_observation_tx(&tx, id).await?;
-        tx.commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        Ok(observation)
-    }
-
     /// Reads the local durable catalogue materialization cache as sys.Materialization.
     pub async fn sys_materialization_projections(
         &self,
