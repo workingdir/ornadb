@@ -454,7 +454,7 @@ fn edit_via_owner(
     request.extend_from_slice(crate::fuse_mount::edit_view_digest(&initial).as_bytes());
     match rustix::fs::setxattr(
         mountpoint,
-        "user.orna.edit-commit",
+        crate::fuse_mount::XATTR_EDIT_COMMIT,
         &request,
         rustix::fs::XattrFlags::empty(),
     ) {
