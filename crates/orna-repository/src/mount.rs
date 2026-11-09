@@ -107,7 +107,7 @@ fn mount_registry_owner_id(paths: &RuntimePaths, create: bool) -> Result<[u8; 16
             }
             let bytes = fs::read(&path).map_err(|_| MountError::HostFilesystem)?;
             let value = std::str::from_utf8(&bytes).map_err(|_| MountError::RecordInvalid)?;
-            let owner_id = parse_hex16(value)?;
+            let owner_id = parse_hex::<16>(value)?;
             if owner_id == [0; 16] {
                 return Err(MountError::RecordInvalid);
             }
@@ -174,6 +174,13 @@ fn remove_registry_file(path: &Path) -> Result<(), MountError> {
     }
 }
 
+/// Whether a mount view accepts mutations. Only a `--cwd` view is writable.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MountAccess {
+    ReadOnly,
+    Writable,
+}
+
 /// One attached read-only view of an exactly-resolved snapshot.
 ///
 /// Reads go through the pinned historical context, so schema, row map, native
@@ -190,7 +197,7 @@ pub struct MountView {
     pin_oid_hex: String,
     view_id: [u8; 32],
     context: HistoricalFormatContext,
-    writable: bool,
+    access: MountAccess,
 }
 
 impl MountView {
@@ -204,7 +211,7 @@ impl MountView {
         mountpoint: impl AsRef<Path>,
         selector: &str,
     ) -> Result<Self, MountError> {
-        Self::attach_with_writability(repository, mountpoint, selector, false)
+        Self::attach_with_access(repository, mountpoint, selector, MountAccess::ReadOnly)
     }
 
     /// Attaches one writable workspace view (`--cwd`) of `selector`, with the
@@ -214,27 +221,23 @@ impl MountView {
         mountpoint: impl AsRef<Path>,
         selector: &str,
     ) -> Result<Self, MountError> {
-        Self::attach_with_writability(repository, mountpoint, selector, true)
+        Self::attach_with_access(repository, mountpoint, selector, MountAccess::Writable)
     }
 
-    fn attach_with_writability(
+    fn attach_with_access(
         repository: &Repository,
         mountpoint: impl AsRef<Path>,
         selector: &str,
-        writable: bool,
+        access: MountAccess,
     ) -> Result<Self, MountError> {
         let context = repository
             .open_format_context_at_selector(selector)
             .map_err(MountError::Format)?;
-        let mountpoint =
-            std::path::absolute(mountpoint.as_ref()).map_err(|_| MountError::HostFilesystem)?;
         let worktree = repository
             .worktree()
             .canonicalize()
             .map_err(|_| MountError::HostFilesystem)?;
-        let resolved_mountpoint = mountpoint
-            .canonicalize()
-            .unwrap_or_else(|_| mountpoint.clone());
+        let resolved_mountpoint = resolve_mountpoint(mountpoint.as_ref())?;
         if resolved_mountpoint == worktree
             || resolved_mountpoint.starts_with(&worktree)
             || worktree.starts_with(&resolved_mountpoint)
@@ -293,7 +296,7 @@ impl MountView {
             pin_oid_hex,
             view_id,
             context,
-            writable,
+            access,
         };
         if let Err(error) = view.write_record() {
             let pin_cleanup = crate::native_graph::delete_mount_snapshot_pin(
@@ -341,7 +344,7 @@ impl MountView {
 
     /// Whether the view refuses mutations. Only a `--cwd` view is writable.
     pub const fn is_read_only(&self) -> bool {
-        !self.writable
+        matches!(self.access, MountAccess::ReadOnly)
     }
 
     /// The canonical Git commit resolved for this view's historical snapshot.
@@ -394,7 +397,7 @@ read_only {}
             self.pin_oid_hex.as_str(),
             self.context.repository_format_number(),
             self.context.is_legacy_format(),
-            !self.writable,
+            self.access == MountAccess::ReadOnly,
         );
         let path = self.record_path();
         let staging = self.staging_path();
@@ -450,16 +453,9 @@ read_only {}
             &self.pin_oid_hex,
         )
         .map_err(|_| MountError::RecordInvalid)?;
-        Ok(MountStatus {
-            mountpoint: record.mountpoint,
-            snapshot: record.snapshot,
-            view: record.view,
-            owner_id: record.owner_id,
-            format: record.format,
-            legacy: record.legacy,
-            writable: record.writable,
-        })
+        Ok(record.status())
     }
+
     fn release(&mut self) -> Result<(), MountError> {
         let _registry_lock = mount_registry_lock(self.repository.runtime_paths(), true)?;
         let registry_owner_id = reconcile_mount_registry_locked(&self.repository)?;
@@ -484,22 +480,7 @@ read_only {}
         {
             return Err(MountError::RecordInvalid);
         }
-        crate::native_graph::delete_mount_snapshot_pin(
-            &self.repository,
-            &registry_owner_id,
-            &self.owner_id,
-            &self.view_id,
-            &self.pin_oid_hex,
-        )
-        .map_err(|_| MountError::SnapshotPinUnavailable)?;
-        remove_registry_file(&path)?;
-        // Accepted-row baselines belong to this view alone; a released view
-        // leaves nothing a later attach could inherit.
-        let _ = fs::remove_dir_all(mount_baseline_dir(
-            self.repository.runtime_paths(),
-            &self.view_id,
-        ));
-        Ok(())
+        release_registered_view(&self.repository, &registry_owner_id, &record, &path)
     }
 }
 
@@ -524,7 +505,7 @@ pub struct MountStatus {
     owner_id: [u8; 16],
     format: u8,
     legacy: bool,
-    writable: bool,
+    access: MountAccess,
 }
 
 impl MountStatus {
@@ -550,12 +531,12 @@ impl MountStatus {
 
     /// Whether the view refuses mutations. Only a `--cwd` view is writable.
     pub const fn is_read_only(&self) -> bool {
-        !self.writable
+        matches!(self.access, MountAccess::ReadOnly)
     }
 
     /// Whether the view accepts mutations (`--cwd`).
     pub const fn is_writable(&self) -> bool {
-        self.writable
+        matches!(self.access, MountAccess::Writable)
     }
 
     /// Hex rendering of the view identity, for stable JSON output.
@@ -578,10 +559,23 @@ struct MountRecord {
     view: [u8; 32],
     format: u8,
     legacy: bool,
-    writable: bool,
+    access: MountAccess,
 }
 
 impl MountRecord {
+    /// The report `mount status` gives for this record.
+    fn status(&self) -> MountStatus {
+        MountStatus {
+            mountpoint: self.mountpoint.clone(),
+            snapshot: self.snapshot,
+            view: self.view,
+            owner_id: self.owner_id,
+            format: self.format,
+            legacy: self.legacy,
+            access: self.access,
+        }
+    }
+
     fn parse(bytes: &[u8]) -> Result<Self, MountError> {
         let text = std::str::from_utf8(bytes).map_err(|_| MountError::RecordInvalid)?;
         let mut lines = text.lines();
@@ -604,9 +598,9 @@ impl MountRecord {
             match key {
                 "mountpoint" => mountpoint = Some(PathBuf::from(value)),
                 "selector" => selector = Some(value.to_owned()),
-                "snapshot" => snapshot = Some(parse_hex32(value)?),
-                "view" => view = Some(parse_hex32(value)?),
-                "owner" => owner_id = Some(parse_hex16(value)?),
+                "snapshot" => snapshot = Some(parse_hex::<32>(value)?),
+                "view" => view = Some(parse_hex::<32>(value)?),
+                "owner" => owner_id = Some(parse_hex::<16>(value)?),
                 "pin" => pin_oid_hex = Some(parse_mount_pin_oid(value)?),
                 "format" => {
                     format = Some(value.parse::<u8>().map_err(|_| MountError::RecordInvalid)?)
@@ -637,31 +631,27 @@ impl MountRecord {
             pin_oid_hex: pin_oid_hex.ok_or(MountError::RecordInvalid)?,
             format: format.ok_or(MountError::RecordInvalid)?,
             legacy: legacy.ok_or(MountError::RecordInvalid)?,
-            writable: !read_only.ok_or(MountError::RecordInvalid)?,
+            access: if read_only.ok_or(MountError::RecordInvalid)? {
+                MountAccess::ReadOnly
+            } else {
+                MountAccess::Writable
+            },
         })
     }
 }
 
-fn parse_hex32(value: &str) -> Result<[u8; 32], MountError> {
-    if value.len() != 64 {
+/// Decodes exactly `N` bytes of ASCII hexadecimal. Operating on bytes keeps a
+/// multi-byte character in `value` an ordinary refusal instead of a slice that
+/// does not fall on a character boundary.
+fn parse_hex<const N: usize>(value: &str) -> Result<[u8; N], MountError> {
+    let digits = value.as_bytes();
+    if digits.len() != N * 2 || !digits.iter().all(u8::is_ascii_hexdigit) {
         return Err(MountError::RecordInvalid);
     }
-    let mut bytes = [0u8; 32];
-    for (index, byte) in bytes.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
-            .map_err(|_| MountError::RecordInvalid)?;
-    }
-    Ok(bytes)
-}
-
-fn parse_hex16(value: &str) -> Result<[u8; 16], MountError> {
-    if value.len() != 32 {
-        return Err(MountError::RecordInvalid);
-    }
-    let mut bytes = [0u8; 16];
-    for (index, byte) in bytes.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
-            .map_err(|_| MountError::RecordInvalid)?;
+    let digit = |byte: u8| char::from(byte).to_digit(16).map_or(0, |digit| digit as u8);
+    let mut bytes = [0u8; N];
+    for (byte, pair) in bytes.iter_mut().zip(digits.chunks_exact(2)) {
+        *byte = (digit(pair[0]) << 4) | digit(pair[1]);
     }
     Ok(bytes)
 }
@@ -756,6 +746,102 @@ fn validate_mount_record_location(
     Ok(())
 }
 
+/// Everything one registry directory holds: the parsed records with their
+/// paths, and the half-written files an interrupted attach or detach left.
+struct RegistryScan {
+    records: Vec<(PathBuf, MountRecord)>,
+    transient: Vec<PathBuf>,
+}
+
+/// Reads every record in the registry. A record that cannot be read, parsed
+/// or located where its own mountpoint says it belongs fails the scan: a
+/// retained record that cannot be read is not absence of a mount.
+fn scan_mount_registry(paths: &RuntimePaths) -> Result<RegistryScan, MountError> {
+    let mut scan = RegistryScan {
+        records: Vec::new(),
+        transient: Vec::new(),
+    };
+    let entries = match fs::read_dir(mount_registry_dir(paths)) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(scan),
+        Err(_) => return Err(MountError::HostFilesystem),
+    };
+    for entry in entries {
+        let path = entry.map_err(|_| MountError::HostFilesystem)?.path();
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "staging" || extension == "tmp")
+        {
+            scan.transient.push(path);
+            continue;
+        }
+        let bytes = fs::read(&path).map_err(|_| MountError::HostFilesystem)?;
+        let record = MountRecord::parse(&bytes)?;
+        validate_mount_record_location(paths, &path, &record)?;
+        scan.records.push((path, record));
+    }
+    Ok(scan)
+}
+
+/// Resolves `mountpoint` the way the registry keys it: absolute, with symlinks
+/// resolved when the path exists.
+fn resolve_mountpoint(mountpoint: &Path) -> Result<PathBuf, MountError> {
+    let mountpoint = std::path::absolute(mountpoint).map_err(|_| MountError::HostFilesystem)?;
+    Ok(mountpoint.canonicalize().unwrap_or(mountpoint))
+}
+
+/// The record registered for the already-resolved `mountpoint`, with the path
+/// it is stored at.
+fn read_registered_record(
+    paths: &RuntimePaths,
+    resolved: &Path,
+) -> Result<(PathBuf, MountRecord), MountError> {
+    let record_path = mount_record_path(paths, resolved);
+    let bytes = fs::read(&record_path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            MountError::NotAttached
+        } else {
+            MountError::HostFilesystem
+        }
+    })?;
+    let record = MountRecord::parse(&bytes)?;
+    if record.mountpoint != resolved {
+        return Err(MountError::RecordInvalid);
+    }
+    validate_mount_record_location(paths, &record_path, &record)?;
+    Ok((record_path, record))
+}
+
+/// Releases one registered view: its accepted-row baselines, its snapshot pin
+/// and, last, its record. The baselines go before the pin and the record
+/// last, so a failure at any step leaves the view registered and verifiable
+/// and the release can be retried.
+fn release_registered_view(
+    repository: &Repository,
+    registry_owner_id: &[u8; 16],
+    record: &MountRecord,
+    record_path: &Path,
+) -> Result<(), MountError> {
+    // Baselines belong to this view alone, and a view with the same
+    // mountpoint and snapshot gets the same identity again. A baseline that
+    // cannot be removed must therefore fail the release instead of being left
+    // for a later attach to inherit.
+    match fs::remove_dir_all(mount_baseline_dir(repository.runtime_paths(), &record.view)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(MountError::HostFilesystem),
+    }
+    crate::native_graph::delete_mount_snapshot_pin(
+        repository,
+        registry_owner_id,
+        &record.owner_id,
+        &record.view,
+        &record.pin_oid_hex,
+    )
+    .map_err(|_| MountError::SnapshotPinUnavailable)?;
+    remove_registry_file(record_path)
+}
+
 fn reconcile_mount_registry_locked(repository: &Repository) -> Result<[u8; 16], MountError> {
     let paths = repository.runtime_paths();
     let registry_owner_id = mount_registry_owner_id(paths, true)?;
@@ -769,40 +855,10 @@ fn reconcile_mount_registry_locked(repository: &Repository) -> Result<[u8; 16], 
         }
     }
 
-    let directory = mount_registry_dir(paths);
-    let entries = match fs::read_dir(&directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            for ((owner_id, view_id), pin_oid_hex) in pins {
-                crate::native_graph::delete_mount_snapshot_pin(
-                    repository,
-                    &registry_owner_id,
-                    &owner_id,
-                    &view_id,
-                    &pin_oid_hex,
-                )
-                .map_err(|_| MountError::SnapshotPinUnavailable)?;
-            }
-            return Ok(registry_owner_id);
-        }
-        Err(_) => return Err(MountError::HostFilesystem),
-    };
-
+    let scan = scan_mount_registry(paths)?;
     let mut seen = BTreeSet::new();
     let mut stale_records = Vec::new();
-    let mut transient_files = Vec::new();
-    for entry in entries {
-        let path = entry.map_err(|_| MountError::HostFilesystem)?.path();
-        if path
-            .extension()
-            .is_some_and(|extension| extension == "staging" || extension == "tmp")
-        {
-            transient_files.push(path);
-            continue;
-        }
-        let bytes = fs::read(&path).map_err(|_| MountError::HostFilesystem)?;
-        let record = MountRecord::parse(&bytes)?;
-        validate_mount_record_location(paths, &path, &record)?;
+    for (path, record) in scan.records {
         let key = (record.owner_id, record.view);
         if !seen.insert(key) {
             return Err(MountError::RecordInvalid);
@@ -826,7 +882,7 @@ fn reconcile_mount_registry_locked(repository: &Repository) -> Result<[u8; 16], 
             .map_err(|_| MountError::SnapshotPinUnavailable)?;
         }
     }
-    for path in stale_records.into_iter().chain(transient_files) {
+    for path in stale_records.into_iter().chain(scan.transient) {
         remove_registry_file(&path)?;
     }
     Ok(registry_owner_id)
@@ -854,24 +910,8 @@ impl Repository {
     pub fn mount_status(&self) -> Result<Vec<MountStatus>, MountError> {
         let _registry_lock = mount_registry_lock(self.runtime_paths(), true)?;
         let registry_owner_id = reconcile_mount_registry_locked(self)?;
-        let directory = mount_registry_dir(self.runtime_paths());
-        let entries = match fs::read_dir(&directory) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(_) => return Err(MountError::HostFilesystem),
-        };
         let mut statuses = Vec::new();
-        for entry in entries {
-            let path = entry.map_err(|_| MountError::HostFilesystem)?.path();
-            if path
-                .extension()
-                .is_some_and(|extension| extension == "staging" || extension == "tmp")
-            {
-                continue;
-            }
-            let bytes = fs::read(&path).map_err(|_| MountError::HostFilesystem)?;
-            let record = MountRecord::parse(&bytes)?;
-            validate_mount_record_location(self.runtime_paths(), &path, &record)?;
+        for (_, record) in scan_mount_registry(self.runtime_paths())?.records {
             crate::native_graph::verify_mount_snapshot_pin(
                 self,
                 &registry_owner_id,
@@ -880,15 +920,7 @@ impl Repository {
                 &record.pin_oid_hex,
             )
             .map_err(|_| MountError::RecordInvalid)?;
-            statuses.push(MountStatus {
-                mountpoint: record.mountpoint,
-                snapshot: record.snapshot,
-                view: record.view,
-                owner_id: record.owner_id,
-                format: record.format,
-                legacy: record.legacy,
-                writable: record.writable,
-            });
+            statuses.push(record.status());
         }
         statuses.sort_by(|left, right| left.mountpoint.cmp(&right.mountpoint));
         Ok(statuses)
@@ -902,55 +934,21 @@ impl Repository {
     /// attached view while the workspace `HEAD` keeps moving. A mountpoint with
     /// no record is refused rather than silently mounted at `HEAD`.
     pub fn open_mount_view(&self, mountpoint: impl AsRef<Path>) -> Result<MountView, MountError> {
-        let mountpoint =
-            std::path::absolute(mountpoint.as_ref()).map_err(|_| MountError::HostFilesystem)?;
-        let resolved = mountpoint
-            .canonicalize()
-            .unwrap_or_else(|_| mountpoint.clone());
+        let resolved = resolve_mountpoint(mountpoint.as_ref())?;
         let _registry_lock = mount_registry_lock(self.runtime_paths(), true)?;
         let registry_owner_id = reconcile_mount_registry_locked(self)?;
-        let record_path = mount_record_path(self.runtime_paths(), &resolved);
-        let bytes = fs::read(&record_path).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                MountError::NotAttached
-            } else {
-                MountError::HostFilesystem
-            }
-        })?;
-        let record = MountRecord::parse(&bytes)?;
-        if record.mountpoint != resolved {
-            return Err(MountError::RecordInvalid);
-        }
-        validate_mount_record_location(self.runtime_paths(), &record_path, &record)?;
+        let (_, record) = read_registered_record(self.runtime_paths(), &resolved)?;
         self.open_mount_record(record, &registry_owner_id)
     }
 
     /// Re-attaches to a recorded view using the view identity carried by its
     /// FUSE source, independent of the registry's canonical mountpoint path.
     pub fn open_mount_view_by_id(&self, view_id_hex: &str) -> Result<MountView, MountError> {
-        let view_id = parse_hex32(view_id_hex)?;
+        let view_id = parse_hex::<32>(view_id_hex)?;
         let _registry_lock = mount_registry_lock(self.runtime_paths(), true)?;
         let registry_owner_id = reconcile_mount_registry_locked(self)?;
-        let directory = mount_registry_dir(self.runtime_paths());
-        let entries = match fs::read_dir(&directory) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(MountError::NotAttached);
-            }
-            Err(_) => return Err(MountError::HostFilesystem),
-        };
         let mut found = None;
-        for entry in entries {
-            let path = entry.map_err(|_| MountError::HostFilesystem)?.path();
-            if path
-                .extension()
-                .is_some_and(|extension| extension == "staging" || extension == "tmp")
-            {
-                continue;
-            }
-            let bytes = fs::read(&path).map_err(|_| MountError::HostFilesystem)?;
-            let record = MountRecord::parse(&bytes)?;
-            validate_mount_record_location(self.runtime_paths(), &path, &record)?;
+        for (_, record) in scan_mount_registry(self.runtime_paths())?.records {
             if record.view == view_id {
                 if found.is_some() {
                     return Err(MountError::RecordInvalid);
@@ -992,7 +990,7 @@ impl Repository {
             pin_oid_hex: record.pin_oid_hex,
             view_id: record.view,
             context,
-            writable: record.writable,
+            access: record.access,
         })
     }
 
@@ -1003,51 +1001,18 @@ impl Repository {
     /// a format-3 workspace view keep working. An unrecognised mountpoint is
     /// reported rather than ignored.
     pub fn unmount_view(&self, mountpoint: impl AsRef<Path>) -> Result<MountStatus, MountError> {
-        let mountpoint =
-            std::path::absolute(mountpoint.as_ref()).map_err(|_| MountError::HostFilesystem)?;
-        let resolved = mountpoint
-            .canonicalize()
-            .unwrap_or_else(|_| mountpoint.clone());
+        let resolved = resolve_mountpoint(mountpoint.as_ref())?;
         let _registry_lock = mount_registry_lock(self.runtime_paths(), true)?;
         let registry_owner_id = reconcile_mount_registry_locked(self)?;
-        let record_path = mount_record_path(self.runtime_paths(), &resolved);
-        let bytes = fs::read(&record_path).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                MountError::NotAttached
-            } else {
-                MountError::HostFilesystem
-            }
-        })?;
-        let record = MountRecord::parse(&bytes)?;
-        if record.mountpoint != resolved {
-            return Err(MountError::RecordInvalid);
-        }
-        validate_mount_record_location(self.runtime_paths(), &record_path, &record)?;
-        let status = MountStatus {
-            mountpoint: record.mountpoint,
-            snapshot: record.snapshot,
-            view: record.view,
-            owner_id: record.owner_id,
-            format: record.format,
-            legacy: record.legacy,
-            writable: record.writable,
-        };
-        crate::native_graph::delete_mount_snapshot_pin(
-            self,
-            &registry_owner_id,
-            &record.owner_id,
-            &record.view,
-            &record.pin_oid_hex,
-        )
-        .map_err(|_| MountError::SnapshotPinUnavailable)?;
-        remove_registry_file(&record_path)?;
-        Ok(status)
+        let (record_path, record) = read_registered_record(self.runtime_paths(), &resolved)?;
+        release_registered_view(self, &registry_owner_id, &record, &record_path)?;
+        Ok(record.status())
     }
 }
 
 #[cfg(test)]
 mod record_parse_tests {
-    use super::MountRecord;
+    use super::{MountAccess, MountRecord};
 
     fn record_text(read_only: &str) -> String {
         format!(
@@ -1062,13 +1027,13 @@ mod record_parse_tests {
     #[test]
     fn read_only_false_parses_as_writable() {
         let record = MountRecord::parse(record_text("false").as_bytes()).unwrap();
-        assert!(record.writable);
+        assert_eq!(record.access, MountAccess::Writable);
     }
 
     #[test]
     fn read_only_true_parses_as_read_only() {
         let record = MountRecord::parse(record_text("true").as_bytes()).unwrap();
-        assert!(!record.writable);
+        assert_eq!(record.access, MountAccess::ReadOnly);
     }
 
     #[test]
