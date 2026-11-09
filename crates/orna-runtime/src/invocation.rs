@@ -19,11 +19,15 @@ use orna_foundation::{
     validate_invocation_argument_reference, validate_invocation_reference, validate_type_reference,
 };
 
-use crate::{
-    CatalogueError, CatalogueFunction, RunObservationId, RuntimeError, RuntimeState, WriterLease,
+use crate::RuntimeState;
+use crate::catalogue::{CatalogueError, CatalogueFunction};
+use crate::codec::{
     decode_bool, decode_u64, encode_capture, fixed, now_ms, validate_digest, validate_id,
-    validate_observation_text, validate_writer_lease,
+    validate_observation_text,
 };
+use crate::error::RuntimeError;
+use crate::lease::{WriterLease, validate_writer_lease};
+use crate::observation::RunObservationId;
 
 const MAX_INVOCATION_ARGUMENTS: usize = 512;
 const MAX_INVOCATION_TAIL_PAGE_SIZE: usize = 256;
@@ -817,7 +821,7 @@ impl RuntimeState {
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let capture = crate::capture_tx(&tx).await?;
+        let capture = crate::codec::capture_tx(&tx).await?;
         // CWD captures include generation as well as digest, so repeating an
         // old digest cannot revive its cursors. Receipt replay or a rolled-back
         // write leaves the capture unchanged; committed generations invalidate.
@@ -1170,7 +1174,7 @@ async fn load_invocation_observation(
         fixed(row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
     let runtime_id: [u8; 16] = fixed(row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
     let runtime_generation: i64 = row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?;
-    let capture = crate::decode_capture(snapshot_bytes.clone(), generation_digest)?;
+    let capture = crate::codec::decode_capture(snapshot_bytes.clone(), generation_digest)?;
     if runtime_id != capture.runtime_id()
         || runtime_generation != bigint_to_i64(capture.generation())?
     {
@@ -1274,10 +1278,13 @@ async fn load_invocation_observation(
         _ => None,
     };
     let run = if let Some(run_id) = run_id {
-        let run_observation =
-            super::load_run_observation_tx(connection, RunObservationId(run_id), &capture)
-                .await?
-                .ok_or(RuntimeError::RecoveryInvalid)?;
+        let run_observation = crate::observation::load_run_observation_tx(
+            connection,
+            RunObservationId(run_id),
+            &capture,
+        )
+        .await?
+        .ok_or(RuntimeError::RecoveryInvalid)?;
         Some(
             run_observation
                 .reference()

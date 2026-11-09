@@ -9,10 +9,11 @@ use std::{
     cmp::Ordering,
     fmt,
     hash::{Hash, Hasher},
-    sync::Arc,
 };
 
 use sha2::{Digest, Sha256};
+
+use crate::cbor::{head, head_bytes};
 
 use orna_value::{
     BlobMetadata, Decimal, MediaAnnotation, Raw, Value, canonical_uuid_text, compare_primary_keys,
@@ -250,14 +251,6 @@ pub struct AdmittedRow {
 }
 
 impl AdmittedRow {
-    fn from_entry(version: &RowMapVersion, entry: &RowEntry) -> Self {
-        Self {
-            version: version.clone(),
-            key: entry.key.clone(),
-            value: entry.value.clone(),
-        }
-    }
-
     pub(crate) fn issue(version: &RowMapVersion, key: TypedKey, value: RowValue) -> Self {
         Self {
             version: version.clone(),
@@ -446,43 +439,18 @@ fn vfs_field_projection_digest(
     hasher.finalize().into()
 }
 
-/// Owner-issued immutable row-map view.  The authority token and rows are
-/// private; only repository-context verification can call `issue`.
+/// Owner-issued immutable row-map view. The authority token is private; only
+/// repository-context verification can call `issue_lazy`.
 #[derive(Clone, Debug)]
 pub struct RowMapSnapshot {
     version: RowMapVersion,
     authority: [u8; 32],
-    entries: Option<Arc<[RowEntry]>>,
 }
 
 impl RowMapSnapshot {
-    /// Seals a row map whose rows are held in memory. Production only issues
-    /// persisted (lazy) snapshots, so this constructor exists for tests.
-    #[cfg(test)]
-    pub(crate) fn issue(
-        version: RowMapVersion,
-        authority: [u8; 32],
-        entries: Vec<RowEntry>,
-    ) -> Result<Self, RowStoreError> {
-        if entries.windows(2).any(|pair| pair[0].key >= pair[1].key) {
-            return Err(RowStoreError::RowsNotStrictlyOrdered);
-        }
-        if version
-            .row_count
-            .is_some_and(|count| count != entries.len() as u64)
-        {
-            return Err(RowStoreError::RowCountMismatch);
-        }
-        Ok(Self {
-            version,
-            authority,
-            entries: Some(entries.into()),
-        })
-    }
-
-    /// Seals a persisted ORP map without materializing its rows. Reads are
-    /// performed through the matching repository-issued NativeGraphContext;
-    /// this snapshot carries identity only and cannot authorize arbitrary OIDs.
+    /// Seals a persisted ORP map. Reads go through the matching
+    /// repository-issued NativeGraphContext; this snapshot carries identity
+    /// only and cannot authorize arbitrary OIDs.
     pub(crate) fn issue_lazy(
         version: RowMapVersion,
         authority: [u8; 32],
@@ -490,11 +458,7 @@ impl RowMapSnapshot {
         if version.row_count.is_none() {
             return Err(RowStoreError::RowCountMismatch);
         }
-        Ok(Self {
-            version,
-            authority,
-            entries: None,
-        })
+        Ok(Self { version, authority })
     }
 
     pub fn version(&self) -> &RowMapVersion {
@@ -503,45 +467,6 @@ impl RowMapSnapshot {
 
     pub(crate) const fn authority(&self) -> &[u8; 32] {
         &self.authority
-    }
-
-    pub const fn is_materialized(&self) -> bool {
-        self.entries.is_some()
-    }
-
-    pub fn get(&self, key: &TypedKey) -> Result<Option<AdmittedRow>, RowStoreError> {
-        let entries = self
-            .entries
-            .as_ref()
-            .ok_or(RowStoreError::PersistedLookupRequiresGraphContext)?;
-        Ok(entries
-            .binary_search_by(|entry| entry.key.cmp(key))
-            .ok()
-            .map(|index| AdmittedRow::from_entry(&self.version, &entries[index])))
-    }
-
-    pub fn range(&self, range: &KeyRange) -> Result<Vec<AdmittedRow>, RowStoreError> {
-        let entries = self
-            .entries
-            .as_ref()
-            .ok_or(RowStoreError::PersistedLookupRequiresGraphContext)?;
-        let start = range.lower_inclusive.as_ref().map_or(0, |lower| {
-            entries.partition_point(|entry| entry.key < *lower)
-        });
-        let start = range.resume_after.as_ref().map_or(start, |after| {
-            start.max(entries.partition_point(|entry| entry.key <= *after))
-        });
-        Ok(entries[start..]
-            .iter()
-            .take_while(|entry| {
-                range
-                    .upper_exclusive
-                    .as_ref()
-                    .is_none_or(|upper| entry.key < *upper)
-            })
-            .take(range.limit)
-            .map(|entry| AdmittedRow::from_entry(&self.version, entry))
-            .collect())
     }
 
     /// Reads a bounded range from a persisted snapshot through its matching
@@ -976,7 +901,7 @@ fn int_head(value: i128) -> (u8, u64) {
 }
 
 fn hash_head<H: Hasher>(state: &mut H, (major, value): (u8, u64)) {
-    let (head, length) = cbor_head_bytes(major, value);
+    let (head, length) = head_bytes(major, value);
     state.write(&head[..length]);
 }
 
@@ -1138,9 +1063,9 @@ impl RowValue {
                     .native_root()
                     .ok_or(RowStoreError::UnresolvedValueOverflow)?;
                 let mut output = Vec::with_capacity(root.as_bytes().len() + 6);
-                cbor_head(&mut output, 6, orna_value::ROV3_OVERFLOW_TAG);
-                cbor_head(&mut output, 4, 1);
-                cbor_head(&mut output, 2, root.as_bytes().len() as u64);
+                head(&mut output, 6, orna_value::ROV3_OVERFLOW_TAG);
+                head(&mut output, 4, 1);
+                head(&mut output, 2, root.as_bytes().len() as u64);
                 output.extend_from_slice(root.as_bytes());
                 Ok(output)
             }
@@ -1158,14 +1083,14 @@ impl RowValue {
         let mut output = Vec::new();
         // The shortest definite array header, so a 256-entry page stays
         // canonical rather than being truncated to a one-byte count.
-        cbor_head(&mut output, 4, entries.len() as u64);
+        head(&mut output, 4, entries.len() as u64);
         for entry in entries {
             let key = entry.key.canonical_bytes()?;
             let value = entry.value.canonical_page_bytes()?;
             let mut pair = Vec::with_capacity(key.len() + value.len() + 4);
             // The pair is a two-element array: the canonical typed key, then
             // the canonical stored value.
-            cbor_head(&mut pair, 4, 2);
+            head(&mut pair, 4, 2);
             pair.extend_from_slice(&key);
             pair.extend_from_slice(&value);
             if output.len() + pair.len() > crate::native_graph::NODE_DATA_LIMIT {
@@ -1237,25 +1162,25 @@ fn encode_key(key: &TypedKey, output: &mut Vec<u8>) -> Result<(), RowStoreError>
         Bool(true) => output.push(0xf5),
         Int(value) => {
             let (major, argument) = int_head(i128::from(*value));
-            cbor_head(output, major, argument);
+            head(output, major, argument);
         }
         UInt(value) => {
             let (major, argument) = int_head(i128::from(*value));
-            cbor_head(output, major, argument);
+            head(output, major, argument);
         }
         Text(value) => {
-            cbor_head(output, 3, value.len() as u64);
+            head(output, 3, value.len() as u64);
             output.extend_from_slice(value.as_bytes());
         }
         Bytes(value) => {
-            cbor_head(output, 2, value.len() as u64);
+            head(output, 2, value.len() as u64);
             output.extend_from_slice(value);
         }
         Tuple(values) => {
             if values.len() > MAX_PAGE_ENTRIES {
                 return Err(RowStoreError::KeyTooLarge(values.len()));
             }
-            cbor_head(output, 4, values.len() as u64);
+            head(output, 4, values.len() as u64);
             for value in values {
                 encode_key(value, output)?;
             }
@@ -1359,44 +1284,6 @@ fn decode_blob_field_metadata(field: &CborValue) -> Result<BlobMetadata, RowStor
     ))
 }
 
-fn cbor_head(output: &mut Vec<u8>, major: u8, value: u64) {
-    let (head, length) = cbor_head_bytes(major, value);
-    output.extend_from_slice(&head[..length]);
-}
-
-/// The shortest definite CBOR head for `major` and `value`, and its length.
-fn cbor_head_bytes(major: u8, value: u64) -> ([u8; 9], usize) {
-    let base = major << 5;
-    let mut head = [0; 9];
-    let length = match value {
-        0..=23 => {
-            head[0] = base | value as u8;
-            1
-        }
-        24..=255 => {
-            head[0] = base | 24;
-            head[1] = value as u8;
-            2
-        }
-        256..=65_535 => {
-            head[0] = base | 25;
-            head[1..3].copy_from_slice(&(value as u16).to_be_bytes());
-            3
-        }
-        65_536..=4_294_967_295 => {
-            head[0] = base | 26;
-            head[1..5].copy_from_slice(&(value as u32).to_be_bytes());
-            5
-        }
-        _ => {
-            head[0] = base | 27;
-            head[1..].copy_from_slice(&value.to_be_bytes());
-            9
-        }
-    };
-    (head, length)
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RowStoreError {
     DuplicateDependency,
@@ -1413,7 +1300,6 @@ pub enum RowStoreError {
     InvalidKeyRange,
     RowsNotStrictlyOrdered,
     RowCountMismatch,
-    PersistedLookupRequiresGraphContext,
     BlobMetadataRequiresGraphContext,
     InvalidCanonicalKey,
     InvalidCanonicalRowValue,
@@ -1455,9 +1341,6 @@ impl fmt::Display for RowStoreError {
                 f.write_str("admitted row keys are not strictly logically ordered")
             }
             Self::RowCountMismatch => f.write_str("row-map count does not match admitted rows"),
-            Self::PersistedLookupRequiresGraphContext => {
-                f.write_str("persisted row lookup requires its repository graph context")
-            }
             Self::BlobMetadataRequiresGraphContext => f.write_str(
                 "row Blob metadata lives in the shared overflow graph, so it requires its \
                  repository graph context",
@@ -1550,333 +1433,6 @@ mod tests {
             let fields = decode_canonical_fields_of(&encoded).expect("well-formed CBOR tuple");
             assert!(decode_blob_field_metadata(&fields[0]).is_err());
         }
-    }
-
-    #[test]
-    fn materialized_range_reads_a_bounded_interval_and_keeps_snapshot_pin() {
-        let schema = SchemaGeneration::issue([0x11; 16], [0x22; 16], oid(0x33), [0x44; 32], 7);
-        let version = RowMapVersion::issue(
-            [0x11; 16],
-            [0x22; 16],
-            oid(0x55),
-            schema,
-            oid(0x66),
-            8,
-            Some(600),
-        )
-        .expect("coherent row-map version");
-        let value = RowValue::decode_canonical_fields(vec![0x80]).expect("empty row value");
-        let entries = (0..600)
-            .map(|key| RowEntry::new(TypedKey::Int(key), value.clone()))
-            .collect::<Vec<_>>();
-        let snapshot = RowMapSnapshot::issue(version.clone(), [0x77; 32], entries)
-            .expect("seal materialized snapshot");
-        let start = 63;
-        let range = KeyRange::new(
-            Some(TypedKey::Int(start)),
-            Some(TypedKey::Int(start + 4)),
-            3,
-        )
-        .expect("valid bounded range");
-
-        let rows = snapshot.range(&range).expect("read bounded range");
-        assert_eq!(
-            rows.iter()
-                .map(AdmittedRow::key)
-                .cloned()
-                .collect::<Vec<_>>(),
-            [
-                TypedKey::Int(start),
-                TypedKey::Int(start + 1),
-                TypedKey::Int(start + 2),
-            ]
-        );
-        assert!(rows.iter().all(|row| row.version() == &version));
-    }
-
-    /// Seals an in-memory row map over `keys`, which must be strictly
-    /// ascending and of one key type.
-    fn sealed_snapshot(keys: &[TypedKey]) -> RowMapSnapshot {
-        let schema = SchemaGeneration::issue([0x11; 16], [0x22; 16], oid(0x33), [0x44; 32], 7);
-        let version = RowMapVersion::issue(
-            [0x11; 16],
-            [0x22; 16],
-            oid(0x55),
-            schema,
-            oid(0x66),
-            8,
-            Some(keys.len() as u64),
-        )
-        .expect("coherent row-map version");
-        let value = RowValue::decode_canonical_fields(vec![0x80]).expect("empty row value");
-        let entries = keys
-            .iter()
-            .map(|key| RowEntry::new(key.clone(), value.clone()))
-            .collect();
-        RowMapSnapshot::issue(version, [0x77; 32], entries).expect("seal row map")
-    }
-
-    /// The keys a resume cursor must return: strictly after `after`, inside
-    /// the bounds, at most `limit` of them, in key order.
-    fn expected_after(
-        keys: &[TypedKey],
-        lower: Option<&TypedKey>,
-        upper: Option<&TypedKey>,
-        after: &TypedKey,
-        limit: usize,
-    ) -> Vec<TypedKey> {
-        keys.iter()
-            .filter(|key| lower.is_none_or(|lower| *key >= lower))
-            .filter(|key| upper.is_none_or(|upper| *key < upper))
-            .filter(|key| *key > after)
-            .take(limit)
-            .cloned()
-            .collect()
-    }
-
-    /// Asserts that a resume cursor returns exactly the sorted suffix that
-    /// [`expected_after`] names, and that a cursor at or above the upper
-    /// bound is refused. Cursors may be present, absent or outside the bounds.
-    fn assert_resume_skips_to_the_sorted_suffix(
-        keys: &[TypedKey],
-        lower: Option<TypedKey>,
-        upper: Option<TypedKey>,
-        cursors: &[TypedKey],
-        limit: usize,
-    ) {
-        let snapshot = sealed_snapshot(keys);
-        for cursor in cursors {
-            let range = KeyRange::new(lower.clone(), upper.clone(), limit).expect("valid range");
-            if upper.as_ref().is_some_and(|upper| cursor >= upper) {
-                assert!(
-                    range.with_resume_after(cursor.clone()).is_err(),
-                    "cursor {cursor:?} at or above the upper bound is refused"
-                );
-                continue;
-            }
-            let resumed = range
-                .with_resume_after(cursor.clone())
-                .expect("cursor below the upper bound");
-            let rows: Vec<TypedKey> = snapshot
-                .range(&resumed)
-                .expect("read the resumed range")
-                .iter()
-                .map(|row| row.key().clone())
-                .collect();
-            assert_eq!(
-                rows,
-                expected_after(keys, lower.as_ref(), upper.as_ref(), cursor, limit),
-                "resume after {cursor:?} with limit {limit}"
-            );
-        }
-    }
-
-    /// Pages every key of `[lower, upper)` with `limit` rows per page, each
-    /// page resuming after the last key the previous page returned.
-    fn page_through(
-        snapshot: &RowMapSnapshot,
-        lower: Option<TypedKey>,
-        upper: Option<TypedKey>,
-        limit: usize,
-    ) -> Vec<TypedKey> {
-        let base = KeyRange::new(lower, upper, limit).expect("valid page range");
-        let mut collected = Vec::new();
-        let mut range = base.clone();
-        loop {
-            let page: Vec<TypedKey> = snapshot
-                .range(&range)
-                .expect("read one page")
-                .iter()
-                .map(|row| row.key().clone())
-                .collect();
-            let short = page.len() < limit;
-            let last = page.last().cloned();
-            collected.extend(page);
-            let Some(last) = last.filter(|_| !short) else {
-                break;
-            };
-            range = base
-                .clone()
-                .with_resume_after(last)
-                .expect("resume cursor inside the range");
-        }
-        collected
-    }
-
-    /// ORNA-ROW-002: `Int` and `UInt` share one key rank, so a resume cursor
-    /// on either spelling skips the same keys across zero. Cursors below the
-    /// first key, on the first, middle and last keys, on absent keys, and
-    /// past the last key are each exclusive.
-    #[test]
-    fn resume_skip_is_exclusive_for_mixed_int_spellings_across_zero() {
-        let keys = vec![
-            TypedKey::Int(-9),
-            TypedKey::Int(-2),
-            TypedKey::Int(-1),
-            TypedKey::UInt(0),
-            TypedKey::Int(3),
-            TypedKey::UInt(4),
-            TypedKey::UInt(10),
-        ];
-        assert_logical_order(&keys);
-        let cursors = [
-            TypedKey::Int(-100),
-            TypedKey::Int(-9),
-            TypedKey::Int(-5),
-            TypedKey::UInt(0),
-            TypedKey::Int(2),
-            TypedKey::UInt(10),
-            TypedKey::UInt(99),
-        ];
-        for limit in [1, 2, 7] {
-            assert_resume_skips_to_the_sorted_suffix(&keys, None, None, &cursors, limit);
-        }
-        let snapshot = sealed_snapshot(&keys);
-        for limit in [1, 2, 3, 256] {
-            assert_eq!(
-                page_through(&snapshot, None, None, limit),
-                keys,
-                "limit {limit}"
-            );
-        }
-    }
-
-    /// ORNA-ROW-002: a resume cursor is checked against the range's bounds.
-    /// A cursor below the lower bound returns the intersection with the
-    /// bounds; a cursor at or above the upper bound is refused. Tuple keys
-    /// compare component by component.
-    #[test]
-    fn resume_skip_respects_tuple_bounds_and_refuses_a_cursor_at_the_upper_bound() {
-        let keys: Vec<TypedKey> = (0..3_i64)
-            .flat_map(|first| {
-                ["a", "b", "c"].into_iter().map(move |second| {
-                    TypedKey::Tuple(vec![
-                        TypedKey::Int(first),
-                        TypedKey::Text(second.to_owned()),
-                    ])
-                })
-            })
-            .collect();
-        let pair = |first: i64, second: &str| {
-            TypedKey::Tuple(vec![
-                TypedKey::Int(first),
-                TypedKey::Text(second.to_owned()),
-            ])
-        };
-        let lower = pair(1, "b");
-        let upper = pair(2, "b");
-        let in_range: Vec<TypedKey> = keys
-            .iter()
-            .filter(|key| *key >= &lower && *key < &upper)
-            .cloned()
-            .collect();
-        assert_eq!(
-            in_range.len(),
-            3,
-            "(1,b), (1,c) and (2,a) lie in [(1,b), (2,b))"
-        );
-        let cursors = [
-            pair(0, "z"),
-            pair(1, "b"),
-            pair(1, "bb"),
-            pair(1, "c"),
-            pair(2, "a"),
-            pair(2, "b"),
-            pair(2, "c"),
-        ];
-        for limit in [1, 2, 256] {
-            assert_resume_skips_to_the_sorted_suffix(
-                &keys,
-                Some(lower.clone()),
-                Some(upper.clone()),
-                &cursors,
-                limit,
-            );
-        }
-        let snapshot = sealed_snapshot(&keys);
-        for limit in [1, 2, 256] {
-            assert_eq!(
-                page_through(&snapshot, Some(lower.clone()), Some(upper.clone()), limit),
-                in_range,
-                "limit {limit}"
-            );
-        }
-    }
-
-    /// Paging crosses each page boundary by the resume cursor alone, for Text,
-    /// Bytes and Bool keys, and a composite key whose canonical encoding is
-    /// exactly 256 bytes pages in order beside a 257-byte neighbour.
-    #[test]
-    fn paging_is_exact_for_text_bytes_bool_and_a_256_byte_tuple_key() {
-        let texts: Vec<TypedKey> = ["a", "b", "c", "d", "e"]
-            .into_iter()
-            .map(|text| TypedKey::Text(text.to_owned()))
-            .collect();
-        let bytes: Vec<TypedKey> = [vec![0x00], vec![0x00, 0x01], vec![0x01], vec![0xff]]
-            .into_iter()
-            .map(TypedKey::Bytes)
-            .collect();
-        let bools = vec![TypedKey::Bool(false), TypedKey::Bool(true)];
-        for keys in [&texts, &bytes, &bools] {
-            assert_logical_order(keys);
-            let snapshot = sealed_snapshot(keys);
-            for limit in [1, 2, 3, 256] {
-                assert_eq!(
-                    page_through(&snapshot, None, None, limit),
-                    *keys,
-                    "limit {limit}"
-                );
-            }
-        }
-
-        let tuple_of = |text_len: usize, last: i64| {
-            TypedKey::Tuple(vec![
-                TypedKey::Text("x".repeat(text_len)),
-                TypedKey::Int(last),
-            ])
-        };
-        let canonical_len = |key: &TypedKey| key.canonical_bytes().expect("canonical key").len();
-        let text_len = (0..512)
-            .find(|&len| canonical_len(&tuple_of(len, 1)) == 256)
-            .expect("some text length encodes the tuple in exactly 256 bytes");
-        let exact = tuple_of(text_len, 1);
-        let longer = tuple_of(text_len + 1, 1);
-        let keys = vec![
-            TypedKey::Tuple(vec![TypedKey::Text("a".to_owned()), TypedKey::Int(1)]),
-            exact,
-            longer,
-        ];
-        assert_eq!(canonical_len(&keys[1]), 256);
-        assert_eq!(canonical_len(&keys[2]), 257);
-        assert_logical_order(&keys);
-        let snapshot = sealed_snapshot(&keys);
-        for limit in [1, 2, 256] {
-            assert_eq!(
-                page_through(&snapshot, None, None, limit),
-                keys,
-                "limit {limit}"
-            );
-        }
-    }
-
-    /// ORNA-ROW-002: a resume cursor at or above the upper bound is refused
-    /// for Text keys, and one just below it returns nothing.
-    #[test]
-    fn resume_cursor_at_or_above_a_text_upper_bound_is_refused() {
-        let keys: Vec<TypedKey> = (0..4)
-            .map(|index| TypedKey::Text(format!("row-{index}")))
-            .collect();
-        assert_resume_skips_to_the_sorted_suffix(
-            &keys,
-            None,
-            Some(TypedKey::Text("row-2".to_owned())),
-            &[
-                TypedKey::Text("row-1".to_owned()),
-                TypedKey::Text("row-2".to_owned()),
-                TypedKey::Text("row-9".to_owned()),
-            ],
-            2,
-        );
     }
 
     fn key_of(raw: Raw) -> TypedKey {
@@ -2162,7 +1718,7 @@ mod tests {
 
         let tagged = |tag: u64, payload: &[u8]| {
             let mut bytes = Vec::new();
-            cbor_head(&mut bytes, 6, tag);
+            head(&mut bytes, 6, tag);
             bytes.extend_from_slice(payload);
             bytes
         };
@@ -2184,28 +1740,6 @@ mod tests {
                 Err(RowStoreError::Native(GraphError::NonCanonicalData))
             ));
         }
-    }
-
-    #[test]
-    fn lazy_snapshot_range_requires_graph_context_instead_of_empty_result() {
-        let schema = SchemaGeneration::issue([0x11; 16], [0x22; 16], oid(0x33), [0x44; 32], 7);
-        let version = RowMapVersion::issue(
-            [0x11; 16],
-            [0x22; 16],
-            oid(0x55),
-            schema,
-            oid(0x66),
-            8,
-            Some(1),
-        )
-        .expect("coherent row-map version");
-        let snapshot = RowMapSnapshot::issue_lazy(version, [0x77; 32])
-            .expect("seal persisted snapshot without materializing rows");
-        let range = KeyRange::new(None, None, 1).expect("valid bounded range");
-        assert!(matches!(
-            snapshot.range(&range),
-            Err(RowStoreError::PersistedLookupRequiresGraphContext)
-        ));
     }
 
     #[test]

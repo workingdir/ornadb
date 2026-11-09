@@ -29,14 +29,17 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use super::{
-    CwdCapture, DiagnosticClass, DiagnosticCode, FaultInjector, ProtectedContentTransferEvidence,
-    RuntimeActivationContext, RuntimeError, RuntimeQueryError, RuntimeState,
-    RuntimeTableActivationSnapshot, RuntimeTableIdentity, SafeDiagnostic,
-    TableActivationCandidateValidator, TableActivationError, TableMutation, TableSchemaIdentity,
-    ValidatedTableActivationCommit, WriterLease,
+use crate::error::{FaultInjector, RuntimeError, TableActivationError};
+use crate::lease::WriterLease;
+use crate::table_snapshot::{RuntimeQueryError, RuntimeTableActivationSnapshot};
+use crate::table_store::{ProtectedContentTransferEvidence, RuntimeTableIdentity, TableMutation};
+use crate::{
+    RuntimeActivationContext, RuntimeState, TableActivationCandidateValidator, TableSchemaIdentity,
+    ValidatedTableActivationCommit,
 };
+use orna_foundation::CwdCapture;
 use orna_repository::{CwdGeneration, ProtectedContentPin};
+use orna_stream::{DiagnosticClass, DiagnosticCode, SafeDiagnostic};
 
 /// One repository-wide invalidation clock shared by projections in a VFS
 /// repository scope.
@@ -3406,7 +3409,7 @@ impl TableActivationCandidateValidator for ContentPinCandidateValidator {
         self.inner.tables()
     }
 
-    fn table_object_ids(&self) -> BTreeMap<String, super::TableObjectId> {
+    fn table_object_ids(&self) -> BTreeMap<String, crate::table_store::TableObjectId> {
         self.inner.table_object_ids()
     }
 
@@ -3418,13 +3421,16 @@ impl TableActivationCandidateValidator for ContentPinCandidateValidator {
         self.inner.schema_identity()
     }
 
-    fn validate(&mut self, rows: &super::RuntimeTableRows) -> Result<(), SafeDiagnostic> {
+    fn validate(
+        &mut self,
+        rows: &crate::table_snapshot::RuntimeTableRows,
+    ) -> Result<(), SafeDiagnostic> {
         self.inner.validate(rows)
     }
 
     fn validate_content_pins(
         &mut self,
-        rows: &super::RuntimeTableRows,
+        rows: &crate::table_snapshot::RuntimeTableRows,
         transfers: &[ProtectedContentTransfer],
     ) -> bool {
         self.inner.validate_content_pins(rows, &[])
@@ -3449,11 +3455,11 @@ impl TableActivationCandidateValidator for LiveSchemaCandidateValidator {
         self.inner.tables()
     }
 
-    fn table_object_ids(&self) -> BTreeMap<String, super::TableObjectId> {
+    fn table_object_ids(&self) -> BTreeMap<String, crate::table_store::TableObjectId> {
         self.inner.table_object_ids()
     }
 
-    fn committed_rows(&self) -> Option<&super::PinnedCommittedRows> {
+    fn committed_rows(&self) -> Option<&crate::table_snapshot::PinnedCommittedRows> {
         self.inner.committed_rows()
     }
 
@@ -3465,13 +3471,16 @@ impl TableActivationCandidateValidator for LiveSchemaCandidateValidator {
         (self.read)()
     }
 
-    fn validate(&mut self, rows: &super::RuntimeTableRows) -> Result<(), SafeDiagnostic> {
+    fn validate(
+        &mut self,
+        rows: &crate::table_snapshot::RuntimeTableRows,
+    ) -> Result<(), SafeDiagnostic> {
         self.inner.validate(rows)
     }
 
     fn validate_changed(
         &mut self,
-        rows: &super::RuntimeTableRows,
+        rows: &crate::table_snapshot::RuntimeTableRows,
         changed_tables: &std::collections::BTreeSet<String>,
     ) -> Result<(), SafeDiagnostic> {
         self.inner.validate_changed(rows, changed_tables)
@@ -3483,7 +3492,7 @@ impl TableActivationCandidateValidator for LiveSchemaCandidateValidator {
 
     fn validate_content_pins(
         &mut self,
-        rows: &super::RuntimeTableRows,
+        rows: &crate::table_snapshot::RuntimeTableRows,
         transfers: &[ProtectedContentTransfer],
     ) -> bool {
         self.inner.validate_content_pins(rows, transfers)
@@ -4063,10 +4072,9 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        RuntimeIdentity, RuntimeState, RuntimeTableRows, TableActivationCandidateValidator,
-        TableObjectId,
-    };
+    use crate::table_snapshot::RuntimeTableRows;
+    use crate::table_store::TableObjectId;
+    use crate::{RuntimeIdentity, RuntimeState, TableActivationCandidateValidator};
     use orna_repository::{ProtectedContentTransfer, Repository};
     use orna_value::{Raw, SchemaDescriptor};
     use std::sync::{
@@ -4519,8 +4527,9 @@ mod tests {
 
     #[test]
     fn vfs_table_row_replacement_preserves_admitted_table_identity() {
-        let table = RuntimeTableIdentity::new("Song", crate::TableObjectId::new([0x71; 16]))
-            .expect("valid table identity");
+        let table =
+            RuntimeTableIdentity::new("Song", crate::table_store::TableObjectId::new([0x71; 16]))
+                .expect("valid table identity");
         let replacement = VfsTableRowReplacement::new(
             [0x55; 16],
             table.clone(),
@@ -6124,7 +6133,7 @@ mod tests {
                         }),
                     ))
                 },
-                &crate::NoFault,
+                &crate::error::NoFault,
             )
             .await
             .unwrap();
@@ -6144,7 +6153,7 @@ mod tests {
                 VfsDurableSave::new([4; 16], schema.clone(), identity.clone(), key.clone())
                     .with_expected_baseline_row(None),
                 |_, _| async { panic!("an accepted temp rename must replay its outcome") },
-                &crate::NoFault,
+                &crate::error::NoFault,
             )
             .await
             .unwrap();
@@ -6190,7 +6199,7 @@ mod tests {
                         }),
                     ))
                 },
-                &crate::NoFault,
+                &crate::error::NoFault,
             )
             .await;
         let Err(VfsSaveError::Stale { diagnostic, .. }) = identical else {
@@ -6232,7 +6241,7 @@ mod tests {
                         }),
                     ))
                 },
-                &crate::NoFault,
+                &crate::error::NoFault,
             )
             .await;
         let Err(VfsSaveError::Stale { diagnostic, .. }) = stale else {
@@ -6272,7 +6281,7 @@ mod tests {
                         }),
                     ))
                 },
-                &crate::NoFault,
+                &crate::error::NoFault,
             )
             .await
             .unwrap();
@@ -6285,7 +6294,7 @@ mod tests {
         let mut failed_lookup = VfsSaveAdmission::<u64>::begin(
             &state,
             VfsDurableSave::new([4; 16], schema.clone(), identity.clone(), key.clone()),
-            &crate::NoFault,
+            &crate::error::NoFault,
         )
         .await
         .unwrap();
@@ -6452,7 +6461,7 @@ mod tests {
                 "image/png",
                 Some("png"),
                 |_, _, _| async { panic!("identity mismatch must stop before row admission") },
-                &crate::NoFault,
+                &crate::error::NoFault,
             )
             .await;
         assert!(matches!(
@@ -6554,7 +6563,7 @@ mod tests {
                         }),
                     ))
                 },
-                &crate::NoFault,
+                &crate::error::NoFault,
             )
             .await;
         let diagnostic = match stale {
@@ -6636,7 +6645,7 @@ mod tests {
                         VfsSaveAdmission::<u64>::begin(
                             state_for_admit,
                             nested_save,
-                            &crate::NoFault,
+                            &crate::error::NoFault,
                         )
                         .await,
                         Err(TableActivationError::Runtime(RuntimeError::AdminBusy))
@@ -6652,7 +6661,7 @@ mod tests {
                                     TableActivationError::Runtime(RuntimeError::AdminBusy),
                                 )
                             },
-                            &crate::NoFault,
+                            &crate::error::NoFault,
                         )
                         .await;
                     assert!(matches!(
@@ -6694,7 +6703,7 @@ mod tests {
                         }),
                     ))
                 },
-                &crate::NoFault,
+                &crate::error::NoFault,
             )
             .await
             .unwrap();
