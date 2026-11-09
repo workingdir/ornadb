@@ -7325,18 +7325,47 @@ impl Context<'_, '_> {
         depth: usize,
     ) -> Option<Result<Value, EvaluationError>> {
         let resolved = self.resolve_function_name(callee, scope);
-        let id = resolved
-            .as_deref()
-            .and_then(|name| self.functions.intrinsic(name))
-            .or_else(|| {
-                let name = function_name(callee)?;
-                (!scope.0.contains_key(&name))
-                    .then(|| {
-                        orna_intrinsics::root_intrinsic(&name)
-                            .or_else(|| root_collection_intrinsic(&name))
-                    })
-                    .flatten()
-            })?;
+        let id = match resolved.as_deref() {
+            Some(name) => self.functions.intrinsic(name)?,
+            None => {
+                let spelling = function_name(callee)?;
+                let leaf = spelling.rsplit('.').next().unwrap_or(spelling.as_str());
+                match spelling.rsplit_once('.') {
+                    Some((module_path, leaf)) => {
+                        // A qualified spelling resolves through the catalogue
+                        // exactly like the native route does; an unknown
+                        // module member stays a source call.
+                        let module = orna_intrinsics::Module::from_path(module_path);
+                        let intrinsic = module
+                            .filter(|module| *module != orna_intrinsics::Module::Time)
+                            .and_then(|module| orna_intrinsics::lookup(module, leaf))
+                            .filter(|intrinsic| {
+                                intrinsic.dispatch != orna_intrinsics::Dispatch::SourceOnly
+                                    && intrinsic
+                                        .pins
+                                        .contains(orna_intrinsics::CURRENT_STD_PIN)
+                            });
+                        let Some(intrinsic) = intrinsic else {
+                            return None;
+                        };
+                        intrinsic.id
+                    }
+                    None => {
+                        if scope.0.contains_key(leaf) {
+                            return None;
+                        }
+                        // `project` is the relation-stage spelling of the
+                        // one-to-one map; it has no finite-list intrinsic.
+                        if leaf == "project" {
+                            orna_intrinsics::IntrinsicId::CoreMap
+                        } else {
+                            orna_intrinsics::root_intrinsic(leaf)
+                                .or_else(|| root_collection_intrinsic(leaf))?
+                        }
+                    }
+                }
+            }
+        };
         let intrinsic = orna_intrinsics::by_id(id);
         let spelling = function_name(callee).unwrap_or_else(|| intrinsic.name.to_owned());
         let name = spelling.rsplit('.').next().unwrap_or(intrinsic.name);
@@ -12911,15 +12940,15 @@ impl Context<'_, '_> {
                 self.stats_mode(rows)
             }
             "histogram" => {
-                let [
-                    Value::List(rows),
-                    Value::List(bins),
-                    Value::Bool(include_final_upper),
-                ] = values.as_slice()
-                else {
+                let [Value::List(rows), Value::List(bins), rest @ ..] = values.as_slice() else {
                     return Err(error("ORNA-EVAL-TYPE"));
                 };
-                self.stats_histogram(rows, bins, *include_final_upper)
+                let include_final_upper = match rest {
+                    [] => false,
+                    [Value::Bool(flag)] => *flag,
+                    _ => return Err(error("ORNA-EVAL-TYPE")),
+                };
+                self.stats_histogram(rows, bins, include_final_upper)
             }
             "rate" | "derivative" | "integrate" => {
                 let [Value::List(points)] = values.as_slice() else {
