@@ -575,7 +575,6 @@ enum Publication {
     NoVisibleChange(BTreeMap<String, usize>),
 }
 
-#[allow(clippy::too_many_lines)]
 /// Rows per table in the frozen batch, in table order. A mutation that was
 /// folded away by an earlier mutation of the same key is already collapsed by
 /// the lowering step, so this counts the frozen range's final mutations.

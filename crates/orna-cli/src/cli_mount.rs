@@ -1152,7 +1152,6 @@ pub(super) fn run_unmount(endpoint: &Endpoint, mountpoint: &Path) -> Result<(), 
     }
 }
 
-#[allow(clippy::too_many_lines)]
 /// Refuses an unmount that would discard unresolved drafts (ORNA-VFS-024),
 /// naming each draft, its state and its cause code on stderr first, so the
 /// remedy applies to known files (W15-03).

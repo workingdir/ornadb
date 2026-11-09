@@ -206,10 +206,6 @@ pub(super) fn requested_debug_mode(arguments: &[String]) -> bool {
     enabled
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "the command grammar deliberately keeps validation precedence in one auditable parser"
-)]
 /// Options for `semantic-legend`. `--limit N` caps the token-type rows of the
 /// plain text and `--quiet` listings; the JSON, Markdown and CSV artifacts
 /// always carry the full legend.
@@ -854,7 +850,6 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
 mod tests {
     use super::*;
 
-    #[allow(clippy::too_many_lines)]
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
     }
