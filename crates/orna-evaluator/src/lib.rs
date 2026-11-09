@@ -1065,9 +1065,9 @@ fn qualified_intrinsic(spelling: &str) -> Option<orna_intrinsics::IntrinsicId> {
         return None;
     }
     let intrinsic = orna_intrinsics::lookup(module, name)?;
-    if intrinsic.module != module {
-        return None;
-    }
+    // `lookup` already scopes the match to `module`; a `std.query` re-export
+    // deliberately returns the `std.collection` descriptor, so the descriptor's
+    // own module is not compared here.
     (intrinsic.dispatch != orna_intrinsics::Dispatch::SourceOnly
         && intrinsic.pins.contains(orna_intrinsics::CURRENT_STD_PIN))
     .then_some(intrinsic.id)
