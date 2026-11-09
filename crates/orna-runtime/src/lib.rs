@@ -13,10 +13,7 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     path::{Path, PathBuf},
     pin::Pin,
-    sync::{
-        Arc,
-        atomic::{AtomicU8, Ordering},
-    },
+    sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -4282,66 +4279,65 @@ impl StreamRunControl for NeverCancelled {
     fn release_admission(&self) {}
 }
 
+/// Where a [`StreamRunGate`] stands between delivery admissions.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GateState {
+    /// No admission is in flight and nobody asked to cancel.
+    Running,
+    /// A delivery admission holds the linearization point.
+    Admitting,
+    /// Cancellation arrived during an admission. It becomes effective when
+    /// the admission is released, so the durable acquire attempt that is
+    /// already in flight is never torn.
+    CancelRequested,
+    /// Cancellation is in effect; no further admission is granted.
+    Cancelled,
+}
+
 /// A cancellation gate which linearizes cancellation against one delivery
 /// admission. Cancellation after admission is retained for the next boundary.
 #[derive(Clone, Debug)]
 pub struct StreamRunGate {
-    state: Arc<AtomicU8>,
+    state: Arc<Mutex<GateState>>,
     cancellation: Arc<Notify>,
 }
 
 impl StreamRunGate {
-    const RUNNING: u8 = 0;
-    const ADMITTING: u8 = 1;
-    const CANCEL_REQUESTED: u8 = 2;
-    const CANCELLED: u8 = 3;
-
     pub fn new() -> Self {
         Self {
-            state: Arc::new(AtomicU8::new(Self::RUNNING)),
+            state: Arc::new(Mutex::new(GateState::Running)),
             cancellation: Arc::new(Notify::new()),
         }
     }
 
+    /// Runs one transition under the gate lock. The guarded value is a `Copy`
+    /// enum that every transition leaves valid, so a poisoned lock carries no
+    /// torn state and is recovered rather than propagated.
+    fn transition<T>(&self, step: impl FnOnce(&mut GateState) -> T) -> T {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        step(&mut state)
+    }
+
     /// Requests cancellation. `true` means this call first recorded it.
     pub fn cancel(&self) -> bool {
-        loop {
-            let state = self.state.load(Ordering::Acquire);
-            match state {
-                Self::RUNNING => {
-                    if self
-                        .state
-                        .compare_exchange(
-                            state,
-                            Self::CANCELLED,
-                            Ordering::AcqRel,
-                            Ordering::Acquire,
-                        )
-                        .is_ok()
-                    {
-                        self.cancellation.notify_one();
-                        return true;
-                    }
-                }
-                Self::ADMITTING => {
-                    if self
-                        .state
-                        .compare_exchange(
-                            state,
-                            Self::CANCEL_REQUESTED,
-                            Ordering::AcqRel,
-                            Ordering::Acquire,
-                        )
-                        .is_ok()
-                    {
-                        self.cancellation.notify_one();
-                        return true;
-                    }
-                }
-                Self::CANCEL_REQUESTED | Self::CANCELLED => return false,
-                _ => return false,
+        let recorded = self.transition(|state| match *state {
+            GateState::Running => {
+                *state = GateState::Cancelled;
+                true
             }
+            GateState::Admitting => {
+                *state = GateState::CancelRequested;
+                true
+            }
+            GateState::CancelRequested | GateState::Cancelled => false,
+        });
+        if recorded {
+            self.cancellation.notify_one();
         }
+        recorded
     }
 }
 
@@ -4353,7 +4349,7 @@ impl Default for StreamRunGate {
 
 impl StreamRunControl for StreamRunGate {
     fn cancelled(&self) -> bool {
-        self.state.load(Ordering::Acquire) >= Self::CANCEL_REQUESTED
+        self.transition(|state| matches!(*state, GateState::CancelRequested | GateState::Cancelled))
     }
 
     fn cancellation_wait<'a>(&'a self) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
@@ -4367,29 +4363,21 @@ impl StreamRunControl for StreamRunGate {
     }
 
     fn acquire_admission(&self) -> bool {
-        self.state
-            .compare_exchange(
-                Self::RUNNING,
-                Self::ADMITTING,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_ok()
+        self.transition(|state| match *state {
+            GateState::Running => {
+                *state = GateState::Admitting;
+                true
+            }
+            GateState::Admitting | GateState::CancelRequested | GateState::Cancelled => false,
+        })
     }
 
     fn release_admission(&self) {
-        let _ = self.state.compare_exchange(
-            Self::ADMITTING,
-            Self::RUNNING,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
-        let _ = self.state.compare_exchange(
-            Self::CANCEL_REQUESTED,
-            Self::CANCELLED,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
+        self.transition(|state| match *state {
+            GateState::Admitting => *state = GateState::Running,
+            GateState::CancelRequested => *state = GateState::Cancelled,
+            GateState::Running | GateState::Cancelled => {}
+        });
     }
 }
 
@@ -37780,6 +37768,47 @@ mod tests {
         gate.release_admission();
         assert!(!gate.acquire_admission());
         assert!(!gate.cancel());
+    }
+
+    #[test]
+    fn stream_run_gate_admits_one_delivery_at_a_time_and_reopens_on_release() {
+        let gate = StreamRunGate::new();
+        assert!(gate.acquire_admission());
+        assert!(
+            !gate.acquire_admission(),
+            "a second admission must wait for the first to release"
+        );
+        gate.release_admission();
+        assert!(!gate.cancelled());
+        assert!(
+            gate.acquire_admission(),
+            "an uncancelled release reopens the gate"
+        );
+        gate.release_admission();
+
+        assert!(gate.cancel());
+        assert!(!gate.acquire_admission());
+        gate.release_admission();
+        assert!(
+            gate.cancelled(),
+            "releasing a gate that is not admitting must not clear cancellation"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_run_gate_cancel_during_admission_wakes_the_waiter() {
+        let gate = StreamRunGate::new();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), gate.cancellation_wait())
+                .await
+                .is_err(),
+            "an uncancelled gate must keep the waiter parked"
+        );
+        assert!(gate.acquire_admission());
+        assert!(gate.cancel());
+        tokio::time::timeout(Duration::from_secs(1), gate.cancellation_wait())
+            .await
+            .expect("a cancellation requested mid-admission must wake the waiter");
     }
 
     #[tokio::test]
