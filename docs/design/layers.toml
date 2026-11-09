@@ -19,7 +19,7 @@
 #   oracle               - a test/table model consumed only by the harness
 #   archive              - the 1.0.0 compatibility archive; nothing may depend on it
 #
-# The `known` entries below are the violations recorded on origin/main d63b6df40
+# The `known` entries below are the violations recorded on origin/main d27f7ceb5
 # (docs/design/architecture.md Appendix A). They are the ratchet baseline:
 # `--mode=deny` fails only on a violation absent from this list. A stage that
 # fixes a violation deletes its entry in the same PR, so this list only shrinks.
@@ -48,29 +48,29 @@ allowed = ["orna-value"]
 warning = "single crate, no cohesive subject, 16 production dependents; absorbed by orna-base and orna-value (stage 03)"
 
 [[crate]]
-name = "orna-syntax"
-layer = 2
-
-[[crate]]
 name = "orna-sys-model"
 layer = 1
 
 [[crate]]
-name = "orna-standard-sources"
-layer = 3
+name = "orna-syntax"
+layer = 2
+
+[[crate]]
+name = "orna-sys-codegen"
+layer = 2
+role = "tool"
 
 [[crate]]
 name = "orna-sys-id"
 layer = 3
 
 [[crate]]
-name = "orna-sys-macros"
+name = "orna-standard-sources"
 layer = 3
 
 [[crate]]
-name = "orna-sys-codegen"
-layer = 2
-role = "tool"
+name = "orna-sys-macros"
+layer = 3
 
 [[crate]]
 name = "orna-semantic"
@@ -215,4 +215,4 @@ reason = "production in-degree 0 and not declared a tool; moves under tools/ wit
 [[known]]
 id = "V11"
 key = "orphan:orna-sys-id"
-reason = "reform stage 01 adds the generated identity crate before stage 06 gives it production dependents"
+reason = "the generated identity crate lands before its adopters; stage 06 wires orna-sys and orna-eval to it"

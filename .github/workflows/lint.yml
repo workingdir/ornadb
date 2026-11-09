@@ -57,9 +57,9 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@1.95.0
 
-      # The fixture tests build synthetic metadata documents; the repository
-      # tests at the end of the module assert that the checked-in layer table,
-      # budgets and docs describe this tree, which is the stage acceptance.
+      # The checker tests build synthetic metadata, budget and raises fixtures;
+      # they do not read this repository, so any PR can run them. The three CLI
+      # steps below are the repository-state gate.
       - name: Prove architecture checker behavior
         run: python3 -m unittest scripts.test_check_architecture
 

@@ -13,6 +13,7 @@ use orna_repository::{
     FormatContextError,
     relation_admission::{
         CommittedRelationChanges, OBJECT_IDENTITY_RELATION_ID, RelationAdmissionError,
+        StagedCandidate, StoreAdmission,
     },
     schema_evolution::SchemaChanges,
 };
@@ -127,7 +128,6 @@ fn relation_failure(error: RelationAdmissionError, title: &'static str) -> Diagn
     }
 }
 
-#[allow(clippy::too_many_lines)]
 /// Admits every table of the staged source into the staged `.orna/store` and
 /// returns one line per table this commit admits, for printing once the
 /// commit exists.
@@ -143,12 +143,49 @@ fn stage_store(
     repository: &orna_repository::Repository,
     changes: CommittedRelationChanges,
 ) -> Result<Vec<String>, Diagnostic> {
+    let staged = capture_staged_candidate(repository)?;
+    let (project, analysis) = load_staged_project(repository, &staged)?;
+    let previous = read_staged_identities(repository, &staged)?;
+    let identities = reconcile_identities(&project, previous.as_ref())?;
+    let staged_relations = build_staged_relations(
+        &project,
+        &analysis,
+        &identities,
+        *staged.database_id().as_bytes(),
+    )?;
+    let table_name =
+        |relation: &[u8; 16]| staged_table_name(&staged_relations, previous.as_ref(), relation);
+    let admission = repository
+        .stage_store_admission(
+            &staged,
+            staged_relations.relations(),
+            &identities.to_stored(),
+            changes,
+        )
+        .map_err(|error| admission_error(error, &table_name))?;
+    Ok(admission_lines(&admission, &staged_relations, &table_name))
+}
+
+/// The candidate the index stages, refusing a store that an interrupted
+/// publication or checkout still owns.
+fn capture_staged_candidate(
+    repository: &orna_repository::Repository,
+) -> Result<StagedCandidate, Diagnostic> {
+    let title = "staged candidate could not be captured";
     repository
         .refuse_unretained_committed_store()
-        .map_err(|error| relation_failure(error, "staged candidate could not be captured"))?;
-    let staged = repository
+        .map_err(|error| relation_failure(error, title))?;
+    repository
         .capture_staged_candidate()
-        .map_err(|error| relation_failure(error, "staged candidate could not be captured"))?;
+        .map_err(|error| relation_failure(error, title))
+}
+
+/// Loads the staged source and proves it analyzes, so the store is built from
+/// source the commit gate would accept.
+fn load_staged_project(
+    repository: &orna_repository::Repository,
+    staged: &StagedCandidate,
+) -> Result<(orna_project::LoadedProject, orna_semantic::Analysis), Diagnostic> {
     let project = orna_project::ProjectLoader::default()
         .load_private_candidate(repository, staged.candidate())
         .map_err(|error| match error {
@@ -177,66 +214,86 @@ fn stage_store(
             format!("{}: {}", first.code(), first.message()),
         ));
     }
-    let previous = orna_project::ObjectIdentityManifest::read_staged(repository, &staged).map_err(
-        |error| {
-            staging_error(
-                "staged object identities could not be read",
-                format!("{error:?}"),
-            )
-        },
-    )?;
-    let identities =
-        orna_project::ObjectIdentityManifest::reconcile(project.modules(), previous.as_ref())
-            .map_err(|error| {
-                staging_error(
-                    "staged object identities could not be reconciled",
-                    format!("{error:?}"),
-                )
-            })?;
-    let database_id = *staged.database_id().as_bytes();
-    let staged_relations = orna_application::build_format3_store_relations(
-        &project,
-        &analysis,
-        &identities,
-        database_id,
-    )
-    .map_err(|error| {
+    Ok((project, analysis))
+}
+
+/// The identity inventory the staged tree already carries, `None` before the
+/// first staged commit.
+fn read_staged_identities(
+    repository: &orna_repository::Repository,
+    staged: &StagedCandidate,
+) -> Result<Option<orna_project::ObjectIdentityManifest>, Diagnostic> {
+    orna_project::ObjectIdentityManifest::read_staged(repository, staged).map_err(|error| {
         staging_error(
-            "staged table schema could not be built",
-            format!("{}: {:?}", error.table(), error.error()),
+            "staged object identities could not be read",
+            format!("{error:?}"),
         )
-    })?;
-    let table_name = |relation: &[u8; 16]| {
-        staged_relations.table_name(relation).map_or_else(
-            || {
-                // A removed table keeps its name in the retired inventory record.
-                previous
-                    .as_ref()
-                    .and_then(|manifest| {
-                        manifest.records().iter().find(|record| {
-                            record.kind() == orna_project::ObjectKind::Table
-                                && record.id() == relation
-                        })
+    })
+}
+
+/// Reconciles the staged declarations with the inventory they already carry.
+fn reconcile_identities(
+    project: &orna_project::LoadedProject,
+    previous: Option<&orna_project::ObjectIdentityManifest>,
+) -> Result<orna_project::ObjectIdentityManifest, Diagnostic> {
+    orna_project::ObjectIdentityManifest::reconcile(project.modules(), previous).map_err(|error| {
+        staging_error(
+            "staged object identities could not be reconciled",
+            format!("{error:?}"),
+        )
+    })
+}
+
+/// The relations the staged tables need in the staged store.
+fn build_staged_relations(
+    project: &orna_project::LoadedProject,
+    analysis: &orna_semantic::Analysis,
+    identities: &orna_project::ObjectIdentityManifest,
+    database_id: [u8; 16],
+) -> Result<orna_application::StagedRelations, Diagnostic> {
+    orna_application::build_format3_store_relations(project, analysis, identities, database_id)
+        .map_err(|error| {
+            staging_error(
+                "staged table schema could not be built",
+                format!("{}: {:?}", error.table(), error.error()),
+            )
+        })
+}
+
+/// The qualified name of a staged table, or the retired inventory record when
+/// the table is being removed.
+fn staged_table_name(
+    relations: &orna_application::StagedRelations,
+    previous: Option<&orna_project::ObjectIdentityManifest>,
+    relation: &[u8; 16],
+) -> String {
+    relations.table_name(relation).map_or_else(
+        || {
+            // A removed table keeps its name in the retired inventory record.
+            previous
+                .and_then(|manifest| {
+                    manifest.records().iter().find(|record| {
+                        record.kind() == orna_project::ObjectKind::Table && record.id() == relation
                     })
-                    .map_or_else(String::new, |record| record.qualified_name().to_owned())
-            },
-            str::to_owned,
-        )
-    };
-    let admission = repository
-        .stage_store_admission(
-            &staged,
-            staged_relations.relations(),
-            &identities.to_stored(),
-            changes,
-        )
-        .map_err(|error| admission_error(error, &table_name))?;
+                })
+                .map_or_else(String::new, |record| record.qualified_name().to_owned())
+        },
+        str::to_owned,
+    )
+}
+
+/// One line per admitted, evolved and removed table of this commit.
+fn admission_lines(
+    admission: &StoreAdmission,
+    relations: &orna_application::StagedRelations,
+    table_name: &dyn Fn(&[u8; 16]) -> String,
+) -> Vec<String> {
     let mut lines = admission
         .admitted()
         .iter()
         .filter(|relation| **relation != OBJECT_IDENTITY_RELATION_ID)
         .map(|relation| {
-            let name = staged_relations.table_name(relation).unwrap_or("");
+            let name = relations.table_name(relation).unwrap_or("");
             format!(
                 "admitted table {name} as relation {}",
                 orna_repository::Uuid::from_bytes(*relation).simple()
@@ -258,7 +315,7 @@ fn stage_store(
             removed.rows()
         ));
     }
-    Ok(lines)
+    lines
 }
 
 /// One line naming every field-level change of an evolved table.
@@ -365,7 +422,6 @@ fn failure(error: &orna_repository::RepositoryError, generic_title: &'static str
     Diagnostic::target_with_detail(code, title, help, format!("{error:?}"))
 }
 
-#[allow(clippy::too_many_lines)]
 pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnostic> {
     let message = message(arguments)?;
     let path = local_project_path(endpoint)?;
@@ -377,10 +433,45 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
             format!("{error:?}"),
         )
     })?;
+    let (runtime, state) = open_commit_runtime(&repository)?;
+    recover_publication(&repository, &runtime, &state)?;
+    let admitted = admit_staged_store(&repository, &runtime, &state)?;
+    let capture = runtime.block_on(state.capture()).map_err(|error| {
+        Diagnostic::target_with_detail(
+            "E2300",
+            "runtime candidate could not be captured",
+            "retry after the local runtime state is available",
+            format!("{error:?}"),
+        )
+    })?;
+    let review = repository
+        .review_current_candidate(&capture)
+        .map_err(|error| failure(&error, "staged candidate could not be reviewed"))?;
+    let commit = repository
+        .commit_reviewed_candidate(
+            &review,
+            message,
+            &AssertionGate {
+                command: GatedCommand::Commit,
+            },
+        )
+        .map_err(|error| failure(&error, "reviewed candidate could not be committed"))?;
+    for line in admitted {
+        println!("{line}");
+    }
+    println!("[{}] {message}", commit.as_str());
+    Ok(())
+}
+
+/// The configured commit identity, the current-thread runtime and the runtime
+/// state the commit operates on.
+fn open_commit_runtime(
+    repository: &orna_repository::Repository,
+) -> Result<(tokio::runtime::Runtime, RuntimeState), Diagnostic> {
     repository
         .require_configured_commit_identity()
         .map_err(|error| failure(&error, "Git identity could not be checked"))?;
-    let (identity, initial_digest) = runtime_identity(&repository)?;
+    let (identity, initial_digest) = runtime_identity(repository)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -393,7 +484,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
             )
         })?;
     let state = runtime
-        .block_on(RuntimeState::open(&repository, identity, initial_digest))
+        .block_on(RuntimeState::open(repository, identity, initial_digest))
         .map_err(|error| {
             Diagnostic::target_with_detail(
                 "E2300",
@@ -402,9 +493,17 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
                 format!("{error:?}"),
             )
         })?;
-    // An interrupted publication is recovered before the index is reviewed:
-    // recovery restores the exact state the review's intent is derived from,
-    // and a stranded Orna index lock would otherwise block this commit.
+    Ok((runtime, state))
+}
+
+/// Recovers an interrupted publication before the index is reviewed: recovery
+/// restores the exact state the review's intent is derived from, and a
+/// stranded Orna index lock would otherwise block this commit.
+fn recover_publication(
+    repository: &orna_repository::Repository,
+    runtime: &tokio::runtime::Runtime,
+    state: &RuntimeState,
+) -> Result<(), Diagnostic> {
     let pending = repository.read_publication_journal().map_err(|error| {
         Diagnostic::target_with_detail(
             "E2300",
@@ -438,21 +537,29 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
                 ));
             }
         }
-    } else {
-        runtime
-            .block_on(orna_storage::RuntimePublicationCoordinator::recover(
-                &repository,
-                &state,
-            ))
-            .map_err(|error| {
-                super::cli_publish::describe_storage_failure(
-                    "pending publication could not be recovered",
-                    &error,
-                )
-            })?;
+        return Ok(());
     }
-    // Unpublished runtime rows were encoded under the committed schemas, so
-    // no committed relation may change under them.
+    runtime
+        .block_on(orna_storage::RuntimePublicationCoordinator::recover(
+            repository, state,
+        ))
+        .map_err(|error| {
+            super::cli_publish::describe_storage_failure(
+                "pending publication could not be recovered",
+                &error,
+            )
+        })?;
+    Ok(())
+}
+
+/// Completes the staged store for the staged source. Unpublished runtime rows
+/// were encoded under the committed schemas, so no committed relation may
+/// change under them.
+fn admit_staged_store(
+    repository: &orna_repository::Repository,
+    runtime: &tokio::runtime::Runtime,
+    state: &RuntimeState,
+) -> Result<Vec<String>, Diagnostic> {
     let pending = runtime.block_on(state.pending_count()).map_err(|error| {
         Diagnostic::target_with_detail(
             "E2300",
@@ -466,30 +573,5 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     } else {
         CommittedRelationChanges::PendingRuntimeRows
     };
-    let admitted = stage_store(&repository, changes)?;
-    let capture = runtime.block_on(state.capture()).map_err(|error| {
-        Diagnostic::target_with_detail(
-            "E2300",
-            "runtime candidate could not be captured",
-            "retry after the local runtime state is available",
-            format!("{error:?}"),
-        )
-    })?;
-    let review = repository
-        .review_current_candidate(&capture)
-        .map_err(|error| failure(&error, "staged candidate could not be reviewed"))?;
-    let commit = repository
-        .commit_reviewed_candidate(
-            &review,
-            message,
-            &AssertionGate {
-                command: GatedCommand::Commit,
-            },
-        )
-        .map_err(|error| failure(&error, "reviewed candidate could not be committed"))?;
-    for line in admitted {
-        println!("{line}");
-    }
-    println!("[{}] {message}", commit.as_str());
-    Ok(())
+    stage_store(repository, changes)
 }
