@@ -1217,6 +1217,11 @@ impl CatFileSession {
 
     /// Requests one object and consumes its reply so the session stays in step.
     fn request(&mut self, object_id: &str) -> Result<(), String> {
+        self.request_bytes(object_id).map(|_| ())
+    }
+
+    /// Requests one object and returns its payload.
+    fn request_bytes(&mut self, object_id: &str) -> Result<Vec<u8>, String> {
         writeln!(self.stdin, "{object_id}")
             .and_then(|()| self.stdin.flush())
             .map_err(|error| format!("cat-file request: {error}"))?;
@@ -1244,7 +1249,8 @@ impl CatFileSession {
         self.stdout
             .read_exact(&mut sink)
             .map_err(|error| format!("cat-file payload: {error}"))?;
-        Ok(())
+        sink.truncate(size);
+        Ok(sink)
     }
 }
 
@@ -2495,8 +2501,18 @@ struct AdmittedProductionRows {
 
 /// Rows admitted by the production-writer probe. Kept at ten so the case is
 /// cheap enough for the scale suite; raise it locally to measure how the
-/// publication cost grows.
+/// admission and publication costs grow.
 const PRODUCTION_ROWS: u64 = 10;
+const PRODUCTION_ROWS_ENV: &str = "ORNA_ORP1_PRODUCTION_ROWS";
+
+/// Row count the production-writer probe runs, or the override a cost-curve
+/// measurement uses.
+fn production_rows() -> u64 {
+    std::env::var(PRODUCTION_ROWS_ENV)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(PRODUCTION_ROWS)
+}
 
 /// Admits ten rows into a fresh empty format-3 repository and freezes the
 /// admitted prefix. Publication is left to the caller.
@@ -2557,7 +2573,9 @@ async fn admit_production_rows_into(
         .head()
         .expect("read repository head")
         .expect("format-3 fixture has a head");
-    for index in 0..PRODUCTION_ROWS {
+    let rows = production_rows();
+    let admission_started = Instant::now();
+    for index in 0..rows {
         // Each request gets its own wide ordinal so request, mutation and
         // digest identities never collide across the rows. The wide path is
         // used because a byte only carries about twenty-five of them, which is
@@ -2577,6 +2595,11 @@ async fn admit_production_rows_into(
         )
         .await;
     }
+    let admission_us = admission_started.elapsed().as_micros() as u64;
+    eprintln!(
+        "ORP-1 production_admission rows={rows} ms={}",
+        admission_us / 1_000
+    );
     drop(bindings);
 
     let checkpoint = state
@@ -2594,7 +2617,7 @@ async fn admit_production_rows_into(
         .expect("read frozen runtime range");
     assert_eq!(
         frozen.len(),
-        usize::try_from(PRODUCTION_ROWS).expect("row count fits a pointer"),
+        usize::try_from(rows).expect("row count fits a pointer"),
         "every admitted row is in the frozen range"
     );
     AdmittedProductionRows {
@@ -2683,11 +2706,12 @@ async fn orp1_production_writer_ten_rows() {
     let row_map = format
         .load_row_map(relation_id)
         .expect("load the relation row map");
-    assert_eq!(row_map.version().row_count(), Some(PRODUCTION_ROWS),);
+    let produced_rows = production_rows();
+    assert_eq!(row_map.version().row_count(), Some(produced_rows),);
     let rows = format3::committed_store_rows(&repository, relation_id);
     // The fixture reader asks for a key range of 16 rows, so a larger probe
     // reads at most 16 back while the row map above still counts them all.
-    let expected_rows = usize::try_from(PRODUCTION_ROWS.min(16)).expect("row count fits a pointer");
+    let expected_rows = usize::try_from(produced_rows.min(16)).expect("row count fits a pointer");
     assert_eq!(
         rows.len(),
         expected_rows,
@@ -2731,6 +2755,358 @@ async fn orp1_production_writer_ten_rows() {
         read_allocations,
         read_bytes,
     );
+}
+
+/// Production-path bulk fixture: one runtime request admits `rows` UInt-keyed
+/// bucket rows into an empty format-3 relation, then the production writer
+/// publishes them. Bulk matters at one million rows: the per-request capture
+/// path costs tens of milliseconds per row, while one request is how a bulk
+/// import hands its rows to the runtime.
+struct BulkProductionRows {
+    _directory: TempDir,
+    repository: Repository,
+    relation_id: [u8; 16],
+    head_before: orna_repository::GitCommitRef,
+    state: orna_runtime::RuntimeState,
+    freeze: orna_runtime::PublicationFreeze,
+}
+
+async fn admit_bulk_production_rows(rows: u64) -> BulkProductionRows {
+    use orna_runtime::{
+        NoFault, RequestIdentity, RuntimeState, TableMutation, TableObjectId, TerminalOutcome,
+    };
+
+    let (directory, repository, relation_id) =
+        format3::format3_repository("pub table media(id: Int) { bucket: Int, }\n");
+    let (identity, initial_digest) = format3::cli_runtime_identity(&repository);
+    let state = RuntimeState::open(&repository, identity, initial_digest)
+        .await
+        .expect("open runtime state");
+    let writer = state
+        .acquire_lease(identity.repository_id)
+        .await
+        .expect("acquire runtime writer");
+    let request_identity = RequestIdentity {
+        session_id: [0xc0; 16],
+        request_id: [0xc1; 16],
+    };
+    let fingerprint = [0xc2; 32];
+    let (_, admission) = state
+        .reserve_request_with_admission(request_identity, fingerprint)
+        .await
+        .expect("reserve the bulk request");
+    state
+        .start_request_with_owner_and_admission(
+            request_identity,
+            fingerprint,
+            writer,
+            admission.expect("a new request returns its admission capability"),
+        )
+        .await
+        .expect("start the bulk request");
+    let context = state
+        .begin_activation()
+        .await
+        .expect("begin the activation");
+    let mut mutations =
+        Vec::with_capacity(usize::try_from(rows).expect("row count fits a pointer"));
+    for index in 0..rows {
+        let mut mutation_id = [0u8; 16];
+        mutation_id[0] = 0xc3;
+        mutation_id[1..9].copy_from_slice(&index.to_be_bytes());
+        let key = TypedKey::UInt(index)
+            .canonical_bytes()
+            .expect("the bucket key has a canonical encoding");
+        let value = encode_bucket(bucket_for(index));
+        mutations.push(
+            TableMutation::insert(mutation_id, "media", key, value)
+                .expect("the bucket row is a valid insert")
+                .with_table_object_id(TableObjectId::new(relation_id)),
+        );
+    }
+    state
+        .commit_table_request_activation(
+            writer,
+            request_identity,
+            fingerprint,
+            &context,
+            &mutations,
+            [0xc4; 32],
+            TerminalOutcome::new(vec![0xc5]).expect("a one-byte terminal outcome is valid"),
+            &NoFault,
+            orna_evaluator::EffectGate::admit_unbound_for_test(),
+        )
+        .await
+        .expect("the runtime commits the bulk request");
+
+    let head_before = repository
+        .head()
+        .expect("read repository head")
+        .expect("format-3 fixture has a head");
+    let checkpoint = state
+        .latest_checkpoint()
+        .await
+        .expect("read latest checkpoint")
+        .expect("admitted rows leave a checkpoint");
+    let freeze = state
+        .freeze([0x92; 16], &checkpoint)
+        .await
+        .expect("freeze the bulk admitted prefix");
+    let frozen = state
+        .pending_table_mutations_through(&freeze)
+        .await
+        .expect("read the frozen runtime range");
+    assert_eq!(
+        frozen.len(),
+        usize::try_from(rows).expect("row count fits a pointer"),
+        "every bulk admitted row is in the frozen range"
+    );
+    BulkProductionRows {
+        _directory: directory,
+        repository,
+        relation_id,
+        head_before,
+        state,
+        freeze,
+    }
+}
+
+/// The one-million-row production-written graph: one bulk runtime request
+/// admits the rows and the production writer publishes them, so the C3
+/// counters come from a graph the product wrote, not from the test fixture.
+/// The ignored case runs in the gate C nightly job with `ORNA_ORP1_SCALE_ROWS`
+/// unset.
+#[tokio::test]
+#[ignore = "requires ORNA_ORP1_MILLION_ROWS=1 and --ignored; a run without the variable must fail, not pass"]
+async fn orp1_row_store_one_million_rows_production_written() {
+    assert!(
+        std::env::var_os(MILLION_ROWS_ENV).is_some(),
+        "ORP-1 production-written one-million-row case needs {MILLION_ROWS_ENV}=1; refusing to report a skipped run as pass"
+    );
+    use orna_storage::RuntimePublicationCoordinator;
+
+    let rows = scale_rows();
+    let started = Instant::now();
+    let fixture = admit_bulk_production_rows(rows).await;
+    eprintln!(
+        "ORP-1 phase label=production_admission rows={rows} ms={}",
+        started.elapsed().as_millis()
+    );
+    let BulkProductionRows {
+        _directory,
+        repository,
+        relation_id,
+        head_before,
+        state,
+        freeze,
+    } = fixture;
+
+    let head = repository
+        .head()
+        .expect("read repository head")
+        .expect("format-3 fixture has a head");
+    let index = repository
+        .index_generation()
+        .expect("read repository index generation");
+    let publish_allocs_before = allocations();
+    let publish_started = Instant::now();
+    let mut coordinator = RuntimePublicationCoordinator::prepare_allow_noop(
+        &repository,
+        &state,
+        &head,
+        index,
+        &freeze,
+        |_| Err(orna_storage::Error::InvalidKey),
+        "orna: publish one million production-written rows",
+    )
+    .await
+    .expect("storage writer prepares the bulk publication")
+    .expect("the bulk rows are a visible change");
+    coordinator
+        .publish(&repository)
+        .expect("storage writer publishes the bulk rows");
+    coordinator
+        .complete(&repository, &state, &freeze)
+        .await
+        .expect("complete the bulk publication");
+    let publish_us = publish_started.elapsed().as_micros() as u64;
+    let (publish_allocations, publish_bytes) =
+        allocation_delta(publish_allocs_before, allocations());
+    eprintln!(
+        "ORP-1 phase label=production_publish rows={rows} ms={}",
+        publish_us / 1_000
+    );
+
+    let head_after = repository
+        .head()
+        .expect("read published head")
+        .expect("publication leaves a head");
+    assert_ne!(
+        head_before.as_str(),
+        head_after.as_str(),
+        "publication advances HEAD"
+    );
+
+    let read_allocs_before = allocations();
+    let read_started = Instant::now();
+    let format = repository
+        .open_format_context()
+        .expect("open the format context");
+    let row_map = format
+        .load_row_map(relation_id)
+        .expect("load the production-written relation row map");
+    assert_eq!(row_map.version().row_count(), Some(rows));
+    let graph = format
+        .open_native_graph(&row_map)
+        .expect("open the production-written native graph");
+    let scope = graph.open_read_scope().expect("open a read scope");
+    let point_key = rows * 3 / 4;
+    let point_allocs_before = allocations();
+    let point_started = Instant::now();
+    let point = graph
+        .lookup_row(&TypedKey::UInt(point_key), &scope)
+        .expect("read a production-written point")
+        .expect("the production-written point exists");
+    let point_us = point_started.elapsed().as_micros() as u64;
+    let (point_allocations, point_bytes) = allocation_delta(point_allocs_before, allocations());
+    assert_eq!(point.key(), &TypedKey::UInt(point_key));
+    assert_eq!(
+        decode_single_uint_array(point.value().encoded_fields().expect("inline bucket field")),
+        bucket_for(point_key)
+    );
+    let range_start = rows / 3;
+    let range_count = 20_usize;
+    let range_end = range_start + u64::try_from(range_count).expect("range count fits");
+    let range = KeyRange::new(
+        Some(TypedKey::UInt(range_start)),
+        Some(TypedKey::UInt(range_end)),
+        range_count,
+    )
+    .expect("valid production-written range");
+    let range_allocs_before = allocations();
+    let range_started = Instant::now();
+    let range_rows = graph
+        .range_rows(&range, &scope)
+        .expect("read a production-written range");
+    let range_us = range_started.elapsed().as_micros() as u64;
+    let (range_allocations, range_bytes) = allocation_delta(range_allocs_before, allocations());
+    assert_eq!(range_rows.len(), range_count);
+    for (offset, row) in range_rows.iter().enumerate() {
+        let key = range_start + u64::try_from(offset).expect("offset fits");
+        assert_eq!(row.key(), &TypedKey::UInt(key));
+        assert_eq!(
+            decode_single_uint_array(row.value().encoded_fields().expect("inline bucket field")),
+            bucket_for(key)
+        );
+    }
+    let missing_key = rows + 7;
+    let missing_allocs_before = allocations();
+    let missing_started = Instant::now();
+    let missing = graph
+        .lookup_row(&TypedKey::UInt(missing_key), &scope)
+        .expect("read a missing production-written key");
+    let missing_us = missing_started.elapsed().as_micros() as u64;
+    let (missing_allocations, missing_bytes) =
+        allocation_delta(missing_allocs_before, allocations());
+    assert!(missing.is_none(), "an absent key reads as absent");
+    let index = store_index_shape(&repository, &head_after);
+    assert!(
+        index.leaves > 1,
+        "one million rows span more than one ordered leaf"
+    );
+    assert!(index.branches > 0, "one million rows need a branch level");
+    assert_eq!(index.store_roots, 1, "exactly one store root is reachable");
+    let read_us = read_started.elapsed().as_micros() as u64;
+    let (read_allocations, read_bytes) = allocation_delta(read_allocs_before, allocations());
+    eprintln!(
+        "ORP-1 production_writer_million rows={} leaves={} branches={} store_roots={} head={} \
+         publish_us={} publish_allocations={} publish_bytes={} read_us={} read_allocations={} \
+         read_bytes={} point_us={} point_allocations={} point_bytes={} range_us={} \
+         range_allocations={} range_bytes={} missing_us={} missing_allocations={} \
+         missing_bytes={}",
+        rows,
+        index.leaves,
+        index.branches,
+        index.store_roots,
+        head_after.as_str(),
+        publish_us,
+        publish_allocations,
+        publish_bytes,
+        read_us,
+        read_allocations,
+        read_bytes,
+        point_us,
+        point_allocations,
+        point_bytes,
+        range_us,
+        range_allocations,
+        range_bytes,
+        missing_us,
+        missing_allocations,
+        missing_bytes,
+    );
+}
+
+/// The ORP node shape of a committed production-written store, counted from
+/// the node data blobs themselves. `NativeGraphContext::object_stats` bounds
+/// its walk at `MAX_RANGE_GRAPH_OBJECTS` (2,048), which a one-million-row graph
+/// exceeds by an order of magnitude, so the harness decodes each node's
+/// `[1, kind, ...]` header through one `git cat-file --batch` session instead.
+struct StoreIndexShape {
+    leaves: u64,
+    branches: u64,
+    store_roots: u64,
+}
+
+fn store_index_shape(
+    repository: &Repository,
+    head: &orna_repository::GitCommitRef,
+) -> StoreIndexShape {
+    let listing = git_text(
+        repository.worktree(),
+        &["ls-tree", "-r", head.as_str(), ".orna/store"],
+    );
+    let mut data_blobs = BTreeSet::new();
+    for line in listing.lines() {
+        let Some((meta, path)) = line.split_once('\t') else {
+            continue;
+        };
+        if !path.ends_with("/data") {
+            continue;
+        }
+        let mut fields = meta.split_ascii_whitespace();
+        let (_mode, kind, oid) = (fields.next(), fields.next(), fields.next());
+        if kind == Some("blob")
+            && let Some(oid) = oid
+        {
+            data_blobs.insert(oid.to_owned());
+        }
+    }
+    let mut session = CatFileSession::spawn(repository.worktree());
+    let mut shape = StoreIndexShape {
+        leaves: 0,
+        branches: 0,
+        store_roots: 0,
+    };
+    for oid in data_blobs {
+        let bytes = session
+            .request_bytes(&oid)
+            .unwrap_or_else(|error| panic!("read node data {oid}: {error}"));
+        // Every node data starts `[1, kind, ...]`: an array header, the
+        // unsigned 1, then the node kind as a small unsigned integer.
+        if bytes.len() >= 3 && bytes[1] == 0x01 {
+            match bytes[2] {
+                0 => shape.store_roots += 1,
+                1 => shape.leaves += 1,
+                2 => shape.branches += 1,
+                _ => {}
+            }
+        }
+    }
+    // The relation map is itself an ordered leaf in the `relations` domain, so
+    // the row-page leaf count is one less.
+    shape.leaves = shape.leaves.saturating_sub(1);
+    shape
 }
 
 /// Asserts that the committed relation's native graph is whole: exactly one
