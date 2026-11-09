@@ -35,7 +35,7 @@ function_lines = 120
 [[crate]]
 name = "orna-application"
 [crate.files]
-"src/lib.rs" = 14911
+"src/lib.rs" = 14830
 "src/migration_rows.rs" = 1733
 "src/repl_transaction.rs" = 1231
 [crate.functions]
