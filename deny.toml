@@ -5,7 +5,7 @@
 # crate-to-crate layer table is ARCHITECTURE.md and docs/design/layers.toml,
 # enforced by scripts/check_architecture.py.
 #
-# Every list below is a ratchet: it records the state of origin/main 95b55e026
+# Every list below is a ratchet: it records the state of origin/main cb197b7b0
 # and may only shrink. A stage that removes a duplicate version, a banned user or
 # a license removes its entry in the same PR.
 

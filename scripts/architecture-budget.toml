@@ -16,9 +16,10 @@
 #   function_lines   hard cap on one function; a function above it needs an
 #                    explicit functions entry
 #
-# Recorded at origin/main 95b55e026. Regenerate only to lower entries:
-# the [[crate]] src_lines, files and functions entries are measurements, and
-# allow_clippy counts every #[allow(clippy::...)] attribute in src.
+# Recorded at the stage-01 merge of origin/main cb197b7b0. Regenerate only to
+# lower entries: the [[crate]] src_lines, files and functions entries are
+# measurements, and allow_clippy counts every #[allow(clippy::...)] attribute
+# in src.
 
 [limits]
 crate_src_lines = 25000
@@ -29,7 +30,7 @@ function_lines = 120
 name = "orna-application"
 allow_clippy = 0
 [crate.files]
-"src/lib.rs" = 14854
+"src/lib.rs" = 14911
 "src/migration_rows.rs" = 1733
 "src/repl_transaction.rs" = 1234
 [crate.functions]
@@ -53,7 +54,7 @@ allow_clippy = 0
 
 [[crate]]
 name = "orna-cli"
-src_lines = 41069
+src_lines = 41071
 allow_clippy = 101
 [crate.files]
 "src/cli_dispatch.rs" = 2093
@@ -62,7 +63,7 @@ allow_clippy = 101
 "src/cli_query.rs" = 1252
 "src/cli_serve.rs" = 4802
 "src/cli_serve_app.rs" = 1270
-"src/fuse_mount.rs" = 12006
+"src/fuse_mount.rs" = 12008
 "src/main.rs" = 5962
 "src/repl.rs" = 1674
 [crate.functions]
@@ -78,7 +79,7 @@ allow_clippy = 101
 "src/cli_query.rs::run_legacy" = 124
 "src/cli_serve.rs::smart_http_clones_and_pushes_the_selected_clones_head" = 143
 "src/cli_serve_app.rs::stage_at_head" = 128
-"src/fuse_mount.rs::candidate" = 228
+"src/fuse_mount.rs::candidate" = 230
 "src/fuse_mount.rs::commit_blob_candidate" = 169
 "src/fuse_mount.rs::create" = 139
 "src/fuse_mount.rs::from_snapshot" = 173
@@ -107,7 +108,7 @@ allow_clippy = 8
 [crate.files]
 "src/lib.rs" = 2962
 "src/main.rs" = 1981
-"src/semantic_adapter.rs" = 14773
+"src/semantic_adapter.rs" = 14483
 [crate.functions]
 "src/lib.rs::execute_reference_project_runtime_adapter" = 208
 "src/lib.rs::run_fixture" = 123
@@ -119,9 +120,8 @@ allow_clippy = 8
 "src/semantic_adapter.rs::evaluate_module_assertion_rows_continuation" = 121
 "src/semantic_adapter.rs::execute_running_table_request_with_success_terminal_with_faults" = 151
 "src/semantic_adapter.rs::handle_inner_with_budget" = 467
-"src/semantic_adapter.rs::lower_relation_expression_with_resolution" = 274
-"src/semantic_adapter.rs::relation_aggregate" = 138
-"src/semantic_adapter.rs::relation_quantifier" = 203
+"src/semantic_adapter.rs::relation_aggregate" = 132
+"src/semantic_adapter.rs::relation_quantifier" = 188
 "src/semantic_adapter.rs::running_table_continuation_fault_recovers_as_proven" = 152
 "src/semantic_adapter.rs::running_table_continuation_rejects_foreign_and_stale_capabilities_without_writes" = 125
 "src/semantic_adapter.rs::typed_composite_scan_orders_components_and_rejects_invalid_cursors" = 145
@@ -235,7 +235,7 @@ allow_clippy = 1
 name = "orna-live"
 allow_clippy = 24
 [crate.files]
-"src/lib.rs" = 12214
+"src/lib.rs" = 12239
 "src/live_presentation.rs" = 1623
 [crate.functions]
 "src/lib.rs::complete_application" = 232
@@ -262,10 +262,10 @@ allow_clippy = 2
 
 [[crate]]
 name = "orna-project"
-allow_clippy = 1
+allow_clippy = 0
 [crate.files]
 "src/attachments.rs" = 12412
-"src/lib.rs" = 3220
+"src/lib.rs" = 3232
 "src/object_identity.rs" = 4562
 "src/typed_row.rs" = 1222
 "src/unicode16.rs" = 1636
@@ -298,6 +298,7 @@ allow_clippy = 1
 "src/attachments.rs::nested_pin_short_rebind_keeps_long_endpoint_child_closure" = 1955
 "src/attachments.rs::nested_pin_swapped_alias_closure_composes_terminal_pin_swaps" = 211
 "src/attachments.rs::nested_pin_terminal_closure_preserves_swapped_equal_alias_edges" = 157
+"src/lib.rs::admit_source_row" = 128
 "src/lib.rs::load_reachable_project" = 142
 "src/object_identity.rs::nominal_enum_and_refined_field_types_emit_closed_definitions" = 214
 

@@ -121,7 +121,7 @@ accident); a crate outside the shipped closure must not depend on a `harness` or
 
 ## 4. Size budgets
 
-| item | cap | recorded worst on origin/main 95b55e026 |
+| item | cap | recorded worst on origin/main cb197b7b0 |
 |---|---:|---:|
 | one source file | 1,200 lines | 35,506 (`orna-runtime/src/lib.rs`) |
 | one function | 120 lines | 4,399 (`orna-sys/src/introspection.rs::explain_with_inputs`) |
