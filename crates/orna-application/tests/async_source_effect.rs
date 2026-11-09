@@ -207,8 +207,8 @@ impl AsyncApplicationEffectDispatcher for RuntimePauseDispatcher<'_> {
                         .map_err(|error| {
                             error
                                 .public_code()
-                                .unwrap_or("sys.storage.unavailable")
-                                .to_owned()
+                                .map(|code| code.as_str().to_owned())
+                                .unwrap_or_else(|| "sys.storage.unavailable".to_owned())
                         })?;
                     let accepted = matches!(
                         outcome,

@@ -68,6 +68,8 @@ pub use explain_bindings::{ActivationExplainCatalogue, ExplainCatalogue};
 use list::List;
 #[cfg(feature = "system-host-bindings")]
 pub use orna_sys::SysHostContext;
+#[cfg(feature = "system-host-bindings")]
+use orna_sys::{SysFailureCode, SysGroupedHandle, SysRelation};
 use relation::{
     BucketBySpec, BucketPeriod, RelationBucket, RelationBucketError, RelationBucketState,
     RelationLastState, RelationPlan, RelationStage, RelationWindowState,
@@ -3065,19 +3067,51 @@ fn annotated_blob(value: &Value) -> Result<orna_value::Blob, EvaluationError> {
 }
 
 /// Maps Blob comparison failures to the portable codes the Blob contracts name.
+#[cfg(feature = "system-host-bindings")]
 fn blob_equality_error(failure: ValueError) -> EvaluationError {
     match failure {
-        ValueError::ContentUnavailable => error("sys.blob.unavailable"),
-        ValueError::ContentDigestMismatch => error("sys.blob.corrupt"),
-        ValueError::InvalidContext => error("sys.blob.reference_context"),
+        ValueError::ContentUnavailable => sys_error(SysFailureCode::BlobUnavailable),
+        ValueError::ContentDigestMismatch => sys_error(SysFailureCode::BlobCorrupt),
+        ValueError::InvalidContext => sys_error(SysFailureCode::BlobReferenceContext),
         _ => error("ORNA-EVAL-VALUE"),
     }
+}
+
+/// Without host bindings the closed `sys` vocabulary is not linked; the portable
+/// code bytes stay identical.
+#[cfg(not(feature = "system-host-bindings"))]
+fn blob_equality_error(failure: ValueError) -> EvaluationError {
+    match failure {
+        ValueError::ContentUnavailable => error(non_host_names::BLOB_UNAVAILABLE),
+        ValueError::ContentDigestMismatch => error(non_host_names::BLOB_CORRUPT),
+        ValueError::InvalidContext => error(non_host_names::BLOB_REFERENCE_CONTEXT),
+        _ => error("ORNA-EVAL-VALUE"),
+    }
+}
+
+/// Exact portable name bytes for builds without the generated identity crate.
+#[cfg(not(feature = "system-host-bindings"))]
+mod non_host_names {
+    pub(super) const STORAGE: &str = "sys.Storage";
+    pub(super) const MAINTENANCE_JOB: &str = "sys.MaintenanceJob";
+    pub(super) const MATERIALIZATION: &str = "sys.Materialization";
+    pub(super) const CATALOG_TABLES: &str = "sys.catalog.tables";
+    pub(super) const CATALOG_COLUMNS: &str = "sys.catalog.columns";
+    pub(super) const BLOB_UNAVAILABLE: &str = "sys.blob.unavailable";
+    pub(super) const BLOB_CORRUPT: &str = "sys.blob.corrupt";
+    pub(super) const BLOB_REFERENCE_CONTEXT: &str = "sys.blob.reference_context";
+    pub(super) const CODEC_UNSUPPORTED_VALUE_PROFILE: &str = "sys.codec.unsupported_value_profile";
 }
 
 fn error(code: &'static str) -> EvaluationError {
     // No parser diagnostic, source text, span, input value, or filesystem data
     // crosses this boundary.
     EvaluationError::redacted(SafeText::new(code).expect("static safe code"))
+}
+
+#[cfg(feature = "system-host-bindings")]
+fn sys_error(code: SysFailureCode) -> EvaluationError {
+    error(code.as_str())
 }
 
 /// The annotation and content identity of one inline OVB-2 Blob. Two inline
@@ -4795,7 +4829,14 @@ impl Scope {
                 return Err(error("ORNA-EVAL-LIMIT"));
             }
             if value.format() == ValueFormat::Ovb1 {
-                return Err(error("sys.codec.unsupported_value_profile"));
+                #[cfg(feature = "system-host-bindings")]
+                {
+                    return Err(sys_error(SysFailureCode::CodecUnsupportedValueProfile));
+                }
+                #[cfg(not(feature = "system-host-bindings"))]
+                {
+                    return Err(error(non_host_names::CODEC_UNSUPPORTED_VALUE_PROFILE));
+                }
             }
             if value.format() != ValueFormat::Ovb2 {
                 return Err(error("ORNA-EVAL-VALUE"));
@@ -8924,7 +8965,7 @@ impl Context<'_, '_> {
             .and_then(|handler| handler.sys_host_context())
             .or(self.sys_host)
         else {
-            return Err(error("sys.version.incompatible"));
+            return Err(sys_error(SysFailureCode::VersionIncompatible));
         };
         attachment.runtime_info()
     }
@@ -9009,7 +9050,7 @@ impl Context<'_, '_> {
                     return Err(error("ORNA-EVAL-TYPE"));
                 };
                 if items.len() as u64 > crate::sys_bindings::MAX_BLOB_CALL_BYTES {
-                    return Err(error("sys.blob.limit"));
+                    return Err(sys_error(SysFailureCode::BlobLimit));
                 }
                 let integers = items
                     .iter()
@@ -15759,18 +15800,45 @@ fn codec_type_matches(
     }
 }
 
+#[cfg(feature = "system-host-bindings")]
 fn system_relation_source(expression: &Expr) -> Option<&'static str> {
-    match function_name(expression)?.as_str() {
-        "sys.Storage" => Some("sys.Storage"),
-        "sys.MaintenanceJob" => Some("sys.MaintenanceJob"),
-        "sys.Materialization" => Some("sys.Materialization"),
-        "sys.catalog.tables" => Some("sys.catalog.tables"),
-        "sys.catalog.columns" => Some("sys.catalog.columns"),
+    let name = function_name(expression)?;
+    match name.as_str() {
+        name if name == SysRelation::Storage.name() => Some(SysRelation::Storage.name()),
+        name if name == SysRelation::MaintenanceJob.name() => {
+            Some(SysRelation::MaintenanceJob.name())
+        }
+        name if name == SysRelation::Materialization.name() => {
+            Some(SysRelation::Materialization.name())
+        }
+        name if name == SysGroupedHandle::CatalogTables.name() => {
+            Some(SysGroupedHandle::CatalogTables.name())
+        }
+        name if name == SysGroupedHandle::CatalogColumns.name() => {
+            Some(SysGroupedHandle::CatalogColumns.name())
+        }
         _ => None,
     }
 }
 
-const SYS_MATERIALIZATION_SOURCE: &str = "sys.Materialization";
+/// Without host bindings the generated identity crate is not linked; the exact
+/// portable name bytes are preserved here.
+#[cfg(not(feature = "system-host-bindings"))]
+fn system_relation_source(expression: &Expr) -> Option<&'static str> {
+    match function_name(expression)?.as_str() {
+        name if name == non_host_names::STORAGE => Some(non_host_names::STORAGE),
+        name if name == non_host_names::MAINTENANCE_JOB => Some(non_host_names::MAINTENANCE_JOB),
+        name if name == non_host_names::MATERIALIZATION => Some(non_host_names::MATERIALIZATION),
+        name if name == non_host_names::CATALOG_TABLES => Some(non_host_names::CATALOG_TABLES),
+        name if name == non_host_names::CATALOG_COLUMNS => Some(non_host_names::CATALOG_COLUMNS),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "system-host-bindings")]
+const SYS_MATERIALIZATION_SOURCE: &str = SysRelation::Materialization.name();
+#[cfg(not(feature = "system-host-bindings"))]
+const SYS_MATERIALIZATION_SOURCE: &str = non_host_names::MATERIALIZATION;
 
 fn sha256_parts(domain: &str, parts: &[&[u8]]) -> [u8; 32] {
     let mut hash = Sha256::new();

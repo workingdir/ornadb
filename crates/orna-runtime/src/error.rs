@@ -118,19 +118,25 @@ impl RuntimeError {
     /// The provider boundary exposes the checkpoint outcomes and the failure
     /// transition outcomes required by the system contract. Other runtime
     /// failures stay internal to this crate's existing error convention.
-    pub fn public_code(&self) -> Option<&'static str> {
+    pub fn public_code(&self) -> Option<orna_sys::SysFailureCode> {
         match self {
-            Self::AdminBusy => Some("sys.admin.busy"),
-            Self::StreamCheckpointStale => Some("sys.checkpoint.conflict"),
-            Self::CheckpointNotReplayable => Some("sys.checkpoint.not_replayable"),
-            Self::SnapshotNotFound => Some("sys.snapshot.not_found"),
-            Self::SnapshotIncomplete => Some("sys.snapshot.incomplete"),
+            Self::AdminBusy => Some(orna_sys::SysFailureCode::AdminBusy),
+            Self::StreamCheckpointStale => Some(orna_sys::SysFailureCode::CheckpointConflict),
+            Self::CheckpointNotReplayable => {
+                Some(orna_sys::SysFailureCode::CheckpointNotReplayable)
+            }
+            Self::SnapshotNotFound => Some(orna_sys::SysFailureCode::SnapshotNotFound),
+            Self::SnapshotIncomplete => Some(orna_sys::SysFailureCode::SnapshotIncomplete),
             // No standalone cross-context code is defined; an exact pin that
             // cannot be resolved in this runtime is incomplete, never rebound.
-            Self::SnapshotContextMismatch => Some("sys.snapshot.incomplete"),
-            Self::StreamFailureStale => Some("sys.failure.stale_version"),
-            Self::StreamFailureStateConflict => Some("sys.failure.state_conflict"),
-            Self::StreamFailureSkipUnsupported => Some("sys.failure.skip_unsupported"),
+            Self::SnapshotContextMismatch => Some(orna_sys::SysFailureCode::SnapshotIncomplete),
+            Self::StreamFailureStale => Some(orna_sys::SysFailureCode::FailureStaleVersion),
+            Self::StreamFailureStateConflict => {
+                Some(orna_sys::SysFailureCode::FailureStateConflict)
+            }
+            Self::StreamFailureSkipUnsupported => {
+                Some(orna_sys::SysFailureCode::FailureSkipUnsupported)
+            }
             _ => None,
         }
     }

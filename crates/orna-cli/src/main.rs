@@ -1894,7 +1894,7 @@ fn runtime_failure_detail(error: &orna_runtime::RuntimeError) -> String {
     }
     let cause = error
         .public_code()
-        .map_or_else(|| error.to_string(), str::to_owned);
+        .map_or_else(|| error.to_string(), |code| code.as_str().to_owned());
     format!("runtime failure: {cause}")
 }
 

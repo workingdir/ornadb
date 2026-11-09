@@ -147,9 +147,9 @@ pub use request::{
     RequestIdentity, RequestOwner, RequestState, RequestStatus, TerminalOutcome,
 };
 pub use stream_admin::{
-    AdminCheckpointResetResult, AdminInvocationAudit, AdminLifecycleEffect, CheckpointResetAudit,
-    CheckpointResetProvider, CheckpointResetRequest, StreamAdministrationOutcome,
-    admin_invocation_id,
+    AdminCheckpointResetResult, AdminInvocationAudit, AdminLifecycleEffect, AdminStreamFunction,
+    CheckpointResetAudit, CheckpointResetProvider, CheckpointResetRequest,
+    StreamAdministrationOutcome, admin_invocation_id,
 };
 pub use stream_carry::{StreamCarry, StreamCarryError, import_stream_carry, read_stream_carry};
 pub use stream_commit::{
@@ -2647,10 +2647,10 @@ mod tests {
     };
     use crate::stream_admin::{
         AdminCheckpointResetResult, AdminInvocationOperation, AdminLifecycleEffect,
-        CheckpointResetAudit, CheckpointResetRequest, StreamAdministrationOutcome,
-        admin_failure_class, admin_failure_from_class, admin_invocation_descriptor_with_id,
-        admin_observed_generation, decode_admin_lifecycle_effect, replay_admin_stream_result,
-        store_admin_invocation_audit,
+        AdminStreamFunction, CheckpointResetAudit, CheckpointResetRequest,
+        StreamAdministrationOutcome, admin_failure_class, admin_failure_from_class,
+        admin_invocation_descriptor_with_id, admin_observed_generation,
+        decode_admin_lifecycle_effect, replay_admin_stream_result, store_admin_invocation_audit,
     };
     use crate::stream_commit::{
         StoredStreamReplayClaim, StreamDeliveryCommit, StreamReplayCommit,
@@ -5008,7 +5008,7 @@ mod tests {
         assert_eq!(checked.len(), checkout.preconditions.len());
         assert_eq!(admitted.id, checkout.id);
 
-        let precondition_failure = orna_sys::FailureCode::new("sys.abi.precondition_failed")
+        let precondition_failure = orna_sys::FailureCode::parse("sys.abi.precondition_failed")
             .expect("shared precondition failure code is valid");
         assert!(
             state
@@ -5032,7 +5032,7 @@ mod tests {
         let rejected = state
             .dispatch_system_operation(
                 checkout.id.as_str(),
-                |_| Err(precondition_failure.clone()),
+                |_| Err(precondition_failure),
                 |_| {
                     native_handler_ran = true;
                     Ok(())
@@ -5041,20 +5041,20 @@ mod tests {
             .expect("a declared precondition failure is returned at the boundary");
         assert_eq!(
             rejected,
-            orna_sys::SystemDispatchResult::Failed(precondition_failure.clone())
+            orna_sys::SystemDispatchResult::Failed(precondition_failure)
         );
         assert!(
             !native_handler_ran,
             "failed checks must stop native dispatch"
         );
 
-        let undeclared_failure = orna_sys::FailureCode::new("sys.storage.corrupt")
+        let undeclared_failure = orna_sys::FailureCode::parse("sys.storage.corrupt")
             .expect("failure code syntax is valid");
         assert!(matches!(
             state.dispatch_system_operation(
                 checkout.id.as_str(),
                 |_| Ok(()),
-                |_| Err::<(), _>(undeclared_failure.clone()),
+                |_| Err::<(), _>(undeclared_failure),
             ),
             Err(orna_sys::ProviderDiagnostic::UndeclaredFailure { .. })
         ));
@@ -5064,7 +5064,7 @@ mod tests {
         ));
         assert!(matches!(
             state.check_system_operation_preconditions(checkout.id.as_str(), |_| {
-                Err(precondition_failure.clone())
+                Err(precondition_failure)
             }),
             Err(orna_sys::ProviderDiagnostic::PreconditionFailed { .. })
         ));
@@ -19299,6 +19299,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn persisted_failure_code_round_trips_every_typed_code() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(200)).await.unwrap();
+        let procedure = materialize_echo_procedure(&state, writer).await;
+        let mut expected = Vec::new();
+        for (index, code) in orna_sys::SysFailureCode::ALL.iter().copied().enumerate() {
+            let invocation_id = id(u8::try_from(index + 1).expect("catalogue fits a test id"));
+            state
+                .begin_invocation_observation(
+                    writer,
+                    InvocationObservationRegistration {
+                        id: invocation_id,
+                        procedure: procedure.clone(),
+                        owner: InvocationLaunchOwner::OwnerSession(id(201)),
+                        run: None,
+                        arguments: vec![echo_invocation_input(&procedure)],
+                        idempotency_key_hash: None,
+                    },
+                )
+                .await
+                .unwrap();
+            let terminal = state
+                .finish_invocation_observation(
+                    writer,
+                    invocation_id,
+                    InvocationCompletion::Failed {
+                        diagnostic_code: code.as_str().to_owned(),
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(terminal.failure_code, Some(code));
+            expected.push((invocation_id, code));
+        }
+        drop(state);
+        let reopened = open_state(&repo).await;
+        for (invocation_id, code) in expected {
+            let row = reopened
+                .invocation_observation(invocation_id)
+                .await
+                .unwrap()
+                .expect("terminal invocation survives reopening runtime state");
+            assert_eq!(row.failure_code, Some(code));
+            assert_eq!(
+                row.failure_code
+                    .expect("failed row keeps its code")
+                    .as_str(),
+                code.as_str(),
+                "the persisted failure_code bytes changed"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn sys_invocation_tail_empty_end_poll_survives_admin_receipt_and_sees_later_event() {
         assert!(orna_syntax::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
         let (_temp, repo) = repository();
@@ -19919,7 +19974,7 @@ mod tests {
             .unwrap();
         assert_eq!(cancelled.status, InvocationObservationStatus::Cancelled);
         assert_eq!(
-            cancelled.failure_code.as_deref(),
+            cancelled.failure_code.map(orna_sys::SysFailureCode::as_str),
             Some(diagnostic_code.as_str())
         );
         assert_eq!(
@@ -19958,7 +20013,7 @@ mod tests {
             .expect("cancelled sys.Invocation remains tracked after reopen");
         assert_eq!(retained.status, InvocationObservationStatus::Cancelled);
         assert_eq!(
-            retained.failure_code.as_deref(),
+            retained.failure_code.map(orna_sys::SysFailureCode::as_str),
             Some(diagnostic_code.as_str())
         );
         assert_eq!(retained.idempotency_key_hash, Some(idempotency_hash));
@@ -19982,7 +20037,10 @@ mod tests {
             InvocationObservationStatus::Cancelled
         );
         assert_eq!(
-            terminal.entries[0].observation.failure_code.as_deref(),
+            terminal.entries[0]
+                .observation
+                .failure_code
+                .map(orna_sys::SysFailureCode::as_str),
             Some(diagnostic_code.as_str())
         );
         assert_eq!(
@@ -21108,8 +21166,8 @@ mod tests {
             .unwrap();
         assert_eq!(orphaned_child.status, InvocationObservationStatus::Orphaned);
         assert_eq!(
-            orphaned_child.failure_code.as_deref(),
-            Some("sys.invoke.orphaned")
+            orphaned_child.failure_code,
+            Some(orna_sys::SysFailureCode::InvokeOrphaned)
         );
         assert!(!orphaned_child.live);
         assert_eq!(
@@ -23670,7 +23728,7 @@ mod tests {
             state
                 .reject_admin_stream_effect_as_busy(
                     writer,
-                    "sys.admin.pause_stream",
+                    AdminStreamFunction::PauseStream,
                     reference.clone(),
                     None,
                     rejected_invocation_id,
@@ -23682,7 +23740,7 @@ mod tests {
             state
                 .reject_admin_stream_effect_as_busy(
                     writer,
-                    "sys.admin.pause_stream",
+                    AdminStreamFunction::PauseStream,
                     reference.clone(),
                     None,
                     rejected_invocation_id,

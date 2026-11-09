@@ -27,22 +27,11 @@ use orna_foundation::{
 };
 use orna_sys::{
     ExplainError, FunctionPlanDescription, ObjectRef, Plan, QueryPlanDescription, SnapshotRef,
-    explain_function, explain_query,
+    SysFailureCode, explain_function, explain_query,
 };
 
 use crate::relation::{RelationPlan, RelationStage};
 use crate::{DecimalValue, EvaluationError, Value, parse_decimal};
-
-/// A required API or profile coordinate is unavailable (ORNA-SYS-008).
-const VERSION_INCOMPATIBLE: &str = "sys.version.incompatible";
-/// No object matches the exact accessible selector.
-const OBJECT_NOT_FOUND: &str = "sys.object.not_found";
-/// The resolved object is not the requested kind.
-const OBJECT_WRONG_KIND: &str = "sys.object.wrong_kind";
-/// The snapshot selector cannot be resolved.
-const SNAPSHOT_NOT_FOUND: &str = "sys.snapshot.not_found";
-/// Required snapshot objects are absent or unavailable.
-const SNAPSHOT_INCOMPLETE: &str = "sys.snapshot.incomplete";
 
 /// The fields of one `sys.Diagnostic` row (`api/sys.json`).
 const DIAGNOSTIC_FIELDS: [&str; 14] = [
@@ -140,14 +129,14 @@ pub(crate) fn explain_query_plan(
     plan: &RelationPlan,
     catalogue: Option<&dyn ExplainCatalogue>,
 ) -> Result<Value, EvaluationError> {
-    let catalogue = catalogue.ok_or_else(|| failure(VERSION_INCOMPATIBLE))?;
+    let catalogue = catalogue.ok_or_else(|| failure(SysFailureCode::VersionIncompatible))?;
     // Unions and value-backed relations have no single catalogue source.
     if plan.source_union.is_some() || plan.source_values.is_some() {
-        return Err(failure(VERSION_INCOMPATIBLE));
+        return Err(failure(SysFailureCode::VersionIncompatible));
     }
     let (snapshot, source) = catalogue
         .resolve_source(&plan.source)
-        .ok_or_else(|| failure(OBJECT_NOT_FOUND))?;
+        .ok_or_else(|| failure(SysFailureCode::ObjectNotFound))?;
     let (distinct, limit) = lower_stages(&plan.stages)?;
     let query = QueryPlanDescription {
         snapshot,
@@ -174,21 +163,21 @@ pub(crate) fn explain_function_plan(
     function: &CanonicalValue,
     catalogue: Option<&dyn ExplainCatalogue>,
 ) -> Result<Value, EvaluationError> {
-    let catalogue = catalogue.ok_or_else(|| failure(VERSION_INCOMPATIBLE))?;
+    let catalogue = catalogue.ok_or_else(|| failure(SysFailureCode::VersionIncompatible))?;
     let reference = function
         .encode()
         .ok()
         .and_then(|bytes| RowRef::decode(&bytes).ok())
-        .ok_or_else(|| failure(OBJECT_NOT_FOUND))?;
+        .ok_or_else(|| failure(SysFailureCode::ObjectNotFound))?;
     if reference.table_id != SYS_FUNCTION_TABLE_ID {
-        return Err(failure(OBJECT_WRONG_KIND));
+        return Err(failure(SysFailureCode::ObjectWrongKind));
     }
     if !catalogue.resolves_functions() {
-        return Err(failure(VERSION_INCOMPATIBLE));
+        return Err(failure(SysFailureCode::VersionIncompatible));
     }
     let description = catalogue
         .describe_function(&TypedRowRef::from_row_ref(reference))
-        .ok_or_else(|| failure(OBJECT_NOT_FOUND))?;
+        .ok_or_else(|| failure(SysFailureCode::ObjectNotFound))?;
     let explained = explain_function(&description).map_err(planner_failure)?;
     plan_record(explained.plan())
 }
@@ -299,15 +288,16 @@ fn lower_stages(stages: &[RelationStage]) -> Result<(bool, Option<u64>), Evaluat
         match stage {
             RelationStage::Distinct => {
                 if limit.is_some() {
-                    return Err(failure(VERSION_INCOMPATIBLE));
+                    return Err(failure(SysFailureCode::VersionIncompatible));
                 }
                 distinct = true;
             }
             RelationStage::Take(count) => {
-                let count = u64::try_from(*count).map_err(|_| failure(VERSION_INCOMPATIBLE))?;
+                let count = u64::try_from(*count)
+                    .map_err(|_| failure(SysFailureCode::VersionIncompatible))?;
                 limit = Some(limit.map_or(count, |current| current.min(count)));
             }
-            _ => return Err(failure(VERSION_INCOMPATIBLE)),
+            _ => return Err(failure(SysFailureCode::VersionIncompatible)),
         }
     }
     Ok((distinct, limit))
@@ -318,13 +308,13 @@ fn lower_stages(stages: &[RelationStage]) -> Result<(bool, Option<u64>), Evaluat
 /// mean the required planning coordinate is unavailable (ORNA-SYS-008).
 fn planner_failure(error: ExplainError) -> EvaluationError {
     failure(match error {
-        ExplainError::InvalidSnapshot => SNAPSHOT_NOT_FOUND,
-        ExplainError::InvalidObject => OBJECT_NOT_FOUND,
-        ExplainError::InvalidDependency => SNAPSHOT_INCOMPLETE,
+        ExplainError::InvalidSnapshot => SysFailureCode::SnapshotNotFound,
+        ExplainError::InvalidObject => SysFailureCode::ObjectNotFound,
+        ExplainError::InvalidDependency => SysFailureCode::SnapshotIncomplete,
         ExplainError::InvalidExpression
         | ExplainError::TooManyNodes
         | ExplainError::TooManyExpressions
-        | ExplainError::InvalidPlanTree => VERSION_INCOMPATIBLE,
+        | ExplainError::InvalidPlanTree => SysFailureCode::VersionIncompatible,
     })
 }
 
@@ -333,7 +323,7 @@ fn plan_record(plan: &Plan) -> Result<Value, EvaluationError> {
     // The planner attaches no warnings to these plans. Fail closed rather
     // than silently dropping a diagnostic this boundary cannot represent.
     if !plan.warnings().is_empty() {
-        return Err(failure(VERSION_INCOMPATIBLE));
+        return Err(failure(SysFailureCode::VersionIncompatible));
     }
     let estimated_cost = match plan.estimated_cost() {
         None => Value::Option(None),
@@ -368,12 +358,12 @@ fn plan_record(plan: &Plan) -> Result<Value, EvaluationError> {
     Ok(Value::Record(fields))
 }
 
-fn failure(code: &'static str) -> EvaluationError {
-    EvaluationError::redacted(SafeText::new(code).expect("static safe code"))
+fn failure(code: SysFailureCode) -> EvaluationError {
+    EvaluationError::redacted(SafeText::new(code.as_str()).expect("static safe code"))
 }
 
 /// An argument that is not a `sys.Diagnostic` row is a host-language type
 /// error; semantic admission selects the overload by static type.
 fn type_error() -> EvaluationError {
-    failure("ORNA-EVAL-TYPE")
+    EvaluationError::redacted(SafeText::new("ORNA-EVAL-TYPE").expect("static safe code"))
 }

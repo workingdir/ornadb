@@ -1404,11 +1404,11 @@ impl LiveAdminEffectDispatcher for RuntimeAdminEffectDispatcher {
     {
         Box::pin(async move {
             let function = if resume {
-                "sys.admin.resume_stream"
+                orna_runtime::AdminStreamFunction::ResumeStream
             } else if reason.is_some() {
-                "sys.admin.pause_stream_with_reason"
+                orna_runtime::AdminStreamFunction::PauseStreamWithReason
             } else {
-                "sys.admin.pause_stream"
+                orna_runtime::AdminStreamFunction::PauseStream
             };
             let invocation_id = admin_invocation_id(self.request);
             self.runtime
@@ -1434,20 +1434,23 @@ impl LiveAdminEffectDispatcher for RuntimeAdminEffectDispatcher {
 /// checkpoint failures keep their more specific codes; and a runtime store
 /// that cannot complete the transition is `sys.storage.unavailable`.
 fn admin_failure_code(error: &RuntimeError) -> String {
-    error
-        .public_code()
-        .unwrap_or(match error {
-            RuntimeError::InvalidObservationReference
-            | RuntimeError::ObservationCoordinateMismatch
-            | RuntimeError::StreamIdentityMismatch => "sys.admin.missing_object",
-            RuntimeError::LeaseHeld
-            | RuntimeError::OwnerLost
-            | RuntimeError::StaleCapture { .. }
-            | RuntimeError::AdminInvocationConflict
-            | RuntimeError::RecoveryPending => "sys.admin.busy",
-            _ => "sys.storage.unavailable",
-        })
-        .to_owned()
+    error.public_code().map_or_else(
+        || {
+            match error {
+                RuntimeError::InvalidObservationReference
+                | RuntimeError::ObservationCoordinateMismatch
+                | RuntimeError::StreamIdentityMismatch => "sys.admin.missing_object",
+                RuntimeError::LeaseHeld
+                | RuntimeError::OwnerLost
+                | RuntimeError::StaleCapture { .. }
+                | RuntimeError::AdminInvocationConflict
+                | RuntimeError::RecoveryPending => "sys.admin.busy",
+                _ => "sys.storage.unavailable",
+            }
+            .to_owned()
+        },
+        |code| code.as_str().to_owned(),
+    )
 }
 
 /// Refuses a transaction the transport may not commit: the transaction must

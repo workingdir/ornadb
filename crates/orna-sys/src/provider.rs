@@ -16,6 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Deserialize;
 
 use crate::{AbiVersion, SystemEffect, TypedValue};
+use orna_sys_id::SysFailureCode;
 use orna_sys_model::signature::{
     matching_delimiter as matching, split_top_level as split_signature,
 };
@@ -24,10 +25,10 @@ const GENERATED_PROVIDER_ABI: &str =
     include_str!(concat!(env!("OUT_DIR"), "/system_provider_abi.json"));
 const GENERATED_PROVIDER_ABI_SCHEMA: &str =
     include_str!(concat!(env!("OUT_DIR"), "/system_provider_abi.schema.json"));
-const PROVIDER_FAILURE_CODES: [&str; 3] = [
-    "sys.abi.precondition_failed",
-    "sys.abi.unavailable",
-    "sys.abi.provider_failed",
+const PROVIDER_FAILURE_CODES: [SysFailureCode; 3] = [
+    SysFailureCode::AbiPreconditionFailed,
+    SysFailureCode::AbiUnavailable,
+    SysFailureCode::AbiProviderFailed,
 ];
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -206,20 +207,44 @@ pub struct Precondition {
     pub declaration: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct FailureCode(String);
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct FailureCode(SysFailureCode);
 
 impl FailureCode {
-    pub fn new(value: impl Into<String>) -> Result<Self, ProviderAbiError> {
-        let value = value.into();
-        if !valid_qualified_id(&value) {
-            return Err(ProviderAbiError::InvalidFailureCode);
-        }
-        Ok(Self(value))
+    /// Wraps a generated failure identity.
+    #[must_use]
+    pub const fn new(code: SysFailureCode) -> Self {
+        Self(code)
     }
 
-    pub fn as_str(&self) -> &str {
-        &self.0
+    /// Parses a failure identity at a wire/storage boundary.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        SysFailureCode::parse(value).map(Self)
+    }
+
+    /// The typed identity this code carries.
+    #[must_use]
+    pub const fn code(self) -> SysFailureCode {
+        self.0
+    }
+
+    /// The exact wire and storage bytes.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        self.0.as_str()
+    }
+
+    /// Whether the code is a provider-ABI failure (the former `sys.abi.` prefix).
+    #[must_use]
+    pub const fn is_provider_abi(self) -> bool {
+        self.0.is_provider_abi()
+    }
+}
+
+impl From<SysFailureCode> for FailureCode {
+    fn from(code: SysFailureCode) -> Self {
+        Self(code)
     }
 }
 
@@ -476,11 +501,9 @@ impl SystemProviderAbi {
             let mut failures = raw_operation
                 .failures
                 .into_iter()
-                .map(FailureCode::new)
+                .map(|code| FailureCode::parse(&code).ok_or(ProviderAbiError::InvalidFailureCode))
                 .collect::<Result<BTreeSet<_>, _>>()?;
-            failures.extend(PROVIDER_FAILURE_CODES.iter().map(|code| {
-                FailureCode::new(*code).expect("static provider failure code is valid")
-            }));
+            failures.extend(PROVIDER_FAILURE_CODES.into_iter().map(FailureCode::new));
             let role_annotation = raw_operation
                 .role
                 .as_deref()
@@ -603,7 +626,7 @@ impl SystemProviderAbi {
         } else {
             Err(ProviderDiagnostic::UndeclaredFailure {
                 operation: id,
-                code: code.clone(),
+                code: *code,
             })
         }
     }

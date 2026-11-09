@@ -14,8 +14,8 @@ use orna_sys::{
     EnvironmentProviderError, FailureCode, FilesystemProvider, HostHttpResponse, HostOperation,
     HostOperationDescriptor, HostProvider, HttpProvider, OperationContract, OperationId, Origin,
     ProcessProvider, ProviderDiagnostic, ProviderFailure, ProviderOffer, SemanticRoleContract,
-    SysEffect, SysFunction, SysFunctionBinding, SysFunctionHost, SystemOperationProvider, TypeId,
-    TypedValue,
+    SysEffect, SysFailureCode, SysFunction, SysFunctionBinding, SysFunctionHost,
+    SystemOperationProvider, TypeId, TypedValue,
 };
 use orna_value::{Blob, ContextValue, Error as ValueError, ValueFormat};
 
@@ -1134,11 +1134,11 @@ impl SysHostBindingRegistry {
     }
 
     fn failure(&self, operation: &HostOperationDescriptor, code: &str) -> EvaluationError {
-        let declares_failure = operation
-            .failures
-            .iter()
-            .any(|declared| declared.as_str() == code);
-        if declares_failure && code == "sys.host.clock.cancelled" {
+        let Some(code) = SysFailureCode::parse(code) else {
+            return redacted_error("ORNA-EVAL-UNSUPPORTED");
+        };
+        let declares_failure = operation.failures.contains(&code);
+        if declares_failure && code == SysFailureCode::HostClockCancelled {
             return redacted_error("ORNA-EVAL-CANCELLED");
         }
         if declares_failure {
@@ -1489,7 +1489,7 @@ impl SysHostBindingRegistry {
         let repository = self
             .repository_capture
             .as_ref()
-            .ok_or_else(|| redacted_error("sys.version.incompatible"))?;
+            .ok_or_else(|| sys_failure_error(SysFailureCode::VersionIncompatible))?;
         let mut source = filesystem
             .capture_file(root, path, max_bytes)
             .map_err(capture_file_failure)?;
@@ -1628,14 +1628,14 @@ pub(crate) fn dispatch_blob_reflection(
 /// declares.
 fn blob_reflection_failure(error: ValueError) -> EvaluationError {
     match error {
-        ValueError::ContentUnavailable => redacted_error("sys.blob.unavailable"),
+        ValueError::ContentUnavailable => sys_failure_error(SysFailureCode::BlobUnavailable),
         ValueError::OwnerExpired | ValueError::MissingDescriptor => {
-            redacted_error("sys.blob.unavailable")
+            sys_failure_error(SysFailureCode::BlobUnavailable)
         }
-        ValueError::ContentDigestMismatch => redacted_error("sys.blob.corrupt"),
+        ValueError::ContentDigestMismatch => sys_failure_error(SysFailureCode::BlobCorrupt),
         ValueError::Cancelled => redacted_error("ORNA-EVAL-CANCELLED"),
-        ValueError::ContentCollision => redacted_error("sys.blob.collision"),
-        ValueError::InvalidContext => redacted_error("sys.blob.reference_context"),
+        ValueError::ContentCollision => sys_failure_error(SysFailureCode::BlobCollision),
+        ValueError::InvalidContext => sys_failure_error(SysFailureCode::BlobReferenceContext),
         _ => redacted_error("ORNA-EVAL-VALUE"),
     }
 }
@@ -1644,14 +1644,12 @@ fn blob_reflection_failure(error: ValueError) -> EvaluationError {
 ///
 /// The code already crossed `validate_failure`, so it is a generated qualified
 /// identifier; the fallback only guards the evaluator's own text admission.
-fn redacted_code(code: &str) -> EvaluationError {
-    SafeText::new(code.to_owned())
-        .map(EvaluationError::redacted)
-        .unwrap_or_else(|_| redacted_error("ORNA-EVAL-UNSUPPORTED"))
+fn redacted_code(code: SysFailureCode) -> EvaluationError {
+    sys_failure_error(code)
 }
 
-fn static_failure(code: &'static str) -> FailureCode {
-    FailureCode::new(code).expect("static provider failure code is valid")
+fn static_failure(code: SysFailureCode) -> FailureCode {
+    FailureCode::new(code)
 }
 
 /// Resolves one portable Blob operation from the generated typed registry.
@@ -1700,7 +1698,9 @@ impl<'a> BlobAnnotationProvider<'a> {
             source.format(),
             ValueFormat::Ovb2 | ValueFormat::Rov3 | ValueFormat::Sov3
         ) {
-            return Err(redacted_error("sys.codec.unsupported_value_profile"));
+            return Err(sys_failure_error(
+                SysFailureCode::CodecUnsupportedValueProfile,
+            ));
         }
         Ok(Self {
             offer: ProviderOffer {
@@ -1731,19 +1731,19 @@ impl SystemOperationProvider for BlobAnnotationProvider<'_> {
         let table = orna_sys::system_dispatch_table();
         let Some(function) = sys_dispatch::sys_function(operation.as_str()) else {
             return Err(ProviderFailure {
-                code: static_failure("sys.abi.unavailable"),
+                code: static_failure(SysFailureCode::AbiUnavailable),
                 payload: None,
             });
         };
         if function != self.function {
             return Err(ProviderFailure {
-                code: static_failure("sys.abi.unavailable"),
+                code: static_failure(SysFailureCode::AbiUnavailable),
                 payload: None,
             });
         }
         let Some(contract) = table.operation(self.function.label()) else {
             return Err(ProviderFailure {
-                code: static_failure("sys.abi.unavailable"),
+                code: static_failure(SysFailureCode::AbiUnavailable),
                 payload: None,
             });
         };
@@ -1782,7 +1782,7 @@ fn apply_blob_annotation(
     suffix: &OvbRaw,
 ) -> Result<ContextValue, FailureCode> {
     if !is_blob_annotation_operation(function) {
-        return Err(static_failure("sys.abi.unavailable"));
+        return Err(static_failure(SysFailureCode::AbiUnavailable));
     }
     let suffix = blob_suffix_argument(suffix)?;
     source
@@ -1792,7 +1792,7 @@ fn apply_blob_annotation(
 
 fn provider_failure() -> ProviderFailure {
     ProviderFailure {
-        code: static_failure("sys.abi.provider_failed"),
+        code: static_failure(SysFailureCode::AbiProviderFailed),
         payload: None,
     }
 }
@@ -1860,7 +1860,7 @@ pub(crate) fn dispatch_blob_annotation(
         }
         // The host does not link the generated provider for this operation:
         // the required coordinate is unavailable (ORNA-SYS-008).
-        Err(_) => Err(redacted_error("sys.version.incompatible")),
+        Err(_) => Err(sys_failure_error(SysFailureCode::VersionIncompatible)),
     }
 }
 
@@ -1893,14 +1893,14 @@ pub(crate) fn is_blob_from_bytes_operation(function: SysFunction) -> bool {
 /// copied, and a value outside the byte range is `sys.blob.bounds`.
 pub(crate) fn dispatch_blob_from_bytes(values: &[BigInt]) -> Result<ContextValue, EvaluationError> {
     if values.len() as u64 > MAX_BLOB_CALL_BYTES {
-        return Err(redacted_error("sys.blob.limit"));
+        return Err(sys_failure_error(SysFailureCode::BlobLimit));
     }
     let bytes = values
         .iter()
         .map(|value| {
             value
                 .to_u8()
-                .ok_or_else(|| redacted_error("sys.blob.bounds"))
+                .ok_or_else(|| sys_failure_error(SysFailureCode::BlobBounds))
         })
         .collect::<Result<Vec<u8>, _>>()?;
     ContextValue::from_blob(&Blob::from_bytes(bytes), ValueFormat::Ovb2).map_err(blob_read_failure)
@@ -1918,16 +1918,19 @@ pub(crate) enum BlobReadValue {
 /// Maps an `orna_value` read failure onto the portable failures declared by
 /// the read-side `sys.blob.*` descriptors.
 fn blob_read_failure(error: ValueError) -> EvaluationError {
+    if error == ValueError::Cancelled {
+        return redacted_error("ORNA-EVAL-CANCELLED");
+    }
     let code = match error {
-        ValueError::InvalidContext => "sys.blob.reference_context",
+        ValueError::InvalidContext => SysFailureCode::BlobReferenceContext,
         ValueError::ContentUnavailable
         | ValueError::OwnerExpired
-        | ValueError::MissingDescriptor => "sys.blob.unavailable",
-        ValueError::Cancelled => "ORNA-EVAL-CANCELLED",
-        ValueError::ContentCollision => "sys.blob.collision",
-        ValueError::InvalidRange => "sys.blob.bounds",
-        ValueError::Limit | ValueError::QuotaExceeded => "sys.blob.limit",
-        ValueError::InvalidProfile => "sys.codec.unsupported_value_profile",
+        | ValueError::MissingDescriptor => SysFailureCode::BlobUnavailable,
+        ValueError::Cancelled => unreachable!("handled above"),
+        ValueError::ContentCollision => SysFailureCode::BlobCollision,
+        ValueError::InvalidRange => SysFailureCode::BlobBounds,
+        ValueError::Limit | ValueError::QuotaExceeded => SysFailureCode::BlobLimit,
+        ValueError::InvalidProfile => SysFailureCode::CodecUnsupportedValueProfile,
         ValueError::Truncated
         | ValueError::TrailingBytes
         | ValueError::Unsupported
@@ -1948,9 +1951,9 @@ fn blob_read_failure(error: ValueError) -> EvaluationError {
         | ValueError::InvalidOid
         | ValueError::ContentDigestMismatch
         | ValueError::RoleMismatch { .. }
-        | ValueError::SinkFailed => "sys.blob.corrupt",
+        | ValueError::SinkFailed => SysFailureCode::BlobCorrupt,
     };
-    redacted_error(code)
+    sys_failure_error(code)
 }
 
 /// Dispatches one portable read-side Blob operation. `bounds` holds the `Int`
@@ -1977,7 +1980,7 @@ pub(crate) fn dispatch_blob_read(
         }
         (SysFunction::BlobToBytes, []) => {
             if blob.length() > MAX_BLOB_CALL_BYTES {
-                return Err(redacted_error("sys.blob.limit"));
+                return Err(sys_failure_error(SysFailureCode::BlobLimit));
             }
             blob.read_to_end()
                 .map(BlobReadValue::Bytes)
@@ -1988,15 +1991,15 @@ pub(crate) fn dispatch_blob_read(
             // overflow are bounds failures before any byte is read (ORNA-BLOB-011).
             let offset = offset
                 .to_u64()
-                .ok_or_else(|| redacted_error("sys.blob.bounds"))?;
+                .ok_or_else(|| sys_failure_error(SysFailureCode::BlobBounds))?;
             let length = length
                 .to_u64()
-                .ok_or_else(|| redacted_error("sys.blob.bounds"))?;
+                .ok_or_else(|| sys_failure_error(SysFailureCode::BlobBounds))?;
             if offset > blob.length() || offset.checked_add(length).is_none() {
-                return Err(redacted_error("sys.blob.bounds"));
+                return Err(sys_failure_error(SysFailureCode::BlobBounds));
             }
             if length > MAX_BLOB_CALL_BYTES {
-                return Err(redacted_error("sys.blob.limit"));
+                return Err(sys_failure_error(SysFailureCode::BlobLimit));
             }
             let bytes = blob.read(offset, length).map_err(blob_read_failure)?;
             ContextValue::from_blob(&Blob::from_bytes(bytes), ValueFormat::Ovb2)
@@ -2012,10 +2015,10 @@ pub(crate) fn dispatch_blob_read(
 /// reports them only for arguments that are not the typed values its contract
 /// declares, which the ordinary argument type diagnostic covers.
 fn blob_annotation_failure(code: &FailureCode) -> EvaluationError {
-    if code.as_str().starts_with("sys.abi.") {
+    if code.is_provider_abi() {
         redacted_error("ORNA-EVAL-TYPE")
     } else {
-        redacted_code(code.as_str())
+        redacted_code(code.code())
     }
 }
 
@@ -2024,7 +2027,7 @@ fn blob_suffix_argument(raw: &OvbRaw) -> Result<Option<&str>, FailureCode> {
     match optional_raw(raw) {
         Some(None) => Ok(None),
         Some(Some(OvbRaw::Text(text))) => Ok(Some(text.as_str())),
-        _ => Err(static_failure("sys.abi.provider_failed")),
+        _ => Err(static_failure(SysFailureCode::AbiProviderFailed)),
     }
 }
 
@@ -2036,11 +2039,11 @@ fn blob_suffix_argument(raw: &OvbRaw) -> Result<Option<&str>, FailureCode> {
 /// which the shared provider-boundary code reports.
 fn blob_value_failure(error: ValueError) -> FailureCode {
     static_failure(match error {
-        ValueError::InvalidMediaType => "sys.blob.invalid_media_type",
-        ValueError::InvalidSuffix => "sys.blob.invalid_suffix",
-        ValueError::IncompatibleSuffix => "sys.blob.incompatible_suffix",
-        ValueError::InvalidProfile => "sys.codec.unsupported_value_profile",
-        _ => "sys.abi.provider_failed",
+        ValueError::InvalidMediaType => SysFailureCode::BlobInvalidMediaType,
+        ValueError::InvalidSuffix => SysFailureCode::BlobInvalidSuffix,
+        ValueError::IncompatibleSuffix => SysFailureCode::BlobIncompatibleSuffix,
+        ValueError::InvalidProfile => SysFailureCode::CodecUnsupportedValueProfile,
+        _ => SysFailureCode::AbiProviderFailed,
     })
 }
 
@@ -2066,6 +2069,10 @@ fn capture_file_failure(failure: CaptureFileError) -> EvaluationError {
 
 fn redacted_error(code: &'static str) -> EvaluationError {
     EvaluationError::redacted(SafeText::new(code).expect("static evaluator error code is safe"))
+}
+
+fn sys_failure_error(code: SysFailureCode) -> EvaluationError {
+    redacted_error(code.as_str())
 }
 
 #[cfg(test)]
