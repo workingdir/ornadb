@@ -1050,8 +1050,10 @@ fn local_intrinsic(name: &str) -> Option<orna_intrinsics::IntrinsicId> {
         return Some(id);
     }
     let (module_path, leaf) = name.rsplit_once('.')?;
-    if !leaf.starts_with("__") {
-        return None;
+    if let Some(submodule) = module_path.strip_prefix("std.time.") {
+        let dotted = format!("{submodule}.{leaf}");
+        return orna_intrinsics::lookup(orna_intrinsics::Module::Time, &dotted)
+            .map(|intrinsic| intrinsic.id);
     }
     let module = orna_intrinsics::Module::from_path(module_path)?;
     orna_intrinsics::lookup(module, leaf).map(|intrinsic| intrinsic.id)
