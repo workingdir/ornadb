@@ -14,6 +14,7 @@
 //! replace a sealed definition by reusing its identity or exact name.
 
 use crate::{FunctionId, ParameterId, TypeId, catalogue::QualifiedSemanticName};
+use orna_sys_id::EngineFunction;
 
 /// Defines one sealed semantic name and its resolved parts from a single
 /// segment list, so the dotted and part forms cannot drift.
@@ -25,37 +26,32 @@ macro_rules! sealed_name {
     };
 }
 
+/// Defines one sealed function's public identity from the generated engine
+/// catalogue, so the durable id, exact name and name parts cannot drift.
+macro_rules! sealed_function {
+    ($(#[$meta:meta])* $id:ident, $name:ident, $variant:ident) => {
+        $(#[$meta])*
+        pub const $id: FunctionId = FunctionId::from_bytes(EngineFunction::$variant.function_id());
+        pub const $name: &str = EngineFunction::$variant.label();
+    };
+}
+
+sealed_function!(
 /// The stable identity of the sealed `sys.catalog.health` function.
-pub const CATALOGUE_HEALTH_FUNCTION_ID: FunctionId =
-    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
-
-sealed_name!(
-    /// The exact resolved name of the sealed catalogue-health function.
-    CATALOGUE_HEALTH_FUNCTION_NAME,
-    CATALOGUE_HEALTH_NAME_PARTS,
-    "sys", "catalog", "health"
+    CATALOGUE_HEALTH_FUNCTION_ID, CATALOGUE_HEALTH_FUNCTION_NAME,
+    CatalogHealth
 );
 
+sealed_function!(
 /// The stable identity of the mandatory sealed `sys.invoke` function.
-pub const SYS_INVOKE_FUNCTION_ID: FunctionId =
-    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
-
-sealed_name!(
-    /// The exact resolved name of the mandatory invocation gateway.
-    SYS_INVOKE_FUNCTION_NAME,
-    SYS_INVOKE_NAME_PARTS,
-    "sys", "invoke"
+    SYS_INVOKE_FUNCTION_ID, SYS_INVOKE_FUNCTION_NAME,
+    Invoke
 );
 
+sealed_function!(
 /// The stable identity of the generic source-introspection function.
-pub const SYS_SOURCE_CURRENT_FUNCTION_ID: FunctionId =
-    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x30]);
-
-sealed_name!(
-    /// The exact semantic name of the generic source-introspection function.
-    SYS_SOURCE_CURRENT_FUNCTION_NAME,
-    SYS_SOURCE_CURRENT_FUNCTION_NAME_PARTS,
-    "sys", "source", "current"
+    SYS_SOURCE_CURRENT_FUNCTION_ID, SYS_SOURCE_CURRENT_FUNCTION_NAME,
+    SourceCurrent
 );
 
 /// The stable identity of the source-introspection result carrier.
@@ -68,268 +64,148 @@ pub const SYS_SOURCE_FUNCTION_TYPE_NAME: &str = "sys.source.function";
 /// The immutable representation contract of the source-introspection carrier.
 pub const SYS_SOURCE_FUNCTION_REPRESENTATION_CONTRACT: &str = "orna.sys.source.function@1";
 
+sealed_function!(
 /// The stable identity of the sealed `sys.inspect.snapshot` function.
-pub const SYS_INSPECT_SNAPSHOT_FUNCTION_ID: FunctionId =
-    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x03]);
-
-sealed_name!(
-    /// The exact resolved name of the sealed inspect-snapshot function.
-    SYS_INSPECT_SNAPSHOT_FUNCTION_NAME,
-    SYS_INSPECT_SNAPSHOT_FUNCTION_NAME_PARTS,
-    "sys", "inspect", "snapshot"
+    SYS_INSPECT_SNAPSHOT_FUNCTION_ID, SYS_INSPECT_SNAPSHOT_FUNCTION_NAME,
+    InspectSnapshot
 );
 
+sealed_function!(
 /// The stable identity of the sealed `sys.inspect.invocation_nodes` function.
-pub const SYS_INSPECT_INVOCATION_NODES_FUNCTION_ID: FunctionId =
-    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x04]);
-
-sealed_name!(
-    /// The exact resolved name of the sealed invocation-nodes projection.
-    SYS_INSPECT_INVOCATION_NODES_FUNCTION_NAME,
-    SYS_INSPECT_INVOCATION_NODES_FUNCTION_NAME_PARTS,
-    "sys", "inspect", "invocation_nodes"
+    SYS_INSPECT_INVOCATION_NODES_FUNCTION_ID, SYS_INSPECT_INVOCATION_NODES_FUNCTION_NAME,
+    InspectInvocationNodes
 );
 
+sealed_function!(
 /// The stable identity of the sealed `sys.inspect.calls` function.
-pub const SYS_INSPECT_CALLS_FUNCTION_ID: FunctionId =
-    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x05]);
-
-sealed_name!(
-    /// The exact resolved name of the sealed calls projection.
-    SYS_INSPECT_CALLS_FUNCTION_NAME,
-    SYS_INSPECT_CALLS_FUNCTION_NAME_PARTS,
-    "sys", "inspect", "calls"
+    SYS_INSPECT_CALLS_FUNCTION_ID, SYS_INSPECT_CALLS_FUNCTION_NAME,
+    InspectCalls
 );
 
+sealed_function!(
 /// The stable identity of the sealed `sys.inspect.resources` function.
-pub const SYS_INSPECT_RESOURCES_FUNCTION_ID: FunctionId =
-    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x06]);
-
-sealed_name!(
-    /// The exact resolved name of the sealed resources projection.
-    SYS_INSPECT_RESOURCES_FUNCTION_NAME,
-    SYS_INSPECT_RESOURCES_FUNCTION_NAME_PARTS,
-    "sys", "inspect", "resources"
+    SYS_INSPECT_RESOURCES_FUNCTION_ID, SYS_INSPECT_RESOURCES_FUNCTION_NAME,
+    InspectResources
 );
 
+sealed_function!(
 /// The stable identity of the sealed `sys.inspect.state_cells` function.
-pub const SYS_INSPECT_STATE_CELLS_FUNCTION_ID: FunctionId =
-    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x07]);
-
-sealed_name!(
-    /// The exact resolved name of the sealed state-cells projection.
-    SYS_INSPECT_STATE_CELLS_FUNCTION_NAME,
-    SYS_INSPECT_STATE_CELLS_FUNCTION_NAME_PARTS,
-    "sys", "inspect", "state_cells"
+    SYS_INSPECT_STATE_CELLS_FUNCTION_ID, SYS_INSPECT_STATE_CELLS_FUNCTION_NAME,
+    InspectStateCells
 );
 
+sealed_function!(
 /// The stable identity of the sealed `sys.inspect.ui_nodes` function.
-pub const SYS_INSPECT_UI_NODES_FUNCTION_ID: FunctionId =
-    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x08]);
-
-sealed_name!(
-    /// The exact resolved name of the sealed ui-nodes projection.
-    SYS_INSPECT_UI_NODES_FUNCTION_NAME,
-    SYS_INSPECT_UI_NODES_FUNCTION_NAME_PARTS,
-    "sys", "inspect", "ui_nodes"
+    SYS_INSPECT_UI_NODES_FUNCTION_ID, SYS_INSPECT_UI_NODES_FUNCTION_NAME,
+    InspectUiNodes
 );
 
+sealed_function!(
 /// The stable identity of the sealed `sys.inspect.presentation_candidates` function.
-pub const SYS_INSPECT_PRESENTATION_CANDIDATES_FUNCTION_ID: FunctionId =
-    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x09]);
-
-sealed_name!(
-    /// The exact resolved name of the sealed presentation-candidates projection.
-    SYS_INSPECT_PRESENTATION_CANDIDATES_FUNCTION_NAME,
-    SYS_INSPECT_PRESENTATION_CANDIDATES_FUNCTION_NAME_PARTS,
-    "sys", "inspect", "presentation_candidates"
+    SYS_INSPECT_PRESENTATION_CANDIDATES_FUNCTION_ID, SYS_INSPECT_PRESENTATION_CANDIDATES_FUNCTION_NAME,
+    InspectPresentationCandidates
 );
 
+sealed_function!(
 /// The stable identity of the sealed `sys.inspect.runtime_bindings` function.
-pub const SYS_INSPECT_RUNTIME_BINDINGS_FUNCTION_ID: FunctionId =
-    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0a]);
-
-sealed_name!(
-    /// The exact resolved name of the sealed runtime-bindings projection.
-    SYS_INSPECT_RUNTIME_BINDINGS_FUNCTION_NAME,
-    SYS_INSPECT_RUNTIME_BINDINGS_FUNCTION_NAME_PARTS,
-    "sys", "inspect", "runtime_bindings"
+    SYS_INSPECT_RUNTIME_BINDINGS_FUNCTION_ID, SYS_INSPECT_RUNTIME_BINDINGS_FUNCTION_NAME,
+    InspectRuntimeBindings
 );
 
+sealed_function!(
 /// The stable identity of the sealed `sys.inspect.security_decisions` function.
-pub const SYS_INSPECT_SECURITY_DECISIONS_FUNCTION_ID: FunctionId =
-    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0b]);
-
-sealed_name!(
-    /// The exact resolved name of the sealed security-decisions projection.
-    SYS_INSPECT_SECURITY_DECISIONS_FUNCTION_NAME,
-    SYS_INSPECT_SECURITY_DECISIONS_FUNCTION_NAME_PARTS,
-    "sys", "inspect", "security_decisions"
+    SYS_INSPECT_SECURITY_DECISIONS_FUNCTION_ID, SYS_INSPECT_SECURITY_DECISIONS_FUNCTION_NAME,
+    InspectSecurityDecisions
 );
 
+sealed_function!(
 /// The stable identity of the sealed `sys.inspect.trace` function.
-pub const SYS_INSPECT_TRACE_FUNCTION_ID: FunctionId =
-    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0c]);
-
-sealed_name!(
-    /// The exact resolved name of the sealed trace function.
-    SYS_INSPECT_TRACE_FUNCTION_NAME,
-    SYS_INSPECT_TRACE_FUNCTION_NAME_PARTS,
-    "sys", "inspect", "trace"
+    SYS_INSPECT_TRACE_FUNCTION_ID, SYS_INSPECT_TRACE_FUNCTION_NAME,
+    InspectTrace
 );
 
+sealed_function!(
 /// The stable identity of the sealed `sys.security.session_principal` function.
-pub const SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID: FunctionId =
-    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x40]);
-
-sealed_name!(
-    /// The exact resolved name of the sealed session-principal function.
-    SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_NAME,
-    SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_NAME_PARTS,
-    "sys", "security", "session_principal"
+    SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID, SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_NAME,
+    SecuritySessionPrincipal
 );
 
+sealed_function!(
 /// The stable identity of the sealed `sys.security.effective_principal` function.
-pub const SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID: FunctionId =
-    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x41]);
-
-sealed_name!(
-    /// The exact resolved name of the sealed effective-principal function.
-    SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_NAME,
-    SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_NAME_PARTS,
-    "sys", "security", "effective_principal"
+    SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID, SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_NAME,
+    SecurityEffectivePrincipal
 );
 
+sealed_function!(
 /// The stable identity of the sealed `sys.security.active_roles` function.
-pub const SYS_SECURITY_ACTIVE_ROLES_FUNCTION_ID: FunctionId =
-    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x42]);
-
-sealed_name!(
-    /// The exact resolved name of the sealed active-roles function.
-    SYS_SECURITY_ACTIVE_ROLES_FUNCTION_NAME,
-    SYS_SECURITY_ACTIVE_ROLES_FUNCTION_NAME_PARTS,
-    "sys", "security", "active_roles"
+    SYS_SECURITY_ACTIVE_ROLES_FUNCTION_ID, SYS_SECURITY_ACTIVE_ROLES_FUNCTION_NAME,
+    SecurityActiveRoles
 );
 
+sealed_function!(
 /// The stable identity of the sealed `sys.security.create_principal` function.
-pub const SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_ID: FunctionId =
-    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x43]);
-
-sealed_name!(
-    /// The exact resolved name of the sealed create-principal function.
-    SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_NAME,
-    SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_NAME_PARTS,
-    "sys", "security", "create_principal"
+    SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_ID, SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_NAME,
+    SecurityCreatePrincipal
 );
 
+sealed_function!(
 /// The stable identity of the sealed `sys.security.disable_principal` function.
-pub const SYS_SECURITY_DISABLE_PRINCIPAL_FUNCTION_ID: FunctionId =
-    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x44]);
-
-sealed_name!(
-    /// The exact resolved name of the sealed disable-principal function.
-    SYS_SECURITY_DISABLE_PRINCIPAL_FUNCTION_NAME,
-    SYS_SECURITY_DISABLE_PRINCIPAL_FUNCTION_NAME_PARTS,
-    "sys", "security", "disable_principal"
+    SYS_SECURITY_DISABLE_PRINCIPAL_FUNCTION_ID, SYS_SECURITY_DISABLE_PRINCIPAL_FUNCTION_NAME,
+    SecurityDisablePrincipal
 );
 
+sealed_function!(
 /// The stable identity of the sealed `sys.security.create_role` function.
-pub const SYS_SECURITY_CREATE_ROLE_FUNCTION_ID: FunctionId =
-    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x45]);
-
-sealed_name!(
-    /// The exact resolved name of the sealed create-role function.
-    SYS_SECURITY_CREATE_ROLE_FUNCTION_NAME,
-    SYS_SECURITY_CREATE_ROLE_FUNCTION_NAME_PARTS,
-    "sys", "security", "create_role"
+    SYS_SECURITY_CREATE_ROLE_FUNCTION_ID, SYS_SECURITY_CREATE_ROLE_FUNCTION_NAME,
+    SecurityCreateRole
 );
 
+sealed_function!(
 /// The stable identity of the sealed `sys.security.grant_role` function.
-pub const SYS_SECURITY_GRANT_ROLE_FUNCTION_ID: FunctionId =
-    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x46]);
-
-sealed_name!(
-    /// The exact resolved name of the sealed grant-role function.
-    SYS_SECURITY_GRANT_ROLE_FUNCTION_NAME,
-    SYS_SECURITY_GRANT_ROLE_FUNCTION_NAME_PARTS,
-    "sys", "security", "grant_role"
+    SYS_SECURITY_GRANT_ROLE_FUNCTION_ID, SYS_SECURITY_GRANT_ROLE_FUNCTION_NAME,
+    SecurityGrantRole
 );
 
+sealed_function!(
 /// The stable identity of the sealed `sys.security.revoke_role` function.
-pub const SYS_SECURITY_REVOKE_ROLE_FUNCTION_ID: FunctionId =
-    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x47]);
-
-sealed_name!(
-    /// The exact resolved name of the sealed revoke-role function.
-    SYS_SECURITY_REVOKE_ROLE_FUNCTION_NAME,
-    SYS_SECURITY_REVOKE_ROLE_FUNCTION_NAME_PARTS,
-    "sys", "security", "revoke_role"
+    SYS_SECURITY_REVOKE_ROLE_FUNCTION_ID, SYS_SECURITY_REVOKE_ROLE_FUNCTION_NAME,
+    SecurityRevokeRole
 );
 
+sealed_function!(
 /// The stable identity of the sealed `sys.security.grant_privilege` function.
-pub const SYS_SECURITY_GRANT_PRIVILEGE_FUNCTION_ID: FunctionId =
-    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x48]);
-
-sealed_name!(
-    /// The exact resolved name of the sealed grant-privilege function.
-    SYS_SECURITY_GRANT_PRIVILEGE_FUNCTION_NAME,
-    SYS_SECURITY_GRANT_PRIVILEGE_FUNCTION_NAME_PARTS,
-    "sys", "security", "grant_privilege"
+    SYS_SECURITY_GRANT_PRIVILEGE_FUNCTION_ID, SYS_SECURITY_GRANT_PRIVILEGE_FUNCTION_NAME,
+    SecurityGrantPrivilege
 );
 
+sealed_function!(
 /// The stable identity of the sealed `sys.security.revoke_privilege` function.
-pub const SYS_SECURITY_REVOKE_PRIVILEGE_FUNCTION_ID: FunctionId =
-    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x49]);
-
-sealed_name!(
-    /// The exact resolved name of the sealed revoke-privilege function.
-    SYS_SECURITY_REVOKE_PRIVILEGE_FUNCTION_NAME,
-    SYS_SECURITY_REVOKE_PRIVILEGE_FUNCTION_NAME_PARTS,
-    "sys", "security", "revoke_privilege"
+    SYS_SECURITY_REVOKE_PRIVILEGE_FUNCTION_ID, SYS_SECURITY_REVOKE_PRIVILEGE_FUNCTION_NAME,
+    SecurityRevokePrivilege
 );
 
+sealed_function!(
 /// The stable identity of the sealed `sys.security.can_execute` function.
-pub const SYS_SECURITY_CAN_EXECUTE_FUNCTION_ID: FunctionId =
-    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x4a]);
-
-sealed_name!(
-    /// The exact resolved name of the sealed can-execute check.
-    SYS_SECURITY_CAN_EXECUTE_FUNCTION_NAME,
-    SYS_SECURITY_CAN_EXECUTE_FUNCTION_NAME_PARTS,
-    "sys", "security", "can_execute"
+    SYS_SECURITY_CAN_EXECUTE_FUNCTION_ID, SYS_SECURITY_CAN_EXECUTE_FUNCTION_NAME,
+    SecurityCanExecute
 );
 
+sealed_function!(
 /// The stable identity of the sealed `sys.security.has_privilege` function.
-pub const SYS_SECURITY_HAS_PRIVILEGE_FUNCTION_ID: FunctionId =
-    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x4b]);
-
-sealed_name!(
-    /// The exact resolved name of the sealed has-privilege check.
-    SYS_SECURITY_HAS_PRIVILEGE_FUNCTION_NAME,
-    SYS_SECURITY_HAS_PRIVILEGE_FUNCTION_NAME_PARTS,
-    "sys", "security", "has_privilege"
+    SYS_SECURITY_HAS_PRIVILEGE_FUNCTION_ID, SYS_SECURITY_HAS_PRIVILEGE_FUNCTION_NAME,
+    SecurityHasPrivilege
 );
 
+sealed_function!(
 /// The stable identity of the sealed `sys.state.load_user_state` function.
-pub const SYS_STATE_LOAD_USER_STATE_FUNCTION_ID: FunctionId =
-    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x4c]);
-
-sealed_name!(
-    /// The exact resolved name of the sealed load-user-state function.
-    SYS_STATE_LOAD_USER_STATE_FUNCTION_NAME,
-    SYS_STATE_LOAD_USER_STATE_FUNCTION_NAME_PARTS,
-    "sys", "state", "load_user_state"
+    SYS_STATE_LOAD_USER_STATE_FUNCTION_ID, SYS_STATE_LOAD_USER_STATE_FUNCTION_NAME,
+    StateLoadUserState
 );
 
+sealed_function!(
 /// The stable identity of the sealed `sys.state.write_user_state` function.
-pub const SYS_STATE_WRITE_USER_STATE_FUNCTION_ID: FunctionId =
-    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x4d]);
-
-sealed_name!(
-    /// The exact resolved name of the sealed write-user-state function.
-    SYS_STATE_WRITE_USER_STATE_FUNCTION_NAME,
-    SYS_STATE_WRITE_USER_STATE_FUNCTION_NAME_PARTS,
-    "sys", "state", "write_user_state"
+    SYS_STATE_WRITE_USER_STATE_FUNCTION_ID, SYS_STATE_WRITE_USER_STATE_FUNCTION_NAME,
+    StateWriteUserState
 );
 
 /// The stable identity of the sole sealed `sys.invoke` parameter.
@@ -1120,143 +996,129 @@ impl SystemFunctionDefinition {
     }
 }
 
+/// Maps every generated sealed variant to its compiled behaviour. There is no
+/// wildcard arm: a new catalogue entry stops this crate compiling until bound.
+const fn sealed_behaviour(function: EngineFunction) -> SystemFunctionBehaviour {
+    match function {
+        EngineFunction::CatalogHealth => SystemFunctionBehaviour::Health,
+        EngineFunction::Invoke => SystemFunctionBehaviour::Invoke(SYS_INVOKE_SIGNATURE),
+        EngineFunction::SourceCurrent => SystemFunctionBehaviour::SourceIntrospection,
+        EngineFunction::InspectSnapshot => {
+            SystemFunctionBehaviour::InspectSnapshot(SYS_INSPECT_SNAPSHOT_SIGNATURE)
+        }
+        EngineFunction::InspectInvocationNodes => {
+            SystemFunctionBehaviour::InspectProjection(SYS_INSPECT_INVOCATION_NODES_SIGNATURE)
+        }
+        EngineFunction::InspectCalls => {
+            SystemFunctionBehaviour::InspectProjection(SYS_INSPECT_CALLS_SIGNATURE)
+        }
+        EngineFunction::InspectResources => {
+            SystemFunctionBehaviour::InspectProjection(SYS_INSPECT_RESOURCES_SIGNATURE)
+        }
+        EngineFunction::InspectStateCells => {
+            SystemFunctionBehaviour::InspectProjection(SYS_INSPECT_STATE_CELLS_SIGNATURE)
+        }
+        EngineFunction::InspectUiNodes => {
+            SystemFunctionBehaviour::InspectProjection(SYS_INSPECT_UI_NODES_SIGNATURE)
+        }
+        EngineFunction::InspectPresentationCandidates => {
+            SystemFunctionBehaviour::InspectProjection(
+                SYS_INSPECT_PRESENTATION_CANDIDATES_SIGNATURE,
+            )
+        }
+        EngineFunction::InspectRuntimeBindings => {
+            SystemFunctionBehaviour::InspectProjection(SYS_INSPECT_RUNTIME_BINDINGS_SIGNATURE)
+        }
+        EngineFunction::InspectSecurityDecisions => {
+            SystemFunctionBehaviour::InspectProjection(SYS_INSPECT_SECURITY_DECISIONS_SIGNATURE)
+        }
+        EngineFunction::InspectTrace => {
+            SystemFunctionBehaviour::InspectTrace(SYS_INSPECT_TRACE_SIGNATURE)
+        }
+        EngineFunction::SecuritySessionPrincipal => {
+            SystemFunctionBehaviour::SecurityIdentity(SYS_SECURITY_SESSION_PRINCIPAL_SIGNATURE)
+        }
+        EngineFunction::SecurityEffectivePrincipal => {
+            SystemFunctionBehaviour::SecurityIdentity(SYS_SECURITY_EFFECTIVE_PRINCIPAL_SIGNATURE)
+        }
+        EngineFunction::SecurityActiveRoles => {
+            SystemFunctionBehaviour::SecurityIdentity(SYS_SECURITY_ACTIVE_ROLES_SIGNATURE)
+        }
+        EngineFunction::SecurityCreatePrincipal => {
+            SystemFunctionBehaviour::SecurityAdmin(SYS_SECURITY_CREATE_PRINCIPAL_SIGNATURE)
+        }
+        EngineFunction::SecurityDisablePrincipal => {
+            SystemFunctionBehaviour::SecurityAdmin(SYS_SECURITY_DISABLE_PRINCIPAL_SIGNATURE)
+        }
+        EngineFunction::SecurityCreateRole => {
+            SystemFunctionBehaviour::SecurityAdmin(SYS_SECURITY_CREATE_ROLE_SIGNATURE)
+        }
+        EngineFunction::SecurityGrantRole => {
+            SystemFunctionBehaviour::SecurityAdmin(SYS_SECURITY_GRANT_ROLE_SIGNATURE)
+        }
+        EngineFunction::SecurityRevokeRole => {
+            SystemFunctionBehaviour::SecurityAdmin(SYS_SECURITY_REVOKE_ROLE_SIGNATURE)
+        }
+        EngineFunction::SecurityGrantPrivilege => {
+            SystemFunctionBehaviour::SecurityAdmin(SYS_SECURITY_GRANT_PRIVILEGE_SIGNATURE)
+        }
+        EngineFunction::SecurityRevokePrivilege => {
+            SystemFunctionBehaviour::SecurityAdmin(SYS_SECURITY_REVOKE_PRIVILEGE_SIGNATURE)
+        }
+        EngineFunction::SecurityCanExecute => {
+            SystemFunctionBehaviour::SecurityCheck(SYS_SECURITY_CAN_EXECUTE_SIGNATURE)
+        }
+        EngineFunction::SecurityHasPrivilege => {
+            SystemFunctionBehaviour::SecurityCheck(SYS_SECURITY_HAS_PRIVILEGE_SIGNATURE)
+        }
+        EngineFunction::StateLoadUserState => {
+            SystemFunctionBehaviour::State(SYS_STATE_LOAD_USER_STATE_SIGNATURE)
+        }
+        EngineFunction::StateWriteUserState => {
+            SystemFunctionBehaviour::State(SYS_STATE_WRITE_USER_STATE_SIGNATURE)
+        }
+    }
+}
+
+macro_rules! sealed_function_entry {
+    ($variant:ident) => {
+        SystemFunctionDefinition::new(
+            FunctionId::from_bytes(EngineFunction::$variant.function_id()),
+            EngineFunction::$variant.name_parts(),
+            sealed_behaviour(EngineFunction::$variant),
+        )
+    };
+}
+
 /// The complete sealed system-function registry in canonical order.
 pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
-    SystemFunctionDefinition::new(
-        CATALOGUE_HEALTH_FUNCTION_ID,
-        CATALOGUE_HEALTH_NAME_PARTS,
-        SystemFunctionBehaviour::Health,
-    ),
-    SystemFunctionDefinition::new(
-        SYS_INVOKE_FUNCTION_ID,
-        SYS_INVOKE_NAME_PARTS,
-        SystemFunctionBehaviour::Invoke(SYS_INVOKE_SIGNATURE),
-    ),
-    SystemFunctionDefinition::new(
-        SYS_SOURCE_CURRENT_FUNCTION_ID,
-        SYS_SOURCE_CURRENT_FUNCTION_NAME_PARTS,
-        SystemFunctionBehaviour::SourceIntrospection,
-    ),
-    SystemFunctionDefinition::new(
-        SYS_INSPECT_SNAPSHOT_FUNCTION_ID,
-        SYS_INSPECT_SNAPSHOT_FUNCTION_NAME_PARTS,
-        SystemFunctionBehaviour::InspectSnapshot(SYS_INSPECT_SNAPSHOT_SIGNATURE),
-    ),
-    SystemFunctionDefinition::new(
-        SYS_INSPECT_INVOCATION_NODES_FUNCTION_ID,
-        SYS_INSPECT_INVOCATION_NODES_FUNCTION_NAME_PARTS,
-        SystemFunctionBehaviour::InspectProjection(SYS_INSPECT_INVOCATION_NODES_SIGNATURE),
-    ),
-    SystemFunctionDefinition::new(
-        SYS_INSPECT_CALLS_FUNCTION_ID,
-        SYS_INSPECT_CALLS_FUNCTION_NAME_PARTS,
-        SystemFunctionBehaviour::InspectProjection(SYS_INSPECT_CALLS_SIGNATURE),
-    ),
-    SystemFunctionDefinition::new(
-        SYS_INSPECT_RESOURCES_FUNCTION_ID,
-        SYS_INSPECT_RESOURCES_FUNCTION_NAME_PARTS,
-        SystemFunctionBehaviour::InspectProjection(SYS_INSPECT_RESOURCES_SIGNATURE),
-    ),
-    SystemFunctionDefinition::new(
-        SYS_INSPECT_STATE_CELLS_FUNCTION_ID,
-        SYS_INSPECT_STATE_CELLS_FUNCTION_NAME_PARTS,
-        SystemFunctionBehaviour::InspectProjection(SYS_INSPECT_STATE_CELLS_SIGNATURE),
-    ),
-    SystemFunctionDefinition::new(
-        SYS_INSPECT_UI_NODES_FUNCTION_ID,
-        SYS_INSPECT_UI_NODES_FUNCTION_NAME_PARTS,
-        SystemFunctionBehaviour::InspectProjection(SYS_INSPECT_UI_NODES_SIGNATURE),
-    ),
-    SystemFunctionDefinition::new(
-        SYS_INSPECT_PRESENTATION_CANDIDATES_FUNCTION_ID,
-        SYS_INSPECT_PRESENTATION_CANDIDATES_FUNCTION_NAME_PARTS,
-        SystemFunctionBehaviour::InspectProjection(SYS_INSPECT_PRESENTATION_CANDIDATES_SIGNATURE),
-    ),
-    SystemFunctionDefinition::new(
-        SYS_INSPECT_RUNTIME_BINDINGS_FUNCTION_ID,
-        SYS_INSPECT_RUNTIME_BINDINGS_FUNCTION_NAME_PARTS,
-        SystemFunctionBehaviour::InspectProjection(SYS_INSPECT_RUNTIME_BINDINGS_SIGNATURE),
-    ),
-    SystemFunctionDefinition::new(
-        SYS_INSPECT_SECURITY_DECISIONS_FUNCTION_ID,
-        SYS_INSPECT_SECURITY_DECISIONS_FUNCTION_NAME_PARTS,
-        SystemFunctionBehaviour::InspectProjection(SYS_INSPECT_SECURITY_DECISIONS_SIGNATURE),
-    ),
-    SystemFunctionDefinition::new(
-        SYS_INSPECT_TRACE_FUNCTION_ID,
-        SYS_INSPECT_TRACE_FUNCTION_NAME_PARTS,
-        SystemFunctionBehaviour::InspectTrace(SYS_INSPECT_TRACE_SIGNATURE),
-    ),
-    SystemFunctionDefinition::new(
-        SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID,
-        SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_NAME_PARTS,
-        SystemFunctionBehaviour::SecurityIdentity(SYS_SECURITY_SESSION_PRINCIPAL_SIGNATURE),
-    ),
-    SystemFunctionDefinition::new(
-        SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID,
-        SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_NAME_PARTS,
-        SystemFunctionBehaviour::SecurityIdentity(SYS_SECURITY_EFFECTIVE_PRINCIPAL_SIGNATURE),
-    ),
-    SystemFunctionDefinition::new(
-        SYS_SECURITY_ACTIVE_ROLES_FUNCTION_ID,
-        SYS_SECURITY_ACTIVE_ROLES_FUNCTION_NAME_PARTS,
-        SystemFunctionBehaviour::SecurityIdentity(SYS_SECURITY_ACTIVE_ROLES_SIGNATURE),
-    ),
-    SystemFunctionDefinition::new(
-        SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_ID,
-        SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_NAME_PARTS,
-        SystemFunctionBehaviour::SecurityAdmin(SYS_SECURITY_CREATE_PRINCIPAL_SIGNATURE),
-    ),
-    SystemFunctionDefinition::new(
-        SYS_SECURITY_DISABLE_PRINCIPAL_FUNCTION_ID,
-        SYS_SECURITY_DISABLE_PRINCIPAL_FUNCTION_NAME_PARTS,
-        SystemFunctionBehaviour::SecurityAdmin(SYS_SECURITY_DISABLE_PRINCIPAL_SIGNATURE),
-    ),
-    SystemFunctionDefinition::new(
-        SYS_SECURITY_CREATE_ROLE_FUNCTION_ID,
-        SYS_SECURITY_CREATE_ROLE_FUNCTION_NAME_PARTS,
-        SystemFunctionBehaviour::SecurityAdmin(SYS_SECURITY_CREATE_ROLE_SIGNATURE),
-    ),
-    SystemFunctionDefinition::new(
-        SYS_SECURITY_GRANT_ROLE_FUNCTION_ID,
-        SYS_SECURITY_GRANT_ROLE_FUNCTION_NAME_PARTS,
-        SystemFunctionBehaviour::SecurityAdmin(SYS_SECURITY_GRANT_ROLE_SIGNATURE),
-    ),
-    SystemFunctionDefinition::new(
-        SYS_SECURITY_REVOKE_ROLE_FUNCTION_ID,
-        SYS_SECURITY_REVOKE_ROLE_FUNCTION_NAME_PARTS,
-        SystemFunctionBehaviour::SecurityAdmin(SYS_SECURITY_REVOKE_ROLE_SIGNATURE),
-    ),
-    SystemFunctionDefinition::new(
-        SYS_SECURITY_GRANT_PRIVILEGE_FUNCTION_ID,
-        SYS_SECURITY_GRANT_PRIVILEGE_FUNCTION_NAME_PARTS,
-        SystemFunctionBehaviour::SecurityAdmin(SYS_SECURITY_GRANT_PRIVILEGE_SIGNATURE),
-    ),
-    SystemFunctionDefinition::new(
-        SYS_SECURITY_REVOKE_PRIVILEGE_FUNCTION_ID,
-        SYS_SECURITY_REVOKE_PRIVILEGE_FUNCTION_NAME_PARTS,
-        SystemFunctionBehaviour::SecurityAdmin(SYS_SECURITY_REVOKE_PRIVILEGE_SIGNATURE),
-    ),
-    SystemFunctionDefinition::new(
-        SYS_SECURITY_CAN_EXECUTE_FUNCTION_ID,
-        SYS_SECURITY_CAN_EXECUTE_FUNCTION_NAME_PARTS,
-        SystemFunctionBehaviour::SecurityCheck(SYS_SECURITY_CAN_EXECUTE_SIGNATURE),
-    ),
-    SystemFunctionDefinition::new(
-        SYS_SECURITY_HAS_PRIVILEGE_FUNCTION_ID,
-        SYS_SECURITY_HAS_PRIVILEGE_FUNCTION_NAME_PARTS,
-        SystemFunctionBehaviour::SecurityCheck(SYS_SECURITY_HAS_PRIVILEGE_SIGNATURE),
-    ),
-    SystemFunctionDefinition::new(
-        SYS_STATE_LOAD_USER_STATE_FUNCTION_ID,
-        SYS_STATE_LOAD_USER_STATE_FUNCTION_NAME_PARTS,
-        SystemFunctionBehaviour::State(SYS_STATE_LOAD_USER_STATE_SIGNATURE),
-    ),
-    SystemFunctionDefinition::new(
-        SYS_STATE_WRITE_USER_STATE_FUNCTION_ID,
-        SYS_STATE_WRITE_USER_STATE_FUNCTION_NAME_PARTS,
-        SystemFunctionBehaviour::State(SYS_STATE_WRITE_USER_STATE_SIGNATURE),
-    ),
+    sealed_function_entry!(CatalogHealth),
+    sealed_function_entry!(Invoke),
+    sealed_function_entry!(SourceCurrent),
+    sealed_function_entry!(InspectSnapshot),
+    sealed_function_entry!(InspectInvocationNodes),
+    sealed_function_entry!(InspectCalls),
+    sealed_function_entry!(InspectResources),
+    sealed_function_entry!(InspectStateCells),
+    sealed_function_entry!(InspectUiNodes),
+    sealed_function_entry!(InspectPresentationCandidates),
+    sealed_function_entry!(InspectRuntimeBindings),
+    sealed_function_entry!(InspectSecurityDecisions),
+    sealed_function_entry!(InspectTrace),
+    sealed_function_entry!(SecuritySessionPrincipal),
+    sealed_function_entry!(SecurityEffectivePrincipal),
+    sealed_function_entry!(SecurityActiveRoles),
+    sealed_function_entry!(SecurityCreatePrincipal),
+    sealed_function_entry!(SecurityDisablePrincipal),
+    sealed_function_entry!(SecurityCreateRole),
+    sealed_function_entry!(SecurityGrantRole),
+    sealed_function_entry!(SecurityRevokeRole),
+    sealed_function_entry!(SecurityGrantPrivilege),
+    sealed_function_entry!(SecurityRevokePrivilege),
+    sealed_function_entry!(SecurityCanExecute),
+    sealed_function_entry!(SecurityHasPrivilege),
+    sealed_function_entry!(StateLoadUserState),
+    sealed_function_entry!(StateWriteUserState),
 ];
 
 /// Resolves one exact sealed system-function identity.
