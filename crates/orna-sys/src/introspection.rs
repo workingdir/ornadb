@@ -450,6 +450,74 @@ fn invalid_reference(value: &str) -> bool {
         || value.chars().any(char::is_control)
 }
 
+/// Every resolver-supplied storage-lineage chain answers the same admission
+/// questions: which exact join pair it annotates, which mutable branch
+/// generation that pair is pinned to, how many plan nodes its entries cost,
+/// and whether its entries are structurally sound. The explain adapter accepts
+/// six such chain kinds, and sharing the checks keeps one kind from silently
+/// admitting input a sibling rejects.
+trait PairedChainDescription {
+    fn join_pair_identity(&self) -> &ObjectRef;
+    fn branch(&self) -> &MutableBranchSnapshot;
+    fn entry_count(&self) -> usize;
+    fn entries_are_valid(&self) -> bool;
+}
+
+/// Validates one chain kind against the resolved join pairs and joins, adding
+/// its entry count to the shared plan-node budget. The caller accumulates the
+/// budget across chain kinds in declaration order so the admitted total is
+/// bounded regardless of how the lineage is split.
+fn validate_paired_chains<C: PairedChainDescription>(
+    chains: &[C],
+    join_pair_identities: &[QueryJoinPairIdentityDescription],
+    joins: &[QueryJoinDescription],
+    node_count: &mut usize,
+) -> Result<(), ExplainError> {
+    let mut pairs_seen = BTreeSet::new();
+    for chain in chains {
+        let identity = chain.join_pair_identity();
+        if invalid_reference(identity.as_str())
+            || invalid_reference(&chain.branch().name)
+            || chain.entry_count() == 0
+        {
+            return Err(ExplainError::InvalidObject);
+        }
+        if !pairs_seen.insert(identity.as_str()) {
+            return Err(ExplainError::InvalidObject);
+        }
+        let pairs = join_pair_identities
+            .iter()
+            .filter(|pair| pair.identity == *identity)
+            .collect::<Vec<_>>();
+        if pairs.len() != 1 {
+            return Err(ExplainError::InvalidObject);
+        }
+        let matching_joins = joins
+            .iter()
+            .filter(|join| {
+                join.source == pairs[0].right_source && join.predicate == pairs[0].predicate
+            })
+            .collect::<Vec<_>>();
+        if matching_joins.len() != 1
+            || matching_joins[0]
+                .statistics
+                .as_ref()
+                .and_then(|statistics| statistics.mutable_branch.as_ref())
+                != Some(chain.branch())
+        {
+            return Err(ExplainError::InvalidObject);
+        }
+        *node_count = node_count.saturating_add(chain.entry_count());
+        if *node_count > MAX_PLAN_NODES {
+            return Err(ExplainError::TooManyNodes);
+        }
+        if !chain.entries_are_valid() {
+            return Err(ExplainError::InvalidObject);
+        }
+    }
+    Ok(())
+}
+
 fn dependency_reference(snapshot: &SnapshotRef, key: &DependencyKey) -> String {
     let mut hash = Sha256::new();
     hash.update(b"orna.sys.dependency.v1\0");
@@ -856,6 +924,177 @@ pub struct QueryPairedWalRotationChainDescription {
     pub join_pair_identity: ObjectRef,
     pub branch: MutableBranchSnapshot,
     pub occurrences: Vec<QueryPairedWalRotationOccurrenceDescription>,
+}
+
+impl PairedChainDescription for QueryPairedCheckpointSegmentCompactionChainDescription {
+    fn join_pair_identity(&self) -> &ObjectRef {
+        &self.join_pair_identity
+    }
+
+    fn branch(&self) -> &MutableBranchSnapshot {
+        &self.branch
+    }
+
+    fn entry_count(&self) -> usize {
+        self.steps.len()
+    }
+
+    fn entries_are_valid(&self) -> bool {
+        self.steps.iter().all(|step| {
+            !invalid_reference(step.checkpoint_identity.as_str())
+                && step
+                    .left_segment_identity
+                    .as_ref()
+                    .is_none_or(|identity| !invalid_reference(identity.as_str()))
+                && step
+                    .right_segment_identity
+                    .as_ref()
+                    .is_none_or(|identity| !invalid_reference(identity.as_str()))
+                && step
+                    .left_compaction_identity
+                    .as_ref()
+                    .is_none_or(|identity| !invalid_reference(identity.as_str()))
+                && step
+                    .right_compaction_identity
+                    .as_ref()
+                    .is_none_or(|identity| !invalid_reference(identity.as_str()))
+                && step.left_segment_identity.is_some() == step.left_compaction_identity.is_some()
+                && step.right_segment_identity.is_some() == step.right_compaction_identity.is_some()
+                && (step.left_segment_identity.is_some() || step.right_segment_identity.is_some())
+        })
+    }
+}
+
+impl PairedChainDescription for QueryPairedSegmentRotationChainDescription {
+    fn join_pair_identity(&self) -> &ObjectRef {
+        &self.join_pair_identity
+    }
+
+    fn branch(&self) -> &MutableBranchSnapshot {
+        &self.branch
+    }
+
+    fn entry_count(&self) -> usize {
+        self.rotations.len()
+    }
+
+    fn entries_are_valid(&self) -> bool {
+        self.rotations.iter().all(|rotation| {
+            !invalid_reference(rotation.checkpoint_identity.as_str())
+                && !invalid_reference(rotation.left_segment_identity.as_str())
+                && !invalid_reference(rotation.right_segment_identity.as_str())
+        })
+    }
+}
+
+impl PairedChainDescription for QueryPairedStreamCompactionChainDescription {
+    fn join_pair_identity(&self) -> &ObjectRef {
+        &self.join_pair_identity
+    }
+
+    fn branch(&self) -> &MutableBranchSnapshot {
+        &self.branch
+    }
+
+    fn entry_count(&self) -> usize {
+        self.occurrences.len()
+    }
+
+    fn entries_are_valid(&self) -> bool {
+        self.occurrences.iter().all(|occurrence| {
+            !invalid_reference(occurrence.checkpoint_identity.as_str())
+                && !invalid_reference(occurrence.redo_fold_identity.as_str())
+                && !invalid_reference(occurrence.left_segment_identity.as_str())
+                && !invalid_reference(occurrence.right_segment_identity.as_str())
+                && occurrence
+                    .left_checkpoint_identity
+                    .as_ref()
+                    .is_none_or(|identity| !invalid_reference(identity.as_str()))
+                && occurrence
+                    .right_checkpoint_identity
+                    .as_ref()
+                    .is_none_or(|identity| !invalid_reference(identity.as_str()))
+        })
+    }
+}
+
+impl PairedChainDescription for QueryPairedCheckpointSpillRestoreChainDescription {
+    fn join_pair_identity(&self) -> &ObjectRef {
+        &self.join_pair_identity
+    }
+
+    fn branch(&self) -> &MutableBranchSnapshot {
+        &self.branch
+    }
+
+    fn entry_count(&self) -> usize {
+        self.occurrences.len()
+    }
+
+    fn entries_are_valid(&self) -> bool {
+        self.occurrences.iter().all(|occurrence| {
+            !invalid_reference(occurrence.checkpoint_identity.as_str())
+                && !invalid_reference(occurrence.spill_identity.as_str())
+                && !invalid_reference(occurrence.source_stream_identity.as_str())
+                && !invalid_reference(occurrence.redo_fold_identity.as_str())
+        })
+    }
+}
+
+impl PairedChainDescription for QueryPairedStreamRotationChainDescription {
+    fn join_pair_identity(&self) -> &ObjectRef {
+        &self.join_pair_identity
+    }
+
+    fn branch(&self) -> &MutableBranchSnapshot {
+        &self.branch
+    }
+
+    fn entry_count(&self) -> usize {
+        self.occurrences.len()
+    }
+
+    fn entries_are_valid(&self) -> bool {
+        self.occurrences.iter().all(|occurrence| {
+            !invalid_reference(occurrence.checkpoint_identity.as_str())
+                && !invalid_reference(occurrence.rotation_identity.as_str())
+                && !invalid_reference(occurrence.source_stream_identity.as_str())
+                && occurrence
+                    .left_stream_identity
+                    .as_ref()
+                    .is_none_or(|identity| !invalid_reference(identity.as_str()))
+                && occurrence
+                    .right_stream_identity
+                    .as_ref()
+                    .is_none_or(|identity| !invalid_reference(identity.as_str()))
+        })
+    }
+}
+
+impl PairedChainDescription for QueryPairedWalRotationChainDescription {
+    fn join_pair_identity(&self) -> &ObjectRef {
+        &self.join_pair_identity
+    }
+
+    fn branch(&self) -> &MutableBranchSnapshot {
+        &self.branch
+    }
+
+    fn entry_count(&self) -> usize {
+        self.occurrences.len()
+    }
+
+    fn entries_are_valid(&self) -> bool {
+        self.occurrences.iter().all(|occurrence| {
+            !invalid_reference(occurrence.checkpoint_identity.as_str())
+                && !invalid_reference(occurrence.left_redo_fold_identity.as_str())
+                && !invalid_reference(occurrence.right_redo_fold_identity.as_str())
+                && !invalid_reference(occurrence.left_write_ahead_identity.as_str())
+                && !invalid_reference(occurrence.right_write_ahead_identity.as_str())
+                && !invalid_reference(occurrence.left_segment_identity.as_str())
+                && !invalid_reference(occurrence.right_segment_identity.as_str())
+        })
+    }
 }
 
 /// A resolver-approved input limit attached to one exact logical join pair.
@@ -2589,363 +2828,45 @@ fn explain_with_inputs(
             return Err(ExplainError::InvalidObject);
         }
     }
-    let mut checkpoint_chain_pairs_seen = BTreeSet::new();
-    let mut checkpoint_step_count = 0usize;
-    for chain in checkpoint_compaction_chains {
-        if invalid_reference(chain.join_pair_identity.as_str())
-            || invalid_reference(&chain.branch.name)
-            || chain.steps.is_empty()
-        {
-            return Err(ExplainError::InvalidObject);
-        }
-        if !checkpoint_chain_pairs_seen.insert(chain.join_pair_identity.as_str()) {
-            return Err(ExplainError::InvalidObject);
-        }
-        let matching_pairs = join_pair_identities
-            .iter()
-            .filter(|pair| pair.identity == chain.join_pair_identity)
-            .count();
-        if matching_pairs != 1 {
-            return Err(ExplainError::InvalidObject);
-        }
-        let pair = join_pair_identities
-            .iter()
-            .find(|pair| pair.identity == chain.join_pair_identity)
-            .expect("one paired identity was counted");
-        let matching_joins = query
-            .joins
-            .iter()
-            .filter(|join| join.source == pair.right_source && join.predicate == pair.predicate)
-            .collect::<Vec<_>>();
-        if matching_joins.len() != 1
-            || matching_joins[0]
-                .statistics
-                .as_ref()
-                .and_then(|statistics| statistics.mutable_branch.as_ref())
-                != Some(&chain.branch)
-        {
-            return Err(ExplainError::InvalidObject);
-        }
-        checkpoint_step_count = checkpoint_step_count.saturating_add(chain.steps.len());
-        if checkpoint_step_count > MAX_PLAN_NODES {
-            return Err(ExplainError::TooManyNodes);
-        }
-        for step in &chain.steps {
-            if invalid_reference(step.checkpoint_identity.as_str())
-                || step
-                    .left_segment_identity
-                    .as_ref()
-                    .is_some_and(|identity| invalid_reference(identity.as_str()))
-                || step
-                    .right_segment_identity
-                    .as_ref()
-                    .is_some_and(|identity| invalid_reference(identity.as_str()))
-                || step
-                    .left_compaction_identity
-                    .as_ref()
-                    .is_some_and(|identity| invalid_reference(identity.as_str()))
-                || step
-                    .right_compaction_identity
-                    .as_ref()
-                    .is_some_and(|identity| invalid_reference(identity.as_str()))
-                || step.left_segment_identity.is_some() != step.left_compaction_identity.is_some()
-                || step.right_segment_identity.is_some() != step.right_compaction_identity.is_some()
-                || (step.left_segment_identity.is_none() && step.right_segment_identity.is_none())
-            {
-                return Err(ExplainError::InvalidObject);
-            }
-        }
-    }
-    let mut segment_rotation_pairs_seen = BTreeSet::new();
-    let mut segment_rotation_count = 0usize;
-    for chain in segment_rotation_chains {
-        if invalid_reference(chain.join_pair_identity.as_str())
-            || invalid_reference(&chain.branch.name)
-            || chain.rotations.is_empty()
-        {
-            return Err(ExplainError::InvalidObject);
-        }
-        if !segment_rotation_pairs_seen.insert(chain.join_pair_identity.as_str()) {
-            return Err(ExplainError::InvalidObject);
-        }
-        let matching_pairs = join_pair_identities
-            .iter()
-            .filter(|pair| pair.identity == chain.join_pair_identity)
-            .count();
-        if matching_pairs != 1 {
-            return Err(ExplainError::InvalidObject);
-        }
-        let pair = join_pair_identities
-            .iter()
-            .find(|pair| pair.identity == chain.join_pair_identity)
-            .expect("one paired identity was counted");
-        let matching_joins = query
-            .joins
-            .iter()
-            .filter(|join| join.source == pair.right_source && join.predicate == pair.predicate)
-            .collect::<Vec<_>>();
-        if matching_joins.len() != 1
-            || matching_joins[0]
-                .statistics
-                .as_ref()
-                .and_then(|statistics| statistics.mutable_branch.as_ref())
-                != Some(&chain.branch)
-        {
-            return Err(ExplainError::InvalidObject);
-        }
-        segment_rotation_count = segment_rotation_count.saturating_add(chain.rotations.len());
-        if checkpoint_step_count.saturating_add(segment_rotation_count) > MAX_PLAN_NODES {
-            return Err(ExplainError::TooManyNodes);
-        }
-        for rotation in &chain.rotations {
-            if invalid_reference(rotation.checkpoint_identity.as_str())
-                || invalid_reference(rotation.left_segment_identity.as_str())
-                || invalid_reference(rotation.right_segment_identity.as_str())
-            {
-                return Err(ExplainError::InvalidObject);
-            }
-        }
-    }
-    let mut stream_compaction_pairs_seen = BTreeSet::new();
-    let mut stream_compaction_occurrence_count = 0usize;
-    for chain in stream_compaction_chains {
-        if invalid_reference(chain.join_pair_identity.as_str())
-            || invalid_reference(&chain.branch.name)
-            || chain.occurrences.is_empty()
-        {
-            return Err(ExplainError::InvalidObject);
-        }
-        if !stream_compaction_pairs_seen.insert(chain.join_pair_identity.as_str()) {
-            return Err(ExplainError::InvalidObject);
-        }
-        let pair = join_pair_identities
-            .iter()
-            .filter(|pair| pair.identity == chain.join_pair_identity)
-            .collect::<Vec<_>>();
-        if pair.len() != 1 {
-            return Err(ExplainError::InvalidObject);
-        }
-        let matching_joins = query
-            .joins
-            .iter()
-            .filter(|join| {
-                join.source == pair[0].right_source && join.predicate == pair[0].predicate
-            })
-            .collect::<Vec<_>>();
-        if matching_joins.len() != 1
-            || matching_joins[0]
-                .statistics
-                .as_ref()
-                .and_then(|statistics| statistics.mutable_branch.as_ref())
-                != Some(&chain.branch)
-        {
-            return Err(ExplainError::InvalidObject);
-        }
-        stream_compaction_occurrence_count =
-            stream_compaction_occurrence_count.saturating_add(chain.occurrences.len());
-        if checkpoint_step_count
-            .saturating_add(segment_rotation_count)
-            .saturating_add(stream_compaction_occurrence_count)
-            > MAX_PLAN_NODES
-        {
-            return Err(ExplainError::TooManyNodes);
-        }
-        for occurrence in &chain.occurrences {
-            if invalid_reference(occurrence.checkpoint_identity.as_str())
-                || invalid_reference(occurrence.redo_fold_identity.as_str())
-                || invalid_reference(occurrence.left_segment_identity.as_str())
-                || invalid_reference(occurrence.right_segment_identity.as_str())
-                || occurrence
-                    .left_checkpoint_identity
-                    .as_ref()
-                    .is_some_and(|identity| invalid_reference(identity.as_str()))
-                || occurrence
-                    .right_checkpoint_identity
-                    .as_ref()
-                    .is_some_and(|identity| invalid_reference(identity.as_str()))
-            {
-                return Err(ExplainError::InvalidObject);
-            }
-        }
-    }
-    let mut spill_restore_pairs_seen = BTreeSet::new();
-    let mut spill_restore_occurrence_count = 0usize;
-    for chain in spill_restore_chains {
-        if invalid_reference(chain.join_pair_identity.as_str())
-            || invalid_reference(&chain.branch.name)
-            || chain.occurrences.is_empty()
-        {
-            return Err(ExplainError::InvalidObject);
-        }
-        if !spill_restore_pairs_seen.insert(chain.join_pair_identity.as_str()) {
-            return Err(ExplainError::InvalidObject);
-        }
-        let pairs = join_pair_identities
-            .iter()
-            .filter(|pair| pair.identity == chain.join_pair_identity)
-            .collect::<Vec<_>>();
-        if pairs.len() != 1 {
-            return Err(ExplainError::InvalidObject);
-        }
-        let matching_joins = query
-            .joins
-            .iter()
-            .filter(|join| {
-                join.source == pairs[0].right_source && join.predicate == pairs[0].predicate
-            })
-            .collect::<Vec<_>>();
-        if matching_joins.len() != 1
-            || matching_joins[0]
-                .statistics
-                .as_ref()
-                .and_then(|statistics| statistics.mutable_branch.as_ref())
-                != Some(&chain.branch)
-        {
-            return Err(ExplainError::InvalidObject);
-        }
-        spill_restore_occurrence_count =
-            spill_restore_occurrence_count.saturating_add(chain.occurrences.len());
-        if checkpoint_step_count
-            .saturating_add(segment_rotation_count)
-            .saturating_add(stream_compaction_occurrence_count)
-            .saturating_add(spill_restore_occurrence_count)
-            > MAX_PLAN_NODES
-        {
-            return Err(ExplainError::TooManyNodes);
-        }
-        for occurrence in &chain.occurrences {
-            if invalid_reference(occurrence.checkpoint_identity.as_str())
-                || invalid_reference(occurrence.spill_identity.as_str())
-                || invalid_reference(occurrence.source_stream_identity.as_str())
-                || invalid_reference(occurrence.redo_fold_identity.as_str())
-            {
-                return Err(ExplainError::InvalidObject);
-            }
-        }
-    }
-    let mut stream_rotation_pairs_seen = BTreeSet::new();
-    let mut stream_rotation_occurrence_count = 0usize;
-    for chain in stream_rotation_chains {
-        if invalid_reference(chain.join_pair_identity.as_str())
-            || invalid_reference(&chain.branch.name)
-            || chain.occurrences.is_empty()
-        {
-            return Err(ExplainError::InvalidObject);
-        }
-        if !stream_rotation_pairs_seen.insert(chain.join_pair_identity.as_str()) {
-            return Err(ExplainError::InvalidObject);
-        }
-        let pairs = join_pair_identities
-            .iter()
-            .filter(|pair| pair.identity == chain.join_pair_identity)
-            .collect::<Vec<_>>();
-        if pairs.len() != 1 {
-            return Err(ExplainError::InvalidObject);
-        }
-        let matching_joins = query
-            .joins
-            .iter()
-            .filter(|join| {
-                join.source == pairs[0].right_source && join.predicate == pairs[0].predicate
-            })
-            .collect::<Vec<_>>();
-        if matching_joins.len() != 1
-            || matching_joins[0]
-                .statistics
-                .as_ref()
-                .and_then(|statistics| statistics.mutable_branch.as_ref())
-                != Some(&chain.branch)
-        {
-            return Err(ExplainError::InvalidObject);
-        }
-        stream_rotation_occurrence_count =
-            stream_rotation_occurrence_count.saturating_add(chain.occurrences.len());
-        if checkpoint_step_count
-            .saturating_add(segment_rotation_count)
-            .saturating_add(stream_compaction_occurrence_count)
-            .saturating_add(spill_restore_occurrence_count)
-            .saturating_add(stream_rotation_occurrence_count)
-            > MAX_PLAN_NODES
-        {
-            return Err(ExplainError::TooManyNodes);
-        }
-        for occurrence in &chain.occurrences {
-            if invalid_reference(occurrence.checkpoint_identity.as_str())
-                || invalid_reference(occurrence.rotation_identity.as_str())
-                || invalid_reference(occurrence.source_stream_identity.as_str())
-                || occurrence
-                    .left_stream_identity
-                    .as_ref()
-                    .is_some_and(|identity| invalid_reference(identity.as_str()))
-                || occurrence
-                    .right_stream_identity
-                    .as_ref()
-                    .is_some_and(|identity| invalid_reference(identity.as_str()))
-            {
-                return Err(ExplainError::InvalidObject);
-            }
-        }
-    }
-    let mut wal_rotation_pairs_seen = BTreeSet::new();
-    let mut wal_rotation_occurrence_count = 0usize;
-    for chain in wal_rotation_chains {
-        if invalid_reference(chain.join_pair_identity.as_str())
-            || invalid_reference(&chain.branch.name)
-            || chain.occurrences.is_empty()
-        {
-            return Err(ExplainError::InvalidObject);
-        }
-        if !wal_rotation_pairs_seen.insert(chain.join_pair_identity.as_str()) {
-            return Err(ExplainError::InvalidObject);
-        }
-        let pairs = join_pair_identities
-            .iter()
-            .filter(|pair| pair.identity == chain.join_pair_identity)
-            .collect::<Vec<_>>();
-        if pairs.len() != 1 {
-            return Err(ExplainError::InvalidObject);
-        }
-        let matching_joins = query
-            .joins
-            .iter()
-            .filter(|join| {
-                join.source == pairs[0].right_source && join.predicate == pairs[0].predicate
-            })
-            .collect::<Vec<_>>();
-        if matching_joins.len() != 1
-            || matching_joins[0]
-                .statistics
-                .as_ref()
-                .and_then(|statistics| statistics.mutable_branch.as_ref())
-                != Some(&chain.branch)
-        {
-            return Err(ExplainError::InvalidObject);
-        }
-        wal_rotation_occurrence_count =
-            wal_rotation_occurrence_count.saturating_add(chain.occurrences.len());
-        if checkpoint_step_count
-            .saturating_add(segment_rotation_count)
-            .saturating_add(stream_compaction_occurrence_count)
-            .saturating_add(spill_restore_occurrence_count)
-            .saturating_add(stream_rotation_occurrence_count)
-            .saturating_add(wal_rotation_occurrence_count)
-            > MAX_PLAN_NODES
-        {
-            return Err(ExplainError::TooManyNodes);
-        }
-        for occurrence in &chain.occurrences {
-            if invalid_reference(occurrence.checkpoint_identity.as_str())
-                || invalid_reference(occurrence.left_redo_fold_identity.as_str())
-                || invalid_reference(occurrence.right_redo_fold_identity.as_str())
-                || invalid_reference(occurrence.left_write_ahead_identity.as_str())
-                || invalid_reference(occurrence.right_write_ahead_identity.as_str())
-                || invalid_reference(occurrence.left_segment_identity.as_str())
-                || invalid_reference(occurrence.right_segment_identity.as_str())
-            {
-                return Err(ExplainError::InvalidObject);
-            }
-        }
-    }
+    // Lineage chains share one plan-node budget, so they are validated in
+    // declaration order against a running total across all six kinds.
+    let mut paired_chain_node_count = 0usize;
+    validate_paired_chains(
+        checkpoint_compaction_chains,
+        join_pair_identities,
+        &query.joins,
+        &mut paired_chain_node_count,
+    )?;
+    validate_paired_chains(
+        segment_rotation_chains,
+        join_pair_identities,
+        &query.joins,
+        &mut paired_chain_node_count,
+    )?;
+    validate_paired_chains(
+        stream_compaction_chains,
+        join_pair_identities,
+        &query.joins,
+        &mut paired_chain_node_count,
+    )?;
+    validate_paired_chains(
+        spill_restore_chains,
+        join_pair_identities,
+        &query.joins,
+        &mut paired_chain_node_count,
+    )?;
+    validate_paired_chains(
+        stream_rotation_chains,
+        join_pair_identities,
+        &query.joins,
+        &mut paired_chain_node_count,
+    )?;
+    validate_paired_chains(
+        wal_rotation_chains,
+        join_pair_identities,
+        &query.joins,
+        &mut paired_chain_node_count,
+    )?;
     for limit_pushdown in input_limit_pushdowns {
         let matching_pairs = join_pair_identities
             .iter()
