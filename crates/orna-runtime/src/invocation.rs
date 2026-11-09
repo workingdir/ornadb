@@ -392,7 +392,7 @@ impl RuntimeState {
         let procedure = &registration.procedure;
         validate_id(procedure.object_id)?;
         if procedure.materialized_ms < 0
-            || procedure.function.as_row_ref().snapshot != *procedure.capture.snapshot()
+            || procedure.function.as_row_ref().snapshot != procedure.capture.snapshot()
         {
             return Err(RuntimeError::InvalidObservationReference);
         }
@@ -910,7 +910,7 @@ fn materialized_procedure_from_catalogue(
         .object
         .function_reference
         .ok_or(RuntimeError::InvalidObservationReference)?;
-    let snapshot = snapshot_reference(capture.database_id(), capture.snapshot().clone())
+    let snapshot = snapshot_reference(capture.database_id(), capture.snapshot())
         .map_err(|_| RuntimeError::InvalidObservationReference)?;
     let parameters = function
         .parameters
@@ -1257,14 +1257,14 @@ async fn load_invocation_observation(
         }
         None => false,
     };
-    let invocation = invocation_reference(capture.database_id(), capture.snapshot().clone(), id)
+    let invocation = invocation_reference(capture.database_id(), capture.snapshot(), id)
         .map_err(|_| RuntimeError::InvalidObservationReference)?;
     validate_invocation_reference(invocation.clone().into_row_ref(), &capture)
         .map_err(|_| RuntimeError::InvalidObservationReference)?;
     let parent = match owner {
         InvocationLaunchOwner::Parent(parent_id) => {
             let reference =
-                invocation_reference(capture.database_id(), capture.snapshot().clone(), parent_id)
+                invocation_reference(capture.database_id(), capture.snapshot(), parent_id)
                     .map_err(|_| RuntimeError::InvalidObservationReference)?;
             Some(
                 validate_invocation_reference(reference.into_row_ref(), &capture)
@@ -1338,7 +1338,7 @@ async fn load_materialized_procedure(
     let object = object_reference(
         capture.database_id(),
         function_object_id,
-        capture.snapshot().clone(),
+        capture.snapshot(),
     )
     .map_err(|_| RuntimeError::InvalidObservationReference)?;
     let function =
@@ -1381,7 +1381,7 @@ async fn load_materialized_procedure(
             return Err(RuntimeError::RecoveryInvalid);
         }
     }
-    let snapshot_reference = snapshot_reference(capture.database_id(), capture.snapshot().clone())
+    let snapshot_reference = snapshot_reference(capture.database_id(), capture.snapshot())
         .map_err(|_| RuntimeError::InvalidObservationReference)?;
     Ok(MaterializedProcedure {
         function,
@@ -1402,12 +1402,8 @@ fn make_type_reference(
     capture: &CwdCapture,
     type_object_id: [u8; 16],
 ) -> Result<TypeRef, RuntimeError> {
-    let object = object_reference(
-        capture.database_id(),
-        type_object_id,
-        capture.snapshot().clone(),
-    )
-    .map_err(|_| RuntimeError::InvalidObservationReference)?;
+    let object = object_reference(capture.database_id(), type_object_id, capture.snapshot())
+        .map_err(|_| RuntimeError::InvalidObservationReference)?;
     let type_reference =
         type_reference(object).map_err(|_| RuntimeError::InvalidObservationReference)?;
     validate_type_reference(type_reference.clone().into_row_ref(), capture)
@@ -1460,7 +1456,7 @@ async fn load_invocation_arguments(
         }
         let reference = invocation_argument_reference(
             capture.database_id(),
-            capture.snapshot().clone(),
+            capture.snapshot(),
             invocation_id,
             BigInt::from(position),
         )

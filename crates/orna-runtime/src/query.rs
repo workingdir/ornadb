@@ -80,12 +80,12 @@ impl TryFrom<&QueryObservation> for SysQueryProjection {
             observation.snapshot.database_id(),
             SYS_QUERY_TABLE_ID,
             opaque_reference_key(observation.id),
-            observation.snapshot.snapshot().clone(),
+            observation.snapshot.snapshot(),
         )
         .map_err(|_| RuntimeError::InvalidObservationReference)?;
         let snapshot = snapshot_reference(
             observation.snapshot.database_id(),
-            observation.snapshot.snapshot().clone(),
+            observation.snapshot.snapshot(),
         )
         .map_err(|_| RuntimeError::InvalidObservationReference)?;
         let started = observation_instant(observation.started_ms)?;
@@ -462,10 +462,10 @@ async fn load_sys_materialization_projections(
         let object = object_reference(
             capture.database_id(),
             function_object_id,
-            capture.snapshot().clone(),
+            capture.snapshot(),
         )
         .map_err(|_| RuntimeError::InvalidObservationReference)?;
-        let snapshot = snapshot_reference(capture.database_id(), capture.snapshot().clone())
+        let snapshot = snapshot_reference(capture.database_id(), capture.snapshot())
             .map_err(|_| RuntimeError::InvalidObservationReference)?;
         let reference = RowRef::new(
             capture.database_id(),
@@ -474,7 +474,7 @@ async fn load_sys_materialization_projections(
                 row_reference_raw(object.as_row_ref()),
                 row_reference_raw(snapshot.as_row_ref()),
             ]),
-            capture.snapshot().clone(),
+            capture.snapshot(),
         )
         .map_err(|_| RuntimeError::InvalidObservationReference)?;
         projections.push(SysMaterializationProjection {

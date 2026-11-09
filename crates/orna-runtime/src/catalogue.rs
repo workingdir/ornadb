@@ -387,7 +387,7 @@ mod batch_tests {
             0
         );
 
-        let stale = CwdCapture::new(current.snapshot().clone(), [99; 32]).unwrap();
+        let stale = CwdCapture::new(current.snapshot(), [99; 32]).unwrap();
         assert!(matches!(
             state.admit_catalogue_at(owned, &stale, admission).await,
             Err(CatalogueError::StaleCapture { .. })
@@ -427,7 +427,7 @@ mod batch_tests {
         advance(&state, lease, 7).await;
         // A carried-forward admitted catalogue is immutable at this capture.
         // Source edits must use the combined new-generation activation boundary.
-        let forged = CwdCapture::new(first.capture.snapshot().clone(), [99; 32]).unwrap();
+        let forged = CwdCapture::new(first.capture.snapshot(), [99; 32]).unwrap();
         assert_eq!(
             admit(
                 &state,
@@ -787,7 +787,7 @@ mod batch_tests {
         );
 
         // Forged digest: same snapshot bytes, wrong generation digest.
-        let forged = CwdCapture::new(first.capture.snapshot().clone(), [99; 32]).unwrap();
+        let forged = CwdCapture::new(first.capture.snapshot(), [99; 32]).unwrap();
         assert_eq!(
             reopened
                 .catalogue_function_at("pkg.f", &forged)
@@ -1034,7 +1034,7 @@ mod module_tests {
         .unwrap();
         assert_eq!(edited.object_id(), first.object_id());
         assert_eq!(edited.object.revision_id, digest(15));
-        assert_eq!(edited.snapshot(), current_capture.snapshot());
+        assert_eq!(edited.snapshot(), &current_capture.snapshot());
         assert_eq!(
             state
                 .catalogue_module_at("pkg.main", &first_capture)
@@ -3280,7 +3280,7 @@ async fn load_object_tx(
     if kind != identity_kind {
         return Err(RuntimeError::CatalogueKindMismatch);
     }
-    let reference = object_reference(capture.database_id(), id, capture.snapshot().clone())
+    let reference = object_reference(capture.database_id(), id, capture.snapshot())
         .map_err(|_| RuntimeError::InvalidObservationReference)?;
     Ok(CatalogueObject {
         object_id: id,

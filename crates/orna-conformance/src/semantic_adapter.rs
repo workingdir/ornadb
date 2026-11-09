@@ -4061,7 +4061,7 @@ impl DurableTransactionalEvaluator {
         // The activation can name its admitted tables and the system relations
         // it serves from publication metadata, all at its pinned CWD snapshot.
         let explain_catalogue = match ActivationExplainCatalogue::new(
-            context.capture().snapshot(),
+            &context.capture().snapshot(),
             admitted
                 .key_fields
                 .keys()

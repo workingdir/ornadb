@@ -397,7 +397,7 @@ async fn historical_snapshot_cannot_be_rebound_to_another_runtime_identity() {
     );
     assert_eq!(
         second
-            .resolve_historical_snapshot(first_pin.capture().snapshot())
+            .resolve_historical_snapshot(&first_pin.capture().snapshot())
             .await
             .unwrap_err(),
         RuntimeError::SnapshotContextMismatch

@@ -44,7 +44,7 @@ fn run(capture: &CwdCapture) -> RowRef {
         capture.database_id(),
         SYS_RUN_TABLE_ID,
         OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(vec![4; 16]))),
-        capture.snapshot().clone(),
+        capture.snapshot(),
     )
     .unwrap()
 }
@@ -54,7 +54,7 @@ fn invocation(capture: &CwdCapture) -> RowRef {
         capture.database_id(),
         SYS_INVOCATION_TABLE_ID,
         OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(vec![5; 16]))),
-        capture.snapshot().clone(),
+        capture.snapshot(),
     )
     .unwrap()
 }
@@ -81,7 +81,7 @@ fn stream(capture: &CwdCapture) -> RowRef {
             OvbRaw::Text("source".into()),
             OvbRaw::Null,
         ]),
-        capture.snapshot().clone(),
+        capture.snapshot(),
     )
     .unwrap()
 }
@@ -92,7 +92,7 @@ fn invocation_argument(capture: &CwdCapture) -> RowRef {
         capture.database_id(),
         SYS_INVOCATION_ARGUMENT_TABLE_ID,
         OvbRaw::Array(vec![encoded_run(&invocation), OvbRaw::Int(0.into())]),
-        capture.snapshot().clone(),
+        capture.snapshot(),
     )
     .unwrap()
 }
@@ -132,7 +132,7 @@ fn runtime_reference_validation_requires_exact_coordinates_and_key_shapes() {
         capture.database_id(),
         SYS_STREAM_TABLE_ID,
         valid_run.key.clone(),
-        capture.snapshot().clone(),
+        capture.snapshot(),
     )
     .unwrap();
     assert_eq!(
@@ -144,7 +144,7 @@ fn runtime_reference_validation_requires_exact_coordinates_and_key_shapes() {
         [2; 16],
         SYS_RUN_TABLE_ID,
         valid_run.key.clone(),
-        capture.snapshot().clone(),
+        capture.snapshot(),
     )
     .unwrap();
     assert_eq!(
@@ -168,7 +168,7 @@ fn runtime_reference_validation_requires_exact_coordinates_and_key_shapes() {
         capture.database_id(),
         SYS_RUN_TABLE_ID,
         OvbRaw::Array(vec![]),
-        capture.snapshot().clone(),
+        capture.snapshot(),
     )
     .unwrap();
     assert_eq!(
@@ -180,7 +180,7 @@ fn runtime_reference_validation_requires_exact_coordinates_and_key_shapes() {
         capture.database_id(),
         SYS_STREAM_TABLE_ID,
         OvbRaw::Array(vec![OvbRaw::Text("not-a-run-reference".into())]),
-        capture.snapshot().clone(),
+        capture.snapshot(),
     )
     .unwrap();
     assert_eq!(
@@ -199,7 +199,7 @@ fn runtime_reference_validation_requires_exact_coordinates_and_key_shapes() {
                     .map(|value| OvbRaw::Text(value.into()))
                     .unwrap_or(OvbRaw::Null),
             ]),
-            capture.snapshot().clone(),
+            capture.snapshot(),
         )
         .unwrap();
         assert_eq!(
@@ -222,7 +222,7 @@ fn runtime_reference_validation_requires_exact_coordinates_and_key_shapes() {
             capture.database_id(),
             SYS_RUN_TABLE_ID,
             invalid_id,
-            capture.snapshot().clone(),
+            capture.snapshot(),
         )
         .unwrap();
         assert_eq!(
@@ -240,14 +240,14 @@ fn runtime_reference_validation_requires_exact_coordinates_and_key_shapes() {
                     capture.database_id(),
                     SYS_STREAM_TABLE_ID,
                     OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(vec![4; 16]))),
-                    capture.snapshot().clone(),
+                    capture.snapshot(),
                 )
                 .unwrap(),
             ),
             OvbRaw::Text("source".into()),
             OvbRaw::Null,
         ]),
-        capture.snapshot().clone(),
+        capture.snapshot(),
     )
     .unwrap();
     assert_eq!(
@@ -265,7 +265,7 @@ fn runtime_reference_validation_requires_exact_coordinates_and_key_shapes() {
                 OvbRaw::Text("source".into()),
                 OvbRaw::Null,
             ]),
-            capture.snapshot().clone(),
+            capture.snapshot(),
         )
         .is_err()
     );
@@ -293,7 +293,7 @@ fn invocation_reference_validation_requires_declared_relation_and_natural_keys()
         capture.database_id(),
         SYS_INVOCATION_ARGUMENT_TABLE_ID,
         valid_invocation.key.clone(),
-        capture.snapshot().clone(),
+        capture.snapshot(),
     )
     .unwrap();
     assert_eq!(
@@ -305,7 +305,7 @@ fn invocation_reference_validation_requires_declared_relation_and_natural_keys()
         [2; 16],
         SYS_INVOCATION_TABLE_ID,
         valid_invocation.key.clone(),
-        capture.snapshot().clone(),
+        capture.snapshot(),
     )
     .unwrap();
     assert_eq!(
@@ -333,7 +333,7 @@ fn invocation_reference_validation_requires_declared_relation_and_natural_keys()
             capture.database_id(),
             SYS_INVOCATION_TABLE_ID,
             invalid_key,
-            capture.snapshot().clone(),
+            capture.snapshot(),
         )
         .unwrap();
         assert_eq!(
@@ -351,13 +351,13 @@ fn invocation_reference_validation_requires_declared_relation_and_natural_keys()
                     capture.database_id(),
                     SYS_RUN_TABLE_ID,
                     valid_invocation.key.clone(),
-                    capture.snapshot().clone(),
+                    capture.snapshot(),
                 )
                 .unwrap(),
             ),
             OvbRaw::Int(0.into()),
         ]),
-        capture.snapshot().clone(),
+        capture.snapshot(),
     )
     .unwrap();
     assert_eq!(
@@ -380,7 +380,7 @@ fn invocation_reference_validation_requires_declared_relation_and_natural_keys()
             capture.database_id(),
             SYS_INVOCATION_ARGUMENT_TABLE_ID,
             invalid_key,
-            capture.snapshot().clone(),
+            capture.snapshot(),
         )
         .unwrap();
         assert_eq!(
@@ -394,7 +394,7 @@ fn invocation_reference_validation_requires_declared_relation_and_natural_keys()
 fn invocation_reference_constructors_preserve_checked_public_coordinates() {
     let capture = cwd();
     let database = capture.database_id();
-    let snapshot = capture.snapshot().clone();
+    let snapshot = capture.snapshot();
     let invocation_ref = invocation_reference(database, snapshot.clone(), [5; 16]).unwrap();
     assert_eq!(invocation_ref.as_row_ref(), &invocation(&capture));
 
@@ -435,7 +435,7 @@ fn invocation_reference_constructors_preserve_checked_public_coordinates() {
     assert_eq!(
         invocation_argument_reference(
             database,
-            capture.snapshot().clone(),
+            capture.snapshot(),
             [5; 16],
             num_bigint::BigInt::from(u64::MAX) + 1
         ),

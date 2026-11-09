@@ -1091,7 +1091,7 @@ async fn project_stream_ignores_unrelated_false_module_assertion() {
     assert_eq!(checkpoint.mutation_sequence, 3);
     assert_eq!(
         stream.checkpoint_reference.as_row_ref().snapshot,
-        run.snapshot.snapshot().clone()
+        run.snapshot.snapshot()
     );
     assert!(
         stream.reference(run).is_ok(),

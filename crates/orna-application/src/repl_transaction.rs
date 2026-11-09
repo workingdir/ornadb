@@ -94,7 +94,7 @@ impl ApplicationAuthority {
         // The REPL host serves no publication relation, so its explain
         // catalogue pins the activation's project tables only.
         let explain_catalogue = orna_evaluator::ActivationExplainCatalogue::new(
-            scope.snapshot.context().capture().snapshot(),
+            &scope.snapshot.context().capture().snapshot(),
             tables.keys().map(String::as_str),
         )
         .map_err(|_| {
