@@ -12,9 +12,9 @@ mod publication_policy;
 
 pub use compact::{
     COMPACT_STORAGE_PROFILE, CompactBaseProjectionError, CompactBaseRow, CompactBaseState,
-    CompactEditableRekey, CompactExactKeyIndex, CompactExactKeySource, CompactHybridRekey,
-    CompactKeyError, CompactKeyIdentity, CompactLogicalKeyError, CompactLogicalReader,
-    CompactOvbProfile, EditableBaseRow, HybridBaseState, OVB_PROFILE, fold_compact_committed_base,
+    CompactExactKeyIndex, CompactExactKeySource, CompactKeyError, CompactKeyIdentity,
+    CompactLogicalKeyError, CompactLogicalReader, CompactOvbProfile, OVB_PROFILE,
+    fold_compact_committed_base,
 };
 // Retired compact and loose row writers. Nothing in production reaches them:
 // publication writes ORP rows and a legacy HEAD is refused before any freeze
@@ -22,9 +22,9 @@ pub use compact::{
 // base enable `compact-writer-fixtures`.
 #[cfg(any(test, feature = "compact-writer-fixtures"))]
 pub use compact::{
-    CompactHybridEvolution, CompactLoweringError, CompactWriterBatch, CompactWriterInput,
-    CompactWriterMutation, CompactWriterMutationState, CompactWriterRow,
-    apply_migration_plan_to_compact, lower_publication_freeze,
+    CompactLoweringError, CompactWriterBatch, CompactWriterInput, CompactWriterMutation,
+    CompactWriterMutationState, CompactWriterRow, apply_migration_plan_to_compact,
+    lower_publication_freeze,
 };
 pub use compact_parquet::{CompactParquetError, CompactParquetKeySource};
 pub use publication_policy::{

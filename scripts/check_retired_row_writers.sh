@@ -33,7 +33,6 @@ SYMBOLS=(
     fold_writer_input
     lower_publication_freeze
     apply_migration_plan_to_compact
-    apply_evolution_plan
 )
 
 # The authority is the defined symbol table, not a plain string scan: crate
