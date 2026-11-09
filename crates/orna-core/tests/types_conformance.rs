@@ -32,8 +32,7 @@ fn binary64_float_constructor_accepts_nan_and_infinities() {
         0x7ff8_0000_0000_0001,
         0xfff0_0000_0000_0001,
     ] {
-        let value = RuntimeFloat::new(f64::from_bits(bits))
-            .expect("every IEEE-754 binary64 bit pattern is a Float value");
+        let value = RuntimeFloat::new(f64::from_bits(bits));
         assert_eq!(value.value().to_bits(), bits);
     }
 }
@@ -46,7 +45,7 @@ fn reference_total_order_vectors_survive_runtime_float_construction() {
         .iter()
         .map(|vector| {
             let bits = u64::from_str_radix(vector["bits"].as_str().unwrap(), 16).unwrap();
-            RuntimeFloat::new(f64::from_bits(bits)).unwrap()
+            RuntimeFloat::new(f64::from_bits(bits))
         })
         .collect::<Vec<_>>();
 
@@ -66,28 +65,26 @@ fn reference_float_equality_vectors_match_runtime_float() {
     let vectors: serde_json::Value = serde_json::from_str(FLOAT_VECTORS).unwrap();
     for vector in vectors["ordinary_equality"].as_array().unwrap() {
         let bits = |side: &str| u64::from_str_radix(vector[side].as_str().unwrap(), 16).unwrap();
-        let left = RuntimeFloat::new(f64::from_bits(bits("left"))).unwrap();
-        let right = RuntimeFloat::new(f64::from_bits(bits("right"))).unwrap();
+        let left = RuntimeFloat::new(f64::from_bits(bits("left")));
+        let right = RuntimeFloat::new(f64::from_bits(bits("right")));
         assert_eq!(left == right, vector["equal"].as_bool().unwrap());
     }
 }
 
 #[test]
 fn ordinary_float_equality_matches_ieee_zero_and_nan_rules() {
-    let negative_zero = RuntimeFloat::new(f64::from_bits(0x8000_0000_0000_0000)).unwrap();
-    let positive_zero = RuntimeFloat::new(0.0).unwrap();
+    let negative_zero = RuntimeFloat::new(f64::from_bits(0x8000_0000_0000_0000));
+    let positive_zero = RuntimeFloat::new(0.0);
     assert_eq!(negative_zero, positive_zero);
 
-    let nan = RuntimeFloat::new(f64::from_bits(0x7ff8_0000_0000_0000)).unwrap();
+    let nan = RuntimeFloat::new(f64::from_bits(0x7ff8_0000_0000_0000));
     assert_ne!(nan, nan);
 }
 
 #[test]
 fn ordered_float_comparisons_with_nan_are_all_false() {
-    let nan = RuntimeFloat::new(f64::from_bits(0x7ff8_0000_0000_0000))
-        .unwrap()
-        .value();
-    let number = RuntimeFloat::new(1.0).unwrap().value();
+    let nan = RuntimeFloat::new(f64::from_bits(0x7ff8_0000_0000_0000)).value();
+    let number = RuntimeFloat::new(1.0).value();
 
     // A NaN operand makes the partial order undefined, which makes every
     // comparison operator on the pair false. Asserting the undefined order
@@ -111,7 +108,7 @@ fn result_rows_preserve_non_finite_float_values_and_signed_zero_bits() {
         [column],
         values
             .into_iter()
-            .map(|value| ResultRow::new([RuntimeValue::Float(RuntimeFloat::new(value).unwrap())])),
+            .map(|value| ResultRow::new([RuntimeValue::Float(RuntimeFloat::new(value))])),
     )
     .expect("all binary64 values are valid values in a Float column");
 

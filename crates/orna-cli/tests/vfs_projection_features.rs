@@ -333,12 +333,11 @@ async fn dot_percent_and_literal_tilde_keys_are_admitted_and_escaped() {
     assert!(read_view(&mountpoint.join("Music/%25/data.orna")).contains("Percent"));
 }
 
-/// ORNA-VFS-016 and profiles/vfs-1.md:41-43: the empty key is `~empty`. Blocked:
-/// the empty text primary key maps to an empty `table_row.row_key`, which the
-/// table schema rejects (orna-runtime lib.rs:174 `CHECK (length(row_key) > 0)`).
+/// ORNA-VFS-016 and profiles/vfs-1.md:41-43: the empty text key is admitted and
+/// projects as `~empty`. Its stored `table_row.row_key` is the zero-length UTF-8
+/// text, admitted by the `empty-row-key-v1` migration and runtime key validation.
 /// Tracked in ornadb-5il1.462.1.
 #[tokio::test]
-#[ignore = "ornadb-5il1.462.1: empty text key cannot be stored (table_row row_key CHECK length>0)"]
 async fn empty_key_is_admitted_as_tilde_empty() {
     if !require_fuse_or_skip() {
         return;

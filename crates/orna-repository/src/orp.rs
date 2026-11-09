@@ -352,6 +352,7 @@ mod tests {
     use serde_json::Value as Json;
 
     use super::*;
+    use crate::hex::hex_encode;
     use crate::native_graph::{
         ByteIndexEntry, CborValue, GitHashAlgorithm, NativeNodeEnvelope, NativeObjectKind,
         canonical_value_bytes,
@@ -366,10 +367,6 @@ mod tests {
 
     fn sha256(bytes: &[u8]) -> [u8; 32] {
         Sha256::digest(bytes).into()
-    }
-
-    fn hex(bytes: &[u8]) -> String {
-        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
     }
 
     /// The Git object ID of `bytes` stored as `kind`, computed in process.
@@ -467,12 +464,12 @@ mod tests {
         );
         objects.extend(descriptor_objects);
         objects.push((chunk, "blob", payload.to_vec()));
-        assert_eq!(graph["blob_sha256"], hex(&chunk_sha256));
+        assert_eq!(graph["blob_sha256"], hex_encode(&chunk_sha256));
         assert_eq!(graph["descriptor_oid"], descriptor.to_hex());
 
         let mut actual: Vec<(String, String, String)> = objects
             .into_iter()
-            .map(|(oid, kind, bytes)| (oid.to_hex(), kind.to_owned(), hex(&bytes)))
+            .map(|(oid, kind, bytes)| (oid.to_hex(), kind.to_owned(), hex_encode(&bytes)))
             .collect();
         actual.sort();
         let mut expected: Vec<(String, String, String)> = graph["objects"]

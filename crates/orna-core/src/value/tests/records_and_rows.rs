@@ -341,7 +341,7 @@ fn accepts_every_current_non_null_runtime_value_as_a_function_argument() {
         RuntimeValue::Boolean(true),
         RuntimeValue::Integer(-7),
         RuntimeValue::BigInt(8),
-        RuntimeValue::Float(RuntimeFloat::new(9.5).unwrap()),
+        RuntimeValue::Float(RuntimeFloat::new(9.5)),
         RuntimeValue::Text("value".into()),
         RuntimeValue::Bytes(vec![1, 2, 3]),
         RuntimeValue::Uuid([0x42; 16]),
@@ -493,7 +493,7 @@ fn accepts_every_initial_runtime_value_type_and_typed_null() {
             RuntimeValue::Boolean(true),
             RuntimeValue::Integer(7),
             RuntimeValue::BigInt(8),
-            RuntimeValue::Float(RuntimeFloat::new(9.5).unwrap()),
+            RuntimeValue::Float(RuntimeFloat::new(9.5)),
             RuntimeValue::Text("value".into()),
             RuntimeValue::null(ResolvedType::scalar(StandardScalar::CharacterLargeObject)).unwrap(),
             RuntimeValue::Bytes(vec![1, 2, 3]),
@@ -613,20 +613,14 @@ fn rejects_zero_columns_even_when_rows_have_zero_width() {
 #[test]
 fn accepts_ieee_float_values_and_preserves_ordinary_equality() {
     for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-        assert!(RuntimeFloat::new(value).is_ok());
+        assert_eq!(RuntimeFloat::new(value).value().to_bits(), value.to_bits());
     }
 
-    let finite = RuntimeFloat::new(2.5).unwrap();
+    let finite = RuntimeFloat::new(2.5);
     assert_eq!(finite, finite);
     assert_eq!(finite.value(), 2.5);
-    assert_eq!(
-        RuntimeFloat::new(0.0).unwrap(),
-        RuntimeFloat::new(-0.0).unwrap()
-    );
-    assert_ne!(
-        RuntimeFloat::new(f64::NAN).unwrap(),
-        RuntimeFloat::new(f64::NAN).unwrap()
-    );
+    assert_eq!(RuntimeFloat::new(0.0), RuntimeFloat::new(-0.0));
+    assert_ne!(RuntimeFloat::new(f64::NAN), RuntimeFloat::new(f64::NAN));
 }
 
 #[test]

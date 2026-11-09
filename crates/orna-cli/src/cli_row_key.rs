@@ -15,6 +15,7 @@
 use orna_repository::TypedKey;
 
 use super::Diagnostic;
+use crate::encoding::{hex, hex_digit};
 
 /// Every row key one `KEY_TEXT` spelling can name, in the order to try them.
 ///
@@ -157,6 +158,67 @@ pub(super) fn check_point_key_type(key_type: Option<&str>) -> Result<(), Diagnos
                 key_type.unwrap_or("not a primitive type")
             ),
         )),
+    }
+}
+
+/// Renders a canonical row key the way the caller spelled it: a text key as
+/// its text, and a byte key as that same text when the key's own bytes are
+/// valid UTF-8, so a listing over an imported catalogue stays greppable and a
+/// key printed by `orna query` is the one `orna history` names. A byte key
+/// that is not UTF-8 is printed as `0x` hex rather than being lossily decoded
+/// into text it does not contain.
+pub(super) fn render_key(key: &TypedKey) -> String {
+    match key {
+        TypedKey::Text(text) => text.clone(),
+        TypedKey::UInt(value) => value.to_string(),
+        TypedKey::Int(value) => value.to_string(),
+        TypedKey::Bool(value) => value.to_string(),
+        TypedKey::Null => "-".to_owned(),
+        TypedKey::Bytes(bytes) => render_bytes(bytes),
+        TypedKey::Tuple(values) => values.iter().map(render_key).collect::<Vec<_>>().join(","),
+        TypedKey::Value(value) => value
+            .canonical_text()
+            .unwrap_or_else(|| format!("cbor:{}", hex(value.canonical_bytes()))),
+    }
+}
+
+fn render_bytes(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(text) if !text.is_empty() && text.chars().all(|character| !character.is_control()) => {
+            text.to_owned()
+        }
+        _ => format!("0x{}", hex(bytes)),
+    }
+}
+
+/// Parses a 32-digit hexadecimal relation id into its 16 raw bytes. `refuse`
+/// builds the calling verb's own diagnostic, so each verb keeps its remedy.
+pub(super) fn parse_relation_id(
+    value: &str,
+    refuse: fn(&'static str, String) -> Diagnostic,
+) -> Result<[u8; 16], Diagnostic> {
+    let digits = value.as_bytes();
+    let mut bytes = [0_u8; 16];
+    let valid = digits.len() == 2 * bytes.len()
+        && bytes
+            .iter_mut()
+            .zip(digits.chunks_exact(2))
+            .all(
+                |(byte, pair)| match (hex_digit(pair[0]), hex_digit(pair[1])) {
+                    (Some(high), Some(low)) => {
+                        *byte = (high << 4) | low;
+                        true
+                    }
+                    _ => false,
+                },
+            );
+    if valid {
+        Ok(bytes)
+    } else {
+        Err(refuse(
+            "Relation id is not 32 hexadecimal digits",
+            format!("got {value:?}"),
+        ))
     }
 }
 

@@ -17,6 +17,7 @@
 mod cli_serve_app;
 
 use super::*;
+use crate::encoding::percent_decode;
 use crate::media_range::{MediaMethod, media_reply};
 use orna_application::ApplicationLiveAdapter;
 use orna_live::{
@@ -154,6 +155,71 @@ impl Default for WebSocketKeepalive {
             ping_after: StdDuration::from_secs(15),
             idle_timeout: StdDuration::from_secs(30),
             write_timeout: StdDuration::from_secs(30),
+        }
+    }
+}
+
+/// How long one attached WebSocket has been silent, and whether the host has
+/// pinged it for that silence: Ping once after `ping_after`, treat the peer as
+/// gone after `idle_timeout`.
+struct Silence {
+    keepalive: WebSocketKeepalive,
+    since: Instant,
+    pinged: bool,
+}
+
+/// What the keepalive asks the worker to do before it reads again.
+#[derive(Debug, Eq, PartialEq)]
+enum SilenceStep {
+    /// The peer stayed silent past the idle bound.
+    Close,
+    /// Silence passed the ping bound: send one Ping, then read for `wait`.
+    Ping { wait: StdDuration },
+    /// Read for `wait` before looking again.
+    Wait(StdDuration),
+}
+
+impl Silence {
+    fn new(keepalive: WebSocketKeepalive) -> Self {
+        Self {
+            keepalive,
+            since: Instant::now(),
+            pinged: false,
+        }
+    }
+
+    /// The peer sent bytes: its silence, and any Ping owed for it, start over.
+    fn heard(&mut self, now: Instant) {
+        self.since = now;
+        self.pinged = false;
+    }
+
+    /// A step served for the peer ended. Silence is measured from the later of
+    /// its last bytes and this moment, because time spent evaluating its own
+    /// requests, while nothing is read from it, is not silence.
+    fn served(&mut self, now: Instant) {
+        self.since = now;
+    }
+
+    fn next_step(&mut self, now: Instant) -> SilenceStep {
+        let silent = now.saturating_duration_since(self.since);
+        if silent >= self.keepalive.idle_timeout {
+            return SilenceStep::Close;
+        }
+        let ping = !self.pinged && silent >= self.keepalive.ping_after;
+        self.pinged |= ping;
+        let bound = if self.pinged {
+            self.keepalive.idle_timeout
+        } else {
+            self.keepalive.ping_after
+        };
+        let wait = bound
+            .saturating_sub(silent)
+            .max(StdDuration::from_millis(1));
+        if ping {
+            SilenceStep::Ping { wait }
+        } else {
+            SilenceStep::Wait(wait)
         }
     }
 }
@@ -306,10 +372,10 @@ struct RegisteredWorker {
     /// A second handle on the worker's socket. Shutting down its read half
     /// wakes a worker that is blocked reading from the peer.
     socket: TcpStream,
+    /// Set by [`WebSocketWorkers::cancel`] when the transport hands this
+    /// attachment over for retirement while the worker is running. The worker
+    /// stops reading frames and acknowledges the retirement as its last step.
     cancelled: Arc<AtomicBool>,
-    /// The transport handed this attachment over for retirement while the
-    /// worker was running; the worker acknowledges it when it exits.
-    retired: bool,
 }
 
 impl WebSocketWorkers {
@@ -318,7 +384,6 @@ impl WebSocketWorkers {
         let worker = RegisteredWorker {
             socket: socket.try_clone()?,
             cancelled: Arc::clone(&cancelled),
-            retired: false,
         };
         let mut workers = self.lock();
         if workers.contains_key(&attachment) {
@@ -334,11 +399,10 @@ impl WebSocketWorkers {
     /// worker owns the attachment any more, so the caller acknowledges the
     /// retirement itself.
     fn cancel(&self, attachment: [u8; 16]) -> bool {
-        let mut workers = self.lock();
-        let Some(worker) = workers.get_mut(&attachment) else {
+        let workers = self.lock();
+        let Some(worker) = workers.get(&attachment) else {
             return false;
         };
-        worker.retired = true;
         worker.cancelled.store(true, Ordering::Release);
         let _ = worker.socket.shutdown(Shutdown::Read);
         true
@@ -350,7 +414,7 @@ impl WebSocketWorkers {
         let retired = self
             .lock()
             .remove(&attachment)
-            .is_some_and(|worker| worker.retired);
+            .is_some_and(|worker| worker.cancelled.load(Ordering::Acquire));
         self.exited.notify_all();
         retired
     }
@@ -1297,42 +1361,35 @@ impl WebSocketWorker<'_> {
     /// step served for it, whichever is later: time spent evaluating its own
     /// requests, while nothing is read from it, is not silence.
     fn serve_frames(&self, initial: Vec<u8>) -> io::Result<()> {
-        let keepalive = self.state.options.keepalive;
         let mut socket = WebSocketState::new(self.attachment);
         let mut stream = self.stream;
         let mut chunk = [0; WEBSOCKET_READ_CHUNK_BYTES];
         let mut input = initial;
-        let mut last_activity = Instant::now();
-        let mut pinged = false;
+        let mut silence = Silence::new(self.state.options.keepalive);
         loop {
             if !input.is_empty() {
                 let bytes = std::mem::take(&mut input);
                 if !self.serve_input(&mut socket, &bytes)? {
                     return Ok(());
                 }
-                last_activity = Instant::now();
+                silence.served(Instant::now());
             }
             if self.cancelled.load(Ordering::Acquire) {
                 self.close(CLOSE_RETIRED);
                 return Ok(());
             }
-            let silent = last_activity.elapsed();
-            if silent >= keepalive.idle_timeout {
-                self.close(CLOSE_IDLE);
-                return Ok(());
-            }
-            if !pinged && silent >= keepalive.ping_after {
-                self.write(&WebSocketOutput::Ping(Vec::new()))?;
-                pinged = true;
-            }
-            let wake = if pinged {
-                keepalive.idle_timeout
-            } else {
-                keepalive.ping_after
+            let wait = match silence.next_step(Instant::now()) {
+                SilenceStep::Close => {
+                    self.close(CLOSE_IDLE);
+                    return Ok(());
+                }
+                SilenceStep::Ping { wait } => {
+                    self.write(&WebSocketOutput::Ping(Vec::new()))?;
+                    wait
+                }
+                SilenceStep::Wait(wait) => wait,
             };
-            stream.set_read_timeout(Some(
-                wake.saturating_sub(silent).max(StdDuration::from_millis(1)),
-            ))?;
+            stream.set_read_timeout(Some(wait))?;
             match stream.read(&mut chunk) {
                 // Cancellation shuts down this socket's read half, which also
                 // reads as end of stream; the loop then sends its Close frame.
@@ -1340,8 +1397,7 @@ impl WebSocketWorker<'_> {
                 Ok(0) => return Ok(()),
                 Ok(read) => {
                     input.extend_from_slice(&chunk[..read]);
-                    last_activity = Instant::now();
-                    pinged = false;
+                    silence.heard(Instant::now());
                 }
                 Err(error)
                     if matches!(
@@ -1519,7 +1575,7 @@ fn content_route(root: &Path, request: &Request, suffix: &str) -> Response {
     let Some(commit) = resolve_listing_commit(&repository, object_id) else {
         return not_found_response();
     };
-    let Ok(decoded_path) = percent_decode(encoded_path) else {
+    let Some(decoded_path) = percent_decode(encoded_path, false) else {
         return bad_request_response();
     };
     let Ok(path) = ManagedPath::new(&decoded_path) else {
@@ -1635,39 +1691,6 @@ fn apply_payload_policy(response: &mut Response, media_type: &str) {
     ensure_header(response, "content-disposition", "attachment");
     ensure_header(response, "x-content-type-options", "nosniff");
     ensure_header(response, "content-security-policy", "sandbox");
-}
-
-fn percent_decode(path: &str) -> Result<String, ()> {
-    let input = path.as_bytes();
-    let mut decoded = Vec::with_capacity(input.len());
-    let mut index = 0;
-    while index < input.len() {
-        if input[index] == b'%' {
-            let high = input
-                .get(index + 1)
-                .and_then(|byte| hex_digit(*byte))
-                .ok_or(())?;
-            let low = input
-                .get(index + 2)
-                .and_then(|byte| hex_digit(*byte))
-                .ok_or(())?;
-            decoded.push((high << 4) | low);
-            index += 3;
-        } else {
-            decoded.push(input[index]);
-            index += 1;
-        }
-    }
-    String::from_utf8(decoded).map_err(|_| ())
-}
-
-fn hex_digit(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
 }
 
 fn git_transport_route(root: &Path, allow_push: bool, request: &Request) -> Option<Response> {
@@ -2361,6 +2384,65 @@ mod tests {
         client.write_all(request).unwrap();
         let (server, _) = listener.accept().unwrap();
         BufReader::new(server)
+    }
+
+    fn keepalive(ping_after: u64, idle_timeout: u64) -> WebSocketKeepalive {
+        WebSocketKeepalive {
+            ping_after: StdDuration::from_secs(ping_after),
+            idle_timeout: StdDuration::from_secs(idle_timeout),
+            write_timeout: StdDuration::from_secs(30),
+        }
+    }
+
+    #[test]
+    fn silence_pings_once_and_closes_at_the_idle_bound() {
+        let start = Instant::now();
+        let at = |seconds: u64| start + StdDuration::from_secs(seconds);
+        let mut silence = Silence::new(keepalive(15, 30));
+        silence.heard(start);
+        assert_eq!(
+            silence.next_step(at(0)),
+            SilenceStep::Wait(StdDuration::from_secs(15))
+        );
+        assert_eq!(
+            silence.next_step(at(10)),
+            SilenceStep::Wait(StdDuration::from_secs(5))
+        );
+        // Past the ping bound one Ping is owed, then the wait runs to the idle bound.
+        assert_eq!(
+            silence.next_step(at(15)),
+            SilenceStep::Ping {
+                wait: StdDuration::from_secs(15)
+            }
+        );
+        assert_eq!(
+            silence.next_step(at(20)),
+            SilenceStep::Wait(StdDuration::from_secs(10))
+        );
+        assert_eq!(silence.next_step(at(30)), SilenceStep::Close);
+    }
+
+    #[test]
+    fn bytes_from_the_peer_restart_silence_and_owe_a_new_ping() {
+        let start = Instant::now();
+        let at = |seconds: u64| start + StdDuration::from_secs(seconds);
+        let mut silence = Silence::new(keepalive(15, 30));
+        silence.heard(start);
+        assert!(matches!(
+            silence.next_step(at(16)),
+            SilenceStep::Ping { .. }
+        ));
+        silence.heard(at(20));
+        assert_eq!(
+            silence.next_step(at(21)),
+            SilenceStep::Wait(StdDuration::from_secs(14))
+        );
+        assert_eq!(
+            silence.next_step(at(35)),
+            SilenceStep::Ping {
+                wait: StdDuration::from_secs(15)
+            }
+        );
     }
 
     #[test]

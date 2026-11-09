@@ -19,6 +19,78 @@ pub const MIN_MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 pub const MIN_MAX_DEPTH: usize = 64;
 pub const MIN_MAX_NODES: usize = 100_000;
 
+// CBOR tags used by the wire, from the format registry (source/29-formats.md).
+const TAG_PROTECTED: u64 = 0;
+const TAG_UUID: u64 = 37;
+const TAG_DURATION: u64 = 60_005;
+const TAG_DIAGNOSTIC: u64 = 60_011;
+const TAG_PRESENT: u64 = 60_012;
+const TAG_ERROR: u64 = 60_016;
+const TAG_SYS_VALUE: u64 = 60_026;
+/// Format-3 profile tags 60110..=60113 (`orna_value::OVB2_BLOB_TAG` through
+/// `ROV3_OVERFLOW_TAG`) are not portable wire values; the wire refuses them as
+/// `wire.invalid_message` before any effect. The sys profile code stays at the
+/// sys/value/evaluator layers (SPEC-QUESTIONS.md).
+const PROFILE_TAGS: std::ops::RangeInclusive<u64> = 60_110..=60_113;
+
+// Kinds shared by Present stable keys and patch path components
+// (source/30-protocol.md, "Present nodes and patches"). Stable keys use every
+// kind except `KIND_INDEX`, which only addresses a positional child.
+const KIND_FIELD: u64 = 0;
+const KIND_RELATION: u64 = 1;
+const KIND_INDEX: u64 = 2;
+const KIND_KEY: u64 = 3;
+
+// Envelope structural keys (source/30-protocol.md, "Envelope and field rules").
+const ENVELOPE_VERSION: u16 = 0;
+const ENVELOPE_TYPE: u16 = 1;
+const ENVELOPE_REQUEST: u16 = 2;
+const ENVELOPE_WATCH: u16 = 3;
+const ENVELOPE_BODY: u16 = 4;
+
+// Message type registry (source/30-protocol.md, "Complete message registry").
+const MSG_SUBSCRIBE: u64 = 0;
+const MSG_UNSUBSCRIBE: u64 = 1;
+const MSG_RESYNC: u64 = 2;
+const MSG_EVENT: u64 = 3;
+const MSG_EVAL: u64 = 4;
+const MSG_WATCH: u64 = 5;
+const MSG_CANCEL: u64 = 6;
+const MSG_REQUEST_STATUS: u64 = 7;
+const MSG_SNAPSHOT: u64 = 16;
+const MSG_DELTA: u64 = 17;
+const MSG_RESULT: u64 = 18;
+const MSG_DIAGNOSTIC: u64 = 19;
+const MSG_REQUEST_STATUS_RESULT: u64 = 20;
+
+/// Unknown body keys from here up are mandatory extensions and are rejected;
+/// unknown keys below it are ignorable extension data.
+const MANDATORY_EXTENSION_FLOOR: u16 = 32_768;
+
+/// `Event` and `Eval` carry their own request fingerprint at this body key. It
+/// is redundant with the digest computed over the rest of the body, so the
+/// digest input omits it.
+const REDUNDANT_FINGERPRINT_KEY: u64 = 3;
+
+const NANOSECONDS_PER_SECOND: u32 = 1_000_000_000;
+
+// CBOR major types and simple values (RFC 8949) used by the canonical codec.
+const MAJOR_UNSIGNED: u8 = 0;
+const MAJOR_NEGATIVE: u8 = 1;
+const MAJOR_BYTES: u8 = 2;
+const MAJOR_TEXT: u8 = 3;
+const MAJOR_ARRAY: u8 = 4;
+const MAJOR_MAP: u8 = 5;
+const MAJOR_TAG: u8 = 6;
+const MAJOR_SIMPLE: u8 = 7;
+const SIMPLE_FALSE: u8 = 20;
+const SIMPLE_TRUE: u8 = 21;
+const SIMPLE_NULL: u8 = 22;
+const SIMPLE_FLOAT64: u8 = 27;
+/// Positive and negative arbitrary-size integers (RFC 8949 tags 2 and 3).
+const TAG_BIGNUM_POSITIVE: u64 = 2;
+const TAG_BIGNUM_NEGATIVE: u64 = 3;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Limits {
     pub max_message_bytes: usize,
@@ -71,7 +143,12 @@ impl Error {
         match self {
             Self::Limit => "wire.limit",
             Self::Unsupported | Self::UnknownMandatoryExtension => "wire.unsupported",
-            _ => "wire.invalid_message",
+            Self::Truncated
+            | Self::TrailingBytes
+            | Self::NonCanonical
+            | Self::InvalidEnvelope
+            | Self::InvalidMessage
+            | Self::InvalidValue => "wire.invalid_message",
         }
     }
 }
@@ -95,7 +172,7 @@ pub fn canonical_request_fingerprint(
 ) -> Result<[u8; 32]> {
     // Keep the helper's accepted public values identical to envelope encoding,
     // including bounds and validation of opaque typed fields and extensions.
-    let _ = envelope.encode(limits)?;
+    envelope.encode(limits)?;
     let mut body = envelope.message.body(&envelope.extensions)?;
     if matches!(
         envelope.message,
@@ -104,7 +181,7 @@ pub fn canonical_request_fingerprint(
         let Node::Map(fields) = &mut body else {
             return Err(Error::InvalidMessage);
         };
-        fields.retain(|(key, _)| u64_value(key).ok() != Some(3));
+        fields.retain(|(key, _)| u64_value(key).ok() != Some(REDUNDANT_FINGERPRINT_KEY));
     }
     let input = encode_node(&Node::Array(vec![
         Node::Bytes(session_id.to_vec()),
@@ -189,6 +266,25 @@ pub enum Message {
         fingerprint: Option<[u8; 32]>,
         result: Option<ResultBody>,
     },
+}
+
+/// Whether an envelope id slot must be null, must carry an id, or may be
+/// either, according to the message registry.
+#[derive(Clone, Copy)]
+enum Presence {
+    Absent,
+    Required,
+    Optional,
+}
+
+impl Presence {
+    const fn admits(self, id: Option<[u8; 16]>) -> bool {
+        match self {
+            Self::Absent => id.is_none(),
+            Self::Required => id.is_some(),
+            Self::Optional => true,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -290,24 +386,27 @@ enum Node {
 
 type PresentProperties = Vec<(Node, Node)>;
 
+/// Unmistakable replacement for any value the wire may not disclose.
+const REDACTED_MARKER: &str = "<redacted>";
+
 impl Envelope {
     pub fn encode(&self, limits: Limits) -> Result<Vec<u8>> {
         limits.validate()?;
         self.validate()?;
         let body = self.message.body(&self.extensions)?;
         let root = Node::Map(vec![
-            (uint(0), uint(VERSION)),
-            (uint(1), uint(self.message.code())),
-            (uint(2), option_bytes(self.request)),
-            (uint(3), option_bytes(self.watch)),
-            (uint(4), body),
+            (key_node(ENVELOPE_VERSION), uint(VERSION)),
+            (key_node(ENVELOPE_TYPE), uint(self.message.code())),
+            (key_node(ENVELOPE_REQUEST), option_bytes(self.request)),
+            (key_node(ENVELOPE_WATCH), option_bytes(self.watch)),
+            (key_node(ENVELOPE_BODY), body),
         ]);
         let bytes = encode_node(&root)?;
         if bytes.len() > limits.max_message_bytes {
             return Err(Error::Limit);
         }
         // Validate public typed fields too, not only decoded wire values.
-        let _ = Self::decode(&bytes, limits)?;
+        Self::decode(&bytes, limits)?;
         Ok(bytes)
     }
 
@@ -326,19 +425,29 @@ impl Envelope {
             return Err(Error::NonCanonical);
         }
         let envelope_map = map(&root).ok_or(Error::InvalidEnvelope)?;
-        require_exact_keys(envelope_map, &[0, 1, 2, 3, 4], Error::InvalidEnvelope)?;
-        let version = u64_value(field(envelope_map, 0)?)?;
+        require_exact_keys(
+            envelope_map,
+            &[
+                ENVELOPE_VERSION,
+                ENVELOPE_TYPE,
+                ENVELOPE_REQUEST,
+                ENVELOPE_WATCH,
+                ENVELOPE_BODY,
+            ],
+            Error::InvalidEnvelope,
+        )?;
+        let version = u64_value(field(envelope_map, ENVELOPE_VERSION)?)?;
         if version != VERSION {
             return Err(Error::InvalidEnvelope);
         }
-        let code = u64_value(field(envelope_map, 1)?)?;
+        let code = u64_value(field(envelope_map, ENVELOPE_TYPE)?)?;
         if code > u16::MAX.into() {
             return Err(Error::InvalidEnvelope);
         }
-        let request = nullable_bytes16(field(envelope_map, 2)?)?;
-        let watch = nullable_bytes16(field(envelope_map, 3)?)?;
-        let body = map(field(envelope_map, 4)?).ok_or(Error::InvalidMessage)?;
-        let (message, extensions) = Message::decode(code as u16, request, watch, body)?;
+        let request = nullable_bytes16(field(envelope_map, ENVELOPE_REQUEST)?)?;
+        let watch = nullable_bytes16(field(envelope_map, ENVELOPE_WATCH)?)?;
+        let body = map(field(envelope_map, ENVELOPE_BODY)?).ok_or(Error::InvalidMessage)?;
+        let (message, extensions) = Message::decode(code, request, watch, body)?;
         let envelope = Self {
             request,
             watch,
@@ -357,21 +466,41 @@ impl Envelope {
 impl Message {
     pub const fn code(&self) -> u64 {
         match self {
-            Self::Subscribe { .. } => 0,
-            Self::Unsubscribe => 1,
-            Self::Resync => 2,
-            Self::Event { .. } => 3,
-            Self::Eval { .. } => 4,
-            Self::Watch { .. } => 5,
-            Self::Cancel { .. } => 6,
-            Self::RequestStatus { .. } => 7,
-            Self::Snapshot { .. } => 16,
-            Self::Delta { .. } => 17,
-            Self::Result { .. } => 18,
-            Self::Diagnostic { .. } => 19,
-            Self::RequestStatusResult { .. } => 20,
+            Self::Subscribe { .. } => MSG_SUBSCRIBE,
+            Self::Unsubscribe => MSG_UNSUBSCRIBE,
+            Self::Resync => MSG_RESYNC,
+            Self::Event { .. } => MSG_EVENT,
+            Self::Eval { .. } => MSG_EVAL,
+            Self::Watch { .. } => MSG_WATCH,
+            Self::Cancel { .. } => MSG_CANCEL,
+            Self::RequestStatus { .. } => MSG_REQUEST_STATUS,
+            Self::Snapshot { .. } => MSG_SNAPSHOT,
+            Self::Delta { .. } => MSG_DELTA,
+            Self::Result { .. } => MSG_RESULT,
+            Self::Diagnostic { .. } => MSG_DIAGNOSTIC,
+            Self::RequestStatusResult { .. } => MSG_REQUEST_STATUS_RESULT,
         }
     }
+
+    /// The body keys this message type defines, required and optional. Any
+    /// other key is extension data (or a rejected mandatory extension).
+    const fn body_keys(&self) -> &'static [u16] {
+        match self {
+            Self::Unsubscribe | Self::Resync => &[],
+            Self::Subscribe { .. }
+            | Self::Cancel { .. }
+            | Self::RequestStatus { .. }
+            | Self::Diagnostic { .. } => &[0, 1],
+            Self::Snapshot { .. } => &[0, 1, 2],
+            Self::Event { .. }
+            | Self::Eval { .. }
+            | Self::Watch { .. }
+            | Self::Delta { .. }
+            | Self::Result { .. }
+            | Self::RequestStatusResult { .. } => &[0, 1, 2, 3],
+        }
+    }
+
     fn validate_envelope(&self, request: Option<[u8; 16]>, watch: Option<[u8; 16]>) -> Result<()> {
         let (request_rule, watch_rule) = match self {
             Self::Subscribe { .. }
@@ -380,17 +509,15 @@ impl Message {
             | Self::Cancel { .. }
             | Self::RequestStatus { .. }
             | Self::Result { .. }
-            | Self::RequestStatusResult { .. } => (1, 0),
-            Self::Unsubscribe | Self::Resync | Self::Event { .. } => (1, 1),
-            Self::Snapshot { .. } => (2, 1),
-            Self::Delta { .. } => (0, 1),
-            Self::Diagnostic { .. } => (2, 2),
+            | Self::RequestStatusResult { .. } => (Presence::Required, Presence::Absent),
+            Self::Unsubscribe | Self::Resync | Self::Event { .. } => {
+                (Presence::Required, Presence::Required)
+            }
+            Self::Snapshot { .. } => (Presence::Optional, Presence::Required),
+            Self::Delta { .. } => (Presence::Absent, Presence::Required),
+            Self::Diagnostic { .. } => (Presence::Optional, Presence::Optional),
         };
-        if (request_rule == 0 && request.is_some())
-            || (request_rule == 1 && request.is_none())
-            || (watch_rule == 0 && watch.is_some())
-            || (watch_rule == 1 && watch.is_none())
-        {
+        if !request_rule.admits(request) || !watch_rule.admits(watch) {
             return Err(Error::InvalidEnvelope);
         }
         if let Self::Cancel {
@@ -430,7 +557,6 @@ impl Message {
             match state {
                 RequestState::Terminal => {}
                 RequestState::Orphaned => {
-                    let fields = map(&result.0.0).ok_or(Error::InvalidMessage)?;
                     // Recovery can retain proven failure or uncertainty, never success.
                     if !matches!(
                         ResultStatus::decode(field(fields, 0)?)?,
@@ -439,7 +565,9 @@ impl Message {
                         return Err(Error::InvalidMessage);
                     }
                 }
-                _ => return Err(Error::InvalidMessage),
+                RequestState::Unknown | RequestState::Reserved | RequestState::Running => {
+                    return Err(Error::InvalidMessage);
+                }
             }
         }
         Ok(())
@@ -513,7 +641,7 @@ impl Message {
             } => vec![
                 (0, uint(*revision)),
                 (1, present.0.0.clone()),
-                (2, snapshot_node(snapshot)?),
+                (2, snapshot_node(snapshot)),
             ],
             Self::Delta {
                 base_revision,
@@ -524,7 +652,7 @@ impl Message {
                 (0, uint(*base_revision)),
                 (1, uint(*new_revision)),
                 (2, patches.0.0.clone()),
-                (3, snapshot_node(snapshot)?),
+                (3, snapshot_node(snapshot)),
             ],
             Self::Result {
                 status,
@@ -573,134 +701,95 @@ impl Message {
             if fields.iter().any(|(known, _)| known == key) {
                 return Err(Error::InvalidMessage);
             }
-            fields.push((*key, present_value_node(&to_ovb(&value.0)?)?));
+            fields.push((*key, present_value_node(&to_ovb(&value.0))?));
         }
         Ok(Node::Map(
             fields
                 .into_iter()
-                .map(|(key, value)| (uint(key.into()), value))
+                .map(|(key, value)| (key_node(key), value))
                 .collect(),
         ))
     }
     fn decode(
-        code: u16,
+        code: u64,
         request: Option<[u8; 16]>,
         watch: Option<[u8; 16]>,
         body: &[(Node, Node)],
     ) -> Result<(Self, BTreeMap<u16, ValueNode>)> {
-        let (required, message) = match code {
-            0 => (
-                vec![0, 1],
-                Self::Subscribe {
-                    resource: bytes16(field(body, 0)?)?,
-                    presentation: PresentationContext::decode(field(body, 1)?)?,
-                },
-            ),
-            1 => (vec![], Self::Unsubscribe),
-            2 => (vec![], Self::Resync),
-            3 => (
-                vec![0, 1, 2, 3],
-                Self::Event {
-                    revision: u64_value(field(body, 0)?)?,
-                    action: bytes16(field(body, 1)?)?,
-                    value: canonical_value(field(body, 2)?)?,
-                    fingerprint: bytes32(field(body, 3)?)?,
-                },
-            ),
-            4 => (
-                vec![0, 1, 2, 3],
-                Self::Eval {
-                    source: text(field(body, 0)?)?.to_owned(),
-                    database: DatabaseContext::decode(field(body, 1)?)?,
-                    presentation: PresentationContext::decode(field(body, 2)?)?,
-                    fingerprint: bytes32(field(body, 3)?)?,
-                },
-            ),
-            5 => (
-                vec![0, 1, 2],
-                Self::Watch {
-                    source: text(field(body, 0)?)?.to_owned(),
-                    database: DatabaseContext::decode(field(body, 1)?)?,
-                    presentation: PresentationContext::decode(field(body, 2)?)?,
-                    refresh_floor: optional_field(body, 3).map(Duration::decode).transpose()?,
-                },
-            ),
-            6 => (
-                vec![0, 1],
-                Self::Cancel {
-                    target_kind: TargetKind::decode(field(body, 0)?)?,
-                    target: bytes16(field(body, 1)?)?,
-                },
-            ),
-            7 => (
-                vec![0, 1],
-                Self::RequestStatus {
-                    target: bytes16(field(body, 0)?)?,
-                    fingerprint: bytes32(field(body, 1)?)?,
-                },
-            ),
-            16 => (
-                vec![0, 1, 2],
-                Self::Snapshot {
-                    revision: u64_value(field(body, 0)?)?,
-                    present: PresentNode::decode(field(body, 1)?)?,
-                    snapshot: snapshot(field(body, 2)?)?,
-                },
-            ),
-            17 => (
-                vec![0, 1, 2, 3],
-                Self::Delta {
-                    base_revision: u64_value(field(body, 0)?)?,
-                    new_revision: u64_value(field(body, 1)?)?,
-                    patches: PatchList::decode(field(body, 2)?)?,
-                    snapshot: snapshot(field(body, 3)?)?,
-                },
-            ),
-            18 => (
-                vec![0, 1, 2, 3],
-                Self::Result {
-                    status: ResultStatus::decode(field(body, 0)?)?,
-                    value: nullable_value(field(body, 1)?)?,
-                    fingerprint: bytes32(field(body, 2)?)?,
-                    diagnostic: nullable_diagnostic(field(body, 3)?)?,
-                },
-            ),
-            19 => (
-                vec![0],
-                Self::Diagnostic {
-                    diagnostic: Diagnostic::decode(field(body, 0)?)?,
-                    recoverable: optional_field(body, 1).map(bool_value).transpose()?,
-                },
-            ),
-            20 => (
-                vec![0, 1, 2, 3],
-                Self::RequestStatusResult {
-                    target: bytes16(field(body, 0)?)?,
-                    state: RequestState::decode(field(body, 1)?)?,
-                    fingerprint: nullable_bytes32(field(body, 2)?)?,
-                    result: nullable_result_body(field(body, 3)?)?,
-                },
-            ),
+        let message = match code {
+            MSG_SUBSCRIBE => Self::Subscribe {
+                resource: bytes16(field(body, 0)?)?,
+                presentation: PresentationContext::decode(field(body, 1)?)?,
+            },
+            MSG_UNSUBSCRIBE => Self::Unsubscribe,
+            MSG_RESYNC => Self::Resync,
+            MSG_EVENT => Self::Event {
+                revision: u64_value(field(body, 0)?)?,
+                action: bytes16(field(body, 1)?)?,
+                value: canonical_value(field(body, 2)?)?,
+                fingerprint: bytes32(field(body, 3)?)?,
+            },
+            MSG_EVAL => Self::Eval {
+                source: text(field(body, 0)?)?.to_owned(),
+                database: DatabaseContext::decode(field(body, 1)?)?,
+                presentation: PresentationContext::decode(field(body, 2)?)?,
+                fingerprint: bytes32(field(body, 3)?)?,
+            },
+            MSG_WATCH => Self::Watch {
+                source: text(field(body, 0)?)?.to_owned(),
+                database: DatabaseContext::decode(field(body, 1)?)?,
+                presentation: PresentationContext::decode(field(body, 2)?)?,
+                refresh_floor: optional_field(body, 3).map(Duration::decode).transpose()?,
+            },
+            MSG_CANCEL => Self::Cancel {
+                target_kind: TargetKind::decode(field(body, 0)?)?,
+                target: bytes16(field(body, 1)?)?,
+            },
+            MSG_REQUEST_STATUS => Self::RequestStatus {
+                target: bytes16(field(body, 0)?)?,
+                fingerprint: bytes32(field(body, 1)?)?,
+            },
+            MSG_SNAPSHOT => Self::Snapshot {
+                revision: u64_value(field(body, 0)?)?,
+                present: PresentNode::decode(field(body, 1)?)?,
+                snapshot: snapshot(field(body, 2)?)?,
+            },
+            MSG_DELTA => Self::Delta {
+                base_revision: u64_value(field(body, 0)?)?,
+                new_revision: u64_value(field(body, 1)?)?,
+                patches: PatchList::decode(field(body, 2)?)?,
+                snapshot: snapshot(field(body, 3)?)?,
+            },
+            MSG_RESULT => Self::Result {
+                status: ResultStatus::decode(field(body, 0)?)?,
+                value: nullable_value(field(body, 1)?)?,
+                fingerprint: bytes32(field(body, 2)?)?,
+                diagnostic: nullable_diagnostic(field(body, 3)?)?,
+            },
+            MSG_DIAGNOSTIC => Self::Diagnostic {
+                diagnostic: Diagnostic::decode(field(body, 0)?)?,
+                recoverable: optional_field(body, 1).map(bool_value).transpose()?,
+            },
+            MSG_REQUEST_STATUS_RESULT => Self::RequestStatusResult {
+                target: bytes16(field(body, 0)?)?,
+                state: RequestState::decode(field(body, 1)?)?,
+                fingerprint: nullable_bytes32(field(body, 2)?)?,
+                result: nullable_result_body(field(body, 3)?)?,
+            },
             _ => return Err(Error::Unsupported),
         };
-        for key in &required {
-            let _ = field(body, *key)?;
-        }
+        let defined = message.body_keys();
         let mut extensions = BTreeMap::new();
         for (key, value) in body {
-            let number = u64_value(key)?;
-            if number > u16::MAX.into() {
-                return Err(Error::InvalidMessage);
+            let number = u16::try_from(u64_value(key)?).map_err(|_| Error::InvalidMessage)?;
+            if defined.contains(&number) {
+                continue;
             }
-            let number = number as u16;
-            let optional = matches!((code, number), (5, 3) | (19, 1));
-            if !required.contains(&number) && !optional {
-                if number >= 32768 {
-                    return Err(Error::UnknownMandatoryExtension);
-                }
-                let safe = canonical_value(value)?;
-                extensions.insert(number, ValueNode(from_ovb(safe.raw())?));
+            if number >= MANDATORY_EXTENSION_FLOOR {
+                return Err(Error::UnknownMandatoryExtension);
             }
+            let safe = canonical_value(value)?;
+            extensions.insert(number, ValueNode(from_ovb(safe.raw())));
         }
         message.validate_envelope(request, watch)?;
         Ok((message, extensions))
@@ -713,10 +802,7 @@ impl DatabaseContext {
             (uint(0), uuid_node(self.database)),
             (
                 uint(1),
-                match self.snapshot.as_ref() {
-                    Some(snapshot) => snapshot_node(snapshot).unwrap_or(Node::Null),
-                    None => Node::Null,
-                },
+                self.snapshot.as_ref().map_or(Node::Null, snapshot_node),
             ),
         ])
     }
@@ -781,7 +867,7 @@ impl PresentationContext {
 impl Duration {
     fn node(&self) -> Node {
         Node::Tag(
-            60005,
+            TAG_DURATION,
             Box::new(Node::Array(vec![
                 Node::Int(self.floor_seconds.clone()),
                 uint(self.nanosecond.into()),
@@ -789,7 +875,7 @@ impl Duration {
         )
     }
     fn decode(node: &Node) -> Result<Self> {
-        let Node::Tag(60005, body) = node else {
+        let Node::Tag(TAG_DURATION, body) = node else {
             return Err(Error::InvalidValue);
         };
         let a = array(body).ok_or(Error::InvalidValue)?;
@@ -799,13 +885,16 @@ impl Duration {
         let Node::Int(seconds) = &a[0] else {
             return Err(Error::InvalidValue);
         };
-        let nanos = u64_value(&a[1])?;
-        if seconds.sign() == Sign::Minus || nanos >= 1_000_000_000 {
+        let nanosecond = u32::try_from(u64_value(&a[1])?)
+            .ok()
+            .filter(|nanos| *nanos < NANOSECONDS_PER_SECOND)
+            .ok_or(Error::InvalidValue)?;
+        if seconds.sign() == Sign::Minus {
             return Err(Error::InvalidValue);
         }
         Ok(Self {
             floor_seconds: seconds.clone(),
-            nanosecond: nanos as u32,
+            nanosecond,
         })
     }
 }
@@ -888,20 +977,22 @@ impl PresentNode {
         let identity = match identity {
             None => Node::Null,
             Some(PresentIdentity::RecordField(name)) => {
-                Node::Array(vec![uint(0), Node::Text(name)])
+                Node::Array(vec![uint(KIND_FIELD), Node::Text(name)])
             }
             Some(PresentIdentity::RecordFieldObjectId(object_id)) => {
-                Node::Array(vec![uint(0), uuid_node(object_id)])
+                Node::Array(vec![uint(KIND_FIELD), uuid_node(object_id)])
             }
             Some(PresentIdentity::RelationRow {
                 table_object_id,
                 primary_key,
             }) => Node::Array(vec![
-                uint(1),
+                uint(KIND_RELATION),
                 uuid_node(table_object_id),
                 value_node(&primary_key)?,
             ]),
-            Some(PresentIdentity::Explicit(key)) => Node::Array(vec![uint(3), value_node(&key)?]),
+            Some(PresentIdentity::Explicit(key)) => {
+                Node::Array(vec![uint(KIND_KEY), value_node(&key)?])
+            }
         };
         let mut properties = properties
             .into_iter()
@@ -921,7 +1012,7 @@ impl PresentNode {
             .collect();
         let children = children.into_iter().map(|child| child.0.0).collect();
         Self::decode(&Node::Tag(
-            60012,
+            TAG_PRESENT,
             Box::new(Node::Array(vec![
                 kind,
                 identity,
@@ -937,7 +1028,7 @@ impl PresentNode {
     /// the protocol inventing a domain-specific widget shape.
     pub fn from_value(value: CanonicalValue) -> Result<Self> {
         Self::decode(&Node::Tag(
-            60012,
+            TAG_PRESENT,
             Box::new(Node::Array(vec![
                 Node::Text("value".into()),
                 Node::Null,
@@ -999,9 +1090,8 @@ impl PatchList {
         // before retaining the tree because Delta serialization reuses it.
         // A PresentNode used as a patch payload is the typed delta boundary,
         // so preserve that wrapper while redacting its untyped property data.
-        let node = from_ovb(&to_ovb(node)?)?;
-        validate_patches(&node)?;
-        let node = sanitize_patch_list(&node)?;
+        validate_patches(node)?;
+        let node = sanitize_patch_list(node)?;
         validate_patches(&node)?;
         Ok(Self(ValueNode(node)))
     }
@@ -1011,11 +1101,64 @@ impl PatchList {
     /// and a full snapshot would duplicate the whole presentation payload.
     pub fn replace_root(present: &PresentNode) -> Result<Self> {
         Self::decode(&Node::Array(vec![Node::Array(vec![
-            uint(2),
+            uint(PatchOp::Replace.code()),
             Node::Array(Vec::new()),
             present.0.0.clone(),
         ])]))
     }
+}
+
+/// One patch operation of the wire registry:
+/// `[0, path, value]` add, `[1, path]` remove, `[2, path, value]` replace and
+/// `[3, from_path, to_path]` move.
+#[derive(Clone, Copy)]
+enum PatchOp {
+    Add,
+    Remove,
+    Replace,
+    Move,
+}
+
+impl PatchOp {
+    const fn from_opcode(opcode: u64) -> Option<Self> {
+        match opcode {
+            0 => Some(Self::Add),
+            1 => Some(Self::Remove),
+            2 => Some(Self::Replace),
+            3 => Some(Self::Move),
+            _ => None,
+        }
+    }
+
+    const fn code(self) -> u64 {
+        match self {
+            Self::Add => 0,
+            Self::Remove => 1,
+            Self::Replace => 2,
+            Self::Move => 3,
+        }
+    }
+
+    /// Element count of the encoded operation, opcode included.
+    const fn arity(self) -> usize {
+        match self {
+            Self::Remove => 2,
+            Self::Add | Self::Replace | Self::Move => 3,
+        }
+    }
+
+    /// Whether operand 2 is a Present value rather than a path.
+    const fn carries_value(self) -> bool {
+        matches!(self, Self::Add | Self::Replace)
+    }
+}
+
+/// Reads the operation encoded by `fields`, enforcing its exact operand count.
+fn patch_op(fields: &[Node]) -> Result<PatchOp> {
+    let opcode = u64_value(fields.first().ok_or(Error::InvalidValue)?)?;
+    PatchOp::from_opcode(opcode)
+        .filter(|op| op.arity() == fields.len())
+        .ok_or(Error::InvalidValue)
 }
 
 fn sanitize_patch_list(node: &Node) -> Result<Node> {
@@ -1025,14 +1168,15 @@ fn sanitize_patch_list(node: &Node) -> Result<Node> {
         .map(|operation| {
             let fields = array(operation).ok_or(Error::InvalidValue)?;
             let opcode = u64_value(fields.first().ok_or(Error::InvalidValue)?)?;
+            let carries_value = PatchOp::from_opcode(opcode).is_some_and(PatchOp::carries_value);
             let fields = fields
                 .iter()
                 .enumerate()
                 .map(|(index, field)| {
-                    if matches!(opcode, 0 | 2) && index == 2 {
+                    if carries_value && index == 2 {
                         sanitize_patch_payload(field)
                     } else {
-                        present_value_node(&to_ovb(field)?)
+                        present_value_node(&to_ovb(field))
                     }
                 })
                 .collect::<Result<Vec<_>>>()?;
@@ -1043,14 +1187,16 @@ fn sanitize_patch_list(node: &Node) -> Result<Node> {
 }
 
 fn sanitize_patch_payload(node: &Node) -> Result<Node> {
-    if matches!(node, Node::Tag(60012, _)) {
+    if matches!(node, Node::Tag(TAG_PRESENT, _)) {
         redact_present_values(node)
     } else {
-        present_value_node(&to_ovb(node)?)
+        present_value_node(&to_ovb(node))
     }
 }
 
-#[derive(Clone)]
+/// One step of a patch path, or a Present stable key (which uses every kind
+/// except `Index`).
+#[derive(Clone, PartialEq)]
 enum PatchPathComponent {
     Field(Node),
     Relation(Node, Node),
@@ -1058,17 +1204,39 @@ enum PatchPathComponent {
     Key(Node),
 }
 
+impl PatchPathComponent {
+    /// Parses and validates `[0, name_or_id]`, `[1, table_uuid, primary_key]`,
+    /// `[2, index]` or `[3, explicit_key]`.
+    fn parse(node: &Node) -> Result<Self> {
+        let fields = array(node).ok_or(Error::InvalidValue)?;
+        let kind = u64_value(fields.first().ok_or(Error::InvalidValue)?)?;
+        match (kind, fields.len()) {
+            (KIND_FIELD, 2) if matches!(fields[1], Node::Text(_)) || uuid(&fields[1]).is_ok() => {
+                Ok(Self::Field(fields[1].clone()))
+            }
+            (KIND_RELATION, 3) if uuid(&fields[1]).is_ok() => {
+                canonical_value(&fields[2])?;
+                Ok(Self::Relation(fields[1].clone(), fields[2].clone()))
+            }
+            (KIND_INDEX, 2) => Ok(Self::Index(
+                usize::try_from(u64_value(&fields[1])?).map_err(|_| Error::InvalidValue)?,
+            )),
+            (KIND_KEY, 2) => {
+                canonical_value(&fields[1])?;
+                Ok(Self::Key(fields[1].clone()))
+            }
+            _ => Err(Error::InvalidValue),
+        }
+    }
+}
+
 fn apply_patch(root: &mut Node, operation: &Node) -> Result<()> {
     let fields = array(operation).ok_or(Error::InvalidValue)?;
-    let opcode = u64_value(fields.first().ok_or(Error::InvalidValue)?)?;
-    match opcode {
-        0 if fields.len() == 3 => add_at(root, &path(&fields[1])?, fields[2].clone()),
-        1 if fields.len() == 2 => {
-            let _ = remove_at(root, &path(&fields[1])?)?;
-            Ok(())
-        }
-        2 if fields.len() == 3 => replace_at(root, &path(&fields[1])?, fields[2].clone()),
-        3 if fields.len() == 3 => {
+    match patch_op(fields)? {
+        PatchOp::Add => add_at(root, &path(&fields[1])?, fields[2].clone()),
+        PatchOp::Remove => remove_at(root, &path(&fields[1])?).map(drop),
+        PatchOp::Replace => replace_at(root, &path(&fields[1])?, fields[2].clone()),
+        PatchOp::Move => {
             let from = path(&fields[1])?;
             let to = path(&fields[2])?;
             if from.is_empty() || from.len() <= to.len() && from == to[..from.len()] {
@@ -1077,7 +1245,6 @@ fn apply_patch(root: &mut Node, operation: &Node) -> Result<()> {
             let value = remove_at(root, &from)?;
             add_at(root, &to, value)
         }
-        _ => Err(Error::InvalidValue),
     }
 }
 
@@ -1085,48 +1252,8 @@ fn path(node: &Node) -> Result<Vec<PatchPathComponent>> {
     array(node)
         .ok_or(Error::InvalidValue)?
         .iter()
-        .map(|component| {
-            let fields = array(component).ok_or(Error::InvalidValue)?;
-            match (
-                u64_value(fields.first().ok_or(Error::InvalidValue)?)?,
-                fields.len(),
-            ) {
-                (0, 2) if matches!(fields[1], Node::Text(_)) || uuid(&fields[1]).is_ok() => {
-                    Ok(PatchPathComponent::Field(fields[1].clone()))
-                }
-                (1, 3) if uuid(&fields[1]).is_ok() => {
-                    canonical_value(&fields[2])?;
-                    Ok(PatchPathComponent::Relation(
-                        fields[1].clone(),
-                        fields[2].clone(),
-                    ))
-                }
-                (2, 2) => Ok(PatchPathComponent::Index(
-                    usize::try_from(u64_value(&fields[1])?).map_err(|_| Error::InvalidValue)?,
-                )),
-                (3, 2) => {
-                    canonical_value(&fields[1])?;
-                    Ok(PatchPathComponent::Key(fields[1].clone()))
-                }
-                _ => Err(Error::InvalidValue),
-            }
-        })
+        .map(PatchPathComponent::parse)
         .collect()
-}
-
-impl PartialEq for PatchPathComponent {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Field(left), Self::Field(right)) | (Self::Key(left), Self::Key(right)) => {
-                left == right
-            }
-            (Self::Relation(left_table, left_key), Self::Relation(right_table, right_key)) => {
-                left_table == right_table && left_key == right_key
-            }
-            (Self::Index(left), Self::Index(right)) => left == right,
-            _ => false,
-        }
-    }
 }
 
 fn add_at(root: &mut Node, path: &[PatchPathComponent], value: Node) -> Result<()> {
@@ -1151,7 +1278,7 @@ fn add_at(root: &mut Node, path: &[PatchPathComponent], value: Node) -> Result<(
             if !tail.is_empty() {
                 return Err(Error::InvalidValue);
             }
-            if matches!(&value, Node::Tag(60012, _)) {
+            if matches!(&value, Node::Tag(TAG_PRESENT, _)) {
                 present_value(&value)?;
                 if matches_selector(&value, &selector)? {
                     children.push(value);
@@ -1301,7 +1428,7 @@ fn replace_at(root: &mut Node, path: &[PatchPathComponent], value: Node) -> Resu
 }
 
 fn present_parts_mut(node: &mut Node) -> Result<(&mut PresentProperties, &mut Vec<Node>)> {
-    let Node::Tag(60012, body) = node else {
+    let Node::Tag(TAG_PRESENT, body) = node else {
         return Err(Error::InvalidValue);
     };
     let Node::Array(fields) = body.as_mut() else {
@@ -1353,7 +1480,7 @@ fn validate_bounded_node(
         return Err(Error::Limit);
     }
     *structural_nodes += 1;
-    if matches!(node, Node::Tag(60012, _)) {
+    if matches!(node, Node::Tag(TAG_PRESENT, _)) {
         if *present_nodes >= limits.max_nodes {
             return Err(Error::Limit);
         }
@@ -1397,7 +1524,7 @@ fn child_index(children: &[Node], selector: &PatchPathComponent) -> Option<usize
 }
 
 fn is_record_field_value(node: &Node) -> Result<bool> {
-    let Node::Tag(60012, body) = node else {
+    let Node::Tag(TAG_PRESENT, body) = node else {
         return Ok(false);
     };
     let Node::Array(fields) = body.as_ref() else {
@@ -1407,12 +1534,12 @@ fn is_record_field_value(node: &Node) -> Result<bool> {
     Ok(matches!(
         key,
         Node::Array(parts) if parts.len() == 2
-            && u64_value(&parts[0]).ok() == Some(0)
+            && u64_value(&parts[0]).ok() == Some(KIND_FIELD)
     ))
 }
 
 fn matches_selector(node: &Node, selector: &PatchPathComponent) -> Result<bool> {
-    let Node::Tag(60012, body) = node else {
+    let Node::Tag(TAG_PRESENT, body) = node else {
         return Err(Error::InvalidValue);
     };
     let Node::Array(fields) = body.as_ref() else {
@@ -1423,20 +1550,20 @@ fn matches_selector(node: &Node, selector: &PatchPathComponent) -> Result<bool> 
         PatchPathComponent::Field(expected) => Ok(matches!(
             key,
             Node::Array(parts) if parts.len() == 2
-                && u64_value(&parts[0]).ok() == Some(0)
+                && u64_value(&parts[0]).ok() == Some(KIND_FIELD)
                 && parts[1] == *expected
         )),
         PatchPathComponent::Relation(table, primary_key) => Ok(matches!(
             key,
             Node::Array(parts) if parts.len() == 3
-                && u64_value(&parts[0]).ok() == Some(1)
+                && u64_value(&parts[0]).ok() == Some(KIND_RELATION)
                 && parts[1] == *table
                 && parts[2] == *primary_key
         )),
         PatchPathComponent::Key(expected) => Ok(matches!(
             key,
             Node::Array(parts) if parts.len() == 2
-                && u64_value(&parts[0]).ok() == Some(3)
+                && u64_value(&parts[0]).ok() == Some(KIND_KEY)
                 && parts[1] == *expected
         )),
         _ => Err(Error::InvalidValue),
@@ -1444,24 +1571,25 @@ fn matches_selector(node: &Node, selector: &PatchPathComponent) -> Result<bool> 
 }
 impl Diagnostic {
     fn decode(node: &Node) -> Result<Self> {
-        validate_diagnostic(node)?;
         let bytes = encode_node(node)?;
+        let diagnostic =
+            orna_foundation::Diagnostic::decode_ovb(&bytes).map_err(|_| Error::InvalidValue)?;
         // Only the fixed, payload-free read-only diagnostic is safe to disclose.
         // The wire redacted bit is never sufficient authority; all other
         // diagnostics are redacted fail-closed at this boundary.
         if Self::is_safe_read_only_diagnostic(node) {
             return Ok(Self(ValueNode(node.clone())));
         }
-        let diagnostic = orna_foundation::Diagnostic::decode_ovb(&bytes)
-            .map_err(|_| Error::InvalidValue)?
-            .redacted();
-        let safe_bytes = diagnostic.encode_ovb().map_err(|_| Error::InvalidValue)?;
+        let safe_bytes = diagnostic
+            .redacted()
+            .encode_ovb()
+            .map_err(|_| Error::InvalidValue)?;
         let safe = CanonicalValue::decode(&safe_bytes).map_err(|_| Error::InvalidValue)?;
-        Ok(Self(ValueNode(from_ovb(safe.raw())?)))
+        Ok(Self(ValueNode(from_ovb(safe.raw()))))
     }
 
     fn is_safe_read_only_diagnostic(node: &Node) -> bool {
-        let Node::Tag(60011, value) = node else {
+        let Node::Tag(TAG_DIAGNOSTIC, value) = node else {
             return false;
         };
         let Some(fields) = map(value) else {
@@ -1493,7 +1621,7 @@ impl Diagnostic {
     }
 
     fn text_field(&self, id: u8) -> Result<String> {
-        let Node::Tag(60011, value) = &self.0.0 else {
+        let Node::Tag(TAG_DIAGNOSTIC, value) = &self.0.0 else {
             return Err(Error::InvalidValue);
         };
         let fields = map(value).ok_or(Error::InvalidValue)?;
@@ -1523,13 +1651,15 @@ impl ResultBody {
     fn decode(node: &Node) -> Result<Self> {
         let node = redacted_value_node(node)?;
         let body = map(&node).ok_or(Error::InvalidValue)?;
-        let (message, extensions) = Message::decode(18, Some([0; 16]), None, body)?;
+        // The embedded body carries no envelope; a placeholder request id
+        // satisfies the Result message's envelope rule for validation only.
+        let (message, extensions) = Message::decode(MSG_RESULT, Some([0; 16]), None, body)?;
         Ok(Self(ValueNode(message.body(&extensions)?)))
     }
 }
 
 fn validate_present(node: &Node) -> Result<()> {
-    let Node::Tag(60012, body) = node else {
+    let Node::Tag(TAG_PRESENT, body) = node else {
         return Err(Error::InvalidValue);
     };
     let fields = array(body).ok_or(Error::InvalidValue)?;
@@ -1557,7 +1687,7 @@ fn validate_present(node: &Node) -> Result<()> {
         }
         property_keys.push(key.clone());
         let _ = canonical_value(value)?;
-        if matches!(value, Node::Tag(60012, _)) {
+        if matches!(value, Node::Tag(TAG_PRESENT, _)) {
             validate_present(value)?;
         }
     }
@@ -1566,7 +1696,7 @@ fn validate_present(node: &Node) -> Result<()> {
     let mut stable_keys = Vec::new();
     for child in children {
         validate_present(child)?;
-        let Node::Tag(60012, body) = child else {
+        let Node::Tag(TAG_PRESENT, body) = child else {
             return Err(Error::InvalidValue);
         };
         let child_fields = array(body).ok_or(Error::InvalidValue)?;
@@ -1582,69 +1712,34 @@ fn validate_present(node: &Node) -> Result<()> {
 }
 
 fn validate_present_key(node: &Node) -> Result<()> {
-    let (Node::Null | Node::Array(_)) = node else {
-        return Err(Error::InvalidValue);
-    };
-    let Some(fields) = array(node) else {
-        return Ok(());
-    };
-    let kind = u64_value(fields.first().ok_or(Error::InvalidValue)?)?;
-    match kind {
-        0 if fields.len() == 2
-            && (matches!(&fields[1], Node::Text(_)) || uuid(&fields[1]).is_ok()) =>
-        {
-            Ok(())
-        }
-        1 if fields.len() == 3 && uuid(&fields[1]).is_ok() => {
-            let _ = canonical_value(&fields[2])?;
-            Ok(())
-        }
-        3 if fields.len() == 2 => {
-            let _ = canonical_value(&fields[1])?;
-            Ok(())
-        }
+    match node {
+        Node::Null => Ok(()),
+        Node::Array(_) => match PatchPathComponent::parse(node)? {
+            PatchPathComponent::Field(_)
+            | PatchPathComponent::Relation(..)
+            | PatchPathComponent::Key(_) => Ok(()),
+            PatchPathComponent::Index(_) => Err(Error::InvalidValue),
+        },
         _ => Err(Error::InvalidValue),
     }
 }
+
 fn validate_patches(node: &Node) -> Result<()> {
     for operation in array(node).ok_or(Error::InvalidValue)? {
-        let a = array(operation).ok_or(Error::InvalidValue)?;
-        let opcode = u64_value(a.first().ok_or(Error::InvalidValue)?)?;
-        if !matches!((opcode, a.len()), (0, 3) | (1, 2) | (2, 3) | (3, 3)) {
-            return Err(Error::InvalidValue);
-        }
-        validate_path(&a[1])?;
-        if opcode == 3 {
-            validate_path(&a[2])?;
-        } else if opcode != 1 {
-            let _ = canonical_value(&a[2])?;
+        let fields = array(operation).ok_or(Error::InvalidValue)?;
+        let op = patch_op(fields)?;
+        path(&fields[1])?;
+        match op {
+            PatchOp::Move => {
+                path(&fields[2])?;
+            }
+            PatchOp::Add | PatchOp::Replace => {
+                canonical_value(&fields[2])?;
+            }
+            PatchOp::Remove => {}
         }
     }
     Ok(())
-}
-fn validate_path(node: &Node) -> Result<()> {
-    for component in array(node).ok_or(Error::InvalidValue)? {
-        let a = array(component).ok_or(Error::InvalidValue)?;
-        let kind = u64_value(a.first().ok_or(Error::InvalidValue)?)?;
-        match kind {
-            0 if a.len() == 2 && (matches!(&a[1], Node::Text(_)) || uuid(&a[1]).is_ok()) => {}
-            1 if a.len() == 3 && uuid(&a[1]).is_ok() => {
-                let _ = canonical_value(&a[2])?;
-            }
-            2 if a.len() == 2 && u64_value(&a[1]).is_ok() => {}
-            3 if a.len() == 2 => {
-                let _ = canonical_value(&a[1])?;
-            }
-            _ => return Err(Error::InvalidValue),
-        }
-    }
-    Ok(())
-}
-fn validate_diagnostic(node: &Node) -> Result<()> {
-    let bytes = encode_node(node)?;
-    orna_foundation::Diagnostic::decode_ovb(&bytes)
-        .map(|_| ())
-        .map_err(|_| Error::InvalidValue)
 }
 
 fn canonical_value(node: &Node) -> Result<CanonicalValue> {
@@ -1654,13 +1749,13 @@ fn canonical_value(node: &Node) -> Result<CanonicalValue> {
     if contains_protected_value(node) {
         return Err(Error::InvalidValue);
     }
-    let value = CanonicalValue::new(to_ovb(node)?).map_err(|_| Error::InvalidValue)?;
+    let value = CanonicalValue::new(to_ovb(node)).map_err(|_| Error::InvalidValue)?;
     value.redacted_for_trace().map_err(|_| Error::InvalidValue)
 }
 
 fn contains_protected_value(node: &Node) -> bool {
     match node {
-        Node::Tag(0, _) => true,
+        Node::Tag(TAG_PROTECTED, _) => true,
         Node::Array(values) => values.iter().any(contains_protected_value),
         Node::Map(entries) => entries
             .iter()
@@ -1675,13 +1770,9 @@ fn contains_protected_value(node: &Node) -> bool {
     }
 }
 
-/// Format-3 profile tags 60110..=60113 (`orna_value::OVB2_BLOB_TAG` through
-/// `ROV3_OVERFLOW_TAG`) are not portable wire values; the wire refuses them as
-/// `wire.invalid_message` before any effect. The sys profile code stays at the
-/// sys/value/evaluator layers (SPEC-QUESTIONS.md).
 fn contains_profile_tag(node: &Node) -> bool {
     match node {
-        Node::Tag(tag, value) => matches!(*tag, 60_110..=60_113) || contains_profile_tag(value),
+        Node::Tag(tag, value) => PROFILE_TAGS.contains(tag) || contains_profile_tag(value),
         Node::Array(values) => values.iter().any(contains_profile_tag),
         Node::Map(entries) => entries
             .iter()
@@ -1694,11 +1785,11 @@ fn redacted_value_node(node: &Node) -> Result<Node> {
     // Result bodies are typed envelopes. Preserve Diagnostic/Present wrappers
     // until their owning decoders apply field-aware redaction, while still
     // scrubbing generic Error values at this trace boundary.
-    let value = CanonicalValue::new(to_ovb(node)?).map_err(|_| Error::InvalidValue)?;
+    let value = CanonicalValue::new(to_ovb(node)).map_err(|_| Error::InvalidValue)?;
     let value = value
         .redacted_error_values_for_trace()
         .map_err(|_| Error::InvalidValue)?;
-    from_ovb(value.raw())
+    Ok(from_ovb(value.raw()))
 }
 fn nullable_value(node: &Node) -> Result<Option<CanonicalValue>> {
     if matches!(node, Node::Null) {
@@ -1707,39 +1798,35 @@ fn nullable_value(node: &Node) -> Result<Option<CanonicalValue>> {
         canonical_value(node).map(Some)
     }
 }
-fn to_ovb(node: &Node) -> Result<OvbRaw> {
-    Ok(match node {
+fn to_ovb(node: &Node) -> OvbRaw {
+    match node {
         Node::Null => OvbRaw::Null,
         Node::Bool(v) => OvbRaw::Bool(*v),
         Node::Int(v) => OvbRaw::Int(v.clone()),
         Node::Float(v) => OvbRaw::Float(*v),
         Node::Bytes(v) => OvbRaw::Bytes(v.clone()),
         Node::Text(v) => OvbRaw::Text(v.clone()),
-        Node::Array(v) => OvbRaw::Array(v.iter().map(to_ovb).collect::<Result<_>>()?),
-        Node::Map(v) => OvbRaw::Map(
-            v.iter()
-                .map(|(k, v)| Ok((to_ovb(k)?, to_ovb(v)?)))
-                .collect::<Result<_>>()?,
-        ),
-        Node::Tag(tag, value) => OvbRaw::Tag(*tag, Box::new(to_ovb(value)?)),
-    })
+        Node::Array(v) => OvbRaw::Array(v.iter().map(to_ovb).collect()),
+        Node::Map(v) => OvbRaw::Map(v.iter().map(|(k, v)| (to_ovb(k), to_ovb(v))).collect()),
+        Node::Tag(tag, value) => OvbRaw::Tag(*tag, Box::new(to_ovb(value))),
+    }
 }
 fn present_value_node(value: &OvbRaw) -> Result<Node> {
     match value {
-        OvbRaw::Tag(0 | 60011 | 60012 | 60026, _) => {
+        OvbRaw::Tag(TAG_PROTECTED | TAG_DIAGNOSTIC | TAG_PRESENT | TAG_SYS_VALUE, _) => {
             // The generic fallback has no type witness or per-field disclosure
             // proof. ORNA-SYS-100 and ORNA-SECRET-002 require an unmistakable
             // marker, so discard the complete protected wrapper payload.
-            Ok(Node::Text("<redacted>".into()))
+            Ok(Node::Text(REDACTED_MARKER.into()))
         }
-        OvbRaw::Tag(60016, _) => {
+        OvbRaw::Tag(TAG_ERROR, _) => {
             let value = CanonicalValue::new(value.clone()).map_err(|_| Error::InvalidValue)?;
-            from_ovb(
+            Ok(from_ovb(
                 value
                     .redacted_for_trace()
                     .map_err(|_| Error::InvalidValue)?
                     .raw(),
-            )
+            ))
         }
         OvbRaw::Array(values) => Ok(Node::Array(
             values
@@ -1748,66 +1835,64 @@ fn present_value_node(value: &OvbRaw) -> Result<Node> {
                 .collect::<Result<Vec<_>>>()?,
         )),
         OvbRaw::Map(original_entries) => {
-            let mut entries = original_entries
+            let entries = original_entries
                 .iter()
                 .map(|(key, value)| Ok((present_value_node(key)?, present_value_node(value)?)))
                 .collect::<Result<Vec<_>>>()?;
-            let mut changed_key = false;
-            for ((key, _), (safe_key, _)) in original_entries.iter().zip(&entries) {
-                if to_ovb(safe_key)? != key.clone() {
-                    changed_key = true;
-                    break;
-                }
-            }
-            if changed_key {
+            let key_changed = original_entries
+                .iter()
+                .zip(&entries)
+                .any(|((key, _), (safe_key, _))| to_ovb(safe_key) != *key);
+            if key_changed {
                 // Redacting keys can merge distinct entries. Fail closed for
                 // the whole map rather than emit an ambiguous trace value.
-                return Ok(Node::Text("<redacted>".into()));
+                return Ok(Node::Text(REDACTED_MARKER.into()));
             }
-            entries.sort_by(|(left, _), (right, _)| {
-                encode_node(left)
-                    .expect("validated presentation keys remain encodable")
-                    .cmp(&encode_node(right).expect("validated presentation keys remain encodable"))
-            });
-            Ok(Node::Map(entries))
+            let mut keyed = entries
+                .into_iter()
+                .map(|(key, value)| Ok((encode_node(&key)?, key, value)))
+                .collect::<Result<Vec<_>>>()?;
+            keyed.sort_by(|left, right| left.0.cmp(&right.0));
+            Ok(Node::Map(
+                keyed
+                    .into_iter()
+                    .map(|(_, key, value)| (key, value))
+                    .collect(),
+            ))
         }
         OvbRaw::Tag(tag, value) => Ok(Node::Tag(*tag, Box::new(present_value_node(value)?))),
-        value => from_ovb(value),
+        value => Ok(from_ovb(value)),
     }
 }
 fn value_node(value: &CanonicalValue) -> Result<Node> {
     // Protocol serialization is an unprivileged trace boundary; preserve the
     // portable local Error for recovery, but never send its caller text or
     // details across the wire without a disclosure classifier.
-    let node = from_ovb(value.raw())?;
+    let node = from_ovb(value.raw());
     if contains_protected_value(&node) {
         return Err(Error::InvalidValue);
     }
     let safe = value
         .redacted_for_trace()
         .map_err(|_| Error::InvalidValue)?;
-    from_ovb(safe.raw())
+    Ok(from_ovb(safe.raw()))
 }
-fn from_ovb(value: &OvbRaw) -> Result<Node> {
-    Ok(match value {
+fn from_ovb(value: &OvbRaw) -> Node {
+    match value {
         OvbRaw::Null => Node::Null,
         OvbRaw::Bool(v) => Node::Bool(*v),
         OvbRaw::Int(v) => Node::Int(v.clone()),
         OvbRaw::Float(v) => Node::Float(*v),
         OvbRaw::Bytes(v) => Node::Bytes(v.clone()),
         OvbRaw::Text(v) => Node::Text(v.clone()),
-        OvbRaw::Array(v) => Node::Array(v.iter().map(from_ovb).collect::<Result<_>>()?),
-        OvbRaw::Map(v) => Node::Map(
-            v.iter()
-                .map(|(k, v)| Ok((from_ovb(k)?, from_ovb(v)?)))
-                .collect::<Result<_>>()?,
-        ),
-        OvbRaw::Tag(tag, value) => Node::Tag(*tag, Box::new(from_ovb(value)?)),
-    })
+        OvbRaw::Array(v) => Node::Array(v.iter().map(from_ovb).collect()),
+        OvbRaw::Map(v) => Node::Map(v.iter().map(|(k, v)| (from_ovb(k), from_ovb(v))).collect()),
+        OvbRaw::Tag(tag, value) => Node::Tag(*tag, Box::new(from_ovb(value))),
+    }
 }
 
 fn redact_present_values(node: &Node) -> Result<Node> {
-    let Node::Tag(60012, body) = node else {
+    let Node::Tag(TAG_PRESENT, body) = node else {
         return Err(Error::InvalidValue);
     };
     let fields = array(body).ok_or(Error::InvalidValue)?;
@@ -1818,13 +1903,13 @@ fn redact_present_values(node: &Node) -> Result<Node> {
     let kind = fields[0].clone();
     let identity = if let Some(identity_fields) = array(&fields[1]) {
         match identity_fields.as_slice() {
-            [kind, table, key] if u64_value(kind).ok() == Some(1) => Node::Array(vec![
+            [kind, table, key] if u64_value(kind).ok() == Some(KIND_RELATION) => Node::Array(vec![
                 kind.clone(),
                 table.clone(),
-                present_value_node(&to_ovb(key)?)?,
+                present_value_node(&to_ovb(key))?,
             ]),
-            [kind, key] if u64_value(kind).ok() == Some(3) => {
-                Node::Array(vec![kind.clone(), present_value_node(&to_ovb(key)?)?])
+            [kind, key] if u64_value(kind).ok() == Some(KIND_KEY) => {
+                Node::Array(vec![kind.clone(), present_value_node(&to_ovb(key))?])
             }
             _ => fields[1].clone(),
         }
@@ -1834,7 +1919,7 @@ fn redact_present_values(node: &Node) -> Result<Node> {
     let properties = map(&fields[2]).ok_or(Error::InvalidValue)?;
     let properties = properties
         .iter()
-        .map(|(key, value)| Ok((key.clone(), present_value_node(&to_ovb(value)?)?)))
+        .map(|(key, value)| Ok((key.clone(), present_value_node(&to_ovb(value))?)))
         .collect::<Result<Vec<_>>>()?;
     let children = array(&fields[3]).ok_or(Error::InvalidValue)?;
     let children = children
@@ -1843,7 +1928,7 @@ fn redact_present_values(node: &Node) -> Result<Node> {
         .collect::<Result<Vec<_>>>()?;
 
     Ok(Node::Tag(
-        60012,
+        TAG_PRESENT,
         Box::new(Node::Array(vec![
             kind,
             identity,
@@ -1853,7 +1938,7 @@ fn redact_present_values(node: &Node) -> Result<Node> {
     ))
 }
 fn snapshot(node: &Node) -> Result<CanonicalSnapshot> {
-    CanonicalSnapshot::decode(&to_ovb(node)?).map_err(|_| Error::InvalidValue)
+    CanonicalSnapshot::decode(&to_ovb(node)).map_err(|_| Error::InvalidValue)
 }
 fn nullable_snapshot(node: &Node) -> Result<Option<CanonicalSnapshot>> {
     if matches!(node, Node::Null) {
@@ -1862,7 +1947,7 @@ fn nullable_snapshot(node: &Node) -> Result<Option<CanonicalSnapshot>> {
         snapshot(node).map(Some)
     }
 }
-fn snapshot_node(snapshot: &CanonicalSnapshot) -> Result<Node> {
+fn snapshot_node(snapshot: &CanonicalSnapshot) -> Node {
     from_ovb(&snapshot.raw())
 }
 fn nullable_diagnostic(node: &Node) -> Result<Option<Diagnostic>> {
@@ -1882,6 +1967,9 @@ fn nullable_result_body(node: &Node) -> Result<Option<ResultBody>> {
 
 fn uint(value: u64) -> Node {
     Node::Int(BigInt::from(value))
+}
+fn key_node(key: u16) -> Node {
+    uint(key.into())
 }
 fn option_bytes(value: Option<[u8; 16]>) -> Node {
     value.map_or(Node::Null, |x| Node::Bytes(x.to_vec()))
@@ -1985,12 +2073,12 @@ fn nullable_text(node: &Node) -> Result<Option<String>> {
 }
 fn uuid(node: &Node) -> Result<[u8; 16]> {
     match node {
-        Node::Tag(37, value) => bytes16(value),
+        Node::Tag(TAG_UUID, value) => bytes16(value),
         _ => Err(Error::InvalidValue),
     }
 }
 fn uuid_node(value: [u8; 16]) -> Node {
-    Node::Tag(37, Box::new(Node::Bytes(value.to_vec())))
+    Node::Tag(TAG_UUID, Box::new(Node::Bytes(value.to_vec())))
 }
 fn field(map: &[(Node, Node)], key: u16) -> Result<&Node> {
     map.iter()
@@ -2016,53 +2104,70 @@ fn encode_node(node: &Node) -> Result<Vec<u8>> {
     write_node(node, &mut out)?;
     Ok(out)
 }
+/// Writes a CBOR item head in its shortest (canonical) form.
 fn head(out: &mut Vec<u8>, major: u8, value: u64) {
-    if value < 24 {
-        out.push((major << 5) | value as u8);
-    } else if u8::try_from(value).is_ok() {
-        out.extend([major << 5 | 24, value as u8]);
-    } else if u16::try_from(value).is_ok() {
-        out.push(major << 5 | 25);
-        out.extend((value as u16).to_be_bytes());
-    } else if u32::try_from(value).is_ok() {
-        out.push(major << 5 | 26);
-        out.extend((value as u32).to_be_bytes());
+    let initial = major << 5;
+    if let Ok(byte) = u8::try_from(value) {
+        if byte < 24 {
+            out.push(initial | byte);
+        } else {
+            out.extend([initial | 24, byte]);
+        }
+    } else if let Ok(short) = u16::try_from(value) {
+        out.push(initial | 25);
+        out.extend(short.to_be_bytes());
+    } else if let Ok(word) = u32::try_from(value) {
+        out.push(initial | 26);
+        out.extend(word.to_be_bytes());
     } else {
-        out.push(major << 5 | 27);
+        out.push(initial | 27);
         out.extend(value.to_be_bytes());
     }
 }
 fn write_node(node: &Node, out: &mut Vec<u8>) -> Result<()> {
     match node {
-        Node::Null => out.push(0xf6),
-        Node::Bool(false) => out.push(0xf4),
-        Node::Bool(true) => out.push(0xf5),
+        Node::Null => head(out, MAJOR_SIMPLE, SIMPLE_NULL.into()),
+        Node::Bool(false) => head(out, MAJOR_SIMPLE, SIMPLE_FALSE.into()),
+        Node::Bool(true) => head(out, MAJOR_SIMPLE, SIMPLE_TRUE.into()),
         Node::Int(value) => {
             let negative = value.sign() == Sign::Minus;
             let magnitude = if negative { -value - 1 } else { value.clone() };
             if let Some(v) = magnitude.to_u64() {
-                head(out, if negative { 1 } else { 0 }, v);
+                head(
+                    out,
+                    if negative {
+                        MAJOR_NEGATIVE
+                    } else {
+                        MAJOR_UNSIGNED
+                    },
+                    v,
+                );
             } else {
                 let (_, bytes) = magnitude.to_bytes_be();
-                head(out, 6, if negative { 3 } else { 2 });
-                head(out, 2, bytes.len() as u64);
+                let tag = if negative {
+                    TAG_BIGNUM_NEGATIVE
+                } else {
+                    TAG_BIGNUM_POSITIVE
+                };
+                head(out, MAJOR_TAG, tag);
+                head(out, MAJOR_BYTES, bytes.len() as u64);
                 out.extend(bytes);
             }
         }
         Node::Float(bits) => {
-            out.push(0xfb);
+            out.push(MAJOR_SIMPLE << 5 | SIMPLE_FLOAT64);
             out.extend(bits.to_be_bytes());
         }
         Node::Bytes(value) => {
-            head(out, 2, value.len() as u64);
+            head(out, MAJOR_BYTES, value.len() as u64);
             out.extend(value);
         }
         Node::Text(value) => {
-            head(out, 3, value.len() as u64);
+            head(out, MAJOR_TEXT, value.len() as u64);
             out.extend(value.as_bytes());
         }
         Node::Array(values) => {
-            head(out, 4, values.len() as u64);
+            head(out, MAJOR_ARRAY, values.len() as u64);
             for value in values {
                 write_node(value, out)?;
             }
@@ -2076,14 +2181,14 @@ fn write_node(node: &Node, out: &mut Vec<u8>) -> Result<()> {
             if sorted.windows(2).any(|window| window[0].0 == window[1].0) {
                 return Err(Error::NonCanonical);
             }
-            head(out, 5, sorted.len() as u64);
+            head(out, MAJOR_MAP, sorted.len() as u64);
             for (key, value) in sorted {
                 out.extend(key);
                 write_node(value, out)?;
             }
         }
         Node::Tag(tag, value) => {
-            head(out, 6, *tag);
+            head(out, MAJOR_TAG, *tag);
             write_node(value, out)?;
         }
     };
@@ -2139,12 +2244,12 @@ impl<'a> Reader<'a> {
         let first = self.take(1)?[0];
         let major = first >> 5;
         let ai = first & 31;
-        if major == 7 {
+        if major == MAJOR_SIMPLE {
             return match ai {
-                20 => Ok(Node::Bool(false)),
-                21 => Ok(Node::Bool(true)),
-                22 => Ok(Node::Null),
-                27 => {
+                SIMPLE_FALSE => Ok(Node::Bool(false)),
+                SIMPLE_TRUE => Ok(Node::Bool(true)),
+                SIMPLE_NULL => Ok(Node::Null),
+                SIMPLE_FLOAT64 => {
                     let mut bytes = [0; 8];
                     bytes.copy_from_slice(self.take(8)?);
                     let bits = u64::from_be_bytes(bytes);
@@ -2158,27 +2263,27 @@ impl<'a> Reader<'a> {
             };
         }
         let arg = self.arg(ai)?;
-        if major == 6 && arg == 60012 {
+        if major == MAJOR_TAG && arg == TAG_PRESENT {
             if self.present_nodes >= self.limits.max_nodes {
                 return Err(Error::Limit);
             }
             self.present_nodes += 1;
         }
         match major {
-            0 => Ok(uint(arg)),
-            1 => Ok(Node::Int(-BigInt::from(arg) - 1)),
-            2 => Ok(Node::Bytes(
+            MAJOR_UNSIGNED => Ok(uint(arg)),
+            MAJOR_NEGATIVE => Ok(Node::Int(-BigInt::from(arg) - 1)),
+            MAJOR_BYTES => Ok(Node::Bytes(
                 self.take(usize::try_from(arg).map_err(|_| Error::Limit)?)?
                     .to_vec(),
             )),
-            3 => Ok(Node::Text(
+            MAJOR_TEXT => Ok(Node::Text(
                 String::from_utf8(
                     self.take(usize::try_from(arg).map_err(|_| Error::Limit)?)?
                         .to_vec(),
                 )
                 .map_err(|_| Error::InvalidValue)?,
             )),
-            4 => {
+            MAJOR_ARRAY => {
                 let count = usize::try_from(arg).map_err(|_| Error::Limit)?;
                 if count > self.limits.max_collection_items {
                     return Err(Error::Limit);
@@ -2189,7 +2294,7 @@ impl<'a> Reader<'a> {
                 }
                 Ok(Node::Array(values))
             }
-            5 => {
+            MAJOR_MAP => {
                 let count = usize::try_from(arg).map_err(|_| Error::Limit)?;
                 if count > self.limits.max_collection_items {
                     return Err(Error::Limit);
@@ -2212,9 +2317,9 @@ impl<'a> Reader<'a> {
                 }
                 Ok(Node::Map(values))
             }
-            6 => {
+            MAJOR_TAG => {
                 let value = self.node(depth + 1)?;
-                if arg == 2 || arg == 3 {
+                if arg == TAG_BIGNUM_POSITIVE || arg == TAG_BIGNUM_NEGATIVE {
                     let Node::Bytes(bytes) = value else {
                         return Err(Error::InvalidValue);
                     };
@@ -2222,7 +2327,11 @@ impl<'a> Reader<'a> {
                         return Err(Error::NonCanonical);
                     }
                     let number = BigInt::from_bytes_be(Sign::Plus, &bytes);
-                    Ok(Node::Int(if arg == 2 { number } else { -number - 1 }))
+                    Ok(Node::Int(if arg == TAG_BIGNUM_POSITIVE {
+                        number
+                    } else {
+                        -number - 1
+                    }))
                 } else {
                     Ok(Node::Tag(arg, Box::new(value)))
                 }
@@ -3076,7 +3185,7 @@ mod tests {
                         )],
                     ),
                 ),
-                (uint(2), snapshot_node(&snapshot()).unwrap()),
+                (uint(2), snapshot_node(&snapshot())),
             ]),
         );
 
@@ -3371,7 +3480,7 @@ mod tests {
     #[test]
     fn diagnostics_validate_each_span_shape_and_value() {
         let valid_span = Node::Array(vec![
-            snapshot_node(&snapshot()).unwrap(),
+            snapshot_node(&snapshot()),
             Node::Text("src/main.orna".into()),
             uint(1),
             uint(3),
@@ -3392,19 +3501,19 @@ mod tests {
                 uint(3),
             ]),
             Node::Array(vec![
-                snapshot_node(&snapshot()).unwrap(),
+                snapshot_node(&snapshot()),
                 Node::Text("../main.orna".into()),
                 uint(1),
                 uint(3),
             ]),
             Node::Array(vec![
-                snapshot_node(&snapshot()).unwrap(),
+                snapshot_node(&snapshot()),
                 Node::Text("src/main.orna".into()),
                 Node::Int((-1).into()),
                 uint(3),
             ]),
             Node::Array(vec![
-                snapshot_node(&snapshot()).unwrap(),
+                snapshot_node(&snapshot()),
                 Node::Text("src/main.orna".into()),
                 uint(4),
                 uint(3),
@@ -3421,7 +3530,7 @@ mod tests {
     #[test]
     fn diagnostics_reject_a_redacted_span_without_a_redaction_claim() {
         let span = Node::Array(vec![
-            snapshot_node(&snapshot()).unwrap(),
+            snapshot_node(&snapshot()),
             Node::Text("<redacted>".into()),
             uint(1),
             uint(3),
@@ -3457,7 +3566,7 @@ mod tests {
             Node::Map(vec![
                 (uint(0), uint(0)),
                 (uint(1), root),
-                (uint(2), snapshot_node(&snapshot()).unwrap()),
+                (uint(2), snapshot_node(&snapshot())),
             ]),
         );
         assert_eq!(
@@ -3501,7 +3610,7 @@ mod tests {
             Node::Map(vec![
                 (uint(0), uint(0)),
                 (uint(1), valid),
-                (uint(2), snapshot_node(&snapshot()).unwrap()),
+                (uint(2), snapshot_node(&snapshot())),
             ]),
         );
         let single = [
@@ -3526,6 +3635,17 @@ mod tests {
     }
     #[test]
     fn present_rejects_malformed_shape_and_stable_key() {
+        let keyed = |key: Node| {
+            Node::Tag(
+                60012,
+                Box::new(Node::Array(vec![
+                    Node::Text("text".into()),
+                    key,
+                    Node::Map(vec![]),
+                    Node::Array(vec![]),
+                ])),
+            )
+        };
         let malformed = [
             Node::Tag(
                 60012,
@@ -3553,6 +3673,13 @@ mod tests {
                     Node::Array(vec![]),
                 ])),
             ),
+            // A positional index addresses a child; it is never a stable key.
+            keyed(Node::Array(vec![uint(2), uint(0)])),
+            keyed(Node::Array(vec![uint(4), Node::Text("x".into())])),
+            keyed(Node::Int(0.into())),
+            keyed(Node::Array(vec![uint(1), uuid_node(id(5))])),
+            keyed(Node::Array(vec![uint(3)])),
+            keyed(Node::Array(vec![uint(0), uint(7)])),
         ];
         for present in malformed {
             let bytes = wire(
@@ -3562,7 +3689,7 @@ mod tests {
                 Node::Map(vec![
                     (uint(0), uint(0)),
                     (uint(1), present),
-                    (uint(2), snapshot_node(&snapshot()).unwrap()),
+                    (uint(2), snapshot_node(&snapshot())),
                 ]),
             );
             assert_eq!(
@@ -3736,7 +3863,7 @@ mod tests {
                         error_node(fixture, true),
                     ])]),
                 ),
-                (uint(3), snapshot_node(&snapshot()).unwrap()),
+                (uint(3), snapshot_node(&snapshot())),
             ]),
         );
         let patch = Envelope::decode(&patch_incoming, Limits::default()).unwrap();
@@ -3768,7 +3895,7 @@ mod tests {
         let decoded_status = Envelope::decode(&status_wire, Limits::default()).unwrap();
         assert!(!format!("{decoded_status:?}").contains(fixture));
 
-        let value = CanonicalValue::new(to_ovb(&error_node(fixture, true)).unwrap()).unwrap();
+        let value = CanonicalValue::new(to_ovb(&error_node(fixture, true))).unwrap();
         let present = PresentNode::new(
             PresentKind::Name("failure".into()),
             None,
@@ -3979,5 +4106,343 @@ mod tests {
             extensions: BTreeMap::new(),
         };
         assert_profile_tags_rejected(present_property, "present property");
+    }
+
+    fn int_value(n: i64) -> CanonicalValue {
+        CanonicalValue::new(OvbRaw::Int(n.into())).unwrap()
+    }
+
+    fn cell(identity: Option<PresentIdentity>, n: i64) -> PresentNode {
+        PresentNode::new(
+            PresentKind::Name("cell".into()),
+            identity,
+            [(PresentPropertyKey::Name("n".into()), int_value(n))],
+            [],
+        )
+        .unwrap()
+    }
+
+    fn named_cell(name: &str, n: i64) -> PresentNode {
+        cell(Some(PresentIdentity::RecordField(name.into())), n)
+    }
+
+    fn row_cell(table: u8, key: i64, n: i64) -> PresentNode {
+        cell(
+            Some(PresentIdentity::RelationRow {
+                table_object_id: id(table),
+                primary_key: int_value(key),
+            }),
+            n,
+        )
+    }
+
+    fn keyed_cell(key: i64, n: i64) -> PresentNode {
+        cell(Some(PresentIdentity::Explicit(int_value(key))), n)
+    }
+
+    fn page(properties: &[(&str, i64)], children: Vec<PresentNode>) -> PresentNode {
+        PresentNode::new(
+            PresentKind::Name("page".into()),
+            None,
+            properties
+                .iter()
+                .map(|(name, n)| (PresentPropertyKey::Name((*name).into()), int_value(*n))),
+            children,
+        )
+        .unwrap()
+    }
+
+    fn base_page() -> PresentNode {
+        page(
+            &[("count", 0)],
+            vec![
+                named_cell("name", 1),
+                row_cell(7, 10, 2),
+                keyed_cell(5, 3),
+                cell(None, 4),
+            ],
+        )
+    }
+
+    fn op(opcode: u64, operands: Vec<Node>) -> Node {
+        let mut fields = vec![uint(opcode)];
+        fields.extend(operands);
+        Node::Array(fields)
+    }
+
+    fn field_step(name: &str) -> Node {
+        Node::Array(vec![uint(0), Node::Text(name.into())])
+    }
+
+    fn relation_step(table: u8, key: u64) -> Node {
+        Node::Array(vec![uint(1), uuid_node(id(table)), uint(key)])
+    }
+
+    fn index_step(index: u64) -> Node {
+        Node::Array(vec![uint(2), uint(index)])
+    }
+
+    fn key_step(key: u64) -> Node {
+        Node::Array(vec![uint(3), uint(key)])
+    }
+
+    fn at(steps: Vec<Node>) -> Node {
+        Node::Array(steps)
+    }
+
+    fn apply(tree: &PresentNode, operations: Vec<Node>) -> Result<PresentNode> {
+        let patches = PatchList::decode(&Node::Array(operations))?;
+        tree.apply_patches(&patches, Limits::default())
+    }
+
+    #[test]
+    fn add_inserts_properties_and_children() {
+        let added = apply(
+            &base_page(),
+            vec![
+                op(0, vec![at(vec![field_step("extra")]), uint(9)]),
+                op(0, vec![at(vec![index_step(1)]), cell(None, 8).0.0.clone()]),
+                op(0, vec![at(vec![key_step(6)]), keyed_cell(6, 6).0.0.clone()]),
+                op(
+                    0,
+                    vec![
+                        at(vec![relation_step(7, 11)]),
+                        row_cell(7, 11, 5).0.0.clone(),
+                    ],
+                ),
+                op(
+                    0,
+                    vec![
+                        at(vec![field_step("late")]),
+                        named_cell("late", 7).0.0.clone(),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            added,
+            page(
+                &[("count", 0), ("extra", 9)],
+                vec![
+                    named_cell("name", 1),
+                    cell(None, 8),
+                    row_cell(7, 10, 2),
+                    keyed_cell(5, 3),
+                    cell(None, 4),
+                    keyed_cell(6, 6),
+                    row_cell(7, 11, 5),
+                    named_cell("late", 7),
+                ]
+            )
+        );
+    }
+
+    #[test]
+    fn replace_rewrites_properties_children_and_the_root() {
+        let replaced = apply(
+            &base_page(),
+            vec![
+                op(2, vec![at(vec![field_step("count")]), uint(5)]),
+                op(
+                    2,
+                    vec![
+                        at(vec![relation_step(7, 10)]),
+                        row_cell(7, 10, 99).0.0.clone(),
+                    ],
+                ),
+                op(
+                    2,
+                    vec![at(vec![key_step(5)]), keyed_cell(5, 77).0.0.clone()],
+                ),
+                op(
+                    2,
+                    vec![
+                        at(vec![field_step("name")]),
+                        named_cell("name", 11).0.0.clone(),
+                    ],
+                ),
+                op(2, vec![at(vec![index_step(3), field_step("n")]), uint(44)]),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            replaced,
+            page(
+                &[("count", 5)],
+                vec![
+                    named_cell("name", 11),
+                    row_cell(7, 10, 99),
+                    keyed_cell(5, 77),
+                    cell(None, 44),
+                ]
+            )
+        );
+
+        let root = cell(None, 123);
+        assert_eq!(
+            apply(
+                &base_page(),
+                vec![op(2, vec![at(vec![]), root.0.0.clone()])]
+            )
+            .unwrap(),
+            root
+        );
+    }
+
+    #[test]
+    fn remove_deletes_properties_and_children_by_selector() {
+        let removed = apply(
+            &base_page(),
+            vec![
+                op(1, vec![at(vec![field_step("count")])]),
+                op(1, vec![at(vec![field_step("name")])]),
+                op(1, vec![at(vec![relation_step(7, 10)])]),
+                op(1, vec![at(vec![index_step(1)])]),
+            ],
+        )
+        .unwrap();
+        assert_eq!(removed, page(&[], vec![keyed_cell(5, 3)]));
+        assert_eq!(
+            apply(&base_page(), vec![op(1, vec![at(vec![key_step(5)])])]).unwrap(),
+            page(
+                &[("count", 0)],
+                vec![named_cell("name", 1), row_cell(7, 10, 2), cell(None, 4)]
+            )
+        );
+    }
+
+    #[test]
+    fn move_removes_the_source_first_and_resolves_the_destination_after() {
+        let moved = apply(
+            &base_page(),
+            vec![op(
+                3,
+                vec![at(vec![index_step(0)]), at(vec![index_step(2)])],
+            )],
+        )
+        .unwrap();
+        assert_eq!(
+            moved,
+            page(
+                &[("count", 0)],
+                vec![
+                    row_cell(7, 10, 2),
+                    keyed_cell(5, 3),
+                    named_cell("name", 1),
+                    cell(None, 4),
+                ]
+            )
+        );
+        let nested = apply(
+            &base_page(),
+            vec![op(
+                3,
+                vec![
+                    at(vec![key_step(5)]),
+                    at(vec![relation_step(7, 10), index_step(0)]),
+                ],
+            )],
+        );
+        assert_eq!(
+            nested,
+            Ok(page(
+                &[("count", 0)],
+                vec![
+                    named_cell("name", 1),
+                    PresentNode::new(
+                        PresentKind::Name("cell".into()),
+                        Some(PresentIdentity::RelationRow {
+                            table_object_id: id(7),
+                            primary_key: int_value(10),
+                        }),
+                        [(PresentPropertyKey::Name("n".into()), int_value(2))],
+                        [keyed_cell(5, 3)],
+                    )
+                    .unwrap(),
+                    cell(None, 4),
+                ]
+            ))
+        );
+    }
+
+    #[test]
+    fn invalid_operations_fail_the_whole_patch() {
+        let rejected_on_apply = [
+            op(1, vec![at(vec![field_step("missing")])]),
+            op(0, vec![at(vec![field_step("count")]), uint(1)]),
+            op(0, vec![at(vec![index_step(5)]), cell(None, 1).0.0.clone()]),
+            op(
+                0,
+                vec![
+                    at(vec![relation_step(7, 10)]),
+                    row_cell(7, 10, 1).0.0.clone(),
+                ],
+            ),
+            op(0, vec![at(vec![index_step(0)]), uint(1)]),
+            op(
+                2,
+                vec![at(vec![key_step(404)]), keyed_cell(404, 1).0.0.clone()],
+            ),
+            op(2, vec![at(vec![key_step(5)]), keyed_cell(6, 1).0.0.clone()]),
+            op(3, vec![at(vec![]), at(vec![index_step(0)])]),
+            op(
+                3,
+                vec![
+                    at(vec![index_step(0)]),
+                    at(vec![index_step(0), index_step(0)]),
+                ],
+            ),
+            op(3, vec![at(vec![index_step(9)]), at(vec![index_step(0)])]),
+        ];
+        for operation in rejected_on_apply {
+            assert_eq!(
+                apply(&base_page(), vec![operation]),
+                Err(Error::InvalidValue)
+            );
+        }
+        // The second removal has no target left, so the whole list fails.
+        assert_eq!(
+            apply(
+                &base_page(),
+                vec![
+                    op(1, vec![at(vec![field_step("count")])]),
+                    op(1, vec![at(vec![field_step("count")])]),
+                ],
+            ),
+            Err(Error::InvalidValue)
+        );
+    }
+
+    #[test]
+    fn malformed_operations_and_paths_are_rejected_when_the_patch_list_is_built() {
+        let path = || at(vec![field_step("count")]);
+        let malformed = [
+            op(0, vec![path()]),
+            op(0, vec![path(), uint(1), uint(2)]),
+            op(1, vec![]),
+            op(1, vec![path(), uint(1)]),
+            op(2, vec![path()]),
+            op(3, vec![path()]),
+            op(4, vec![path()]),
+            Node::Array(vec![]),
+            Node::Text("add".into()),
+            op(1, vec![at(vec![Node::Array(vec![uint(2)])])]),
+            op(1, vec![at(vec![Node::Array(vec![uint(5), uint(1)])])]),
+            op(
+                1,
+                vec![at(vec![Node::Array(vec![uint(1), uuid_node(id(7))])])],
+            ),
+            op(1, vec![at(vec![Node::Array(vec![uint(0), uint(7)])])]),
+            op(1, vec![at(vec![Node::Array(vec![uint(3)])])]),
+            op(1, vec![at(vec![Node::Null])]),
+            op(1, vec![Node::Null]),
+        ];
+        for operation in malformed {
+            assert_eq!(
+                PatchList::decode(&Node::Array(vec![operation])).map(|_| ()),
+                Err(Error::InvalidValue)
+            );
+        }
     }
 }

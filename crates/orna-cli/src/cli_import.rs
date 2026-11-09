@@ -25,6 +25,7 @@ use orna_repository::offline_copy::{OfflineCopy, PAYLOAD_BUFFER_BYTES};
 use orna_value::normalize_media_type;
 
 use super::Diagnostic;
+use crate::encoding::hex;
 
 const USAGE: &str = "usage: orna import <bundle-dir> --dry-run [--limit N] [--quiet] [--metadata-only] [--type MEDIA_TYPE] [--format human|table]";
 
@@ -376,16 +377,6 @@ fn render_table(rows: &[ReportRow<'_>], media_type: Option<&str>) -> String {
         )]);
     }
     out
-}
-
-fn hex(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        output.push(DIGITS[(byte >> 4) as usize] as char);
-        output.push(DIGITS[(byte & 0x0f) as usize] as char);
-    }
-    output
 }
 
 #[allow(clippy::cast_precision_loss)]
