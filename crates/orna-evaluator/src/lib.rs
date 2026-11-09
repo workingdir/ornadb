@@ -5913,6 +5913,7 @@ impl Context<'_, '_> {
             self.evaluate_node(expression, scope, depth)
         })
     }
+
     fn evaluate_node(
         &mut self,
         expression: &Expr,
@@ -5926,111 +5927,26 @@ impl Context<'_, '_> {
         }
         self.step()?;
         let result = match expression {
-            Expr::Name { text, .. } => scope
-                .0
-                .get(text)
-                .cloned()
-                .or_else(|| {
-                    (self.bare_user_names_visible() && self.functions.contains_key(text)).then(
-                        || Value::Function {
-                            name: text.clone(),
-                            nominal_definitions: scope.3.clone(),
-                        },
-                    )
-                })
-                .or_else(|| {
-                    self.alias_target(text)
-                        .filter(|name| self.functions.contains_key(name))
-                        .map(str::to_owned)
-                        .map(|name| Value::Function {
-                            name,
-                            nominal_definitions: scope.3.clone(),
-                        })
-                })
-                .or_else(|| {
-                    let namespace = self.namespace.as_deref()?;
-                    let qualified = format!("{namespace}.{text}");
-                    self.functions
-                        .contains_key(&qualified)
-                        .then_some(Value::Function {
-                            name: qualified,
-                            nominal_definitions: scope.3.clone(),
-                        })
-                })
-                .ok_or_else(|| error("ORNA-EVAL-NAME")),
+            Expr::Name { text, .. } => self.name_lookup(text, scope),
             Expr::Lambda {
                 parameters, body, ..
-            } => {
-                self.items(parameters.len())?;
-                self.items(scope.0.len())?;
-                let mut captured = scope.clone();
-                captured.1.extend(captured.0.keys().cloned());
-                Ok(Value::Closure(Arc::new(Closure {
-                    parameters: parameters
-                        .iter()
-                        .map(|parameter| Parameter {
-                            pattern: parameter.pattern.clone(),
-                            annotation: parameter.annotation.clone(),
-                            default: None,
-                            span: parameter.span.clone(),
-                        })
-                        .collect(),
-                    body: body.as_ref().clone(),
-                    captured,
-                    namespace: self.namespace.clone(),
-                })))
-            }
+            } => self.lambda_closure(parameters, body, scope),
             Expr::Literal { text, kind, .. } => self.literal(text, *kind),
             Expr::InterpolatedString { segments, .. } => {
                 self.interpolated_string(segments, scope, depth)
             }
             Expr::Group { inner, .. } => self.evaluate(inner, scope, depth + 1),
-            Expr::Unary { op, rhs, .. } => {
-                let value = self.evaluate(rhs, scope, depth + 1)?;
-                if self.transfer.is_some() {
-                    return Ok(Value::Null);
-                }
-                self.unary(op, value)
-            }
+            Expr::Unary { op, rhs, .. } => self.unary_node(op, rhs, scope, depth),
             Expr::Range {
                 lower,
                 operator,
                 upper,
                 ..
-            } => {
-                let lower = lower
-                    .as_deref()
-                    .map(|value| self.evaluate(value, scope, depth + 1))
-                    .transpose()?;
-                if self.transfer.is_some() {
-                    return Ok(Value::Null);
-                }
-                let upper = upper
-                    .as_deref()
-                    .map(|value| self.evaluate(value, scope, depth + 1))
-                    .transpose()?;
-                if self.transfer.is_some() {
-                    return Ok(Value::Null);
-                }
-                self.ordered_range_optional(lower, upper, operator == "..=")
-            }
+            } => self.range_node(lower.as_deref(), operator, upper.as_deref(), scope, depth),
             Expr::Binary { lhs, op, rhs, .. } => self.binary(op, lhs, rhs, scope, depth),
             Expr::List { elements, .. } => self.sequence(elements, scope, depth).map(Value::list),
             Expr::Tuple { elements, .. } => self.sequence(elements, scope, depth).map(Value::Tuple),
-            Expr::Record { fields, .. } => {
-                self.items(fields.len())?;
-                let mut result = BTreeMap::new();
-                for field in fields {
-                    let value = self.evaluate(&field.value, scope, depth + 1)?;
-                    if self.transfer.is_some() {
-                        return Ok(Value::Null);
-                    }
-                    if result.insert(field.name.clone(), value).is_some() {
-                        return Err(error("ORNA-EVAL-VALUE"));
-                    }
-                }
-                Ok(Value::Record(result))
-            }
+            Expr::Record { fields, .. } => self.record_node(fields, scope, depth),
             Expr::Nominal { path, fields, .. } => self.nominal(path, fields, scope, depth),
             Expr::Block {
                 statements, tail, ..
@@ -6044,60 +5960,15 @@ impl Context<'_, '_> {
             Expr::GenericCall {
                 callee, arguments, ..
             } => self.call(callee, arguments, None, scope, depth),
-            Expr::Index { base, index, .. } => {
-                let base = self.evaluate(base, scope, depth + 1)?;
-                if self.transfer.is_some() {
-                    return Ok(Value::Null);
-                }
-                let index = self.evaluate(index, scope, depth + 1)?;
-                if self.transfer.is_some() {
-                    return Ok(Value::Null);
-                }
-                self.index(base, index)
-            }
-            Expr::Field { base, name, .. } => {
-                if let Some((enum_name, variant)) = system_enum_constant(expression, scope) {
-                    return Ok(Value::Enum {
-                        type_id: Raw::Text(enum_name),
-                        variant_id: Raw::Text(variant),
-                        payload: None,
-                    });
-                }
-                match payload_free_enum_variant(base, name, scope, self.namespace.as_deref()) {
-                    Some(variant) => variant,
-                    None => {
-                        // A grouped system handle such as `sys.catalog.tables`
-                        // is one relation expression, not a field on a `sys`
-                        // value, so it is recognised before the base resolves.
-                        if let Some(source) = system_relation_source(expression) {
-                            return Ok(Value::Relation(RelationPlan {
-                                source: source.to_owned(),
-                                source_identity: RelationReadScope(0),
-                                source_union: None,
-                                shared_filter_group: None,
-                                source_values: None,
-                                stages: Vec::new(),
-                            }));
-                        }
-                        let base = self.evaluate(base, scope, depth + 1)?;
-                        self.field_value(base, name, scope)
-                    }
-                }
-            }
+            Expr::Index { base, index, .. } => self.index_node(base, index, scope, depth),
+            Expr::Field { base, name, .. } => self.field_node(expression, base, name, scope, depth),
             Expr::Control {
                 kind: ControlKind::If,
                 condition: Some(condition),
                 body: Some(body),
                 alternate,
                 ..
-            } => match self.evaluate(condition, scope, depth + 1)? {
-                _ if self.transfer.is_some() => Ok(Value::Null),
-                Value::Bool(true) => self.evaluate(body, scope, depth + 1),
-                Value::Bool(false) => alternate.as_deref().map_or(Ok(Value::Null), |value| {
-                    self.evaluate(value, scope, depth + 1)
-                }),
-                _ => Err(error("ORNA-EVAL-TYPE")),
-            },
+            } => self.conditional(condition, body, alternate.as_deref(), scope, depth),
             Expr::Control {
                 kind: ControlKind::Case,
                 condition: Some(condition),
@@ -6112,23 +5983,7 @@ impl Context<'_, '_> {
                 arms,
                 alternate: None,
                 ..
-            } if arms.is_empty() => loop {
-                match self.evaluate(condition, scope, depth + 1)? {
-                    _ if self.transfer.is_some() => return Ok(Value::Null),
-                    Value::Bool(false) => break Ok(Value::Unit),
-                    Value::Bool(true) => {}
-                    _ => break Err(error("ORNA-EVAL-TYPE")),
-                }
-                self.evaluate(body, scope, depth + 1)?;
-                match self.transfer.take() {
-                    None | Some(Transfer::Continue) => {}
-                    Some(Transfer::Break(value)) => break Ok(value),
-                    Some(transfer @ Transfer::Return(_)) => {
-                        self.transfer = Some(transfer);
-                        break Ok(Value::Null);
-                    }
-                }
-            },
+            } if arms.is_empty() => self.while_node(condition, body, scope, depth),
             Expr::Control {
                 kind: ControlKind::Loop,
                 binding: None,
@@ -6137,17 +5992,7 @@ impl Context<'_, '_> {
                 arms,
                 alternate: None,
                 ..
-            } if arms.is_empty() => loop {
-                self.evaluate(body, scope, depth + 1)?;
-                match self.transfer.take() {
-                    None | Some(Transfer::Continue) => {}
-                    Some(Transfer::Break(value)) => break Ok(value),
-                    Some(transfer @ Transfer::Return(_)) => {
-                        self.transfer = Some(transfer);
-                        break Ok(Value::Null);
-                    }
-                }
-            },
+            } if arms.is_empty() => self.loop_node(body, scope, depth),
             Expr::Control {
                 kind: ControlKind::For,
                 binding: Some(binding),
@@ -6156,46 +6001,294 @@ impl Context<'_, '_> {
                 arms,
                 alternate: None,
                 ..
-            } => {
-                if arms.len() != 1
-                    || arms[0].guard.is_some()
-                    || arms[0].pattern != *binding
-                    || arms[0].body != **body
-                {
-                    return Err(error("ORNA-EVAL-UNSUPPORTED"));
-                }
-                let iterable = self.evaluate(iterable, scope, depth + 1)?;
-                if self.transfer.is_some() {
-                    return Ok(Value::Null);
-                }
-                let values = self.finite_iterable(iterable)?;
-                let outer_names = scope.0.keys().cloned().collect::<Vec<_>>();
-                let bound_names = pattern_names(binding);
-                for value in values {
-                    let mut iteration = scope.clone();
-                    if !bind(binding, value, &mut iteration, self, 1)? {
-                        return Err(error("ORNA-EVAL-TYPE"));
+            } => self.for_node(binding, iterable, body, arms, scope, depth),
+            Expr::ReplBinding { text, .. } if self.repl_bindings => scope
+                .0
+                .get(text)
+                .cloned()
+                .ok_or_else(|| error("ORNA-EVAL-NAME")),
+            Expr::ReplBinding { .. } => Err(error("ORNA-EVAL-UNSUPPORTED")),
+            // Control expressions whose parser shape no evaluator path admits.
+            Expr::Control { .. } => Err(error("ORNA-EVAL-UNSUPPORTED")),
+        };
+        if self.transfer.is_some() {
+            Ok(Value::Null)
+        } else {
+            result
+        }
+    }
+
+    /// Resolves a bare name through the scope, user functions, aliases and then
+    /// the active namespace.
+    fn name_lookup(&self, text: &str, scope: &Scope) -> Result<Value, EvaluationError> {
+        scope
+            .0
+            .get(text)
+            .cloned()
+            .or_else(|| {
+                (self.bare_user_names_visible() && self.functions.contains_key(text)).then(|| {
+                    Value::Function {
+                        name: text.to_owned(),
+                        nominal_definitions: scope.3.clone(),
                     }
-                    self.evaluate(body, &mut iteration, depth + 1)?;
-                    match self.transfer.take() {
-                        Some(Transfer::Continue) => {}
-                        Some(Transfer::Break(value)) => {
-                            for name in &outer_names {
-                                if bound_names.contains(name) {
-                                    continue;
-                                }
-                                if let Some(value) = iteration.0.remove(name) {
-                                    scope.0.insert(name.clone(), value);
-                                }
-                            }
-                            return Ok(value);
-                        }
-                        Some(transfer @ Transfer::Return(_)) => {
-                            self.transfer = Some(transfer);
-                            return Ok(Value::Null);
-                        }
-                        None => {}
-                    }
+                })
+            })
+            .or_else(|| {
+                self.alias_target(text)
+                    .filter(|name| self.functions.contains_key(name))
+                    .map(str::to_owned)
+                    .map(|name| Value::Function {
+                        name,
+                        nominal_definitions: scope.3.clone(),
+                    })
+            })
+            .or_else(|| {
+                let namespace = self.namespace.as_deref()?;
+                let qualified = format!("{namespace}.{text}");
+                self.functions
+                    .contains_key(&qualified)
+                    .then_some(Value::Function {
+                        name: qualified,
+                        nominal_definitions: scope.3.clone(),
+                    })
+            })
+            .ok_or_else(|| error("ORNA-EVAL-NAME"))
+    }
+
+    /// Captures the current scope so the closure keeps the names its body sees.
+    fn lambda_closure(
+        &self,
+        parameters: &[orna_syntax::LambdaParameter],
+        body: &Expr,
+        scope: &Scope,
+    ) -> Result<Value, EvaluationError> {
+        self.items(parameters.len())?;
+        self.items(scope.0.len())?;
+        let mut captured = scope.clone();
+        captured.1.extend(captured.0.keys().cloned());
+        Ok(Value::Closure(Arc::new(Closure {
+            parameters: parameters
+                .iter()
+                .map(|parameter| Parameter {
+                    pattern: parameter.pattern.clone(),
+                    annotation: parameter.annotation.clone(),
+                    default: None,
+                    span: parameter.span.clone(),
+                })
+                .collect(),
+            body: body.clone(),
+            captured,
+            namespace: self.namespace.clone(),
+        })))
+    }
+
+    fn unary_node(
+        &mut self,
+        op: &str,
+        rhs: &Expr,
+        scope: &mut Scope,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        let value = self.evaluate(rhs, scope, depth + 1)?;
+        if self.transfer.is_some() {
+            return Ok(Value::Null);
+        }
+        self.unary(op, value)
+    }
+
+    fn range_node(
+        &mut self,
+        lower: Option<&Expr>,
+        operator: &str,
+        upper: Option<&Expr>,
+        scope: &mut Scope,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        let lower = lower
+            .map(|value| self.evaluate(value, scope, depth + 1))
+            .transpose()?;
+        if self.transfer.is_some() {
+            return Ok(Value::Null);
+        }
+        let upper = upper
+            .map(|value| self.evaluate(value, scope, depth + 1))
+            .transpose()?;
+        if self.transfer.is_some() {
+            return Ok(Value::Null);
+        }
+        self.ordered_range_optional(lower, upper, operator == "..=")
+    }
+
+    fn record_node(
+        &mut self,
+        fields: &[orna_syntax::RecordField],
+        scope: &mut Scope,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        self.items(fields.len())?;
+        let mut result = BTreeMap::new();
+        for field in fields {
+            let value = self.evaluate(&field.value, scope, depth + 1)?;
+            if self.transfer.is_some() {
+                return Ok(Value::Null);
+            }
+            if result.insert(field.name.clone(), value).is_some() {
+                return Err(error("ORNA-EVAL-VALUE"));
+            }
+        }
+        Ok(Value::Record(result))
+    }
+
+    fn index_node(
+        &mut self,
+        base: &Expr,
+        index: &Expr,
+        scope: &mut Scope,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        let base = self.evaluate(base, scope, depth + 1)?;
+        if self.transfer.is_some() {
+            return Ok(Value::Null);
+        }
+        let index = self.evaluate(index, scope, depth + 1)?;
+        if self.transfer.is_some() {
+            return Ok(Value::Null);
+        }
+        self.index(base, index)
+    }
+
+    fn field_node(
+        &mut self,
+        expression: &Expr,
+        base: &Expr,
+        name: &str,
+        scope: &mut Scope,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        if let Some((enum_name, variant)) = system_enum_constant(expression, scope) {
+            return Ok(Value::Enum {
+                type_id: Raw::Text(enum_name),
+                variant_id: Raw::Text(variant),
+                payload: None,
+            });
+        }
+        match payload_free_enum_variant(base, name, scope, self.namespace.as_deref()) {
+            Some(variant) => variant,
+            None => {
+                // A grouped system handle such as `sys.catalog.tables` is one
+                // relation expression, not a field on a `sys` value, so it is
+                // recognised before the base resolves.
+                if let Some(source) = system_relation_source(expression) {
+                    return Ok(Value::Relation(RelationPlan {
+                        source: source.to_owned(),
+                        source_identity: RelationReadScope(0),
+                        source_union: None,
+                        shared_filter_group: None,
+                        source_values: None,
+                        stages: Vec::new(),
+                    }));
+                }
+                let base = self.evaluate(base, scope, depth + 1)?;
+                self.field_value(base, name, scope)
+            }
+        }
+    }
+
+    fn conditional(
+        &mut self,
+        condition: &Expr,
+        body: &Expr,
+        alternate: Option<&Expr>,
+        scope: &mut Scope,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        match self.evaluate(condition, scope, depth + 1)? {
+            _ if self.transfer.is_some() => Ok(Value::Null),
+            Value::Bool(true) => self.evaluate(body, scope, depth + 1),
+            Value::Bool(false) => alternate.map_or(Ok(Value::Null), |value| {
+                self.evaluate(value, scope, depth + 1)
+            }),
+            _ => Err(error("ORNA-EVAL-TYPE")),
+        }
+    }
+
+    fn while_node(
+        &mut self,
+        condition: &Expr,
+        body: &Expr,
+        scope: &mut Scope,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        loop {
+            match self.evaluate(condition, scope, depth + 1)? {
+                _ if self.transfer.is_some() => return Ok(Value::Null),
+                Value::Bool(false) => break Ok(Value::Unit),
+                Value::Bool(true) => {}
+                _ => break Err(error("ORNA-EVAL-TYPE")),
+            }
+            self.evaluate(body, scope, depth + 1)?;
+            match self.transfer.take() {
+                None | Some(Transfer::Continue) => {}
+                Some(Transfer::Break(value)) => break Ok(value),
+                Some(transfer @ Transfer::Return(_)) => {
+                    self.transfer = Some(transfer);
+                    break Ok(Value::Null);
+                }
+            }
+        }
+    }
+
+    fn loop_node(
+        &mut self,
+        body: &Expr,
+        scope: &mut Scope,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        loop {
+            self.evaluate(body, scope, depth + 1)?;
+            match self.transfer.take() {
+                None | Some(Transfer::Continue) => {}
+                Some(Transfer::Break(value)) => break Ok(value),
+                Some(transfer @ Transfer::Return(_)) => {
+                    self.transfer = Some(transfer);
+                    break Ok(Value::Null);
+                }
+            }
+        }
+    }
+
+    fn for_node(
+        &mut self,
+        binding: &Pattern,
+        iterable: &Expr,
+        body: &Expr,
+        arms: &[orna_syntax::CaseArm],
+        scope: &mut Scope,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        if arms.len() != 1
+            || arms[0].guard.is_some()
+            || arms[0].pattern != *binding
+            || arms[0].body != *body
+        {
+            return Err(error("ORNA-EVAL-UNSUPPORTED"));
+        }
+        let iterable = self.evaluate(iterable, scope, depth + 1)?;
+        if self.transfer.is_some() {
+            return Ok(Value::Null);
+        }
+        let values = self.finite_iterable(iterable)?;
+        let outer_names = scope.0.keys().cloned().collect::<Vec<_>>();
+        let bound_names = pattern_names(binding);
+        for value in values {
+            let mut iteration = scope.clone();
+            if !bind(binding, value, &mut iteration, self, 1)? {
+                return Err(error("ORNA-EVAL-TYPE"));
+            }
+            self.evaluate(body, &mut iteration, depth + 1)?;
+            match self.transfer.take() {
+                Some(Transfer::Continue) => {}
+                Some(Transfer::Break(value)) => {
                     for name in &outer_names {
                         if bound_names.contains(name) {
                             continue;
@@ -6204,22 +6297,24 @@ impl Context<'_, '_> {
                             scope.0.insert(name.clone(), value);
                         }
                     }
+                    return Ok(value);
                 }
-                Ok(Value::Unit)
+                Some(transfer @ Transfer::Return(_)) => {
+                    self.transfer = Some(transfer);
+                    return Ok(Value::Null);
+                }
+                None => {}
             }
-            Expr::ReplBinding { text, .. } if self.repl_bindings => scope
-                .0
-                .get(text)
-                .cloned()
-                .ok_or_else(|| error("ORNA-EVAL-NAME")),
-            Expr::ReplBinding { .. } => Err(error("ORNA-EVAL-UNSUPPORTED")),
-            _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
-        };
-        if self.transfer.is_some() {
-            Ok(Value::Null)
-        } else {
-            result
+            for name in &outer_names {
+                if bound_names.contains(name) {
+                    continue;
+                }
+                if let Some(value) = iteration.0.remove(name) {
+                    scope.0.insert(name.clone(), value);
+                }
+            }
         }
+        Ok(Value::Unit)
     }
     fn nominal(
         &mut self,
