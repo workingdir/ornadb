@@ -264,3 +264,21 @@ path = "crates/orna-protocol/src/lib.rs::apply_at"
 new_limit = 136
 reason = "PR #9777 replaces three duplicated add/remove/replace walkers with one apply_at; splitting it per operation is follow-up"
 bead = "ornadb-xssb1"
+
+[[raise]]
+path = "crates/orna-runtime/src/publication.rs"
+new_limit = 1445
+reason = "main's #9794 writer-entry fence grows publication.rs; recorded with the fence bead so the budget gate stays green"
+bead = "ornadb-5il1.127"
+
+[[raise]]
+path = "crates/orna-runtime/src/lib.rs::replaying_a_published_vfs_save_keeps_the_durable_generation"
+new_limit = 122
+reason = "main's #9794 writer-entry fence adds the replay test; recorded with the fence bead"
+bead = "ornadb-5il1.127"
+
+[[raise]]
+path = "crates/orna-runtime/src/lib.rs::replaying_a_published_vfs_save_reports_the_idempotent_outcome"
+new_limit = 124
+reason = "main's #9794 writer-entry fence adds the replay test; recorded with the fence bead"
+bead = "ornadb-5il1.127"
