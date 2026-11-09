@@ -606,3 +606,4 @@ path = "crates/orna-semantic/src/system_calls.rs::infer_start_system_call"
 new_limit = 132
 reason = "pure module split of orna-semantic lib.rs: this section moved to its own file unchanged; further shrinking is on the bead"
 bead = "ornadb-rkn8m"
+
