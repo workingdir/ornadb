@@ -4237,7 +4237,10 @@ impl DurableTransactionalEvaluator {
         path_for: impl Fn(&TableMutation) -> Result<LoosePath, orna_storage::Error>,
         message: &str,
     ) -> Result<orna_repository::IndexGeneration, RuntimeError> {
-        let freeze = runtime.freeze(intent_id, checkpoint).await?;
+        let freeze = runtime
+            .publication_writer(repository)?
+            .freeze(intent_id, checkpoint)
+            .await?;
         let index = repository
             .index_generation()
             .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -4258,7 +4261,10 @@ impl DurableTransactionalEvaluator {
             let commit_id =
                 orna_runtime::PublicationCommitId::new(commit.as_str().as_bytes().to_vec())
                     .map_err(|_| RuntimeError::StorageUnavailable)?;
-            runtime.complete_publication(&freeze, &commit_id).await?;
+            runtime
+                .publication_writer(repository)?
+                .complete_publication(&freeze, &commit_id)
+                .await?;
             // The no-op range advanced no ref, so the ordinary index is still
             // the generation this call captured; re-read it rather than clone.
             return repository

@@ -846,6 +846,8 @@ impl RuntimePublicationCoordinator {
         }
         verify_reconciled_publication(repository, &self.journal)?;
         runtime
+            .publication_writer(repository)
+            .map_err(|_| Error::RuntimeUnavailable)?
             .complete_publication(freeze, &commit)
             .await
             .map_err(|_| Error::RuntimeUnavailable)?;
@@ -913,6 +915,8 @@ impl RuntimePublicationCoordinator {
                 | orna_repository::PublicationJournalStage::Complete
         ) {
             runtime
+                .publication_writer(repository)
+                .map_err(|_| Error::RuntimeUnavailable)?
                 .complete_publication(&freeze, &commit)
                 .await
                 .map_err(|_| Error::RuntimeUnavailable)?;
@@ -941,6 +945,8 @@ impl RuntimePublicationCoordinator {
         }
         verify_reconciled_publication(repository, &journal)?;
         runtime
+            .publication_writer(repository)
+            .map_err(|_| Error::RuntimeUnavailable)?
             .complete_publication(&freeze, &commit)
             .await
             .map_err(|_| Error::RuntimeUnavailable)?;
@@ -1303,6 +1309,8 @@ mod tests {
             .await
             .unwrap();
         let freeze = runtime
+            .publication_writer(repository)
+            .unwrap()
             .freeze(
                 [97; 16],
                 &orna_runtime::Checkpoint {
@@ -1435,6 +1443,8 @@ mod tests {
             .unwrap();
         let commit = publication_commit_id(journal.new_head()).unwrap();
         runtime
+            .publication_writer(&repository)
+            .unwrap()
             .complete_publication(&freeze, &commit)
             .await
             .unwrap();

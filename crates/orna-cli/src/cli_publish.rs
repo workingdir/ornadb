@@ -500,6 +500,13 @@ async fn publish_frozen_range(
     checkpoint: &orna_runtime::Checkpoint,
 ) -> Result<Publication, Diagnostic> {
     let freeze = state
+        .publication_writer(repository)
+        .map_err(|error| {
+            publish_error(
+                "worktree publication lease could not be acquired",
+                format!("{error:?}"),
+            )
+        })?
         .freeze(intent_id, checkpoint)
         .await
         .map_err(|error| publish_error("runtime tail could not be frozen", format!("{error:?}")))?;
@@ -554,6 +561,13 @@ async fn publish_frozen_range(
         // that produced the range stays successful and the pending tail
         // does not grow without bound (ORNA-PUB-006).
         state
+            .publication_writer(repository)
+            .map_err(|error| {
+                publish_error(
+                    "worktree publication lease could not be acquired",
+                    format!("{error:?}"),
+                )
+            })?
             .complete_publication(&freeze, &publication_commit_id(&head)?)
             .await
             .map_err(|error| {
