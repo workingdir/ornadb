@@ -97,7 +97,7 @@ fn signature_type(sig: SigType, subst: &[Option<Type>], container: Container, sl
         SigType::Tuple(elements) => Type::Tuple(
             elements
                 .iter()
-                .map(|element| signature_type(*element, subst, container, false))
+                .map(|element| signature_type(*element, subst, container, slot))
                 .collect(),
         ),
         SigType::Record(fields) => Type::Record(
