@@ -1021,8 +1021,7 @@ impl RuntimeEvaluator for BoundedEvaluator {
         }
     }
 
-    fn validate_rows(&mut self, project: &ProjectUnit) -> StageOutcome<Diagnostic> {
-        let _ = project;
+    fn validate_rows(&mut self, _: &ProjectUnit) -> StageOutcome<Diagnostic> {
         StageOutcome::Skipped {
             reason: "row validation requires resolved table schemas and path-derived keys".into(),
         }
@@ -2465,14 +2464,16 @@ impl DurableTransactionalEvaluator {
         .is_ok()
     }
 
+    #[cfg(test)]
     fn record_activation_time(&self, activation_time: SystemTime) {
-        #[cfg(test)]
         if let Some(observer) = &self.activation_time_observer {
             *observer.lock().expect("activation observer lock") = Some(activation_time);
         }
-        #[cfg(not(test))]
-        let _ = activation_time;
     }
+
+    /// Only tests observe the activation instant.
+    #[cfg(not(test))]
+    fn record_activation_time(&self, _: SystemTime) {}
 
     /// Executes one admitted source activation against durable committed rows.
     /// Failed source evaluation never reaches the durable commit boundary.
@@ -11194,7 +11195,7 @@ mod transaction_admission_tests {
         assert_eq!(value_for("id"), Some(&OvbRaw::Text("note-7".into())));
     }
 
-    #[allow(dead_code)]
+    #[test]
     fn same_key_rekey_reports_duplicate_without_mutating_the_committed_row() {
         let mut evaluator = TransactionalEvaluator::new("main", Limits::default());
         assert!(matches!(
