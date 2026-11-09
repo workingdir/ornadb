@@ -43,7 +43,11 @@ struct FrameSource {
 impl WatchFrameSource for FrameSource {
     type Error = &'static str;
 
-    fn start_watch(&mut self, source: &str) -> Result<WatchPresentation, Self::Error> {
+    fn start_watch(
+        &mut self,
+        source: &str,
+        _session: &AdmittedReplSession,
+    ) -> Result<WatchPresentation, Self::Error> {
         self.subscriptions.push(source.to_owned());
         self.active_watch = self.watch_ids.pop_front().unwrap_or(WATCH);
         self.active_frames = self.frames.pop_front().unwrap_or_default();
@@ -59,7 +63,11 @@ impl WatchFrameSource for FrameSource {
         Ok(self.active_frames.pop_front())
     }
 
-    fn request_resync(&mut self, request: ResyncRequest) -> Result<(), Self::Error> {
+    fn request_resync(
+        &mut self,
+        request: ResyncRequest,
+        _session: &AdmittedReplSession,
+    ) -> Result<(), Self::Error> {
         assert_eq!(
             request.watch(),
             self.active_watch,
@@ -81,6 +89,16 @@ impl WatchFrameSource for FrameSource {
         } else {
             Ok(())
         }
+    }
+
+    /// The scripted source has no scheduler: every frame it serves is queued
+    /// by the test.
+    fn poll(
+        &mut self,
+        _watch: [u8; 16],
+        _session: &AdmittedReplSession,
+    ) -> Result<(), Self::Error> {
+        Ok(())
     }
 }
 
@@ -175,6 +193,29 @@ fn unwired_watch_reports_command_error_and_retains_expression_execution() {
     let output = String::from_utf8(output).unwrap();
     assert!(output.contains("error[ORNA-REPL-COMMAND]"), "{output}");
     assert!(output.contains("2 : Int"), "{output}");
+}
+
+#[test]
+fn production_host_installs_a_snapshot_for_a_read_only_expression() {
+    let mut session = AdmittedReplSession::new(Limits::default());
+    let mut host =
+        repl::ReplWatchHost::new(Some(([1; 16], [2; 16])), orna_protocol::Limits::default());
+    let mut state = WatchCommandState::new();
+    let mut output = Vec::new();
+    repl::run_with_watch(
+        &mut ":watch 1 + 1\n:quit\n".as_bytes(),
+        &mut output,
+        &mut session,
+        &mut host,
+        &mut state,
+    )
+    .expect("REPL remains interactive");
+    let output = String::from_utf8(output).expect("REPL output is UTF-8");
+    assert!(
+        output.contains("watch: snapshot installed (rev 0)"),
+        "{output}"
+    );
+    assert_eq!(state.watch(), None);
 }
 
 #[test]

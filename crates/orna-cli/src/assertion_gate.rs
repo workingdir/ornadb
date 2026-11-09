@@ -125,8 +125,7 @@ fn committed_admitted_rows(
     }
     let manifest =
         orna_project::ObjectIdentityManifest::read_committed_if_present(repository, commit)
-            .ok()
-            .flatten()
+            .map_err(|_| "commit object identity inventory could not be read")?
             .ok_or("commit carries no object identity inventory")?;
     let identities = table_identities_from_manifest(&manifest, table_names)
         .map_err(|_| "table identities are unavailable")?;
@@ -207,8 +206,7 @@ fn validate_candidate_assertions(
     }
     let manifest =
         orna_project::ObjectIdentityManifest::read_private_candidate(repository, candidate)
-            .ok()
-            .flatten()
+            .map_err(|_| unvalidated(&format!("{word} object identities could not be read")))?
             .ok_or_else(|| unvalidated(&format!("{word} object identities are unavailable")))?;
     let identities = table_identities_from_manifest(&manifest, table_names)
         .map_err(|_| unvalidated(&format!("{word} table identities are unavailable")))?;
