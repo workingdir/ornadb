@@ -32,14 +32,14 @@ pub use publication_policy::{
     DEFAULT_COMPRESSED_TARGET_BYTES, MAX_COMPRESSED_TARGET_BYTES, MIN_COMPRESSED_TARGET_BYTES,
 };
 
-use std::{collections::BTreeMap, fmt, sync::Arc};
+use std::{borrow::Cow, collections::BTreeMap, fmt, sync::Arc};
 
 use orna_foundation::{OvbRaw, SchemaDescriptor};
 use orna_repository::{
     GitCommitRef, HistoricalFormatContext, IndexGeneration, IndexMaintenance, ManagedPath,
     NativeGraphContext, NativeOid, PrivateCommit, PublicationJournal, PublicationJournalEntry,
     PublicationLogicalRowRekey, Repository, RepositoryError, RepositoryFormat, RowIndexMutation,
-    TypedKey,
+    RowMapSnapshot, TypedKey,
 };
 use orna_runtime::{PublicationCommitId, PublicationFreeze, RuntimeState, TableMutation};
 use orna_value::{
@@ -100,26 +100,11 @@ impl PartialOrd for LoosePath {
     }
 }
 
-fn build_private_publication_candidate_with_store_root(
-    repository: &Repository,
-    expected_head: &GitCommitRef,
-    graph: &NativeGraphContext,
-    store_root: &NativeOid,
-    message: &str,
-) -> Result<PrivateCommit, Error> {
-    repository
-        .build_private_commit_with_store_root(expected_head, graph, store_root, message)
-        .map_err(|_| Error::RepositoryUnavailable)
-}
-
-struct ProjectedStoreRow {
-    base_present: bool,
-    next: Option<Vec<u8>>,
-}
-
-#[derive(Clone, Debug)]
-struct CommittedProjectionSchema {
-    descriptor: SchemaDescriptor,
+/// A committed schema descriptor and the two facts row projection needs from
+/// it. A caller that holds only a descriptor reference borrows it; the
+/// publication path owns the one it read from the graph.
+struct CommittedProjectionSchema<'a> {
+    descriptor: Cow<'a, SchemaDescriptor>,
     text_primary_key: bool,
     stored_field_count: usize,
 }
@@ -143,8 +128,8 @@ fn schema_descriptor_entry(schema: &SchemaDescriptor, number: i64) -> Result<&Ov
 }
 
 fn committed_projection_schema(
-    descriptor: SchemaDescriptor,
-) -> Result<CommittedProjectionSchema, Error> {
+    descriptor: Cow<'_, SchemaDescriptor>,
+) -> Result<CommittedProjectionSchema<'_>, Error> {
     let OvbRaw::Array(key_ids) = schema_descriptor_entry(&descriptor, 2)? else {
         return Err(Error::RepositoryUnavailable);
     };
@@ -218,7 +203,7 @@ pub fn canonicalize_runtime_key(
     relation_id: [u8; 16],
     bytes: &[u8],
 ) -> Result<Vec<u8>, Error> {
-    let schema = committed_projection_schema(descriptor.clone())?;
+    let schema = committed_projection_schema(Cow::Borrowed(descriptor))?;
     project_runtime_key(&schema, relation_id, bytes)
 }
 
@@ -275,23 +260,166 @@ pub fn project_runtime_mutation_for_descriptor(
     mutation: &TableMutation,
     value_context: &Format3Context,
 ) -> Result<ProjectedRuntimeMutation, Error> {
-    let schema = committed_projection_schema(descriptor.clone())?;
+    let schema = committed_projection_schema(Cow::Borrowed(descriptor))?;
     project_runtime_mutation(&schema, relation_id, mutation, value_context)
+}
+
+/// One relation's committed state at the expected head: its row map, the
+/// graph over it, the schema its rows are projected against and the value
+/// context they decode in.
+struct RelationBase {
+    rows: RowMapSnapshot,
+    graph: NativeGraphContext,
+    schema: CommittedProjectionSchema<'static>,
+    value_context: Format3Context,
+}
+
+impl RelationBase {
+    fn load(format: &HistoricalFormatContext, relation_id: [u8; 16]) -> Result<Self, Error> {
+        let rows = format
+            .load_row_map(relation_id)
+            .map_err(repository_format_error)?;
+        let graph = format
+            .open_native_graph(&rows)
+            .map_err(repository_format_error)?;
+        let scope = graph.open_read_scope().map_err(graph_operation_error)?;
+        let descriptor = graph
+            .read_schema_descriptor(&scope)
+            .map_err(graph_operation_error)?;
+        let schema = committed_projection_schema(Cow::Owned(descriptor))?;
+        let value_context = format
+            .open_value_context(relation_id)
+            .map_err(repository_format_error)?;
+        Ok(Self {
+            rows,
+            graph,
+            schema,
+            value_context,
+        })
+    }
+}
+
+/// Whether a row key exists in the committed snapshot a frozen prefix is
+/// applied to.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CommittedPresence {
+    Present,
+    Absent,
+}
+
+/// The net effect of a frozen prefix on one row key: whether the key is in
+/// the committed snapshot, and the stored value, if any, the prefix leaves.
+#[derive(Debug, Eq, PartialEq)]
+struct NetRow {
+    committed: CommittedPresence,
+    next: Option<Vec<u8>>,
+}
+
+impl NetRow {
+    /// The row-index mutations that turn the committed row into the net row.
+    /// A replacement is a delete followed by an insert; a row the prefix
+    /// inserts and removes again needs none.
+    fn index_mutations(self, key: &[u8]) -> Result<Vec<RowIndexMutation>, Error> {
+        let delete =
+            || RowIndexMutation::delete_canonical(key).map_err(|_| Error::RepositoryUnavailable);
+        let insert = |value: &[u8]| {
+            RowIndexMutation::insert_canonical(key, value).map_err(|_| Error::RepositoryUnavailable)
+        };
+        match (self.committed, self.next) {
+            (CommittedPresence::Absent, None) => Ok(Vec::new()),
+            (CommittedPresence::Absent, Some(value)) => Ok(vec![insert(&value)?]),
+            (CommittedPresence::Present, None) => Ok(vec![delete()?]),
+            (CommittedPresence::Present, Some(value)) => Ok(vec![delete()?, insert(&value)?]),
+        }
+    }
+}
+
+/// A frozen prefix folded into one net change per row key, so a row inserted
+/// and deleted inside the prefix publishes nothing and a row replaced twice
+/// publishes its last value.
+#[derive(Default)]
+struct NetRows {
+    rows: BTreeMap<([u8; 16], Vec<u8>), NetRow>,
+}
+
+impl NetRows {
+    /// Folds one projected mutation in. `creates_key` says the mutation
+    /// inserts its key, so the key was absent from the committed snapshot
+    /// when the prefix first touched it; a re-key target is absent for the
+    /// same reason.
+    fn fold(
+        &mut self,
+        relation_id: [u8; 16],
+        projected: ProjectedRuntimeMutation,
+        creates_key: bool,
+    ) {
+        let committed = if creates_key {
+            CommittedPresence::Absent
+        } else {
+            CommittedPresence::Present
+        };
+        let source = self
+            .rows
+            .entry((relation_id, projected.key))
+            .or_insert(NetRow {
+                committed,
+                next: None,
+            });
+        match projected.rekey_to {
+            Some(target) => {
+                // The old key ends absent; its row now lives at the target.
+                source.next = None;
+                self.rows
+                    .entry((relation_id, target))
+                    .or_insert(NetRow {
+                        committed: CommittedPresence::Absent,
+                        next: None,
+                    })
+                    .next = projected.value;
+            }
+            None => source.next = projected.value,
+        }
+    }
+
+    /// The row-index mutations of every relation with a net change, keys in
+    /// ascending canonical order.
+    fn into_index_mutations(self) -> Result<BTreeMap<[u8; 16], Vec<RowIndexMutation>>, Error> {
+        let mut by_relation = BTreeMap::<[u8; 16], Vec<RowIndexMutation>>::new();
+        for ((relation_id, key), row) in self.rows {
+            let mutations = row.index_mutations(&key)?;
+            if !mutations.is_empty() {
+                by_relation
+                    .entry(relation_id)
+                    .or_default()
+                    .extend(mutations);
+            }
+        }
+        Ok(by_relation)
+    }
+}
+
+/// A relation's committed state with the row-index maintenance the prefix
+/// performs on it, `None` when the prefix leaves its rows unchanged.
+struct RelationCandidate {
+    rows: RowMapSnapshot,
+    graph: NativeGraphContext,
+    maintenance: Option<IndexMaintenance>,
+}
+
+/// The store root a frozen prefix publishes, with what the caller journals and
+/// measures.
+struct FrozenStoreRoot {
+    graph: NativeGraphContext,
+    store_root: NativeOid,
+    logical_rekeys: Vec<PublicationLogicalRowRekey>,
+    churn: PublicationChurn,
 }
 
 fn build_frozen_publication_store_root(
     repository: &Repository,
     expected_head: &GitCommitRef,
     mutations: &[TableMutation],
-) -> Result<
-    (
-        NativeGraphContext,
-        NativeOid,
-        Vec<PublicationLogicalRowRekey>,
-        PublicationChurn,
-    ),
-    Error,
-> {
+) -> Result<FrozenStoreRoot, Error> {
     let format = repository
         .open_format_context_at_selector(expected_head.as_str())
         .map_err(|_| Error::RepositoryUnavailable)?;
@@ -299,38 +427,22 @@ fn build_frozen_publication_store_root(
         return Err(Error::RepositoryUnavailable);
     }
 
-    let mut relation_bases = BTreeMap::new();
-    let mut projected_rows = BTreeMap::<([u8; 16], Vec<u8>), ProjectedStoreRow>::new();
-    let mut operations_by_relation = BTreeMap::<[u8; 16], Vec<RowIndexMutation>>::new();
+    let mut bases = BTreeMap::<[u8; 16], RelationBase>::new();
+    let mut net_rows = NetRows::default();
     let mut logical_rekeys = Vec::new();
     for mutation in mutations {
         let relation_id = mutation
             .table_object_id()
             .ok_or(Error::RepositoryUnavailable)?
             .bytes();
-        if let std::collections::btree_map::Entry::Vacant(e) = relation_bases.entry(relation_id) {
-            let rows = format
-                .load_row_map(relation_id)
-                .map_err(repository_format_error)?;
-            let graph = format
-                .open_native_graph(&rows)
-                .map_err(repository_format_error)?;
-            let scope = graph.open_read_scope().map_err(graph_operation_error)?;
-            let descriptor = graph
-                .read_schema_descriptor(&scope)
-                .map_err(graph_operation_error)?;
-            let schema = committed_projection_schema(descriptor)?;
-            let value_context = format
-                .open_value_context(relation_id)
-                .map_err(repository_format_error)?;
-            e.insert((rows, graph, schema, value_context));
-        }
-        let (_, _, schema, value_context) = relation_bases
-            .get(&relation_id)
-            .ok_or(Error::RepositoryUnavailable)?;
-        operations_by_relation.entry(relation_id).or_default();
-
-        let projected = project_runtime_mutation(schema, relation_id, mutation, value_context)?;
+        let base = match bases.entry(relation_id) {
+            std::collections::btree_map::Entry::Occupied(occupied) => occupied.into_mut(),
+            std::collections::btree_map::Entry::Vacant(vacant) => {
+                vacant.insert(RelationBase::load(&format, relation_id)?)
+            }
+        };
+        let projected =
+            project_runtime_mutation(&base.schema, relation_id, mutation, &base.value_context)?;
         if let Some(new_key) = projected.rekey_to.as_ref() {
             logical_rekeys.push(
                 PublicationLogicalRowRekey::new(
@@ -341,71 +453,47 @@ fn build_frozen_publication_store_root(
                 .map_err(|_| Error::RepositoryUnavailable)?,
             );
         }
-        let source = projected_rows
-            .entry((relation_id, projected.key))
-            .or_insert_with(|| ProjectedStoreRow {
-                base_present: !mutation.is_insert(),
-                next: None,
-            });
-        if let Some(next_key) = projected.rekey_to {
-            source.next = None;
-            projected_rows
-                .entry((relation_id, next_key))
-                .or_insert_with(|| ProjectedStoreRow {
-                    base_present: false,
-                    next: None,
-                })
-                .next = projected.value;
-        } else {
-            source.next = projected.value;
-        }
+        net_rows.fold(relation_id, projected, mutation.is_insert());
     }
 
-    for ((relation_id, key), row) in projected_rows {
-        let operations = operations_by_relation
-            .get_mut(&relation_id)
-            .ok_or(Error::RepositoryUnavailable)?;
-        if row.base_present {
-            operations.push(
-                RowIndexMutation::delete_canonical(&key)
-                    .map_err(|_| Error::RepositoryUnavailable)?,
-            );
-        }
-        if let Some(value) = row.next {
-            operations.push(
-                RowIndexMutation::insert_canonical(&key, &value)
-                    .map_err(|_| Error::RepositoryUnavailable)?,
-            );
-        }
-    }
-
-    let mut relation_candidates = Vec::with_capacity(operations_by_relation.len());
-    for (relation_id, operations) in operations_by_relation {
-        let (rows, graph, _, _) = relation_bases
-            .remove(&relation_id)
-            .ok_or(Error::RepositoryUnavailable)?;
-        let maintenance = if operations.is_empty() {
+    // Relations are maintained in ascending id order, and the first one's
+    // graph carries the publication.
+    let mut index_mutations = net_rows.into_index_mutations()?;
+    let mut candidates = Vec::with_capacity(bases.len());
+    for (relation_id, base) in bases {
+        let mutations = index_mutations.remove(&relation_id).unwrap_or_default();
+        let maintenance = if mutations.is_empty() {
             None
         } else {
-            let scope = graph.open_read_scope().map_err(graph_operation_error)?;
+            let scope = base
+                .graph
+                .open_read_scope()
+                .map_err(graph_operation_error)?;
             Some(
-                graph
-                    .maintain_row_index(&operations, &scope)
+                base.graph
+                    .maintain_row_index(&mutations, &scope)
                     .map_err(graph_operation_error)?,
             )
         };
-        relation_candidates.push((rows, graph, maintenance));
+        candidates.push(RelationCandidate {
+            rows: base.rows,
+            graph: base.graph,
+            maintenance,
+        });
     }
-
-    let Some((_, base_graph, _)) = relation_candidates.first() else {
+    let mut candidates = candidates.into_iter();
+    let Some(first) = candidates.next() else {
         return Err(Error::IncompleteStaging);
     };
+    let others: Vec<RelationCandidate> = candidates.collect();
+    let all = || std::iter::once(&first).chain(&others);
+
     // A publication that changes rows also records the allocator watermark
     // known when it is made (ORNA-AUTOID-005); a no-op prefix stays a no-op.
-    let rows_changed = relation_candidates.iter().any(|(rows, _, maintenance)| {
-        maintenance
-            .as_ref()
-            .is_some_and(|maintenance| maintenance.primary_root() != rows.version().primary_root())
+    let rows_changed = all().any(|candidate| {
+        candidate.maintenance.as_ref().is_some_and(|maintenance| {
+            maintenance.primary_root() != candidate.rows.version().primary_root()
+        })
     });
     let allocator_summary = if rows_changed {
         repository
@@ -414,15 +502,16 @@ fn build_frozen_publication_store_root(
     } else {
         None
     };
-    let scope = base_graph
+    let scope = first
+        .graph
         .open_read_scope()
         .map_err(graph_operation_error)?;
-    let candidates = relation_candidates
-        .iter()
-        .filter_map(|(rows, _, maintenance)| {
-            maintenance
+    let maintained = all()
+        .filter_map(|candidate| {
+            candidate
+                .maintenance
                 .as_ref()
-                .map(|maintenance| (rows.version(), maintenance))
+                .map(|maintenance| (candidate.rows.version(), maintenance))
         })
         .chain(
             allocator_summary
@@ -430,18 +519,23 @@ fn build_frozen_publication_store_root(
                 .map(|(rows, maintenance)| (rows.version(), maintenance)),
         )
         .collect::<Vec<_>>();
-    let store_root = base_graph
-        .maintain_relations_rows(&candidates, &scope)
+    let store_root = first
+        .graph
+        .maintain_relations_rows(&maintained, &scope)
         .map_err(graph_operation_error)?;
     let mut churn = PublicationChurn::default();
-    for (_, maintenance) in &candidates {
+    for (_, maintenance) in &maintained {
         churn.add(maintenance);
     }
     let store_root = repository
         .append_rekey_log(&format, &store_root, &logical_rekeys)
         .map_err(|_| Error::RepositoryUnavailable)?;
-    let (_, graph, _) = relation_candidates.swap_remove(0);
-    Ok((graph, store_root, logical_rekeys, churn))
+    Ok(FrozenStoreRoot {
+        graph: first.graph,
+        store_root,
+        logical_rekeys,
+        churn,
+    })
 }
 
 /// Index churn and reuse one publication measured while maintaining the row
@@ -594,18 +688,18 @@ impl RuntimePublicationCoordinator {
             .version()
             .store_root()
             .clone();
-        let (graph, store_root, logical_rekeys, churn) =
-            build_frozen_publication_store_root(repository, expected_head, &mutations)?;
+        let FrozenStoreRoot {
+            graph,
+            store_root,
+            logical_rekeys,
+            churn,
+        } = build_frozen_publication_store_root(repository, expected_head, &mutations)?;
         if store_root == current_store_root && logical_rekeys.is_empty() {
             return Ok(None);
         }
-        let candidate = build_private_publication_candidate_with_store_root(
-            repository,
-            expected_head,
-            &graph,
-            &store_root,
-            message,
-        )?;
+        let candidate = repository
+            .build_private_commit_with_store_root(expected_head, &graph, &store_root, message)
+            .map_err(|_| Error::RepositoryUnavailable)?;
         // Store-only candidates still need a durable journal anchor. Keep the
         // format metadata file unchanged rather than projecting row keys into
         // legacy loose paths.
@@ -707,22 +801,11 @@ impl RuntimePublicationCoordinator {
         {
             return Err(Error::InvalidTransition);
         }
-        let commit = PublicationCommitId::new(self.candidate.commit().as_str().as_bytes().to_vec())
-            .map_err(|_| Error::InvalidObjectId)?;
+        let commit = publication_commit_id(self.candidate.commit())?;
         if self.journal.stage() != orna_repository::PublicationJournalStage::WorktreeReconciled {
             return Err(Error::PublicationPending);
         }
-        if !repository
-            .head_contains_commit(self.journal.new_head())
-            .map_err(map_publication_repository_error)?
-        {
-            return Err(Error::RefConflict);
-        }
-        // Verified before the runtime tail is consumed, so a moved index
-        // leaves the pending batch intact (ORNA-PUB-009, ORNA-PUB-011).
-        repository
-            .verify_reconciled_index(&self.journal)
-            .map_err(map_publication_repository_error)?;
+        verify_reconciled_publication(repository, &self.journal)?;
         runtime
             .complete_publication(freeze, &commit)
             .await
@@ -783,8 +866,7 @@ impl RuntimePublicationCoordinator {
             .publication_freeze(intent_id)
             .await
             .map_err(|_| Error::RuntimeUnavailable)?;
-        let commit = PublicationCommitId::new(journal.new_head().as_str().as_bytes().to_vec())
-            .map_err(|_| Error::InvalidObjectId)?;
+        let commit = publication_commit_id(journal.new_head())?;
 
         if matches!(
             journal.stage(),
@@ -818,17 +900,7 @@ impl RuntimePublicationCoordinator {
         {
             return Err(Error::InvalidTransition);
         }
-        if !repository
-            .head_contains_commit(journal.new_head())
-            .map_err(map_publication_repository_error)?
-        {
-            return Err(Error::RefConflict);
-        }
-        // Verified before the runtime tail is consumed, so a moved index
-        // leaves the pending batch intact (ORNA-PUB-009, ORNA-PUB-011).
-        repository
-            .verify_reconciled_index(&journal)
-            .map_err(map_publication_repository_error)?;
+        verify_reconciled_publication(repository, &journal)?;
         runtime
             .complete_publication(&freeze, &commit)
             .await
@@ -841,6 +913,30 @@ impl RuntimePublicationCoordinator {
             .map(Some)
             .map_err(|_| Error::RepositoryUnavailable)
     }
+}
+
+fn publication_commit_id(commit: &GitCommitRef) -> Result<PublicationCommitId, Error> {
+    PublicationCommitId::new(commit.as_str().as_bytes().to_vec())
+        .map_err(|_| Error::InvalidObjectId)
+}
+
+/// Both completion paths consume the runtime tail only after the repository
+/// confirms that HEAD holds the published commit and that the index still
+/// matches the journal, so a moved index leaves the pending batch intact
+/// (ORNA-PUB-009, ORNA-PUB-011).
+fn verify_reconciled_publication(
+    repository: &Repository,
+    journal: &PublicationJournal,
+) -> Result<(), Error> {
+    if !repository
+        .head_contains_commit(journal.new_head())
+        .map_err(map_publication_repository_error)?
+    {
+        return Err(Error::RefConflict);
+    }
+    repository
+        .verify_reconciled_index(journal)
+        .map_err(map_publication_repository_error)
 }
 
 fn map_publication_repository_error(error: RepositoryError) -> Error {
@@ -1655,5 +1751,123 @@ mod tests {
                 "operational graph fault must stay unavailable: {operational:?}"
             );
         }
+    }
+
+    fn text_key(text: &str) -> Vec<u8> {
+        TypedKey::Text(text.to_owned()).canonical_bytes().unwrap()
+    }
+
+    /// A stored-field tuple the row index accepts: the one-element array `[n]`.
+    fn stored(n: u8) -> Vec<u8> {
+        vec![0x81, n]
+    }
+
+    fn projected(
+        key: &[u8],
+        rekey_to: Option<&[u8]>,
+        value: Option<Vec<u8>>,
+    ) -> ProjectedRuntimeMutation {
+        ProjectedRuntimeMutation {
+            key: key.to_vec(),
+            rekey_to: rekey_to.map(<[u8]>::to_vec),
+            value,
+        }
+    }
+
+    fn delete_of(key: &[u8]) -> RowIndexMutation {
+        RowIndexMutation::delete_canonical(key).unwrap()
+    }
+
+    fn insert_of(key: &[u8], n: u8) -> RowIndexMutation {
+        RowIndexMutation::insert_canonical(key, &stored(n)).unwrap()
+    }
+
+    #[test]
+    fn a_row_inserted_and_deleted_inside_one_prefix_publishes_nothing() {
+        let relation = [1; 16];
+        let key = text_key("a");
+        let mut net = NetRows::default();
+        net.fold(relation, projected(&key, None, Some(stored(1))), true);
+        net.fold(relation, projected(&key, None, None), false);
+        assert!(net.into_index_mutations().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_committed_row_updated_twice_is_replaced_by_its_last_value() {
+        let relation = [1; 16];
+        let key = text_key("a");
+        let mut net = NetRows::default();
+        net.fold(relation, projected(&key, None, Some(stored(1))), false);
+        net.fold(relation, projected(&key, None, Some(stored(2))), false);
+        assert_eq!(
+            net.into_index_mutations().unwrap(),
+            BTreeMap::from([(relation, vec![delete_of(&key), insert_of(&key, 2)])])
+        );
+    }
+
+    #[test]
+    fn deleting_then_reinserting_a_committed_key_is_a_replacement() {
+        let relation = [1; 16];
+        let key = text_key("a");
+        let mut net = NetRows::default();
+        net.fold(relation, projected(&key, None, None), false);
+        // The re-insert creates the key in the runtime's view, but the key was
+        // already in the committed snapshot when the prefix first touched it.
+        net.fold(relation, projected(&key, None, Some(stored(3))), true);
+        assert_eq!(
+            net.into_index_mutations().unwrap(),
+            BTreeMap::from([(relation, vec![delete_of(&key), insert_of(&key, 3)])])
+        );
+    }
+
+    #[test]
+    fn deleting_a_committed_row_only_deletes_it() {
+        let relation = [1; 16];
+        let key = text_key("a");
+        let mut net = NetRows::default();
+        net.fold(relation, projected(&key, None, None), false);
+        assert_eq!(
+            net.into_index_mutations().unwrap(),
+            BTreeMap::from([(relation, vec![delete_of(&key)])])
+        );
+    }
+
+    #[test]
+    fn a_rekey_chain_publishes_only_its_ends() {
+        let relation = [1; 16];
+        let (a, b, c) = (text_key("a"), text_key("b"), text_key("c"));
+        let mut net = NetRows::default();
+        net.fold(relation, projected(&a, Some(&b), Some(stored(4))), false);
+        assert_eq!(
+            net.rows.get(&(relation, b.clone())),
+            Some(&NetRow {
+                committed: CommittedPresence::Absent,
+                next: Some(stored(4)),
+            })
+        );
+        // `b` is the source of the second re-key but was never committed.
+        net.fold(relation, projected(&b, Some(&c), Some(stored(4))), false);
+        assert_eq!(
+            net.into_index_mutations().unwrap(),
+            BTreeMap::from([(relation, vec![delete_of(&a), insert_of(&c, 4)])])
+        );
+    }
+
+    #[test]
+    fn index_mutations_group_by_relation_in_canonical_key_order() {
+        let (first, second) = ([1; 16], [2; 16]);
+        let (a, b) = (text_key("a"), text_key("b"));
+        let mut net = NetRows::default();
+        net.fold(second, projected(&a, None, Some(stored(1))), true);
+        net.fold(first, projected(&b, None, Some(stored(2))), true);
+        net.fold(first, projected(&a, None, Some(stored(3))), true);
+        let grouped = net.into_index_mutations().unwrap();
+        assert_eq!(
+            grouped.into_iter().collect::<Vec<_>>(),
+            vec![
+                (first, vec![insert_of(&a, 3), insert_of(&b, 2)]),
+                (second, vec![insert_of(&a, 1)]),
+            ]
+        );
     }
 }
