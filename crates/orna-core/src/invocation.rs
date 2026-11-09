@@ -9,7 +9,7 @@ use crate::{
     FunctionId, FunctionRevisionId, InvocationId, ParameterId, PrincipalId,
     StandardLibraryRevisionId, TypeId,
     catalogue::{CatalogueSnapshot, FunctionDefinition, FunctionSecurity, QualifiedSemanticName},
-    revision::{ActiveDatabaseRevision, VerifiedStandardLibrarySnapshot},
+    revision::{ActiveDatabaseRevision, RevisionPair, VerifiedStandardLibrarySnapshot},
     security::{
         AuthenticatedSession, ExecuteDecision, InvocationTarget as SecurityInvocationTarget,
         SecuritySnapshot,
@@ -80,55 +80,16 @@ pub fn decide_protected_invocation(
     let Some(target) = resolve_target_privately(active, request.target()) else {
         return ProtectedInvocationDecision::Denied;
     };
-    let security_target = SecurityInvocationTarget::new(target.id(), active.pair());
-    let authorised = match target.class() {
-        PrivateTargetClass::System => security.authorise_system_function(session, security_target),
-        PrivateTargetClass::Application | PrivateTargetClass::VerifiedStandard => {
-            let security_target = match target.class() {
-                PrivateTargetClass::Application => security_target,
-                PrivateTargetClass::VerifiedStandard => {
-                    let Some(standard_revision) = target.standard_revision() else {
-                        return ProtectedInvocationDecision::Denied;
-                    };
-                    SecurityInvocationTarget::verified_standard(
-                        target.id(),
-                        active.pair(),
-                        standard_revision,
-                        target.executable_revision(),
-                    )
-                }
-                PrivateTargetClass::System => {
-                    unreachable!("system targets use system authorisation")
-                }
-            };
-            security.authorise_execute(session, security_target)
-        }
-    };
-    if !matches!(authorised, ExecuteDecision::Allowed(_)) {
+    if !matches!(
+        target.authorise(security, session, active.pair()),
+        ExecuteDecision::Allowed(_)
+    ) {
         return ProtectedInvocationDecision::Denied;
     }
-
-    let prebind = match target.class() {
-        PrivateTargetClass::System => {
-            if target.system_definition().is_none() {
-                return ProtectedInvocationDecision::Denied;
-            }
-            prebind_system_privately(request)
-        }
-        PrivateTargetClass::Application | PrivateTargetClass::VerifiedStandard => {
-            let Some(definition) = target.definition() else {
-                return ProtectedInvocationDecision::Denied;
-            };
-            if definition.security() != FunctionSecurity::Invoker {
-                return ProtectedInvocationDecision::Denied;
-            }
-            prebind_privately(definition, request)
-        }
-    };
-
-    match prebind {
-        PrivatePrebind::Complete => ProtectedInvocationDecision::Allowed,
-        PrivatePrebind::Failed => ProtectedInvocationDecision::AllowedWithBindFailure,
+    match target.prebind(request) {
+        Some(PrivatePrebind::Complete) => ProtectedInvocationDecision::Allowed,
+        Some(PrivatePrebind::Failed) => ProtectedInvocationDecision::AllowedWithBindFailure,
+        None => ProtectedInvocationDecision::Denied,
     }
 }
 
@@ -138,18 +99,6 @@ enum PrivatePrebind {
     Failed,
 }
 
-/// The closed target class of one privately resolved invocation target.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PrivateTargetClass {
-    /// A function in the pinned application catalogue.
-    Application,
-    /// A function in the exact verified standard snapshot pinned by the
-    /// active application revision.
-    VerifiedStandard,
-    /// One of the explicitly admitted sealed system identity functions.
-    System,
-}
-
 /// One privately resolved invocation target with its immutable executable pin.
 ///
 /// Application and verified-standard targets retain their catalogue definition
@@ -157,36 +106,22 @@ enum PrivateTargetClass {
 /// definition: it never fabricates or borrows a `FunctionDefinition`.
 #[derive(Clone, Debug)]
 enum PrivateResolvedTarget {
-    Application {
-        definition: FunctionDefinition,
-    },
+    /// A function in the pinned application catalogue.
+    Application { definition: FunctionDefinition },
+    /// A function in the exact verified standard snapshot pinned by the
+    /// active application revision.
     VerifiedStandard {
         definition: FunctionDefinition,
         standard_revision: StandardLibraryRevisionId,
         executable_revision: FunctionRevisionId,
     },
+    /// One of the explicitly admitted sealed system identity functions.
     System {
         definition: SystemFunctionDefinition,
     },
 }
 
 impl PrivateResolvedTarget {
-    fn new_application(definition: FunctionDefinition) -> Self {
-        Self::Application { definition }
-    }
-
-    fn new_verified_standard(
-        definition: FunctionDefinition,
-        standard_revision: StandardLibraryRevisionId,
-        executable_revision: FunctionRevisionId,
-    ) -> Self {
-        Self::VerifiedStandard {
-            definition,
-            standard_revision,
-            executable_revision,
-        }
-    }
-
     fn new_system(definition: SystemFunctionDefinition) -> Option<Self> {
         if !matches!(definition.kind(), SystemFunctionKind::SecurityIdentity) {
             return None;
@@ -199,64 +134,50 @@ impl PrivateResolvedTarget {
         }
     }
 
-    /// Returns the stable target function identity.
-    fn id(&self) -> FunctionId {
+    /// Makes the base security decision for this target: system targets use the
+    /// sealed system rule, and catalogue targets use `EXECUTE` authorisation
+    /// against the target class and immutable pins they were resolved with.
+    fn authorise(
+        &self,
+        security: &SecuritySnapshot,
+        session: &AuthenticatedSession,
+        pair: RevisionPair,
+    ) -> ExecuteDecision {
         match self {
-            Self::Application { definition } | Self::VerifiedStandard { definition, .. } => {
-                definition.id()
-            }
-            Self::System { definition } => definition.id(),
-        }
-    }
-
-    /// Returns the complete catalogue function definition, when applicable.
-    fn definition(&self) -> Option<&FunctionDefinition> {
-        match self {
-            Self::Application { definition } | Self::VerifiedStandard { definition, .. } => {
-                Some(definition)
-            }
-            Self::System { .. } => None,
-        }
-    }
-
-    /// Returns the sealed system-function definition, when applicable.
-    fn system_definition(&self) -> Option<SystemFunctionDefinition> {
-        match self {
-            Self::System { definition } => Some(*definition),
-            Self::Application { .. } | Self::VerifiedStandard { .. } => None,
-        }
-    }
-
-    /// Returns the closed target class.
-    fn class(&self) -> PrivateTargetClass {
-        match self {
-            Self::Application { .. } => PrivateTargetClass::Application,
-            Self::VerifiedStandard { .. } => PrivateTargetClass::VerifiedStandard,
-            Self::System { .. } => PrivateTargetClass::System,
-        }
-    }
-
-    /// Returns the exact pinned executable function revision.
-    fn executable_revision(&self) -> FunctionRevisionId {
-        match self {
+            Self::System { definition } => security.authorise_system_function(
+                session,
+                SecurityInvocationTarget::new(definition.id(), pair),
+            ),
+            Self::Application { definition } => security.authorise_execute(
+                session,
+                SecurityInvocationTarget::new(definition.id(), pair),
+            ),
             Self::VerifiedStandard {
+                definition,
+                standard_revision,
                 executable_revision,
-                ..
-            } => *executable_revision,
-            Self::Application { definition } => definition.current_revision(),
-            Self::System { .. } => {
-                unreachable!("system targets do not carry executable revisions")
-            }
+            } => security.authorise_execute(
+                session,
+                SecurityInvocationTarget::verified_standard(
+                    definition.id(),
+                    pair,
+                    *standard_revision,
+                    *executable_revision,
+                ),
+            ),
         }
     }
 
-    /// Returns the exact verified standard snapshot revision for a standard target.
-    fn standard_revision(&self) -> Option<StandardLibraryRevisionId> {
+    /// Prebinds the request against this target. `None` denies a catalogue
+    /// target that requires unavailable semantics (a non-`INVOKER` function)
+    /// before any binding fact escapes.
+    fn prebind(&self, request: &InvokeRequest) -> Option<PrivatePrebind> {
         match self {
-            Self::VerifiedStandard {
-                standard_revision, ..
-            } => Some(*standard_revision),
-            Self::Application { .. } | Self::System { .. } => None,
+            Self::System { .. } => Some(prebind_system_privately(request)),
+            Self::Application { definition } | Self::VerifiedStandard { definition, .. } => {
+                (definition.security() == FunctionSecurity::Invoker)
+                    .then(|| prebind_privately(definition, request))
+            }
         }
     }
 }
@@ -294,7 +215,9 @@ fn resolve_target_in_catalogues(
     match (application_target, standard_target) {
         // A function in both catalogues is ambiguous and resolves to neither.
         (Some(_), Some(_)) | (None, None) => None,
-        (Some(function), None) => Some(PrivateResolvedTarget::new_application(function.clone())),
+        (Some(function), None) => Some(PrivateResolvedTarget::Application {
+            definition: function.clone(),
+        }),
         (None, Some(function)) => {
             let standard = standard.expect("a standard target requires the pinned snapshot");
             let executable = standard
@@ -304,11 +227,11 @@ fn resolve_target_in_catalogues(
             if executable.revision().id() != function.current_revision() {
                 return None;
             }
-            Some(PrivateResolvedTarget::new_verified_standard(
-                function.clone(),
-                standard.revision(),
-                executable.revision().id(),
-            ))
+            Some(PrivateResolvedTarget::VerifiedStandard {
+                definition: function.clone(),
+                standard_revision: standard.revision(),
+                executable_revision: executable.revision().id(),
+            })
         }
     }
 }
@@ -1632,9 +1555,10 @@ fn selector_order(
 mod tests {
     use super::*;
     use crate::catalogue::{
-        CatalogueSnapshot, FunctionDefinition, FunctionDomain, FunctionReturn, FunctionSecurity,
-        FunctionTransaction, FunctionVolatility, ObjectTypeDefinition, ParameterDefinition,
-        SchemaDefinition, ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
+        CatalogueDefinitions, CatalogueSnapshot, FunctionDefinition, FunctionDomain,
+        FunctionReturn, FunctionSecurity, FunctionTransaction, FunctionVolatility,
+        ObjectTypeDefinition, ParameterDefinition, SchemaDefinition, ValueTypeDefinition,
+        ValueTypeMutability, ValueTypePersistence,
     };
     use crate::revision::{
         ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
@@ -1804,14 +1728,16 @@ mod tests {
         )
         .expect("an application source revision");
         let function = decision_function(security);
-        let catalogue = CatalogueSnapshot::new_with_functions(
+        let catalogue = CatalogueSnapshot::from_definitions(
             CatalogueRevisionId::from_bytes([19; 16]),
-            vec![SchemaDefinition::new(
-                SchemaId::from_bytes([20; 16]),
-                QualifiedSemanticName::new(["app"]).expect("a schema name"),
-            )],
-            vec![],
-            vec![function.clone()],
+            CatalogueDefinitions {
+                schemas: vec![SchemaDefinition::new(
+                    SchemaId::from_bytes([20; 16]),
+                    QualifiedSemanticName::new(["app"]).expect("a schema name"),
+                )],
+                functions: vec![function.clone()],
+                ..CatalogueDefinitions::default()
+            },
         )
         .expect("an application function catalogue");
         let origin = SourceOrigin::new(source_unit, 0, 0).expect("a source origin");
@@ -1936,16 +1862,17 @@ mod tests {
             ValueTypePersistence::Persistable,
             "orna.kernel.value.integer@1",
         );
-        let catalogue = CatalogueSnapshot::new_with_functions_and_types(
+        let catalogue = CatalogueSnapshot::from_definitions(
             CatalogueRevisionId::from_bytes([0x49; 16]),
-            vec![SchemaDefinition::new(
-                SchemaId::from_bytes([0x4a; 16]),
-                QualifiedSemanticName::new(["std", "invoke"]).expect("a schema name"),
-            )],
-            vec![],
-            vec![integer_type.clone()],
-            vec![],
-            vec![function.clone()],
+            CatalogueDefinitions {
+                schemas: vec![SchemaDefinition::new(
+                    SchemaId::from_bytes([0x4a; 16]),
+                    QualifiedSemanticName::new(["std", "invoke"]).expect("a schema name"),
+                )],
+                value_types: vec![integer_type.clone()],
+                functions: vec![function.clone()],
+                ..CatalogueDefinitions::default()
+            },
         )
         .expect("a standard catalogue");
         let declaration = SourceOrigin::new(invoke_unit, 0, 0).expect("a source origin");
@@ -2117,20 +2044,22 @@ mod tests {
             Some(FunctionTransaction::ReadOnly),
             FunctionVolatility::Stable,
         );
-        let catalogue = CatalogueSnapshot::new_with_functions(
+        let catalogue = CatalogueSnapshot::from_definitions(
             CatalogueRevisionId::from_bytes([0x76; 16]),
-            vec![
-                SchemaDefinition::new(
-                    SchemaId::from_bytes([0x57; 16]),
-                    QualifiedSemanticName::new(["app"]).expect("a schema name"),
-                ),
-                SchemaDefinition::new(
-                    SchemaId::from_bytes([0x4a; 16]),
-                    QualifiedSemanticName::new(["std", "invoke"]).expect("a schema name"),
-                ),
-            ],
-            vec![],
-            vec![function.clone()],
+            CatalogueDefinitions {
+                schemas: vec![
+                    SchemaDefinition::new(
+                        SchemaId::from_bytes([0x57; 16]),
+                        QualifiedSemanticName::new(["app"]).expect("a schema name"),
+                    ),
+                    SchemaDefinition::new(
+                        SchemaId::from_bytes([0x4a; 16]),
+                        QualifiedSemanticName::new(["std", "invoke"]).expect("a schema name"),
+                    ),
+                ],
+                functions: vec![function.clone()],
+                ..CatalogueDefinitions::default()
+            },
         )
         .expect("an application catalogue that duplicates a standard function");
         let origin = SourceOrigin::new(source_unit, 0, 0).expect("a source origin");
@@ -2629,14 +2558,16 @@ mod tests {
     fn protected_decision_resolves_ambiguity_privately_and_fails_closed_for_definer() {
         let verified = standard_executable_snapshot();
         let standard_function = verified.catalogue().functions()[0].clone();
-        let application = CatalogueSnapshot::new_with_functions(
+        let application = CatalogueSnapshot::from_definitions(
             CatalogueRevisionId::from_bytes([26; 16]),
-            vec![SchemaDefinition::new(
-                SchemaId::from_bytes([0x5b; 16]),
-                QualifiedSemanticName::new(["std", "invoke"]).expect("a schema name"),
-            )],
-            vec![],
-            vec![standard_function],
+            CatalogueDefinitions {
+                schemas: vec![SchemaDefinition::new(
+                    SchemaId::from_bytes([0x5b; 16]),
+                    QualifiedSemanticName::new(["std", "invoke"]).expect("a schema name"),
+                )],
+                functions: vec![standard_function],
+                ..CatalogueDefinitions::default()
+            },
         )
         .expect("an application catalogue that duplicates a standard function");
         assert!(
@@ -2680,24 +2611,28 @@ mod tests {
     fn private_resolution_pins_class_and_executable_for_both_target_classes() {
         let verified = standard_executable_snapshot();
         let standard_function = verified.catalogue().functions()[0].clone();
-        let application = CatalogueSnapshot::new_with_functions(
+        let application = CatalogueSnapshot::from_definitions(
             CatalogueRevisionId::from_bytes([0x5a; 16]),
-            vec![SchemaDefinition::new(
-                SchemaId::from_bytes([0x5b; 16]),
-                QualifiedSemanticName::new(["app"]).expect("a schema name"),
-            )],
-            vec![],
-            vec![decision_function(FunctionSecurity::Invoker)],
+            CatalogueDefinitions {
+                schemas: vec![SchemaDefinition::new(
+                    SchemaId::from_bytes([0x5b; 16]),
+                    QualifiedSemanticName::new(["app"]).expect("a schema name"),
+                )],
+                functions: vec![decision_function(FunctionSecurity::Invoker)],
+                ..CatalogueDefinitions::default()
+            },
         )
         .expect("an application catalogue");
-        let both = CatalogueSnapshot::new_with_functions(
+        let both = CatalogueSnapshot::from_definitions(
             CatalogueRevisionId::from_bytes([0x5c; 16]),
-            vec![SchemaDefinition::new(
-                SchemaId::from_bytes([0x5d; 16]),
-                QualifiedSemanticName::new(["std", "invoke"]).expect("a schema name"),
-            )],
-            vec![],
-            vec![standard_function.clone()],
+            CatalogueDefinitions {
+                schemas: vec![SchemaDefinition::new(
+                    SchemaId::from_bytes([0x5d; 16]),
+                    QualifiedSemanticName::new(["std", "invoke"]).expect("a schema name"),
+                )],
+                functions: vec![standard_function.clone()],
+                ..CatalogueDefinitions::default()
+            },
         )
         .expect("an application catalogue that duplicates a standard function");
         let application_selector = InvocationTarget::function_id(FunctionId::from_bytes([10; 16]));
@@ -2707,32 +2642,31 @@ mod tests {
         let application_target =
             resolve_target_in_catalogues(&application, None, &application_selector)
                 .expect("an application function must resolve");
-        assert_eq!(application_target.class(), PrivateTargetClass::Application);
+        let PrivateResolvedTarget::Application { definition } = application_target else {
+            panic!("an application function must resolve as an application target");
+        };
         assert_eq!(
-            application_target.executable_revision(),
+            definition.current_revision(),
             FunctionRevisionId::from_bytes([12; 16])
         );
-        assert_eq!(application_target.standard_revision(), None);
-        assert_eq!(application_target.id(), FunctionId::from_bytes([10; 16]));
+        assert_eq!(definition.id(), FunctionId::from_bytes([10; 16]));
 
         let standard_target =
             resolve_target_in_catalogues(&application, Some(&verified), &standard_selector)
                 .expect("a verified-standard function must resolve");
+        let PrivateResolvedTarget::VerifiedStandard {
+            definition,
+            standard_revision,
+            executable_revision,
+        } = standard_target
+        else {
+            panic!("a verified-standard function must resolve as a verified-standard target");
+        };
+        assert_eq!(executable_revision, standard_function.current_revision());
+        assert_eq!(standard_revision, verified.revision());
+        assert_eq!(definition.id(), standard_function.id());
         assert_eq!(
-            standard_target.class(),
-            PrivateTargetClass::VerifiedStandard
-        );
-        assert_eq!(
-            standard_target.executable_revision(),
-            standard_function.current_revision()
-        );
-        assert_eq!(
-            standard_target.standard_revision(),
-            Some(verified.revision())
-        );
-        assert_eq!(standard_target.id(), standard_function.id());
-        assert_eq!(
-            standard_target.executable_revision(),
+            executable_revision,
             verified.executables()[0].revision().id()
         );
 

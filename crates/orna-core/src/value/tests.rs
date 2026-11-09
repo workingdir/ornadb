@@ -9,9 +9,9 @@ use crate::{
         verify_standard_library_snapshot,
     },
     catalogue::{
-        CatalogueSnapshot, EnumTypeDefinition, ObjectTypeDefinition, QualifiedSemanticName,
-        RecordValueFieldDefinition, RecordValueTypeDefinition, SchemaDefinition,
-        ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
+        CatalogueDefinitions, CatalogueSnapshot, EnumTypeDefinition, ObjectTypeDefinition,
+        QualifiedSemanticName, RecordValueFieldDefinition, RecordValueTypeDefinition,
+        SchemaDefinition, ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
     },
     revision::{
         ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
@@ -109,12 +109,13 @@ fn verified_standard_with_value_types_and_schemas(
         ),
     ];
     schemas.extend(extra_schemas);
-    let standard_catalogue = CatalogueSnapshot::new_with_types(
+    let standard_catalogue = CatalogueSnapshot::from_definitions(
         CatalogueRevisionId::from_bytes([0x5b; 16]),
-        schemas,
-        vec![],
-        value_types,
-        vec![],
+        CatalogueDefinitions {
+            schemas,
+            value_types,
+            ..CatalogueDefinitions::default()
+        },
     )
     .unwrap();
     let mut standard_origins = standard_catalogue
@@ -171,40 +172,40 @@ fn active_record_revision_with_standard(
 ) -> ActiveDatabaseRevision {
     let application_schema = SchemaId::from_bytes([0x57; 16]);
     let catalogue_revision = CatalogueRevisionId::from_bytes([0x58; 16]);
-    let catalogue = CatalogueSnapshot::new_with_record_value_types(
+    let catalogue = CatalogueSnapshot::from_definitions(
         catalogue_revision,
-        vec![SchemaDefinition::new(
-            application_schema,
-            QualifiedSemanticName::new(["crm"]).unwrap(),
-        )],
-        vec![],
-        vec![],
-        vec![EnumTypeDefinition::new(
-            ENUM_TYPE,
-            QualifiedSemanticName::new(["crm", "stage"]).unwrap(),
-            ["lead", "qualified"],
-        )],
-        vec![RecordValueTypeDefinition::new(
-            record_type,
-            QualifiedSemanticName::new(["crm", "status"]).unwrap(),
-            vec![
-                RecordValueFieldDefinition::try_new_descriptor(
-                    ENABLED_FIELD,
-                    "enabled",
-                    0,
-                    TypeDescriptor::named(STANDARD_BOOLEAN),
-                )
-                .unwrap(),
-                RecordValueFieldDefinition::try_new_descriptor(
-                    STAGE_FIELD,
-                    "stage",
-                    1,
-                    TypeDescriptor::named(ENUM_TYPE),
-                )
-                .unwrap(),
-            ],
-        )],
-        vec![],
+        CatalogueDefinitions {
+            schemas: vec![SchemaDefinition::new(
+                application_schema,
+                QualifiedSemanticName::new(["crm"]).unwrap(),
+            )],
+            enum_types: vec![EnumTypeDefinition::new(
+                ENUM_TYPE,
+                QualifiedSemanticName::new(["crm", "stage"]).unwrap(),
+                ["lead", "qualified"],
+            )],
+            record_value_types: vec![RecordValueTypeDefinition::new(
+                record_type,
+                QualifiedSemanticName::new(["crm", "status"]).unwrap(),
+                vec![
+                    RecordValueFieldDefinition::try_new_descriptor(
+                        ENABLED_FIELD,
+                        "enabled",
+                        0,
+                        TypeDescriptor::named(STANDARD_BOOLEAN),
+                    )
+                    .unwrap(),
+                    RecordValueFieldDefinition::try_new_descriptor(
+                        STAGE_FIELD,
+                        "stage",
+                        1,
+                        TypeDescriptor::named(ENUM_TYPE),
+                    )
+                    .unwrap(),
+                ],
+            )],
+            ..CatalogueDefinitions::default()
+        },
     )
     .unwrap();
     let context = CatalogueHashContext::version_two(standard);
@@ -315,39 +316,39 @@ fn opaque_registration(
 }
 
 fn enum_catalogue(labels: &[&str]) -> CatalogueSnapshot {
-    CatalogueSnapshot::new_with_enum_types(
+    CatalogueSnapshot::from_definitions(
         CatalogueRevisionId::from_bytes([0x44; 16]),
-        vec![SchemaDefinition::new(
-            SchemaId::from_bytes([0x45; 16]),
-            QualifiedSemanticName::new(["crm"]).unwrap(),
-        )],
-        vec![],
-        vec![],
-        vec![EnumTypeDefinition::new(
-            ENUM_TYPE,
-            QualifiedSemanticName::new(["crm", "stage"]).unwrap(),
-            labels.iter().copied(),
-        )],
-        vec![],
+        CatalogueDefinitions {
+            schemas: vec![SchemaDefinition::new(
+                SchemaId::from_bytes([0x45; 16]),
+                QualifiedSemanticName::new(["crm"]).unwrap(),
+            )],
+            enum_types: vec![EnumTypeDefinition::new(
+                ENUM_TYPE,
+                QualifiedSemanticName::new(["crm", "stage"]).unwrap(),
+                labels.iter().copied(),
+            )],
+            ..CatalogueDefinitions::default()
+        },
     )
     .unwrap()
 }
 
 fn standard_enum_catalogue(labels: &[&str]) -> CatalogueSnapshot {
-    CatalogueSnapshot::new_with_enum_types(
+    CatalogueSnapshot::from_definitions(
         CatalogueRevisionId::from_bytes([0x96; 16]),
-        vec![SchemaDefinition::new(
-            SchemaId::from_bytes([0x97; 16]),
-            QualifiedSemanticName::new(["std"]).unwrap(),
-        )],
-        vec![],
-        vec![],
-        vec![EnumTypeDefinition::new(
-            MAP_STD_ENUM,
-            QualifiedSemanticName::new(["std", "mode"]).unwrap(),
-            labels.iter().copied(),
-        )],
-        vec![],
+        CatalogueDefinitions {
+            schemas: vec![SchemaDefinition::new(
+                SchemaId::from_bytes([0x97; 16]),
+                QualifiedSemanticName::new(["std"]).unwrap(),
+            )],
+            enum_types: vec![EnumTypeDefinition::new(
+                MAP_STD_ENUM,
+                QualifiedSemanticName::new(["std", "mode"]).unwrap(),
+                labels.iter().copied(),
+            )],
+            ..CatalogueDefinitions::default()
+        },
     )
     .unwrap()
 }

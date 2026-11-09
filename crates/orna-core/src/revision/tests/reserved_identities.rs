@@ -12,21 +12,22 @@ fn invocation_carrier_value_type(id: TypeId, parts: &[&str]) -> ValueTypeDefinit
 }
 
 fn invocation_carrier_catalogue(value_types: Vec<ValueTypeDefinition>) -> CatalogueSnapshot {
-    CatalogueSnapshot::new_with_types(
+    CatalogueSnapshot::from_definitions(
         CatalogueRevisionId::from_bytes(id::<112>()),
-        vec![
-            SchemaDefinition::new(
-                SchemaId::from_bytes(id::<113>()),
-                QualifiedSemanticName::new(["sys"]).unwrap(),
-            ),
-            SchemaDefinition::new(
-                SchemaId::from_bytes(id::<114>()),
-                QualifiedSemanticName::new(["sys", "invoke"]).unwrap(),
-            ),
-        ],
-        vec![],
-        value_types,
-        vec![],
+        CatalogueDefinitions {
+            schemas: vec![
+                SchemaDefinition::new(
+                    SchemaId::from_bytes(id::<113>()),
+                    QualifiedSemanticName::new(["sys"]).unwrap(),
+                ),
+                SchemaDefinition::new(
+                    SchemaId::from_bytes(id::<114>()),
+                    QualifiedSemanticName::new(["sys", "invoke"]).unwrap(),
+                ),
+            ],
+            value_types,
+            ..CatalogueDefinitions::default()
+        },
     )
     .unwrap()
 }
@@ -585,24 +586,26 @@ fn name_collisions_use_registry_order_independent_of_application_vector_order() 
         SchemaId::from_bytes(id::<9>()),
         QualifiedSemanticName::new(["sys", "catalog"]).unwrap(),
     );
-    let catalogue = CatalogueSnapshot::new_with_functions(
+    let catalogue = CatalogueSnapshot::from_definitions(
         CatalogueRevisionId::from_bytes(id::<7>()),
-        vec![schema_sys, schema_sys_catalog],
-        vec![],
-        vec![
-            function_definition_named(
-                &["sys", "invoke"],
-                invoke_name_id,
-                invoke_name_revision.id(),
-                ResolvedType::scalar(StandardScalar::Boolean),
-            ),
-            function_definition_named(
-                &["sys", "catalog", "health"],
-                health_name_id,
-                health_name_revision.id(),
-                ResolvedType::scalar(StandardScalar::Boolean),
-            ),
-        ],
+        CatalogueDefinitions {
+            schemas: vec![schema_sys, schema_sys_catalog],
+            functions: vec![
+                function_definition_named(
+                    &["sys", "invoke"],
+                    invoke_name_id,
+                    invoke_name_revision.id(),
+                    ResolvedType::scalar(StandardScalar::Boolean),
+                ),
+                function_definition_named(
+                    &["sys", "catalog", "health"],
+                    health_name_id,
+                    health_name_revision.id(),
+                    ResolvedType::scalar(StandardScalar::Boolean),
+                ),
+            ],
+            ..CatalogueDefinitions::default()
+        },
     )
     .unwrap();
     // Reserved-name validation is authoritative before origin

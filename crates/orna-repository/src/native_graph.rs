@@ -30,9 +30,8 @@ use orna_value::{
 };
 use sha2::{Digest, Sha256};
 
-/// Dead code: no caller yet; kept for the store surface it specifies.
-#[allow(dead_code)]
-pub const REPOSITORY_FORMAT: u8 = 3;
+use crate::hex::hex_encode;
+
 pub const NODE_DATA_LIMIT: usize = 65_536;
 pub const MAX_REFS: usize = 256;
 pub const MAX_GRAPH_HEIGHT: u8 = 64;
@@ -135,13 +134,7 @@ impl NativeOid {
     }
 
     pub fn to_hex(&self) -> String {
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        let mut output = String::with_capacity(self.bytes.len() * 2);
-        for byte in &self.bytes {
-            output.push(HEX[(byte >> 4) as usize] as char);
-            output.push(HEX[(byte & 0x0f) as usize] as char);
-        }
-        output
+        hex_encode(&self.bytes)
     }
 }
 
@@ -3408,19 +3401,6 @@ impl NativeGraphContext {
         )
     }
 
-    /// Removes a private ref only with a PUB-3 receipt for this exact pin.
-    /// Dropping a pin handle alone never invokes this operation.
-    pub fn release_published_pin(
-        &self,
-        pin: ProtectedContentPin,
-        receipt: Pub3ReleaseReceipt,
-    ) -> Result<(), GraphError> {
-        if !receipt.authorizes(&pin) || pin.repository_id != self.repository_id {
-            return Err(GraphError::PinReceiptMismatch);
-        }
-        self.delete_protected_ref(&pin.protected_ref, &pin.descriptor_oid)
-    }
-
     /// Admits a Blob only from already-verified descriptor evidence in this
     /// exact owner and snapshot.  The evidence constructor is private to this
     /// module's future Git reader, so public OIDs cannot mint capabilities.
@@ -3908,8 +3888,6 @@ impl NativeGraphContext {
         self.write_capture_envelope(node, written, object_limit)
     }
 
-    /// Dead code: no caller yet; kept for the store surface it specifies.
-    #[allow(dead_code)]
     /// Writes one complete OGS-1 node envelope (its canonical `data` blob, its
     /// `refs` tree when the node has dependencies, and the envelope tree that
     /// names both) into the repository's single object store.
@@ -3920,6 +3898,7 @@ impl NativeGraphContext {
     /// names them, which is the durable writer a publication candidate needs
     /// for its encoded ORP nodes. `written` accumulates the exact closure so
     /// the caller can run its own durability barrier before advancing a ref.
+    #[cfg(test)]
     pub(crate) fn write_native_node(
         &self,
         node: &NodeData,
@@ -3971,7 +3950,7 @@ impl NativeGraphContext {
         crate::bind_tree_entry_in_index(
             || self.git_command(),
             index,
-            crate::init::format_context::STORE_PATH,
+            crate::format_context::STORE_PATH,
             "040000",
             &store_root.to_hex(),
         )
@@ -4678,33 +4657,6 @@ fn git_tree_cmp(left: &ParsedGitTreeEntry, right: &ParsedGitTreeEntry) -> std::c
         (None, Some(right)) => left_suffix.cmp(right),
         (None, None) => std::cmp::Ordering::Equal,
     }
-}
-
-pub(crate) fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        output.push(HEX[(byte >> 4) as usize] as char);
-        output.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    output
-}
-
-/// The inverse of [`hex_encode`]: exactly its lowercase, even-length
-/// spelling, so every byte string has one accepted form.
-pub(crate) fn hex_decode(text: &str) -> Option<Vec<u8>> {
-    let digit = |byte: u8| match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        _ => None,
-    };
-    let (pairs, []) = text.as_bytes().as_chunks::<2>() else {
-        return None;
-    };
-    pairs
-        .iter()
-        .map(|[high, low]| Some((digit(*high)? << 4) | digit(*low)?))
-        .collect()
 }
 
 fn scratch_content_ref(owner_id: &[u8; 16], pin_id: &[u8; 16]) -> String {
@@ -5679,8 +5631,7 @@ impl ProtectedContentPin {
         }
     }
 
-    /// Dead code: no caller yet; kept for the store surface it specifies.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn protected_ref(&self) -> &str {
         &self.protected_ref
     }
@@ -5854,49 +5805,6 @@ impl PreparedOrpGraphCandidate {
     }
 }
 
-/// Opaque PUB-3 evidence that the accepted content root is durable and the
-/// publication journal has reached its terminal state.  Only publication
-/// integration in this crate may issue one.
-#[derive(Debug)]
-pub struct Pub3ReleaseReceipt {
-    repository_id: [u8; 32],
-    pin_id: [u8; 16],
-    descriptor_oid: NativeOid,
-    durable_root: NativeOid,
-    journal_terminal: bool,
-}
-
-impl Pub3ReleaseReceipt {
-    /// Dead code: no caller yet; kept for the store surface it specifies.
-    #[allow(dead_code)]
-    pub(crate) fn issue_after_pub3(
-        repository_id: [u8; 32],
-        pin_id: [u8; 16],
-        descriptor_oid: NativeOid,
-        durable_root: NativeOid,
-        journal_terminal: bool,
-    ) -> Result<Self, GraphError> {
-        if !journal_terminal || descriptor_oid.algorithm() != durable_root.algorithm() {
-            return Err(GraphError::PublicationNotTerminal);
-        }
-        Ok(Self {
-            repository_id,
-            pin_id,
-            descriptor_oid,
-            durable_root,
-            journal_terminal,
-        })
-    }
-
-    pub(crate) fn authorizes(&self, pin: &ProtectedContentPin) -> bool {
-        self.journal_terminal
-            && self.repository_id == pin.repository_id
-            && self.pin_id == pin.pin_id
-            && self.descriptor_oid == pin.descriptor_oid
-            && self.durable_root.algorithm() == pin.descriptor_oid.algorithm()
-    }
-}
-
 /// The only Git tree entry kinds accepted for native graph references.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum NativeObjectKind {
@@ -6061,18 +5969,6 @@ impl ObjectStats {
         STATS_SCHEMA_VERSION
     }
 }
-
-/// Dead code: no caller yet; kept for the store surface it specifies.
-#[allow(dead_code)]
-/// Help text for the exit codes of `ogs stats`. Each line names one code the
-/// stats exit with; the codes come from [`ObjectStats::exit_code`] and
-/// [`GraphError::exit_code`].
-pub const OGS_STATS_EXIT_CODES_HELP: &str = "\
-Exit codes:
-  0  the store has at least one reachable node
-  1  any other failure
-  2  corrupt index: bytes on disk do not match the format
-  3  empty store, or an object id that does not resolve";
 
 /// Output schema version for [`ObjectStats::to_json`].
 pub const STATS_SCHEMA_VERSION: u32 = 1;
@@ -6514,22 +6410,6 @@ impl NativeNodeEnvelope {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ValidatedRepositoryContext {
     algorithm: GitHashAlgorithm,
-}
-
-impl ValidatedRepositoryContext {
-    /// Dead code: no caller yet; kept for the store surface it specifies.
-    #[allow(dead_code)]
-    pub(crate) const fn algorithm(self) -> GitHashAlgorithm {
-        self.algorithm
-    }
-}
-
-/// Test-only context creation keeps tests focused without creating a public
-/// production admission route from arbitrary caller data.
-#[cfg(test)]
-#[allow(dead_code)]
-pub(crate) const fn test_context(algorithm: GitHashAlgorithm) -> ValidatedRepositoryContext {
-    ValidatedRepositoryContext { algorithm }
 }
 
 /// Local availability classification for an object observed by the owning
@@ -6985,23 +6865,6 @@ impl PinnedNativeGraphReader {
             return Err(GraphError::ContentIdentityMismatch);
         }
         Ok(output)
-    }
-
-    /// Dead code: no caller yet; kept for the store surface it specifies.
-    #[allow(dead_code)]
-    fn verify_full_byte_index(
-        &mut self,
-        root: &NativeObjectId,
-        expected_length: u64,
-        expected_digest: [u8; 32],
-    ) -> Result<(), GraphError> {
-        let mut hasher = Sha256::new();
-        let (length, _) = self.walk_byte_index(root, None, &mut hasher, None, None)?;
-        let digest: [u8; 32] = hasher.finalize().into();
-        if length != expected_length || digest != expected_digest {
-            return Err(GraphError::ContentIdentityMismatch);
-        }
-        Ok(())
     }
 
     fn walk_byte_index(
@@ -13844,7 +13707,6 @@ pub enum GraphError {
     DurabilityFailed,
     ObjectDurabilityUnavailable,
     InventoryQuotaExceeded,
-    PinReceiptMismatch,
     UnsupportedGitObjectType,
     InvalidProtectedRef,
     PublicationNotTerminal,
@@ -13990,9 +13852,6 @@ impl fmt::Display for GraphError {
             }
             Self::InventoryQuotaExceeded => {
                 f.write_str("native graph verification exceeded its object/edge quota")
-            }
-            Self::PinReceiptMismatch => {
-                f.write_str("PUB-3 release receipt does not authorize this pin")
             }
             Self::UnsupportedGitObjectType => {
                 f.write_str("Git commit/tag objects are not valid native graph dependencies")
@@ -14348,21 +14207,6 @@ impl GraphError {
 #[cfg(test)]
 mod exit_code_tests {
     use super::GraphError;
-
-    #[test]
-    fn help_documents_every_exit_code_the_stats_return() {
-        let help = super::OGS_STATS_EXIT_CODES_HELP;
-        assert_eq!(super::ObjectStats::default().exit_code(), 3);
-        assert_eq!(GraphError::GitObjectHashMismatch.exit_code(), 2);
-        assert_eq!(GraphError::ReadQuotaExceeded.exit_code(), 1);
-        for code in [0, 1, 2, 3] {
-            assert!(
-                help.lines()
-                    .any(|line| line.starts_with(&format!("  {code}  "))),
-                "help must document exit code {code}: {help}"
-            );
-        }
-    }
 
     #[test]
     fn corrupt_index_exits_2_and_other_failures_exit_1() {

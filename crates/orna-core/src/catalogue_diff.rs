@@ -878,10 +878,10 @@ fn qualified(name: &crate::catalogue::QualifiedSemanticName) -> String {
 mod tests {
     use super::*;
     use crate::catalogue::{
-        EnumTypeDefinition, FieldDefinition, FunctionDomain, FunctionReturn, FunctionSecurity,
-        FunctionTransaction, FunctionVolatility, ParameterDefinition, QualifiedSemanticName,
-        RecordValueFieldDefinition, RecordValueTypeDefinition, SchemaDefinition,
-        ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
+        CatalogueDefinitions, EnumTypeDefinition, FieldDefinition, FunctionDomain, FunctionReturn,
+        FunctionSecurity, FunctionTransaction, FunctionVolatility, ParameterDefinition,
+        QualifiedSemanticName, RecordValueFieldDefinition, RecordValueTypeDefinition,
+        SchemaDefinition, ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
     };
     use crate::{
         CatalogueRevisionId, ExpressionId, FunctionRevisionId,
@@ -1002,15 +1002,14 @@ mod tests {
         values: Vec<ValueTypeDefinition>,
         records: Vec<RecordValueTypeDefinition>,
     ) -> CatalogueSnapshot {
-        CatalogueSnapshot::new_with_functions_and_record_value_types(
+        CatalogueSnapshot::from_definitions(
             CatalogueRevisionId::from_bytes([7; 16]),
-            schemas,
-            Vec::new(),
-            values,
-            Vec::new(),
-            records,
-            Vec::new(),
-            Vec::new(),
+            CatalogueDefinitions {
+                schemas,
+                value_types: values,
+                record_value_types: records,
+                ..CatalogueDefinitions::default()
+            },
         )
         .unwrap()
     }
@@ -1020,15 +1019,14 @@ mod tests {
         enums: Vec<EnumTypeDefinition>,
         records: Vec<RecordValueTypeDefinition>,
     ) -> CatalogueSnapshot {
-        CatalogueSnapshot::new_with_functions_and_record_value_types(
+        CatalogueSnapshot::from_definitions(
             CatalogueRevisionId::from_bytes([7; 16]),
-            schemas,
-            Vec::new(),
-            Vec::new(),
-            enums,
-            records,
-            Vec::new(),
-            Vec::new(),
+            CatalogueDefinitions {
+                schemas,
+                enum_types: enums,
+                record_value_types: records,
+                ..CatalogueDefinitions::default()
+            },
         )
         .unwrap()
     }
@@ -1039,14 +1037,15 @@ mod tests {
         enums: Vec<EnumTypeDefinition>,
         functions: Vec<FunctionDefinition>,
     ) -> CatalogueSnapshot {
-        CatalogueSnapshot::new_with_functions_and_enum_types(
+        CatalogueSnapshot::from_definitions(
             CatalogueRevisionId::from_bytes([7; 16]),
-            schemas,
-            types,
-            Vec::new(),
-            enums,
-            Vec::new(),
-            functions,
+            CatalogueDefinitions {
+                schemas,
+                object_types: types,
+                enum_types: enums,
+                functions,
+                ..CatalogueDefinitions::default()
+            },
         )
         .unwrap()
     }

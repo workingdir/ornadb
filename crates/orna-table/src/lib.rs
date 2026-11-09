@@ -22,6 +22,111 @@ fn next_activation_id() -> u64 {
     activation_id
 }
 
+/// The lifecycle both root kinds share: where the activation is, which
+/// identity its savepoints are bound to, and who may publish it.
+struct Lifecycle {
+    state: ActivationState,
+    id: u64,
+    /// `activate` publishes after the operation returns, so the operation
+    /// itself may not commit.
+    helper_managed: bool,
+}
+
+impl Lifecycle {
+    fn open() -> Self {
+        Self {
+            state: ActivationState::Open,
+            id: next_activation_id(),
+            helper_managed: false,
+        }
+    }
+
+    fn require_open(&self) -> Result<(), TableError> {
+        if self.state == ActivationState::Open {
+            Ok(())
+        } else {
+            Err(TableError::UseAfterClose)
+        }
+    }
+
+    /// An explicit commit is refused for a helper-managed root in any state.
+    fn require_caller_publication(&self) -> Result<(), TableError> {
+        if self.helper_managed {
+            Err(TableError::HelperManagedCommit)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn require_unpublished(&self) -> Result<(), TableError> {
+        match self.state {
+            ActivationState::Open => Ok(()),
+            ActivationState::Committed => Err(TableError::DoubleCommit),
+            ActivationState::RolledBack => Err(TableError::UseAfterClose),
+        }
+    }
+
+    fn require_own_savepoint(&self, savepoint_id: u64) -> Result<(), TableError> {
+        self.require_open()?;
+        if savepoint_id == self.id {
+            Ok(())
+        } else {
+            Err(TableError::ForeignSavepoint)
+        }
+    }
+
+    /// Closes an open activation; the caller then drops what it staged.
+    /// Closing a closed activation does nothing, so cleanup can repeat.
+    fn roll_back(&mut self) -> bool {
+        let was_open = self.state == ActivationState::Open;
+        if was_open {
+            self.state = ActivationState::RolledBack;
+        }
+        was_open
+    }
+}
+
+/// Applies staged inserts, replacements (`Some`) and deletions (`None`).
+fn apply_overlay<Key: Clone + Ord, Row: Clone>(
+    rows: &mut BTreeMap<Key, Row>,
+    overlay: &BTreeMap<Key, Option<Row>>,
+) {
+    for (key, mutation) in overlay {
+        match mutation {
+            Some(row) => {
+                rows.insert(key.clone(), row.clone());
+            }
+            None => {
+                rows.remove(key);
+            }
+        }
+    }
+}
+
+/// The required-reference graph after publication. Staged edges replace
+/// published ones, edges whose source row no longer exists are dropped, and an
+/// edge whose target row no longer exists refuses the publication.
+fn settle_references<Address: Clone + Ord>(
+    published: &BTreeMap<Address, BTreeSet<Address>>,
+    staged: &BTreeMap<Address, BTreeSet<Address>>,
+    exists: impl Fn(&Address) -> bool,
+) -> Result<BTreeMap<Address, BTreeSet<Address>>, TableError> {
+    let mut references = published.clone();
+    references.extend(
+        staged
+            .iter()
+            .map(|(source, targets)| (source.clone(), targets.clone())),
+    );
+    references.retain(|source, _| exists(source));
+    if references
+        .values()
+        .any(|targets| targets.iter().any(|target| !exists(target)))
+    {
+        return Err(TableError::ReferencedRow);
+    }
+    Ok(references)
+}
+
 /// The committed relation for one table.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TableRuntime<Key, Row> {
@@ -57,9 +162,7 @@ where
             overlay: BTreeMap::new(),
             rekey_changes: Vec::new(),
             required_reference_overlay: BTreeMap::new(),
-            state: ActivationState::Open,
-            activation_id: next_activation_id(),
-            helper_managed: false,
+            lifecycle: Lifecycle::open(),
         }
     }
 
@@ -71,7 +174,7 @@ where
         F: FnOnce(&mut Activation<'_, Key, Row>) -> Result<T, E>,
     {
         let mut activation = self.begin();
-        activation.helper_managed = true;
+        activation.lifecycle.helper_managed = true;
         match operation(&mut activation) {
             Ok(value) => activation
                 .publish()
@@ -570,39 +673,24 @@ where
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            match (self.committed.peek(), self.overlay.peek()) {
+            let order = match (self.committed.peek(), self.overlay.peek()) {
                 (None, None) => return None,
-                (Some(_), None) => {
-                    let (key, row) = self.committed.next().expect("peeked committed row");
-                    return Some((key.clone(), row.clone()));
-                }
-                (None, Some(_)) => {
-                    let (key, row) = self.overlay.next().expect("peeked overlay row");
-                    if let Some(row) = row {
-                        return Some((key.clone(), row.clone()));
-                    }
-                }
-                (Some((committed_key, _)), Some((overlay_key, _))) => {
-                    match committed_key.cmp(overlay_key) {
-                        std::cmp::Ordering::Less => {
-                            let (key, row) = self.committed.next().expect("peeked committed row");
-                            return Some((key.clone(), row.clone()));
-                        }
-                        std::cmp::Ordering::Equal => {
-                            self.committed.next();
-                            let (key, row) = self.overlay.next().expect("peeked overlay row");
-                            if let Some(row) = row {
-                                return Some((key.clone(), row.clone()));
-                            }
-                        }
-                        std::cmp::Ordering::Greater => {
-                            let (key, row) = self.overlay.next().expect("peeked overlay row");
-                            if let Some(row) = row {
-                                return Some((key.clone(), row.clone()));
-                            }
-                        }
-                    }
-                }
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (Some((committed, _)), Some((staged, _))) => committed.cmp(staged),
+            };
+            if order == std::cmp::Ordering::Less {
+                let (key, row) = self.committed.next()?;
+                return Some((key.clone(), row.clone()));
+            }
+            if order == std::cmp::Ordering::Equal {
+                // A staged entry at the same key replaces the committed row.
+                self.committed.next();
+            }
+            // A staged deletion hides the committed row and yields nothing.
+            let (key, staged) = self.overlay.next()?;
+            if let Some(row) = staged {
+                return Some((key.clone(), row.clone()));
             }
         }
     }
@@ -615,9 +703,7 @@ pub struct Activation<'runtime, Key, Row> {
     overlay: BTreeMap<Key, Option<Row>>,
     rekey_changes: Vec<RekeyChange<Key>>,
     required_reference_overlay: BTreeMap<Key, BTreeSet<Key>>,
-    state: ActivationState,
-    activation_id: u64,
-    helper_managed: bool,
+    lifecycle: Lifecycle,
 }
 
 impl<'runtime, Key, Row> Activation<'runtime, Key, Row>
@@ -629,20 +715,19 @@ where
     pub fn child<'scope>(
         &'scope mut self,
     ) -> Result<ChildScope<'scope, 'runtime, Key, Row>, TableError> {
-        self.require_open()?;
+        self.lifecycle.require_open()?;
         Ok(ChildScope { activation: self })
     }
 
     /// Stages a reference-free insert. Use `insert_with_required_references`
     /// for a row with non-optional stored references.
     pub fn insert(&mut self, key: Key, row: Row) -> Result<(), TableError> {
-        self.require_open()?;
+        self.lifecycle.require_open()?;
         if self.candidate(&key).is_some() {
             return Err(TableError::DuplicateKey);
         }
         self.overlay.insert(key.clone(), Some(row));
-        self.required_reference_overlay
-            .insert(key.clone(), BTreeSet::new());
+        self.required_reference_overlay.insert(key, BTreeSet::new());
         Ok(())
     }
 
@@ -663,11 +748,11 @@ where
     /// Stages a replacement while preserving its registered required-reference
     /// targets. Use `update_with_required_references` when those targets change.
     pub fn update(&mut self, key: Key, row: Row) -> Result<(), TableError> {
-        self.require_open()?;
+        self.lifecycle.require_open()?;
         if self.candidate(&key).is_none() {
             return Err(TableError::MissingRow);
         }
-        self.overlay.insert(key.clone(), Some(row));
+        self.overlay.insert(key, Some(row));
         Ok(())
     }
 
@@ -695,7 +780,7 @@ where
     where
         I: IntoIterator<Item = Key>,
     {
-        self.require_open()?;
+        self.lifecycle.require_open()?;
         if self.candidate(&source_key).is_none() {
             return Err(TableError::MissingRow);
         }
@@ -706,13 +791,12 @@ where
 
     /// Stages deletion of an existing candidate row.
     pub fn delete(&mut self, key: Key) -> Result<(), TableError> {
-        self.require_open()?;
+        self.lifecycle.require_open()?;
         if self.candidate(&key).is_none() {
             return Err(TableError::MissingRow);
         }
         self.overlay.insert(key.clone(), None);
-        self.required_reference_overlay
-            .insert(key.clone(), BTreeSet::new());
+        self.required_reference_overlay.insert(key, BTreeSet::new());
         Ok(())
     }
 
@@ -721,7 +805,7 @@ where
     /// The operation leaves the overlay unchanged when the old key is missing or
     /// the new key is already occupied.
     pub fn rekey(&mut self, old_key: Key, new_key: Key) -> Result<(), TableError> {
-        self.require_open()?;
+        self.lifecycle.require_open()?;
         let Some(row) = self.candidate(&old_key).cloned() else {
             return Err(TableError::MissingRow);
         };
@@ -752,24 +836,15 @@ where
 
     /// Reads the candidate relation, including this activation's own writes.
     pub fn read(&self, key: &Key) -> Result<Option<&Row>, TableError> {
-        self.require_open()?;
+        self.lifecycle.require_open()?;
         Ok(self.candidate(key))
     }
 
     /// Materialises the unpublished candidate relation for validation.
     pub fn candidate_rows(&self) -> Result<BTreeMap<Key, Row>, TableError> {
-        self.require_open()?;
+        self.lifecycle.require_open()?;
         let mut candidate = self.runtime.committed.clone();
-        for (key, mutation) in &self.overlay {
-            match mutation {
-                Some(row) => {
-                    candidate.insert(key.clone(), row.clone());
-                }
-                None => {
-                    candidate.remove(key);
-                }
-            }
-        }
+        apply_overlay(&mut candidate, &self.overlay);
         Ok(candidate)
     }
 
@@ -781,7 +856,7 @@ where
         &self,
         limit: usize,
     ) -> Result<impl Iterator<Item = (Key, Row)>, TableError> {
-        self.require_open()?;
+        self.lifecycle.require_open()?;
         Ok(CandidateScan::new(self.runtime.committed.iter(), self.overlay.iter()).take(limit))
     }
 
@@ -793,7 +868,7 @@ where
     where
         R: RangeBounds<Key> + Clone,
     {
-        self.require_open()?;
+        self.lifecycle.require_open()?;
         Ok(CandidateScan::new(
             self.runtime.committed.range(range.clone()),
             self.overlay.range(range),
@@ -802,7 +877,7 @@ where
 
     /// Returns a lazy ordered relation over this activation's candidate rows.
     pub fn candidate_relation(&self) -> Result<Relation<'_, (Key, Row)>, TableError> {
-        self.require_open()?;
+        self.lifecycle.require_open()?;
         Ok(Relation::new(CandidateScan::new(
             self.runtime.committed.iter(),
             self.overlay.iter(),
@@ -811,21 +886,19 @@ where
 
     /// Captures the current private overlay for statement-level recovery.
     pub fn savepoint(&self) -> Result<Savepoint<Key, Row>, TableError> {
-        self.require_open()?;
+        self.lifecycle.require_open()?;
         Ok(Savepoint {
             overlay: self.overlay.clone(),
             rekey_changes: self.rekey_changes.clone(),
             required_reference_overlay: self.required_reference_overlay.clone(),
-            activation_id: self.activation_id,
+            activation_id: self.lifecycle.id,
         })
     }
 
     /// Restores a previously captured overlay without affecting committed rows.
     pub fn rollback_to(&mut self, savepoint: Savepoint<Key, Row>) -> Result<(), TableError> {
-        self.require_open()?;
-        if savepoint.activation_id != self.activation_id {
-            return Err(TableError::ForeignSavepoint);
-        }
+        self.lifecycle
+            .require_own_savepoint(savepoint.activation_id)?;
         self.overlay = savepoint.overlay;
         self.rekey_changes = savepoint.rekey_changes;
         self.required_reference_overlay = savepoint.required_reference_overlay;
@@ -834,59 +907,31 @@ where
 
     /// Publishes every staged change together. Nested scopes cannot call this.
     pub fn commit(&mut self) -> Result<(), TableError> {
-        if self.helper_managed {
-            return Err(TableError::HelperManagedCommit);
-        }
+        self.lifecycle.require_caller_publication()?;
         self.publish()
     }
 
     fn publish(&mut self) -> Result<(), TableError> {
-        match self.state {
-            ActivationState::Committed => return Err(TableError::DoubleCommit),
-            ActivationState::RolledBack => return Err(TableError::UseAfterClose),
-            ActivationState::Open => {}
-        }
+        self.lifecycle.require_unpublished()?;
         let mut committed = self.runtime.committed.clone();
-        for (key, mutation) in &self.overlay {
-            match mutation {
-                Some(row) => {
-                    committed.insert(key.clone(), row.clone());
-                }
-                None => {
-                    committed.remove(key);
-                }
-            }
-        }
-        let mut references = self.runtime.required_references.clone();
-        references.extend(self.required_reference_overlay.clone());
-        references.retain(|source, _| committed.contains_key(source));
-        if references
-            .values()
-            .any(|targets| targets.iter().any(|target| !committed.contains_key(target)))
-        {
-            return Err(TableError::ReferencedRow);
-        }
+        apply_overlay(&mut committed, &self.overlay);
+        let references = settle_references(
+            &self.runtime.required_references,
+            &self.required_reference_overlay,
+            |key| committed.contains_key(key),
+        )?;
         self.runtime.committed = committed;
         self.runtime.required_references = references;
-        self.state = ActivationState::Committed;
+        self.lifecycle.state = ActivationState::Committed;
         Ok(())
     }
 
     /// Discards every staged change. The operation is idempotent for cleanup.
     pub fn rollback(&mut self) {
-        if self.state == ActivationState::Open {
+        if self.lifecycle.roll_back() {
             self.overlay.clear();
             self.rekey_changes.clear();
             self.required_reference_overlay.clear();
-            self.state = ActivationState::RolledBack;
-        }
-    }
-
-    fn require_open(&self) -> Result<(), TableError> {
-        if self.state == ActivationState::Open {
-            Ok(())
-        } else {
-            Err(TableError::UseAfterClose)
         }
     }
 
@@ -1059,9 +1104,7 @@ where
             overlay: BTreeMap::new(),
             rekey_changes: Vec::new(),
             required_reference_overlay: BTreeMap::new(),
-            state: ActivationState::Open,
-            activation_id: next_activation_id(),
-            helper_managed: false,
+            lifecycle: Lifecycle::open(),
         }
     }
 
@@ -1072,7 +1115,7 @@ where
         F: FnOnce(&mut DatabaseActivation<'_, Table, Key, Row>) -> Result<T, E>,
     {
         let mut activation = self.begin();
-        activation.helper_managed = true;
+        activation.lifecycle.helper_managed = true;
         match operation(&mut activation) {
             Ok(value) => activation
                 .publish()
@@ -1205,9 +1248,7 @@ pub struct DatabaseActivation<'runtime, Table, Key, Row> {
     overlay: BTreeMap<Table, BTreeMap<Key, Option<Row>>>,
     rekey_changes: Vec<DatabaseRekeyChange<Table, Key>>,
     required_reference_overlay: BTreeMap<(Table, Key), BTreeSet<(Table, Key)>>,
-    state: ActivationState,
-    activation_id: u64,
-    helper_managed: bool,
+    lifecycle: Lifecycle,
 }
 
 impl<'runtime, Table, Key, Row> DatabaseActivation<'runtime, Table, Key, Row>
@@ -1220,14 +1261,14 @@ where
     pub fn child<'scope>(
         &'scope mut self,
     ) -> Result<DatabaseChildScope<'scope, 'runtime, Table, Key, Row>, TableError> {
-        self.require_open()?;
+        self.lifecycle.require_open()?;
         Ok(DatabaseChildScope { activation: self })
     }
 
     /// Stages a reference-free row in one relation. Use
     /// `insert_with_required_references` for non-optional references.
     pub fn insert(&mut self, table: Table, key: Key, row: Row) -> Result<(), TableError> {
-        self.require_open()?;
+        self.lifecycle.require_open()?;
         if self.candidate(&table, &key).is_some() {
             return Err(TableError::DuplicateKey);
         }
@@ -1258,7 +1299,7 @@ where
     /// Stages a replacement while preserving its registered required-reference
     /// targets. Use `update_with_required_references` when those targets change.
     pub fn update(&mut self, table: Table, key: Key, row: Row) -> Result<(), TableError> {
-        self.require_open()?;
+        self.lifecycle.require_open()?;
         if self.candidate(&table, &key).is_none() {
             return Err(TableError::MissingRow);
         }
@@ -1297,7 +1338,7 @@ where
     where
         I: IntoIterator<Item = (Table, Key)>,
     {
-        self.require_open()?;
+        self.lifecycle.require_open()?;
         if self.candidate(&source_table, &source_key).is_none() {
             return Err(TableError::MissingRow);
         }
@@ -1308,7 +1349,7 @@ where
 
     /// Stages deletion of one existing candidate row.
     pub fn delete(&mut self, table: Table, key: Key) -> Result<(), TableError> {
-        self.require_open()?;
+        self.lifecycle.require_open()?;
         if self.candidate(&table, &key).is_none() {
             return Err(TableError::MissingRow);
         }
@@ -1323,7 +1364,7 @@ where
     /// The operation leaves the overlay unchanged when the old key is missing or
     /// the new key is already occupied.
     pub fn rekey(&mut self, table: Table, old_key: Key, new_key: Key) -> Result<(), TableError> {
-        self.require_open()?;
+        self.lifecycle.require_open()?;
         let Some(row) = self.candidate(&table, &old_key).cloned() else {
             return Err(TableError::MissingRow);
         };
@@ -1357,13 +1398,13 @@ where
 
     /// Reads the candidate relation, including all writes staged by this root.
     pub fn read(&self, table: &Table, key: &Key) -> Result<Option<&Row>, TableError> {
-        self.require_open()?;
+        self.lifecycle.require_open()?;
         Ok(self.candidate(table, key))
     }
 
     /// Materialises one unpublished candidate relation for validation.
     pub fn candidate_rows(&self, table: &Table) -> Result<BTreeMap<Key, Row>, TableError> {
-        self.require_open()?;
+        self.lifecycle.require_open()?;
         let mut candidate = self
             .runtime
             .committed
@@ -1371,16 +1412,7 @@ where
             .cloned()
             .unwrap_or_default();
         if let Some(overlay) = self.overlay.get(table) {
-            for (key, mutation) in overlay {
-                match mutation {
-                    Some(row) => {
-                        candidate.insert(key.clone(), row.clone());
-                    }
-                    None => {
-                        candidate.remove(key);
-                    }
-                }
-            }
+            apply_overlay(&mut candidate, overlay);
         }
         Ok(candidate)
     }
@@ -1391,7 +1423,7 @@ where
         table: &Table,
         limit: usize,
     ) -> Result<impl Iterator<Item = (Key, Row)>, TableError> {
-        self.require_open()?;
+        self.lifecycle.require_open()?;
         let committed = self
             .runtime
             .committed
@@ -1411,7 +1443,7 @@ where
     where
         R: RangeBounds<Key> + Clone + 'a,
     {
-        self.require_open()?;
+        self.lifecycle.require_open()?;
         let committed_range = range.clone();
         let committed = self
             .runtime
@@ -1432,7 +1464,7 @@ where
         &self,
         table: &Table,
     ) -> Result<Relation<'_, (Key, Row)>, TableError> {
-        self.require_open()?;
+        self.lifecycle.require_open()?;
         let committed = self
             .runtime
             .committed
@@ -1445,12 +1477,12 @@ where
 
     /// Captures every private relation overlay for statement-level recovery.
     pub fn savepoint(&self) -> Result<DatabaseSavepoint<Table, Key, Row>, TableError> {
-        self.require_open()?;
+        self.lifecycle.require_open()?;
         Ok(DatabaseSavepoint {
             overlay: self.overlay.clone(),
             rekey_changes: self.rekey_changes.clone(),
             required_reference_overlay: self.required_reference_overlay.clone(),
-            activation_id: self.activation_id,
+            activation_id: self.lifecycle.id,
         })
     }
 
@@ -1459,10 +1491,8 @@ where
         &mut self,
         savepoint: DatabaseSavepoint<Table, Key, Row>,
     ) -> Result<(), TableError> {
-        self.require_open()?;
-        if savepoint.activation_id != self.activation_id {
-            return Err(TableError::ForeignSavepoint);
-        }
+        self.lifecycle
+            .require_own_savepoint(savepoint.activation_id)?;
         self.overlay = savepoint.overlay;
         self.rekey_changes = savepoint.rekey_changes;
         self.required_reference_overlay = savepoint.required_reference_overlay;
@@ -1471,69 +1501,37 @@ where
 
     /// Publishes the overlays of every changed relation together.
     pub fn commit(&mut self) -> Result<(), TableError> {
-        if self.helper_managed {
-            return Err(TableError::HelperManagedCommit);
-        }
+        self.lifecycle.require_caller_publication()?;
         self.publish()
     }
 
     fn publish(&mut self) -> Result<(), TableError> {
-        match self.state {
-            ActivationState::Committed => return Err(TableError::DoubleCommit),
-            ActivationState::RolledBack => return Err(TableError::UseAfterClose),
-            ActivationState::Open => {}
-        }
+        self.lifecycle.require_unpublished()?;
         let mut committed = self.runtime.committed.clone();
         for (table, overlay) in &self.overlay {
-            let relation = committed.entry(table.clone()).or_default();
-            for (key, mutation) in overlay {
-                match mutation {
-                    Some(row) => {
-                        relation.insert(key.clone(), row.clone());
-                    }
-                    None => {
-                        relation.remove(key);
-                    }
-                }
-            }
+            apply_overlay(committed.entry(table.clone()).or_default(), overlay);
         }
-        let mut references = self.runtime.required_references.clone();
-        references.extend(self.required_reference_overlay.clone());
-        references.retain(|(source_table, source_key), _| {
-            committed
-                .get(source_table)
-                .is_some_and(|rows| rows.contains_key(source_key))
-        });
-        if references.iter().any(|(_, targets)| {
-            targets.iter().any(|(target_table, target_key)| {
-                !committed
-                    .get(target_table)
-                    .is_some_and(|rows| rows.contains_key(target_key))
-            })
-        }) {
-            return Err(TableError::ReferencedRow);
-        }
+        let references = settle_references(
+            &self.runtime.required_references,
+            &self.required_reference_overlay,
+            |(table, key)| {
+                committed
+                    .get(table)
+                    .is_some_and(|rows| rows.contains_key(key))
+            },
+        )?;
         self.runtime.committed = committed;
         self.runtime.required_references = references;
-        self.state = ActivationState::Committed;
+        self.lifecycle.state = ActivationState::Committed;
         Ok(())
     }
 
     /// Discards every relation overlay. Repeated cleanup is harmless.
     pub fn rollback(&mut self) {
-        if self.state == ActivationState::Open {
+        if self.lifecycle.roll_back() {
             self.overlay.clear();
             self.rekey_changes.clear();
             self.required_reference_overlay.clear();
-            self.state = ActivationState::RolledBack;
-        }
-    }
-
-    fn require_open(&self) -> Result<(), TableError> {
-        if self.state == ActivationState::Open {
-            Ok(())
-        } else {
-            Err(TableError::UseAfterClose)
         }
     }
 

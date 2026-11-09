@@ -18,6 +18,9 @@ use std::{
 
 const VERSION: &str = "1.1.0";
 const NORMATIVE_PAYLOAD_COUNT: usize = 58;
+/// The 1.1.0 requirement register has exactly this many requirements, each with
+/// one evidence entry (`release.json` counts agree).
+const REQUIREMENT_COUNT: usize = 947;
 /// The only named algorithm results the 1.1.0 model register records twice; each
 /// pair is byte-identical in the vendored `evidence/model-results.json`.
 const EXACT_DUPLICATE_MODEL_RESULTS: [&str; 2] =
@@ -67,6 +70,25 @@ pub struct RequirementTrace {
     pub status: Status,
     pub boundaries: Vec<Boundary>,
 }
+impl RequirementTrace {
+    /// Appends `boundary` and recomputes the requirement's aggregate status.
+    fn push_boundary(&mut self, boundary: Boundary) {
+        self.boundaries.push(boundary);
+        self.status = aggregate_boundaries(&self.boundaries);
+    }
+}
+
+/// Indexes the report's requirements by identifier so witnesses can append
+/// boundaries to the requirement they name.
+fn requirements_by_id(
+    requirements: &mut [RequirementTrace],
+) -> BTreeMap<String, &mut RequirementTrace> {
+    requirements
+        .iter_mut()
+        .map(|requirement| (requirement.requirement_id.clone(), requirement))
+        .collect()
+}
+
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct Boundary {
     pub kind: String,
@@ -248,7 +270,7 @@ struct Model {
 /// Returns an error when the reference bundle or its publication digests are
 /// invalid.
 pub fn generate(root: impl AsRef<Path>) -> Result<Report> {
-    generate_inner(root.as_ref(), None, None, None)
+    generate_inner(root.as_ref(), ExecutionEvidence::None)
 }
 
 /// Generate the frozen report with an execution register produced by the
@@ -263,7 +285,7 @@ pub fn generate_with_engine_witnesses(
     root: impl AsRef<Path>,
     witnesses: &EngineWitnesses,
 ) -> Result<Report> {
-    generate_inner(root.as_ref(), Some(witnesses), None, None)
+    generate_inner(root.as_ref(), ExecutionEvidence::Engine(witnesses))
 }
 
 /// Generate the frozen report with implementation-scenario execution
@@ -278,7 +300,10 @@ pub fn generate_with_scenario_execution_witnesses(
     root: impl AsRef<Path>,
     witnesses: &ScenarioExecutionWitnesses,
 ) -> Result<Report> {
-    generate_inner(root.as_ref(), None, Some(witnesses), None)
+    generate_inner(
+        root.as_ref(),
+        ExecutionEvidence::ScenarioExecution(witnesses),
+    )
 }
 
 /// Generate the frozen report with publication-pinned bounded production-unit
@@ -293,15 +318,23 @@ pub fn generate_with_implementation_evidence_overlay(
     root: impl AsRef<Path>,
     overlay: &ImplementationEvidenceOverlay,
 ) -> Result<Report> {
-    generate_inner(root.as_ref(), None, None, Some(overlay))
+    generate_inner(root.as_ref(), ExecutionEvidence::ProductionOverlay(overlay))
 }
 
-fn generate_inner(
-    root: &Path,
-    engine_witnesses: Option<&EngineWitnesses>,
-    scenario_execution_witnesses: Option<&ScenarioExecutionWitnesses>,
-    implementation_evidence_overlay: Option<&ImplementationEvidenceOverlay>,
-) -> Result<Report> {
+/// The one source of execution evidence layered over the frozen report. Each
+/// public entry point supplies at most one, and the kinds are recorded as
+/// distinct boundaries that never stand in for one another.
+enum ExecutionEvidence<'a> {
+    None,
+    /// Orna-engine execution witnesses.
+    Engine(&'a EngineWitnesses),
+    /// Implementation-scenario execution witnesses (not engine execution).
+    ScenarioExecution(&'a ScenarioExecutionWitnesses),
+    /// Bounded production-unit evidence, always partial.
+    ProductionOverlay(&'a ImplementationEvidenceOverlay),
+}
+
+fn generate_inner(root: &Path, execution: ExecutionEvidence<'_>) -> Result<Report> {
     let release: Release = read_json(root, "release.json")?;
     if release.version != VERSION
         || release.normative_payload_sha256.len() != NORMATIVE_PAYLOAD_COUNT
@@ -362,7 +395,7 @@ fn generate_inner(
             RequirementTrace {
                 requirement_id: requirement.id.clone(),
                 chapter: requirement.chapter.clone(),
-                status: aggregate(&boundaries.iter().map(|b| b.status).collect::<Vec<_>>()),
+                status: aggregate_boundaries(&boundaries),
                 boundaries,
             }
         })
@@ -409,14 +442,17 @@ fn generate_inner(
             .collect::<Result<Vec<_>>>()?,
         bounded_production_evidence: Vec::new(),
     };
-    if let Some(witnesses) = engine_witnesses {
-        apply_engine_witnesses(&mut report, witnesses, &manifest, &evidence)?;
-    }
-    if let Some(witnesses) = scenario_execution_witnesses {
-        apply_scenario_execution_witnesses(&mut report, witnesses, &scenarios)?;
-    }
-    if let Some(overlay) = implementation_evidence_overlay {
-        apply_implementation_evidence_overlay(&mut report, overlay)?;
+    match execution {
+        ExecutionEvidence::None => {}
+        ExecutionEvidence::Engine(witnesses) => {
+            apply_engine_witnesses(&mut report, witnesses, &manifest, &evidence)?;
+        }
+        ExecutionEvidence::ScenarioExecution(witnesses) => {
+            apply_scenario_execution_witnesses(&mut report, witnesses, &scenarios)?;
+        }
+        ExecutionEvidence::ProductionOverlay(overlay) => {
+            apply_implementation_evidence_overlay(&mut report, overlay)?;
+        }
     }
     Ok(report)
 }
@@ -433,11 +469,7 @@ fn apply_implementation_evidence_overlay(
     if overlay.aggregate() != ImplementationEvidenceAggregate::PartiallyExecuted {
         return Err(err("implementation evidence overlay has invalid aggregate"));
     }
-    let mut requirements = report
-        .requirements
-        .iter_mut()
-        .map(|requirement| (requirement.requirement_id.clone(), requirement))
-        .collect::<BTreeMap<_, _>>();
+    let mut requirements = requirements_by_id(&mut report.requirements);
     let mut seen = BTreeSet::new();
     for evidence in overlay.evidence() {
         if evidence.source() != &ImplementationEvidenceSource::ProductionUnit {
@@ -480,14 +512,7 @@ fn apply_implementation_evidence_overlay(
             test_ref: Some(evidence.test_ref().into()),
             status: Status::PartiallyExecuted,
         };
-        requirement.boundaries.push(boundary);
-        requirement.status = aggregate(
-            &requirement
-                .boundaries
-                .iter()
-                .map(|boundary| boundary.status)
-                .collect::<Vec<_>>(),
-        );
+        requirement.push_boundary(boundary);
         report
             .bounded_production_evidence
             .push(BoundedProductionEvidence {
@@ -568,11 +593,7 @@ fn apply_engine_witnesses(
         .iter()
         .map(|item| (item.requirement.as_str(), item))
         .collect::<BTreeMap<_, _>>();
-    let mut requirements = report
-        .requirements
-        .iter_mut()
-        .map(|requirement| (requirement.requirement_id.clone(), requirement))
-        .collect::<BTreeMap<_, _>>();
+    let mut requirements = requirements_by_id(&mut report.requirements);
     let mut seen = BTreeSet::new();
     for witness in witnesses.witnesses() {
         let declared_evidence = evidence_by_requirement
@@ -637,20 +658,13 @@ fn apply_engine_witnesses(
                     witness.requirement_id()
                 ))
             })?;
-        requirement.boundaries.push(Boundary {
+        requirement.push_boundary(Boundary {
             kind: "engine-witness".into(),
             logical_id: format!("{}:{stage}", witness.fixture_id()),
             implementation_ref: Some(witness.implementation_ref().into()),
             test_ref: Some(witness.test_ref().into()),
             status: Status::Executed,
         });
-        requirement.status = aggregate(
-            &requirement
-                .boundaries
-                .iter()
-                .map(|boundary| boundary.status)
-                .collect::<Vec<_>>(),
-        );
     }
     Ok(())
 }
@@ -670,11 +684,7 @@ fn apply_scenario_execution_witnesses(
         .iter()
         .map(|scenario| (scenario.id.as_str(), scenario))
         .collect::<BTreeMap<_, _>>();
-    let mut requirements = report
-        .requirements
-        .iter_mut()
-        .map(|requirement| (requirement.requirement_id.clone(), requirement))
-        .collect::<BTreeMap<_, _>>();
+    let mut requirements = requirements_by_id(&mut report.requirements);
     let mut seen = BTreeSet::new();
     for witness in witnesses.witnesses() {
         let scenario = scenarios.get(witness.scenario_id()).ok_or_else(|| {
@@ -715,7 +725,7 @@ fn apply_scenario_execution_witnesses(
                     witness.requirement_id()
                 ))
             })?;
-        requirement.boundaries.push(Boundary {
+        requirement.push_boundary(Boundary {
             kind: "implementation-scenario-witness".into(),
             logical_id: witness.scenario_id().into(),
             implementation_ref: Some(witness.implementation_ref().into()),
@@ -725,13 +735,6 @@ fn apply_scenario_execution_witnesses(
             // distinction machine-readable at the boundary itself.
             status: Status::PartiallyExecuted,
         });
-        requirement.status = aggregate(
-            &requirement
-                .boundaries
-                .iter()
-                .map(|boundary| boundary.status)
-                .collect::<Vec<_>>(),
-        );
     }
     Ok(())
 }
@@ -746,6 +749,8 @@ fn stage_name(stage: &Stage) -> &'static str {
     }
 }
 
+/// Checks the whole reference bundle before any trace is built, in the order
+/// the artefacts depend on each other.
 fn validate(
     root: &Path,
     requirements: &[Requirement],
@@ -755,10 +760,22 @@ fn validate(
     scenarios: &Scenarios,
     models: &Models,
 ) -> Result<()> {
-    if requirements.len() != 947 || !unique(requirements.iter().map(|r| r.id.as_str())) {
-        return Err(err(
-            "requirements must contain exactly 947 unique identifiers",
-        ));
+    validate_requirements(requirements, evidence)?;
+    validate_manifest(root, manifest)?;
+    validate_invalid_metadata(root, manifest, invalid)?;
+    validate_scenarios(manifest, scenarios)?;
+    validate_models(models)
+}
+
+/// The requirement register and its evidence plan: exactly
+/// `REQUIREMENT_COUNT` unique requirements, each with a non-empty test list.
+fn validate_requirements(requirements: &[Requirement], evidence: &EvidenceFile) -> Result<()> {
+    if requirements.len() != REQUIREMENT_COUNT
+        || !unique(requirements.iter().map(|r| r.id.as_str()))
+    {
+        return Err(err(format!(
+            "requirements must contain exactly {REQUIREMENT_COUNT} unique identifiers"
+        )));
     }
     if requirements
         .iter()
@@ -768,12 +785,12 @@ fn validate(
             "requirements contain an empty chapter or source identifier",
         ));
     }
-    if evidence.requirements.len() != 947
+    if evidence.requirements.len() != REQUIREMENT_COUNT
         || !unique(evidence.requirements.iter().map(|e| e.requirement.as_str()))
     {
-        return Err(err(
-            "requirement evidence must contain exactly 947 unique identifiers",
-        ));
+        return Err(err(format!(
+            "requirement evidence must contain exactly {REQUIREMENT_COUNT} unique identifiers"
+        )));
     }
     let ids = requirements
         .iter()
@@ -801,6 +818,12 @@ fn validate(
             }
         }
     }
+    Ok(())
+}
+
+/// The conformance manifest: counts, unique identities, and each fixture's
+/// kind-specific expectations.
+fn validate_manifest(root: &Path, manifest: &Manifest) -> Result<()> {
     let fixture_counts = manifest
         .fixtures
         .iter()
@@ -896,6 +919,16 @@ fn validate(
             _ => {}
         }
     }
+    Ok(())
+}
+
+/// The invalid-fixture metadata and the expected-diagnostic file each invalid
+/// fixture points at.
+fn validate_invalid_metadata(
+    root: &Path,
+    manifest: &Manifest,
+    invalid: &InvalidMetadata,
+) -> Result<()> {
     let fixture_paths = manifest
         .fixtures
         .iter()
@@ -961,6 +994,11 @@ fn validate(
             )));
         }
     }
+    Ok(())
+}
+
+/// The scenario oracle register.
+fn validate_scenarios(manifest: &Manifest, scenarios: &Scenarios) -> Result<()> {
     if scenarios.version != manifest.version
         || scenarios.count != scenarios.scenarios.len()
         || !unique(scenarios.scenarios.iter().map(|s| s.id.as_str()))
@@ -983,6 +1021,12 @@ fn validate(
             ));
         }
     }
+    Ok(())
+}
+
+/// The named algorithm model results: all passing, and only the pinned exact
+/// duplicates appear twice.
+fn validate_models(models: &Models) -> Result<()> {
     let mut result_counts = BTreeMap::new();
     for model in &models.results {
         if model.name.is_empty() || !model.passed {
@@ -1170,6 +1214,14 @@ fn status_from_level(level: &str) -> Status {
     } else {
         Status::SpecifiedModelOnly
     }
+}
+fn aggregate_boundaries(boundaries: &[Boundary]) -> Status {
+    aggregate(
+        &boundaries
+            .iter()
+            .map(|boundary| boundary.status)
+            .collect::<Vec<_>>(),
+    )
 }
 fn aggregate(statuses: &[Status]) -> Status {
     if statuses.is_empty() {

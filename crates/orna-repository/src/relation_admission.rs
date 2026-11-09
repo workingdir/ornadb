@@ -44,10 +44,11 @@ use crate::{
     allocator::AllocatorError,
     bind_tree_entry_in_index,
     blob_store::{ContentIdentity, GearChunker},
+    hex::{hex_decode, hex_encode},
     native_graph::{
         ByteIndexEntry, GitHashAlgorithm, GraphError, IndexMaintenance, MAX_GRAPH_HEIGHT, MAX_REFS,
         NativeGraphContext, NativeNodeEnvelope, NativeObjectKind, NativeOid, NodeData,
-        RowIndexMutation, StoreRelationEntry, hex_decode, hex_encode, sync_object_files,
+        RowIndexMutation, StoreRelationEntry, sync_object_files,
     },
     overflow::{OverflowStore, OverflowWriter},
     row_store::{
@@ -1835,8 +1836,8 @@ impl Repository {
                 let Some(bytes) = change.bytes() else {
                     return Err(RelationAdmissionError::DatabaseRecordDeleted);
                 };
-                let recorded = crate::init::format_context::parse_canonical_database(bytes)
-                    .map_err(|()| {
+                let recorded =
+                    crate::format_context::parse_canonical_database(bytes).map_err(|()| {
                         RelationAdmissionError::Format(FormatContextError::MetadataInvalid)
                     })?;
                 if recorded != database_id {
@@ -4067,9 +4068,8 @@ mod tests {
         NodeData::decode_canonical(&bytes, GitHashAlgorithm::Sha1).expect("the descriptor decodes")
     }
 
-    /// An empty migration blob writes the null byte root that
-    /// `BlobDescriptor::empty()` names: zero length, the empty SHA-256 and no
-    /// byte index.
+    /// An empty migration blob writes the canonical empty descriptor: zero
+    /// length, the empty SHA-256 and a null byte root (no byte index).
     #[test]
     fn empty_migration_blob_has_the_null_byte_root() {
         let (directory, repository) = initialized_repository();
@@ -4088,10 +4088,8 @@ mod tests {
         else {
             panic!("the written node is a blob descriptor");
         };
-        let expected = crate::blob_store::BlobDescriptor::empty();
         assert_eq!(length, 0);
         assert_eq!(raw_sha256, empty.sha256());
-        assert_eq!(byte_root.as_ref(), expected.byte_root());
         assert!(byte_root.is_none());
     }
 

@@ -6,7 +6,7 @@
 //! boundary.  A delivery can advance a checkpoint only through `Complete` or `Skip`.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
@@ -138,6 +138,25 @@ impl DeliveryIdentity {
         }
     }
 
+    /// Whether this delivery belongs to the ordered stream `key`, compared
+    /// field by field so scanning many deliveries builds no keys.
+    fn is_on_stream(&self, key: &CheckpointKey) -> bool {
+        let CheckpointKey {
+            consumer,
+            source_format,
+            source,
+            partition_format,
+            partition,
+            position_format,
+        } = key;
+        self.consumer == *consumer
+            && self.source_format == *source_format
+            && self.source == *source
+            && self.partition_format == *partition_format
+            && self.partition == *partition
+            && self.position_format == *position_format
+    }
+
     pub fn canonical(&self) -> String {
         let prefix = if self.partition.is_some() {
             "delivery/v1"
@@ -184,6 +203,17 @@ pub struct Checkpoint {
     pub version: u64,
     /// `None` means no item has been committed.
     pub committed: Option<Position>,
+}
+
+impl Checkpoint {
+    /// The checkpoint of a stream that has never committed.
+    fn unwritten(key: &CheckpointKey) -> Self {
+        Self {
+            key: key.clone(),
+            version: 0,
+            committed: None,
+        }
+    }
 }
 
 /// The result of merging a checkpoint position from two branches.
@@ -333,10 +363,9 @@ impl fmt::Debug for SafeAssertionWitness {
 
 /// Structured context for an assertion failure.
 ///
-/// The current `CommitIntent` and `FailureRecord` boundary carries only
-/// [`SafeDiagnostic`], so this detail is not yet a durable stream result.
-/// Runtime persistence and projection must be extended before an assertion
-/// producer can enter the normal failure path with this context.
+/// It enters the failure path through [`CommitIntent::FailWithAssertion`] and
+/// [`CommitIntent::ReplayFailWithAssertion`] and is retained on
+/// [`FailureRecord::assertion_detail`].
 ///
 /// `assertion` and `predicate` are snapshot-pinned `sys.AssertionRef` and
 /// `sys.ExpressionRef` coordinates respectively. These foundation aliases
@@ -361,7 +390,6 @@ pub struct AssertionDiagnosticDetail {
 }
 
 impl AssertionDiagnosticDetail {
-    #[allow(clippy::too_many_arguments)]
     pub fn table_or_cross_table_false(
         assertion: AssertionRef,
         owner: ObjectRef,
@@ -693,17 +721,216 @@ pub trait AsyncFailurePayloadBackend {
     ) -> Pin<Box<dyn Future<Output = Result<CommitResult, Self::Error>> + 'a>>;
 }
 
+/// Refuses an intent with `reason` when `condition` holds. Intent handlers use
+/// it to read as the ordered list of guards they apply before mutating state.
+fn reject_if(condition: bool, reason: RejectReason) -> Result<(), RejectReason> {
+    if condition { Err(reason) } else { Ok(()) }
+}
+
+/// The diagnostic stored for an assertion failure: the primary code is fixed
+/// and only the class is taken from the caller.
+fn assertion_diagnostic(supplied: SafeDiagnostic) -> SafeDiagnostic {
+    SafeDiagnostic {
+        code: DiagnosticCode::TableAssertionFalse,
+        class: supplied.class,
+    }
+}
+
+impl FailureStatus {
+    /// A row in this state holds back its stream's ordered delivery.
+    const fn blocks_stream(self) -> bool {
+        matches!(self, Self::Failed | Self::Retrying)
+    }
+
+    /// A settled row an administrator may archive with `Resolve`.
+    const fn is_resolvable(self) -> bool {
+        matches!(self, Self::Succeeded | Self::Skipped | Self::Replayed)
+    }
+}
+
+/// A delivery lease and the requests that can only exist while it is held.
+struct HeldLease {
+    lease: DeliveryLease,
+    /// A pause arrived during the lease (`PausePending`). It takes effect when
+    /// the lease reaches a terminal transition.
+    pause_requested: bool,
+    /// `Retry` issued this lease, so the provider's retried delivery adopts it
+    /// through the next `Acquire` instead of being refused as a second lease.
+    awaiting_retry_acquire: bool,
+}
+
+/// What one ordered stream owns besides its checkpoint: admission status, the
+/// single lease it may hold and its fence counter. They change together, so
+/// they share one value.
+struct StreamSlot {
+    status: StreamStatus,
+    lease: Option<HeldLease>,
+    /// The highest fence issued for this stream. A fence is never reused.
+    last_fence: u64,
+}
+
+impl Default for StreamSlot {
+    fn default() -> Self {
+        Self {
+            status: StreamStatus::Running,
+            lease: None,
+            last_fence: 0,
+        }
+    }
+}
+
+impl StreamSlot {
+    fn issue_lease(
+        &mut self,
+        delivery: DeliveryIdentity,
+        purpose: LeasePurpose,
+        awaiting_retry_acquire: bool,
+    ) -> DeliveryLease {
+        self.last_fence += 1;
+        let lease = DeliveryLease {
+            delivery,
+            fence: self.last_fence,
+            purpose,
+        };
+        self.lease = Some(HeldLease {
+            lease: lease.clone(),
+            pause_requested: false,
+            awaiting_retry_acquire,
+        });
+        lease
+    }
+}
+
+/// Checkpoints and per-stream state, keyed by the stream's checkpoint key.
+#[derive(Default)]
+struct StreamTable {
+    checkpoints: BTreeMap<CheckpointKey, Checkpoint>,
+    slots: BTreeMap<CheckpointKey, StreamSlot>,
+}
+
+impl StreamTable {
+    fn checkpoint(&self, key: &CheckpointKey) -> Checkpoint {
+        self.checkpoints
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| Checkpoint::unwritten(key))
+    }
+
+    fn checkpoint_mut(&mut self, key: &CheckpointKey) -> &mut Checkpoint {
+        self.checkpoints
+            .entry(key.clone())
+            .or_insert_with(|| Checkpoint::unwritten(key))
+    }
+
+    /// A stream that was never written holds the version-0, no-position
+    /// checkpoint.
+    fn checkpoint_matches(&self, key: &CheckpointKey, expected: &CheckpointPrecondition) -> bool {
+        self.checkpoints.get(key).map_or_else(
+            || expected.version == 0 && expected.committed.is_none(),
+            |checkpoint| {
+                checkpoint.version == expected.version && checkpoint.committed == expected.committed
+            },
+        )
+    }
+
+    fn slot_mut(&mut self, key: &CheckpointKey) -> &mut StreamSlot {
+        self.slots.entry(key.clone()).or_default()
+    }
+
+    /// Ends the stream's lease when `lease` is exactly the one held, including
+    /// the provider-selected successor, and applies a pause that waited for it.
+    fn consume_lease(&mut self, lease: &DeliveryLease) -> Result<(), RejectReason> {
+        let slot = self
+            .slots
+            .get_mut(&lease.delivery.checkpoint_key())
+            .ok_or(RejectReason::LeaseFenced)?;
+        let held = slot
+            .lease
+            .as_ref()
+            .filter(|held| {
+                held.lease == *lease && held.lease.delivery.successor == lease.delivery.successor
+            })
+            .ok_or(RejectReason::LeaseFenced)?;
+        if held.pause_requested {
+            slot.status = StreamStatus::Paused;
+        }
+        slot.lease = None;
+        Ok(())
+    }
+
+    /// Moves the checkpoint to the delivery's successor. The caller has already
+    /// verified the compare-and-set precondition.
+    fn advance(&mut self, delivery: &DeliveryIdentity) -> Checkpoint {
+        let checkpoint = self.checkpoint_mut(&delivery.checkpoint_key());
+        checkpoint.committed = Some(delivery.successor.clone());
+        checkpoint.version += 1;
+        checkpoint.clone()
+    }
+}
+
+/// A stored failure row plus the in-memory-only replay claim.
+struct FailureEntry {
+    record: FailureRecord,
+    /// An admitted replay is claimed before provider or handler execution
+    /// starts. Only a `Replaying` row can hold a claim.
+    replay_claimed: bool,
+}
+
+#[derive(Default)]
+struct FailureTable {
+    rows: BTreeMap<FailureIdentity, FailureEntry>,
+}
+
+impl FailureTable {
+    fn get(&self, identity: &FailureIdentity) -> Option<&FailureEntry> {
+        self.rows.get(identity)
+    }
+
+    /// The row at `identity`, provided it is still at `expected_version`.
+    fn at_version(
+        &mut self,
+        identity: &FailureIdentity,
+        expected_version: u64,
+    ) -> Result<&mut FailureEntry, RejectReason> {
+        let entry = self
+            .rows
+            .get_mut(identity)
+            .ok_or(RejectReason::FailureMissing)?;
+        reject_if(
+            entry.record.version != expected_version,
+            RejectReason::StaleFailure,
+        )?;
+        Ok(entry)
+    }
+
+    fn has_blocking(&self, key: &CheckpointKey) -> bool {
+        self.rows.values().any(|entry| {
+            entry.record.status.blocks_stream() && entry.record.identity.0.is_on_stream(key)
+        })
+    }
+}
+
 /// Deterministic in-memory backend for runtime integration and focused tests.
+///
+/// Failure rows move through one lifecycle, and every transition bumps the
+/// row's `version`:
+///
+/// ```text
+/// Failed --Retry--> Retrying --Complete--> Succeeded
+///   ^                  |
+///   +-----Fail/Cancel--+
+/// Failed --Skip--> Skipped --Replay--> Replaying --ReplayComplete--> Replayed
+///                     ^                    |
+///                     +-ReplayFail/Cancel--+
+/// Succeeded | Skipped | Replayed --Resolve--> Resolved
+/// ```
+///
+/// `Fail` on a delivery with no row creates the `Failed` row, and a
+/// `Deliver` lease over a `Succeeded` or `Resolved` row admits a redelivery.
 #[derive(Default)]
 pub struct InMemoryCheckpointBackend {
-    checkpoints: BTreeMap<CheckpointKey, Checkpoint>,
-    streams: BTreeMap<CheckpointKey, StreamStatus>,
-    failures: BTreeMap<FailureIdentity, FailureRecord>,
-    leases: BTreeMap<CheckpointKey, DeliveryLease>,
-    pause_requested: BTreeSet<CheckpointKey>,
-    next_fence: BTreeMap<CheckpointKey, u64>,
-    retry_claims: BTreeSet<CheckpointKey>,
-    replay_claims: BTreeSet<FailureIdentity>,
+    streams: StreamTable,
+    failures: FailureTable,
 }
 
 impl InMemoryCheckpointBackend {
@@ -712,597 +939,508 @@ impl InMemoryCheckpointBackend {
     /// Once claimed, administrative cancellation is fenced until the replay
     /// reaches a terminal completion or failure transition.
     pub fn claim_replay(&mut self, grant: &ReplayGrant) -> Result<(), RejectReason> {
-        let Some(record) = self.failures.get(&grant.failure) else {
-            return Err(RejectReason::FailureMissing);
-        };
-        if record.version != grant.version {
-            return Err(RejectReason::StaleFailure);
-        }
-        if record.status != FailureStatus::Replaying {
-            return Err(RejectReason::RetryNotAllowed);
-        }
-        if !self.replay_claims.insert(grant.failure.clone()) {
-            return Err(RejectReason::LeaseAlreadyHeld);
-        }
+        let entry = self.failures.at_version(&grant.failure, grant.version)?;
+        reject_if(
+            entry.record.status != FailureStatus::Replaying,
+            RejectReason::RetryNotAllowed,
+        )?;
+        reject_if(entry.replay_claimed, RejectReason::LeaseAlreadyHeld)?;
+        entry.replay_claimed = true;
         Ok(())
     }
-}
 
-impl InMemoryCheckpointBackend {
-    fn checkpoint_mut(&mut self, key: &CheckpointKey) -> &mut Checkpoint {
-        self.checkpoints
-            .entry(key.clone())
-            .or_insert_with(|| Checkpoint {
-                key: key.clone(),
-                version: 0,
-                committed: None,
-            })
-    }
-
-    fn checkpoint_matches(
-        &mut self,
-        key: &CheckpointKey,
-        expected: &CheckpointPrecondition,
-    ) -> bool {
-        let checkpoint = self.checkpoint_mut(key);
-        checkpoint.version == expected.version && checkpoint.committed == expected.committed
-    }
-
-    fn consume_lease(&mut self, lease: &DeliveryLease) -> Result<(), RejectReason> {
-        let key = lease.delivery.checkpoint_key();
-        match self.leases.get(&key) {
-            Some(current)
-                if current == lease && current.delivery.successor == lease.delivery.successor =>
-            {
-                self.leases.remove(&key);
-                self.retry_claims.remove(&key);
-                if self.pause_requested.remove(&key) {
-                    self.streams.insert(key, StreamStatus::Paused);
-                }
-                Ok(())
-            }
-            _ => Err(RejectReason::LeaseFenced),
+    fn pause(&mut self, key: CheckpointKey) -> CommitResult {
+        let slot = self.streams.slot_mut(&key);
+        if slot.status == StreamStatus::Paused {
+            return CommitResult::StreamStatusChanged {
+                state: StreamState {
+                    key,
+                    status: StreamStatus::Paused,
+                },
+                changed: false,
+            };
+        }
+        if let Some(held) = slot.lease.as_mut() {
+            // An admitted delivery still owns the item boundary, so the stream
+            // stays `Running` until that lease ends.
+            let changed = !std::mem::replace(&mut held.pause_requested, true);
+            return CommitResult::PausePending {
+                state: StreamState {
+                    key,
+                    status: slot.status,
+                },
+                changed,
+            };
+        }
+        slot.status = StreamStatus::Paused;
+        CommitResult::StreamStatusChanged {
+            state: StreamState {
+                key,
+                status: StreamStatus::Paused,
+            },
+            changed: true,
         }
     }
 
-    fn advance(
-        &mut self,
-        delivery: &DeliveryIdentity,
-        expected: &CheckpointPrecondition,
-    ) -> CommitResult {
-        let key = delivery.checkpoint_key();
-        if !self.checkpoint_matches(&key, expected) {
-            return CommitResult::Rejected(RejectReason::StaleCheckpoint);
+    fn resume(&mut self, key: CheckpointKey) -> Result<CommitResult, RejectReason> {
+        let slot = self.streams.slot_mut(&key);
+        if slot.status == StreamStatus::Running {
+            return Ok(CommitResult::StreamStatusChanged {
+                state: StreamState {
+                    key,
+                    status: StreamStatus::Running,
+                },
+                changed: false,
+            });
         }
-        let checkpoint = self.checkpoint_mut(&key);
-        checkpoint.committed = Some(delivery.successor.clone());
+        reject_if(slot.lease.is_some(), RejectReason::StreamBusy)?;
+        reject_if(
+            self.failures.has_blocking(&key),
+            RejectReason::BlockingFailure,
+        )?;
+        slot.status = StreamStatus::Running;
+        Ok(CommitResult::StreamStatusChanged {
+            state: StreamState {
+                key,
+                status: StreamStatus::Running,
+            },
+            changed: true,
+        })
+    }
+
+    fn reset(
+        &mut self,
+        key: CheckpointKey,
+        expected: &CheckpointPrecondition,
+        to: Position,
+    ) -> Result<CommitResult, RejectReason> {
+        let slot = self.streams.slot_mut(&key);
+        reject_if(
+            slot.status != StreamStatus::Paused,
+            RejectReason::StreamNotPaused,
+        )?;
+        reject_if(slot.lease.is_some(), RejectReason::StreamBusy)?;
+        reject_if(
+            self.failures.has_blocking(&key),
+            RejectReason::BlockingFailure,
+        )?;
+        reject_if(
+            !self.streams.checkpoint_matches(&key, expected),
+            RejectReason::StaleCheckpoint,
+        )?;
+        let checkpoint = self.streams.checkpoint_mut(&key);
+        checkpoint.committed = Some(to);
         checkpoint.version += 1;
-        CommitResult::CheckpointAdvanced {
+        Ok(CommitResult::CheckpointReset {
             checkpoint: checkpoint.clone(),
-        }
-    }
-
-    fn stream_status(&self, key: &CheckpointKey) -> StreamStatus {
-        self.streams
-            .get(key)
-            .copied()
-            .unwrap_or(StreamStatus::Running)
-    }
-
-    fn stream_state(&self, key: &CheckpointKey) -> StreamState {
-        StreamState {
-            key: key.clone(),
-            status: self.stream_status(key),
-        }
-    }
-
-    fn has_blocking_failure(&self, key: &CheckpointKey) -> bool {
-        self.failures.values().any(|failure| {
-            &failure.identity.0.checkpoint_key() == key
-                && matches!(
-                    failure.status,
-                    FailureStatus::Failed | FailureStatus::Retrying
-                )
         })
     }
 
-    fn has_ordered_blocking_failure(&self, key: &CheckpointKey) -> bool {
-        self.failures.values().any(|failure| {
-            &failure.identity.0.checkpoint_key() == key
-                && matches!(
-                    failure.status,
-                    FailureStatus::Failed | FailureStatus::Retrying
-                )
+    fn acquire(
+        &mut self,
+        delivery: DeliveryIdentity,
+        expected: &CheckpointPrecondition,
+        purpose: LeasePurpose,
+    ) -> Result<CommitResult, RejectReason> {
+        let key = delivery.checkpoint_key();
+        reject_if(
+            !self.streams.checkpoint_matches(&key, expected),
+            RejectReason::StaleCheckpoint,
+        )?;
+        let identity = FailureIdentity(delivery);
+        let failure_status = self
+            .failures
+            .get(&identity)
+            .map(|entry| entry.record.status);
+        // A blocking failure admits only the delivery that works it off: the
+        // retry of a `Retrying` row or the skip of a `Failed` one.
+        let works_off_blocking_failure = matches!(
+            (purpose, failure_status),
+            (LeasePurpose::Deliver, Some(FailureStatus::Retrying))
+                | (LeasePurpose::Skip, Some(FailureStatus::Failed))
+        );
+        reject_if(
+            self.failures.has_blocking(&key) && !works_off_blocking_failure,
+            RejectReason::BlockingFailure,
+        )?;
+        let FailureIdentity(delivery) = identity;
+        let slot = self.streams.slot_mut(&key);
+        if let Some(held) = slot.lease.as_mut() {
+            // `Retry` already issued this lease; the provider's retried
+            // delivery adopts it, keeping the fence and possibly selecting a
+            // different successor.
+            if purpose == LeasePurpose::Deliver
+                && failure_status == Some(FailureStatus::Retrying)
+                && std::mem::take(&mut held.awaiting_retry_acquire)
+            {
+                held.lease = DeliveryLease {
+                    delivery,
+                    fence: held.lease.fence,
+                    purpose: held.lease.purpose,
+                };
+                return Ok(CommitResult::Acquired {
+                    lease: held.lease.clone(),
+                });
+            }
+            return Err(RejectReason::LeaseAlreadyHeld);
+        }
+        match failure_status {
+            Some(status) => reject_if(
+                !matches!(
+                    (purpose, status),
+                    (LeasePurpose::Deliver, FailureStatus::Retrying)
+                        | (
+                            LeasePurpose::Deliver,
+                            FailureStatus::Succeeded | FailureStatus::Resolved
+                        )
+                        | (LeasePurpose::Skip, FailureStatus::Failed)
+                ),
+                RejectReason::RetryNotAllowed,
+            )?,
+            None => reject_if(purpose == LeasePurpose::Skip, RejectReason::FailureMissing)?,
+        }
+        reject_if(
+            purpose == LeasePurpose::Deliver
+                && slot.status == StreamStatus::Paused
+                && failure_status != Some(FailureStatus::Retrying),
+            RejectReason::StreamPaused,
+        )?;
+        Ok(CommitResult::Acquired {
+            lease: slot.issue_lease(delivery, purpose, false),
         })
     }
 
-    fn has_replay_claim(&self, failure: &FailureIdentity) -> bool {
-        self.replay_claims.contains(failure)
+    /// Records a failed delivery. `detail` is `Some` only for an assertion
+    /// failure, whose `diagnostic` has already been normalised.
+    fn fail(
+        &mut self,
+        lease: DeliveryLease,
+        diagnostic: SafeDiagnostic,
+        detail: Option<AssertionDiagnosticDetail>,
+    ) -> Result<CommitResult, RejectReason> {
+        reject_if(
+            lease.purpose != LeasePurpose::Deliver,
+            RejectReason::LeaseFenced,
+        )?;
+        self.streams.consume_lease(&lease)?;
+        let identity = FailureIdentity(lease.delivery);
+        let entry = self
+            .failures
+            .rows
+            .entry(identity.clone())
+            .or_insert_with(|| FailureEntry {
+                record: FailureRecord {
+                    identity: identity.clone(),
+                    version: 0,
+                    attempts: 0,
+                    status: FailureStatus::Failed,
+                    diagnostic,
+                    assertion_detail: None,
+                },
+                replay_claimed: false,
+            });
+        let record = &mut entry.record;
+        // A provider may select a different successor when the same opaque
+        // delivery is retried. Keep the natural identity stable while
+        // retaining the newest successor for a later explicit skip.
+        record.identity = identity;
+        record.version += 1;
+        record.attempts += u32::from(record.status != FailureStatus::Retrying);
+        record.status = FailureStatus::Failed;
+        record.diagnostic = diagnostic;
+        record.assertion_detail = detail;
+        Ok(CommitResult::Failed {
+            failure: record.clone(),
+        })
+    }
+
+    fn retry(
+        &mut self,
+        failure: FailureIdentity,
+        expected_version: u64,
+        expected: &CheckpointPrecondition,
+    ) -> Result<CommitResult, RejectReason> {
+        let key = failure.0.checkpoint_key();
+        reject_if(
+            !self.streams.checkpoint_matches(&key, expected),
+            RejectReason::StaleCheckpoint,
+        )?;
+        let entry = self
+            .failures
+            .rows
+            .get_mut(&failure)
+            .ok_or(RejectReason::FailureMissing)?;
+        reject_if(
+            entry.record.version != expected_version
+                || entry.record.identity.0.successor != failure.0.successor,
+            RejectReason::StaleFailure,
+        )?;
+        reject_if(
+            entry.record.status != FailureStatus::Failed,
+            RejectReason::RetryNotAllowed,
+        )?;
+        let slot = self.streams.slot_mut(&key);
+        reject_if(slot.lease.is_some(), RejectReason::LeaseAlreadyHeld)?;
+        slot.issue_lease(failure.0, LeasePurpose::Deliver, true);
+        entry.record.version += 1;
+        entry.record.attempts += 1;
+        entry.record.status = FailureStatus::Retrying;
+        Ok(CommitResult::RetryScheduled {
+            failure: entry.record.clone(),
+        })
+    }
+
+    fn complete(
+        &mut self,
+        lease: DeliveryLease,
+        expected: &CheckpointPrecondition,
+    ) -> Result<CommitResult, RejectReason> {
+        reject_if(
+            lease.purpose != LeasePurpose::Deliver,
+            RejectReason::LeaseFenced,
+        )?;
+        reject_if(
+            !self
+                .streams
+                .checkpoint_matches(&lease.delivery.checkpoint_key(), expected),
+            RejectReason::StaleCheckpoint,
+        )?;
+        self.streams.consume_lease(&lease)?;
+        let checkpoint = self.streams.advance(&lease.delivery);
+        if let Some(entry) = self.failures.rows.get_mut(&FailureIdentity(lease.delivery)) {
+            entry.record.version += 1;
+            entry.record.status = FailureStatus::Succeeded;
+        }
+        Ok(CommitResult::CheckpointAdvanced { checkpoint })
+    }
+
+    fn skip(
+        &mut self,
+        lease: DeliveryLease,
+        expected: &CheckpointPrecondition,
+        expected_failure_version: u64,
+    ) -> Result<CommitResult, RejectReason> {
+        reject_if(
+            lease.purpose != LeasePurpose::Skip,
+            RejectReason::LeaseFenced,
+        )?;
+        let identity = FailureIdentity(lease.delivery.clone());
+        let entry = self
+            .failures
+            .rows
+            .get_mut(&identity)
+            .ok_or(RejectReason::FailureMissing)?;
+        reject_if(
+            entry.record.version != expected_failure_version
+                || entry.record.status != FailureStatus::Failed
+                || entry.record.identity.0.successor != lease.delivery.successor,
+            RejectReason::StaleFailure,
+        )?;
+        reject_if(
+            !self
+                .streams
+                .checkpoint_matches(&lease.delivery.checkpoint_key(), expected),
+            RejectReason::StaleCheckpoint,
+        )?;
+        self.streams.consume_lease(&lease)?;
+        let checkpoint = self.streams.advance(&lease.delivery);
+        entry.record.version += 1;
+        entry.record.status = FailureStatus::Skipped;
+        Ok(CommitResult::CheckpointAdvanced { checkpoint })
+    }
+
+    fn replay(
+        &mut self,
+        failure: FailureIdentity,
+        expected_version: u64,
+    ) -> Result<CommitResult, RejectReason> {
+        let entry = self.failures.at_version(&failure, expected_version)?;
+        reject_if(
+            entry.record.status != FailureStatus::Skipped,
+            RejectReason::RetryNotAllowed,
+        )?;
+        entry.record.version += 1;
+        entry.record.attempts += 1;
+        entry.record.status = FailureStatus::Replaying;
+        Ok(CommitResult::ReplayGranted {
+            grant: ReplayGrant {
+                failure,
+                version: entry.record.version,
+            },
+        })
+    }
+
+    /// Releases the claim of an admitted replay and bumps its row. Only the
+    /// claim holder may complete or fail a replay.
+    fn end_claimed_replay(
+        &mut self,
+        failure: &FailureIdentity,
+        expected_version: u64,
+    ) -> Result<&mut FailureRecord, RejectReason> {
+        let entry = self.failures.at_version(failure, expected_version)?;
+        reject_if(
+            entry.record.status != FailureStatus::Replaying,
+            RejectReason::RetryNotAllowed,
+        )?;
+        reject_if(!entry.replay_claimed, RejectReason::LeaseFenced)?;
+        entry.replay_claimed = false;
+        entry.record.version += 1;
+        Ok(&mut entry.record)
+    }
+
+    fn complete_replay(
+        &mut self,
+        failure: FailureIdentity,
+        expected_version: u64,
+    ) -> Result<CommitResult, RejectReason> {
+        let record = self.end_claimed_replay(&failure, expected_version)?;
+        record.status = FailureStatus::Replayed;
+        Ok(CommitResult::ReplayCompleted {
+            failure: record.clone(),
+        })
+    }
+
+    /// A failed replay returns the row to `Skipped`; `detail` is `Some` only
+    /// for an assertion failure, whose `diagnostic` is already normalised.
+    fn fail_replay(
+        &mut self,
+        failure: FailureIdentity,
+        expected_version: u64,
+        diagnostic: SafeDiagnostic,
+        detail: Option<AssertionDiagnosticDetail>,
+    ) -> Result<CommitResult, RejectReason> {
+        let record = self.end_claimed_replay(&failure, expected_version)?;
+        record.status = FailureStatus::Skipped;
+        record.diagnostic = diagnostic;
+        record.assertion_detail = detail;
+        Ok(CommitResult::ReplayFailed {
+            failure: record.clone(),
+        })
+    }
+
+    /// Withdraws an admitted replay that has not been claimed.
+    fn cancel_replay(
+        &mut self,
+        failure: FailureIdentity,
+        expected_version: u64,
+    ) -> Result<CommitResult, RejectReason> {
+        let entry = self.failures.at_version(&failure, expected_version)?;
+        reject_if(
+            entry.record.status != FailureStatus::Replaying,
+            RejectReason::RetryNotAllowed,
+        )?;
+        reject_if(entry.replay_claimed, RejectReason::LeaseAlreadyHeld)?;
+        entry.record.version += 1;
+        entry.record.status = FailureStatus::Skipped;
+        Ok(CommitResult::ReplayCancelled {
+            failure: entry.record.clone(),
+        })
+    }
+
+    fn resolve(
+        &mut self,
+        failure: FailureIdentity,
+        expected_version: u64,
+    ) -> Result<CommitResult, RejectReason> {
+        let entry = self.failures.at_version(&failure, expected_version)?;
+        reject_if(
+            !entry.record.status.is_resolvable(),
+            RejectReason::ResolveBlocked,
+        )?;
+        entry.record.version += 1;
+        entry.record.status = FailureStatus::Resolved;
+        Ok(CommitResult::Resolved {
+            failure: entry.record.clone(),
+        })
+    }
+
+    fn cancel(&mut self, lease: DeliveryLease) -> Result<CommitResult, RejectReason> {
+        self.streams.consume_lease(&lease)?;
+        let key = lease.delivery.checkpoint_key();
+        if let Some(entry) = self.failures.rows.get_mut(&FailureIdentity(lease.delivery))
+            && entry.record.status == FailureStatus::Retrying
+        {
+            entry.record.version += 1;
+            entry.record.status = FailureStatus::Failed;
+        }
+        Ok(CommitResult::Cancelled {
+            checkpoint: self.streams.checkpoint(&key),
+            classification: CancellationClassification::RollbackShaped,
+        })
     }
 }
 
 impl CheckpointBackend for InMemoryCheckpointBackend {
     fn apply(&mut self, intent: CommitIntent) -> CommitResult {
-        match intent {
-            CommitIntent::Pause { key } => {
-                self.checkpoint_mut(&key);
-                if self.stream_status(&key) == StreamStatus::Paused {
-                    return CommitResult::StreamStatusChanged {
-                        state: self.stream_state(&key),
-                        changed: false,
-                    };
-                }
-                if self.leases.contains_key(&key) {
-                    let changed = self.pause_requested.insert(key.clone());
-                    return CommitResult::PausePending {
-                        state: self.stream_state(&key),
-                        changed,
-                    };
-                }
-                let changed = self.stream_status(&key) != StreamStatus::Paused;
-                self.streams.insert(key.clone(), StreamStatus::Paused);
-                CommitResult::StreamStatusChanged {
-                    state: self.stream_state(&key),
-                    changed,
-                }
-            }
-            CommitIntent::Resume { key } => {
-                self.checkpoint_mut(&key);
-                if self.stream_status(&key) == StreamStatus::Running {
-                    return CommitResult::StreamStatusChanged {
-                        state: self.stream_state(&key),
-                        changed: false,
-                    };
-                }
-                if self.leases.contains_key(&key) {
-                    return CommitResult::Rejected(RejectReason::StreamBusy);
-                }
-                if self.has_blocking_failure(&key) {
-                    return CommitResult::Rejected(RejectReason::BlockingFailure);
-                }
-                self.streams.insert(key.clone(), StreamStatus::Running);
-                CommitResult::StreamStatusChanged {
-                    state: self.stream_state(&key),
-                    changed: true,
-                }
-            }
-            CommitIntent::Reset { key, expected, to } => {
-                self.checkpoint_mut(&key);
-                if self.stream_status(&key) != StreamStatus::Paused {
-                    return CommitResult::Rejected(RejectReason::StreamNotPaused);
-                }
-                if self.leases.contains_key(&key) {
-                    return CommitResult::Rejected(RejectReason::StreamBusy);
-                }
-                if self.has_blocking_failure(&key) {
-                    return CommitResult::Rejected(RejectReason::BlockingFailure);
-                }
-                if !self.checkpoint_matches(&key, &expected) {
-                    return CommitResult::Rejected(RejectReason::StaleCheckpoint);
-                }
-                let checkpoint = self.checkpoint_mut(&key);
-                checkpoint.committed = Some(to);
-                checkpoint.version += 1;
-                CommitResult::CheckpointReset {
-                    checkpoint: checkpoint.clone(),
-                }
-            }
+        let outcome = match intent {
+            CommitIntent::Pause { key } => Ok(self.pause(key)),
+            CommitIntent::Resume { key } => self.resume(key),
+            CommitIntent::Reset { key, expected, to } => self.reset(key, &expected, to),
             CommitIntent::Acquire {
                 delivery,
                 expected,
                 purpose,
-            } => {
-                let key = delivery.checkpoint_key();
-                if !self.checkpoint_matches(&key, &expected) {
-                    return CommitResult::Rejected(RejectReason::StaleCheckpoint);
-                }
-                let failure_status = self
-                    .failures
-                    .get(&FailureIdentity(delivery.clone()))
-                    .map(|failure| failure.status);
-                let authorised_blocking_delivery = matches!(
-                    (purpose, failure_status),
-                    (LeasePurpose::Deliver, Some(FailureStatus::Retrying))
-                        | (LeasePurpose::Skip, Some(FailureStatus::Failed))
-                );
-                if self.has_ordered_blocking_failure(&key) && !authorised_blocking_delivery {
-                    return CommitResult::Rejected(RejectReason::BlockingFailure);
-                }
-                if let Some(existing) = self.leases.get(&key).cloned() {
-                    if purpose == LeasePurpose::Deliver
-                        && failure_status == Some(FailureStatus::Retrying)
-                        && self.retry_claims.remove(&key)
-                    {
-                        let lease = DeliveryLease {
-                            delivery,
-                            fence: existing.fence,
-                            purpose: existing.purpose,
-                        };
-                        self.leases.insert(key, lease.clone());
-                        return CommitResult::Acquired { lease };
-                    }
-                    return CommitResult::Rejected(RejectReason::LeaseAlreadyHeld);
-                }
-                if let Some(status) = failure_status {
-                    let allowed = matches!(
-                        (purpose, status),
-                        (LeasePurpose::Deliver, FailureStatus::Retrying)
-                            | (
-                                LeasePurpose::Deliver,
-                                FailureStatus::Succeeded | FailureStatus::Resolved
-                            )
-                            | (LeasePurpose::Skip, FailureStatus::Failed)
-                    );
-                    if !allowed {
-                        return CommitResult::Rejected(RejectReason::RetryNotAllowed);
-                    }
-                } else if purpose == LeasePurpose::Skip {
-                    return CommitResult::Rejected(RejectReason::FailureMissing);
-                }
-                if purpose == LeasePurpose::Deliver
-                    && self.stream_status(&key) == StreamStatus::Paused
-                    && failure_status != Some(FailureStatus::Retrying)
-                {
-                    return CommitResult::Rejected(RejectReason::StreamPaused);
-                }
-                let fence = self.next_fence.entry(key.clone()).or_insert(0);
-                *fence += 1;
-                let lease = DeliveryLease {
-                    delivery: delivery.clone(),
-                    fence: *fence,
-                    purpose,
-                };
-                self.leases.insert(key, lease.clone());
-                CommitResult::Acquired { lease }
-            }
-            CommitIntent::Fail { lease, diagnostic } => {
-                let detail = None;
-                if lease.purpose != LeasePurpose::Deliver {
-                    return CommitResult::Rejected(RejectReason::LeaseFenced);
-                }
-                if let Err(reason) = self.consume_lease(&lease) {
-                    return CommitResult::Rejected(reason);
-                }
-                let identity = FailureIdentity(lease.delivery);
-                let failure = self
-                    .failures
-                    .entry(identity.clone())
-                    .or_insert(FailureRecord {
-                        identity: identity.clone(),
-                        version: 0,
-                        attempts: 0,
-                        status: FailureStatus::Failed,
-                        diagnostic,
-                        assertion_detail: detail.clone(),
-                    });
-                // A provider may select a different successor when the same
-                // opaque delivery is retried. Keep the natural identity
-                // stable while retaining the newest successor for a later
-                // explicit skip.
-                failure.identity = identity;
-                failure.version += 1;
-                failure.attempts += u32::from(failure.status != FailureStatus::Retrying);
-                failure.status = FailureStatus::Failed;
-                failure.diagnostic = diagnostic;
-                failure.assertion_detail = detail;
-                CommitResult::Failed {
-                    failure: failure.clone(),
-                }
-            }
+            } => self.acquire(delivery, &expected, purpose),
+            CommitIntent::Fail { lease, diagnostic } => self.fail(lease, diagnostic, None),
             CommitIntent::FailWithAssertion {
                 lease,
-                diagnostic: supplied_diagnostic,
+                diagnostic,
                 detail,
-            } => {
-                let diagnostic = SafeDiagnostic {
-                    code: DiagnosticCode::TableAssertionFalse,
-                    class: supplied_diagnostic.class,
-                };
-                if lease.purpose != LeasePurpose::Deliver {
-                    return CommitResult::Rejected(RejectReason::LeaseFenced);
-                }
-                if let Err(reason) = self.consume_lease(&lease) {
-                    return CommitResult::Rejected(reason);
-                }
-                let identity = FailureIdentity(lease.delivery);
-                let failure = self
-                    .failures
-                    .entry(identity.clone())
-                    .or_insert(FailureRecord {
-                        identity: identity.clone(),
-                        version: 0,
-                        attempts: 0,
-                        status: FailureStatus::Failed,
-                        diagnostic,
-                        assertion_detail: Some(detail.clone()),
-                    });
-                failure.identity = identity;
-                failure.version += 1;
-                failure.attempts += u32::from(failure.status != FailureStatus::Retrying);
-                failure.status = FailureStatus::Failed;
-                failure.diagnostic = diagnostic;
-                failure.assertion_detail = Some(detail);
-                CommitResult::Failed {
-                    failure: failure.clone(),
-                }
-            }
+            } => self.fail(lease, assertion_diagnostic(diagnostic), Some(detail)),
             CommitIntent::Retry {
                 failure,
                 expected_version,
                 expected,
-            } => {
-                let key = failure.0.checkpoint_key();
-                if !self.checkpoint_matches(&key, &expected) {
-                    return CommitResult::Rejected(RejectReason::StaleCheckpoint);
-                }
-                let Some(record) = self.failures.get(&failure) else {
-                    return CommitResult::Rejected(RejectReason::FailureMissing);
-                };
-                if record.version != expected_version
-                    || record.identity.0.successor != failure.0.successor
-                {
-                    return CommitResult::Rejected(RejectReason::StaleFailure);
-                }
-                if record.status != FailureStatus::Failed {
-                    return CommitResult::Rejected(RejectReason::RetryNotAllowed);
-                }
-                if self.leases.contains_key(&key) {
-                    return CommitResult::Rejected(RejectReason::LeaseAlreadyHeld);
-                }
-                let fence = self.next_fence.entry(key.clone()).or_insert(0);
-                *fence += 1;
-                let lease = DeliveryLease {
-                    delivery: failure.0.clone(),
-                    fence: *fence,
-                    purpose: LeasePurpose::Deliver,
-                };
-                self.leases.insert(key.clone(), lease);
-                self.retry_claims.insert(key);
-                let record = self.failures.get_mut(&failure).expect("checked above");
-                record.version += 1;
-                record.attempts += 1;
-                record.status = FailureStatus::Retrying;
-                CommitResult::RetryScheduled {
-                    failure: record.clone(),
-                }
-            }
-            CommitIntent::Complete { lease, expected } => {
-                if lease.purpose != LeasePurpose::Deliver {
-                    return CommitResult::Rejected(RejectReason::LeaseFenced);
-                }
-                let key = lease.delivery.checkpoint_key();
-                if !self.checkpoint_matches(&key, &expected) {
-                    return CommitResult::Rejected(RejectReason::StaleCheckpoint);
-                }
-                if let Err(reason) = self.consume_lease(&lease) {
-                    return CommitResult::Rejected(reason);
-                }
-                let delivery = lease.delivery;
-                let result = self.advance(&delivery, &expected);
-                if matches!(result, CommitResult::CheckpointAdvanced { .. })
-                    && let Some(record) = self.failures.get_mut(&FailureIdentity(delivery))
-                {
-                    record.version += 1;
-                    record.status = FailureStatus::Succeeded;
-                }
-                result
-            }
+            } => self.retry(failure, expected_version, &expected),
+            CommitIntent::Complete { lease, expected } => self.complete(lease, &expected),
             CommitIntent::Skip {
                 lease,
                 expected,
                 expected_failure_version,
-            } => {
-                if lease.purpose != LeasePurpose::Skip {
-                    return CommitResult::Rejected(RejectReason::LeaseFenced);
-                }
-                let identity = FailureIdentity(lease.delivery.clone());
-                let Some(record) = self.failures.get(&identity) else {
-                    return CommitResult::Rejected(RejectReason::FailureMissing);
-                };
-                if record.version != expected_failure_version
-                    || record.status != FailureStatus::Failed
-                    || record.identity.0.successor != lease.delivery.successor
-                {
-                    return CommitResult::Rejected(RejectReason::StaleFailure);
-                }
-                let key = lease.delivery.checkpoint_key();
-                if !self.checkpoint_matches(&key, &expected) {
-                    return CommitResult::Rejected(RejectReason::StaleCheckpoint);
-                }
-                if let Err(reason) = self.consume_lease(&lease) {
-                    return CommitResult::Rejected(reason);
-                }
-                let result = self.advance(&lease.delivery, &expected);
-                if matches!(result, CommitResult::CheckpointAdvanced { .. }) {
-                    let record = self.failures.get_mut(&identity).expect("checked above");
-                    record.version += 1;
-                    record.status = FailureStatus::Skipped;
-                }
-                result
-            }
+            } => self.skip(lease, &expected, expected_failure_version),
             CommitIntent::Replay {
                 failure,
                 expected_version,
-            } => {
-                let Some(record) = self.failures.get_mut(&failure) else {
-                    return CommitResult::Rejected(RejectReason::FailureMissing);
-                };
-                if record.version != expected_version {
-                    return CommitResult::Rejected(RejectReason::StaleFailure);
-                }
-                if record.status != FailureStatus::Skipped {
-                    return CommitResult::Rejected(RejectReason::RetryNotAllowed);
-                }
-                record.version += 1;
-                record.attempts += 1;
-                record.status = FailureStatus::Replaying;
-                CommitResult::ReplayGranted {
-                    grant: ReplayGrant {
-                        failure,
-                        version: record.version,
-                    },
-                }
-            }
+            } => self.replay(failure, expected_version),
             CommitIntent::ReplayComplete {
                 failure,
                 expected_version,
-            } => {
-                let replay_claimed = self.has_replay_claim(&failure);
-                let Some(record) = self.failures.get_mut(&failure) else {
-                    return CommitResult::Rejected(RejectReason::FailureMissing);
-                };
-                if record.version != expected_version {
-                    return CommitResult::Rejected(RejectReason::StaleFailure);
-                }
-                if record.status != FailureStatus::Replaying {
-                    return CommitResult::Rejected(RejectReason::RetryNotAllowed);
-                }
-                if !replay_claimed {
-                    return CommitResult::Rejected(RejectReason::LeaseFenced);
-                }
-                self.replay_claims.remove(&failure);
-                record.version += 1;
-                record.status = FailureStatus::Replayed;
-                CommitResult::ReplayCompleted {
-                    failure: record.clone(),
-                }
-            }
+            } => self.complete_replay(failure, expected_version),
             CommitIntent::ReplayFail {
                 failure,
                 expected_version,
                 diagnostic,
-            } => {
-                let replay_claimed = self.has_replay_claim(&failure);
-                let Some(record) = self.failures.get_mut(&failure) else {
-                    return CommitResult::Rejected(RejectReason::FailureMissing);
-                };
-                if record.version != expected_version {
-                    return CommitResult::Rejected(RejectReason::StaleFailure);
-                }
-                if record.status != FailureStatus::Replaying {
-                    return CommitResult::Rejected(RejectReason::RetryNotAllowed);
-                }
-                if !replay_claimed {
-                    return CommitResult::Rejected(RejectReason::LeaseFenced);
-                }
-                self.replay_claims.remove(&failure);
-                record.version += 1;
-                record.status = FailureStatus::Skipped;
-                record.diagnostic = diagnostic;
-                record.assertion_detail = None;
-                CommitResult::ReplayFailed {
-                    failure: record.clone(),
-                }
-            }
+            } => self.fail_replay(failure, expected_version, diagnostic, None),
             CommitIntent::ReplayFailWithAssertion {
                 failure,
                 expected_version,
-                diagnostic: supplied_diagnostic,
+                diagnostic,
                 detail,
-            } => {
-                let diagnostic = SafeDiagnostic {
-                    code: DiagnosticCode::TableAssertionFalse,
-                    class: supplied_diagnostic.class,
-                };
-                let replay_claimed = self.has_replay_claim(&failure);
-                let Some(record) = self.failures.get_mut(&failure) else {
-                    return CommitResult::Rejected(RejectReason::FailureMissing);
-                };
-                if record.version != expected_version {
-                    return CommitResult::Rejected(RejectReason::StaleFailure);
-                }
-                if record.status != FailureStatus::Replaying {
-                    return CommitResult::Rejected(RejectReason::RetryNotAllowed);
-                }
-                if !replay_claimed {
-                    return CommitResult::Rejected(RejectReason::LeaseFenced);
-                }
-                self.replay_claims.remove(&failure);
-                record.version += 1;
-                record.status = FailureStatus::Skipped;
-                record.diagnostic = diagnostic;
-                record.assertion_detail = Some(detail);
-                CommitResult::ReplayFailed {
-                    failure: record.clone(),
-                }
-            }
+            } => self.fail_replay(
+                failure,
+                expected_version,
+                assertion_diagnostic(diagnostic),
+                Some(detail),
+            ),
             CommitIntent::ReplayCancel {
                 failure,
                 expected_version,
-            } => {
-                let Some(record) = self.failures.get_mut(&failure) else {
-                    return CommitResult::Rejected(RejectReason::FailureMissing);
-                };
-                if record.version != expected_version {
-                    return CommitResult::Rejected(RejectReason::StaleFailure);
-                }
-                if record.status != FailureStatus::Replaying {
-                    return CommitResult::Rejected(RejectReason::RetryNotAllowed);
-                }
-                if self.replay_claims.contains(&failure) {
-                    return CommitResult::Rejected(RejectReason::LeaseAlreadyHeld);
-                }
-                self.replay_claims.remove(&failure);
-                record.version += 1;
-                record.status = FailureStatus::Skipped;
-                CommitResult::ReplayCancelled {
-                    failure: record.clone(),
-                }
-            }
+            } => self.cancel_replay(failure, expected_version),
             CommitIntent::Resolve {
                 failure,
                 expected_version,
-            } => {
-                let Some(record) = self.failures.get_mut(&failure) else {
-                    return CommitResult::Rejected(RejectReason::FailureMissing);
-                };
-                if record.version != expected_version {
-                    return CommitResult::Rejected(RejectReason::StaleFailure);
-                }
-                if !matches!(
-                    record.status,
-                    FailureStatus::Succeeded | FailureStatus::Skipped | FailureStatus::Replayed
-                ) {
-                    return CommitResult::Rejected(RejectReason::ResolveBlocked);
-                }
-                record.version += 1;
-                record.status = FailureStatus::Resolved;
-                CommitResult::Resolved {
-                    failure: record.clone(),
-                }
-            }
-            CommitIntent::Cancel { lease } => {
-                if let Err(reason) = self.consume_lease(&lease) {
-                    return CommitResult::Rejected(reason);
-                }
-                let identity = FailureIdentity(lease.delivery.clone());
-                if let Some(record) = self.failures.get_mut(&identity)
-                    && record.status == FailureStatus::Retrying
-                {
-                    record.version += 1;
-                    record.status = FailureStatus::Failed;
-                }
-                CommitResult::Cancelled {
-                    checkpoint: self.checkpoint(&lease.delivery.checkpoint_key()),
-                    classification: CancellationClassification::RollbackShaped,
-                }
-            }
-        }
+            } => self.resolve(failure, expected_version),
+            CommitIntent::Cancel { lease } => self.cancel(lease),
+        };
+        outcome.unwrap_or_else(CommitResult::Rejected)
     }
 
     fn checkpoint(&self, key: &CheckpointKey) -> Checkpoint {
-        self.checkpoints
-            .get(key)
-            .cloned()
-            .unwrap_or_else(|| Checkpoint {
-                key: key.clone(),
-                version: 0,
-                committed: None,
-            })
+        self.streams.checkpoint(key)
     }
 
     fn failure(&self, identity: &FailureIdentity) -> Option<&FailureRecord> {
-        self.failures.get(identity)
+        self.failures.get(identity).map(|entry| &entry.record)
     }
 }
 

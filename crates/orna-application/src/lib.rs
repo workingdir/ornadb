@@ -2565,11 +2565,10 @@ impl EffectHandler for AsyncSourceMutationEffectHandler {
         &mut self,
         callee: &Expr,
         arguments: &[CanonicalValue],
-        budget: &mut StepBudget,
+        _budget: &mut StepBudget,
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
         // The existing synchronous table handler does not debit additional
         // work; runtime dispatch remains bounded by its own operation budget.
-        let _ = budget;
         self.handle(callee, arguments)
     }
 
@@ -3363,10 +3362,16 @@ struct SessionRunEventLog {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct SessionRunEvent {
     sequence: u64,
-    succeeded: bool,
-    value: CanonicalValue,
+    outcome: SessionRunOutcome,
     stdout: String,
-    error: Option<SessionRunError>,
+}
+
+/// How one Eval run ended. A failed run has no value, so the event carries the
+/// error that stopped it in place of one.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SessionRunOutcome {
+    Success { value: CanonicalValue },
+    Error(SessionRunError),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3611,7 +3616,11 @@ impl ApplicationLiveAdapter {
     }
 
     fn record_run_success(&self, session: [u8; 16], value: CanonicalValue) {
-        record_session_run_event(&self.run_events, session, true, value, None);
+        record_session_run_event(
+            &self.run_events,
+            session,
+            SessionRunOutcome::Success { value },
+        );
     }
 
     fn record_run_failure(&self, session: [u8; 16], source: &str, code: &str) {
@@ -3619,9 +3628,7 @@ impl ApplicationLiveAdapter {
         record_session_run_event(
             &self.run_events,
             session,
-            false,
-            CanonicalValue::new(OvbRaw::Null).expect("null is canonical"),
-            Some(SessionRunError {
+            SessionRunOutcome::Error(SessionRunError {
                 code: code.to_owned(),
                 line,
                 column,
@@ -3639,6 +3646,13 @@ impl ApplicationLiveAdapter {
         let children = events
             .iter()
             .map(|event| {
+                let (status, value) = match &event.outcome {
+                    SessionRunOutcome::Success { value } => ("success", value.clone()),
+                    SessionRunOutcome::Error(_) => (
+                        "error",
+                        CanonicalValue::new(OvbRaw::Null).expect("null is canonical"),
+                    ),
+                };
                 let mut properties = vec![
                     (PresentPropertyKey::Name("kind".into()), text_value("run")),
                     (
@@ -3647,18 +3661,15 @@ impl ApplicationLiveAdapter {
                     ),
                     (
                         PresentPropertyKey::Name("status".into()),
-                        text_value(if event.succeeded { "success" } else { "error" }),
+                        text_value(status),
                     ),
-                    (
-                        PresentPropertyKey::Name("value".into()),
-                        event.value.clone(),
-                    ),
+                    (PresentPropertyKey::Name("value".into()), value),
                     (
                         PresentPropertyKey::Name("stdout".into()),
                         text_value(&event.stdout),
                     ),
                 ];
-                if let Some(error) = &event.error {
+                if let SessionRunOutcome::Error(error) = &event.outcome {
                     properties.extend([
                         (
                             PresentPropertyKey::Name("error_code".into()),
@@ -3803,9 +3814,7 @@ fn application_module_source(project: &LoadedProject) -> Option<(String, String)
 fn record_session_run_event(
     logs: &Arc<Mutex<BTreeMap<[u8; 16], SessionRunEventLog>>>,
     session: [u8; 16],
-    succeeded: bool,
-    value: CanonicalValue,
-    error: Option<SessionRunError>,
+    outcome: SessionRunOutcome,
 ) {
     let mut logs = logs
         .lock()
@@ -3824,13 +3833,11 @@ fn record_session_run_event(
     }
     log.events.push(SessionRunEvent {
         sequence,
-        succeeded,
-        value,
+        outcome,
         // The evaluator currently has no implicit print operation. Keeping
         // stdout as a typed field leaves the event contract ready for an
         // explicitly captured host output stream.
         stdout: String::new(),
-        error,
     });
 }
 
@@ -4035,7 +4042,11 @@ impl LiveApplication for ApplicationLiveAdapter {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .insert(session, ApplicationReplSession { repl: successor });
-                    record_session_run_event(&run_events, session, true, event_value, None);
+                    record_session_run_event(
+                        &run_events,
+                        session,
+                        SessionRunOutcome::Success { value: event_value },
+                    );
                 });
                 return Ok(LiveEvalResponse::transaction(envelope, transaction));
             }
@@ -4079,7 +4090,11 @@ impl LiveApplication for ApplicationLiveAdapter {
                 request_id: request,
             })
             .after_commit(move || {
-                record_session_run_event(&run_events, session, true, event_value, None);
+                record_session_run_event(
+                    &run_events,
+                    session,
+                    SessionRunOutcome::Success { value: event_value },
+                );
             });
             Ok(LiveEvalResponse::transaction(envelope, transaction))
         })

@@ -21,6 +21,8 @@ use std::{
 
 use sha2::{Digest, Sha256};
 
+use crate::hex::hex_encode;
+
 const INDEX_FILE: &str = "index.tsv";
 const MEDIA_DIR: &str = "media";
 const HEADER: &str = "orna-offline-copy 1";
@@ -77,18 +79,26 @@ impl fmt::Display for OfflineCopyError {
             Self::InvalidBundle(reason) => write!(formatter, "invalid offline bundle: {reason}"),
             Self::InvalidRow(reason) => write!(formatter, "invalid offline row: {reason}"),
             Self::PayloadMismatch { key } => {
-                write!(formatter, "payload for row {} fails its digest", hex(key))
+                write!(
+                    formatter,
+                    "payload for row {} fails its digest",
+                    hex_encode(key)
+                )
             }
-            Self::NotFound { key } => write!(formatter, "no offline row {}", hex(key)),
+            Self::NotFound { key } => write!(formatter, "no offline row {}", hex_encode(key)),
             Self::NoPayload { key } => {
-                write!(formatter, "offline row {} has no copied payload", hex(key))
+                write!(
+                    formatter,
+                    "offline row {} has no copied payload",
+                    hex_encode(key)
+                )
             }
             Self::PayloadAbsent { key, sha256 } => {
                 write!(
                     formatter,
                     "payload {} for offline row {} is not present in the copy",
-                    hex(sha256),
-                    hex(key)
+                    hex_encode(sha256),
+                    hex_encode(key)
                 )
             }
         }
@@ -187,18 +197,18 @@ pub fn write_offline_copy_limited(
         if let Some(payload) = &row.payload {
             verify_payload(row, payload)?;
             fs::create_dir_all(&media)?;
-            let path = media.join(hex(&row.sha256));
+            let path = media.join(hex_encode(&row.sha256));
             if !path.exists() {
                 fs::write(&path, payload)?;
             }
         }
         index.push_str(&format!(
             "row\t{}\t{}\t{}\t{}\t{}\t{}\n",
-            hex(&row.key),
+            hex_encode(&row.key),
             row.media_type,
             row.suffix.as_deref().unwrap_or("-"),
             row.length,
-            hex(&row.sha256),
+            hex_encode(&row.sha256),
             u8::from(row.payload.is_some()),
         ));
     }
@@ -206,7 +216,7 @@ pub fn write_offline_copy_limited(
         index.push_str(&format!(
             "history\t{}\t{}\n",
             entry.sequence,
-            hex(&entry.commit)
+            hex_encode(&entry.commit)
         ));
     }
     fs::create_dir_all(directory)?;
@@ -337,7 +347,7 @@ impl OfflineCopy {
         if !row.has_payload {
             return None;
         }
-        let path = self.directory.join(MEDIA_DIR).join(hex(&row.sha256));
+        let path = self.directory.join(MEDIA_DIR).join(hex_encode(&row.sha256));
         match fs::metadata(&path) {
             Ok(metadata) if metadata.is_file() => Some(path),
             _ => None,
@@ -633,7 +643,10 @@ impl OfflineCopy {
                     key: metadata.key.clone(),
                 });
             }
-            let path = self.directory.join(MEDIA_DIR).join(hex(&metadata.sha256));
+            let path = self
+                .directory
+                .join(MEDIA_DIR)
+                .join(hex_encode(&metadata.sha256));
             verify_payload_stream(
                 &metadata.key,
                 metadata.length,
@@ -708,16 +721,6 @@ fn verify_payload_stream(
         return Err(OfflineCopyError::PayloadMismatch { key: key.to_vec() });
     }
     Ok(())
-}
-
-fn hex(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        output.push(DIGITS[(byte >> 4) as usize] as char);
-        output.push(DIGITS[(byte & 0x0f) as usize] as char);
-    }
-    output
 }
 
 fn unhex(text: &str) -> Option<Vec<u8>> {

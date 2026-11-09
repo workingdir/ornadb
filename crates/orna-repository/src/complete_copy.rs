@@ -68,6 +68,7 @@ use std::{
 use sha1::{Digest as Sha1Digest, Sha1};
 use sha2::{Digest as Sha2Digest, Sha256};
 
+use crate::hex::hex_encode;
 use crate::native_graph::{GitHashAlgorithm, NODE_DATA_LIMIT, NodeData};
 use crate::object_reader::{ObjectKind, ObjectReader, TreeEntryMode};
 use crate::{
@@ -1897,7 +1898,7 @@ fn verify_blob(reader: &ObjectReader, oid: &str, size: u64) -> Result<(), Comple
             Ok(())
         })
         .map_err(|error| read_error(error, mismatch()))?;
-    if encode_oid(&hasher.finalize()) != oid {
+    if hex_encode(&hasher.finalize()) != oid {
         return Err(mismatch());
     }
     Ok(())
@@ -1930,15 +1931,6 @@ fn object_hasher(oid: &str) -> Result<ObjectHasher, CompleteCopyError> {
         64 => Ok(ObjectHasher::Sha256(<Sha256 as Sha2Digest>::new())),
         _ => Err(CompleteCopyError::InvalidArchive("object id length")),
     }
-}
-
-fn encode_oid(digest: &[u8]) -> String {
-    use std::fmt::Write as _;
-    let mut text = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        let _ = write!(text, "{byte:02x}");
-    }
-    text
 }
 
 /// Writes one self-contained bundle of the closure reachable from `commit`.

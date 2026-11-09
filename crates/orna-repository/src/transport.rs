@@ -577,14 +577,32 @@ enum RefKind {
     Allocator,
 }
 
+/// How installing one planned ref changes the local ref.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum RefChange {
+    /// The local ref does not exist yet.
+    Create,
+    /// The local ref names `old` and moves to the planned object.
+    Advance { old: String },
+    /// The local ref already names the planned object; the transaction only
+    /// verifies that it still does.
+    Unchanged { old: String },
+}
+
+impl RefChange {
+    /// Whether the transaction writes the ref (as opposed to verifying it).
+    const fn updates(&self) -> bool {
+        !matches!(self, Self::Unchanged { .. })
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct RefPlan {
     source: String,
     destination: String,
-    object_id: String,
-    old: Option<String>,
+    object_id: NativeObjectId,
+    change: RefChange,
     kind: RefKind,
-    updated: bool,
 }
 
 /// One allocator watermark a push creates or advances on the remote.
@@ -620,18 +638,8 @@ impl Repository {
     pub fn hydrate_promised_object(&self, object_id: &str) -> Result<(), FetchError> {
         let object_id =
             NativeObjectId::new(object_id.to_owned()).map_err(|_| FetchError::InvalidObjectId)?;
-        let state = self.observe_git_object(object_id.as_str())?;
-        if matches!(state, super::GitObjectState::Materialized { .. }) {
+        if !self.hydration_needed(&object_id)? {
             return Ok(());
-        }
-        if !matches!(state, super::GitObjectState::Promised) {
-            return Err(match state {
-                super::GitObjectState::Malformed => FetchError::InvalidObjectId,
-                super::GitObjectState::Unavailable => FetchError::ObjectNotPromised,
-                super::GitObjectState::Materialized { .. } | super::GitObjectState::Promised => {
-                    unreachable!()
-                }
-            });
         }
 
         let _lock = self.acquire_coordination_lock()?;
@@ -645,18 +653,8 @@ impl Repository {
         // Revalidate the promise under the repository lock so a concurrent
         // fetch or maintenance operation cannot turn a stale observation into
         // an unconstrained object request.
-        let state = self.observe_git_object(object_id.as_str())?;
-        if matches!(state, super::GitObjectState::Materialized { .. }) {
+        if !self.hydration_needed(&object_id)? {
             return Ok(());
-        }
-        if !matches!(state, super::GitObjectState::Promised) {
-            return Err(match state {
-                super::GitObjectState::Malformed => FetchError::InvalidObjectId,
-                super::GitObjectState::Unavailable => FetchError::ObjectNotPromised,
-                super::GitObjectState::Materialized { .. } | super::GitObjectState::Promised => {
-                    unreachable!()
-                }
-            });
         }
 
         let mut saw_successful_fetch = false;
@@ -692,6 +690,18 @@ impl Repository {
             Err(FetchError::HydrationFailed)
         } else {
             Err(FetchError::ObjectUnavailable)
+        }
+    }
+
+    /// Whether `object_id` still has to be fetched: `false` once it is
+    /// materialized, `true` while it is a proven promise, and a refusal for an
+    /// object that is neither.
+    fn hydration_needed(&self, object_id: &NativeObjectId) -> Result<bool, FetchError> {
+        match self.observe_git_object(object_id.as_str())? {
+            super::GitObjectState::Materialized { .. } => Ok(false),
+            super::GitObjectState::Promised => Ok(true),
+            super::GitObjectState::Malformed => Err(FetchError::InvalidObjectId),
+            super::GitObjectState::Unavailable => Err(FetchError::ObjectNotPromised),
         }
     }
 
@@ -851,17 +861,17 @@ impl Repository {
 
         kind: RefKind,
     ) -> Result<RefPlan, FetchError> {
-        let old = local_ref_oid(self, &destination)?;
-        let updated = match &old {
-            None => true,
-            Some(old) if old == &object_id => false,
-            Some(_)
+        let object_id = NativeObjectId::new(object_id)?;
+        let change = match local_ref_oid(self, &destination)? {
+            None => RefChange::Create,
+            Some(old) if old == object_id.as_str() => RefChange::Unchanged { old },
+            Some(old)
                 if matches!(
                     kind,
                     RefKind::Branch | RefKind::Internal | RefKind::Allocator
                 ) =>
             {
-                true
+                RefChange::Advance { old }
             }
             Some(_) => return Err(FetchError::RefConflict),
         };
@@ -869,9 +879,8 @@ impl Repository {
             source,
             destination,
             object_id,
-            old,
+            change,
             kind,
-            updated,
         })
     }
     /// Creates a partial clone with no checkout, retaining ordinary Git refs
@@ -1129,8 +1138,8 @@ impl From<RefPlan> for FetchedRef {
         Self {
             source: plan.source,
             destination: plan.destination,
-            object_id: NativeObjectId::new(plan.object_id).expect("validated fetch object ID"),
-            updated: plan.updated,
+            object_id: plan.object_id,
+            updated: plan.change.updates(),
         }
     }
 }
@@ -1142,11 +1151,11 @@ fn validate_fast_forward_plans(
     for plan in plans {
         // Allocator plans are ordered by watermark value, which
         // `retain_advancing_watermarks` has already checked.
-        if !plan.updated || !matches!(plan.kind, RefKind::Branch | RefKind::Internal) {
+        if !matches!(plan.kind, RefKind::Branch | RefKind::Internal) {
             continue;
         }
-        if let Some(old) = &plan.old
-            && !is_fast_forward(repository, old, &plan.object_id)?
+        if let RefChange::Advance { old } = &plan.change
+            && !is_fast_forward(repository, old, plan.object_id.as_str())?
         {
             return Err(FetchError::RefConflict);
         }
@@ -1165,9 +1174,9 @@ fn retain_advancing_watermarks(
 ) -> Result<Vec<RefPlan>, FetchError> {
     let mut retained = Vec::with_capacity(plans.len());
     for plan in plans {
-        if plan.kind == RefKind::Allocator && plan.updated {
-            let remote = allocator_watermark(repository, &plan.object_id)?;
-            if let Some(old) = &plan.old
+        if plan.kind == RefKind::Allocator && plan.change.updates() {
+            let remote = allocator_watermark(repository, plan.object_id.as_str())?;
+            if let RefChange::Advance { old } = &plan.change
                 && watermark_order(&remote, &allocator_watermark(repository, old)?)
                     != std::cmp::Ordering::Greater
             {
@@ -1207,7 +1216,7 @@ fn verify_remote_snapshot(
         || plans.iter().any(|plan| {
             current
                 .get(&plan.source)
-                .is_none_or(|object_id| object_id != &plan.object_id)
+                .is_none_or(|object_id| object_id != plan.object_id.as_str())
         })
     {
         return Err(FetchError::RemoteChanged);
@@ -1470,7 +1479,7 @@ fn verify_fetched_objects(repository: &Repository, plans: &[RefPlan]) -> Result<
         let mut command = repository.observer_command();
         command
             .env("GIT_NO_LAZY_FETCH", "1")
-            .args(["cat-file", "-e", &plan.object_id]);
+            .args(["cat-file", "-e", plan.object_id.as_str()]);
         let status = command
             .status()
             .map_err(|_| FetchError::Repository(RepositoryError::GitUnavailable))?;
@@ -1481,7 +1490,7 @@ fn verify_fetched_objects(repository: &Repository, plans: &[RefPlan]) -> Result<
             let mut command = repository.observer_command();
             command
                 .env("GIT_NO_LAZY_FETCH", "1")
-                .args(["cat-file", "-t", &plan.object_id]);
+                .args(["cat-file", "-t", plan.object_id.as_str()]);
             let output = command
                 .output()
                 .map_err(|_| FetchError::Repository(RepositoryError::GitUnavailable))?;
@@ -1537,8 +1546,7 @@ fn sync_fetched_objects(repository: &Repository, plans: &[RefPlan]) -> Result<()
     }
     let mut objects = BTreeSet::new();
     for plan in plans {
-        objects
-            .insert(NativeObjectId::new(plan.object_id.clone()).map_err(FetchError::Repository)?);
+        objects.insert(plan.object_id.clone());
     }
     let objects_dir = git_path(repository, "objects")?;
     let alternates = objects_dir.join("info").join("alternates");
@@ -1653,24 +1661,16 @@ fn install_refs(repository: &Repository, plans: &[RefPlan]) -> Result<(), FetchE
         .map_err(|_| FetchError::Repository(RepositoryError::GitUnavailable))?;
     let mut input = String::from("start\n");
     for plan in plans {
-        if plan.updated {
-            match &plan.old {
-                Some(old) => {
-                    input.push_str(&format!(
-                        "update {} {} {}\n",
-                        plan.destination, plan.object_id, old
-                    ));
-                }
-                None => {
-                    input.push_str(&format!("create {} {}\n", plan.destination, plan.object_id))
-                }
+        let destination = &plan.destination;
+        let object_id = plan.object_id.as_str();
+        match &plan.change {
+            RefChange::Create => input.push_str(&format!("create {destination} {object_id}\n")),
+            RefChange::Advance { old } => {
+                input.push_str(&format!("update {destination} {object_id} {old}\n"));
             }
-        } else {
-            let old = plan
-                .old
-                .as_deref()
-                .expect("unchanged plan has an old object ID");
-            input.push_str(&format!("verify {} {}\n", plan.destination, old));
+            RefChange::Unchanged { old } => {
+                input.push_str(&format!("verify {destination} {old}\n"));
+            }
         }
     }
     input.push_str("prepare\ncommit\n");
@@ -1941,14 +1941,13 @@ mod tests {
         git(&local, &["init", "-b", "main"]);
         let repository = Repository::discover(&local).unwrap();
 
-        let absent = "0123456789abcdef0123456789abcdef01234567".to_owned();
+        let absent = NativeObjectId::new("0123456789abcdef0123456789abcdef01234567").unwrap();
         let plan = RefPlan {
             source: "refs/heads/main".to_owned(),
             destination: "refs/remotes/origin/main".to_owned(),
             object_id: absent,
-            old: None,
+            change: RefChange::Create,
             kind: RefKind::Branch,
-            updated: true,
         };
         assert!(matches!(
             sync_fetched_objects(&repository, &[plan]),

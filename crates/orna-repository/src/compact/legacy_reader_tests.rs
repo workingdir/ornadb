@@ -35,6 +35,7 @@ use uuid::Uuid;
 
 use super::legacy_fixture_writer::with_page_checksums;
 use super::{CompactCommittedRow, resolve_legacy_authoritative_rows};
+use crate::hex::hex_encode;
 use crate::{
     CompactManifest, CompactPublicationPlan, CompactSegment, CompactSegmentRole, GitCommitRef,
     GitDeclaredObjectSetState, GitObjectKind, GitObjectState, IndexGeneration, ManagedFileChange,
@@ -184,7 +185,7 @@ fn compact_parquet(table: Uuid, ordinal: u64, columns: &[u8], payload: Vec<u8>) 
         KeyValue::new("orna.table".to_owned(), Some(table.to_string())),
         KeyValue::new(
             "orna.schema.sha256".to_owned(),
-            Some(hex_digest(&compact_schema_fingerprint(table))),
+            Some(hex_encode(&compact_schema_fingerprint(table))),
         ),
         KeyValue::new(
             "orna.schema.ovb".to_owned(),
@@ -283,7 +284,7 @@ fn date_parquet(table: Uuid, schema: &SchemaDescriptor, columns: &[u8], days: &[
         KeyValue::new("orna.table".to_owned(), Some(table.to_string())),
         KeyValue::new(
             "orna.schema.sha256".to_owned(),
-            Some(hex_digest(&schema_fingerprint(schema))),
+            Some(hex_encode(&schema_fingerprint(schema))),
         ),
         KeyValue::new(
             "orna.schema.ovb".to_owned(),
@@ -523,7 +524,7 @@ fn compact_primitive_parquet(
         KeyValue::new("orna.table".to_owned(), Some(table.to_string())),
         KeyValue::new(
             "orna.schema.sha256".to_owned(),
-            Some(hex_digest(&schema_fingerprint(schema))),
+            Some(hex_encode(&schema_fingerprint(schema))),
         ),
         KeyValue::new(
             "orna.schema.ovb".to_owned(),
@@ -599,7 +600,7 @@ fn compact_ovb_parquet(
         KeyValue::new("orna.table".to_owned(), Some(table.to_string())),
         KeyValue::new(
             "orna.schema.sha256".to_owned(),
-            Some(hex_digest(&schema_fingerprint(schema))),
+            Some(hex_encode(&schema_fingerprint(schema))),
         ),
         KeyValue::new(
             "orna.schema.ovb".to_owned(),
@@ -842,7 +843,7 @@ fn compact_key_blob_parquet(
         KeyValue::new("orna.table".to_owned(), Some(table.to_string())),
         KeyValue::new(
             "orna.schema.sha256".to_owned(),
-            Some(hex_digest(&schema_fingerprint(schema))),
+            Some(hex_encode(&schema_fingerprint(schema))),
         ),
         KeyValue::new(
             "orna.schema.ovb".to_owned(),
@@ -2627,7 +2628,7 @@ fn compact_manifest_recovery_rejects_a_same_shape_descriptor_with_the_wrong_iden
         .unwrap()
         .replacen(
             &expected_hash,
-            &hex_digest(&Sha256::digest(&malformed_shard)),
+            &hex_encode(&Sha256::digest(&malformed_shard)),
             1,
         )
         .into_bytes();
@@ -2737,7 +2738,7 @@ fn compact_publication_rejects_a_noncanonical_reordered_candidate_manifest() {
         ],
     );
     let reordered_shard = reorder_two_canonical_shard_entries(&shard);
-    let reordered_hash = hex_digest(&Sha256::digest(&reordered_shard));
+    let reordered_hash = hex_encode(&Sha256::digest(&reordered_shard));
     let original_manifest_hash: [u8; 32] = Sha256::digest(&manifest).into();
     let original_hash = manifest_hash_for(&manifest, "shards/00000000.orna");
     let reordered_manifest = String::from_utf8(manifest)
@@ -2810,10 +2811,6 @@ fn manifest_hash_for(bytes: &[u8], shard: &str) -> String {
     let marker = format!("file: \"{shard}\", hash: \"");
     let hash = text.split_once(&marker).unwrap().1;
     hash[..64].to_owned()
-}
-
-fn hex_digest(digest: &[u8]) -> String {
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[test]

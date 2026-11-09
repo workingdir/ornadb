@@ -20,7 +20,7 @@ use orna_value::{
 };
 
 use crate::native_graph::{
-    CborValue, GraphError, NODE_DATA_LIMIT, NativeGraphContext, NativeObjectId, NativeObjectKind,
+    CborValue, GraphError, NativeGraphContext, NativeObjectId, NativeObjectKind,
     RepositoryReadScope, canonical_value_bytes, decode_canonical_cbor, direct_blob_reference_count,
     row_fields_dependencies,
 };
@@ -456,8 +456,9 @@ pub struct RowMapSnapshot {
 }
 
 impl RowMapSnapshot {
-    /// Dead code: no caller yet; kept for the store surface it specifies.
-    #[allow(dead_code)]
+    /// Seals a row map whose rows are held in memory. Production only issues
+    /// persisted (lazy) snapshots, so this constructor exists for tests.
+    #[cfg(test)]
     pub(crate) fn issue(
         version: RowMapVersion,
         authority: [u8; 32],
@@ -1146,11 +1147,10 @@ impl RowValue {
         }
     }
 
-    /// Dead code: no caller yet; kept for the store surface it specifies.
-    #[allow(dead_code)]
     /// The complete canonical ORP-1 page body for an ordered set of entries:
     /// the CBOR array of `[key, value]` pairs a reader decodes into one leaf.
     /// Entry order is the order supplied, which the caller owns.
+    #[cfg(test)]
     pub(crate) fn page_bytes(entries: &[RowEntry]) -> Result<Vec<u8>, RowStoreError> {
         if entries.len() > MAX_PAGE_ENTRIES {
             return Err(RowStoreError::PageFanoutExceeded(entries.len()));
@@ -1168,7 +1168,7 @@ impl RowValue {
             cbor_head(&mut pair, 4, 2);
             pair.extend_from_slice(&key);
             pair.extend_from_slice(&value);
-            if output.len() + pair.len() > NODE_DATA_LIMIT {
+            if output.len() + pair.len() > crate::native_graph::NODE_DATA_LIMIT {
                 return Err(RowStoreError::EntryTooLarge(pair.len()));
             }
             output.extend_from_slice(&pair);
