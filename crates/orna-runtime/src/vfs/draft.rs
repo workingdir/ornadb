@@ -310,6 +310,29 @@ impl<S> DraftState<S> {
                 .absorb_candidate_spool(&self.quota, &mut spool.charge);
         }
     }
+
+    /// The diagnostic activation recorded for this exact revision, if it
+    /// refused it. A later revision never reads an earlier refusal.
+    pub(super) fn rejection_for(&self, revision: u64) -> Option<SafeDiagnostic> {
+        match &self.memo {
+            FsyncMemo::Rejected {
+                revision: rejected,
+                diagnostic,
+            } if *rejected == revision => Some(*diagnostic),
+            _ => None,
+        }
+    }
+
+    /// The image activation recorded for this exact revision, if it accepted it.
+    pub(super) fn accepted_for(&self, revision: u64) -> Option<&Arc<VfsFileSnapshot<S>>> {
+        match &self.memo {
+            FsyncMemo::Accepted {
+                revision: accepted,
+                image,
+            } if *accepted == revision => Some(image),
+            _ => None,
+        }
+    }
 }
 
 /// A private EDIT-1 replacement draft. Writes land in a disk-backed spool
