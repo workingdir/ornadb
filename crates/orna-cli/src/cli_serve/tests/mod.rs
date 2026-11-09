@@ -204,7 +204,7 @@ fn oversized_orna_body_is_refused_by_its_declared_length() {
     );
 }
 
-const SERVE_FIXTURE: &str = include_str!("../../tests/fixtures/serve-no-autoload.orna");
+const SERVE_FIXTURE: &str = include_str!("../../../tests/fixtures/serve-no-autoload.orna");
 
 fn git_succeeds(directory: &Path, arguments: &[&str]) {
     let output = Command::new("git")
