@@ -3252,109 +3252,59 @@ impl Repository {
         self.objects().check_expansion(expected_head.as_str(), "")?;
         self.reject_final_loose_path_collisions(expected_head, changes)?;
 
-        self.runtime.ensure_exists()?;
-        fs::create_dir_all(self.runtime.locks())
-            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
-        let index = self.runtime.locks().join(format!(
-            "private-index-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_err(|_| RepositoryError::LocalStateUnavailable)?
-                .as_nanos()
-        ));
-        fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&index)
-            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
-        fs::remove_file(&index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        let index = self.private_index()?;
+        let mut read_tree = self.command();
+        read_tree
+            .env("GIT_INDEX_FILE", index.path())
+            .args(["read-tree", expected_head.as_str()]);
+        self.run(read_tree)?;
 
-        let result = (|| {
-            let mut read_tree = self.command();
-            read_tree
-                .env("GIT_INDEX_FILE", &index)
-                .args(["read-tree", expected_head.as_str()]);
-            self.run(read_tree)?;
-
-            for change in changes {
-                if let Some(bytes) = change.bytes() {
-                    let object = self.hash_object(bytes)?;
-                    let cacheinfo = format!(
-                        "100644,{object},{}",
-                        change
-                            .path
-                            .as_path()
-                            .to_str()
-                            .ok_or(RepositoryError::UnsafeManagedPath)?
-                    );
-                    let mut update = self.command();
-                    update.env("GIT_INDEX_FILE", &index).args([
-                        "update-index",
-                        "--add",
-                        "--cacheinfo",
-                        &cacheinfo,
-                    ]);
-                    self.run(update)?;
-                } else {
-                    let mut update = self.command();
-                    update
-                        .env("GIT_INDEX_FILE", &index)
-                        .args(["update-index", "--force-remove", "--"])
-                        .arg(change.path.as_path());
-                    self.run(update)?;
-                }
+        for change in changes {
+            if let Some(bytes) = change.bytes() {
+                let object = self.hash_object(bytes)?;
+                let cacheinfo = format!(
+                    "100644,{object},{}",
+                    change
+                        .path
+                        .as_path()
+                        .to_str()
+                        .ok_or(RepositoryError::UnsafeManagedPath)?
+                );
+                let mut update = self.command();
+                update.env("GIT_INDEX_FILE", index.path()).args([
+                    "update-index",
+                    "--add",
+                    "--cacheinfo",
+                    &cacheinfo,
+                ]);
+                self.run(update)?;
+            } else {
+                let mut update = self.command();
+                update
+                    .env("GIT_INDEX_FILE", index.path())
+                    .args(["update-index", "--force-remove", "--"])
+                    .arg(change.path.as_path());
+                self.run(update)?;
             }
-            match store_projection {
-                None => {}
-                Some(StoreBinding::Validated { graph, root }) => {
-                    graph
-                        .pin_store_subtree_in_index(&index, root)
-                        .map_err(RepositoryError::Graph)?;
-                }
-                Some(StoreBinding::Decoded(root)) => {
-                    bind_tree_entry_in_index(
-                        || self.command(),
-                        &index,
-                        STORE_PATH,
-                        "040000",
-                        &root.to_hex(),
-                    )?;
-                }
+        }
+        match store_projection {
+            None => {}
+            Some(StoreBinding::Validated { graph, root }) => {
+                graph
+                    .pin_store_subtree_in_index(index.path(), root)
+                    .map_err(RepositoryError::Graph)?;
             }
-
-            let mut write_tree = self.command();
-            write_tree
-                .env("GIT_INDEX_FILE", &index)
-                .args(["write-tree"]);
-            let tree =
-                self.index_tree_from_native_oid(trim_output(&self.run(write_tree)?.stdout))?;
-
-            let mut commit_tree = self.command();
-            commit_tree.args([
-                "commit-tree",
-                tree.as_str(),
-                "-p",
-                expected_head.as_str(),
-                "-m",
-            ]);
-            if let Some(timestamp) = commit_time {
-                // One offset for both identities keeps the object independent
-                // of the host's time zone as well as its clock.
-                let date = format!("@{timestamp} +0000");
-                commit_tree.env("GIT_AUTHOR_DATE", &date);
-                commit_tree.env("GIT_COMMITTER_DATE", &date);
+            Some(StoreBinding::Decoded(root)) => {
+                bind_tree_entry_in_index(
+                    || self.command(),
+                    index.path(),
+                    STORE_PATH,
+                    "040000",
+                    &root.to_hex(),
+                )?;
             }
-            commit_tree.arg(message);
-            let commit =
-                self.snapshot_from_native_oid(trim_output(&self.run(commit_tree)?.stdout))?;
-            if self.head()?.as_ref() != Some(expected_head) {
-                return Err(RepositoryError::StaleHead);
-            }
-            Ok(PrivateCommit { tree, commit })
-        })();
-        let _ = fs::remove_file(&index);
-        result
+        }
+        self.commit_private_index(index.path(), expected_head, message, commit_time)
     }
 
     /// Builds one publication candidate `N = H + P` from the captured base and
@@ -3396,59 +3346,79 @@ impl Repository {
                 actual: store_root.as_bytes().len(),
             }));
         }
+        let index = self.private_index()?;
+        let mut read_tree = self.command();
+        read_tree
+            .env("GIT_INDEX_FILE", index.path())
+            .args(["read-tree", expected_head.as_str()]);
+        self.run(read_tree)?;
+
+        // The store root must be a real decodable OGS-1 tree, so a raw
+        // object ID cannot be planted at the store position.
+        graph
+            .pin_store_subtree_in_index(index.path(), store_root)
+            .map_err(RepositoryError::Graph)?;
+        self.commit_private_index(index.path(), expected_head, message, None)
+    }
+
+    /// A fresh private index path under the runtime locks directory, for
+    /// building a candidate commit without touching the ordinary index. Git
+    /// creates the file itself; the returned guard removes it.
+    fn private_index(&self) -> Result<StagedFile, RepositoryError> {
         self.runtime.ensure_exists()?;
         fs::create_dir_all(self.runtime.locks())
             .map_err(|_| RepositoryError::LocalStateUnavailable)?;
-        let index = self.runtime.locks().join(format!(
+        let path = self.runtime.locks().join(format!(
             "private-index-{}-{}",
             std::process::id(),
             Uuid::new_v4()
         ));
+        // `create_new` proves the name is unused before Git claims it.
         fs::OpenOptions::new()
             .create_new(true)
             .write(true)
-            .open(&index)
+            .open(&path)
             .map_err(|_| RepositoryError::LocalStateUnavailable)?;
-        fs::remove_file(&index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        fs::remove_file(&path).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        Ok(StagedFile::reserve(path))
+    }
 
-        let result = (|| {
-            let mut read_tree = self.command();
-            read_tree
-                .env("GIT_INDEX_FILE", &index)
-                .args(["read-tree", expected_head.as_str()]);
-            self.run(read_tree)?;
+    /// Writes the private `index` as a tree and commits it as a child of
+    /// `expected_head`. `commit_time` pins the time of both identities when
+    /// the object must be reproducible. The commit is refused if `HEAD` moved
+    /// while it was built.
+    fn commit_private_index(
+        &self,
+        index: &Path,
+        expected_head: &GitCommitRef,
+        message: &str,
+        commit_time: Option<i64>,
+    ) -> Result<PrivateCommit, RepositoryError> {
+        let mut write_tree = self.command();
+        write_tree.env("GIT_INDEX_FILE", index).args(["write-tree"]);
+        let tree = self.index_tree_from_native_oid(trim_output(&self.run(write_tree)?.stdout))?;
 
-            // The store root must be a real decodable OGS-1 tree, so a raw
-            // object ID cannot be planted at the store position.
-            graph
-                .pin_store_subtree_in_index(&index, store_root)
-                .map_err(RepositoryError::Graph)?;
-
-            let mut write_tree = self.command();
-            write_tree
-                .env("GIT_INDEX_FILE", &index)
-                .args(["write-tree"]);
-            let tree =
-                self.index_tree_from_native_oid(trim_output(&self.run(write_tree)?.stdout))?;
-
-            let mut commit_tree = self.command();
-            commit_tree.args([
-                "commit-tree",
-                tree.as_str(),
-                "-p",
-                expected_head.as_str(),
-                "-m",
-            ]);
-            commit_tree.arg(message);
-            let commit =
-                self.snapshot_from_native_oid(trim_output(&self.run(commit_tree)?.stdout))?;
-            if self.head()?.as_ref() != Some(expected_head) {
-                return Err(RepositoryError::StaleHead);
-            }
-            Ok(PrivateCommit { tree, commit })
-        })();
-        let _ = fs::remove_file(&index);
-        result
+        let mut commit_tree = self.command();
+        commit_tree.args([
+            "commit-tree",
+            tree.as_str(),
+            "-p",
+            expected_head.as_str(),
+            "-m",
+        ]);
+        if let Some(timestamp) = commit_time {
+            // One offset for both identities keeps the object independent
+            // of the host's time zone as well as its clock.
+            let date = format!("@{timestamp} +0000");
+            commit_tree.env("GIT_AUTHOR_DATE", &date);
+            commit_tree.env("GIT_COMMITTER_DATE", &date);
+        }
+        commit_tree.arg(message);
+        let commit = self.snapshot_from_native_oid(trim_output(&self.run(commit_tree)?.stdout))?;
+        if self.head()?.as_ref() != Some(expected_head) {
+            return Err(RepositoryError::StaleHead);
+        }
+        Ok(PrivateCommit { tree, commit })
     }
 
     /// Advances the symbolic current branch to a previously built private
@@ -3705,65 +3675,62 @@ impl Repository {
             return Err(RepositoryError::UnsafeManagedPath);
         }
 
-        let candidate_index = index
-            .parent()
-            .ok_or(RepositoryError::LocalStateUnavailable)?
-            .join(format!("index-candidate-{}", Uuid::new_v4()));
-        write_new_index_candidate(&candidate_index, base_index)?;
-        let result = (|| {
-            for path in paths {
-                let encoded = path
-                    .as_path()
-                    .to_str()
-                    .ok_or(RepositoryError::UnsafeManagedPath)?;
-                match self.candidate_tree_entry(candidate, path)? {
-                    Some((mode, object)) => bind_tree_entry_in_index(
-                        || self.command(),
-                        &candidate_index,
-                        encoded,
-                        &mode,
-                        &object,
-                    )?,
-                    None => {
-                        let mut update = self.command();
-                        update
-                            .env("GIT_INDEX_FILE", &candidate_index)
-                            .args(["update-index", "--force-remove", "--"])
-                            .arg(path.as_path());
-                        self.run(update)?;
-                    }
+        let candidate_index = StagedFile::create(
+            index
+                .parent()
+                .ok_or(RepositoryError::LocalStateUnavailable)?
+                .join(format!("index-candidate-{}", Uuid::new_v4())),
+            base_index,
+        )?;
+        for path in paths {
+            let encoded = path
+                .as_path()
+                .to_str()
+                .ok_or(RepositoryError::UnsafeManagedPath)?;
+            match self.candidate_tree_entry(candidate, path)? {
+                Some((mode, object)) => bind_tree_entry_in_index(
+                    || self.command(),
+                    candidate_index.path(),
+                    encoded,
+                    &mode,
+                    &object,
+                )?,
+                None => {
+                    let mut update = self.command();
+                    update
+                        .env("GIT_INDEX_FILE", candidate_index.path())
+                        .args(["update-index", "--force-remove", "--"])
+                        .arg(path.as_path());
+                    self.run(update)?;
                 }
             }
-            // Reconcile store leaves before atomically installing the candidate index.
-            self.reconcile_store_worktree_transition(expected_index, candidate, true)?;
-            // Gate D boundary: the store worktree has been rewritten but the
-            // candidate index is not yet installed (ORNA-PUB-005/PUB-016).
-            crate::publication_crash_barrier("store-worktree");
-            self.configure_store_tree_skip_worktree(&candidate_index)?;
-            fs::File::open(&candidate_index)
-                .and_then(|file| file.sync_all())
-                .map_err(|_| RepositoryError::LocalStateUnavailable)?;
-            let current_index =
-                fs::read(&index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
-            if current_index != base_index || self.head()?.as_ref() != Some(candidate.commit()) {
-                return Err(RepositoryError::StaleHead);
-            }
-            fs::rename(&candidate_index, &index)
-                .map_err(|_| RepositoryError::LocalStateUnavailable)?;
-            fs::File::open(
-                index
-                    .parent()
-                    .ok_or(RepositoryError::LocalStateUnavailable)?,
-            )
-            .and_then(|directory| directory.sync_all())
+        }
+        // Reconcile store leaves before atomically installing the candidate index.
+        self.reconcile_store_worktree_transition(expected_index, candidate, true)?;
+        // Gate D boundary: the store worktree has been rewritten but the
+        // candidate index is not yet installed (ORNA-PUB-005/PUB-016).
+        crate::publication_crash_barrier("store-worktree");
+        self.configure_store_tree_skip_worktree(candidate_index.path())?;
+        fs::File::open(candidate_index.path())
+            .and_then(|file| file.sync_all())
             .map_err(|_| RepositoryError::LocalStateUnavailable)?;
-            Ok(IndexGeneration {
-                head: self.head()?,
-                tree: self.index_tree_from_file(&index)?,
-            })
-        })();
-        let _ = fs::remove_file(&candidate_index);
-        result
+        let current_index = fs::read(&index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        if current_index != base_index || self.head()?.as_ref() != Some(candidate.commit()) {
+            return Err(RepositoryError::StaleHead);
+        }
+        fs::rename(candidate_index.path(), &index)
+            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        fs::File::open(
+            index
+                .parent()
+                .ok_or(RepositoryError::LocalStateUnavailable)?,
+        )
+        .and_then(|directory| directory.sync_all())
+        .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        Ok(IndexGeneration {
+            head: self.head()?,
+            tree: self.index_tree_from_file(&index)?,
+        })
     }
 
     /// OGS envelope metadata stays materialized, but OGB-2 raw chunks remain
@@ -3879,54 +3846,51 @@ impl Repository {
         let parent = index
             .parent()
             .ok_or(RepositoryError::LocalStateUnavailable)?;
-        let candidate_index = parent.join(format!(".orna-index-recovery-{}", Uuid::new_v4()));
-        let result = (|| {
-            write_new_index_candidate(&candidate_index, &base_index)?;
-            let mut update = self.command();
-            update
-                .env("GIT_INDEX_FILE", &candidate_index)
-                .args([
-                    "update-index",
-                    if skip {
-                        "--skip-worktree"
-                    } else {
-                        "--no-skip-worktree"
-                    },
-                    "-z",
-                    "--stdin",
-                ])
-                .stdin(Stdio::piped());
-            let mut child = update
-                .spawn()
-                .map_err(|_| RepositoryError::GitUnavailable)?;
-            child
-                .stdin
-                .take()
-                .ok_or(RepositoryError::LocalStateUnavailable)?
-                .write_all(&encoded_paths)
-                .map_err(|_| RepositoryError::GitOperationFailed)?;
-            let output = child
-                .wait_with_output()
-                .map_err(|_| RepositoryError::GitUnavailable)?;
-            if !output.status.success() {
-                return Err(RepositoryError::GitOperationFailed);
-            }
-            fs::File::open(&candidate_index)
-                .and_then(|file| file.sync_all())
-                .map_err(|_| RepositoryError::LocalStateUnavailable)?;
-            let current_index =
-                fs::read(&index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
-            if current_index != base_index || self.head()?.as_ref() != Some(journal.new_head()) {
-                return Err(RepositoryError::StaleHead);
-            }
-            fs::rename(&candidate_index, &index)
-                .map_err(|_| RepositoryError::LocalStateUnavailable)?;
-            fs::File::open(parent)
-                .and_then(|directory| directory.sync_all())
-                .map_err(|_| RepositoryError::LocalStateUnavailable)
-        })();
-        let _ = fs::remove_file(&candidate_index);
-        result
+        let candidate_index = StagedFile::create(
+            parent.join(format!(".orna-index-recovery-{}", Uuid::new_v4())),
+            &base_index,
+        )?;
+        let mut update = self.command();
+        update
+            .env("GIT_INDEX_FILE", candidate_index.path())
+            .args([
+                "update-index",
+                if skip {
+                    "--skip-worktree"
+                } else {
+                    "--no-skip-worktree"
+                },
+                "-z",
+                "--stdin",
+            ])
+            .stdin(Stdio::piped());
+        let mut child = update
+            .spawn()
+            .map_err(|_| RepositoryError::GitUnavailable)?;
+        child
+            .stdin
+            .take()
+            .ok_or(RepositoryError::LocalStateUnavailable)?
+            .write_all(&encoded_paths)
+            .map_err(|_| RepositoryError::GitOperationFailed)?;
+        let output = child
+            .wait_with_output()
+            .map_err(|_| RepositoryError::GitUnavailable)?;
+        if !output.status.success() {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+        fs::File::open(candidate_index.path())
+            .and_then(|file| file.sync_all())
+            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        let current_index = fs::read(&index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        if current_index != base_index || self.head()?.as_ref() != Some(journal.new_head()) {
+            return Err(RepositoryError::StaleHead);
+        }
+        fs::rename(candidate_index.path(), &index)
+            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|_| RepositoryError::LocalStateUnavailable)
     }
     /// Enumerates regular blobs in a committed native-store tree.
     /// Tree entries are validated before they can affect the worktree.
@@ -9510,18 +9474,20 @@ impl Repository {
                 actual: captured,
             });
         }
-        let candidate = index
-            .parent()
-            .ok_or(RepositoryError::LocalStateUnavailable)?
-            .join(format!("index-candidate-{}", Uuid::new_v4()));
-        write_new_index_candidate(&candidate, &base_index)?;
+        let candidate = StagedFile::create(
+            index
+                .parent()
+                .ok_or(RepositoryError::LocalStateUnavailable)?
+                .join(format!("index-candidate-{}", Uuid::new_v4())),
+            &base_index,
+        )?;
         let permissions = fs::metadata(&index)
             .map_err(|_| RepositoryError::LocalStateUnavailable)?
             .permissions();
-        fs::set_permissions(&candidate, permissions)
+        fs::set_permissions(candidate.path(), permissions)
             .map_err(|_| RepositoryError::LocalStateUnavailable)?;
         let mut command = self.command();
-        command.env("GIT_INDEX_FILE", &candidate);
+        command.env("GIT_INDEX_FILE", candidate.path());
         match operation {
             ManagedIndexOperation::Add | ManagedIndexOperation::AddContents(_) => {
                 command.arg("add");
@@ -9534,37 +9500,24 @@ impl Repository {
         for path in paths {
             command.arg(path.as_path());
         }
-        if let Err(error) = self.run(command) {
-            let _ = fs::remove_file(&candidate);
-            return Err(error);
-        }
-        if let ManagedIndexOperation::AddContents(contents) = operation
-            && let Err(error) = self.prepare_index_contents(&candidate, &paths[0], contents)
-        {
-            let _ = fs::remove_file(&candidate);
-            return Err(error);
+        self.run(command)?;
+        if let ManagedIndexOperation::AddContents(contents) = operation {
+            self.prepare_index_contents(candidate.path(), &paths[0], contents)?;
         }
         if let Some(hook) = before_install.as_mut() {
             hook();
         }
-        fs::File::open(&candidate)
+        fs::File::open(candidate.path())
             .and_then(|file| file.sync_all())
             .map_err(|_| RepositoryError::LocalStateUnavailable)?;
 
         // Git itself serializes normal index writers through this pathname.
         // The candidate is prepared off-index; only an unchanged observed index
         // is atomically replaced while this lock exists.
-        let git_lock = match GitIndexLock::acquire(index.with_extension("lock")) {
-            Ok(lock) => lock,
-            Err(error) => {
-                let _ = fs::remove_file(&candidate);
-                return Err(error);
-            }
-        };
+        let git_lock = GitIndexLock::acquire(index.with_extension("lock"))?;
         let current_index = fs::read(&index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
         let current_head = self.head()?;
         if current_index != base_index || current_head != expected.head {
-            let _ = fs::remove_file(&candidate);
             drop(git_lock);
             let actual = self.index_generation()?;
             return Err(RepositoryError::StaleIndex {
@@ -9572,19 +9525,11 @@ impl Repository {
                 actual,
             });
         }
-        let contents_match = match operation {
-            ManagedIndexOperation::AddContents(contents) => paths
-                .first()
-                .ok_or(RepositoryError::NoManagedPaths)
-                .and_then(|path| self.ensure_managed_contents_match(path, contents)),
-            _ => Ok(()),
-        };
-        if let Err(error) = contents_match {
-            let _ = fs::remove_file(&candidate);
-            drop(git_lock);
-            return Err(error);
+        if let ManagedIndexOperation::AddContents(contents) = operation {
+            let path = paths.first().ok_or(RepositoryError::NoManagedPaths)?;
+            self.ensure_managed_contents_match(path, contents)?;
         }
-        fs::rename(&candidate, &index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        fs::rename(candidate.path(), &index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
         fs::File::open(
             index
                 .parent()
@@ -9927,17 +9872,49 @@ fn persist_runtime_owner_state(
         .map_err(|_| RepositoryError::LocalStateUnavailable)
 }
 
-/// Writes a brand-new index candidate. `create_new` refuses any existing file
-/// or symlink at the path, so a candidate is never written through a link or
-/// over an attacker-prepared name.
-fn write_new_index_candidate(path: &Path, bytes: &[u8]) -> Result<(), RepositoryError> {
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .map_err(|_| RepositoryError::LocalStateUnavailable)?;
-    file.write_all(bytes)
-        .map_err(|_| RepositoryError::LocalStateUnavailable)
+/// A file staged next to the one it will replace: an index candidate, or the
+/// private index a candidate commit is built from. Dropping it removes the
+/// file, so every early return leaves nothing behind; a successful rename has
+/// already moved the file away, which makes the removal a no-op.
+struct StagedFile {
+    path: PathBuf,
+}
+
+impl StagedFile {
+    /// Claims `path` for a file another process creates, such as the index Git
+    /// builds. Nothing is written here.
+    fn reserve(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    /// Writes `bytes` to a brand-new file. `create_new` refuses any existing
+    /// file or symlink at the path, so a candidate is never written through a
+    /// link or over an attacker-prepared name, and the guard exists only once
+    /// the file is ours to remove.
+    fn create(path: PathBuf, bytes: &[u8]) -> Result<Self, RepositoryError> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        let staged = Self { path };
+        file.write_all(bytes)
+            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        Ok(staged)
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for StagedFile {
+    fn drop(&mut self) {
+        // Best effort by design: the file is already gone after a successful
+        // rename, and a failed removal must not mask the error that ended the
+        // operation.
+        let _ = fs::remove_file(&self.path);
+    }
 }
 
 /// A process-lifetime local runtime owner lock.
@@ -12192,10 +12169,33 @@ mod tests {
         fs::write(&candidate, b"attacker-owned").unwrap();
 
         assert!(matches!(
-            super::write_new_index_candidate(&candidate, b"index-bytes"),
+            super::StagedFile::create(candidate.clone(), b"index-bytes"),
             Err(RepositoryError::LocalStateUnavailable)
         ));
         assert_eq!(fs::read(&candidate).unwrap(), b"attacker-owned");
+    }
+
+    #[test]
+    fn staged_file_is_removed_on_drop_and_left_alone_once_installed() {
+        let root = tempfile::tempdir().unwrap();
+        let candidate = root.path().join("index-candidate-staged");
+        let staged = super::StagedFile::create(candidate.clone(), b"index-bytes").unwrap();
+        assert_eq!(fs::read(&candidate).unwrap(), b"index-bytes");
+        drop(staged);
+        assert!(
+            !candidate.exists(),
+            "dropping the guard removes the candidate"
+        );
+
+        let staged = super::StagedFile::create(candidate.clone(), b"index-bytes").unwrap();
+        let live = root.path().join("index");
+        fs::rename(staged.path(), &live).unwrap();
+        drop(staged);
+        assert_eq!(
+            fs::read(&live).unwrap(),
+            b"index-bytes",
+            "a candidate that was installed is not touched by the guard"
+        );
     }
 
     #[test]
