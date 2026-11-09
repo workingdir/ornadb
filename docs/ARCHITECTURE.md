@@ -154,6 +154,11 @@ list, so no size grows silently; the budget file itself only moves down. A raise
 whose path has not landed yet is reserved for an in-flight PR and is reported as a
 note, never a failure.
 
+A pure split that moves code into new modules records each over-cap child as a
+raise with the split's bead, and `--mode=budget --update` lowers the parent's
+entries in the same PR. The checker's new-debt diagnostic names this path, so a
+split is not mistaken for new code.
+
 Scope and measurement: `crates/<crate>/src/**/*.rs`; integration tests under
 `tests/` are excluded. Lines are logical lines. A function's length is counted from
 its `fn` line through its closing brace; comments and string literals are blanked
