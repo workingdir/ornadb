@@ -63,7 +63,6 @@ const UPGRADE_2_CANDIDATE: &str = "`orna upgrade --to-format 2` is refused as an
 const ANNOTATION_DEFAULTS_FLAG: &str = "`migrate copy --annotation-defaults N` asserts the decoded Blob count and, when omitted, records the decoded count rather than explicit octet-stream and no-suffix defaults";
 const CONSUMER_CARRY_FLAG: &str = "`migrate copy --no-persistent-consumers` acknowledges that consumer checkpoints are carried, not reset, instead of requiring an explicit validated migration map";
 const STORAGE_PREFERENCE_RETIRED: &str = "storage-preference operations are retired, so `orna help` documents no storage option and no storage choice can be driven to check that a legacy layout is not selected; the atomic source/API change needs a legacy-source executor the harness lacks";
-const TYPED_KEYS: &str = "the CLI names rows only by text or bytes: an Int-keyed row cannot be found with `orna query --key`";
 const STORAGE_METADATA: &str = "storage metadata and work counters are unobservable: `sys.Storage` does not evaluate in the project REPL";
 const CHECKOUT: &str = "`orna checkout` to a different commit is refused while drafts are pending or a changed path has uncommitted changes: pending drafts are not carried forward (CHECKOUT-3 step 4) and no checkout journal is written";
 const STAGING: &str = "`orna add --row` cannot stage a published row: format 3 has no row adapter that stages a row into the index store (ORNA-STAGE-001), so the command refuses and stages nothing";
@@ -81,18 +80,8 @@ const NESTED_BLOBS: &str =
 pub fn entries() -> Vec<Entry> {
     vec![
         // FINAL-ROW
-        Entry::gap(
-            "FINAL-ROW-001",
-            "ornadb-5il1.180",
-            TYPED_KEYS,
-            typed_key_lookup_fails,
-        ),
-        Entry::gap(
-            "FINAL-ROW-002",
-            "ornadb-5il1.180",
-            TYPED_KEYS,
-            typed_key_lookup_fails,
-        ),
+        Entry::pass("FINAL-ROW-001", typed_key_lookup_finds_row),
+        Entry::pass("FINAL-ROW-002", typed_keys_each_resolve),
         Entry::pass("FINAL-ROW-003", run_rows_publish),
         Entry::pass("FINAL-ROW-004", blob_rows_hold_references),
         Entry::gap(
@@ -390,13 +379,7 @@ pub fn entries() -> Vec<Entry> {
             workspace_is_read_only,
         )
         .with_fuse(),
-        Entry::gap(
-            "FINAL-VFS-016",
-            "ornadb-k2wq",
-            REPL_EFFECT_UNADMITTED,
-            row_016_blocker,
-        )
-        .with_fuse(),
+        Entry::pass("FINAL-VFS-016", row_names_escape_reversibly).with_fuse(),
         Entry::gap(
             "FINAL-VFS-017",
             "ornadb-ame1",
@@ -1701,7 +1684,6 @@ export_blocker! {
 const EXPORT_COPIES_TAMPERED_STORE: &str =
     "orna export copies a tampered store that every other product reader refuses";
 
-const REPL_EFFECT_UNADMITTED: &str = "the REPL preview refuses the effectful row insert, and scenarios have no admitted runtime entry point to perform it";
 const SIZE_LIMIT_CHUNK_CAPTURE: &str =
     "a 3 MiB REPL capture fails with sys.blob.limit before the row is inserted";
 
@@ -1720,10 +1702,6 @@ fn executor_stops_at(check: Check, needle: &str) -> Probe {
             .to_owned()),
         Err(failure) => Err(failure),
     }
-}
-
-fn row_016_blocker(db: &mut Db) -> Probe {
-    executor_stops_at(row_names_escape_reversibly(db), "ORNA-REPL-EFFECT")
 }
 
 fn ogb_03_blocker(db: &mut Db) -> Probe {
@@ -2143,21 +2121,53 @@ fn snapshot_mounts_are_pinned(db: &mut Db) -> Check {
 
 // Gap probes.
 
-fn typed_key_lookup_fails(db: &mut Db) -> Probe {
+fn typed_key_lookup_finds_row(db: &mut Db) -> Check {
     let tables = db.declare("pub table Counter(id: Int) { label: Str, }\n")?;
     let relation = relation_of(&tables, "Counter")?;
     db.repl_effect(r#"main.Counter.insert({ id: 2, label: "two" })"#)?;
     db.publish()?.ok()?;
-    let found = db.orna(&["query", &relation, "--key", "2", "--format", "json"])?;
+    let found = db
+        .orna(&["query", &relation, "--key", "2", "--format", "json"])?
+        .ok()?;
+    let report: serde_json::Value = serde_json::from_str(&found.stdout)
+        .map_err(|error| Failure::Harness(format!("orna query printed no JSON ({error})")))?;
     ensure!(
-        !found.succeeded(),
-        "orna query now finds the Int-keyed row: {}",
-        found.output()
+        report["rows"] == 1,
+        "orna query --key 2 did not return the one Int-keyed row: {}",
+        found.describe()
     );
-    Ok(format!(
-        "orna query --key 2 on an Int key: {}",
-        found.diagnostic()
-    ))
+    Ok(())
+}
+
+/// Each Int key resolves to its own row, and an absent key is refused rather
+/// than answered with another row. Row values and logical order are not part
+/// of the CLI's JSON or text output, so neither is asserted here.
+fn typed_keys_each_resolve(db: &mut Db) -> Check {
+    let tables = db.declare("pub table Counter(id: Int) { label: Str, }\n")?;
+    let relation = relation_of(&tables, "Counter")?;
+    db.repl_effect(r#"main.Counter.insert({ id: 10, label: "ten" })"#)?;
+    db.repl_effect(r#"main.Counter.insert({ id: 2, label: "two" })"#)?;
+    db.repl_effect(r#"main.Counter.insert({ id: 1, label: "one" })"#)?;
+    db.publish()?.ok()?;
+    for key in ["1", "2", "10"] {
+        let found = db
+            .orna(&["query", &relation, "--key", key, "--format", "json"])?
+            .ok()?;
+        let report: serde_json::Value = serde_json::from_str(&found.stdout)
+            .map_err(|error| Failure::Harness(format!("orna query printed no JSON ({error})")))?;
+        ensure!(
+            report["rows"] == 1,
+            "orna query --key {key} did not return its one Int-keyed row: {}",
+            found.describe()
+        );
+    }
+    let absent = db.orna(&["query", &relation, "--key", "99", "--format", "json"])?;
+    ensure!(
+        !absent.succeeded() && absent.output().contains("Row is not committed"),
+        "orna query --key 99 did not refuse the absent key: {}",
+        absent.describe()
+    );
+    Ok(())
 }
 
 const SEED_SOURCE: &str = r#"pub table Note(id: Str) { text: Str, }

@@ -172,7 +172,7 @@ CREATE TABLE IF NOT EXISTS accepted_content_pin (
 );
 CREATE TABLE IF NOT EXISTS table_row (
     table_id TEXT NOT NULL CHECK (length(table_id) > 0),
-    row_key BLOB NOT NULL CHECK (length(row_key) > 0),
+    row_key BLOB NOT NULL,
     row_value BLOB NOT NULL,
     row_digest BLOB NOT NULL CHECK (length(row_digest) = 32),
     PRIMARY KEY (table_id, row_key)
@@ -200,7 +200,7 @@ CREATE TABLE IF NOT EXISTS checkpoint (
 CREATE TABLE IF NOT EXISTS runtime_table_history (
     mutation_sequence INTEGER NOT NULL CHECK (mutation_sequence >= 0),
     table_id TEXT NOT NULL CHECK (length(table_id) > 0),
-    row_key BLOB NOT NULL CHECK (length(row_key) > 0),
+    row_key BLOB NOT NULL,
     row_value BLOB,
     row_digest BLOB,
     deleted INTEGER NOT NULL CHECK (deleted IN (0, 1)),
@@ -5086,6 +5086,7 @@ impl RuntimeState {
         state.migrate_stream_observation_checkpoint_reuse().await?;
         state.migrate_catalogue_identity_schema().await?;
         state.migrate_admin_failure_unobservable().await?;
+        state.migrate_empty_row_keys().await?;
         let accepted_pending = state.validate_recovery_with_pin_manifest().await?;
         // Receipt recovery opens runtime while the repository journal can still
         // be pending. Owner cleanup defers in that state and retains the full
@@ -10124,6 +10125,88 @@ impl RuntimeState {
             )
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)
+    }
+
+    /// Admits the empty text key `""` (VFS-1 `~empty`). Earlier stores carry a
+    /// `length(row_key) > 0` CHECK on `table_row` and `runtime_table_history`,
+    /// which SQLite cannot drop in place, so both tables are rebuilt in one
+    /// transaction. Rows keep their keys and values; the rebuild runs only while
+    /// the legacy CHECK is still present.
+    async fn migrate_empty_row_keys(&self) -> Result<(), RuntimeError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let mut legacy = transaction
+            .query(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table'
+                   AND name IN ('table_row', 'runtime_table_history')
+                   AND sql LIKE '%length(row_key) > 0%'",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let legacy_count = legacy
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .ok_or(RuntimeError::RecoveryInvalid)?
+            .get::<i64>(0)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+        drop(legacy);
+        if legacy_count != 0 {
+            transaction
+                .execute_batch(
+                    "CREATE TABLE table_row_empty_key (
+                        table_id TEXT NOT NULL CHECK (length(table_id) > 0),
+                        row_key BLOB NOT NULL,
+                        row_value BLOB NOT NULL,
+                        row_digest BLOB NOT NULL CHECK (length(row_digest) = 32),
+                        PRIMARY KEY (table_id, row_key)
+                    );
+                    INSERT INTO table_row_empty_key (table_id, row_key, row_value, row_digest)
+                        SELECT table_id, row_key, row_value, row_digest FROM table_row;
+                    DROP TABLE table_row;
+                    ALTER TABLE table_row_empty_key RENAME TO table_row;
+                    CREATE TABLE runtime_table_history_empty_key (
+                        mutation_sequence INTEGER NOT NULL CHECK (mutation_sequence >= 0),
+                        table_id TEXT NOT NULL CHECK (length(table_id) > 0),
+                        row_key BLOB NOT NULL,
+                        row_value BLOB,
+                        row_digest BLOB,
+                        deleted INTEGER NOT NULL CHECK (deleted IN (0, 1)),
+                        PRIMARY KEY (mutation_sequence, table_id, row_key),
+                        CHECK (
+                            (deleted = 1 AND row_value IS NULL AND row_digest IS NULL)
+                            OR (deleted = 0 AND row_value IS NOT NULL AND length(row_digest) = 32)
+                        )
+                    );
+                    INSERT INTO runtime_table_history_empty_key
+                        (mutation_sequence, table_id, row_key, row_value, row_digest, deleted)
+                        SELECT mutation_sequence, table_id, row_key, row_value, row_digest, deleted
+                        FROM runtime_table_history;
+                    DROP TABLE runtime_table_history;
+                    ALTER TABLE runtime_table_history_empty_key RENAME TO runtime_table_history;
+                    CREATE INDEX IF NOT EXISTS runtime_table_history_lookup
+                        ON runtime_table_history (table_id, row_key, mutation_sequence);",
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            transaction
+                .execute(
+                    "INSERT OR IGNORE INTO runtime_schema_migration (migration)
+                     VALUES ('empty-row-key-v1')",
+                    (),
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+        }
         transaction
             .commit()
             .await
@@ -19979,9 +20062,13 @@ fn validate_stream_mutations(
     validate_digest(next_digest)
 }
 
+/// Empty keys are admitted: the only producer of an empty stored key is the
+/// text key `""` (the VFS-1 `~empty` projection). Canonical keys of every other
+/// key type are never empty; the project layer validates key shape before it
+/// reaches the runtime.
 fn validate_table_identity(table: &str, key: &[u8]) -> Result<(), RuntimeError> {
     validate_table_name(table)?;
-    if key.is_empty() || key.len() > MAX_TABLE_MUTATION_BYTES {
+    if key.len() > MAX_TABLE_MUTATION_BYTES {
         return Err(RuntimeError::InvalidTableMutation);
     }
     Ok(())
@@ -50954,6 +51041,208 @@ mod tests {
         let reopened = open_state(&repo).await;
         assert_eq!(reopened.stream_checkpoint(&key).await.unwrap().key, key);
         reopened.migrate_nullable_stream_partitions().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn empty_row_key_migration_drops_legacy_check_and_keeps_rows() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let legacy_digest: String = Sha256::digest([0u8])
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        state
+            .connection
+            .execute_batch(&format!(
+                "DROP TABLE table_row;
+                 CREATE TABLE table_row (
+                    table_id TEXT NOT NULL CHECK (length(table_id) > 0),
+                    row_key BLOB NOT NULL CHECK (length(row_key) > 0),
+                    row_value BLOB NOT NULL,
+                    row_digest BLOB NOT NULL CHECK (length(row_digest) = 32),
+                    PRIMARY KEY (table_id, row_key)
+                 );
+                 INSERT INTO table_row (table_id, row_key, row_value, row_digest)
+                    VALUES ('legacy', X'6b', X'00', X'{legacy_digest}');"
+            ))
+            .await
+            .unwrap();
+        state.migrate_empty_row_keys().await.unwrap();
+        let mut legacy_checks = state
+            .connection
+            .query(
+                "SELECT COUNT(*) FROM sqlite_master WHERE sql LIKE '%length(row_key) > 0%'",
+                (),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            legacy_checks
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .get::<i64>(0)
+                .unwrap(),
+            0
+        );
+        let mut kept = state
+            .connection
+            .query(
+                "SELECT COUNT(*) FROM table_row WHERE table_id = 'legacy' AND row_key = X'6b'",
+                (),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            kept.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+            1
+        );
+        state
+            .connection
+            .execute(
+                &format!(
+                    "INSERT INTO table_row (table_id, row_key, row_value, row_digest)
+                     VALUES ('legacy', X'', X'00', X'{legacy_digest}')"
+                ),
+                (),
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn empty_row_key_migration_runs_on_reopen_and_admits_empty_keys() {
+        let (_temp, repo) = repository();
+        let legacy_digest: String = Sha256::digest([0u8])
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        {
+            let state = open_state(&repo).await;
+            state
+                .connection
+                .execute_batch(&format!(
+                    "DROP TABLE table_row;
+                     CREATE TABLE table_row (
+                        table_id TEXT NOT NULL CHECK (length(table_id) > 0),
+                        row_key BLOB NOT NULL CHECK (length(row_key) > 0),
+                        row_value BLOB NOT NULL,
+                        row_digest BLOB NOT NULL CHECK (length(row_digest) = 32),
+                        PRIMARY KEY (table_id, row_key)
+                     );
+                     INSERT INTO table_row (table_id, row_key, row_value, row_digest)
+                        VALUES ('legacy', X'6b', X'00', X'{legacy_digest}');
+                     DROP TABLE runtime_table_history;
+                     CREATE TABLE runtime_table_history (
+                        mutation_sequence INTEGER NOT NULL CHECK (mutation_sequence >= 0),
+                        table_id TEXT NOT NULL CHECK (length(table_id) > 0),
+                        row_key BLOB NOT NULL CHECK (length(row_key) > 0),
+                        row_value BLOB,
+                        row_digest BLOB,
+                        deleted INTEGER NOT NULL CHECK (deleted IN (0, 1)),
+                        PRIMARY KEY (mutation_sequence, table_id, row_key),
+                        CHECK (
+                            (deleted = 1 AND row_value IS NULL AND row_digest IS NULL)
+                            OR (deleted = 0 AND row_value IS NOT NULL AND length(row_digest) = 32)
+                        )
+                     );
+                     INSERT INTO runtime_table_history
+                        (mutation_sequence, table_id, row_key, row_value, row_digest, deleted)
+                        VALUES (0, 'legacy', X'6b', X'00', X'{legacy_digest}', 0);
+                     CREATE INDEX IF NOT EXISTS runtime_table_history_lookup
+                        ON runtime_table_history (table_id, row_key, mutation_sequence);"
+                ))
+                .await
+                .unwrap();
+        }
+
+        let reopened = open_state(&repo).await;
+        let count = |connection: &libsql::Connection, sql: &'static str| {
+            let connection = connection.clone();
+            async move {
+                let mut rows = connection.query(sql, ()).await.unwrap();
+                rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
+            }
+        };
+        assert_eq!(
+            count(
+                &reopened.connection,
+                "SELECT COUNT(*) FROM sqlite_master WHERE sql LIKE '%length(row_key) > 0%'",
+            )
+            .await,
+            0,
+            "reopening must drop the legacy row_key CHECK from both tables"
+        );
+        assert_eq!(
+            count(
+                &reopened.connection,
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'runtime_table_history_lookup'",
+            )
+            .await,
+            1,
+            "the history lookup index must be recreated by the rebuild"
+        );
+        assert_eq!(
+            count(
+                &reopened.connection,
+                "SELECT COUNT(*) FROM table_row WHERE table_id = 'legacy' AND row_key = X'6b'",
+            )
+            .await,
+            1,
+            "the legacy table_row row must survive the rebuild"
+        );
+        assert_eq!(
+            count(
+                &reopened.connection,
+                "SELECT COUNT(*) FROM runtime_table_history WHERE table_id = 'legacy' AND row_key = X'6b'",
+            )
+            .await,
+            1,
+            "the legacy history row must survive the rebuild"
+        );
+        assert_eq!(
+            count(
+                &reopened.connection,
+                "SELECT COUNT(*) FROM runtime_schema_migration WHERE migration = 'empty-row-key-v1'",
+            )
+            .await,
+            1,
+            "the rebuild must record the empty-row-key-v1 marker"
+        );
+        reopened
+            .connection
+            .execute(
+                &format!(
+                    "INSERT INTO table_row (table_id, row_key, row_value, row_digest)
+                     VALUES ('legacy', X'', X'01', X'{legacy_digest}')"
+                ),
+                (),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened.committed_table_row("legacy", &[]).await.unwrap(),
+            Some(vec![1]),
+            "an empty key must be admitted and read back through the table API"
+        );
+        drop(reopened);
+
+        let again = open_state(&repo).await;
+        assert_eq!(
+            count(
+                &again.connection,
+                "SELECT COUNT(*) FROM runtime_schema_migration WHERE migration = 'empty-row-key-v1'",
+            )
+            .await,
+            1,
+            "a second open must not record the marker again"
+        );
+        assert_eq!(
+            again.committed_table_row("legacy", &[]).await.unwrap(),
+            Some(vec![1]),
+            "the empty-key row must persist across a second open"
+        );
     }
 
     #[tokio::test]
