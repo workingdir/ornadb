@@ -7,10 +7,7 @@ use std::{
 use quote::ToTokens;
 use serde::Serialize;
 use serde_json::{Value, json};
-use syn::{
-    Expr, Lit, Meta, Token, punctuated::Punctuated,
-    visit::Visit,
-};
+use syn::{Expr, Lit, Meta, Token, punctuated::Punctuated, visit::Visit};
 
 use orna_sys_model::{
     abi_version::AbiVersion,
@@ -623,6 +620,9 @@ fn effect_name(variant: &str) -> Option<&'static str> {
 fn doc_preconditions(attributes: &[syn::Attribute]) -> Result<Vec<String>, String> {
     let mut lines = Vec::new();
     for attribute in attributes {
+        if attribute.path().is_ident("sys_host_operation") {
+            break;
+        }
         if !attribute.path().is_ident("doc") {
             continue;
         }
@@ -707,7 +707,9 @@ fn typed_attribute_metadata(
             "role" => role = Some(string_value(&named.value, "role")?),
             "provider" => provider = Some(variant_ident(&named.value, "HostProvider")?),
             "signature" => signature = Some(string_value(&named.value, "signature")?),
-            "implementation" => implementation = Some(string_value(&named.value, "implementation")?),
+            "implementation" => {
+                implementation = Some(string_value(&named.value, "implementation")?)
+            }
             other => {
                 return Err(format!("unknown host operation metadata key `{other}`"));
             }
@@ -733,7 +735,8 @@ fn typed_attribute_metadata(
             "host operation `{name}` role must be `{expected_role}`"
         ));
     }
-    let provider = provider.ok_or_else(|| "host operation metadata is missing `provider`".to_owned())?;
+    let provider =
+        provider.ok_or_else(|| "host operation metadata is missing `provider`".to_owned())?;
     let provider_name = host_provider_name(&provider)
         .ok_or_else(|| format!("unknown HostProvider variant `{provider}`"))?;
     if provider_name != expected_provider {
@@ -741,11 +744,12 @@ fn typed_attribute_metadata(
             "host operation `{name}` provider must be `{expected_provider}`"
         ));
     }
-    let signature = signature
-        .ok_or_else(|| "host operation metadata is missing `signature`".to_owned())?;
+    let signature =
+        signature.ok_or_else(|| "host operation metadata is missing `signature`".to_owned())?;
     let implementation = implementation
         .ok_or_else(|| "host operation metadata is missing `implementation`".to_owned())?;
-    let effects = effects.ok_or_else(|| "host operation metadata is missing `effects`".to_owned())?;
+    let effects =
+        effects.ok_or_else(|| "host operation metadata is missing `effects`".to_owned())?;
     if effects.is_empty() {
         return Err("host operation effects must be a non-empty known effect list".to_owned());
     }
@@ -812,10 +816,8 @@ impl<'ast> Visit<'ast> for Collector {
                     .map(Value::String)
                     .collect(),
                 );
-                let operation: HostOperationDescriptor =
-                    serde_json::from_value(metadata).map_err(|error| {
-                        format!("invalid typed host-operation metadata: {error}")
-                    })?;
+                let operation: HostOperationDescriptor = serde_json::from_value(metadata)
+                    .map_err(|error| format!("invalid typed host-operation metadata: {error}"))?;
                 let name = operation.name.clone();
                 Ok((name, operation))
             });

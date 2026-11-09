@@ -343,7 +343,9 @@ fn variant_from_host_name(name: &str) -> Result<String> {
         variant.push_str(&pascal(segment));
     }
     if variant.is_empty() {
-        return Err(GenError::new(format!("host operation `{name}` has no name")));
+        return Err(GenError::new(format!(
+            "host operation `{name}` has no name"
+        )));
     }
     Ok(variant)
 }
@@ -2463,21 +2465,25 @@ fn render_hosts(engine: &Engine) -> String {
     }
     writeln!(out, "}}").unwrap();
     out.push('\n');
-    writeln!(out, "pub const HOST_PROVIDER_COUNT: usize = {HOST_PROVIDER_COUNT};").unwrap();
+    writeln!(
+        out,
+        "pub const HOST_PROVIDER_COUNT: usize = {HOST_PROVIDER_COUNT};"
+    )
+    .unwrap();
     out.push('\n');
     writeln!(out, "impl HostProvider {{").unwrap();
-    writeln!(out, "    pub const ALL: [HostProvider; HOST_PROVIDER_COUNT] = [").unwrap();
+    writeln!(
+        out,
+        "    pub const ALL: [HostProvider; HOST_PROVIDER_COUNT] = ["
+    )
+    .unwrap();
     for (_, variant) in &engine.host_providers {
         writeln!(out, "        HostProvider::{variant},").unwrap();
     }
     writeln!(out, "    ];").unwrap();
     out.push('\n');
     writeln!(out, "    #[must_use]").unwrap();
-    writeln!(
-        out,
-        "    pub const fn name(self) -> &'static str {{"
-    )
-    .unwrap();
+    writeln!(out, "    pub const fn name(self) -> &'static str {{").unwrap();
     writeln!(out, "        match self {{").unwrap();
     for (name, variant) in &engine.host_providers {
         writeln!(out, "            Self::{variant} => \"{name}\",").unwrap();
@@ -2653,7 +2659,11 @@ fn render_hosts(engine: &Engine) -> String {
     writeln!(out, "    }}").unwrap();
     out.push('\n');
     writeln!(out, "    #[must_use]").unwrap();
-    writeln!(out, "    pub fn descriptor(self) -> &'static HostOperationDescriptor {{").unwrap();
+    writeln!(
+        out,
+        "    pub fn descriptor(self) -> &'static HostOperationDescriptor {{"
+    )
+    .unwrap();
     writeln!(out, "        host_operation_descriptor(self)").unwrap();
     writeln!(out, "    }}").unwrap();
     out.push('\n');

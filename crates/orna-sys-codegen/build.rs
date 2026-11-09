@@ -51,6 +51,5 @@ fn main() {
     out.push_str("];\n");
 
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("cargo sets OUT_DIR"));
-    fs::write(out_dir.join("sys_host_vocabulary.rs"), out)
-        .expect("write typed host vocabulary");
+    fs::write(out_dir.join("sys_host_vocabulary.rs"), out).expect("write typed host vocabulary");
 }

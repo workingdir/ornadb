@@ -250,7 +250,7 @@ fn every_generated_host_binding_has_a_fixture_and_native_value_proof() {
             .filter(|proof| {
                 registry
                     .operation(proof.operation)
-                    .is_some_and(|operation| operation.role == role.name)
+                    .is_some_and(|operation| operation.role == role.name.as_str())
             })
             .map(|proof| proof.operation)
             .collect::<BTreeSet<_>>();

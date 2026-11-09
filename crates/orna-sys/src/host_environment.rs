@@ -137,18 +137,21 @@ impl EnvironmentProvider {
         name: &str,
     ) -> Result<EnvironmentDispatchValue, EnvironmentProviderError> {
         let registered = system_host_operation_registry()
-            .operation(&operation.name)
+            .operation(operation.name.label())
             .filter(|registered| *registered == operation)
             .ok_or(EnvironmentProviderError::Denied)?;
         let role = system_host_operation_registry()
-            .role(&registered.role)
-            .filter(|role| role.provider == registered.provider)
+            .role_by_id(&registered.role)
+            .filter(|role| role.provider.as_str() == registered.provider.name())
             .ok_or(EnvironmentProviderError::Denied)?;
         if !role
             .operations
             .iter()
-            .any(|candidate| candidate == &registered.name)
-            || !registered.effects.iter().any(|effect| effect == "read")
+            .any(|candidate| candidate == registered.name.label())
+            || !registered
+                .effects
+                .iter()
+                .any(|effect| *effect == orna_sys_id::SysEffect::Read)
         {
             return Err(EnvironmentProviderError::Denied);
         }

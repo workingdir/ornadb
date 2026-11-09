@@ -488,7 +488,10 @@ fn engine_inventory_matches_the_generated_tables() {
         let name = entry["name"].as_str().unwrap();
         let operation = orna_sys_id::HostOperation::ALL[index];
         assert_eq!(operation.label(), name);
-        assert_eq!(orna_sys_id::HostOperation::from_label(name), Some(operation));
+        assert_eq!(
+            orna_sys_id::HostOperation::from_label(name),
+            Some(operation)
+        );
         assert_eq!(operation.origin(), orna_sys_id::Origin::Engine);
         assert_eq!(
             orna_sys_id::HostProvider::parse(entry["provider"].as_str().unwrap()),

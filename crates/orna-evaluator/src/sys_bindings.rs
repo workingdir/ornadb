@@ -371,9 +371,9 @@ impl SysHostBindingRegistry {
             return Err(redacted_error("ORNA-EVAL-UNSUPPORTED"));
         }
         let role = registry
-            .role(&operation.role)
+            .role_by_id(&operation.role)
             .ok_or_else(|| redacted_error("ORNA-EVAL-UNSUPPORTED"))?;
-        if role.provider != operation.provider
+        if role.provider.as_str() != operation.provider.name()
             || !role
                 .operations
                 .iter()
@@ -851,7 +851,10 @@ impl SysHostBindingRegistry {
     }
 
     fn failure(&self, operation: &HostOperationDescriptor, code: &str) -> EvaluationError {
-        let declares_failure = operation.failures.iter().any(|declared| declared == code);
+        let declares_failure = operation
+            .failures
+            .iter()
+            .any(|declared| declared.as_str() == code);
         if declares_failure && code == "sys.host.clock.cancelled" {
             return redacted_error("ORNA-EVAL-CANCELLED");
         }
@@ -1847,7 +1850,7 @@ mod tests {
             operation
                 .failures
                 .iter()
-                .map(String::as_str)
+                .map(|failure| failure.as_str())
                 .collect::<Vec<_>>(),
             [
                 "sys.blob.source_denied",
@@ -1869,7 +1872,7 @@ mod tests {
                 operation
                     .failures
                     .iter()
-                    .any(|declared| declared == failure.failure_code()),
+                    .any(|declared| declared.as_str() == failure.failure_code()),
                 "{failure:?}"
             );
             assert_eq!(capture_file_failure(failure).code(), failure.failure_code());
@@ -1901,7 +1904,7 @@ mod tests {
             operation
                 .failures
                 .iter()
-                .any(|failure| failure == "sys.blob.bounds"),
+                .any(|failure| failure.as_str() == "sys.blob.bounds"),
             "capture_file must declare the negative-bound failure"
         );
     }
