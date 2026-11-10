@@ -362,6 +362,7 @@ impl Program {
                     DefKind::is_variant,
                     errors,
                 );
+                self.validate_def_refs(&enumeration.members, "enum implementation", errors);
             }
             DefKind::Variant(variant) => {
                 self.validate_kinds(&variant.fields, "variant field", DefKind::is_field, errors);

@@ -177,3 +177,39 @@ fn a_printed_signature_uses_the_specification_spelling() {
         Some("add(Int, [Str?]) -> Int")
     );
 }
+
+#[test]
+fn an_enum_implementation_static_is_read_through_the_enum() {
+    let mut program = program(
+        "pub protocol Named { fn name(self): Str; }\n\
+             pub enum Rounding {\n\
+                 half_up,\n\
+                 half_even,\n\
+                 impl Named {\n\
+                     static label = \"rounding\";\n\
+                     fn name(self): Str = \"rounding\";\n\
+                 }\n\
+             }\n\
+             pub fn f(): Str = Rounding.label;\n",
+    );
+    let summary = typeck(&mut program);
+    assert!(test_accepted(&program, &summary), "{summary:?}");
+    assert_eq!(result(&program, "f"), "Str");
+}
+
+#[test]
+fn an_unknown_enum_static_is_not_a_member() {
+    let mut program = program(
+        "pub protocol Named { fn name(self): Str; }\n\
+             pub enum Rounding {\n\
+                 half_up,\n\
+                 impl Named {\n\
+                     static label = \"rounding\";\n\
+                     fn name(self): Str = \"rounding\";\n\
+                 }\n\
+             }\n\
+             pub fn f(): Str = Rounding.missing;\n",
+    );
+    let summary = typeck(&mut program);
+    assert!(!test_accepted(&program, &summary), "{summary:?}");
+}
