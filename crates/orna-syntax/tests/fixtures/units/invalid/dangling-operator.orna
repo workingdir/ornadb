@@ -1,0 +1,4 @@
+pub enum Speed {
+    kmh = Length.kilometre /,
+    impl Unit {}
+}
