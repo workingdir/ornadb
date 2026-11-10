@@ -55,13 +55,14 @@ namespace components, everywhere they are usable today.
 of a module unit. It is not permitted in `repl_input`, in a row unit, in a
 block, or as a member of a `table`, `protocol`, `enum`, `type` or `impl` body.
 
-**ORNA-NATIVE-004** Only a module of the admitted pinned `std` dependency may
-contain a native declaration. A module is such a module when its logical path
-is a standard module path and its bytes are the bytes verified against the
-admitted standard dependency profile. A native declaration in project source,
-in an attachment, in a generated stub, in a replacement `std` supplied outside
-the admitted dependency, or through any interactive entry point is rejected at
-load, naming the module path, the declaration name and the source position.
+**ORNA-NATIVE-004** (amended 2026-11-10; the earlier admitted-`std`-only rule is
+withdrawn) Any module unit MAY contain a native declaration, including a module of
+the pinned `std` dependency and a module in project source. A key `(module path,
+name)` in `core` or `sys` binds to the engine. Any other key binds at link to a
+symbol of the shared library the root project names in its manifest, with a
+pinned digest. A declaration with no binding is rejected at link, before any
+expression is evaluated, naming the module path, the declaration name and the
+source position.
 
 **ORNA-NATIVE-005** The binding key of a native declaration is the namespace
 path of the module that declares it together with the declared name. Two native
@@ -112,12 +113,11 @@ text supports, and a snapshot that contains one uses it. Removing an operation's
 native declaration in a later pin changes that later pin's behaviour only and
 MUST NOT change the behaviour of any earlier captured snapshot.
 
-**ORNA-NATIVE-012** A native declaration is not part of a user program's own
-source. A user program MUST NOT require, redeclare, extend, shadow or otherwise
-obtain a native declaration outside an admitted pinned standard dependency. A
-`std` dependency that is not the admitted pinned dependency (ORNA-NS-007) either
-contains no native declaration, in which case it is ordinary source, or is
-rejected under ORNA-NATIVE-004.
+**ORNA-NATIVE-012** (amended 2026-11-10) A package MAY declare a native function.
+A package MUST NOT supply its code: the code for a native key outside `core` and
+`sys` comes only from the shared library the root project names in its manifest
+(`docs/design/native-libraries.md`, R4). A native declaration with no supplier is
+rejected at link.
 
 **ORNA-NATIVE-013** An operation is dispatched by the identity bound to its
 resolved declaration at admission. An implementation MUST NOT dispatch an
@@ -146,7 +146,7 @@ Load diagnostics:
 |---|---|---|
 | `ORNA-STD-NATIVE-UNBOUND` | a native declaration has no implementation (ORNA-NATIVE-006), or the registry entry for the key is not implementation-bearing | module path, declared name, pin |
 | `ORNA-STD-NATIVE-UNDECLARED` | an admissible implementation has no declaration (ORNA-NATIVE-007) | module path, declared name, pin |
-| `ORNA-STD-NATIVE-SCOPE` | a native declaration is outside the admitted pinned dependency (ORNA-NATIVE-004, ORNA-NATIVE-012) | module path, declared name, file and position |
+| `ORNA-STD-NATIVE-SCOPE` | retired 2026-11-10: a declaration is not rejected by its module's location; link codes are in `docs/design/native-libraries.md` section 11 | - |
 | `ORNA-STD-NATIVE-DUPLICATE` | two declarations share one binding key (ORNA-NATIVE-005) | module path, declared name, both positions |
 | `ORNA-STD-NATIVE-BINDING` | the declared signature and the implementation's recorded signature disagree (ORNA-NATIVE-015) | module path, declared name, both signatures |
 
@@ -168,8 +168,11 @@ A conforming implementation satisfies, in addition to the clauses above:
    as identifiers on the same source line as a native declaration.
 2. ORNA-NATIVE-003 is demonstrated by rejection of a native declaration in each
    position it forbids.
-3. ORNA-NATIVE-004 and ORNA-NATIVE-012 are demonstrated separately for project
-   source, a replacement dependency and an interactive entry point.
+3. ORNA-NATIVE-004 is demonstrated by a native declaration in a project module
+   whose key has a binding at link and runs, and by one with no binding that is
+   rejected at link before evaluation. ORNA-NATIVE-012 is demonstrated by a
+   package that declares a native whose library the root project does not name,
+   rejected at link.
 4. ORNA-NATIVE-006 and ORNA-NATIVE-007 are demonstrated by removing and by
    adding an implementation respectively, with the diagnostic naming the module
    path and the declared name in both directions.
@@ -199,7 +202,7 @@ A conforming implementation satisfies, in addition to the clauses above:
 | `source/10-execution.md:33` (ORNA-TXN-008) | served: the clause supplies the effect information the host otherwise infers |
 | `source/14-pages.md:76` (ORNA-EVAL-004) | served: a body-less declaration cannot have its effects derived from a call graph |
 | `source/03-source-modules.md:9` (ORNA-SOURCE-002) | unchanged: a native declaration is a top-level declaration |
-| `source/03-source-modules.md:36` (ORNA-NS-007) | governs: ORNA-NATIVE-004 and -012 keep a replaced `std` ordinary |
+| `source/03-source-modules.md:36` (ORNA-NS-007) | governs: a replaced `std` is ordinary source; its native declarations bind as ORNA-NATIVE-004 (amended) |
 | `source/04-lexical.md:29` (ORNA-LEX-007) | unchanged: ORNA-NATIVE-002 adds no keyword |
 
 ## 6. Grammar delta
