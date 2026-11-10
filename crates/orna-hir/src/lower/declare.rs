@@ -404,6 +404,56 @@ impl<'a> Builder<'a> {
         &self.pending[def.index()].name
     }
 
+    /// The unit declaration a unit suffix names: one of this module first,
+    /// otherwise the one unit of the program with that name.
+    pub(crate) fn resolve_unit(&self, module: ModuleId, name: &Name) -> Option<DefId> {
+        let candidates = self
+            .pending
+            .iter()
+            .enumerate()
+            .filter_map(|(index, pending)| {
+                matches!(pending.kind, PendingKind::Built(crate::DefKind::Unit(_)))
+                    .then_some(DefId::new(u32::try_from(index).ok()?))
+            })
+            .filter(|def| &self.pending[def.index()].name == name)
+            .collect::<Vec<_>>();
+        if let Some(own) = candidates
+            .iter()
+            .find(|def| self.pending[def.index()].module == module)
+        {
+            return Some(*own);
+        }
+        (candidates.len() == 1).then(|| candidates[0])
+    }
+
+    /// The member of `base` named `name`: a variant, field or nested member.
+    pub(crate) fn member_def(&self, base: DefId, name: &Name) -> Option<DefId> {
+        let members = match &self.pending[base.index()].kind {
+            PendingKind::Built(crate::DefKind::Enum(enumeration)) => enumeration.variants.clone(),
+            PendingKind::Built(crate::DefKind::Type(definition)) => definition.members.clone(),
+            PendingKind::Built(crate::DefKind::Table(table)) => table.fields.clone(),
+            PendingKind::Built(crate::DefKind::Variant(variant)) => variant.fields.clone(),
+            _ => Vec::new(),
+        };
+        members
+            .into_iter()
+            .find(|member| &self.pending[member.index()].name == name)
+    }
+
+    /// Whether the definition is a table, type or enum: a value type.
+    pub(crate) fn is_nominal(&self, def: DefId) -> bool {
+        match &self.pending[def.index()].kind {
+            PendingKind::Unbuilt(declaration) => matches!(
+                **declaration,
+                DeclAst::Table(..) | DeclAst::Type(..) | DeclAst::Enum(..)
+            ),
+            PendingKind::Built(
+                crate::DefKind::Table(_) | crate::DefKind::Type(_) | crate::DefKind::Enum(_),
+            ) => true,
+            PendingKind::Function(_) | PendingKind::Built(_) => false,
+        }
+    }
+
     /// Whether the definition is a table.
     pub(crate) fn def_is_table(&self, def: DefId) -> bool {
         match &self.pending[def.index()].kind {

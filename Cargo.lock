@@ -1643,6 +1643,7 @@ dependencies = [
  "lsp-types",
  "orna-base",
  "orna-check",
+ "orna-hir",
  "orna-project",
  "orna-repository",
  "orna-standard-sources",

@@ -46,13 +46,14 @@ pub(crate) fn lower_pattern_with(
             let name = Name::new(text);
             let ty = expected.unwrap_or(error_ty);
             let local = state.add_local(name.clone(), ty, span.clone());
-            super::record_use(
+            super::record_binding_use(
                 &mut builder.program,
                 module,
+                state.id,
                 span.clone(),
                 name,
-                crate::UseContext::Pattern,
-                NameTarget::Local(local),
+                local,
+                false,
             );
             state.push_pat(Pat::Bind { local })
         }
@@ -103,6 +104,15 @@ pub(crate) fn lower_pattern_with(
             let mut lowered = Vec::with_capacity(fields.len());
             for (name, field_pattern, span) in fields {
                 let field_ty = expected.and_then(|ty| field_type(builder, ty, name));
+                super::record_body_use(
+                    &mut builder.program,
+                    module,
+                    state.id,
+                    span.clone(),
+                    Name::new(name),
+                    crate::UseContext::Field,
+                    NameTarget::Unresolved,
+                );
                 let sub = match field_pattern {
                     Some(field_pattern) => {
                         lower_pattern_with(builder, state, field_pattern, field_ty)
@@ -113,13 +123,14 @@ pub(crate) fn lower_pattern_with(
                             field_ty.unwrap_or(error_ty),
                             span.clone(),
                         );
-                        super::record_use(
+                        super::record_binding_use(
                             &mut builder.program,
                             module,
+                            state.id,
                             span.clone(),
                             Name::new(name),
-                            crate::UseContext::Pattern,
-                            NameTarget::Local(local),
+                            local,
+                            true,
                         );
                         state.push_pat(Pat::Bind { local })
                     }
@@ -192,39 +203,62 @@ fn lower_constructor(
         .iter()
         .map(|segment| Name::new(&segment.text))
         .collect::<Vec<_>>();
-    let def = match builder.resolve_path(module, &segments) {
-        PathKind::Def(def) => {
-            super::record_use(
-                &mut builder.program,
-                module,
-                span.clone(),
-                segments.last().cloned().unwrap_or_else(|| Name::new("")),
-                crate::UseContext::Pattern,
-                NameTarget::Def(def),
-            );
-            Some(def)
-        }
-        _ => {
-            super::record_use(
-                &mut builder.program,
-                module,
-                span.clone(),
-                segments.last().cloned().unwrap_or_else(|| Name::new("")),
-                crate::UseContext::Pattern,
-                NameTarget::Unresolved,
-            );
-            builder.diagnose(
-                module,
-                crate::diag::UNRESOLVED,
-                "pattern constructor does not resolve",
-                span.clone(),
-            );
-            None
-        }
+    let last_span = path
+        .last()
+        .map_or_else(|| span.clone(), |segment| segment.span.clone());
+    let path_segments = path
+        .iter()
+        .zip(&segments)
+        .map(|(segment, name)| (name.clone(), segment.span.clone()))
+        .collect::<Vec<_>>();
+    super::exprs::record_prefix_uses(
+        builder,
+        module,
+        Some(state.id),
+        &path_segments,
+        crate::UseContext::Pattern,
+    );
+    let last_name = segments.last().cloned().unwrap_or_else(|| Name::new(""));
+    let resolved = match builder.resolve_path(module, &segments) {
+        PathKind::Member { base, .. } => builder
+            .member_def(base, &last_name)
+            .map_or(PathKind::Unresolved, PathKind::Def),
+        other => other,
     };
+    let def = match resolved {
+        PathKind::Def(def) => Some(def),
+        _ => None,
+    };
+    super::record_body_use(
+        &mut builder.program,
+        module,
+        state.id,
+        last_span.clone(),
+        last_name.clone(),
+        crate::UseContext::Pattern,
+        def.map_or(NameTarget::Unresolved, NameTarget::Def),
+    );
+    if def.is_none() {
+        builder.diagnose(
+            module,
+            crate::diag::UNRESOLVED,
+            "pattern constructor does not resolve",
+            span.clone(),
+        );
+    }
     let mut lowered_fields = Vec::new();
     for field in fields {
+        let name_span = SyntaxSpan::new(field.span.start, field.span.start + field.name.len());
         let field_def = def.and_then(|def| find_field(builder, def, &field.name));
+        super::record_body_use(
+            &mut builder.program,
+            module,
+            state.id,
+            name_span.clone(),
+            Name::new(&field.name),
+            crate::UseContext::Field,
+            field_def.map_or(NameTarget::Unresolved, NameTarget::Def),
+        );
         let field_ty = field_def.and_then(|field| field_definition_of(builder, field));
         let sub = match &field.pattern {
             Some(pattern) => lower_pattern_with(builder, state, pattern, field_ty),
@@ -234,13 +268,14 @@ fn lower_constructor(
                     field_ty.unwrap_or(error_ty),
                     field.span.clone(),
                 );
-                super::record_use(
+                super::record_binding_use(
                     &mut builder.program,
                     module,
+                    state.id,
                     field.span.clone(),
                     Name::new(&field.name),
-                    crate::UseContext::Pattern,
-                    NameTarget::Local(local),
+                    local,
+                    true,
                 );
                 state.push_pat(Pat::Bind { local })
             }

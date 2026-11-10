@@ -1086,12 +1086,14 @@ mod tests {
             ty: int,
             mutable: false,
             span: span(0),
+            scope: span(0),
         });
         body.locals.push(Local {
             name: Name::new("value"),
             ty: int,
             mutable: false,
             span: span(1),
+            scope: span(1),
         });
         body.params = Box::new([LocalId::new(1)]);
         let def = program.defs.get_mut(crate::DefId::new(0));
