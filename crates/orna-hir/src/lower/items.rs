@@ -748,18 +748,29 @@ impl Builder<'_> {
         let mut generics = inherited.to_vec();
         generics.extend(self.build_generics(module, &names, &signature.generics));
         let ret = self.build_result(module, &names, signature.result.as_ref());
+        // The protocol's `Self` parameter types an unannotated receiver `self`, as in an implementation (D1).
+        let self_ty = names
+            .iter()
+            .position(|name| *name == crate::Name::new("Self"))
+            .map(|index| {
+                let index = u32::try_from(index).expect("generic parameters fit u32");
+                self.program.tys.intern(crate::TyKind::Param(crate::ParamIdx::new(index)))
+            });
         let params = signature
             .parameters
             .iter()
             .enumerate()
             .map(|(index, parameter)| {
-                let written = parameter.annotation.is_some();
-                let ty = match &parameter.annotation {
-                    Some(annotation) => super::types::lower_type(self, module, &names, annotation),
-                    None => self.program.tys.error(),
+                let name = parameter_name(&parameter.pattern, index);
+                let is_receiver = index == 0 && name == "self";
+                let written = parameter.annotation.is_some() || is_receiver;
+                let ty = match (&parameter.annotation, self_ty) {
+                    (Some(annotation), _) => super::types::lower_type(self, module, &names, annotation),
+                    (None, Some(self_ty)) if is_receiver => self_ty,
+                    (None, _) => self.program.tys.error(),
                 };
                 ParamDef {
-                    name: crate::Name::new(&parameter_name(&parameter.pattern, index)),
+                    name: crate::Name::new(&name),
                     ty,
                     written,
                     default: None,
