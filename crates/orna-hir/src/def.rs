@@ -132,6 +132,9 @@ pub struct NativeDecl {
     pub abi: NativeAbi,
     /// The identity the link step binds.
     pub key: NativeKey,
+    /// The effect kinds the declaration's `effect` clause names. Empty for
+    /// `effect none`. The effect pass adds `MayFail` to a non-empty set.
+    pub effects: crate::EffectSet,
 }
 
 /// The engine native ABI version (design section 4.5).
