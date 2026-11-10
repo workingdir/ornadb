@@ -5,7 +5,7 @@ use std::rc::Rc;
 use num_traits::ToPrimitive;
 use orna_hir::{
     Arg, ArgValue, Arm, AssignOp, BinOp, Body, BodyId, Call, Callee, DefKind, ExprId, ExprKind,
-    FieldRef, FnBody, Lit, LocalId, LogicOp, Name, Pat, PatId, Place, Stmt,
+    FieldRef, FnBody, Lit, LocalId, LogicOp, Name, ParamDef, Pat, PatId, Place, Stmt,
 };
 
 use crate::binders;
@@ -139,14 +139,14 @@ impl<'p> Machine<'p> {
                 let FnBody::Source(callee_body) = function.body else {
                     return Err(Stop::NotYet("call of a function without a source body"));
                 };
-                let arguments = self.arguments(body, frame, call)?;
+                let arguments = self.arguments(body, frame, call, &function.params)?;
                 self.invoke(callee_body, arguments, &[])
             }
             Callee::Value { callee } => {
                 let Value::Closure(closure) = self.eval(body, frame, *callee)? else {
                     return Err(Stop::NotYet("call of a non-closure value"));
                 };
-                let arguments = self.arguments(body, frame, call)?;
+                let arguments = self.arguments(body, frame, call, &[])?;
                 let callee_body = &self.program.bodies[closure.body];
                 if arguments.len() != callee_body.params.len() {
                     return Err(Stop::Error("ORNA-EVAL-ARGUMENT"));
@@ -162,10 +162,11 @@ impl<'p> Machine<'p> {
         body: &'p Body,
         frame: &mut Frame,
         call: &Call,
+        params: &[ParamDef],
     ) -> Result<Vec<(usize, Value)>, Stop> {
         let mut arguments = Vec::with_capacity(call.args.len());
         for argument in call.args.iter() {
-            arguments.push(self.argument(body, frame, argument)?);
+            arguments.push(self.argument(body, frame, argument, params)?);
         }
         Ok(arguments)
     }
@@ -175,13 +176,21 @@ impl<'p> Machine<'p> {
         body: &'p Body,
         frame: &mut Frame,
         argument: &Arg,
+        params: &[ParamDef],
     ) -> Result<(usize, Value), Stop> {
+        let slot = argument.slot.as_u32() as usize;
         match argument.value {
             ArgValue::Expr(id) => {
                 let value = self.eval(body, frame, id)?;
-                Ok((argument.slot.as_u32() as usize, value))
+                Ok((slot, value))
             }
-            ArgValue::Default => Err(Stop::NotYet("default argument")),
+            ArgValue::Default => {
+                let Some(default) = params.get(slot).and_then(|param| param.default) else {
+                    return Err(Stop::NotYet("default argument without a default body"));
+                };
+                let value = self.invoke(default, Vec::new(), &[])?;
+                Ok((slot, value))
+            }
         }
     }
 
@@ -260,18 +269,98 @@ impl<'p> Machine<'p> {
         op: AssignOp,
         value: ExprId,
     ) -> Result<Value, Stop> {
-        let Place::Local(slot) = place else {
-            return Err(Stop::NotYet("assignment to a field or index"));
+        match place {
+            Place::Local(slot) => {
+                let rhs = self.eval(body, frame, value)?;
+                let new = self.combine(op, rhs, || frame.get(*slot))?;
+                frame.set(*slot, new)?;
+                Ok(Value::Unit)
+            }
+            Place::Field { base, field } => self.assign_field(body, frame, base, field, op, value),
+            Place::Index { base, index } => self.assign_index(body, frame, base, *index, op, value),
+        }
+    }
+
+    /// Applies an assignment operator. `Set` never reads the current value.
+    fn combine(
+        &self,
+        op: AssignOp,
+        rhs: Value,
+        current: impl FnOnce() -> Result<Value, Stop>,
+    ) -> Result<Value, Stop> {
+        let bin = match op {
+            AssignOp::Set => return Ok(rhs),
+            AssignOp::Add => BinOp::Add,
+            AssignOp::Subtract => BinOp::Sub,
+            AssignOp::Multiply => BinOp::Mul,
+            AssignOp::Divide => BinOp::Div,
         };
+        ops::binary(bin, current()?, rhs, &self.limits)
+    }
+
+    /// Assigns to a named field of a record held in a local. Deeper places decline.
+    fn assign_field(
+        &mut self,
+        body: &'p Body,
+        frame: &mut Frame,
+        base: &Place,
+        field: &FieldRef,
+        op: AssignOp,
+        value: ExprId,
+    ) -> Result<Value, Stop> {
+        let Place::Local(slot) = base else {
+            return Err(Stop::NotYet("assignment to a nested field"));
+        };
+        let FieldRef::Name(name) = field else {
+            return Err(Stop::NotYet("assignment to a field by index or definition"));
+        };
+        let Value::Record(fields) = frame.get(*slot)? else {
+            return Err(Stop::NotYet(
+                "field assignment on a value that is not a record",
+            ));
+        };
+        let position = fields
+            .iter()
+            .position(|(key, _)| key == name)
+            .ok_or(Stop::Error("ORNA-EVAL-FIELD"))?;
         let rhs = self.eval(body, frame, value)?;
-        let new = match op {
-            AssignOp::Set => rhs,
-            AssignOp::Add => ops::binary(BinOp::Add, frame.get(*slot)?, rhs, &self.limits)?,
-            AssignOp::Subtract => ops::binary(BinOp::Sub, frame.get(*slot)?, rhs, &self.limits)?,
-            AssignOp::Multiply => ops::binary(BinOp::Mul, frame.get(*slot)?, rhs, &self.limits)?,
-            AssignOp::Divide => ops::binary(BinOp::Div, frame.get(*slot)?, rhs, &self.limits)?,
+        let new = self.combine(op, rhs, || Ok(fields[position].1.clone()))?;
+        let mut updated = fields.to_vec();
+        updated[position].1 = new;
+        frame.set(*slot, Value::Record(updated.into()))?;
+        Ok(Value::Unit)
+    }
+
+    /// Assigns to an element of a list held in a local. Deeper places decline.
+    fn assign_index(
+        &mut self,
+        body: &'p Body,
+        frame: &mut Frame,
+        base: &Place,
+        index: ExprId,
+        op: AssignOp,
+        value: ExprId,
+    ) -> Result<Value, Stop> {
+        let Place::Local(slot) = base else {
+            return Err(Stop::NotYet("assignment to a nested index"));
         };
-        frame.set(*slot, new)?;
+        let Value::List(values) = frame.get(*slot)? else {
+            return Err(Stop::NotYet(
+                "index assignment on a value that is not a list",
+            ));
+        };
+        let Value::Int(index) = self.eval(body, frame, index)? else {
+            return Err(Stop::Error("ORNA-EVAL-TYPE"));
+        };
+        let index = index.to_usize().ok_or(Stop::Error("ORNA-EVAL-INDEX"))?;
+        if index >= values.len() {
+            return Err(Stop::Error("ORNA-EVAL-INDEX"));
+        }
+        let rhs = self.eval(body, frame, value)?;
+        let new = self.combine(op, rhs, || Ok(values[index].clone()))?;
+        let mut updated = values.to_vec();
+        updated[index] = new;
+        frame.set(*slot, Value::List(updated.into()))?;
         Ok(Value::Unit)
     }
 
