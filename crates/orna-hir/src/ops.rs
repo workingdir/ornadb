@@ -52,6 +52,7 @@ pub fn binary(types: &mut TyInterner, op: BinOp, left: Ty, right: Ty) -> Option<
         BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
             (left == right && ordered(&left_kind)).then(|| types.intern(TyKind::Bool))
         }
+        BinOp::In => None,
         BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem | BinOp::Pow => {
             arithmetic(types, op, left, &left_kind, &right_kind)
         }
@@ -141,7 +142,7 @@ fn arithmetic(
             _ => None,
         },
         BinOp::Rem | BinOp::Pow => None,
-        BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => None,
+        BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::In => None,
     }
 }
 

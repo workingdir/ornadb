@@ -586,6 +586,7 @@ fn bin_op(op: &str) -> Option<BinOp> {
         "<=" => BinOp::Le,
         ">" => BinOp::Gt,
         ">=" => BinOp::Ge,
+        "in" => BinOp::In,
         _ => return None,
     })
 }

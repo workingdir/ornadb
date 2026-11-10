@@ -2,6 +2,9 @@
 //! and whose kernel scalar row does not apply selects an instance of its `core.ops`
 //! protocol. The instance's right protocol argument must equal the right operand's
 //! type. The selected implementation member is the call the operator becomes.
+//!
+//! `in` is the one operator whose receiver is its right operand: `value in container`
+//! selects the `Contains` instance of `container` and becomes `container.contains(value)`.
 
 use orna_syntax::SyntaxSpan;
 
@@ -18,6 +21,8 @@ struct OperatorProtocol {
     symbol: &'static str,
     protocol: &'static str,
     member: &'static str,
+    /// Whether the protocol's last type argument is the member's result (`Out`).
+    output: bool,
 }
 
 fn binary_protocol(op: BinOp) -> Option<OperatorProtocol> {
@@ -28,12 +33,15 @@ fn binary_protocol(op: BinOp) -> Option<OperatorProtocol> {
         BinOp::Div => ("/", "Div", "div"),
         BinOp::Rem => ("%", "Rem", "rem"),
         BinOp::Pow => ("^", "Pow", "pow"),
-        BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => return None,
+        BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::In => {
+            return None;
+        }
     };
     Some(OperatorProtocol {
         symbol,
         protocol,
         member,
+        output: true,
     })
 }
 
@@ -61,6 +69,9 @@ impl BodyCheck<'_> {
         types: (Ty, Ty),
         span: SyntaxSpan,
     ) -> Option<Ty> {
+        if matches!(op, BinOp::In) {
+            return self.contains_operator_ty(body, id, operands, types, span);
+        }
         let operator = binary_protocol(op)?;
         let (left_expr, right_expr) = operands;
         let (left, right) = types;
@@ -69,7 +80,7 @@ impl BodyCheck<'_> {
         }
         let owner = self.nominal_owner(left)?;
         let protocol = self.core_ops_protocol(operator.protocol)?;
-        let found = self.operator_implementations(owner, protocol, operator.member, Some(right));
+        let found = self.operator_implementations(owner, protocol, &operator, Some(right));
         let Some(implementation) =
             self.settle_operator(found, &operator, (left, Some(right)), &span)
         else {
@@ -77,6 +88,42 @@ impl BodyCheck<'_> {
         };
         self.unify_operands(&[left, right], &implementation.params, &span);
         body.exprs[id].kind = operator_call(implementation.member, &[left_expr, right_expr], span);
+        Some(implementation.output)
+    }
+
+    /// Types `value in container` through the `Contains` instance of a nominal container.
+    ///
+    /// The container is the receiver, so the operator becomes `container.contains(value)`.
+    fn contains_operator_ty(
+        &mut self,
+        body: &mut Body,
+        id: ExprId,
+        operands: (ExprId, ExprId),
+        types: (Ty, Ty),
+        span: SyntaxSpan,
+    ) -> Option<Ty> {
+        let (value_expr, container_expr) = operands;
+        let (value, container) = types;
+        if matches!(self.kind_of(value), Some(TyKind::Infer(_))) {
+            return None;
+        }
+        let owner = self.nominal_owner(container)?;
+        let operator = OperatorProtocol {
+            symbol: "in",
+            protocol: "Contains",
+            member: "contains",
+            output: false,
+        };
+        let protocol = self.core_ops_protocol(operator.protocol)?;
+        let found = self.operator_implementations(owner, protocol, &operator, Some(value));
+        let Some(implementation) =
+            self.settle_operator(found, &operator, (value, Some(container)), &span)
+        else {
+            return Some(self.error());
+        };
+        self.unify_operands(&[container, value], &implementation.params, &span);
+        body.exprs[id].kind =
+            operator_call(implementation.member, &[container_expr, value_expr], span);
         Some(implementation.output)
     }
 
@@ -98,9 +145,10 @@ impl BodyCheck<'_> {
             symbol: "-",
             protocol: "Neg",
             member: "neg",
+            output: true,
         };
         let protocol = self.core_ops_protocol(operator.protocol)?;
-        let found = self.operator_implementations(owner, protocol, operator.member, None);
+        let found = self.operator_implementations(owner, protocol, &operator, None);
         let Some(implementation) =
             self.settle_operator(found, &operator, (operand_ty, None), &span)
         else {
@@ -132,15 +180,16 @@ impl BodyCheck<'_> {
 
     /// The implementations of `protocol` on `owner` that serve the operator.
     ///
-    /// `right` filters on the protocol's first type argument, the right operand's type.
+    /// `right` filters on the protocol's first type argument: the right operand for
+    /// the arithmetic operators, the value for `Contains`.
     fn operator_implementations(
         &self,
         owner: DefId,
         protocol: DefId,
-        member_name: &str,
+        operator: &OperatorProtocol,
         right: Option<Ty>,
     ) -> Vec<Implementation> {
-        let member_name = Name::new(member_name);
+        let member_name = Name::new(operator.member);
         let implementations = self
             .program
             .instances
@@ -175,7 +224,11 @@ impl BodyCheck<'_> {
                 member,
                 params: function.params.iter().map(|param| param.ty).collect(),
                 output: function.ret,
-                protocol_output: declared.protocol_args.last().copied(),
+                protocol_output: declared
+                    .protocol_args
+                    .last()
+                    .copied()
+                    .filter(|_| operator.output),
             });
         }
         found

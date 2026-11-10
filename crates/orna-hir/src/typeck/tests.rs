@@ -345,3 +345,29 @@ fn negation_selects_the_neg_instance() {
     assert!(test_accepted(&program, &summary), "{summary:?}");
     assert_eq!(result(&program, "flip"), "Money");
 }
+
+#[test]
+fn membership_selects_the_contains_instance_of_the_container() {
+    let mut program = program(
+        "use core.ops.*;\npub type Bag {\n    count: Int,\n    impl Contains<Int> {\n        fn contains(self, value: Int): Bool = true;\n    }\n}\npub fn has(bag: Bag, value: Int): Bool = value in bag;\n",
+    );
+    let summary = typeck(&mut program);
+    assert!(test_accepted(&program, &summary), "{summary:?}");
+    assert_eq!(result(&program, "has"), "Bool");
+}
+
+#[test]
+fn missing_contains_instance_names_the_in_operator_and_protocol() {
+    let mut program = program(
+        "pub type Bag {\n    count: Int,\n}\npub fn has(bag: Bag, value: Int): Bool = value in bag;\n",
+    );
+    let _ = typeck(&mut program);
+    let message = program.modules[test_module(&program)]
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == crate::diag::INFER_CONFLICT)
+        .map(|diagnostic| diagnostic.message.to_string())
+        .unwrap_or_default();
+    assert!(message.contains("`in`"), "{message}");
+    assert!(message.contains("`Contains`"), "{message}");
+}
