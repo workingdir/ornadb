@@ -223,3 +223,16 @@ fn main() -> ExitCode {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::measure_benchmarks;
+
+    #[test]
+    fn record_lists_b1_and_b2_gated_and_b3_not_yet() {
+        let text = measure_benchmarks().expect("the executor runs B1 and B2");
+        assert!(text.starts_with("{\"pipeline\":\"exec\",\"benchmarks\":{\"b1_fib_25\":{"));
+        assert!(text.contains("\"b2_fold_1000000\":{"));
+        assert!(text.contains("\"not_yet\":{\"b3_filter_100000\":\"NotYet("));
+    }
+}
