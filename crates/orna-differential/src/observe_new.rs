@@ -41,7 +41,7 @@ use orna_syntax::{
 };
 
 use crate::Route;
-use crate::case::{Case, CaseKind};
+use crate::case::{Case, CaseKind, Family};
 
 /// The repository's standard modules, parsed once per test process.
 struct StandardModule {
@@ -65,6 +65,18 @@ static STANDARD_MODULES: LazyLock<Vec<StandardModule>> = LazyLock::new(|| {
             }
         })
         .collect()
+});
+
+/// The fixture's unit namespace, which the old catalogue supplies to reference
+/// cases only (`catalogue_for`). A reference case reaches it through `use
+/// fixture.units.*;`, so it is lowered as an unowned module.
+static FIXTURE_UNITS: LazyLock<StandardModule> = LazyLock::new(|| {
+    let logical = "fixture/units.orna".to_owned();
+    StandardModule {
+        path: module_path_of(&logical),
+        tree: parse_module_with_file(orna_check::FIXTURE_UNIT_SUPPORT, logical.clone()).value,
+        logical,
+    }
 });
 
 /// The namespace a logical path declares (`ORNA-NS-001` to `ORNA-NS-004`).
@@ -104,16 +116,36 @@ pub fn lower_case(case: &Case) -> Result<LoweredProgram, String> {
     }
 }
 
+/// Makes the fixture units visible to a reference module without an import.
+///
+/// The old catalogue supplies the fixture unit names to every reference module
+/// (`C`, `mph`, `kWh`), and the corpus uses them with no `use`. HIR resolves a
+/// bare name only through an import, so the observer adds the import the
+/// catalogue supplies implicitly. The spliced item carries the snippet's spans,
+/// which hold no call or diagnostic.
+fn import_fixture_units(tree: &mut SyntaxTree) {
+    let import = parse_module_with_file("use fixture.units.*;\n", "fixture/import.orna").value;
+    tree.items.splice(0..0, import.items);
+}
+
 fn lower_module_case(case: &Case) -> Result<LoweredProgram, String> {
     let mut parsed = Vec::new();
     for source in &case.sources {
-        let tree = parse_module_with_file(&source.text, source.logical_path.clone()).value;
+        let mut tree = parse_module_with_file(&source.text, source.logical_path.clone()).value;
+        if case.family == Family::Reference {
+            import_fixture_units(&mut tree);
+        }
         parsed.push((source.clone(), tree));
     }
     // Every standard module is available to a case, as the catalogue makes it
     // available to the old pipeline: a qualified `std.x.y` path needs no
-    // `use`, so the reached-imports closure would miss it.
-    let standard = STANDARD_MODULES.iter();
+    // `use`, so the reached-imports closure would miss it. Reference cases also
+    // get the fixture environment the old pipeline admits them against.
+    let mut standard: Vec<&StandardModule> = STANDARD_MODULES.iter().collect();
+    if case.family == Family::Reference {
+        standard.push(&FIXTURE_UNITS);
+    }
+    let standard = standard.into_iter();
     let mut units = Vec::new();
     let mut logical_paths = Vec::new();
     let mut owned = Vec::new();

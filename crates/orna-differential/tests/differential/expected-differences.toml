@@ -1037,3 +1037,11 @@ first = "examples.valid.dependency-query::impact=TableRead+MayFail"
 second = "examples.valid.dependency-query::impact=pure"
 reason = "`sys.dependents` is declared `effect table_read` in the HIR interface, but the H3a native-effect rule (`effect_pass.rs` host_effect) classifies only host paths such as `sys.io`, `sys.net`, `sys.admin`, so the declared table_read is not applied and the call is pure. The checker assigns `read` (TableRead+MayFail). Closing this is the effect-pass work of H3"
 bead = "ornadb-csenl.18"
+
+[[difference]]
+case = "valid/affine-max.orna"
+field = "public-signature"
+first = "examples.valid.affine-max::hottest=hottest([Quantity]) -> Quantity?"
+second = "examples.valid.affine-max::hottest=hottest([Float]) -> Float?"
+reason = "the fixture unit `C` now resolves in the HIR observer (the reference catalogue supplies it), so the HIR lowers `Float<C>` but its public signature renders the unit-applied Float as plain Float; the checker renders the same parameter as Quantity. The unit argument is dropped by the HIR signature rendering, which the H2a signature slice does not yet carry"
+bead = "ornadb-csenl.18"
