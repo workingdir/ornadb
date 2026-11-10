@@ -460,6 +460,14 @@ impl<'a> Builder<'a> {
             );
         }
         self.program.defs = definitions;
+        // The index promises source order so a query can binary-search by
+        // span; lowering visits a callee before its arguments, so sort once.
+        for index in 0..self.program.modules.len() {
+            let module = &mut self.program.modules[crate::ModuleId::new(index as u32)];
+            module.name_uses.sort_by(|left, right| {
+                (left.span.start, left.span.end).cmp(&(right.span.start, right.span.end))
+            });
+        }
         for (index, body) in self.bodies.drain(..).enumerate() {
             let body = body.unwrap_or_else(|| crate::Body {
                 owner: self.body_owners[index],

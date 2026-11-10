@@ -243,6 +243,20 @@ fn a_local_call_is_a_first_class_value() {
 }
 
 #[test]
+fn name_uses_are_in_source_order() {
+    let program = lower_one("fn f(a: Int): Int = a + f(a);\n");
+    let module = &program.modules[module_of(&program, "main")];
+    assert!(module.name_uses.len() >= 3, "{:?}", module.name_uses);
+    for pair in module.name_uses.windows(2) {
+        assert!(
+            (pair[0].span.start, pair[0].span.end) <= (pair[1].span.start, pair[1].span.end),
+            "name uses are sorted by span: {:?}",
+            module.name_uses
+        );
+    }
+}
+
+#[test]
 fn root_intrinsics_classify_without_a_declaration() {
     let program = lower_one("fn run(): Int? = Some(1);\n");
     let run = defined(&program, "main", "run");
