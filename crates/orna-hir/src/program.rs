@@ -75,6 +75,9 @@ pub struct Program {
     pub bodies: IndexVec<BodyId, Body>,
     /// The interned types.
     pub tys: TyInterner,
+    /// Each type's protocol implementations, in declaration order: the
+    /// candidates a member call on a value of that type selects from.
+    pub instances: BTreeMap<DefId, Vec<DefId>>,
     /// Which engine native ABI the `core` and `sys` declarations were loaded
     /// against.
     pub native_abi: NativeAbi,
@@ -92,6 +95,7 @@ impl Program {
             defs: IndexVec::new(),
             bodies: IndexVec::new(),
             tys: TyInterner::new(),
+            instances: BTreeMap::new(),
             native_abi: NativeAbi::new(0),
         }
     }

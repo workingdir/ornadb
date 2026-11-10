@@ -45,6 +45,7 @@ use crate::{
 
 mod call;
 mod expr;
+mod protocol;
 #[cfg(test)]
 mod tests;
 
@@ -366,7 +367,7 @@ impl TypeChecker<'_> {
             }
         };
 
-        let mut check = BodyCheck::new(&mut *self.program, &self.variant_owner);
+        let mut check = BodyCheck::new(&mut *self.program, &self.variant_owner, owner);
         let root = check.check_root(body_id, expected);
         let root_ty = match root {
             Ok(root_ty) => root_ty,
@@ -459,6 +460,9 @@ impl TypeChecker<'_> {
 struct BodyCheck<'a> {
     program: &'a mut Program,
     variant_owner: &'a BTreeMap<DefId, DefId>,
+    /// The definition whose body is being checked; its generics bound the
+    /// `Param` types the body names.
+    owner: DefId,
     infer: crate::infer::InferCtxt,
     diagnostics: Vec<HirDiagnostic>,
     conflicts: usize,
@@ -469,10 +473,11 @@ struct BodyCheck<'a> {
 }
 
 impl<'a> BodyCheck<'a> {
-    fn new(program: &'a mut Program, variant_owner: &'a BTreeMap<DefId, DefId>) -> Self {
+    fn new(program: &'a mut Program, variant_owner: &'a BTreeMap<DefId, DefId>, owner: DefId) -> Self {
         Self {
             program,
             variant_owner,
+            owner,
             infer: crate::infer::InferCtxt::new(),
             diagnostics: Vec::new(),
             conflicts: 0,

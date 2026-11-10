@@ -89,7 +89,7 @@ impl Builder<'_> {
         signature: &FunctionSignature,
     ) -> PendingFunction {
         let names = generic_names(&signature.generics);
-        let generics = self.build_generics(module, &signature.generics);
+        let generics = self.build_generics(module, &names, &signature.generics);
         let (params, defaults) =
             self.build_parameters(def, module, &signature.parameters, None, &names);
         for (body, expr) in defaults {
@@ -306,7 +306,15 @@ impl Builder<'_> {
         generics: &[GenericParameter],
         members: &[ProtocolMember],
     ) {
-        let names = generic_names(generics);
+        let mut names = generic_names(generics);
+        names.push(crate::Name::new("Self"));
+        let params = self.build_generics(module, &names, generics);
+        // Each member is generic over the protocol's parameters, then `Self`, then its own.
+        let mut inherited = params.clone();
+        inherited.push(GenericParam {
+            name: crate::Name::new("Self"),
+            bounds: Vec::new(),
+        });
         let mut lowered = Vec::new();
         for member in members {
             match member {
@@ -318,7 +326,7 @@ impl Builder<'_> {
                         span.clone(),
                         DefKind::Unit(UnitDef),
                     );
-                    let kind = self.signature_only(module, signature);
+                    let kind = self.signature_only(module, signature, &inherited);
                     self.pending[member_def.index()].kind = PendingKind::Built(kind);
                     lowered.push(member_def);
                 }
@@ -334,8 +342,10 @@ impl Builder<'_> {
                 }
             }
         }
-        self.pending[def.index()].kind =
-            PendingKind::Built(DefKind::Protocol(ProtocolDef { members: lowered }));
+        self.pending[def.index()].kind = PendingKind::Built(DefKind::Protocol(ProtocolDef {
+            params,
+            members: lowered,
+        }));
     }
 
     /// Builds an enum and its variants.
@@ -392,7 +402,7 @@ impl Builder<'_> {
         representation: &TypeRepresentation,
     ) {
         let names = generic_names(generics);
-        let params = self.build_generics(module, generics);
+        let params = self.build_generics(module, &names, generics);
         let mut members = Vec::new();
         let type_members = match representation {
             TypeRepresentation::Alias { ty, refinements } => {
@@ -447,12 +457,22 @@ impl Builder<'_> {
         implementation: &Implementation,
         span: SyntaxSpan,
     ) -> DefId {
-        let protocol = self.resolve_protocol(module, &implementation.protocol);
-        // A method's receiver `self` has the implementing type (decision D1: the receiver is not written out).
+        // A method's receiver `self` has the implementing type (decision D1: the receiver is not written out),
+        // and `Self` written in the implementation names that type.
         let receiver = self
             .program
             .tys
             .intern(crate::TyKind::Adt(owner, Box::new([])));
+        self.self_ty = Some(receiver);
+        let protocol = self.resolve_protocol(module, &implementation.protocol);
+        let protocol_args = match &implementation.protocol {
+            TypeExpr::Name { arguments, .. } => arguments
+                .iter()
+                .map(|argument| super::types::lower_type(self, module, &[], argument))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+            _ => Vec::new().into_boxed_slice(),
+        };
         let mut members = Vec::new();
         for member in &implementation.members {
             match member {
@@ -470,7 +490,7 @@ impl Builder<'_> {
                     );
                     let body_id = self.allocate_body(member_def);
                     let names = generic_names(&signature.generics);
-                    let generics = self.build_generics(module, &signature.generics);
+                    let generics = self.build_generics(module, &names, &signature.generics);
                     let (params, defaults) = self.build_parameters(
                         member_def,
                         module,
@@ -535,13 +555,27 @@ impl Builder<'_> {
                 }
             }
         }
-        self.declare_nested(
+        self.self_ty = None;
+        let implementation_def = self.declare_nested(
             module,
             "impl",
             Visibility::Private,
             span,
-            DefKind::Impl(ImplDef { protocol, members }),
-        )
+            DefKind::Impl(ImplDef {
+                owner,
+                protocol,
+                protocol_args,
+                members,
+            }),
+        );
+        if protocol.is_some() {
+            self.program
+                .instances
+                .entry(owner)
+                .or_default()
+                .push(implementation_def);
+        }
+        implementation_def
     }
 
     /// Resolves the protocol an implementation names, recording the use.
@@ -590,9 +624,13 @@ impl Builder<'_> {
     }
 
     /// The generic parameters of a declaration, with resolved protocol bounds.
+    ///
+    /// `names` is every type name in scope for the bounds' arguments: the
+    /// enclosing parameters first, then `generics`.
     fn build_generics(
         &mut self,
         module: ModuleId,
+        names: &[crate::Name],
         generics: &[GenericParameter],
     ) -> Vec<GenericParam> {
         generics
@@ -601,19 +639,7 @@ impl Builder<'_> {
                 let bounds = generic
                     .bounds
                     .iter()
-                    .filter_map(|bound| match bound {
-                        TypeExpr::Name { path, .. } if !path.is_empty() => {
-                            let segments = path
-                                .iter()
-                                .map(|segment| crate::Name::new(segment))
-                                .collect::<Vec<_>>();
-                            match self.resolve_path(module, &segments) {
-                                super::super::resolve::PathKind::Def(def) => Some(def),
-                                _ => None,
-                            }
-                        }
-                        _ => None,
-                    })
+                    .filter_map(|bound| self.build_bound(module, names, bound))
                     .collect();
                 GenericParam {
                     name: crate::Name::new(&generic.name),
@@ -621,6 +647,39 @@ impl Builder<'_> {
                 }
             })
             .collect()
+    }
+
+    /// Resolves one protocol bound and lowers its type arguments.
+    fn build_bound(
+        &mut self,
+        module: ModuleId,
+        names: &[crate::Name],
+        bound: &TypeExpr,
+    ) -> Option<crate::Bound> {
+        let TypeExpr::Name {
+            path, arguments, ..
+        } = bound
+        else {
+            return None;
+        };
+        if path.is_empty() {
+            return None;
+        }
+        let segments = path
+            .iter()
+            .map(|segment| crate::Name::new(segment))
+            .collect::<Vec<_>>();
+        let super::super::resolve::PathKind::Def(protocol) = self.resolve_path(module, &segments) else {
+            return None;
+        };
+        let args = arguments
+            .iter()
+            .map(|argument| super::types::lower_type(self, module, names, argument))
+            .collect::<Vec<_>>();
+        Some(crate::Bound {
+            protocol,
+            args: args.into_boxed_slice(),
+        })
     }
 
     /// The parameters of a function, with default bodies.
@@ -675,9 +734,19 @@ impl Builder<'_> {
     }
 
     /// A signature with no body, for a protocol member.
-    fn signature_only(&mut self, module: ModuleId, signature: &FunctionSignature) -> DefKind {
-        let names = generic_names(&signature.generics);
-        let generics = self.build_generics(module, &signature.generics);
+    fn signature_only(
+        &mut self,
+        module: ModuleId,
+        signature: &FunctionSignature,
+        inherited: &[GenericParam],
+    ) -> DefKind {
+        let mut names = inherited
+            .iter()
+            .map(|generic| generic.name.clone())
+            .collect::<Vec<_>>();
+        names.extend(generic_names(&signature.generics));
+        let mut generics = inherited.to_vec();
+        generics.extend(self.build_generics(module, &names, &signature.generics));
         let ret = self.build_result(module, &names, signature.result.as_ref());
         let params = signature
             .parameters

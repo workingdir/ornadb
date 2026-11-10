@@ -172,6 +172,8 @@ pub(crate) struct Builder<'a> {
     pub(crate) std_module: Option<ModuleId>,
     /// Bodies to lower once every signature is final.
     pub(crate) body_jobs: Vec<super::items::BodyJob>,
+    /// The type `Self` names while an implementation's members are lowered.
+    pub(crate) self_ty: Option<crate::Ty>,
 }
 
 impl<'a> Builder<'a> {
@@ -189,6 +191,7 @@ impl<'a> Builder<'a> {
             sys_module: ModuleId::new(0),
             std_module: None,
             body_jobs: Vec::new(),
+            self_ty: None,
         };
         let mut registered = Vec::with_capacity(sources.len());
         for unit in sources {

@@ -54,7 +54,7 @@ pub use body::{
 };
 pub use call::{Arg, ArgValue, Call, Callee, IntrinsicForm, RelOp, TableOp};
 pub use def::{
-    AssertionDef, Def, DefKind, DimensionDef, EnumDef, FieldDef, FnBody, FnDef, GenericParam,
+    AssertionDef, Bound, Def, DefKind, DimensionDef, EnumDef, FieldDef, FnBody, FnDef, GenericParam,
     ImplDef, LetDef, NativeAbi, NativeDecl, NativeKey, ParamDef, ProtocolDef, TableDef, TypeDef,
     UnitDef, VariantDef, Visibility,
 };

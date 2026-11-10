@@ -367,9 +367,11 @@ impl Program {
                 self.validate_kinds(&variant.fields, "variant field", DefKind::is_field, errors);
             }
             DefKind::Protocol(protocol) => {
+                self.validate_generics(&protocol.params, errors);
                 self.validate_def_refs(&protocol.members, "protocol member", errors)
             }
             DefKind::Impl(implementation) => {
+                self.validate_def_refs(std::slice::from_ref(&implementation.owner), "impl owner", errors);
                 if let Some(protocol) = implementation.protocol {
                     self.validate_kinds(
                         std::slice::from_ref(&protocol),
@@ -377,6 +379,9 @@ impl Program {
                         DefKind::is_protocol,
                         errors,
                     );
+                }
+                for ty in &implementation.protocol_args {
+                    self.validate_ty(*ty, "impl protocol argument", errors);
                 }
                 self.validate_def_refs(&implementation.members, "impl member", errors);
             }
@@ -407,12 +412,17 @@ impl Program {
         errors: &mut Vec<ValidationError>,
     ) {
         for generic in generics {
-            self.validate_kinds(
-                &generic.bounds,
-                "generic bound",
-                DefKind::is_protocol,
-                errors,
-            );
+            for bound in &generic.bounds {
+                self.validate_kinds(
+                    std::slice::from_ref(&bound.protocol),
+                    "generic bound",
+                    DefKind::is_protocol,
+                    errors,
+                );
+                for ty in &bound.args {
+                    self.validate_ty(*ty, "generic bound argument", errors);
+                }
+            }
         }
     }
 
