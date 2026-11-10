@@ -270,7 +270,7 @@ fn walk_place(
     found: &mut BTreeMap<String, SyntaxSpan>,
 ) {
     match target {
-        AssignmentTarget::Name { .. } => {}
+        AssignmentTarget::Name { name, span } => note(bound, found, name, span),
         AssignmentTarget::Field { base, .. } => walk_place(base, bound, found),
         AssignmentTarget::Index { base, index, .. } => {
             walk_place(base, bound, found);
