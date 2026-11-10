@@ -2872,7 +2872,7 @@ impl Parser {
                 Pattern::Name(token.text, token.span)
             } else {
                 let token = self.current().clone();
-                self.require_name();
+                self.require_contextual_name();
                 Pattern::Name(token.text, token.span)
             };
             let annotation = if self.is_punct(":") {
@@ -4284,8 +4284,7 @@ impl Parser {
                 } else {
                     false
                 };
-                let name = self.current().text.clone();
-                self.require_name();
+                let name = self.require_contextual_name();
                 let ty = if self.is_punct(":") {
                     self.bump();
                     self.parse_type_expr().unwrap_or_else(|| self.error_type())
@@ -5650,6 +5649,15 @@ impl Parser {
         } else {
             self.error_here("ORNA-PARSE-001", "expected identifier")
         }
+    }
+    fn require_contextual_name(&mut self) -> String {
+        let text = self.current().text.clone();
+        if self.contextual() {
+            self.bump()
+        } else {
+            self.error_here("ORNA-PARSE-001", "expected name")
+        }
+        text
     }
     fn require_name_text(&mut self) -> String {
         let text = self.current().text.clone();

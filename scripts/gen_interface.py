@@ -121,7 +121,7 @@ def emit_type_declarations(catalogue, known):
         lines.append("}")
         lines.append("")
     for value in catalogue["value_types"]:
-        name = strip_sys(value["name"])
+        name = strip_sys(value["name"]).split("<")[0]
         generics = value.get("type_parameters") or []
         head = name + (f"<{', '.join(generics)}>" if generics else "")
         public = value["kind"] == "record" or value["kind"] == "record-generic"

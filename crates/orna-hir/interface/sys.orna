@@ -424,7 +424,7 @@ pub enum ChangeTargetKind {
     row,
 }
 
-pub type RowRef<T><T> {}
+pub type RowRef<T> {}
 
 pub type Value {
     type: TypeRef,
@@ -441,7 +441,7 @@ pub type ArgumentMap {
     pub entries: [Argument],
 }
 
-pub type ValueMetadata<T><T> {
+pub type ValueMetadata<T> {
     pub static_type: TypeRef,
     pub nominal_type: TypeRef?,
     pub protocols: Relation<Protocol>,
@@ -449,14 +449,14 @@ pub type ValueMetadata<T><T> {
     pub redacted: Bool,
 }
 
-pub type InvocationHandle<T><T> {
+pub type InvocationHandle<T> {
     invocation: InvocationRef,
     runtime: RuntimeId,
     result_type: TypeRef,
     resumable: Bool,
 }
 
-pub type InvocationResult<T><T> {
+pub type InvocationResult<T> {
     pub invocation: InvocationRef,
     pub status: InvocationStatus,
     pub value: T?,
