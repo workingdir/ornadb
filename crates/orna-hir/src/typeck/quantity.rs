@@ -126,7 +126,9 @@ impl<'a> BodyCheck<'a> {
         rhs_expr: ExprId,
         span: SyntaxSpan,
     ) -> Option<Ty> {
-        if matches!(op, BinOp::Rem) || (!self.is_quantity(lhs) && !self.is_quantity(rhs)) {
+        if matches!(op, BinOp::Rem | BinOp::In)
+            || (!self.is_quantity(lhs) && !self.is_quantity(rhs))
+        {
             return None;
         }
         let left = self.operand(lhs)?;
@@ -238,8 +240,8 @@ impl<'a> BodyCheck<'a> {
                 self.common(left, right)?;
                 Ok(self.intern(TyKind::Bool))
             }
-            BinOp::Rem | BinOp::Pow => {
-                unreachable!("quantity_binary routes Rem and Pow before binary")
+            BinOp::Rem | BinOp::Pow | BinOp::In => {
+                unreachable!("quantity_binary routes Rem, Pow and In before binary")
             }
         }
     }
