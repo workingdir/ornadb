@@ -271,3 +271,444 @@ standard source, the fixture and conformance corpus (92 `examples/valid`, 80
 `examples/invalid`, 104 `repl-inline-*` fixtures, plus the module corpus), and
 the gate registry. HIR sits on top of the syntax crate and below nothing that
 has to change shape in stage H0.
+
+--------------------------------------------------------------------------
+
+## 2. Target data model
+
+### 2.1 Crate and layer
+
+New crate `orna-hir`. It depends on `orna-syntax` (input), `orna-base` (name
+and NFC helpers, layer 0) and `orna-value` (the `Diagnostic` type and canonical
+type identities, layer 1). It depends on nothing else: not on `orna-check`,
+`orna-evaluator`, `orna-intrinsics`, `orna-sys` or any storage crate. In the
+layer table of [`architecture.md`](architecture.md) section 3.1 it is a new
+layer between syntax (layer 2) and `orna-check`/`orna-evaluator`; no existing
+crate may be below it except `orna-syntax`, `orna-base` and `orna-value`.
+`scripts/check_architecture.py` enforces that in the same PR that creates the
+crate (stage H0, section 6).
+
+Three further crates appear in later stages and are described in sections 3 to
+5: `orna-exec` (HIR to operator tree; replaces the evaluator core), `orna-host`
+(the `Host` trait and the link step), and the store interface that lives in
+`orna-storage`'s existing layer. `orna-check` keeps its name and its public
+`analyze*` API; its internals become checks over HIR (section 3.1).
+
+### 2.2 Ids and tables
+
+Every nameable thing has a `DefId`. Locals do not: they are slots in a body.
+
+```rust
+/// Index types are `u32` newtypes over `IndexVec<I, T>` (a `Vec<T>` that can
+/// only be indexed by `I`). Ids are stable within one `Program`.
+pub struct ModuleId(u32);
+pub struct DefId(u32);        // global across modules, one per declaration
+pub struct BodyId(u32);       // one per function, lambda, initializer, assertion
+pub struct LocalId(u32);      // slot index inside one Body
+pub struct ExprId(u32);       // index inside one Body
+pub struct PatId(u32);        // index inside one Body
+pub struct Name(Arc<str>);    // NFC-normalised identifier (ORNA-LEX-005), interned
+
+pub struct Program {
+    pub modules: IndexVec<ModuleId, Module>,
+    pub defs:    IndexVec<DefId, Def>,
+    pub bodies:  IndexVec<BodyId, Body>,
+    pub tys:     TyInterner,
+    /// Which engine native ABI the `core`/`sys` modules were loaded against.
+    pub native_abi: NativeAbi,
+}
+
+pub struct Module {
+    pub path: ModulePath,             // Vec<Name>, e.g. std.bits
+    pub origin: ModuleOrigin,         // Core | Sys | Std | Project | Repl
+    pub source: SourceId,
+    pub items: Vec<DefId>,            // declaration order
+    pub exports: BTreeMap<Name, DefId>,
+    pub imports: Vec<Import>,         // resolved: each carries the DefId or ModuleId it names
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+pub struct Def {
+    pub module: ModuleId,
+    pub name: Name,
+    pub vis: Visibility,
+    pub span: SourceSpan,
+    pub kind: DefKind,
+}
+
+pub enum DefKind {
+    Fn(FnDef),
+    Table(TableDef),
+    Type(TypeDef),               // alias or nominal, refinements included
+    Enum(EnumDef),               // variants are DefKind::Variant defs, listed here
+    Variant(VariantDef),
+    Protocol(ProtocolDef),
+    Impl(ImplDef),               // protocol implementation (table or type member)
+    Dimension(DimensionDef),     // [D8]
+    Unit(UnitDef),               // [D8]
+    Let(LetDef),                 // module-level binding
+    Assertion(AssertionDef),
+    Field(FieldDef),             // table, nominal and enum-payload fields
+}
+```
+
+`Module.exports` and `imports` replace the checker's `Scope.names`,
+`Scope.modules`, `Scope.available_modules` and `ModuleHeader` exports
+(`orna-check/src/scope.rs:7`, `:33`, `:36`). Resolution of a path is a lookup
+in these tables, run once, by `orna-hir::resolve`.
+
+`DefKind::Fn` is the only place a function lives, whoever implements it:
+
+```rust
+pub struct FnDef {
+    pub generics: Vec<GenericParam>,          // name + protocol bounds, resolved to DefIds
+    pub params: Vec<ParamDef>,                // name, Ty, default: Option<BodyId>, binder pattern
+    pub ret: Ty,
+    pub effects: EffectSet,                   // [D2] computed by one pass, see 2.5
+    pub body: FnBody,
+}
+pub enum FnBody {
+    /// An Orna body. Lambdas and initializers use the same `Body`.
+    Source(BodyId),
+    /// `native fn` in `core.orna`, `sys.orna` or the pinned `std`. No body, so
+    /// the signature above is the only signature. Bound at link time to a
+    /// host implementation keyed by this DefId (section 4).
+    Native(NativeDecl),
+}
+pub struct NativeDecl { pub abi: NativeAbi, pub key: NativeKey }   // key = (module path, name)
+```
+
+`FnDef.params` carries the default expression as a `BodyId` and the binder
+information that today lives in four places (section 1.3): parameter names for
+named arguments, positions, defaults, and whether a parameter accepts piped
+input (always parameter 0). There is exactly one argument binder, section 2.7.
+
+### 2.3 Types: one `Ty` with inference variables
+
+```rust
+/// Interned; `Ty` is a `Copy` index and equal types are equal indices.
+pub struct Ty(u32);
+
+pub enum TyKind {
+    // Scalars, spec spellings (F43): Str, not Text.
+    Bool, Int, Decimal, Float, Str, Blob, Uuid, Date, Instant, Duration, Period,
+    Digest, Unit,
+    /// The type of an expression that cannot complete (fail, return, break).
+    Never,
+    /// A diagnostic was already emitted. Never a dynamic Any.
+    Error,
+
+    /// `T?`. [D3] one option representation: there is no `Null` type and no
+    /// `Value::Null`; the literal `null` lowers to `None` of an inferred
+    /// payload. If D3 keeps two nulls, `Null` returns here as a scalar and
+    /// section 8 lists the extra lowering rules.
+    Option(Ty),
+
+    List(Ty),
+    Tuple(Box<[Ty]>),
+    Record(Box<[(Name, Ty)]>),          // structural, sorted by name
+    Range(Ty),
+    Relation(Ty),                       // table or query value; row type inside
+    Stream(Ty),
+    /// A declared nominal: table row type, `type`, `enum`, or a `sys` type.
+    /// The DefId is the identity (no `Named(String)`); arguments are the
+    /// generic arguments.
+    Adt(DefId, Box<[Ty]>),
+    Fn(FnTy),
+    /// `Quantity`, `Money<C>` etc. only if D8 keeps them. [D8]
+    Quantity(QuantityTy),
+
+    /// A generic parameter of the enclosing definition.
+    Param(ParamIdx),
+    /// An inference variable; solved by `InferCtxt`, absent from a finished Body.
+    Infer(TyVar),
+}
+
+pub struct FnTy { pub params: Box<[Ty]>, pub ret: Ty, pub effects: EffectRow }  // [D2]
+```
+
+Unification is standard: `InferCtxt` holds a union-find table of `TyVar`
+with a generalisation level. After checking a body, a `zonk` pass replaces
+every `Infer` with its solution or reports a new ambiguity diagnostic at the span
+of the expression that introduced the variable (the empty list literal, the
+`null`, the unannotated lambda parameter). This is what makes
+`let xs = []; union(xs, [1])` type-check: `xs : List<?T>` with `?T := Int` at
+the use. Today it fails with "empty list needs an expected element type".
+
+`[D1]` parameterises the solver, not the data model. The `Ty` above is the
+same under both answers.
+
+- **D1 = constraint inference (HM-style, principal types).** A function
+  signature may omit parameter types; its parameters start as fresh `Infer`
+  variables, are solved from the body and generalised at the function boundary
+  into `Param`s with inferred protocol bounds. The solver needs let-level
+  generalisation, defaulting rules for numeric literals, and a protocol
+  obligation queue. This is the "implement INFER-1" option.
+- **D1 = required parameter annotations.** Parameters and generic parameters
+  must be written. `Infer` variables exist only for locals, literals and lambda
+  parameters whose type is fixed by the context at the call. There is no
+  generalisation and no obligation queue; unification is first-order and local
+  to a body. This removes `lambda_numeric_parameter_usage`
+  (`orna-check/src/inference.rs:1455`) either way.
+
+Stage H3 (section 6) builds the solver for the second option first, because it
+is a strict subset of the first. The first option adds generalisation on top.
+
+### 2.4 Bodies, locals in slots, patterns
+
+```rust
+pub struct Body {
+    pub owner: DefId,
+    pub exprs: IndexVec<ExprId, Expr>,
+    pub pats:  IndexVec<PatId, Pat>,
+    /// One entry per binding in the body. `LocalId` is the frame slot.
+    pub locals: IndexVec<LocalId, Local>,
+    pub params: Box<[LocalId]>,           // slots 0..n bound by the argument binder
+    /// Only for lambdas: the outer slot each captured slot is copied from.
+    /// Capture is by value (VALUE-003); [D10] changes the checks, not this shape.
+    pub captures: Box<[Capture]>,
+    pub root: ExprId,
+    pub effects: EffectSet,               // body's own effects, see 2.5
+}
+pub struct Local { pub name: Name, pub ty: Ty, pub mutable: bool, pub span: SourceSpan }
+pub struct Capture { pub outer: LocalId, pub inner: LocalId }
+
+pub struct Expr { pub kind: ExprKind, pub ty: Ty, pub span: SourceSpan }
+```
+
+A local read is `ExprKind::Local(LocalId)`: an array index, not a
+`BTreeMap<String, Value>` lookup (`orna-evaluator/src/lib.rs:4797`). A lambda
+is its own `Body` with `captures`; at run time a closure is a body id plus a
+`Box<[Value]>` of the captured slots, replacing `Closure { captured: Scope }`
+(`lib.rs:3667-3673`) which clones a whole scope per closure.
+
+Expressions. Operators are enums; `if`, `case`, `for`, `while` and `loop` are
+separate variants with required fields, replacing
+`Expr::Control { kind, binding, condition, body, arms, alternate }`
+(`parser.rs:582-590`, whose legal field combinations the evaluator enumerates
+at `lib.rs:6041-6083`):
+
+```rust
+pub enum ExprKind {
+    Lit(Lit),                               // Int(BigInt|i64 small), Decimal, Float(bits), Str, Bool, Date, Instant
+    Local(LocalId),
+    Def(DefId),                             // value use of a fn, table, variant, let
+    Unary   { op: UnOp, operand: ExprId },  // Neg, Not
+    Binary  { op: BinOp, lhs: ExprId, rhs: ExprId },        // arithmetic, comparison, ^
+    Logic   { op: LogicOp, lhs: ExprId, rhs: ExprId },      // And, Or, Coalesce (??): short-circuit
+    Range   { lo: Option<ExprId>, hi: Option<ExprId>, inclusive: bool },
+    Call(Box<Call>),                        // see 2.6; pipes `|` lower to Call with the input as arg 0
+    Recover { body: ExprId, handler: LocalId, arm: ExprId },// `|?`
+    Field   { base: ExprId, field: FieldRef },              // FieldRef = DefId (nominal/table) or record index
+    Index   { base: ExprId, index: ExprId },
+    Tuple(Box<[ExprId]>), List(Box<[ExprId]>),
+    Record(Box<[(Name, ExprId)]>),          // structural record
+    Construct { def: DefId, fields: Box<[(DefId, ExprId)]> },// nominal / variant, field DefIds
+    Lambda  { body: BodyId, captured: Box<[ExprId]> },
+    Interp(Box<[InterpPart]>),
+    Block   { stmts: Box<[Stmt]>, tail: Option<ExprId> },
+    If      { cond: ExprId, then: ExprId, els: Option<ExprId> },
+    Case    { scrutinee: ExprId, arms: Box<[Arm]> },        // Arm { pat, guard, body }
+    For     { pat: PatId, iter: ExprId, body: ExprId },
+    While   { cond: ExprId, body: ExprId },
+    Loop    { body: ExprId },
+    Return(Option<ExprId>), Break(Option<ExprId>), Continue,
+    Assign  { place: Place, op: AssignOp, value: ExprId },  // Place = Local | Field | Index chain rooted at a LocalId
+    Error,                                                  // a diagnostic was emitted
+}
+pub enum Stmt { Let { pat: PatId, init: ExprId }, Assert(ExprId), Expr(ExprId) }
+```
+
+`BinOp` is `Add | Sub | Mul | Div | Rem | Pow | Eq | Ne | Lt | Le | Gt | Ge`.
+The checker does not choose an arithmetic implementation: it records operand
+types, and `orna-exec` picks `AddInt`, `AddDecimal`, ... when it builds the
+operator tree from `ty(lhs)` (section 7.2). The parser's operator strings
+(`"|"`, `"|?"`, `"??"`, `"^"`, `"&&"`, `"||"`, `parser.rs:3626-3640`) are
+turned into enums by lowering, not by the parser's consumers.
+
+Patterns carry resolved constructors:
+
+```rust
+pub enum Pat {
+    Wild,
+    Bind  { local: LocalId },
+    Lit(Lit),
+    Tuple(Box<[PatId]>),
+    List  { prefix: Box<[PatId]>, rest: Option<LocalId>, suffix: Box<[PatId]> },
+    Record(Box<[(Name, PatId)]>),
+    /// An enum variant or nominal constructor, resolved to a DefId. Field
+    /// patterns name FieldDefs, not strings.
+    Ctor  { def: DefId, fields: Box<[(DefId, PatId)]> },
+}
+```
+
+Exhaustiveness and constructor-arity checks run over `Pat`, once, in
+`orna-check`; the evaluator no longer re-validates pattern shapes.
+
+### 2.5 Effects per function
+
+```rust
+/// A bitset: the 12 `sys.EffectKind` values (`orna-check/src/effects.rs:11`)
+/// plus `Opaque` (effectful with no EffectKind, today `EffectSummary.opaque`)
+/// and `MayFail`.
+pub struct EffectSet(u16);
+
+pub enum EffectRow {
+    Known(EffectSet),     // [D2-signature] written or inferred, part of the type
+    Var(EffectVar),       // [D2-signature] polymorphic over a callback's effects
+    Hidden,               // [D2-hidden] function types carry no effect information
+}
+```
+
+`FnDef.effects` and `Body.effects` are computed by one pass in `orna-hir`: a
+body's effects are the join of its calls' callee effects (`Callee` carries the
+DefId, so the effect is a table lookup) plus its table operations; mutually
+recursive functions are joined over strongly connected components. A `native
+fn` takes its effects from its declaration, so `core.orna`, `sys.orna` and the
+std natives all state effects in the same syntax, which resolves the critique's
+objection to an `effect` clause that exists "for natives alone"
+(`local://critique-fable-5-2.md` section 4.2 item 3).
+
+Two vocabularies today (section 1.5) become one: `EffectKind` is the single
+enumeration, and `orna_intrinsics::Effect` is deleted in stage H6. The
+mapping, from the intrinsic classes: `Pure` and `PinnedData` to the empty set,
+`Clock` to `Clock`, `Entropy` to `Randomness`, `Host` to the specific
+`EffectKind` the declaration names (today decided per callee by
+`host_effect`, `effects.rs`), `Stream` to `Opaque`, `Query` to `TableRead`.
+
+`[D2]` selects how a function *value* is treated:
+
+- **hidden** (status quo made explicit): `FnTy.effects = Hidden`. A callee that
+  is a parameter or a local of function type has unknown effects and counts as
+  `Opaque`, as `EffectSummary.opaque` does today. A callback passed to `filter`
+  is checked at the argument site: a `Lambda` has its `Body.effects`, a
+  `Def(fn)` has `FnDef.effects`, anything else is `Opaque`.
+- **signature**: `FnTy.effects` is `Known` or `Var`. Callback-taking natives
+  (`filter`, `map`, `every`) are declared `native fn filter<T, E>(rows:
+  Relation<T>, f: fn(T): Bool effect E): Relation<T> effect E`. Unification
+  gains an effect-row component (set join and equality, no row polymorphism
+  beyond a single variable per function type).
+
+The pass and the field exist in both cases. Only `FnTy.effects` changes.
+
+### 2.6 Calls: classified once
+
+```rust
+pub struct Call { pub callee: Callee, pub args: Box<[Arg]>, pub piped: bool }
+
+pub enum Callee {
+    /// A function with an Orna body.
+    Source    { def: DefId, targs: Box<[Ty]> },
+    /// A `native fn` in `core` or the pinned `std`. Host-implemented.
+    Native    { def: DefId, targs: Box<[Ty]> },
+    /// A `native fn` in `sys.orna`. Same declaration and link mechanism as
+    /// Native; a separate variant because the host capability and the
+    /// `sys.EffectKind` gating differ (section 4).
+    Sys       { def: DefId, targs: Box<[Ty]> },
+    /// `Table.insert/upsert/update/delete/rekey/count/first/one/as_of`.
+    TableOp   { table: DefId, op: TableOp },
+    /// A relation pipeline stage or relation constructor: `filter`, `map`,
+    /// `sort_by`, `bucket_by`, `distinct`, `pairs`, `window`, `take`, `drop`,
+    /// `flat_map`, source scan.
+    Relational { op: RelOp },
+    /// A form that cannot be a function because it has a non-call evaluation
+    /// rule: `fail` (abrupt), `parallel`, `race`, `timeout`, `merge_streams`.
+    /// A closed enum; the initial list is the checker's special-case probes
+    /// (`orna-check/src/inference.rs:318-467`) that are not natives.
+    Intrinsic (IntrinsicForm),
+    /// A constructor: enum variant, nominal type, `Money<C>`.
+    Ctor      { def: DefId },
+    /// A call of a first-class value: closure, function-typed parameter or
+    /// local. The callee is an expression and its type is `Ty::Fn`.
+    Value     { callee: ExprId },
+}
+pub enum TableOp { Insert, Upsert, Update, Delete, Rekey, Count, First, One, AsOf }
+```
+
+The classification is a total function of the resolved callee `DefId` or
+expression type, computed in `orna-hir::lower` after name resolution. It
+replaces: `route_call` (R13), `call` pre-dispatch (R15), `call_system_host`
+(R14), the checker's `infer_call` probe chain (R02), `resolve_intrinsic` (R04),
+`infer_table_operation` and its two copies (R06), the application admission
+binding (R19) and every handler's "is this callee mine" test (R16, R20-R22).
+The shadowing rule that `root_intrinsic` implements by `scope.0.contains_key`
+(`lib.rs:9671-9684`) becomes ordinary lexical resolution: `Some` is a
+`core.orna` export, a local named `Some` shadows it because the resolver finds
+the local first.
+
+Which names are in `Intrinsic` versus `Native` is not an implementation
+detail: if D12 moves `Some`, `now`, `uuid7` and `error` into `core.orna`
+they are `Native`; if not they must be `Intrinsic`. Stage H2 (section 6) pins
+the current classification with a test against the old evaluator's routing
+before any behaviour changes.
+
+### 2.7 One argument binder
+
+Arguments are matched to parameters once, during lowering, never at run time:
+
+```rust
+pub struct Arg { pub slot: ParamIdx, pub value: ArgValue }
+pub enum ArgValue { Expr(ExprId), Default /* run the parameter's default body */ }
+```
+
+`lower_call` takes the callee's `FnDef.params`, applies positional-then-named
+rules (positional after named is `ORNA-EVAL-ARGUMENT` today; it becomes a
+checker diagnostic), puts the piped input at parameter 0 (`piped: true`), and
+emits one `Arg` per parameter in parameter order, with `Default` where the
+declaration provides one. A call whose arguments do not bind is a diagnostic at
+the call span; no run-time `ORNA-EVAL-ARGUMENT` remains for a statically
+resolved callee. This deletes `order_arguments`, `ordered_host_arguments`, the
+source binder in `call_source_function` and the Blob binder
+(`lib.rs:10329`, `:11167`, `:10061-10100`, `:9290`). A `Callee::Value` call
+binds positionally against its `FnTy` (function types carry no parameter
+names, `types.rs:54-57`), which is the existing rule.
+
+### 2.8 Completion
+
+```rust
+/// What evaluating an expression produced. The spec has three completion
+/// states; cancellation is a fourth, distinct from failure.   [D4]
+pub enum Completion {
+    Value(Value),
+    Return(Value),
+    Break(Value),
+    Continue,
+    Fail(Error),
+    Cancelled,
+}
+```
+
+The executor returns `Completion` from every operator. A caller that wants a
+value matches once; a `?`-style helper short-circuits every non-`Value`
+variant to the enclosing operator. This replaces `Context.transfer:
+Option<Transfer>` plus `Result` plus the cancellation flag, and the 43
+`if self.transfer.is_some()` checks (section 1.6). `Cancelled` is a variant so
+"failed while cancellation was requested" and "cancelled" are different values;
+`[D4]` decides whether `Recover` (`|?`) may catch it (the critique argues it
+must not).
+
+### 2.9 What HIR does not contain
+
+No `Value` (runtime values live in `orna-exec`, with `orna-value`'s canonical
+encodings at the boundary). No storage identity (a `TableDef` records declared
+fields, keys and assertions; the store binds it to a table object at link
+time). No resolved source text: spans refer to a `SourceId` and are used for
+diagnostics and editor queries only.
+
+### 2.10 Worked example: `std.bits.bit_or(a, b)`
+
+Today (critique 4.1, re-verified): the checker decides "native" from
+`name.starts_with("__")` (`intrinsics.rs:244`); admission builds a string map
+and binds the leaf by catalogue lookup (`orna-application/src/lib.rs:297-355`);
+at run time `call` resolves the callee string again, runs the public wrapper
+as source, reaches the `__bit_or` leaf, takes `CallRoute::Native`, orders
+arguments from the catalogue's copy of the signature, and `dispatch` matches
+the name string in `bits` (`intrinsics/bits.rs:10-12`).
+
+With HIR: `std/bits.orna` declares `pub native fn bit_or(a: Int, b: Int):
+Int effect none;`. Lowering resolves `bits.bit_or` through the import to a
+`DefId`, whose `FnBody` is `Native`, and emits `Call { callee: Native { def },
+args: [Expr(a), Expr(b)] }`. Link binds `(std.bits, bit_or)` to a Rust
+function once and records it under that `DefId`. Execution evaluates two
+arguments and calls a function pointer. There is no name in the executed
+program.
