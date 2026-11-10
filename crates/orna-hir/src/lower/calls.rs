@@ -17,7 +17,7 @@
 
 use orna_syntax::{Expr as AstExpr, SyntaxSpan, TypeExpr};
 
-use crate::{Callee, ExprId, ExprKind, FieldRef, Name, NameTarget};
+use crate::{Callee, DefId, ExprId, ExprKind, FieldRef, Name, NameTarget};
 
 use super::BodyState;
 use super::classify::{Classified, ParamInfo};
@@ -26,6 +26,23 @@ use super::exprs::{error_expr, flatten_path, lower_expr, push};
 
 /// One callee and the parameters its arguments bind to, when it declares them.
 pub(crate) type ClassifiedCallee = Option<(Callee, Option<Vec<ParamInfo>>)>;
+
+/// Whether a callee starts concurrent bodies: the lambdas it receives run as
+/// separate activations that capture snapshots (design 03, "Concurrent bodies
+/// capture snapshots"). These are `parallel`, `race` and `timeout`, and
+/// `sys.start`.
+pub(crate) fn starts_concurrent_bodies(builder: &Builder<'_>, callee: &Callee) -> bool {
+    match callee {
+        Callee::Intrinsic(form) => matches!(
+            form,
+            crate::IntrinsicForm::Parallel
+                | crate::IntrinsicForm::Race
+                | crate::IntrinsicForm::Timeout
+        ),
+        Callee::Sys { def, .. } => builder.def_name(*def).as_str() == "start",
+        _ => false,
+    }
+}
 
 /// Resolves and classifies the callee of a call.
 pub(crate) fn classify_callee(
@@ -170,25 +187,7 @@ fn classify_path(
             classified_def(builder, state, def, span)
         }
         crate::resolve::PathKind::Member { base, .. } => {
-            super::record_body_use(
-                &mut builder.program,
-                module,
-                state.id,
-                last_span,
-                last.clone(),
-                crate::UseContext::Value,
-                NameTarget::Def(base),
-            );
-            if builder.def_is_table(base) {
-                if let Some(op) = super::classify::table_op(last.as_str()) {
-                    return Some((Callee::TableOp { table: base, op }, None));
-                }
-                if let Some(op) = super::classify::rel_op(last.as_str()) {
-                    return Some((Callee::Relational { op }, None));
-                }
-            }
-            let base = lower_path_value(builder, state, &segments[..segments.len() - 1]);
-            Some((Callee::Pending { base, name: last }, None))
+            classify_member_path(builder, state, segments, base, last, last_span, span)
         }
         crate::resolve::PathKind::MissingMember { module: target, .. } => {
             super::record_body_use(
@@ -232,6 +231,53 @@ fn classify_path(
             None
         }
     }
+}
+
+/// Classifies a path whose prefix names a definition, then a member of it (`Note.insert`).
+fn classify_member_path(
+    builder: &mut Builder<'_>,
+    state: &mut BodyState,
+    segments: &[(&str, SyntaxSpan)],
+    base: DefId,
+    last: Name,
+    last_span: SyntaxSpan,
+    span: &SyntaxSpan,
+) -> ClassifiedCallee {
+    let module = state.module;
+    if let Some(unit) = builder
+        .member_def(base, &last)
+        .filter(|def| builder.is_unit(*def))
+    {
+        super::record_body_use(
+            &mut builder.program,
+            module,
+            state.id,
+            last_span.clone(),
+            last,
+            crate::UseContext::Value,
+            NameTarget::Def(unit),
+        );
+        return classified_def(builder, state, unit, span);
+    }
+    super::record_body_use(
+        &mut builder.program,
+        module,
+        state.id,
+        last_span,
+        last.clone(),
+        crate::UseContext::Value,
+        NameTarget::Def(base),
+    );
+    if builder.def_is_table(base) {
+        if let Some(op) = super::classify::table_op(last.as_str()) {
+            return Some((Callee::TableOp { table: base, op }, None));
+        }
+        if let Some(op) = super::classify::rel_op(last.as_str()) {
+            return Some((Callee::Relational { op }, None));
+        }
+    }
+    let base = lower_path_value(builder, state, &segments[..segments.len() - 1]);
+    Some((Callee::Pending { base, name: last }, None))
 }
 
 /// Reports a path whose root name does not resolve.

@@ -6,6 +6,7 @@
 //! their elements behind an `Rc`, so copying a value out of a slot never copies
 //! its contents.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use num_bigint::BigInt;
@@ -35,6 +36,16 @@ pub enum Value {
     /// A failure, delivered to a recovery handler. It carries the canonical
     /// code the failure reports.
     Error(&'static str),
+    /// An enum variant: its enum's type id, the variant id, and the payload
+    /// record of a variant with fields. A payload-free variant has no payload.
+    Enum {
+        /// The declaring enum's ObjectId.
+        type_id: [u8; 16],
+        /// The variant's ObjectId, derived from its enum's qualified name.
+        variant_id: [u8; 16],
+        /// The payload fields, in name order.
+        payload: Option<Rc<[(Name, Value)]>>,
+    },
 }
 
 impl From<i64> for Value {
@@ -43,13 +54,17 @@ impl From<i64> for Value {
     }
 }
 
-/// A lambda's body and the values captured when it was created.
+/// One variable: the slot a binding owns and every closure that captured it
+/// shares (`docs/language/reference/03-bindings-and-expressions.md`).
+pub type Cell = Rc<RefCell<Value>>;
+
+/// A lambda's body and the variables it captured when it was created.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Closure {
     /// The lambda's body.
     pub body: BodyId,
-    /// The captured values, in the order of the body's captures.
-    pub captured: Box<[Value]>,
+    /// The captured variables, in the order of the body's captures.
+    pub captured: Box<[Cell]>,
 }
 
 impl Value {
@@ -70,7 +85,7 @@ impl Value {
             Self::Tuple(values) => Ok(Raw::Tag(TUPLE_TAG, Box::new(array(values)?))),
             Self::List(values) => array(values),
             Self::Record(fields) => record_raw(fields),
-            Self::Closure(_) => Err("ORNA-EVAL-UNSUPPORTED"),
+            Self::Closure(_) | Self::Enum { .. } => Err("ORNA-EVAL-UNSUPPORTED"),
             Self::Error(code) => Err(code),
         }
     }
@@ -110,3 +125,7 @@ fn record_raw(fields: &[(Name, Value)]) -> Result<Raw, &'static str> {
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Raw::Map(entries))
 }
+
+/// The payload record of an enum variant: its fields in name order, or none
+/// for a payload-free variant.
+pub(crate) type Payload = Option<Rc<[(Name, Value)]>>;

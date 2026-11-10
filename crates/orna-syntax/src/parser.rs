@@ -3,7 +3,10 @@ use crate::lexer::{Keyword, LexError, Token, TokenKind, lex};
 use crate::semicolon::MissingSemicolon;
 
 mod lookahead;
+mod units;
 use lookahead::TokenLookahead;
+use units::annotate_unit_expr;
+pub use units::{UnitExpr, UnitTerm};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SourcePosition {
@@ -281,6 +284,8 @@ pub enum Declaration {
         generics: Vec<GenericParameter>,
         variants: Vec<EnumVariant>,
         implementations: Vec<Implementation>,
+        /// Whether the enum is a unit family, marked by a trailing `impl Unit {}`.
+        unit_family: bool,
     },
     Dimension {
         name: String,
@@ -415,6 +420,8 @@ pub enum ProtocolMember {
 pub struct EnumVariant {
     pub name: String,
     pub fields: Vec<EnumPayloadField>,
+    /// The `= unit_expr` of a unit variant; `None` for a payload variant and for the base unit.
+    pub unit: Option<UnitExpr>,
     pub span: SourceSpan,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1251,6 +1258,9 @@ fn annotate_item(item: &mut Item, source: &SourceLines<'_>, file: &str) {
                 for field in &mut variant.fields {
                     annotate_type(&mut field.ty, source, file);
                     annotate_span(&mut field.span, source, file);
+                }
+                if let Some(unit) = &mut variant.unit {
+                    annotate_unit_expr(unit, source, file);
                 }
                 annotate_span(&mut variant.span, source, file)
             }
@@ -3174,6 +3184,7 @@ impl Parser {
                         generics,
                         variants: Vec::new(),
                         implementations: Vec::new(),
+                        unit_family: false,
                     }
                 }
             } else if self.is_punct("{") {
@@ -3191,6 +3202,7 @@ impl Parser {
                         generics,
                         variants: Vec::new(),
                         implementations: Vec::new(),
+                        unit_family: false,
                     }
                 }
             } else {
@@ -3210,6 +3222,7 @@ impl Parser {
                         generics,
                         variants: Vec::new(),
                         implementations: Vec::new(),
+                        unit_family: false,
                     }
                 }
             }
@@ -3233,6 +3246,7 @@ impl Parser {
                     generics,
                     variants: Vec::new(),
                     implementations: Vec::new(),
+                    unit_family: false,
                 }
             } else {
                 Declaration::Type {
@@ -3246,12 +3260,14 @@ impl Parser {
         }
     }
     fn enum_declaration(&mut self, name: String, generics: Vec<GenericParameter>) -> Declaration {
-        let (variants, implementations) = self.parse_enum_body();
+        let (variants, mut implementations) = self.parse_enum_body();
+        let unit_family = self.settle_unit_family(&variants, &mut implementations);
         Declaration::Enum {
             name,
             generics,
             variants,
             implementations,
+            unit_family,
         }
     }
 
@@ -4222,7 +4238,8 @@ impl Parser {
             let name = self.current().text.clone();
             self.bump();
             let mut fields = Vec::new();
-            if self.is_punct("{") {
+            let braced = self.is_punct("{");
+            if braced {
                 self.bump();
                 while !self.eof() && !self.is_punct("}") {
                     if !self.contextual() {
@@ -4256,9 +4273,22 @@ impl Parser {
                     self.error_here("ORNA-PARSE-003", "unterminated enum payload")
                 }
             }
+            let unit = if self.is_punct("=") {
+                self.bump();
+                if braced {
+                    self.error_here(
+                        "ORNA-UNIT-009",
+                        "a variant is either a payload variant or a unit variant, not both",
+                    );
+                }
+                self.parse_unit_expr()
+            } else {
+                None
+            };
             variants.push(EnumVariant {
                 name,
                 fields,
+                unit,
                 span: start.join(self.previous().span.clone()),
             });
             if self.is_punct(",") {

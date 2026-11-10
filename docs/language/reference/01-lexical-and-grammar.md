@@ -227,10 +227,20 @@ impl_static_property = "static" , identifier , [ ":" , type_expression ] , "=" ,
 enum_declaration  = visibility , "enum" , identifier , [ generic_parameters ] ,
                     "{" , [ enum_variants ] , { nested_impl_declaration } , "}" ;
 enum_variants     = enum_variant , { "," , enum_variant } , [ "," ] ;
-enum_variant      = contextual_name , [ "{" , [ enum_payload_fields ] , "}" ] ;
+enum_variant      = contextual_name , ( [ "{" , [ enum_payload_fields ] , "}" ] | [ "=" , unit_expression ] ) ;
 enum_payload_fields = enum_payload_field , { "," , enum_payload_field } , [ "," ] ;
 enum_payload_field  = identifier , ":" , type_expression ;
+unit_expression   = unit_term , { ( "*" | "/" ) , unit_term } ;
+unit_term         = [ rational_literal ] , unit_name , [ "^" , integer_literal ] ;
+unit_name         = contextual_name , [ "." , contextual_name ] ;
+rational_literal  = integer_literal | decimal_numeral ;
 ```
+
+A unit family is an enum whose last nested implementation is the marker `impl Unit {}`; the
+marker is not an implementation. A variant with `=` is a unit variant and is accepted only in a
+unit family; a unit family has no payload variant. A variant without `=` in a unit family is the
+base unit. The `unit_expression` is evaluated by the unit kernel (units.md section 2), not here.
+The `=` form is ORNA-UNIT-009 outside a unit family, and `impl Unit {}` must be its last line.
 
 ### Types
 

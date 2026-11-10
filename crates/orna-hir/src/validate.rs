@@ -361,7 +361,7 @@ impl Program {
                 self.validate_kinds(
                     &enumeration.variants,
                     "enum variant",
-                    DefKind::is_variant,
+                    |kind| kind.is_variant() || kind.is_unit(),
                     errors,
                 );
                 self.validate_def_refs(&enumeration.members, "enum implementation", errors);
@@ -956,6 +956,7 @@ mod tests {
             kind: ExprKind::Lit(Lit::Int(BigInt::from(1))),
             ty: int,
             span: span(0),
+            weight: 1,
         });
         let body = Body {
             owner: crate::DefId::new(0),
@@ -1063,6 +1064,7 @@ mod tests {
             kind: ExprKind::Return(Some(ExprId::new(9))),
             ty: int,
             span: span(2),
+            weight: 1,
         });
         program.bodies[body_id].root = value;
         assert_eq!(
@@ -1129,6 +1131,7 @@ mod tests {
             kind: ExprKind::Lit(Lit::Int(BigInt::from(1))),
             ty: int,
             span: span(2),
+            weight: 1,
         });
         let root = program.bodies[body_id].exprs.push(Expr {
             kind: ExprKind::Call(Box::new(Call {
@@ -1145,6 +1148,7 @@ mod tests {
             })),
             ty: int,
             span: span(3),
+            weight: 1,
         });
         program.bodies[body_id].root = root;
         assert_eq!(
@@ -1178,6 +1182,7 @@ mod tests {
             },
             ty: int,
             span: span(2),
+            weight: 1,
         });
         program.bodies[body_id].root = root;
         assert_eq!(

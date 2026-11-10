@@ -380,6 +380,8 @@ pub struct ExecShare {
     pub agreed: usize,
     /// Corpus cases with `evaluate == true` (the old pipeline yields an outcome).
     pub evaluable: usize,
+    /// Agreeing runs whose executor step count equals the old pipeline's exactly.
+    pub steps_exact: usize,
 }
 
 /// Reads `tests/differential/exec-share.toml`.
@@ -399,7 +401,66 @@ pub fn parse_exec_share(source: &str) -> Result<ExecShare, String> {
         .map_err(|_| "exec-share.toml: `agreed` must be non-negative".to_owned())?;
     let evaluable = usize::try_from(table.integer("evaluable")?)
         .map_err(|_| "exec-share.toml: `evaluable` must be non-negative".to_owned())?;
-    Ok(ExecShare { agreed, evaluable })
+    let steps_exact = usize::try_from(table.integer("steps-exact")?)
+        .map_err(|_| "exec-share.toml: `steps-exact` must be non-negative".to_owned())?;
+    Ok(ExecShare {
+        agreed,
+        evaluable,
+        steps_exact,
+    })
+}
+
+/// One accepted step-count disagreement: the executor charges `executor` steps for a case the
+/// old pipeline charges `old` steps for. It matches only that exact pair, so a change in either
+/// count makes it stale and the test fails until the entry is updated or removed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StepAllowance {
+    /// The case.
+    pub case: String,
+    /// The old pipeline's step count.
+    pub old: u64,
+    /// The executor's step count.
+    pub executor: u64,
+    /// Why the step counts differ.
+    pub reason: String,
+}
+
+impl StepAllowance {
+    /// Whether this allowance covers the run of `case` with these counts.
+    #[must_use]
+    pub fn matches(&self, case: &str, old: u64, executor: u64) -> bool {
+        self.case == case && self.old == old && self.executor == executor
+    }
+}
+
+/// Reads the `[[step-allowance]]` tables of `tests/differential/exec-share.toml`.
+pub fn load_step_allowances() -> Result<Vec<StepAllowance>, String> {
+    let path = differential_dir().join("exec-share.toml");
+    parse_step_allowances(&read_file(&path)?)
+}
+
+/// Parses the step allowances. A missing reason is a load error.
+pub fn parse_step_allowances(source: &str) -> Result<Vec<StepAllowance>, String> {
+    let document = toml_lite::parse(source)?;
+    let mut allowances = Vec::new();
+    for table in document.tables_named("step-allowance") {
+        let case = table.string("case")?.to_owned();
+        let old = u64::try_from(table.integer("old")?)
+            .map_err(|_| format!("{case}: `old` must be non-negative"))?;
+        let executor = u64::try_from(table.integer("executor")?)
+            .map_err(|_| format!("{case}: `executor` must be non-negative"))?;
+        let reason = table.string("reason")?.to_owned();
+        if reason.trim().is_empty() {
+            return Err(format!("{case}: a step allowance needs a reason"));
+        }
+        allowances.push(StepAllowance {
+            case,
+            old,
+            executor,
+            reason,
+        });
+    }
+    Ok(allowances)
 }
 
 /// Applies the exec-share ratchet.
@@ -427,6 +488,18 @@ pub fn exec_share_ratchet(recorded: ExecShare, observed: ExecShare) -> Vec<Strin
         failures.push(format!(
             "evaluable denominator moved from {} to {}; record {} in exec-share.toml",
             recorded.evaluable, observed.evaluable, observed.evaluable
+        ));
+    }
+    if observed.steps_exact < recorded.steps_exact {
+        failures.push(format!(
+            "exact step parity fell from {} to {} cases; the ratchet only grows",
+            recorded.steps_exact, observed.steps_exact
+        ));
+    }
+    if observed.steps_exact > recorded.steps_exact {
+        failures.push(format!(
+            "exact step parity rose from {} to {}; record {} in exec-share.toml",
+            recorded.steps_exact, observed.steps_exact, observed.steps_exact
         ));
     }
     failures

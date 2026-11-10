@@ -186,7 +186,10 @@ impl Builder<'_> {
                     callee: Callee::Ctor { def },
                 }
             }
-            PendingKind::Built(DefKind::Unit(_) | DefKind::Dimension(_)) => Classified::NotCallable,
+            PendingKind::Built(DefKind::Unit(_)) => Classified::Open {
+                callee: Callee::Ctor { def },
+            },
+            PendingKind::Built(DefKind::Dimension(_)) => Classified::NotCallable,
             PendingKind::Built(_) | PendingKind::Unbuilt(_) => Classified::NotCallable,
         }
     }

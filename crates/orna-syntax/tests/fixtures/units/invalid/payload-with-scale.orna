@@ -1,0 +1,5 @@
+pub enum Length {
+    metre,
+    box { width: Decimal } = 3 metre,
+    impl Unit {}
+}

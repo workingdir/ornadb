@@ -148,11 +148,13 @@ impl BodyCheck<'_> {
             kind: operator_call(implementation.member, &[left_expr, right_expr], span),
             ty: ordering,
             span: node_span.clone(),
+            weight: 1,
         });
         let variant = body.exprs.push(crate::Expr {
             kind: ExprKind::Def(variant),
             ty: ordering,
             span: node_span,
+            weight: 1,
         });
         body.exprs[id].kind = ExprKind::Binary {
             op: test,

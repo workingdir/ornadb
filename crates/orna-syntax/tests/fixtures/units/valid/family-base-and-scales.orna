@@ -1,0 +1,7 @@
+pub enum Length {
+    metre,
+    kilometre = 1000 metre,
+    mile = 1609.344 metre,
+    m = metre,
+    impl Unit {}
+}

@@ -1,0 +1,4 @@
+pub enum Acceleration {
+    g = metre / second^,
+    impl Unit {}
+}

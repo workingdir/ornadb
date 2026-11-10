@@ -7,7 +7,7 @@ full specification is `docs/design/units.md`.
 
 ## Declaring a unit family
 
-A unit family is an enum, followed by the marker `impl Unit {}` as its last line. Its variants are units:
+A unit family is an enum whose last entry, written inside its braces, is the marker `impl Unit {}`. Its variants are units:
 
 * A **base family** has exactly one bare variant, the base unit. Other variants
   give scales of it, written `name = factor base`.
@@ -19,14 +19,14 @@ pub enum Length {
     metre,
     kilometre = 1000 metre,
     mile = 1609.344 metre,
+    impl Unit {}
 }
-impl Unit {}
 
 pub enum Speed {
     kmh = Length.kilometre / Duration.hour,
     mph = Length.mile / Duration.hour,
+    impl Unit {}
 }
-impl Unit {}
 ```
 
 Built-in families (`Duration`, and the data-size family) are declared the same way. A user family
