@@ -228,14 +228,6 @@ reason = "the fixture-catalogue environment the reference corpus is admitted aga
 bead = "ornadb-csenl.15"
 
 [[difference]]
-case = "invalid/mutate-sys-commit.orna"
-field = "resolution-unresolved"
-first = "insert:0"
-second = "insert:1"
-reason = "the name is a `sys` or engine-native `std` surface member; `core.orna` and `sys.orna` declare those surfaces in stage H5 (D12), until then HIR has no declaration to resolve it to"
-bead = "ornadb-csenl.20"
-
-[[difference]]
 case = "invalid/relation-equality.orna"
 field = "resolution-unresolved"
 first = "contacts:0"
@@ -409,14 +401,6 @@ field = "resolution-unresolved"
 first = "half_even:0"
 second = "half_even:1"
 reason = "the name is a language-defined native; its declaration moves into `core.orna` in stage H5 (D12)"
-bead = "ornadb-csenl.20"
-
-[[difference]]
-case = "valid/dependency-query.orna"
-field = "resolution-unresolved"
-first = "dependents:0"
-second = "dependents:1"
-reason = "the name is a `sys` or engine-native `std` surface member; `core.orna` and `sys.orna` declare those surfaces in stage H5 (D12), until then HIR has no declaration to resolve it to"
 bead = "ornadb-csenl.20"
 
 [[difference]]
@@ -670,9 +654,9 @@ bead = "ornadb-csenl.20"
 [[difference]]
 case = "valid/sys-checkpoint.orna"
 field = "resolution-unresolved"
-first = "as_of:0"
-second = "as_of:1"
-reason = "the name is a `sys` or engine-native `std` surface member; `core.orna` and `sys.orna` declare those surfaces in stage H5 (D12), until then HIR has no declaration to resolve it to"
+first = "HEAD:0"
+second = "HEAD:1"
+reason = "`HEAD` is a contextual selector word the checker resolves as the argument of `as_of` (crates/orna-check/src/calls.rs); HIR has no selector rule, and the `sys` interface that types the argument arrives in stage H5 (D12)"
 bead = "ornadb-csenl.20"
 
 [[difference]]
@@ -686,9 +670,9 @@ bead = "ornadb-csenl.20"
 [[difference]]
 case = "valid/sys-run-history.orna"
 field = "resolution-unresolved"
-first = "as_of:0"
-second = "as_of:1"
-reason = "the name is a `sys` or engine-native `std` surface member; `core.orna` and `sys.orna` declare those surfaces in stage H5 (D12), until then HIR has no declaration to resolve it to"
+first = "HEAD:0"
+second = "HEAD:1"
+reason = "`HEAD` is a contextual selector word the checker resolves as the argument of `as_of` (crates/orna-check/src/calls.rs); HIR has no selector rule, and the `sys` interface that types the argument arrives in stage H5 (D12)"
 bead = "ornadb-csenl.20"
 
 [[difference]]

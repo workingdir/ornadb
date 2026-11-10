@@ -13,8 +13,10 @@
 # Each family below names what the follow-up work has to supply. H0 loads the
 # families whose driving is already data-driven: the published reference corpus
 # (169 cases), the evaluator's expression fixtures (42), the REPL admission
-# fixtures (14) and the pinned standard modules (77). 5,399 programs are
-# excluded here; the follow-up PRs move them across family by family.
+# fixtures (14) and the pinned standard modules (77). 5,399 programs were excluded
+# at H0; the embedded interface tree (12) and the native parser fixtures (25) were
+# added later, so 5,436 programs are excluded here. The follow-up PRs move them
+# across family by family.
 
 [[excluded]]
 scope = "crates/archive/orna-compat-v1/tests/fixtures"
