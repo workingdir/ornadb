@@ -18,12 +18,11 @@ use std::sync::{Arc, OnceLock};
 
 use lsp_types::Uri;
 use orna_hir::{
-    BodyId, DefId, DefKind, LocalId, ModuleId as HirModuleId, Name, NameTarget, NameUse, Program, SourceId, SourceUnit,
-    TyKind, UseContext, lower,
+    BodyId, DefId, DefKind, LocalId, ModuleId as HirModuleId, Name, NameTarget, NameUse, Program,
+    SourceId, SourceUnit, TyKind, UseContext, lower,
 };
 use orna_syntax::{
-    Declaration, Keyword, SyntaxSpan, SyntaxTree, Token, TokenKind, UseTail, lex,
-    parse_module,
+    Declaration, Keyword, SyntaxSpan, SyntaxTree, Token, TokenKind, UseTail, lex, parse_module,
 };
 
 use crate::analysis::{self, EditorParse, EditorSymbol};
@@ -418,14 +417,19 @@ impl Workspace {
 
         let owner_of = owner_map(&self.program);
         for (def_id, def) in self.program.defs.iter_enumerated() {
-            let Some((module, _)) = self.hir_modules.iter().enumerate().find_map(
-                |(module, hir)| hir.filter(|hir| *hir == def.module).map(|hir| (module, hir)),
-            ) else {
+            let Some((module, _)) =
+                self.hir_modules
+                    .iter()
+                    .enumerate()
+                    .find_map(|(module, hir)| {
+                        hir.filter(|hir| *hir == def.module)
+                            .map(|hir| (module, hir))
+                    })
+            else {
                 continue;
             };
             let owner_def = owner_of.get(&def_id).copied();
-            let Some(declared) =
-                self.declared_from_def(module, def_id, &def.module, owner_def)
+            let Some(declared) = self.declared_from_def(module, def_id, &def.module, owner_def)
             else {
                 continue;
             };
@@ -441,10 +445,7 @@ impl Workspace {
 
         for (body_id, body) in self.program.bodies.iter_enumerated() {
             let module = self.program.defs[body.owner].module;
-            let Some(module_index) = self
-                .hir_modules
-                .iter()
-                .position(|hir| *hir == Some(module))
+            let Some(module_index) = self.hir_modules.iter().position(|hir| *hir == Some(module))
             else {
                 continue;
             };
@@ -500,7 +501,10 @@ impl Workspace {
                     }
                 }
                 for (key, def) in first_in_module {
-                    self.detached_defs.entry(key.to_owned()).or_default().push(def);
+                    self.detached_defs
+                        .entry(key.to_owned())
+                        .or_default()
+                        .push(def);
                 }
             }
         }
@@ -522,8 +526,11 @@ impl Workspace {
                 });
             }
             self.occurrences[module].sort_by(|left, right| {
-                (left.span.start, left.span.end, left.context as u8)
-                    .cmp(&(right.span.start, right.span.end, right.context as u8))
+                (left.span.start, left.span.end, left.context as u8).cmp(&(
+                    right.span.start,
+                    right.span.end,
+                    right.context as u8,
+                ))
             });
             self.occurrences[module].dedup_by(|right, left| {
                 if left.span.start == right.span.start && left.span.end == right.span.end {
@@ -615,7 +622,11 @@ impl Workspace {
                     // Outside a project every document shares one scope; a
                     // name declared by two documents is ambiguous even when
                     // one of them is the document that writes the use.
-                    match self.detached_defs.get(use_.name.as_str()).map(Vec::as_slice) {
+                    match self
+                        .detached_defs
+                        .get(use_.name.as_str())
+                        .map(Vec::as_slice)
+                    {
                         Some([only]) => self.target_of_def(*only),
                         Some(_) => Resolved::Ambiguous,
                         None => self.target_of_def(def),
@@ -633,12 +644,14 @@ impl Workspace {
                     .collect(),
             )),
             NameTarget::Intrinsic => {
-                if matches!(self.scope, Scope::Detached)
-                    && use_.context == UseContext::Value
-                {
+                if matches!(self.scope, Scope::Detached) && use_.context == UseContext::Value {
                     // A declaration in the shared detached scope outranks a
                     // language-defined form of the same spelling.
-                    match self.detached_defs.get(use_.name.as_str()).map(Vec::as_slice) {
+                    match self
+                        .detached_defs
+                        .get(use_.name.as_str())
+                        .map(Vec::as_slice)
+                    {
                         Some([only]) => self.target_of_def(*only),
                         Some(_) => Resolved::Ambiguous,
                         None => Resolved::Unknown,
@@ -817,12 +830,10 @@ impl Workspace {
             if let Some((imported_module, index)) = self.declarations_by_def.get(&def)
                 && self.declarations[*imported_module][*index].public
             {
-                symbols.extend(
-                    analysis::declared_symbol(
-                        &self.modules[*imported_module].file.symbols,
-                        &self.declarations[*imported_module][*index].selection,
-                    ),
-                );
+                symbols.extend(analysis::declared_symbol(
+                    &self.modules[*imported_module].file.symbols,
+                    &self.declarations[*imported_module][*index].selection,
+                ));
             }
         }
         symbols
@@ -890,10 +901,7 @@ impl Workspace {
         if let Some(binding) = self.binding_containing(module, byte) {
             return Some((
                 self.bindings(module)[binding].selection.clone(),
-                Resolved::Target(Target::Local {
-                    module,
-                    binding,
-                }),
+                Resolved::Target(Target::Local { module, binding }),
             ));
         }
         let declared = self
@@ -935,11 +943,7 @@ impl Workspace {
     }
 
     /// The occurrence with exactly this span.
-    pub(crate) fn occurrence(
-        &self,
-        module: usize,
-        span: &SyntaxSpan,
-    ) -> Option<&NameOccurrence> {
+    pub(crate) fn occurrence(&self, module: usize, span: &SyntaxSpan) -> Option<&NameOccurrence> {
         self.occurrences(module)
             .iter()
             .find(|occurrence| same_span(&occurrence.span, span))
@@ -1103,16 +1107,15 @@ fn owner_map(program: &Program) -> HashMap<DefId, DefId> {
 }
 
 /// The identifier span of a declaration within its written extent.
-fn selection_span(
-    file: &FileAnalysis,
-    full: &SyntaxSpan,
-    name: &str,
-) -> Option<SyntaxSpan> {
+fn selection_span(file: &FileAnalysis, full: &SyntaxSpan, name: &str) -> Option<SyntaxSpan> {
     file.tokens_in(full)
         .iter()
         .find(|token| {
             token.text == name
-                && matches!(token.kind, TokenKind::Identifier { .. } | TokenKind::Keyword(_))
+                && matches!(
+                    token.kind,
+                    TokenKind::Identifier { .. } | TokenKind::Keyword(_)
+                )
         })
         .map(|token| token.span.clone())
 }
@@ -1167,7 +1170,10 @@ pub(crate) fn declared_type_name(program: &Program, ty: orna_hir::Ty) -> Option<
         TyKind::List(inner) => Some(format!("[{}]", declared_type_name(program, *inner)?)),
         TyKind::Set(inner) => Some(format!("Set<{}>", declared_type_name(program, *inner)?)),
         TyKind::Range(inner) => Some(format!("Range<{}>", declared_type_name(program, *inner)?)),
-        TyKind::Relation(inner) => Some(format!("Relation<{}>", declared_type_name(program, *inner)?)),
+        TyKind::Relation(inner) => Some(format!(
+            "Relation<{}>",
+            declared_type_name(program, *inner)?
+        )),
         TyKind::Stream(inner) => Some(format!("Stream<{}>", declared_type_name(program, *inner)?)),
         TyKind::Adt(def, _) => Some(program.defs.get(*def)?.name.as_str().to_owned()),
         _ => None,

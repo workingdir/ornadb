@@ -16,8 +16,8 @@ use orna_syntax::{
 };
 
 use crate::documents::PositionMapper;
-use crate::workspace::{DeclaredKind, LocalBindingKind};
 use crate::standard::{StandardLibrary, StandardSymbol};
+use crate::workspace::{DeclaredKind, LocalBindingKind};
 use crate::workspace::{FileAnalysis, Target, Workspace};
 
 pub type EditorParse = Parse<SyntaxTree>;
@@ -1183,9 +1183,7 @@ pub(crate) fn completion_at(
                         LocalBindingKind::Parameter => format!("{}: {ty}", binding.name),
                         LocalBindingKind::Local => format!("let {}: {ty}", binding.name),
                     })
-                    .unwrap_or_else(|| {
-                        source_slice(text, &binding.context).trim().to_owned()
-                    });
+                    .unwrap_or_else(|| source_slice(text, &binding.context).trim().to_owned());
                 let mut item = CompletionItem {
                     label: binding.name.clone(),
                     kind: Some(CompletionItemKind::VARIABLE),

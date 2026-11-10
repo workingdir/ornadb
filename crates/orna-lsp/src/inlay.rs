@@ -13,8 +13,8 @@ use orna_syntax::{
 };
 
 use crate::analysis;
-use crate::documents::PositionMapper;
 use crate::analysis::control_arms;
+use crate::documents::PositionMapper;
 use crate::workspace::{FileAnalysis, Target, Workspace};
 
 /// Returns in-range type and parameter-name hints for one module.

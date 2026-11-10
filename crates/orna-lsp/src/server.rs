@@ -947,13 +947,10 @@ fn request_document_highlights(
                 .into_iter()
                 .filter(|(found_module, _)| *found_module == module)
                 .map(|(_, span)| {
-                    let declaration = workspace
-                        .binding_at(module, &span)
-                        .is_some_and(|binding| {
-                            let selection = &workspace.binding(module, binding).selection;
-                            selection.start == span.start && selection.end == span.end
-                        })
-                        || workspace.declared_at(module, &span).is_some();
+                    let declaration = workspace.binding_at(module, &span).is_some_and(|binding| {
+                        let selection = &workspace.binding(module, binding).selection;
+                        selection.start == span.start && selection.end == span.end
+                    }) || workspace.declared_at(module, &span).is_some();
                     let write = workspace
                         .occurrence(module, &span)
                         .is_some_and(|occurrence| occurrence.written);
@@ -1580,8 +1577,9 @@ fn request_inline_values(
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let (_, params) = request.extract::<InlineValueParams>("textDocument/inlineValue")?;
-    let Some((workspace, module)) =
-        state.views.workspace(&state.documents, &params.text_document.uri)
+    let Some((workspace, module)) = state
+        .views
+        .workspace(&state.documents, &params.text_document.uri)
     else {
         return Ok(serde_json::Value::Null);
     };

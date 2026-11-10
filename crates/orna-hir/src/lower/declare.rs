@@ -429,9 +429,7 @@ impl<'a> Builder<'a> {
     /// The member of `base` named `name`: a variant, field or nested member.
     pub(crate) fn member_def(&self, base: DefId, name: &Name) -> Option<DefId> {
         let members = match &self.pending[base.index()].kind {
-            PendingKind::Built(crate::DefKind::Enum(enumeration)) => {
-                enumeration.variants.clone()
-            }
+            PendingKind::Built(crate::DefKind::Enum(enumeration)) => enumeration.variants.clone(),
             PendingKind::Built(crate::DefKind::Type(definition)) => definition.members.clone(),
             PendingKind::Built(crate::DefKind::Table(table)) => table.fields.clone(),
             PendingKind::Built(crate::DefKind::Variant(variant)) => variant.fields.clone(),

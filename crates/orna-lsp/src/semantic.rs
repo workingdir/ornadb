@@ -16,9 +16,7 @@ use orna_hir::UseContext;
 
 use crate::analysis::EditorSymbolKind;
 use crate::documents::PositionMapper;
-use crate::workspace::{
-    DeclaredKind, LocalBindingKind, NameOccurrence, Target, Workspace,
-};
+use crate::workspace::{DeclaredKind, LocalBindingKind, NameOccurrence, Target, Workspace};
 
 /// The intrinsic type environment (05-types, "Core type forms").
 const INTRINSIC_TYPES: &[&str] = &[
@@ -246,9 +244,8 @@ fn resolved_token(workspace: &Workspace, target: &Target) -> Option<(u32, u32)> 
 /// An unresolved single-segment type name from the intrinsic type
 /// environment.
 fn intrinsic_type(occurrence: &NameOccurrence) -> Option<(u32, u32)> {
-    (occurrence.context == UseContext::Type
-        && INTRINSIC_TYPES.contains(&occurrence.key.as_str()))
-    .then_some((TOKEN_TYPES.ty, READONLY | DEFAULT_LIBRARY))
+    (occurrence.context == UseContext::Type && INTRINSIC_TYPES.contains(&occurrence.key.as_str()))
+        .then_some((TOKEN_TYPES.ty, READONLY | DEFAULT_LIBRARY))
 }
 
 fn binding_token_type(kind: LocalBindingKind) -> u32 {

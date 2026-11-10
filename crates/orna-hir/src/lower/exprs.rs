@@ -625,10 +625,7 @@ fn lower_stage(
 }
 
 /// The segments of a dotted path, when the expression is one.
-pub(crate) fn flatten_path<'a>(
-    expr: &'a AstExpr,
-    out: &mut Vec<(&'a str, SyntaxSpan)>,
-) -> bool {
+pub(crate) fn flatten_path<'a>(expr: &'a AstExpr, out: &mut Vec<(&'a str, SyntaxSpan)>) -> bool {
     match expr {
         AstExpr::Name { text, span } => {
             out.push((text, span.clone()));
@@ -798,9 +795,10 @@ fn lower_construct(
         crate::UseContext::Value,
     );
     let resolved = match builder.resolve_path(module, &segments) {
-        crate::resolve::PathKind::Member { base, .. } => builder
-            .member_def(base, &last)
-            .map_or(crate::resolve::PathKind::Unresolved, crate::resolve::PathKind::Def),
+        crate::resolve::PathKind::Member { base, .. } => builder.member_def(base, &last).map_or(
+            crate::resolve::PathKind::Unresolved,
+            crate::resolve::PathKind::Def,
+        ),
         other => other,
     };
     let def = match resolved {
@@ -864,10 +862,7 @@ fn lower_construct(
     }
     match def {
         Some(def) => {
-            let ty = builder
-                .program
-                .tys
-                .intern(TyKind::Adt(def, Box::new([])));
+            let ty = builder.program.tys.intern(TyKind::Adt(def, Box::new([])));
             push_typed(
                 builder,
                 state,
@@ -997,12 +992,7 @@ fn lower_block(
                 let init = lower_expr(builder, state, value);
                 let pat = pats::lower_pattern(builder, state, pattern);
                 if let Some(annotation) = annotation {
-                    let ty = super::types::lower_type(
-                        builder,
-                        state.module,
-                        &[],
-                        annotation,
-                    );
+                    let ty = super::types::lower_type(builder, state.module, &[], annotation);
                     if let orna_syntax::Pattern::Name(name, _) = pattern
                         && let Some(local) = state.local(&Name::new(name))
                     {

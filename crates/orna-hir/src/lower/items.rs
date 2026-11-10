@@ -128,10 +128,7 @@ impl Builder<'_> {
                 let ty = super::types::lower_type(self, module, &[], &dimension);
                 let _ = ty;
                 self.pending[def.index()].kind = PendingKind::Built(DefKind::Unit(UnitDef));
-                if let orna_syntax::UnitDefinition::Derived {
-                    value, offset, ..
-                } = definition
-                {
+                if let orna_syntax::UnitDefinition::Derived { value, offset, .. } = definition {
                     // A derived unit's expression is not part of the value
                     // model, but its names are still written in the module:
                     // lower it so the editor index sees them.
@@ -417,7 +414,10 @@ impl Builder<'_> {
                     .iter()
                     .map(|segment| crate::Name::new(segment))
                     .collect::<Vec<_>>();
-                let last = segments.last().cloned().unwrap_or_else(|| crate::Name::new(""));
+                let last = segments
+                    .last()
+                    .cloned()
+                    .unwrap_or_else(|| crate::Name::new(""));
                 let name_span = orna_syntax::SyntaxSpan::new(
                     span.end.saturating_sub(last.as_str().len()),
                     span.end,

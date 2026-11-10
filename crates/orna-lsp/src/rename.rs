@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use orna_syntax::SyntaxSpan;
 
-use crate::documents::Document;
 use crate::analysis::normalized_identifier;
+use crate::documents::Document;
 use crate::workspace::DeclaredKind;
 use crate::workspace::{FileAnalysis, Resolved, Target, Workspace};
 
@@ -94,9 +94,7 @@ pub(crate) fn prepare(
         Target::Standard { module, .. } => Err(Refusal::new(format!(
             "`{placeholder}` is declared in the read-only standard library module `{module}`"
         ))),
-        Target::Local { module, binding }
-            if workspace.binding(*module, *binding).key == "self" =>
-        {
+        Target::Local { module, binding } if workspace.binding(*module, *binding).key == "self" => {
             Err(Refusal::new("`self` cannot be renamed"))
         }
         _ => Ok(Renamable {
