@@ -88,6 +88,15 @@ Pinned `stdlib/std` at `fdf63e87` (80 `.orna` files):
 | `fail(error(` occurrences in the whole pin | 152 |
 | top-level declarations whose whole body is `fail(error(...))` | 123 (68 private, 55 public) |
 | of the 55 public ones, actual native markers (`std.query` core re-exports) | 16 |
+| `native fn` declarations the migration must write | 129 |
+| distinct catalogue identities those declarations bind | 113 |
+
+The 129 is 113 plus 16, not 113: 16 of the pin's native markers are the core
+relation re-exports in `stdlib/std/query.orna:254-284`, which are `REEXPORTS`
+rows rather than catalogue rows. The language has no `pub use`, so
+`std.query.filter` cannot re-export `std.collection.filter`; it needs its own
+declaration binding the same identity (section 3.6). The other 23
+`REEXPORTS` entries are ordinary one-line delegations and need no declaration.
 
 ### 1.2 Two dispatch conventions live in one pin today
 
@@ -106,20 +115,25 @@ pub fn binds_declaration(&self, name: &str) -> bool {
 ```
 
 Leaf-bound (56): `std.text` 10, `std.bits` 6, `std.stats` 14,
-`std.collection` 4, `std.random` 4, `std.hash` 0, `std.encoding.*` 9,
+`std.collection` 4, `std.random` 4, `std.encoding.*` 9,
 `std.money` 3, `std.ui` 1, `std.query` 5.
 
 Public-bound (57): `std.collection` 32, `std.stream` 10, `std.time` 6,
 `std.hash` 5, `std.concurrent` 3, `std.query` 1.
 
 The two are observably different. A leaf-bound call evaluates the public
-wrapper and then the leaf (`stdlib/std/text.orna:17-28`,
-`stdlib/std/hash.orna:12-17`); a public-bound call never evaluates the
-declared body at all, because `route_call`
+wrapper and then the leaf (`stdlib/std/text.orna:17-28`); a public-bound call
+never evaluates the declared body at all, because `route_call`
 (`crates/orna-evaluator/src/lib.rs:9887`) returns `CallRoute::Native` for the
 resolved declaration before the body is entered. So 57 declared bodies in the
 pinned source are dead code, and 74 one-line forwarders exist only to move
 the call one frame down to a `__` name.
+
+`std.hash` shows the inconsistency inside one module: it declares five marker
+leaves with the two-way body (`stdlib/std/hash.orna:12-17`) and the catalogue
+nevertheless binds the five public names
+(`crates/orna-intrinsics/src/modules/hash.rs`), so its five leaves are
+unreachable guards rather than entry points.
 
 ### 1.3 The `fail(...)` body cannot identify a native
 
@@ -460,7 +474,7 @@ extension" is "admit a different pinned snapshot".
 
 ## 3. Target design
 
-### 3.1 Surface syntax: four candidates
+### 3.1 Surface syntax: five candidates
 
 | Form | Grammar cost | Honesty | Verdict |
 |---|---|---|---|
@@ -1029,11 +1043,25 @@ pin is a Git commit, and a capture names it. Consequences, all normative
 
 ### 3.16 What the pin looks like afterwards
 
-`stdlib/std` keeps 630 minus the wrappers it deletes, plus the declarations it
-adds: 113 `native fn` declarations replace 74 forwarders, 68 marker leaves and
-16 marker-bodied re-exports, and 32 spellings that were never declared get
-their first declaration. The 15 `std.io` leaves are `Dispatch::Host` and are
-untouched by this design (they bind through `orna-sys`;
+`stdlib/std` keeps 630 minus the declarations it deletes, plus the 129 it
+adds. What each existing shape becomes:
+
+| Today's shape | After |
+|---|---|
+| pure-forwarder wrapper plus marker leaf (`stdlib/std/text.orna:17-28`) | one `pub native fn` carrying the wrapper's parameter list and the leaf's result; both old declarations deleted |
+| marker leaf under a validating wrapper (`stdlib/std/query.orna:202-207`) | the wrapper stays as source; the leaf keeps its spelling as a `native fn` |
+| marker leaf with no public counterpart (`stdlib/std/ui.orna:5-15`) | `native fn __node` keeps its spelling; visibility is the reachability |
+| marker-bodied public re-export (`stdlib/std/query.orna:254-284`) | `pub native fn`, binding the same `IntrinsicId` |
+| self-recursive public declaration (`stdlib/std/stream.orna:26-65`) | `pub native fn`; the self-call cannot be written |
+| public-bound name with a forwarder body (`stdlib/std/hash.orna:12-17`) | `pub native fn`; the unreachable leaf is deleted |
+| spelling with no declaration at all | its first `native fn` |
+
+The per-file split is produced by the stage's generator and asserted by its
+parity test; this document states the total (129 declarations over 113
+identities, section 1.1) and the rules, not a hand-counted breakdown.
+
+The 15 `std.io` leaves are `Dispatch::Host` and are untouched by this design
+(they bind through `orna-sys`;
 [`docs/design/std-native.md`](std-native.md) section 3.10 keeps the parity
 check between the two registries).
 
@@ -1152,9 +1180,10 @@ snapshot is the oracle; any diff is a bug in the rewrite, not a fix.
 
 Two PRs, `github.com/workingdir/ornadb-std` then the superproject pin bump.
 
-Std repo: 113 `native fn ... effect ...;` declarations; delete 74 forwarders,
-68 marker leaves and 16 marker-bodied re-exports; add declarations for the 32
-spellings that were never declared; keep the 15 `std.io` leaves.
+Std repo: 129 `native fn ... effect ...;` declarations (113 catalogue
+identities plus the 16 core re-export declarations in `std.query`); delete the
+pure-forwarder wrappers, the marker leaves and the 16 marker-bodied
+re-exports; keep the 15 `std.io` leaves. Section 3.16 gives the per-shape rule.
 
 Superproject: `crates/orna-intrinsics/src/pin.rs:7` (`CURRENT_STD_PIN`),
 `crates/orna-intrinsics/src/modules/*.rs` (`declaration_path` for the
@@ -1166,8 +1195,8 @@ Acceptance:
 ```
 python3 scripts/check_standard_library_pin.py
 cargo test -p orna-intrinsics -p orna-evaluator -p orna-check --locked
-    every_native_declaration_binds         202 declarations, 202 bindings, 0 unbound
-    every_bound_identity_is_declared       113 identities, 113 declarations
+    every_native_declaration_binds         129 declarations, 129 bindings, 0 unbound
+    every_bound_identity_is_declared       129 declarations over 113 distinct identities
     signatures_are_equal                   declaration digest == catalogue digest per identity
     no_marker_remains                      grep 'is a native intrinsic' stdlib/std returns nothing
 ```
