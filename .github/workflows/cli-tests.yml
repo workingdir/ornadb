@@ -257,8 +257,11 @@ jobs:
       - name: Prove the route-trace feature is off in the shipped build
         run: |
           set -euo pipefail
-          features="$(cargo tree --locked -p orna-cli -e features --prefix none)"
-          if printf '%s\n' "$features" | grep -q 'route-trace'; then
+          python3 scripts/gate_evidence.py run --record route-trace-features \
+            --check feature-closure --title "route-trace is off in the shipped closure" \
+            --out "$RUNNER_TEMP/hir-bench" --timeout-minutes 10 \
+            -- cargo tree --locked -p orna-cli -e features --prefix none
+          if grep -q 'feature "route-trace"' "$RUNNER_TEMP/hir-bench/route-trace-features.log"; then
             echo "the shipped orna-cli closure enables the route-trace feature" >&2
             exit 1
           fi
@@ -268,13 +271,16 @@ jobs:
         run: python3 -m unittest scripts.test_check_benchmark_baseline
 
       - name: Test that every cascade branch records its route
-        run: cargo test --locked -p orna-evaluator --features route-trace --test route_trace_kinds
+        run: python3 scripts/gate_evidence.py test -p orna-evaluator --target test:route_trace_kinds --features route-trace --timeout-minutes 30
 
       - name: Run the baseline benchmarks and compare their counters
         run: |
           set -euo pipefail
-          cargo run --locked --release -p orna-evaluator --bin orna_bench \
-            --features route-trace > "$RUNNER_TEMP/bench.json"
+          python3 scripts/gate_evidence.py run --record hir-benchmarks --check benchmarks \
+            --title "the three H0 baseline benchmarks of the HIR design" \
+            --out "$RUNNER_TEMP/hir-bench" --timeout-minutes 30 \
+            -- cargo run --locked --release -p orna-evaluator --bin orna_bench --features route-trace
+          grep -o '{"evaluator".*}' "$RUNNER_TEMP/hir-bench/hir-benchmarks.log" > "$RUNNER_TEMP/bench.json"
           python3 scripts/check_benchmark_baseline.py \
             --baseline crates/orna-evaluator/benchmarks/baseline.json \
             --results "$RUNNER_TEMP/bench.json" \
