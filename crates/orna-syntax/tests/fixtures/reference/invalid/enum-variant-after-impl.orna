@@ -1,0 +1,7 @@
+pub enum Rounding {
+    impl Display {
+        fn display(self, context): Str = "rounding";
+    }
+
+    half_even,
+}

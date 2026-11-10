@@ -1067,13 +1067,13 @@ bead = "ornadb-csenl.18"
 
 [[environment]]
 category = "connector-and-host-names"
-count = 25
+count = 22
 reason = "connector and host names (mail, google, finance, energy, HEAD, CWD, work) are a documented not-in-scope class: they name external connectors and host paths that the reference fixture supplies, and HIR does not invent declarations for them. They are not resolvable in HIR until a connector surface is declared"
 bead = "ornadb-csenl.15"
 
 [[environment]]
 category = "fixture-tables-and-modules"
-count = 53
+count = 47
 reason = "fixture tables and modules (Contact, Message, Order, Account, and the like) come from the old checker's Rust Type objects, not from source. Lowering them is not done: the reference environment is carried by name only until real declarations exist, so each use is an H0 environment blocker that shrinks as declarations land"
 bead = "ornadb-csenl.15"
 
@@ -1091,7 +1091,7 @@ bead = "ornadb-csenl.16"
 
 [[environment]]
 category = "harness-environment-names"
-count = 13
+count = 11
 reason = "harness bindings: the expression fixtures (fallback, left, middle, missing) and the example cases use names the harness supplies (log, process, read, rows, get, valid_email). The case declares none of them, so each use is an environment blocker that the harness fidelity work closes"
 bead = "ornadb-csenl.15"
 
@@ -1103,7 +1103,7 @@ bead = "ornadb-csenl.16"
 
 [[environment]]
 category = "pending-p3b-names"
-count = 2
+count = 1
 reason = "names that need a later typed-pipeline phase (phase 3b): half_even of a decimal division, and Str used as an as:-argument of a secret display. They resolve only once that phase lands"
 bead = "ornadb-csenl.16"
 

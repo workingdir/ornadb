@@ -197,13 +197,19 @@ pub fn walk_declaration<V: Visit + ?Sized>(visitor: &mut V, declaration: &Declar
             }
         }
         Declaration::Enum {
-            generics, variants, ..
+            generics,
+            variants,
+            implementations,
+            ..
         } => {
             for generic in generics {
                 visitor.visit_generic_parameter(generic);
             }
             for variant in variants {
                 visitor.visit_enum_variant(variant);
+            }
+            for implementation in implementations {
+                visitor.visit_implementation(implementation);
             }
         }
         Declaration::Dimension { expression, .. } => {

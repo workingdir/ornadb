@@ -526,10 +526,21 @@ impl Producer<'_> {
                 )
             }
             Declaration::Enum {
-                generics, variants, ..
+                generics,
+                variants,
+                implementations,
+                ..
             } => {
                 if !generics.is_empty() {
                     return Err(self.error(key, SemanticPayloadErrorKind::OpenGenericDeclaration));
+                }
+                if !implementations.is_empty() {
+                    return Err(self.error(
+                        key,
+                        SemanticPayloadErrorKind::UnsupportedDeclaration {
+                            category: "implementation",
+                        },
+                    ));
                 }
                 let mut encoded = Vec::new();
                 for variant in variants {

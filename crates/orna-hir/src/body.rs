@@ -76,6 +76,9 @@ pub enum ExprKind {
     Local(LocalId),
     /// A value use of a function, table, variant or module-level binding.
     Def(DefId),
+    /// A bare word that named no local or definition; typeck resolves it to a
+    /// payload-free variant of the expected enum type, or reports it.
+    BareName(crate::Name),
     /// Unary negation or logical not.
     Unary {
         /// The operator.
