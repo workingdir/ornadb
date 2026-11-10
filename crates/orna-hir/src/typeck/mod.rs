@@ -300,7 +300,7 @@ impl TypeChecker<'_> {
                         .params
                         .iter()
                         .enumerate()
-                        .filter(|(_, parameter)| self.is_error(parameter.ty))
+                        .filter(|(_, parameter)| !parameter.written)
                         .map(|(index, _)| index)
                         .collect::<Vec<_>>();
                     if public && !omitted.is_empty() {
@@ -338,7 +338,7 @@ impl TypeChecker<'_> {
                     .iter()
                     .position(|parameter| parameter.default == Some(body_id))
                 {
-                    let is_omitted = self.is_error(function.params[index].ty);
+                    let is_omitted = !function.params[index].written;
                     if is_omitted && public {
                         return Attempt::NotYet(NotYetReason::UnannotatedParameter(owner));
                     }

@@ -1105,6 +1105,7 @@ mod tests {
         function.params.push(ParamDef {
             name: Name::new("value"),
             ty: int,
+            written: true,
             default: None,
             binder: None,
         });

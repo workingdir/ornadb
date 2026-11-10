@@ -87,7 +87,8 @@ impl Builder<'_> {
             DeclAst::Function(signature, body) => {
                 let body_id = self.allocate_body(def);
                 let generics = self.build_generics(module, &signature.generics);
-                let (params, defaults) = self.build_parameters(def, module, &signature.parameters);
+                let (params, defaults) =
+                    self.build_parameters(def, module, &signature.parameters, None);
                 for (body, expr) in defaults {
                     self.body_jobs.push(BodyJob::Expression {
                         def,
@@ -197,7 +198,7 @@ impl Builder<'_> {
                     implementation,
                     span,
                 } => {
-                    self.build_implementation(module, implementation, span.clone());
+                    self.build_implementation(def, module, implementation, span.clone());
                 }
             }
         }
@@ -373,7 +374,7 @@ impl Builder<'_> {
                     implementation,
                     span,
                 } => {
-                    self.build_implementation(module, implementation, span.clone());
+                    self.build_implementation(def, module, implementation, span.clone());
                 }
             }
         }
@@ -384,6 +385,7 @@ impl Builder<'_> {
     /// Builds one protocol implementation.
     fn build_implementation(
         &mut self,
+        owner: DefId,
         module: ModuleId,
         implementation: &Implementation,
         span: SyntaxSpan,
@@ -401,6 +403,11 @@ impl Builder<'_> {
             }
             _ => None,
         };
+        // A method's receiver `self` has the implementing type (decision D1: the receiver is not written out).
+        let receiver = self
+            .program
+            .tys
+            .intern(crate::TyKind::Adt(owner, Box::new([])));
         let mut members = Vec::new();
         for member in &implementation.members {
             match member {
@@ -418,8 +425,12 @@ impl Builder<'_> {
                     );
                     let body_id = self.allocate_body(member_def);
                     let generics = self.build_generics(module, &signature.generics);
-                    let (params, defaults) =
-                        self.build_parameters(member_def, module, &signature.parameters);
+                    let (params, defaults) = self.build_parameters(
+                        member_def,
+                        module,
+                        &signature.parameters,
+                        Some(receiver),
+                    );
                     for (default_body, expr) in defaults {
                         self.body_jobs.push(BodyJob::Expression {
                             def: member_def,
@@ -525,13 +536,20 @@ impl Builder<'_> {
         def: DefId,
         module: ModuleId,
         parameters: &[Parameter],
+        receiver: Option<crate::Ty>,
     ) -> (Vec<ParamDef>, Vec<(BodyId, Expr)>) {
         let mut built = Vec::with_capacity(parameters.len());
         let mut defaults = Vec::new();
         for (index, parameter) in parameters.iter().enumerate() {
-            let ty = match &parameter.annotation {
-                Some(annotation) => super::types::lower_type(self, module, &[], annotation),
-                None => self.program.tys.error(),
+            let name = parameter_name(&parameter.pattern, index);
+            let is_receiver = index == 0 && name == "self";
+            let (ty, written) = match (&parameter.annotation, receiver) {
+                (Some(annotation), _) => (
+                    super::types::lower_type(self, module, &[], annotation),
+                    true,
+                ),
+                (None, Some(receiver)) if is_receiver => (receiver, true),
+                (None, _) => (self.program.tys.error(), false),
             };
             let default = parameter.default.as_ref().map(|expr| {
                 let body = self.allocate_body(def);
@@ -539,8 +557,9 @@ impl Builder<'_> {
                 body
             });
             built.push(ParamDef {
-                name: crate::Name::new(&parameter_name(&parameter.pattern, index)),
+                name: crate::Name::new(&name),
                 ty,
+                written,
                 default,
                 binder: None,
             });
@@ -565,6 +584,7 @@ impl Builder<'_> {
             .iter()
             .enumerate()
             .map(|(index, parameter)| {
+                let written = parameter.annotation.is_some();
                 let ty = match &parameter.annotation {
                     Some(annotation) => super::types::lower_type(self, module, &[], annotation),
                     None => self.program.tys.error(),
@@ -572,6 +592,7 @@ impl Builder<'_> {
                 ParamDef {
                     name: crate::Name::new(&parameter_name(&parameter.pattern, index)),
                     ty,
+                    written,
                     default: None,
                     binder: None,
                 }

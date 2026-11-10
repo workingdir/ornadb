@@ -176,19 +176,23 @@ impl<'a> BodyCheck<'a> {
                 "calling a protocol member is not on HIR yet".into(),
             ));
         }
-        if !function.generics.is_empty() {
-            if targs.is_empty() {
-                return Err(NotYetReason::Unsupported(
-                    "a generic call without explicit type arguments is stage H2b".into(),
-                ));
-            }
-            if targs.len() != function.generics.len() {
-                self.conflict(
-                    "the call supplies the wrong number of type arguments",
-                    span.clone(),
-                );
-                return Ok(self.error());
-            }
+        let inferred: Vec<Ty>;
+        let targs = if function.generics.is_empty() || !targs.is_empty() {
+            targs
+        } else {
+            // D1/D5: type arguments that the call omits are solved by unification from the value arguments
+            // and the expected type; an unsolved one is reported by the zonk pass as an ambiguity.
+            inferred = (0..function.generics.len())
+                .map(|_| self.infer.new_var(&mut self.program.tys, span.clone()))
+                .collect();
+            inferred.as_slice()
+        };
+        if !function.generics.is_empty() && targs.len() != function.generics.len() {
+            self.conflict(
+                "the call supplies the wrong number of type arguments",
+                span.clone(),
+            );
+            return Ok(self.error());
         }
         let mut params = Vec::with_capacity(function.params.len());
         for parameter in &function.params {
