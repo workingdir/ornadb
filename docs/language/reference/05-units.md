@@ -7,7 +7,7 @@ full specification is `docs/design/units.md`.
 
 ## Declaring a unit family
 
-A unit family is an enum. Its variants are units:
+A unit family is an enum, followed by the marker `impl Unit {}` as its last line. Its variants are units:
 
 * A **base family** has exactly one bare variant, the base unit. Other variants
   give scales of it, written `name = factor base`.
@@ -20,15 +20,18 @@ pub enum Length {
     kilometre = 1000 metre,
     mile = 1609.344 metre,
 }
+impl Unit {}
 
 pub enum Speed {
     kmh = Length.kilometre / Duration.hour,
     mph = Length.mile / Duration.hour,
 }
+impl Unit {}
 ```
 
-Built-in families (`Duration`, and the data-size family) are declared the same way.
-A user family takes the same form.
+Built-in families (`Duration`, and the data-size family) are declared the same way. A user family
+takes the same form. An enum without the marker is an ordinary enum, and a `=` variant in it is an
+error.
 
 ## Using a unit
 
@@ -38,6 +41,10 @@ A unit variant is written as a suffix on a numeric literal, or as a call:
 let a = 5.kilometre;            // Quantity<Int, Length.kilometre>
 let b = Length.kilometre(5);    // the same type and value
 ```
+
+A family name used as a type, such as `let d: Duration = 5;`, accepts units of that family and no
+bare number. A quantity of another unit in the family is converted to the family's base unit at that
+position, so `let d: Duration = 1.hour;` stores 3600 seconds.
 
 A suffix names a unit in scope. It never converts an existing quantity. If two
 families in scope define the same suffix, the suffix is ambiguous; use the qualified

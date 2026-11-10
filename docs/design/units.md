@@ -7,7 +7,7 @@ owner direction decides four sub-questions: `day` and `days` are the elapsed 24-
 `Duration` is the nominal name of the time family (Q5); an `Int` does not flow into a
 `Duration` annotation (Q6); `Money<C>` is a library type with a library `Rate<C, U>`, and
 the kernel has no currency axis (O4). Sub-questions Q2, Q3, Q4 and Q7 and kernel-review
-changes C4 to C7 and C11 are settled by the default rule of section 12. The owner may
+changes C4 to C7, C11 and C13 to C16 are settled by the default rule of section 12. The owner may
 reverse any default. The document is a clean-sheet specification. It does not port the
 1.1.0 implementation in `orna-check/src/units.rs`. It is the input for HIR stages
 H2c-1 and H2c-2 (section 11.2), implemented in `orna-hir`.
@@ -57,6 +57,7 @@ pub enum Length {
     kilometre = 1000 metre,
     mile = 1609.344 metre,
 }
+impl Unit {}
 
 pub enum Duration {                      // the time family; the nominal name of its quantities
     second,
@@ -70,11 +71,13 @@ pub enum Duration {                      // the time family; the nominal name of
     day = 86400 second,                  // elapsed 24 hours, not a calendar day (Q1)
     days = 86400 second,
 }
+impl Unit {}
 
 pub enum Speed {                         // derived: no bare variant
     kmh = Length.kilometre / Duration.hour,
     mph = Length.mile / Duration.hour,
 }
+impl Unit {}
 ```
 
 Calls and literals, same for built-in and user families:
@@ -101,10 +104,14 @@ Rules on the surface:
 
 * A variant is either payload (1.2 enum) or unit (unit family). A family may not mix
   payload variants with unit variants.
+* A unit family is an enum followed by the marker `impl Unit {}` as its last line (C13, default
+  M-a; ORNA-UNIT-009). `Unit` is a marker trait of `core`. An enum without the marker is ordinary:
+  its bare variants are payload-free variants, and a `=` variant in it is rejected.
 * `RATIONAL` is an exact decimal literal such as `0.125`. Fractions are not written.
   A non-terminating ratio is not a valid scale.
 * `unit_name` in a unit expression resolves by the static unit lookup of ORNA-UNIT-008.
   A bare name needs the variant in scope; `Family.variant` always resolves.
+* `unit_expr` is a production of its own and is not an ordinary expression (C16, default U-a).
 * There is no `canonical`, `repr`, `offset`, `affine`, `dim`, `unit`, `base` or `alias`
   clause or declaration. A transparent alias is `type Name<..> = ..;` (U03). Wire forms
   are bound by the engine registry (section 8.4, P9); affine types are library types
@@ -271,10 +278,11 @@ numeric literal `n.name` is resolved statically and without ambiguity, in this o
 A unit suffix never converts an existing quantity: a quantity of key `U1` that receives
 suffix `U2` is ORNA-UNIT-CONVERT. The suffix rule applies to numeric literals only.
 
-**ORNA-UNIT-009 (family declarations).** A base family has exactly one bare variant, whose
-key is its axis. A family with zero bare variants and at least one `=` variant is derived;
-its dimension is computed from its variants. A family with two or more bare variants is
-ORNA-UNIT-BASE. A cycle among variant definitions is ORNA-UNIT-CYCLE.
+**ORNA-UNIT-009 (family declarations).** A unit family is an enum marked by `impl Unit {}`
+(section 2, C13). A base family has exactly one bare variant, whose key is its axis. A family
+with zero bare variants and at least one `=` variant is derived; its dimension is computed from
+its variants. A marked family with two or more bare variants is ORNA-UNIT-BASE. A `=` variant in
+an unmarked enum is rejected. A cycle among variant definitions is ORNA-UNIT-CYCLE.
 
 **ORNA-UNIT-010 (family membership).** Every variant `u` of family `F` has `dim(u) = V(F)`.
 For a base family `V(F)` is the axis of its bare variant. For a derived family `V(F)` is the
@@ -284,8 +292,9 @@ dimensions.
 **ORNA-UNIT-011 (add, subtract, compare).** `Q_1 op Q_2` requires `V_1 = V_2`. Otherwise
 ORNA-UNIT-DIM. The result unit is the finer operand: the key with the smaller `s`. The
 other operand is converted by multiplying its value by `r = s_i / s_min`, which is at least
-1. Equal keys give the same key. Compare follows the same conversion. A non-exact ratio
-of `Decimal` operands is ORNA-UNIT-INEXACT.
+1. Equal keys give the same key. Ordering (`<`, `<=`, `>`, `>=`) follows the same conversion.
+`==` and `!=` need equal keys; unequal keys are a compile error and `to` converts first (C15).
+A non-exact ratio of `Decimal` operands is ORNA-UNIT-INEXACT.
 
 **ORNA-UNIT-012 (multiply, divide).** The key of `Q_1 * Q_2` is `U_1 * U_2`; of `Q_1 / Q_2`
 it is `U_1 / U_2`. Values multiply or divide by the numeric rule of `ops.rs`. Keys never
@@ -342,7 +351,11 @@ accepted under `F`: `let d: Duration = 5;` is ORNA-UNIT-ANNOT, and no conversion
 inserted (D7). The explicit forms are `Duration.second(5)` and `5.second`. A derived
 product of variants (for example `second^2`) is not a variant of `Duration` and is
 rejected. `F` as a type is nominal, not an alias of `Quantity<N, U>`. Realised by the
-family record of section 11.1.
+family record of section 11.1. Where a quantity enters a position of type `F`, the checker
+converts its value to the base unit of `F`, exact for integer scales (C14, rule (a)); a non-exact
+ratio is ORNA-UNIT-INEXACT. So a stored `Duration` is always in seconds and tag 60005 needs no
+unit at run time. A derived family has no base unit; what an annotation on it converts to is open
+(section 13).
 
 ## 7. Worked examples (dogfooded)
 
@@ -357,6 +370,7 @@ pub enum Length {
     kilometre = 1000 metre,
     mile = 1609.344 metre,
 }
+impl Unit {}
 
 let a = 2.kilometre + 300.metre;      // finer metre (ORNA-UNIT-011): Quantity<Int, metre>, 2300
 let b = 1.mile + 1.kilometre;         // finer kilometre; ratio 1.609344 is exact: Decimal 2.609344
@@ -371,6 +385,7 @@ pub enum Speed {
     kmh = Length.kilometre / Duration.hour,      // scale 1000/3600, that is 5/18
     mph = Length.mile / Duration.hour,           // scale 1609.344/3600
 }
+impl Unit {}
 
 let v = 60.kmh + 10.mph;      // finer kmh; mph ratio exact: Decimal 76.09344 kmh
 let bad = 60.kmh + 2.metre;   // ORNA-UNIT-DIM: Speed and Length
@@ -384,8 +399,11 @@ let bad = 60.kmh + 2.metre;   // ORNA-UNIT-DIM: Speed and Length
 
 ```orna
 pub enum Length { metre, kilometre = 1000 metre }
+impl Unit {}
 pub enum Storage { byte, kilobyte = 1000 byte }
+impl Unit {}
 pub enum Stream { chunk, kilometre = 3 chunk }    // a second family with the suffix kilometre
+impl Unit {}
 
 let ok = Length.kilometre(5);       // qualified form resolves the name
 let bad = 5.kilometre;              // ORNA-S011: suffix kilometre is in two families in scope
@@ -419,9 +437,11 @@ pub enum Data {
     kB = 1000 byte,
     KiB = 1024 byte,
 }
+impl Unit {}
 pub enum DataRate {
     Mbps = 1000000 bit / Duration.second,
 }
+impl Unit {}
 
 let total = 8.bit + 1.byte;          // finer bit; byte ratio 8 is an integer: Int 16 bit
 let mixed = 1.KiB + 1.kB;            // finer kB; KiB ratio 1.024 exact: Decimal 2.024 kB
@@ -451,6 +471,7 @@ pub enum Duration {
     day = 86400 second,
     days = 86400 second,
 }
+impl Unit {}
 ```
 
 The names listed are the intrinsic duration suffixes of the 1.1.0 checker
@@ -490,6 +511,7 @@ pub enum Data {
     MiB = 1048576 byte,
     GiB = 1073741824 byte,
 }
+impl Unit {}
 ```
 
 ### 8.3 Currency and money (library)
@@ -542,10 +564,12 @@ pub type GBP {
 pub enum Mass {
     kg,
 }
+impl Unit {}
 pub enum Energy {
     J = Mass.kg * Length.metre^2 / Duration.second^2,
     kilowatt_hour = 3600000 J,
 }
+impl Unit {}
 ```
 
 `Money<C>` is `Decimal` with impls, so `Money<GBP> * Money<GBP>` has no impl and is an
@@ -693,8 +717,9 @@ no native primitive. Cost: the family-membership rule ORNA-UNIT-020 is one new k
 * Programs with `dim` or `unit` declarations are rejected by the 1.2 reference. They become
   valid with the enum-shaped forms of section 2. No program declares a unit today, so no
   migration of existing source is needed.
-* `1.hour` keeps its key and prints as `hour`. Its value is 1, not 3600. Comparison with
-  `3600.second` is exact (ORNA-UNIT-011). A column typed `Duration` keeps tag 60005.
+* `1.hour` keeps its key and prints as `hour`. Its value is 1, not 3600. Ordering against
+  `3600.second` is exact (ORNA-UNIT-011); `==` needs `to` first (C15). A column typed `Duration`
+  keeps tag 60005 and stores seconds (C14).
 * `90.days + 4.kilowatt_hour` stays invalid: ORNA-UNIT-DIM, naming `Duration` and `Energy`.
   `90.days` is an elapsed `Duration`; a calendar period is `Period.days(90)`.
 * Mixed-scale add (`1.kilometre + 1.metre`) follows the finer-unit rule that the 1.1.0
@@ -776,7 +801,7 @@ may reverse any default. Each entry names its source.
 ## 13. Kernel review: what changed in this revision
 
 The kernel review (branch `docs/kernel-and-library`, PR #9856; not in this tree) proposed
-twelve changes. This revision:
+twelve changes and four open questions (C13 to C16). This revision:
 
 * Applied: C1 (enum-shaped surface, section 2); C2 (`type` declaration for `Money`, not an
   alias, and no `alias` declaration); C3 (`Money<C impl Currency>`, already in the 1.1.0
@@ -790,6 +815,10 @@ twelve changes. This revision:
 * Applied in part: C11 (`Duration`). The owner chose the nominal family (Q5), so there is no
   kernel integer. The time view is withdrawn; the family-membership rule ORNA-UNIT-020 is the
   one kernel addition.
+* Applied as defaults, the four open questions of the kernel review: C13 (`impl Unit {}` marker,
+  M-a, section 2); C14 (conversion to the base unit at family-typed positions, rule (a),
+  ORNA-UNIT-020); C15 (`==` and `!=` need equal keys, ORNA-UNIT-011); C16 (`unit_expr` is its own
+  production, U-a, section 2). The owner may reverse any of them.
 * Not applied: none. C1 to C10 and C12 are applied as stated above. C11 is applied in part
   (the family form, not a kernel integer; Q5). Where the review recorded no decision, the
-  defaults of section 12 apply.
+  defaults of section 12 apply. Open: the conversion for derived families under C14 (section 6).
