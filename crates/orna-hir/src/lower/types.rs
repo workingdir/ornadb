@@ -13,7 +13,7 @@
 
 use orna_syntax::TypeExpr;
 
-use crate::{DefId, DefKind, EffectRow, FnTy, ModuleId, Name, NameTarget, ParamIdx, Ty, TyKind};
+use crate::{DefId, EffectRow, FnTy, ModuleId, Name, NameTarget, ParamIdx, Ty, TyKind};
 
 use super::declare::Builder;
 
@@ -233,16 +233,12 @@ fn language_constructor(name: &Name, args: &[Ty]) -> Option<TyKind> {
 
 /// The type of a declared nominal, enum, table or alias.
 fn nominal(builder: &mut Builder<'_>, def: DefId, args: Vec<Ty>) -> Ty {
-    match builder
-        .program
-        .defs
-        .get(def)
-        .map(|definition| &definition.kind)
-    {
-        Some(DefKind::Type(_) | DefKind::Enum(_) | DefKind::Table(_)) => builder
+    if builder.is_nominal(def) {
+        builder
             .program
             .tys
-            .intern(TyKind::Adt(def, args.into_boxed_slice())),
-        _ => builder.program.tys.error(),
+            .intern(TyKind::Adt(def, args.into_boxed_slice()))
+    } else {
+        builder.program.tys.error()
     }
 }

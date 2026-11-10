@@ -12,10 +12,13 @@ use std::sync::LazyLock;
 use lsp_types::{Range, SemanticToken, SemanticTokenModifier, SemanticTokenType};
 use orna_syntax::{SyntaxSpan, editor};
 
+use orna_hir::UseContext;
+
 use crate::analysis::EditorSymbolKind;
 use crate::documents::PositionMapper;
-use crate::names::{DeclaredKind, LocalBindingKind, NameOccurrence, Role};
-use crate::workspace::{Target, Workspace};
+use crate::workspace::{
+    DeclaredKind, LocalBindingKind, NameOccurrence, Target, Workspace,
+};
 
 /// The intrinsic type environment (05-types, "Core type forms").
 const INTRINSIC_TYPES: &[&str] = &[
@@ -165,8 +168,7 @@ pub(crate) fn semantic_tokens(
 
 fn contextual_tokens(workspace: &Workspace, module: usize) -> HashMap<(usize, usize), (u32, u32)> {
     let mut tokens = HashMap::new();
-    let names = &workspace.file(module).names;
-    for declared in names.declarations() {
+    for declared in workspace.declarations(module) {
         let (token_type, modifiers) = declared_token(declared.kind);
         insert(
             &mut tokens,
@@ -175,7 +177,7 @@ fn contextual_tokens(workspace: &Workspace, module: usize) -> HashMap<(usize, us
             modifiers | DECLARATION,
         );
     }
-    for binding in names.bindings() {
+    for binding in workspace.bindings(module) {
         insert(
             &mut tokens,
             &binding.selection,
@@ -183,28 +185,28 @@ fn contextual_tokens(workspace: &Workspace, module: usize) -> HashMap<(usize, us
             DECLARATION,
         );
     }
-    for occurrence in names.occurrences() {
-        if matches!(occurrence.role, Role::Declaration)
+    for occurrence in workspace.occurrences(module) {
+        if occurrence.context == UseContext::Binding
             || tokens.contains_key(&(occurrence.span.start, occurrence.span.end))
         {
             continue;
         }
-        let classified = match workspace.resolve(module, occurrence).target() {
+        let classified = match occurrence.resolved.clone().target() {
             Some(target) => resolved_token(workspace, &target),
-            None => intrinsic_type(occurrence),
+            None => intrinsic_type(occurrence).or_else(|| {
+                (occurrence.context == UseContext::Field
+                    && workspace.unit_named(module, &occurrence.key))
+                .then_some((TOKEN_TYPES.variable, READONLY))
+            }),
         };
         let Some((token_type, modifiers)) = classified else {
             continue;
         };
-        let write = matches!(
-            occurrence.role,
-            Role::Value { write: true } | Role::Member { write: true, .. }
-        );
         insert(
             &mut tokens,
             &occurrence.span,
             token_type,
-            if write {
+            if occurrence.written {
                 modifiers | MODIFICATION
             } else {
                 modifiers
@@ -219,7 +221,7 @@ fn resolved_token(workspace: &Workspace, target: &Target) -> Option<(u32, u32)> 
     let types = &*TOKEN_TYPES;
     Some(match target {
         Target::Local { module, binding } => (
-            binding_token_type(workspace.file(*module).names.binding(*binding).kind),
+            binding_token_type(workspace.binding(*module, *binding).kind),
             0,
         ),
         Target::Declared { module, index } => {
@@ -244,11 +246,9 @@ fn resolved_token(workspace: &Workspace, target: &Target) -> Option<(u32, u32)> 
 /// An unresolved single-segment type name from the intrinsic type
 /// environment.
 fn intrinsic_type(occurrence: &NameOccurrence) -> Option<(u32, u32)> {
-    let Role::Path { path, .. } = &occurrence.role else {
-        return None;
-    };
-    (path.len() == 1 && INTRINSIC_TYPES.contains(&occurrence.key.as_str()))
-        .then_some((TOKEN_TYPES.ty, READONLY | DEFAULT_LIBRARY))
+    (occurrence.context == UseContext::Type
+        && INTRINSIC_TYPES.contains(&occurrence.key.as_str()))
+    .then_some((TOKEN_TYPES.ty, READONLY | DEFAULT_LIBRARY))
 }
 
 fn binding_token_type(kind: LocalBindingKind) -> u32 {

@@ -12,7 +12,8 @@ use std::sync::Arc;
 use orna_syntax::SyntaxSpan;
 
 use crate::documents::Document;
-use crate::names::{DeclaredKind, Role, key_of};
+use crate::analysis::normalized_identifier;
+use crate::workspace::DeclaredKind;
 use crate::workspace::{FileAnalysis, Resolved, Target, Workspace};
 
 /// Why a rename cannot be made. The message completes "cannot rename: ".
@@ -94,7 +95,7 @@ pub(crate) fn prepare(
             "`{placeholder}` is declared in the read-only standard library module `{module}`"
         ))),
         Target::Local { module, binding }
-            if workspace.file(*module).names.binding(*binding).key == "self" =>
+            if workspace.binding(*module, *binding).key == "self" =>
         {
             Err(Refusal::new("`self` cannot be renamed"))
         }
@@ -134,11 +135,9 @@ pub(crate) fn plan(
         )));
     }
     for (found_module, span) in &search.found {
-        let names = &workspace.file(*found_module).names;
-        let shorthand = names.binding_at(span).is_some()
-            && names
-                .occurrence(span)
-                .is_some_and(|occurrence| matches!(occurrence.role, Role::PatternField { .. }));
+        let shorthand = workspace
+            .occurrence(*found_module, span)
+            .is_some_and(|occurrence| occurrence.shorthand);
         if shorthand {
             return Err(Refusal::new(format!(
                 "the pattern at {} binds `{old_name}` by its field name; write `{old_name}: {old_name}` there first",
@@ -168,7 +167,8 @@ pub(crate) fn valid_identifier(name: &str) -> bool {
             [item] if matches!(
                 &item.declaration,
                 orna_syntax::Declaration::Function { signature, .. }
-                    if signature.name == name && key_of(&signature.name) == key_of(name)
+                    if signature.name == name
+                        && normalized_identifier(&signature.name) == normalized_identifier(name)
             )
         )
 }
@@ -247,7 +247,7 @@ enum Meaning {
 fn meaning(workspace: &Workspace, resolved: Resolved, shifts: &[Shift<'_>]) -> Meaning {
     match resolved {
         Resolved::Target(Target::Local { module, binding }) => {
-            let selection = &workspace.file(module).names.binding(binding).selection;
+            let selection = &workspace.binding(module, binding).selection;
             Meaning::Local(module, shifts[module].offset(selection.start))
         }
         Resolved::Target(Target::Declared { module, index }) => {
@@ -293,8 +293,8 @@ fn verify_resolution(workspace: &Workspace, edits: &ModuleEdits) -> Result<(), R
         .map(|_| Shift::new(None))
         .collect::<Vec<_>>();
     for module in 0..workspace.modules.len() {
-        let before = workspace.file(module).names.occurrences();
-        let after = edited.file(module).names.occurrences();
+        let before = workspace.occurrences(module);
+        let after = edited.occurrences(module);
         if before.len() != after.len() {
             return Err(Refusal::new(format!(
                 "the edit would change the names in {}",
@@ -303,14 +303,14 @@ fn verify_resolution(workspace: &Workspace, edits: &ModuleEdits) -> Result<(), R
         }
         for occurrence in before {
             let span = shifts[module].span(&occurrence.span);
-            let Some(moved) = edited.file(module).names.occurrence(&span) else {
+            let Some(moved) = edited.occurrence(module, &span) else {
                 return Err(Refusal::new(format!(
                     "the edit would change the name at {}",
                     workspace.location_label(module, occurrence.span.start)
                 )));
             };
-            let old = meaning(workspace, workspace.resolve(module, occurrence), &shifts);
-            let new = meaning(&edited, edited.resolve(module, moved), &after_shifts);
+            let old = meaning(workspace, occurrence.resolved.clone(), &shifts);
+            let new = meaning(&edited, moved.resolved.clone(), &after_shifts);
             if old != new {
                 let text =
                     &workspace.file(module).text()[occurrence.span.start..occurrence.span.end];

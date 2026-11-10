@@ -14,7 +14,7 @@ use orna_syntax::{
 
 use crate::analysis;
 use crate::documents::PositionMapper;
-use crate::names::control_arms;
+use crate::analysis::control_arms;
 use crate::workspace::{FileAnalysis, Target, Workspace};
 
 /// Returns in-range type and parameter-name hints for one module.
@@ -131,8 +131,8 @@ impl Collector<'_> {
 
     fn callee_target(&self, callee: &Expr) -> Option<Target> {
         let name = analysis::callee_name_span(self.file, callee)?;
-        let occurrence = self.file.names.occurrence(&name)?;
-        self.workspace.resolve(self.module, occurrence).target()
+        let occurrence = self.workspace.occurrence(self.module, &name)?;
+        occurrence.resolved.clone().target()
     }
 
     fn parameter_hints(&mut self, callee: &Expr, arguments: &[Argument]) {

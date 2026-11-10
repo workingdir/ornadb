@@ -27,13 +27,14 @@ pub(crate) fn lower_pattern(
         AstPattern::Name(text, span) => {
             let name = Name::new(text);
             let local = state.add_local(name.clone(), error_ty, span.clone());
-            super::record_use(
+            super::record_binding_use(
                 &mut builder.program,
                 module,
+                state.id,
                 span.clone(),
                 name,
-                crate::UseContext::Pattern,
-                NameTarget::Local(local),
+                local,
+                false,
             );
             state.push_pat(Pat::Bind { local })
         }
@@ -71,17 +72,27 @@ pub(crate) fn lower_pattern(
         AstPattern::Record { fields, .. } => {
             let mut lowered = Vec::with_capacity(fields.len());
             for (name, field_pattern, span) in fields {
+                super::record_body_use(
+                    &mut builder.program,
+                    module,
+                    state.id,
+                    span.clone(),
+                    Name::new(name),
+                    crate::UseContext::Field,
+                    NameTarget::Unresolved,
+                );
                 let sub = match field_pattern {
                     Some(field_pattern) => lower_pattern(builder, state, field_pattern),
                     None => {
                         let local = state.add_local(Name::new(name), error_ty, span.clone());
-                        super::record_use(
+                        super::record_binding_use(
                             &mut builder.program,
                             module,
+                            state.id,
                             span.clone(),
                             Name::new(name),
-                            crate::UseContext::Pattern,
-                            NameTarget::Local(local),
+                            local,
+                            true,
                         );
                         state.push_pat(Pat::Bind { local })
                     }
@@ -115,12 +126,28 @@ fn lower_constructor(
         .iter()
         .map(|segment| Name::new(&segment.text))
         .collect::<Vec<_>>();
+    let last_span = path
+        .last()
+        .map_or_else(|| span.clone(), |segment| segment.span.clone());
+    let path_segments = path
+        .iter()
+        .zip(&segments)
+        .map(|(segment, name)| (name.clone(), segment.span.clone()))
+        .collect::<Vec<_>>();
+    super::exprs::record_prefix_uses(
+        builder,
+        module,
+        Some(state.id),
+        &path_segments,
+        crate::UseContext::Pattern,
+    );
     let def = match builder.resolve_path(module, &segments) {
         PathKind::Def(def) => {
-            super::record_use(
+            super::record_body_use(
                 &mut builder.program,
                 module,
-                span.clone(),
+                state.id,
+                last_span.clone(),
                 segments.last().cloned().unwrap_or_else(|| Name::new("")),
                 crate::UseContext::Pattern,
                 NameTarget::Def(def),
@@ -128,10 +155,11 @@ fn lower_constructor(
             Some(def)
         }
         _ => {
-            super::record_use(
+            super::record_body_use(
                 &mut builder.program,
                 module,
-                span.clone(),
+                state.id,
+                last_span.clone(),
                 segments.last().cloned().unwrap_or_else(|| Name::new("")),
                 crate::UseContext::Pattern,
                 NameTarget::Unresolved,
@@ -147,14 +175,34 @@ fn lower_constructor(
     };
     let mut lowered_fields = Vec::new();
     for field in fields {
+        let name_span = SyntaxSpan::new(field.span.start, field.span.start + field.name.len());
+        let field_def = def.and_then(|def| find_field(builder, def, &field.name));
+        super::record_body_use(
+            &mut builder.program,
+            module,
+            state.id,
+            name_span.clone(),
+            Name::new(&field.name),
+            crate::UseContext::Field,
+            field_def.map_or(NameTarget::Unresolved, NameTarget::Def),
+        );
         let sub = match &field.pattern {
             Some(pattern) => lower_pattern(builder, state, pattern),
             None => {
                 let local = state.add_local(Name::new(&field.name), error_ty, field.span.clone());
+                super::record_binding_use(
+                    &mut builder.program,
+                    module,
+                    state.id,
+                    field.span.clone(),
+                    Name::new(&field.name),
+                    local,
+                    true,
+                );
                 state.push_pat(Pat::Bind { local })
             }
         };
-        if let Some(field_def) = def.and_then(|def| find_field(builder, def, &field.name)) {
+        if let Some(field_def) = field_def {
             lowered_fields.push((field_def, sub));
         }
     }

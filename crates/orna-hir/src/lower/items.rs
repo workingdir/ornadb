@@ -389,15 +389,41 @@ impl Builder<'_> {
         span: SyntaxSpan,
     ) -> DefId {
         let protocol = match &implementation.protocol {
-            TypeExpr::Name { path, .. } if !path.is_empty() => {
+            TypeExpr::Name { path, span, .. } if !path.is_empty() => {
                 let segments = path
                     .iter()
                     .map(|segment| crate::Name::new(segment))
                     .collect::<Vec<_>>();
-                match self.resolve_path(module, &segments) {
-                    super::super::resolve::PathKind::Def(def) => Some(def),
-                    _ => None,
-                }
+                let last = segments.last().cloned().unwrap_or_else(|| crate::Name::new(""));
+                let name_span = orna_syntax::SyntaxSpan::new(
+                    span.end.saturating_sub(last.as_str().len()),
+                    span.end,
+                );
+                let resolved = match self.resolve_path(module, &segments) {
+                    super::super::resolve::PathKind::Def(def) => {
+                        super::record_use(
+                            &mut self.program,
+                            module,
+                            name_span,
+                            last,
+                            crate::UseContext::Type,
+                            crate::NameTarget::Def(def),
+                        );
+                        Some(def)
+                    }
+                    _ => {
+                        super::record_use(
+                            &mut self.program,
+                            module,
+                            name_span,
+                            last,
+                            crate::UseContext::Type,
+                            crate::NameTarget::Unresolved,
+                        );
+                        None
+                    }
+                };
+                resolved
             }
             _ => None,
         };
@@ -613,8 +639,19 @@ impl Builder<'_> {
         let mut prologue = Vec::new();
         for (index, (param, pattern)) in params.iter().zip(patterns.iter()).enumerate() {
             let span = pattern.span().clone();
-            let local = state.add_local(param.name.clone(), param.ty, span);
+            let local = state.add_local(param.name.clone(), param.ty, span.clone());
             state.params.push(local);
+            if matches!(pattern, Pattern::Name(..)) {
+                super::record_binding_use(
+                    &mut self.program,
+                    module,
+                    state.id,
+                    span,
+                    param.name.clone(),
+                    local,
+                    false,
+                );
+            }
             if !matches!(pattern, Pattern::Name(..)) {
                 let init = super::exprs::push(
                     self,

@@ -18,6 +18,7 @@ orna-base = { path = "../orna-base" }
 orna-project = { path = "../orna-project" }
 orna-repository = { path = "../orna-repository" }
 orna-check = { path = "../orna-check" }
+orna-hir = { path = "../orna-hir" }
 orna-standard-sources = { path = "../orna-standard-sources" }
 orna-syntax = { path = "../orna-syntax" }
 serde_json = "1.0.151"

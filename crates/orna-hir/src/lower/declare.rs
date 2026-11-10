@@ -404,6 +404,20 @@ impl<'a> Builder<'a> {
         &self.pending[def.index()].name
     }
 
+    /// Whether the definition is a table, type or enum: a value type.
+    pub(crate) fn is_nominal(&self, def: DefId) -> bool {
+        match &self.pending[def.index()].kind {
+            PendingKind::Unbuilt(declaration) => matches!(
+                **declaration,
+                DeclAst::Table(..) | DeclAst::Type(..) | DeclAst::Enum(..)
+            ),
+            PendingKind::Built(
+                crate::DefKind::Table(_) | crate::DefKind::Type(_) | crate::DefKind::Enum(_),
+            ) => true,
+            PendingKind::Function(_) | PendingKind::Built(_) => false,
+        }
+    }
+
     /// Whether the definition is a table.
     pub(crate) fn def_is_table(&self, def: DefId) -> bool {
         match &self.pending[def.index()].kind {

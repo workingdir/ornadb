@@ -1,19 +1,24 @@
 //! One index of every name occurrence and what it resolved to (design H1).
 //!
 //! Each module records one [`NameUse`] per name it writes: an identifier, a
-//! path segment that names a definition, a pattern binding's constructor, or a
-//! callee. The index is the single answer the language server's definition,
-//! references, rename and hover queries read, and the answer the H1
-//! resolution comparison checks against the old checker.
+//! path segment that names a definition or module, a pattern binding's
+//! constructor, a field label, an import segment or a callee. The index is the
+//! single answer the language server's definition, references, rename, hover
+//! and semantic-token queries read, and the answer the H1 resolution
+//! comparison checks against the old checker.
 //!
 //! The index is per module and in source order, so a consumer can binary-search
 //! by span. A use that resolved to nothing is still recorded, with
 //! [`NameTarget::Unresolved`], so a query never has to distinguish "absent from
 //! the index" from "did not resolve".
+//!
+//! A local slot is meaningful only inside one [`crate::Body`], so every use
+//! inside a body records the body it belongs to in [`NameUse::body`]. Editor
+//! queries use it to tell apart same-numbered slots of different bodies.
 
 use orna_syntax::SyntaxSpan as SourceSpan;
 
-use crate::{DefId, LocalId, ModuleId, Name};
+use crate::{BodyId, DefId, LocalId, ModuleId, Name};
 
 /// What one written name denotes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -48,6 +53,14 @@ pub enum UseContext {
     Type,
     /// A binding pattern or a pattern constructor.
     Pattern,
+    /// A field access, record label or pattern field.
+    Field,
+    /// A named argument label.
+    Label,
+    /// A segment or imported name of a `use` declaration.
+    Import,
+    /// The declared name of a local binding.
+    Binding,
 }
 
 /// One name occurrence and its resolution.
@@ -61,4 +74,12 @@ pub struct NameUse {
     pub context: UseContext,
     /// What it denotes.
     pub target: NameTarget,
+    /// The body the occurrence belongs to, for a name written inside one.
+    pub body: Option<BodyId>,
+    /// Whether the occurrence is an assignment target or a declaration.
+    pub written: bool,
+    /// Whether the occurrence is the callee of a call.
+    pub callee: bool,
+    /// Whether a pattern field binds a local under the field's own name.
+    pub shorthand: bool,
 }

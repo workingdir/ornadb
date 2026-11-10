@@ -194,6 +194,28 @@ pub(crate) fn record_value_use(
     );
 }
 
+/// Appends one name use inside a body to the module's index.
+pub(crate) fn record_body_use(
+    program: &mut Program,
+    module: ModuleId,
+    body: BodyId,
+    span: SyntaxSpan,
+    name: Name,
+    context: crate::UseContext,
+    target: crate::NameTarget,
+) {
+    program.modules[module].name_uses.push(NameUse {
+        span,
+        name,
+        context,
+        target,
+        body: Some(body),
+        written: false,
+        callee: false,
+        shorthand: false,
+    });
+}
+
 /// Appends one name use to the module's index.
 pub(crate) fn record_use(
     program: &mut Program,
@@ -208,5 +230,55 @@ pub(crate) fn record_use(
         name,
         context,
         target,
+        body: None,
+        written: false,
+        callee: false,
+        shorthand: false,
     });
+}
+
+/// Appends one local binding declaration to the module's index.
+pub(crate) fn record_binding_use(
+    program: &mut Program,
+    module: ModuleId,
+    body: BodyId,
+    span: SyntaxSpan,
+    name: Name,
+    local: LocalId,
+    shorthand: bool,
+) {
+    program.modules[module].name_uses.push(NameUse {
+        span,
+        name,
+        context: crate::UseContext::Binding,
+        target: crate::NameTarget::Local(local),
+        body: Some(body),
+        written: true,
+        callee: false,
+        shorthand,
+    });
+}
+
+/// Marks the use at `span` as an assignment target or declaration.
+pub(crate) fn mark_written(program: &mut Program, module: ModuleId, span: &SyntaxSpan) {
+    if let Some(use_) = program.modules[module]
+        .name_uses
+        .iter_mut()
+        .rev()
+        .find(|use_| use_.span.start == span.start && use_.span.end == span.end)
+    {
+        use_.written = true;
+    }
+}
+
+/// Marks the last use written inside `span` as the callee of a call.
+pub(crate) fn mark_callee(program: &mut Program, module: ModuleId, span: &SyntaxSpan) {
+    if let Some(use_) = program.modules[module]
+        .name_uses
+        .iter_mut()
+        .rev()
+        .find(|use_| span.start <= use_.span.start && use_.span.end <= span.end)
+    {
+        use_.callee = true;
+    }
 }

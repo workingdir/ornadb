@@ -16,7 +16,7 @@ use orna_syntax::{
 };
 
 use crate::documents::PositionMapper;
-use crate::names::{DeclaredKind, LocalBindingKind, control_arms, key_of};
+use crate::workspace::{DeclaredKind, LocalBindingKind};
 use crate::standard::{StandardLibrary, StandardSymbol};
 use crate::workspace::{FileAnalysis, Target, Workspace};
 
@@ -141,7 +141,7 @@ pub(crate) fn document_links(workspace: &Workspace, module: usize) -> Vec<Docume
             let target = if in_project {
                 let keys = path
                     .iter()
-                    .map(|segment| key_of(&segment.name))
+                    .map(|segment| normalized_identifier(&segment.name))
                     .collect::<Vec<_>>();
                 workspace
                     .modules
@@ -578,6 +578,12 @@ fn source_slice<'a>(text: &'a str, span: &SourceSpan) -> &'a str {
     text.get(span.start..span.end).unwrap_or("")
 }
 
+/// The case arms a control expression visits. A `for` loop stores its body
+/// again as one arm (A01-17); the body is visited once, as the loop body.
+pub(crate) fn control_arms(kind: ControlKind, arms: &[CaseArm]) -> &[CaseArm] {
+    if kind == ControlKind::For { &[] } else { arms }
+}
+
 pub(crate) fn normalized_identifier(text: &str) -> String {
     lex(text)
         .ok()
@@ -609,37 +615,43 @@ pub(crate) fn hover(workspace: &Workspace, module: usize, byte: usize) -> Option
     }
     let (_, resolved) = workspace.resolve_at(module, byte)?;
     match resolved.target()? {
-        Target::Local { module, binding } => {
+        Target::Local {
+            module,
+            binding: binding_index,
+        } => {
             let file = workspace.file(module);
-            let binding = file.names.binding(binding);
+            let binding = workspace.binding(module, binding_index);
             let kind = match binding.kind {
                 LocalBindingKind::Parameter => "parameter",
                 LocalBindingKind::Local => "local",
                 LocalBindingKind::Pattern => "pattern binding",
             };
-            let context = source_slice(file.text(), &binding.context);
+            let detail = workspace
+                .binding_type_text(module, binding_index)
+                .map_or_else(
+                    || source_slice(file.text(), &binding.context).to_owned(),
+                    |ty| format!("{}: {ty}", binding.name),
+                );
             Some(crate::hover::declaration(
                 kind,
                 &binding.name,
-                (!context.trim().is_empty()).then_some(context),
+                (!detail.trim().is_empty()).then_some(detail.as_str()),
                 &[],
                 None,
             ))
         }
         Target::Declared { module, index } => {
             let file = workspace.file(module);
-            let declared = file.names.declaration(index);
+            let declared = workspace.declaration(module, index);
             if let Some(symbol) = declared_symbol(&file.symbols, &declared.selection) {
                 return Some(hover_symbol(symbol));
             }
-            let detail = match &declared.ty {
-                Some(ty) => format!(
-                    "{}: {}",
-                    declared.name,
-                    source_slice(file.text(), ty.span())
-                ),
-                None => source_slice(file.text(), &declared.full).trim().to_owned(),
-            };
+            let detail = source_slice(file.text(), &declared.full)
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_owned();
             Some(crate::hover::declaration(
                 declared_noun(declared.kind),
                 &declared.name,
@@ -740,8 +752,8 @@ pub(crate) fn signature_help(
         .filter(|call| call.span.start <= byte && byte <= call.span.end)
         .min_by_key(|call| call.span.end.saturating_sub(call.span.start))?;
     let name = callee_name_span(file, &call.callee)?;
-    let occurrence = file.names.occurrence(&name)?;
-    let functions = match workspace.resolve(module, occurrence).target()? {
+    let occurrence = workspace.occurrence(module, &name)?;
+    let functions = match occurrence.resolved.clone().target()? {
         Target::Declared {
             module: declared_module,
             index,
@@ -1013,7 +1025,7 @@ pub(crate) fn target_location(workspace: &Workspace, target: &Target) -> Option<
         Target::Local { module, binding } => Some(location(
             workspace,
             *module,
-            &workspace.file(*module).names.binding(*binding).selection,
+            &workspace.binding(*module, *binding).selection,
         )),
         Target::Declared { module, index } => Some(location(
             workspace,
@@ -1155,7 +1167,7 @@ pub(crate) fn completion_at(
 
     if !standard_context {
         if let Some(byte) = byte {
-            for binding in file.names.visible_bindings(byte) {
+            for binding in workspace.visible_bindings(module, byte) {
                 let key = binding.key.clone();
                 if !completion_matches(&key, &prefix_key) || !seen.insert(key.clone()) {
                     continue;
