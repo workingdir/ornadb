@@ -1,10 +1,13 @@
 //! The machine: active-call accounting and the entry point.
 
+use std::collections::HashMap;
+
 use orna_hir::{Body, BodyId, DefId, DefKind, FnBody, Program};
 
 use crate::error::{ExecError, Stop};
 use crate::frame::Frame;
 use crate::value::Value;
+use crate::variants::{VariantIds, variant_ids};
 
 /// The resource limits one run is bounded by. Their defaults in the old
 /// evaluator are the parity targets for the differential harness.
@@ -24,6 +27,8 @@ pub struct ExecLimits {
 pub(crate) struct Machine<'p> {
     pub(crate) program: &'p Program,
     pub(crate) limits: ExecLimits,
+    /// The ids of every source enum variant, keyed by its definition.
+    pub(crate) variants: HashMap<DefId, VariantIds>,
     steps: u64,
     depth: usize,
 }
@@ -33,6 +38,7 @@ impl<'p> Machine<'p> {
         Self {
             program,
             limits,
+            variants: variant_ids(program),
             steps: 0,
             depth: 0,
         }

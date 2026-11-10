@@ -4,8 +4,8 @@ use std::rc::Rc;
 
 use num_traits::ToPrimitive;
 use orna_hir::{
-    Arg, ArgValue, Arm, AssignOp, BinOp, Body, BodyId, Call, Callee, DefKind, ExprId, ExprKind,
-    FieldRef, FnBody, Lit, LocalId, LogicOp, Name, ParamDef, Pat, PatId, Place, Stmt,
+    Arg, ArgValue, Arm, AssignOp, BinOp, Body, BodyId, Call, Callee, DefId, DefKind, ExprId,
+    ExprKind, FieldRef, FnBody, Lit, LocalId, LogicOp, Name, ParamDef, Pat, PatId, Place, Stmt,
 };
 
 use crate::binders;
@@ -13,7 +13,7 @@ use crate::error::Stop;
 use crate::frame::Frame;
 use crate::machine::Machine;
 use crate::ops;
-use crate::value::{Closure, Value};
+use crate::value::{Closure, Payload, Value};
 
 impl<'p> Machine<'p> {
     /// Evaluates one expression of `body` in `frame`.
@@ -165,7 +165,7 @@ impl<'p> Machine<'p> {
             Callee::Relational { .. } => Err(Stop::NotYet("relation stage (H7)")),
             Callee::Intrinsic(_) => Err(Stop::NotYet("intrinsic form (H4)")),
             Callee::Pending { .. } => Err(Stop::NotYet("member call awaiting the type pass (H2)")),
-            Callee::Ctor { .. } => Err(Stop::NotYet("enum or money constructor (H4)")),
+            Callee::Ctor { def } => self.construct(body, frame, call, *def),
         }
     }
 
@@ -405,6 +405,106 @@ impl<'p> Machine<'p> {
         Ok(Value::Record(values.into()))
     }
 
+    /// A call of a source enum variant. Its arguments fill the payload fields
+    /// by slot; a variant with no fields takes no arguments.
+    fn construct(
+        &mut self,
+        body: &'p Body,
+        frame: &mut Frame,
+        call: &Call,
+        variant: DefId,
+    ) -> Result<Value, Stop> {
+        let Some(&ids) = self.variants.get(&variant) else {
+            return Err(Stop::NotYet("money or type constructor (H4)"));
+        };
+        let program = self.program;
+        let DefKind::Variant(variant_def) = &program.defs[variant].kind else {
+            return Err(Stop::NotYet("money or type constructor (H4)"));
+        };
+        let arguments = self.arguments(body, frame, call, &[])?;
+        let payload = self.payload(&variant_def.fields, arguments)?;
+        Ok(Value::Enum {
+            type_id: ids.type_id,
+            variant_id: ids.variant_id,
+            payload,
+        })
+    }
+
+    /// Orders constructor arguments into the payload record of a variant. Each
+    /// argument fills the field at its slot; every field is filled exactly once.
+    /// The record is sorted by field name, as the old pipeline stores it.
+    fn payload(&self, fields: &[DefId], arguments: Vec<(usize, Value)>) -> Result<Payload, Stop> {
+        if fields.is_empty() {
+            return if arguments.is_empty() {
+                Ok(None)
+            } else {
+                Err(Stop::Error("ORNA-EVAL-ARGUMENT"))
+            };
+        }
+        let mut slots: Vec<Option<Value>> = vec![None; fields.len()];
+        for (slot, value) in arguments {
+            let Some(cell) = slots.get_mut(slot) else {
+                return Err(Stop::Error("ORNA-EVAL-ARGUMENT"));
+            };
+            if cell.replace(value).is_some() {
+                return Err(Stop::Error("ORNA-EVAL-ARGUMENT"));
+            }
+        }
+        let mut record = Vec::with_capacity(fields.len());
+        for (field, slot) in fields.iter().zip(slots) {
+            let Some(value) = slot else {
+                return Err(Stop::Error("ORNA-EVAL-ARGUMENT"));
+            };
+            record.push((self.program.defs[*field].name.clone(), value));
+        }
+        record.sort_by(|left, right| left.0.cmp(&right.0));
+        Ok(Some(record.into()))
+    }
+
+    /// A constructor pattern: the value must be the same variant, and each field
+    /// pattern must match the payload field it names. A pattern with no field
+    /// patterns matches only a payload-free variant.
+    fn matches_variant(
+        &mut self,
+        body: &'p Body,
+        frame: &mut Frame,
+        variant: DefId,
+        fields: &[(DefId, PatId)],
+        value: Value,
+    ) -> Result<bool, Stop> {
+        let Some(&ids) = self.variants.get(&variant) else {
+            return Err(Stop::NotYet("money or type constructor pattern (H4)"));
+        };
+        let Value::Enum {
+            type_id,
+            variant_id,
+            payload,
+        } = value
+        else {
+            return Ok(false);
+        };
+        if type_id != ids.type_id || variant_id != ids.variant_id {
+            return Ok(false);
+        }
+        match (fields.is_empty(), payload) {
+            (true, None) => Ok(true),
+            (true, Some(_)) | (false, None) => Ok(false),
+            (false, Some(record)) => {
+                let program = self.program;
+                for (field, pat) in fields {
+                    let name = &program.defs[*field].name;
+                    let Some((_, value)) = record.iter().find(|(key, _)| key == name) else {
+                        return Ok(false);
+                    };
+                    if !self.matches(body, frame, *pat, value.clone())? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+        }
+    }
+
     fn field(
         &mut self,
         body: &'p Body,
@@ -548,7 +648,7 @@ impl<'p> Machine<'p> {
                 Value::Record(values) => self.matches_record(body, frame, fields, &values),
                 _ => Ok(false),
             },
-            Pat::Ctor { .. } => Err(Stop::NotYet("constructor pattern")),
+            Pat::Ctor { def, fields } => self.matches_variant(body, frame, *def, fields, value),
         }
     }
 

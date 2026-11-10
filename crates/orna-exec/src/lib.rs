@@ -14,6 +14,7 @@ mod frame;
 mod machine;
 mod ops;
 mod value;
+mod variants;
 
 pub use error::ExecError;
 pub use machine::{ExecLimits, run_entry};

@@ -35,6 +35,16 @@ pub enum Value {
     /// A failure, delivered to a recovery handler. It carries the canonical
     /// code the failure reports.
     Error(&'static str),
+    /// An enum variant: its enum's type id, the variant id, and the payload
+    /// record of a variant with fields. A payload-free variant has no payload.
+    Enum {
+        /// The declaring enum's ObjectId.
+        type_id: [u8; 16],
+        /// The variant's ObjectId, derived from its enum's qualified name.
+        variant_id: [u8; 16],
+        /// The payload fields, in name order.
+        payload: Option<Rc<[(Name, Value)]>>,
+    },
 }
 
 /// A lambda's body and the values captured when it was created.
@@ -64,7 +74,7 @@ impl Value {
             Self::Tuple(values) => Ok(Raw::Tag(TUPLE_TAG, Box::new(array(values)?))),
             Self::List(values) => array(values),
             Self::Record(fields) => record_raw(fields),
-            Self::Closure(_) => Err("ORNA-EVAL-UNSUPPORTED"),
+            Self::Closure(_) | Self::Enum { .. } => Err("ORNA-EVAL-UNSUPPORTED"),
             Self::Error(code) => Err(code),
         }
     }
@@ -104,3 +114,7 @@ fn record_raw(fields: &[(Name, Value)]) -> Result<Raw, &'static str> {
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Raw::Map(entries))
 }
+
+/// The payload record of an enum variant: its fields in name order, or none
+/// for a payload-free variant.
+pub(crate) type Payload = Option<Rc<[(Name, Value)]>>;
