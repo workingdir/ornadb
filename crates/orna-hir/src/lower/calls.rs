@@ -220,24 +220,7 @@ fn classify_path(
         crate::resolve::PathKind::NotAModule
         | crate::resolve::PathKind::Ambiguous
         | crate::resolve::PathKind::Unresolved => {
-            // The root is the name that failed, not the member written after
-            // it: a member spelling is not a name in any scope.
-            super::record_body_use(
-                &mut builder.program,
-                module,
-                state.id,
-                segments[0].1.clone(),
-                names[0].clone(),
-                crate::UseContext::Value,
-                NameTarget::Unresolved,
-            );
-            builder.diagnose(
-                module,
-                crate::diag::UNRESOLVED,
-                format!("`{}` is not in scope", names[0]),
-                segments[0].1.clone(),
-            );
-            None
+            report_unresolved_root(builder, state, segments, &names)
         }
         crate::resolve::PathKind::Module(_) => {
             builder.diagnose(
@@ -249,6 +232,33 @@ fn classify_path(
             None
         }
     }
+}
+
+/// Reports a path whose root name does not resolve.
+fn report_unresolved_root(
+    builder: &mut Builder<'_>,
+    state: &BodyState,
+    segments: &[(&str, SyntaxSpan)],
+    names: &[Name],
+) -> ClassifiedCallee {
+    // The root is the name that failed, not the member written after
+    // it: a member spelling is not a name in any scope.
+    super::record_body_use(
+        &mut builder.program,
+        state.module,
+        state.id,
+        segments[0].1.clone(),
+        names[0].clone(),
+        crate::UseContext::Value,
+        NameTarget::Unresolved,
+    );
+    builder.diagnose(
+        state.module,
+        crate::diag::UNRESOLVED,
+        format!("`{}` is not in scope", names[0]),
+        segments[0].1.clone(),
+    );
+    None
 }
 
 /// The classification of a resolved definition.

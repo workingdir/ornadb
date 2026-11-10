@@ -408,47 +408,7 @@ impl Builder<'_> {
         implementation: &Implementation,
         span: SyntaxSpan,
     ) -> DefId {
-        let protocol = match &implementation.protocol {
-            TypeExpr::Name { path, span, .. } if !path.is_empty() => {
-                let segments = path
-                    .iter()
-                    .map(|segment| crate::Name::new(segment))
-                    .collect::<Vec<_>>();
-                let last = segments
-                    .last()
-                    .cloned()
-                    .unwrap_or_else(|| crate::Name::new(""));
-                let name_span = orna_syntax::SyntaxSpan::new(
-                    span.end.saturating_sub(last.as_str().len()),
-                    span.end,
-                );
-                match self.resolve_path(module, &segments) {
-                    super::super::resolve::PathKind::Def(def) => {
-                        super::record_use(
-                            &mut self.program,
-                            module,
-                            name_span,
-                            last,
-                            crate::UseContext::Type,
-                            crate::NameTarget::Def(def),
-                        );
-                        Some(def)
-                    }
-                    _ => {
-                        super::record_use(
-                            &mut self.program,
-                            module,
-                            name_span,
-                            last,
-                            crate::UseContext::Type,
-                            crate::NameTarget::Unresolved,
-                        );
-                        None
-                    }
-                }
-            }
-            _ => None,
-        };
+        let protocol = self.resolve_protocol(module, &implementation.protocol);
         let mut members = Vec::new();
         for member in &implementation.members {
             match member {
@@ -531,6 +491,51 @@ impl Builder<'_> {
             span,
             DefKind::Impl(ImplDef { protocol, members }),
         )
+    }
+
+    /// Resolves the protocol an implementation names, recording the use.
+    fn resolve_protocol(&mut self, module: ModuleId, protocol: &TypeExpr) -> Option<DefId> {
+        match protocol {
+            TypeExpr::Name { path, span, .. } if !path.is_empty() => {
+                let segments = path
+                    .iter()
+                    .map(|segment| crate::Name::new(segment))
+                    .collect::<Vec<_>>();
+                let last = segments
+                    .last()
+                    .cloned()
+                    .unwrap_or_else(|| crate::Name::new(""));
+                let name_span = orna_syntax::SyntaxSpan::new(
+                    span.end.saturating_sub(last.as_str().len()),
+                    span.end,
+                );
+                match self.resolve_path(module, &segments) {
+                    super::super::resolve::PathKind::Def(def) => {
+                        super::record_use(
+                            &mut self.program,
+                            module,
+                            name_span,
+                            last,
+                            crate::UseContext::Type,
+                            crate::NameTarget::Def(def),
+                        );
+                        Some(def)
+                    }
+                    _ => {
+                        super::record_use(
+                            &mut self.program,
+                            module,
+                            name_span,
+                            last,
+                            crate::UseContext::Type,
+                            crate::NameTarget::Unresolved,
+                        );
+                        None
+                    }
+                }
+            }
+            _ => None,
+        }
     }
 
     /// The generic parameters of a declaration, with resolved protocol bounds.
