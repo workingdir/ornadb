@@ -47,12 +47,13 @@ impl<'p> Machine<'p> {
         Ok(())
     }
 
-    /// Runs one function body with its argument slots already bound. A
-    /// `return` ends the call with its value.
+    /// Runs one body with its argument slots and capture slots already bound.
+    /// A `return` ends the call with its value.
     pub(crate) fn invoke(
         &mut self,
         body_id: BodyId,
         arguments: Vec<(usize, Value)>,
+        captured: &[Value],
     ) -> Result<Value, Stop> {
         if self.depth >= self.limits.max_depth {
             return Err(Stop::Error("ORNA-EVAL-LIMIT"));
@@ -61,7 +62,13 @@ impl<'p> Machine<'p> {
         let body: &'p Body = &program.bodies[body_id];
         let mut frame = Frame::new(body.locals.len());
         for (index, value) in arguments {
-            frame.set(body.params[index], value)?;
+            let Some(&local) = body.params.get(index) else {
+                return Err(Stop::Error("ORNA-EVAL-ARGUMENT"));
+            };
+            frame.set(local, value)?;
+        }
+        for (capture, value) in body.captures.iter().zip(captured) {
+            frame.set(capture.inner, value.clone())?;
         }
         self.depth += 1;
         let result = self.eval(body, &mut frame, body.root);
@@ -90,5 +97,7 @@ pub fn run_entry(program: &Program, entry: DefId, limits: ExecLimits) -> Result<
         return Err(ExecError::NotYet("entry takes arguments"));
     }
     let mut machine = Machine::new(program, limits);
-    machine.invoke(body_id, Vec::new()).map_err(ExecError::from)
+    machine
+        .invoke(body_id, Vec::new(), &[])
+        .map_err(ExecError::from)
 }
