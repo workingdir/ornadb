@@ -197,6 +197,7 @@ struct Measured {
     steps: u64,
     calls: usize,
     wall: Duration,
+    value: CanonicalValue,
 }
 
 /// Runs one named function under a caller-owned budget and a call collector.
@@ -220,12 +221,24 @@ fn measure(
         )
     });
     let wall = started.elapsed();
-    result.map_err(|error| format!("{name} failed: {}", error.code()))?;
+    let value = result.map_err(|error| format!("{name} failed: {}", error.code()))?;
     Ok(Measured {
         steps: limits.max_steps - budget.remaining(),
         calls: records.len(),
         wall,
+        value,
     })
+}
+
+/// Asserts the benchmarked program produced the value it is supposed to
+/// produce, so a change that makes the evaluator skip work cannot masquerade as
+/// an improvement.
+fn expect(value: &CanonicalValue, expected: i64, benchmark: &str) {
+    assert_eq!(
+        value.raw(),
+        &Raw::Int(BigInt::from(expected)),
+        "{benchmark} produced an unexpected value"
+    );
 }
 
 fn json(object: &[(&str, String)]) -> String {
@@ -301,6 +314,10 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+
+    expect(&b1.value, 75_025, "b1_fib_25");
+    expect(&b2.value, 500_000_500_000, "b2_fold_1000000");
+    expect(&b3.value, 49_000, "b3_filter_100000");
 
     let benchmarks = BTreeMap::from([
         ("b1_fib_25".to_owned(), record(&b1)),
