@@ -56,7 +56,7 @@ fn the_unmutated_catalogues_generate() {
             .engine_functions
             .contains("pub enum EngineFunction")
     );
-    assert_eq!(generated.files().len(), 8);
+    assert_eq!(generated.files().len(), 9);
 }
 
 #[test]

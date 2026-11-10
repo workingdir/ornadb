@@ -183,16 +183,35 @@ impl fmt::Display for SystemMember<'_> {
     }
 }
 
+/// Resolves a catalogue-spelled admission member to its generated identity.
+/// An unknown spelling cannot be admitted, because no provider can be linked
+/// for a member the catalogue does not name.
 #[cfg(not(target_arch = "wasm32"))]
-impl<'a> From<SystemMember<'a>> for orna_sys::SystemSurfaceMember<'a> {
-    fn from(member: SystemMember<'a>) -> Self {
-        match member {
-            SystemMember::Callable(label) => Self::Callable(label),
-            SystemMember::Relation(path) => Self::Relation(path),
-            SystemMember::HistoricalView(path) => Self::HistoricalView(path),
-            SystemMember::Singleton(name) => Self::Singleton(name),
+fn typed_member(member: SystemMember<'_>) -> Option<orna_sys::SystemSurfaceMember> {
+    use orna_sys::{
+        HistoricalViewMember, SysFunction, SysGroupedHandle, SysRelation, SysSingleton,
+        SystemSurfaceMember,
+    };
+    Some(match member {
+        SystemMember::Callable(label) => {
+            SystemSurfaceMember::Callable(SysFunction::from_label(label)?)
         }
-    }
+        SystemMember::Relation(path) => match SysRelation::parse(path) {
+            Some(relation) => SystemSurfaceMember::Relation(relation),
+            None => SystemSurfaceMember::GroupedHandle(SysGroupedHandle::parse(path)?),
+        },
+        SystemMember::HistoricalView(path) => {
+            let view = if let Some(relation) = SysRelation::parse(path) {
+                HistoricalViewMember::Relation(relation)
+            } else if let Some(handle) = SysGroupedHandle::parse(path) {
+                HistoricalViewMember::GroupedHandle(handle)
+            } else {
+                HistoricalViewMember::Singleton(SysSingleton::parse(path)?)
+            };
+            SystemSurfaceMember::HistoricalView(view)
+        }
+        SystemMember::Singleton(name) => SystemSurfaceMember::Singleton(SysSingleton::parse(name)?),
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -238,16 +257,27 @@ impl SystemApi {
         use orna_sys::SystemSurfaceMember;
 
         let published = |link: &orna_sys::SystemProviderLink| match link.member {
-            SystemSurfaceMember::Callable(label) => self
+            SystemSurfaceMember::Callable(function) => self
                 .functions
                 .values()
                 .flatten()
-                .any(|function| function.label == label),
-            SystemSurfaceMember::Relation(path) => self.relation(path).is_some(),
-            SystemSurfaceMember::HistoricalView(path) => {
-                self.relation(path).is_some() || self.singletons.contains_key(path)
+                .any(|descriptor| descriptor.label == function.label()),
+            SystemSurfaceMember::Relation(relation) => self.relation(relation.name()).is_some(),
+            SystemSurfaceMember::GroupedHandle(handle) => self.relation(handle.name()).is_some(),
+            SystemSurfaceMember::HistoricalView(view) => match view {
+                orna_sys::HistoricalViewMember::Relation(relation) => {
+                    self.relation(relation.name()).is_some()
+                }
+                orna_sys::HistoricalViewMember::GroupedHandle(handle) => {
+                    self.relation(handle.name()).is_some()
+                }
+                orna_sys::HistoricalViewMember::Singleton(singleton) => {
+                    self.singletons.contains_key(singleton.name())
+                }
+            },
+            SystemSurfaceMember::Singleton(singleton) => {
+                self.singletons.contains_key(singleton.name())
             }
-            SystemSurfaceMember::Singleton(name) => self.singletons.contains_key(name),
         };
         if links.into_iter().all(published) {
             Ok(())
@@ -819,7 +849,8 @@ impl SystemApi {
     /// True when a production host links a provider for `member`.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn provider_linked(&self, member: SystemMember<'_>) -> bool {
-        orna_sys::system_provider_linkage().is_linked(member.into())
+        typed_member(member)
+            .is_some_and(|member| orna_sys::system_provider_linkage().is_linked(member))
     }
 
     /// Wasm builds carry no host bindings, so no provider is linked there.
@@ -2214,8 +2245,6 @@ mod tests {
 
     #[test]
     fn provider_links_must_name_published_members_of_their_kind() {
-        use orna_sys::{SystemProviderHost, SystemProviderLink, SystemSurfaceMember};
-
         let api = SystemApi::embedded().unwrap();
         assert_eq!(
             api.validate_provider_links(orna_sys::system_provider_linkage().links()),
@@ -2223,22 +2252,16 @@ mod tests {
         );
         assert!(api.provider_linked(SystemMember::Callable("sys.blob.annotate")));
         assert!(api.provider_linked(SystemMember::Callable("sys.rt.info")));
+        // A spelling the catalogue does not name has no typed identity, so no
+        // provider can be linked for it.
         for member in [
-            SystemSurfaceMember::Callable("sys.blob.annotate_all"),
-            SystemSurfaceMember::Callable("sys.snapshot"),
-            SystemSurfaceMember::Relation("sys.rt"),
-            SystemSurfaceMember::HistoricalView("sys.rt.info"),
-            SystemSurfaceMember::Singleton("sys.Storage"),
+            SystemMember::Callable("sys.blob.annotate_all"),
+            SystemMember::Callable("sys.snapshot"),
+            SystemMember::Relation("sys.rt"),
+            SystemMember::HistoricalView("sys.rt.info"),
+            SystemMember::Singleton("sys.Storage"),
         ] {
-            let link = SystemProviderLink {
-                member,
-                host: SystemProviderHost::Evaluator,
-            };
-            assert_eq!(
-                api.validate_provider_links([&link]),
-                Err(SystemApiError::ProviderLinkMismatch),
-                "{member:?}"
-            );
+            assert!(!api.provider_linked(member), "{member:?}");
         }
     }
 
