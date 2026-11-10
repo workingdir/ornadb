@@ -63,7 +63,10 @@ pub fn run_case(case: &Case) -> ExecOutcome {
         return ExecOutcome::NotYet(format!("the entry `{entry}` is not a function of the case"));
     };
     match run_entry(&lowered.program, def, EXEC_LIMITS) {
-        Ok(value) => ExecOutcome::Ran(encode(value.to_raw())),
+        Ok(value) => ExecOutcome::Ran(match value.to_raw() {
+            Ok(raw) => encode(raw),
+            Err(code) => Err(code.to_owned()),
+        }),
         Err(ExecError::Code(STEP_LIMIT_CODE)) => ExecOutcome::NotYet(
             "the step budget ends the run; step parity is not measured yet".to_owned(),
         ),
