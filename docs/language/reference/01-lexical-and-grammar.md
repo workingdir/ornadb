@@ -74,6 +74,9 @@ Rules:
    `12.34.GBP` are a literal followed by `.name`. The name is resolved as chapter 5
    describes: a unit variant in scope first, then a type with a literal target, such as a
    currency. Any other name is an error.
+7. `1.day` and `7.days` are elapsed `Duration` values (chapter 05). Calendar
+   periods are `Period`, written `1.months` or `Period.days(n)`. `12.34.GBP` is the
+   library type `Money<GBP>` (chapter 02).
 
 ### Dates and instants
 
