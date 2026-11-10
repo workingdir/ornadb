@@ -35,8 +35,11 @@ fn hir_call_classification_matches_the_route_trace() {
     let all_expected = compare::load_expected_differences().expect("the ratchet file parses");
     for entry in &all_expected {
         assert!(
-            entry.field.starts_with("call") || entry.field.starts_with("resolution"),
-            "{}: `{}` is not a compared field; the classification and resolution tests own this file",
+            entry.field.starts_with("call")
+                || entry.field.starts_with("resolution")
+                || entry.field == "public-signature",
+            "{}: `{}` is not a compared field; the classification, resolution and signature \
+             tests own this file",
             entry.case,
             entry.field
         );
