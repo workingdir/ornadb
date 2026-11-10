@@ -3,9 +3,10 @@
 //!
 //! Their sources live under `interface/` and are generated from the old
 //! catalogue by `scripts/gen_core_interface.py`. They declare the engine's
-//! natives with body-less `native fn`, which lowering admits only in these
-//! modules. Lowering loads them ahead of every caller's sources, so a native
-//! call always has a signature to type against.
+//! natives with body-less `native fn`, which bind to the engine registry (a
+//! key in these modules is an engine native; see `NativeBinding`). Lowering
+//! loads them ahead of every caller's sources, so a native call always has a
+//! signature to type against.
 
 use orna_syntax::{SyntaxTree, parse_module_with_file};
 
@@ -80,13 +81,6 @@ pub(crate) fn parse_all() -> Vec<EmbeddedModule> {
 pub(crate) fn source_id(index: usize) -> SourceId {
     let offset = u32::try_from(index).expect("embedded module count fits u32");
     SourceId::new(EMBEDDED_SOURCE_BASE + offset)
-}
-
-/// Whether a source id belongs to an embedded module, the only sources that
-/// may declare natives.
-pub(crate) fn is_embedded_source(source: SourceId) -> bool {
-    let raw = source.as_u32();
-    raw >= EMBEDDED_SOURCE_BASE && raw < EMBEDDED_SOURCE_BASE + FILES.len() as u32
 }
 
 #[cfg(test)]

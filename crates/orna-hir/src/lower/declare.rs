@@ -98,7 +98,7 @@ pub(crate) struct PendingFunction {
 pub(crate) enum DeclAst {
     /// A function.
     Function(FunctionSignature, Expr),
-    /// A body-less native function, admitted only in an embedded module.
+    /// A body-less native function, in any module unit (ORNA-NATIVE-004).
     Native(FunctionSignature, Option<NativeEffectSet>),
     /// A table.
     Table(Vec<Parameter>, Vec<TableMember>),
@@ -302,20 +302,6 @@ impl<'a> Builder<'a> {
                 tail: tail.clone(),
                 span: item.span.clone(),
             });
-            return;
-        }
-        if let Declaration::Native { signature, .. } = &item.declaration
-            && !crate::embedded::is_embedded_source(self.program.modules[module].source)
-        {
-            self.diagnose(
-                module,
-                crate::diag::NATIVE_ADMISSION,
-                format!(
-                    "native declaration `{}` is admitted only in the engine-embedded core and sys modules",
-                    signature.name
-                ),
-                item.span.clone(),
-            );
             return;
         }
         let Some(name) = item_name(&item.declaration) else {

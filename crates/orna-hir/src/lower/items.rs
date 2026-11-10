@@ -133,13 +133,31 @@ impl Builder<'_> {
             }
             DeclAst::Native(signature, clause) => {
                 let mut head = self.build_function_head(def, module, &signature);
-                let key = crate::NativeKey {
-                    module: self.program.modules[module].path.clone(),
-                    name: crate::Name::new(&signature.name),
+                let path = self.program.modules[module].path.clone();
+                let name = crate::Name::new(&signature.name);
+                let binding = match self.program.modules[module].origin {
+                    crate::ModuleOrigin::Core | crate::ModuleOrigin::Sys => {
+                        crate::NativeBinding::Engine {
+                            abi: self.program.native_abi,
+                        }
+                    }
+                    _ => {
+                        let (symbol, ascii) = native_symbol(&path, &name);
+                        if !ascii {
+                            let span = self.pending[def.index()].span.clone();
+                            self.diagnose(
+                                module,
+                                crate::diag::UNSUPPORTED,
+                                format!("native `{}` has a name outside [A-Za-z0-9_]: no library symbol", signature.name),
+                                span,
+                            );
+                        }
+                        crate::NativeBinding::Library { symbol }
+                    }
                 };
                 head.native = Some(crate::NativeDecl {
-                    abi: self.program.native_abi,
-                    key,
+                    binding,
+                    key: crate::NativeKey { module: path, name },
                     effects: declared_effects(clause.as_ref()),
                 });
                 self.pending[def.index()].kind = PendingKind::Function(Box::new(head));
@@ -960,6 +978,23 @@ fn generic_names(generics: &[GenericParameter]) -> Vec<crate::Name> {
         .iter()
         .map(|generic| crate::Name::new(&generic.name))
         .collect()
+}
+
+/// The C symbol a shared library exports for a native key (library document
+/// section 4): `orna_` followed by the module path segments and the name joined
+/// by `__`. The flag is false when a part is outside `[A-Za-z0-9_]`.
+fn native_symbol(module: &crate::ModulePath, name: &crate::Name) -> (String, bool) {
+    let parts: Vec<&str> = module
+        .segments()
+        .iter()
+        .chain(std::iter::once(name))
+        .map(crate::Name::as_str)
+        .collect();
+    let ascii = parts.iter().all(|part| {
+        part.bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    });
+    (format!("orna_{}", parts.join("__")), ascii)
 }
 
 /// The effect kinds a native declaration's `effect` clause names (ORNA-NATIVE-009).

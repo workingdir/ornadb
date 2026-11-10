@@ -27,8 +27,6 @@ pub const DUPLICATE: &str = "ORNA-S013-DUPLICATE";
 pub const UNSUPPORTED: &str = "ORNA-S022-UNSUPPORTED";
 /// A unit name that names no unit of a family or unit declaration in scope (units.md ORNA-UNIT-UNRESOLVED).
 pub const UNIT_UNRESOLVED: &str = "ORNA-UNIT-UNRESOLVED";
-/// A `native fn` outside the engine-embedded `core` and `sys` modules (D12).
-pub const NATIVE_ADMISSION: &str = "ORNA-NATIVE-004";
 /// A call whose arguments do not bind to its parameters.
 ///
 /// The classifier keeps the evaluator's code so a consumer sees one
