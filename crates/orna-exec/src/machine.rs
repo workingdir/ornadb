@@ -1,5 +1,6 @@
 //! The machine: active-call accounting and the entry point.
 
+use std::cell::OnceCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -43,7 +44,7 @@ pub(crate) struct Machine<'p> {
     pub(crate) program: &'p Program,
     pub(crate) limits: ExecLimits,
     /// The ids of every source enum variant, keyed by its definition.
-    pub(crate) variants: HashMap<DefId, VariantIds>,
+    variants: OnceCell<HashMap<DefId, VariantIds>>,
     /// The owner's cancellation request. Once set, the run ends with
     /// [`Stop::Cancelled`] at its next step.
     cancel: Option<Arc<AtomicBool>>,
@@ -57,12 +58,21 @@ impl<'p> Machine<'p> {
         Self {
             program,
             limits,
-            variants: variant_ids(program),
+            variants: OnceCell::new(),
             cancel,
             steps: 0,
             calls: 0,
             depth: 0,
         }
+    }
+
+    /// The ids of the source enum variant `variant`. The map is built on first
+    /// use, so a run that never constructs or matches a variant pays nothing.
+    pub(crate) fn variant_ids_of(&self, variant: DefId) -> Option<VariantIds> {
+        self.variants
+            .get_or_init(|| variant_ids(self.program))
+            .get(&variant)
+            .copied()
     }
 
     /// Charges one expression evaluation against the step limit, and ends the

@@ -446,7 +446,7 @@ impl<'p> Machine<'p> {
         call: &Call,
         variant: DefId,
     ) -> Result<Value, Stop> {
-        let Some(&ids) = self.variants.get(&variant) else {
+        let Some(ids) = self.variant_ids_of(variant) else {
             return Err(Stop::NotYet("money or type constructor (H4)"));
         };
         let program = self.program;
@@ -504,7 +504,7 @@ impl<'p> Machine<'p> {
         fields: &[(DefId, PatId)],
         value: Value,
     ) -> Result<bool, Stop> {
-        let Some(&ids) = self.variants.get(&variant) else {
+        let Some(ids) = self.variant_ids_of(variant) else {
             return Err(Stop::NotYet("money or type constructor pattern (H4)"));
         };
         let Value::Enum {
@@ -610,7 +610,7 @@ impl<'p> Machine<'p> {
 
     /// Builds a closure over the variables its body captures. The closure shares
     /// each variable's slot, so an assignment on either side is seen by the other.
-    fn lambda(&self, frame: &Frame, lambda: BodyId) -> Result<Value, Stop> {
+    fn lambda(&self, frame: &mut Frame, lambda: BodyId) -> Result<Value, Stop> {
         let program = self.program;
         let captures = &program.bodies[lambda].captures;
         let mut captured = Vec::with_capacity(captures.len());
