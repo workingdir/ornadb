@@ -33,6 +33,20 @@ pub const UNSUPPORTED: &str = "ORNA-S022-UNSUPPORTED";
 /// vocabulary changes.
 pub const ARGUMENT: &str = "ORNA-EVAL-ARGUMENT";
 
+/// Two constraints on one expression disagree.
+///
+/// The classification is the specification requirement that governs the
+/// report: "Inference errors MUST show the conflicting constraints and their
+/// source spans" (ORNA-INFER-011).
+pub const INFER_CONFLICT: &str = "ORNA-INFER-011";
+
+/// An inference variable is still unsolved after its body was checked.
+///
+/// The classification is the requirement that asks inference to name the
+/// smallest useful annotation site instead of demanding annotations everywhere
+/// (ORNA-INFER-007).
+pub const INFER_AMBIGUOUS: &str = "ORNA-INFER-007";
+
 /// One diagnostic raised while lowering a module.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HirDiagnostic {

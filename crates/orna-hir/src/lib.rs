@@ -9,8 +9,16 @@
 //! names, imports, locals, slots and patterns (design section 2.2), the one
 //! argument binder (section 2.7), `Callee` classification for every call
 //! (section 2.6), the per-module [`NameUse`] index, and the item and body
-//! lowering behind the same total [`lower`] entry point. There is still no
-//! type inference or effect inference: those arrive in H2 and H3.
+//! lowering behind the same total [`lower`] entry point.
+//!
+//! Stage H2a adds the type pass: one interned [`Ty`], the first-order
+//! [`InferCtxt`] local to a body, operator tables over types, expression
+//! typing for fully annotated programs, call checking per [`Callee`] (a
+//! `Pending` member call is settled from the receiver's type), and diagnostics
+//! with spans under the ORNA-INFER codes. A construct outside the subset is a
+//! [`NotYetReason`] rather than a program error. Effect inference arrives in
+//! H3, and the `core`/`sys` native declarations needed to type `core` and `sys`
+//! calls arrive with H2b/H5, so those calls stay "not yet on HIR" here.
 //!
 //! The crate depends on `orna-syntax` (input), `orna-value` (the portable
 //! diagnostic the admission boundary converts to), `num-bigint` (literal
@@ -26,12 +34,16 @@ mod def;
 pub mod diag;
 mod effects;
 mod ids;
+pub mod infer;
 mod lower;
 mod name_use;
+pub mod ops;
 mod pat;
+pub mod print;
 mod program;
 mod resolve;
 mod ty;
+pub mod typeck;
 mod validate;
 
 pub use body::{
@@ -49,9 +61,12 @@ pub use effects::{EffectKind, EffectRow, EffectSet, EffectVar};
 pub use ids::{
     BodyId, DefId, ExprId, Idx, IndexVec, LocalId, ModuleId, ModulePath, Name, PatId, SourceId,
 };
+pub use infer::{Conflict, InferCtxt};
 pub use lower::{SourceUnit, lower};
 pub use name_use::{NameTarget, NameUse, UseContext};
 pub use pat::Pat;
+pub use print::{print_signature, print_type};
 pub use program::{Import, ImportTarget, Module, ModuleOrigin, Program};
 pub use ty::{FnTy, ParamIdx, Ty, TyInterner, TyKind, TyVar};
+pub use typeck::{BodyOutcome, NotYetReason, TypeCheckSummary, typeck};
 pub use validate::ValidationError;
