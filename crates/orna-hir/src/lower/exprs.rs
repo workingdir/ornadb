@@ -15,8 +15,8 @@ use orna_syntax::{
 };
 
 use crate::{
-    AssignOp, BinOp, Call, Capture, Expr, ExprId, ExprKind, FieldRef, InterpPart, LogicOp, Name,
-    NameTarget, Place, Stmt, UnOp,
+    AssignOp, BinOp, Call, Capture, DefId, DefKind, Expr, ExprId, ExprKind, FieldRef, Idx,
+    InterpPart, LogicOp, Name, NameTarget, Place, Stmt, Ty, TyKind, UnOp,
 };
 
 use super::calls::{attach_type_arguments, classify_callee};
@@ -181,16 +181,56 @@ fn lower_operator(
             )
         }
         AstExpr::Field { base, name, span } => {
+            let member_of_path = qualified_member(builder, state, base.as_ref(), name);
             let base = lower_expr(builder, state, base);
-            push(
-                builder,
-                state,
-                ExprKind::Field {
-                    base,
-                    field: FieldRef::Name(Name::new(name)),
-                },
-                span.clone(),
-            )
+            let field_name = Name::new(name);
+            let name_span = SyntaxSpan::new(span.end.saturating_sub(name.len()), span.end);
+            let base_ty = state.exprs[base].ty;
+            match field_of_type(builder, base_ty, &field_name) {
+                Some(field) => {
+                    let ty = field_type(builder, field);
+                    super::record_body_use(
+                        &mut builder.program,
+                        state.module,
+                        state.id,
+                        name_span,
+                        field_name,
+                        crate::UseContext::Field,
+                        NameTarget::Def(field),
+                    );
+                    push_typed(
+                        builder,
+                        state,
+                        ExprKind::Field {
+                            base,
+                            field: FieldRef::Def(field),
+                        },
+                        span.clone(),
+                        ty,
+                    )
+                }
+                None => {
+                    let member = member_of_path;
+                    super::record_body_use(
+                        &mut builder.program,
+                        state.module,
+                        state.id,
+                        name_span,
+                        field_name.clone(),
+                        crate::UseContext::Field,
+                        member.map_or(NameTarget::Unresolved, NameTarget::Def),
+                    );
+                    push(
+                        builder,
+                        state,
+                        ExprKind::Field {
+                            base,
+                            field: FieldRef::Name(field_name),
+                        },
+                        span.clone(),
+                    )
+                }
+            }
         }
         AstExpr::Group { inner, .. } => lower_expr(builder, state, inner),
         _ => return None,
@@ -283,6 +323,95 @@ pub(crate) fn push(
     state.push_expr(Expr { kind, ty, span })
 }
 
+/// Adds one expression with the type its declaration already states.
+pub(crate) fn push_typed(
+    builder: &mut Builder<'_>,
+    state: &mut BodyState,
+    kind: ExprKind,
+    span: SyntaxSpan,
+    ty: Ty,
+) -> ExprId {
+    let _ = builder;
+    state.push_expr(Expr { kind, ty, span })
+}
+
+/// The field definition `name` denotes on a value of `ty`, when the written
+/// type states it. This reads declared types only; inference is stage H2.
+fn field_of_type(builder: &Builder<'_>, ty: Ty, name: &Name) -> Option<DefId> {
+    match builder.program.tys.kind(ty)? {
+        TyKind::Adt(def, _) => payload_fields(builder, *def)
+            .into_iter()
+            .find(|field| builder.def_name(*field) == name),
+        TyKind::Option(inner)
+        | TyKind::List(inner)
+        | TyKind::Range(inner)
+        | TyKind::Relation(inner)
+        | TyKind::Stream(inner) => field_of_type(builder, *inner, name),
+        _ => None,
+    }
+}
+
+/// The definition a `base.name` access that has no field type names: a
+/// member of the type or enum the dotted `base` path names (`Status.draft`),
+/// or the unit a numeric literal's suffix names (`1000.metre`).
+fn qualified_member(
+    builder: &Builder<'_>,
+    state: &BodyState,
+    base: &AstExpr,
+    name: &str,
+) -> Option<DefId> {
+    if matches!(
+        base,
+        AstExpr::Literal {
+            kind: orna_syntax::LiteralKind::Integer
+                | orna_syntax::LiteralKind::Decimal
+                | orna_syntax::LiteralKind::Float,
+            ..
+        }
+    ) {
+        return builder.resolve_unit(state.module, &Name::new(name));
+    }
+    let mut segments = Vec::new();
+    if !flatten_path(base, &mut segments) {
+        return None;
+    }
+    let root = Name::new(segments.first()?.0);
+    if state.local(&root).is_some() {
+        return None;
+    }
+    let names = segments
+        .iter()
+        .map(|(text, _)| Name::new(text))
+        .collect::<Vec<_>>();
+    match builder.resolve_path(state.module, &names) {
+        crate::resolve::PathKind::Def(owner) => builder.member_def(owner, &Name::new(name)),
+        _ => None,
+    }
+}
+
+/// The declared type of a field definition.
+fn field_type(builder: &mut Builder<'_>, field: DefId) -> Ty {
+    match &builder.pending[field.index()].kind {
+        super::declare::PendingKind::Built(DefKind::Field(definition)) => definition.ty,
+        _ => builder.program.tys.error(),
+    }
+}
+
+/// The field definitions a table, nominal type or enum variant owns.
+fn payload_fields(builder: &Builder<'_>, owner: DefId) -> Vec<DefId> {
+    payload(builder, owner)
+}
+
+fn payload(builder: &Builder<'_>, owner: DefId) -> Vec<DefId> {
+    use super::declare::PendingKind;
+    match &builder.pending[owner.index()].kind {
+        PendingKind::Built(DefKind::Variant(variant)) => variant.fields.clone(),
+        PendingKind::Built(DefKind::Type(definition)) => definition.members.clone(),
+        PendingKind::Built(DefKind::Table(table)) => table.fields.clone(),
+        _ => Vec::new(),
+    }
+}
+
 /// Adds one diagnostic expression.
 pub(crate) fn error_expr(
     builder: &mut Builder<'_>,
@@ -310,14 +439,17 @@ pub(crate) fn lower_name(
     let name = Name::new(text);
     let span = span.clone();
     if let Some(local) = state.local(&name) {
-        super::record_value_use(
+        super::record_body_use(
             &mut builder.program,
             state.module,
+            state.id,
             span.clone(),
             name,
+            crate::UseContext::Value,
             NameTarget::Local(local),
         );
-        return push(builder, state, ExprKind::Local(local), span.clone());
+        let ty = state.locals[local].ty;
+        return push_typed(builder, state, ExprKind::Local(local), span.clone(), ty);
     }
     let module = state.module;
     let target = builder.resolve_bare(module, &name);
@@ -443,12 +575,12 @@ fn lower_recover(
     span: &SyntaxSpan,
 ) -> ExprId {
     let body = lower_expr(builder, state, lhs);
-    state.push_scope();
+    state.push_scope(span.start);
     let error_ty = builder.program.tys.error();
     let handler = state.add_local(Name::new(ERROR_SLOT), error_ty, span.clone());
     let error_value = push(builder, state, ExprKind::Local(handler), span.clone());
     let arm = lower_stage(builder, state, rhs, Some(error_value), span);
-    state.pop_scope();
+    state.pop_scope(span.end);
     push(
         builder,
         state,
@@ -493,20 +625,20 @@ fn lower_stage(
 }
 
 /// The segments of a dotted path, when the expression is one.
-pub(crate) fn flatten_path<'a>(
-    expr: &'a AstExpr,
-    out: &mut Vec<(&'a str, &'a SyntaxSpan)>,
-) -> bool {
+pub(crate) fn flatten_path<'a>(expr: &'a AstExpr, out: &mut Vec<(&'a str, SyntaxSpan)>) -> bool {
     match expr {
         AstExpr::Name { text, span } => {
-            out.push((text, span));
+            out.push((text, span.clone()));
             true
         }
         AstExpr::Field { base, name, span } => {
             if !flatten_path(base, out) {
                 return false;
             }
-            out.push((name, span));
+            // A field expression's span covers the receiver too; the name is
+            // its last `name.len()` bytes.
+            let name_span = SyntaxSpan::new(span.end.saturating_sub(name.len()), span.end);
+            out.push((name, name_span));
             true
         }
         AstExpr::Group { inner, .. } => flatten_path(inner, out),
@@ -529,8 +661,17 @@ fn lower_call(
     let target = classify_callee(builder, state, callee, span);
     let (callee, params) = match target {
         Some(classified) => classified,
-        None => return error_expr(builder, state, span.clone()),
+        None => {
+            // The callee did not resolve: keep the occurrence the callee
+            // wrote, and lower the arguments so their names are still indexed.
+            super::mark_callee(&mut builder.program, module, &callee_span);
+            for argument in arguments {
+                let _ = lower_expr(builder, state, &argument.value);
+            }
+            return error_expr(builder, state, span.clone());
+        }
     };
+    super::mark_callee(&mut builder.program, module, &callee_span);
     let callee = attach_type_arguments(builder, state, callee, type_arguments);
     let lowered = arguments
         .iter()
@@ -551,7 +692,8 @@ fn lower_call(
         placeholder,
         span,
     );
-    push(
+    let ty = call_type(builder, &callee);
+    push_typed(
         builder,
         state,
         ExprKind::Call(Box::new(Call {
@@ -561,7 +703,81 @@ fn lower_call(
             piped,
         })),
         span.clone(),
+        ty,
     )
+}
+
+/// The declared result type of a call, when the callee states one.
+fn call_type(builder: &mut Builder<'_>, callee: &crate::Callee) -> Ty {
+    match callee {
+        crate::Callee::Source { def, .. }
+        | crate::Callee::Native { def, .. }
+        | crate::Callee::Sys { def, .. } => match &builder.pending[def.index()].kind {
+            super::declare::PendingKind::Function(function) => function.ret,
+            super::declare::PendingKind::Built(DefKind::Fn(function)) => function.ret,
+            _ => builder.program.tys.error(),
+        },
+        crate::Callee::Ctor { def } => builder.program.tys.intern(TyKind::Adt(*def, Box::new([]))),
+        _ => builder.program.tys.error(),
+    }
+}
+
+/// Records the module and definition prefixes of a dotted path, excluding the
+/// final segment, which the caller records with the resolution it computed.
+/// A prefix that does not resolve is not recorded here: the caller reports the
+/// failing root itself, so recording it again would count one unresolved name
+/// twice. Only the root segment carries `context`; a later segment is a member
+/// and records as a field.
+pub(crate) fn record_prefix_uses(
+    builder: &mut Builder<'_>,
+    module: crate::ModuleId,
+    body: Option<crate::BodyId>,
+    segments: &[(Name, SyntaxSpan)],
+    context: crate::UseContext,
+) {
+    for index in 0..segments.len().saturating_sub(1) {
+        let names = segments[..=index]
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>();
+        let target = match builder.resolve_path(module, &names) {
+            crate::resolve::PathKind::Module(module) => NameTarget::Module(module),
+            crate::resolve::PathKind::Def(def) => NameTarget::Def(def),
+            crate::resolve::PathKind::Ambiguous => NameTarget::Ambiguous,
+            crate::resolve::PathKind::Member { base, member } if member == index => {
+                NameTarget::Def(base)
+            }
+            _ => continue,
+        };
+        let (name, span) = &segments[index];
+        match body {
+            Some(body) => super::record_body_use(
+                &mut builder.program,
+                module,
+                body,
+                span.clone(),
+                name.clone(),
+                if index == 0 {
+                    context
+                } else {
+                    crate::UseContext::Field
+                },
+                target,
+            ),
+            None => super::record_use(
+                &mut builder.program,
+                module,
+                span.clone(),
+                name.clone(),
+                if index == 0 {
+                    context
+                } else {
+                    crate::UseContext::Field
+                },
+                target,
+            ),
+        }
+    }
 }
 
 /// Lowers a nominal or variant construction.
@@ -578,12 +794,34 @@ fn lower_construct(
         .map(|segment| Name::new(&segment.text))
         .collect::<Vec<_>>();
     let last = segments.last().cloned().unwrap_or_else(|| Name::new(""));
-    let def = match builder.resolve_path(module, &segments) {
+    let last_span = path
+        .last()
+        .map_or_else(|| span.clone(), |segment| segment.span.clone());
+    let path_segments = path
+        .iter()
+        .zip(&segments)
+        .map(|(segment, name)| (name.clone(), segment.span.clone()))
+        .collect::<Vec<_>>();
+    record_prefix_uses(
+        builder,
+        module,
+        Some(state.id),
+        &path_segments,
+        crate::UseContext::Value,
+    );
+    let resolved = match builder.resolve_path(module, &segments) {
+        crate::resolve::PathKind::Member { base, .. } => builder.member_def(base, &last).map_or(
+            crate::resolve::PathKind::Unresolved,
+            crate::resolve::PathKind::Def,
+        ),
+        other => other,
+    };
+    let def = match resolved {
         crate::resolve::PathKind::Def(def) => {
             super::record_value_use(
                 &mut builder.program,
                 module,
-                span.clone(),
+                last_span,
                 last,
                 NameTarget::Def(def),
             );
@@ -593,7 +831,7 @@ fn lower_construct(
             super::record_value_use(
                 &mut builder.program,
                 module,
-                span.clone(),
+                last_span,
                 last,
                 NameTarget::Unresolved,
             );
@@ -609,24 +847,48 @@ fn lower_construct(
     let mut lowered = Vec::with_capacity(fields.len());
     for field in fields {
         let value = lower_expr(builder, state, &field.value);
+        let name_span = SyntaxSpan::new(field.span.start, field.span.start + field.name.len());
         if let Some(field_def) = def.and_then(|def| {
             pats::payload(builder, def)
                 .into_iter()
                 .find(|candidate| builder.def_name(*candidate).as_str() == field.name)
         }) {
+            super::record_body_use(
+                &mut builder.program,
+                module,
+                state.id,
+                name_span,
+                Name::new(&field.name),
+                crate::UseContext::Field,
+                NameTarget::Def(field_def),
+            );
             lowered.push((field_def, value));
+        } else {
+            super::record_body_use(
+                &mut builder.program,
+                module,
+                state.id,
+                name_span,
+                Name::new(&field.name),
+                crate::UseContext::Field,
+                NameTarget::Unresolved,
+            );
         }
     }
     match def {
-        Some(def) => push(
-            builder,
-            state,
-            ExprKind::Construct {
-                def,
-                fields: lowered.into_boxed_slice(),
-            },
-            span.clone(),
-        ),
+        Some(def) => {
+            let ty = builder.program.tys.intern(TyKind::Adt(def, Box::new([])));
+            push_typed(
+                builder,
+                state,
+                ExprKind::Construct {
+                    def,
+                    fields: lowered.into_boxed_slice(),
+                },
+                span.clone(),
+                ty,
+            )
+        }
         None => error_expr(builder, state, span.clone()),
     }
 }
@@ -643,7 +905,7 @@ fn lower_lambda(
     let module = state.module;
     let id = builder.allocate_body(owner);
     let mut lambda = BodyState::new(id, owner, module);
-    lambda.push_scope();
+    lambda.push_scope(body.span().start);
     for (index, parameter) in parameters.iter().enumerate() {
         let ty = match &parameter.annotation {
             Some(annotation) => super::types::lower_type(builder, module, &[], annotation),
@@ -653,12 +915,28 @@ fn lower_lambda(
             orna_syntax::Pattern::Name(name, _) => Name::new(name),
             _ => Name::new(&format!("_arg{index}")),
         };
-        let local = lambda.add_local(name, ty, parameter.span.clone());
+        let local = lambda.add_local(name.clone(), ty, parameter.span.clone());
         lambda.params.push(local);
+        if matches!(parameter.pattern, orna_syntax::Pattern::Name(..)) {
+            super::record_binding_use(
+                &mut builder.program,
+                module,
+                lambda.id,
+                parameter.span.clone(),
+                name,
+                local,
+                false,
+            );
+        }
     }
     let free = free_names(body);
     for (name, free_span) in free {
         let name = Name::new(&name);
+        // A name the lambda itself binds is not a capture, even when the
+        // enclosing body has a slot of the same name.
+        if lambda.local(&name).is_some() {
+            continue;
+        }
         if let Some(outer) = state.local(&name) {
             let outer_local = state.locals[outer].clone();
             let inner = lambda.add_local(outer_local.name.clone(), outer_local.ty, free_span);
@@ -696,7 +974,7 @@ fn lower_lambda(
             body.span(),
         )
     });
-    lambda.pop_scope();
+    lambda.pop_scope(body.span().end);
     let error_ty = builder.program.tys.error();
     builder.complete_body(lambda, error_ty);
     push(
@@ -718,7 +996,7 @@ fn lower_block(
     tail: Option<&AstExpr>,
     span: &SyntaxSpan,
 ) -> ExprId {
-    state.push_scope();
+    state.push_scope(span.start);
     let mut lowered = Vec::with_capacity(statements.len());
     for statement in statements {
         match statement {
@@ -794,7 +1072,7 @@ fn lower_block(
         }
     }
     let tail = tail.map(|tail| lower_expr(builder, state, tail));
-    state.pop_scope();
+    state.pop_scope(span.end);
     push(
         builder,
         state,
@@ -816,13 +1094,27 @@ fn lower_place(
         AssignmentTarget::Name { name, span } => {
             let name = Name::new(name);
             match state.local(&name) {
-                Some(local) => Place::Local(local),
-                None => {
-                    super::record_value_use(
+                Some(local) => {
+                    super::record_body_use(
                         &mut builder.program,
                         state.module,
+                        state.id,
+                        span.clone(),
+                        name,
+                        crate::UseContext::Value,
+                        NameTarget::Local(local),
+                    );
+                    super::mark_written(&mut builder.program, state.module, span);
+                    Place::Local(local)
+                }
+                None => {
+                    super::record_body_use(
+                        &mut builder.program,
+                        state.module,
+                        state.id,
                         span.clone(),
                         name.clone(),
+                        crate::UseContext::Value,
                         NameTarget::Unresolved,
                     );
                     builder.diagnose(
@@ -836,10 +1128,25 @@ fn lower_place(
                 }
             }
         }
-        AssignmentTarget::Field { base, name, .. } => Place::Field {
-            base: Box::new(lower_place(builder, state, base)),
-            field: FieldRef::Name(Name::new(name)),
-        },
+        AssignmentTarget::Field {
+            base, name, span, ..
+        } => {
+            let name_span = SyntaxSpan::new(span.end.saturating_sub(name.len()), span.end);
+            super::record_body_use(
+                &mut builder.program,
+                state.module,
+                state.id,
+                name_span.clone(),
+                Name::new(name),
+                crate::UseContext::Field,
+                NameTarget::Unresolved,
+            );
+            super::mark_written(&mut builder.program, state.module, &name_span);
+            Place::Field {
+                base: Box::new(lower_place(builder, state, base)),
+                field: FieldRef::Name(Name::new(name)),
+            }
+        }
         AssignmentTarget::Index {
             base, index, span, ..
         } => {

@@ -101,11 +101,13 @@ impl Views {
         {
             return Arc::clone(workspace);
         }
-        let workspace = Arc::new(Workspace::detached(
+        let workspace = Arc::new(Workspace::detached_with_sources(
             members
                 .iter()
                 .map(|document| Arc::clone(document.analysis()))
                 .collect(),
+            crate::standard::StandardLibrary::reference(),
+            orna_standard_sources::reference_standard_sources_v1().to_vec(),
         ));
         *cache = Some((fingerprint, Arc::clone(&workspace)));
         workspace
@@ -151,11 +153,13 @@ impl Views {
         let mut modules = Vec::new();
         let mut included = HashSet::new();
         let mut standard = StandardLibrary::none();
+        let mut std_sources = Vec::new();
         let incomplete = match ProjectLoader::default()
             .load_with_overlays(project.repository(), &overlays)
         {
             Ok(loaded) => {
                 standard = self.captured_standard(&loaded);
+                std_sources = loaded.standard_sources().to_vec();
                 for module in loaded.modules() {
                     let logical_path = module.logical_path.as_str();
                     let file = match open_by_path.get(logical_path) {
@@ -181,7 +185,7 @@ impl Views {
                 ));
             }
         }
-        Workspace::project(modules, standard, incomplete)
+        Workspace::project_with_sources(modules, standard, std_sources, incomplete)
     }
 
     /// The standard dependency `loaded` captures, as `orna check` analyses it.

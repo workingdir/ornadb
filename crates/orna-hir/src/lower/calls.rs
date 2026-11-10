@@ -75,11 +75,13 @@ fn classify_name(
         } else {
             target
         };
-    super::record_value_use(
+    super::record_body_use(
         &mut builder.program,
         module,
+        state.id,
         span.clone(),
         name.clone(),
+        crate::UseContext::Value,
         recorded,
     );
     match target {
@@ -126,7 +128,7 @@ fn classify_name(
 fn classify_path(
     builder: &mut Builder<'_>,
     state: &mut BodyState,
-    segments: &[(&str, &SyntaxSpan)],
+    segments: &[(&str, SyntaxSpan)],
     span: &SyntaxSpan,
 ) -> ClassifiedCallee {
     let module = state.module;
@@ -137,28 +139,44 @@ fn classify_path(
     let last = names.last().cloned().unwrap_or_else(|| Name::new(""));
     let last_span = segments
         .last()
-        .map_or_else(|| span.clone(), |(_, span)| (*span).clone());
+        .map_or_else(|| span.clone(), |(_, span)| span.clone());
+    let path_segments = segments
+        .iter()
+        .zip(&names)
+        .map(|((_, span), name)| (name.clone(), span.clone()))
+        .collect::<Vec<_>>();
     if state.local(&names[0]).is_some() {
         let base = lower_path_value(builder, state, &segments[..segments.len() - 1]);
         return Some((Callee::Pending { base, name: last }, None));
     }
+    super::exprs::record_prefix_uses(
+        builder,
+        module,
+        Some(state.id),
+        &path_segments,
+        crate::UseContext::Value,
+    );
     match builder.resolve_path(module, &names) {
         crate::resolve::PathKind::Def(def) => {
-            super::record_value_use(
+            super::record_body_use(
                 &mut builder.program,
                 module,
+                state.id,
                 last_span.clone(),
                 last,
+                crate::UseContext::Value,
                 NameTarget::Def(def),
             );
             classified_def(builder, state, def, span)
         }
         crate::resolve::PathKind::Member { base, .. } => {
-            super::record_value_use(
+            super::record_body_use(
                 &mut builder.program,
                 module,
+                state.id,
                 last_span,
                 last.clone(),
+                crate::UseContext::Value,
                 NameTarget::Def(base),
             );
             if builder.def_is_table(base) {
@@ -173,11 +191,13 @@ fn classify_path(
             Some((Callee::Pending { base, name: last }, None))
         }
         crate::resolve::PathKind::MissingMember { module: target, .. } => {
-            super::record_value_use(
+            super::record_body_use(
                 &mut builder.program,
                 module,
+                state.id,
                 last_span.clone(),
                 last.clone(),
+                crate::UseContext::Value,
                 NameTarget::Unresolved,
             );
             if builder.program.modules[target].origin == crate::ModuleOrigin::Sys {
@@ -200,22 +220,7 @@ fn classify_path(
         crate::resolve::PathKind::NotAModule
         | crate::resolve::PathKind::Ambiguous
         | crate::resolve::PathKind::Unresolved => {
-            // The root is the name that failed, not the member written after
-            // it: a member spelling is not a name in any scope.
-            super::record_value_use(
-                &mut builder.program,
-                module,
-                segments[0].1.clone(),
-                names[0].clone(),
-                NameTarget::Unresolved,
-            );
-            builder.diagnose(
-                module,
-                crate::diag::UNRESOLVED,
-                format!("`{}` is not in scope", names[0]),
-                segments[0].1.clone(),
-            );
-            None
+            report_unresolved_root(builder, state, segments, &names)
         }
         crate::resolve::PathKind::Module(_) => {
             builder.diagnose(
@@ -227,6 +232,33 @@ fn classify_path(
             None
         }
     }
+}
+
+/// Reports a path whose root name does not resolve.
+fn report_unresolved_root(
+    builder: &mut Builder<'_>,
+    state: &BodyState,
+    segments: &[(&str, SyntaxSpan)],
+    names: &[Name],
+) -> ClassifiedCallee {
+    // The root is the name that failed, not the member written after
+    // it: a member spelling is not a name in any scope.
+    super::record_body_use(
+        &mut builder.program,
+        state.module,
+        state.id,
+        segments[0].1.clone(),
+        names[0].clone(),
+        crate::UseContext::Value,
+        NameTarget::Unresolved,
+    );
+    builder.diagnose(
+        state.module,
+        crate::diag::UNRESOLVED,
+        format!("`{}` is not in scope", names[0]),
+        segments[0].1.clone(),
+    );
+    None
 }
 
 /// The classification of a resolved definition.
@@ -255,14 +287,14 @@ fn classified_def(
 fn lower_path_value(
     builder: &mut Builder<'_>,
     state: &mut BodyState,
-    segments: &[(&str, &SyntaxSpan)],
+    segments: &[(&str, SyntaxSpan)],
 ) -> ExprId {
     let Some((first, first_span)) = segments.first() else {
         return error_expr(builder, state, SyntaxSpan::new(0, 0));
     };
     let mut value = super::exprs::lower_name(builder, state, first, first_span);
     for (name, span) in &segments[1..] {
-        let span = (*span).clone();
+        let span = span.clone();
         value = push(
             builder,
             state,

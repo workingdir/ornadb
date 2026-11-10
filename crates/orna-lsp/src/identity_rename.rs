@@ -17,8 +17,8 @@ use orna_repository::relation_admission::StagedCandidate;
 use orna_repository::{Repository, RepositoryFormat};
 
 use crate::documents::{Document, PositionMapper};
-use crate::names::DeclaredKind;
 use crate::sync::lock;
+use crate::workspace::DeclaredKind;
 use crate::workspace::{Target, Workspace};
 
 /// How far one rename of a chain has got.

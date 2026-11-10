@@ -18,8 +18,7 @@ use orna_syntax::{
 
 use crate::analysis::{self, EditorSymbolKind};
 use crate::documents::PositionMapper;
-use crate::names::{DeclaredKind, Role};
-use crate::workspace::{Resolved, Target, Workspace};
+use crate::workspace::{DeclaredKind, Resolved, Target, Workspace};
 
 const MONIKER_SCHEME: &str = "orna-syntax";
 
@@ -64,7 +63,7 @@ fn declared_at_range(workspace: &Workspace, module: usize, range: &Range) -> Opt
         mapper.byte_offset(range.start),
         mapper.byte_offset(range.end),
     );
-    file.names.declared_at(&span)
+    workspace.declared_at(module, &span)
 }
 
 /// The function or method declared at an item's selection range.
@@ -128,9 +127,7 @@ fn calls_of(workspace: &Workspace, target: &Target) -> Vec<(usize, SyntaxSpan)> 
         .into_iter()
         .filter(|(module, span)| {
             workspace
-                .file(*module)
-                .names
-                .occurrence(span)
+                .occurrence(*module, span)
                 .is_some_and(|occurrence| occurrence.callee)
         })
         .collect()
@@ -139,9 +136,7 @@ fn calls_of(workspace: &Workspace, target: &Target) -> Vec<(usize, SyntaxSpan)> 
 /// The innermost function or method in `module` whose body contains `span`.
 fn enclosing_function(workspace: &Workspace, module: usize, span: &SyntaxSpan) -> Option<usize> {
     workspace
-        .file(module)
-        .names
-        .declarations()
+        .declarations(module)
         .iter()
         .enumerate()
         .filter(|(_, declared)| {
@@ -230,7 +225,7 @@ pub(crate) fn outgoing_calls(
     };
     let full = &workspace.declaration(module, source).full;
     let mut callees = BTreeMap::<(usize, usize), Vec<SyntaxSpan>>::new();
-    for occurrence in workspace.file(module).names.occurrences() {
+    for occurrence in workspace.occurrences(module) {
         if !occurrence.callee
             || occurrence.span.start < full.start
             || full.end < occurrence.span.end
@@ -241,7 +236,7 @@ pub(crate) fn outgoing_calls(
         if let Resolved::Target(Target::Declared {
             module: callee_module,
             index,
-        }) = workspace.resolve(module, occurrence)
+        }) = occurrence.resolved.clone()
             && is_function(workspace.declaration(callee_module, index).kind)
         {
             callees
@@ -275,7 +270,7 @@ pub(crate) fn code_lenses(workspace: &Workspace, module: usize) -> Vec<CodeLens>
     let file = workspace.file(module);
     let mut mappers = Mappers::new(workspace);
     let mut lenses = Vec::new();
-    for (index, declared) in file.names.declarations().iter().enumerate() {
+    for (index, declared) in workspace.declarations(module).iter().enumerate() {
         if !is_function(declared.kind) {
             continue;
         }
@@ -434,20 +429,18 @@ fn implemented_protocols(
             continue;
         };
         // The protocol is named by the last segment of its path.
-        let Some(occurrence) = file.names.occurrences().iter().find(|occurrence| {
+        let _ = path;
+        let Some(occurrence) = workspace.occurrences(module).iter().find(|occurrence| {
             span.start <= occurrence.span.start
                 && occurrence.span.end <= span.end
-                && matches!(
-                    &occurrence.role,
-                    Role::Path { path: keys, index } if keys.len() == path.len() && index + 1 == keys.len()
-                )
+                && occurrence.context == orna_hir::UseContext::Type
         }) else {
             continue;
         };
         if let Resolved::Target(Target::Declared {
             module: protocol_module,
             index: protocol,
-        }) = workspace.resolve(module, occurrence)
+        }) = occurrence.resolved.clone()
             && workspace.declaration(protocol_module, protocol).kind == DeclaredKind::Protocol
         {
             protocols.push((protocol_module, protocol));
@@ -491,8 +484,8 @@ pub(crate) fn subtypes(
         return Vec::new();
     }
     let mut implementors = Vec::new();
-    for (candidate_module, entry) in workspace.modules.iter().enumerate() {
-        for (candidate, declared) in entry.file.names.declarations().iter().enumerate() {
+    for candidate_module in 0..workspace.modules.len() {
+        for (candidate, declared) in workspace.declarations(candidate_module).iter().enumerate() {
             if declared.owner.is_none()
                 && matches!(declared.kind, DeclaredKind::Table | DeclaredKind::Type)
                 && implemented_protocols(workspace, candidate_module, candidate)
@@ -539,7 +532,7 @@ pub(crate) fn moniker(workspace: &Workspace, module: usize, byte: usize) -> Opti
             module: binding_module,
             binding,
         } => {
-            let binding = workspace.file(binding_module).names.binding(binding);
+            let binding = workspace.binding(binding_module, binding);
             Moniker {
                 scheme: MONIKER_SCHEME.to_owned(),
                 identifier: format!(

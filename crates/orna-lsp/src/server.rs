@@ -16,7 +16,6 @@ use crate::analysis;
 use crate::diagnostics::{self, DiagnosticsWorker, Publisher, Snapshot};
 use crate::documents::{Document, PositionMapper};
 use crate::identity_rename::{PendingRenames, carries_identity, identity_not_carried};
-use crate::names::Role;
 use crate::project::{ProjectHome, ProjectLocator};
 use crate::rename::{self, ModuleEdits, Refusal};
 use crate::requests::RequestPool;
@@ -941,7 +940,6 @@ fn request_document_highlights(
             else {
                 return Vec::new();
             };
-            let names = &workspace.file(module).names;
             let mapper = PositionMapper::new(workspace.file(module).text());
             workspace
                 .search(&target)
@@ -949,16 +947,13 @@ fn request_document_highlights(
                 .into_iter()
                 .filter(|(found_module, _)| *found_module == module)
                 .map(|(_, span)| {
-                    let declaration = names.binding_at(&span).is_some_and(|binding| {
-                        let selection = &names.binding(binding).selection;
+                    let declaration = workspace.binding_at(module, &span).is_some_and(|binding| {
+                        let selection = &workspace.binding(module, binding).selection;
                         selection.start == span.start && selection.end == span.end
-                    }) || names.declared_at(&span).is_some();
-                    let write = names.occurrence(&span).is_some_and(|occurrence| {
-                        matches!(
-                            occurrence.role,
-                            Role::Value { write: true } | Role::Member { write: true, .. }
-                        )
-                    });
+                    }) || workspace.declared_at(module, &span).is_some();
+                    let write = workspace
+                        .occurrence(module, &span)
+                        .is_some_and(|occurrence| occurrence.written);
                     DocumentHighlight {
                         kind: Some(if declaration || write {
                             DocumentHighlightKind::WRITE
@@ -1582,10 +1577,13 @@ fn request_inline_values(
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let (_, params) = request.extract::<InlineValueParams>("textDocument/inlineValue")?;
-    let Some(open) = state.documents.get(&params.text_document.uri) else {
+    let Some((workspace, module)) = state
+        .views
+        .workspace(&state.documents, &params.text_document.uri)
+    else {
         return Ok(serde_json::Value::Null);
     };
-    let file = open.analysis();
+    let file = workspace.file(module);
     if !file.parse.diagnostics.is_empty() {
         return Ok(serde_json::to_value(Vec::<InlineValue>::new())?);
     }
@@ -1599,16 +1597,15 @@ fn request_inline_values(
         return Ok(serde_json::to_value(Vec::<InlineValue>::new())?);
     }
 
-    let names = &file.names;
-    let mut values = names
-        .visible_bindings(stopped_at)
+    let mut values = workspace
+        .visible_bindings(module, stopped_at)
         .into_iter()
         .filter_map(|binding| {
-            let index = names.binding_at(&binding.selection)?;
-            names
-                .references(index)
-                .map(|occurrence| &occurrence.span)
-                .chain(std::iter::once(&binding.selection))
+            let index = workspace.binding_at(module, &binding.selection)?;
+            workspace
+                .binding_references(module, index)
+                .into_iter()
+                .chain(std::iter::once(binding.selection.clone()))
                 .filter(|span| {
                     span.start >= requested_start
                         && span.end <= requested_end
@@ -1619,7 +1616,7 @@ fn request_inline_values(
                     (
                         span.start,
                         InlineValue::VariableLookup(InlineValueVariableLookup {
-                            range: mapper.range(span),
+                            range: mapper.range(&span),
                             variable_name: Some(binding.name.clone()),
                             case_sensitive_lookup: false,
                         }),
