@@ -83,6 +83,7 @@ pub(crate) fn rel_op(name: &str) -> Option<RelOp> {
         "one" => RelOp::One,
         "every" => RelOp::Every,
         "exists" => RelOp::Exists,
+        "all_unique" => RelOp::AllUnique,
         "sum" => RelOp::Sum,
         "min" => RelOp::Min,
         "max" => RelOp::Max,

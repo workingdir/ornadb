@@ -182,6 +182,8 @@ pub enum RelOp {
     Every,
     /// `exists`, the any-row terminal.
     Exists,
+    /// `all_unique(selector)`, the predicate that holds when no two rows share a selected key.
+    AllUnique,
     /// `sum`, the integer-sum terminal.
     Sum,
     /// `min`, the minimum terminal.
