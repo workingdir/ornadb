@@ -99,8 +99,8 @@ flowchart LR
 | Editor | `orna-lsp`, 11,974 lines in `src/` | AST, checker diagnostics only (`orna-lsp/src/project.rs:19`) | its own resolver (`workspace.rs:382-561`, `names.rs:338`) |
 | REPL | 8,049 lines in five files | AST | `orna-check/src/repl.rs` (564), `orna-evaluator/src/repl.rs` (1,766), `orna-project-repl/src/lib.rs` (2,605), `orna-cli/src/repl.rs` (1,883), `orna-application/src/repl_transaction.rs` (1,231) |
 
-The checker's `Scope` has 43 fields, 38 of them `BTreeMap` or `BTreeSet`
-keyed by source names (`awk` count over `scope.rs:6-117`): `names`, `modules`,
+The checker's `Scope` has 35 fields, 31 of them `BTreeMap` or `BTreeSet`
+keyed by source names (Appendix B, command 8, over `scope.rs:6-117`): `names`, `modules`,
 `table_rows`, `nominal_rows`, `nominal_identities`, `refined_types`,
 `enum_variants`, `secret_types`, `local_nominal_names`, and so on. Each map
 is one more answer to "what does this spelling mean".
@@ -143,8 +143,8 @@ still counted separately when they share no code.
 
 That is **26 independent resolution implementations in 6 crates** (check 10,
 evaluate 8, application 3, conformance 1 row of 3 handlers, intrinsics 1,
-editor 3). Beyond them, the checker reads `scope.names` directly 25 times and
-`scope.modules` or `available_modules` 14 times (Appendix B, commands 3 and
+editor 3). Beyond them, the checker mentions `scope.names` 33 times and
+`scope.modules` or `available_modules` 36 times (reads and writes; Appendix B, commands 3 and
 4). No row delegates to another.
 
 ### 1.3 The call cascade, and the order it is decided in
@@ -938,8 +938,8 @@ Three modules of such declarations exist, in three packages:
 
 | Module | Package | Versioned with | Replaces |
 |---|---|---|---|
-| `core.orna` | `PackageKind::Core`, embedded in `orna-exec` | the engine | `orna-intrinsics` tables for the root environment and for every native that is language-defined (collections, text, bits, hash, codecs, stats, time) |
-| `sys.orna` | `PackageKind::Sys`, embedded in the engine, never shadowable | the engine | `api/sys.json` as a source of truth, `SystemType`, `AbiType`, the signature half of `orna-sys-codegen` |
+| `core.orna` | `PackageKind::Core`, embedded in `orna-hir` (below the checker, so the checker, the language server and the executor read the same declarations; the build script of 4.3 reads the same file) | the engine | `orna-intrinsics` tables for the root environment and for every native that is language-defined (collections, text, bits, hash, codecs, stats, time) |
+| `sys.orna` | `PackageKind::Sys`, embedded in `orna-hir`, never shadowable | the engine | `api/sys.json` as a source of truth, `SystemType`, `AbiType`, the signature half of `orna-sys-codegen` |
 | the pinned `std` | `PackageKind::Std`, captured with the project | the project's std pin | the `fail(..)` marker bodies; only if D12 keeps natives there |
 
 `[D12]` decides the third row and nothing else. Under D12 option "core and
@@ -1808,3 +1808,141 @@ is at least a fivefold improvement on B1 and B2 over the H0 baseline, to be
 confirmed or revised when H4 lands. The numbers of every CI run are written to
 the job summary, and the H0 and H4 results are committed as a results file next
 to the baseline, so the numbers are published (critique item 6).
+
+--------------------------------------------------------------------------
+
+## 8. Which language decisions block which stage
+
+The decisions are stream B's D1 to D13 in the file docs/language/DECISIONS.md
+(draft PR #9832, every decision open, no recommendation recorded). Each section
+there ends with "What the HIR needs from the answer"; this section is the
+inverse: for each stage, what it needs decided before it can finish, and what
+it can do first. The rule of 6.1.5 applies: a stage ships the part that no
+decision affects, and the data structures of section 2 are written so that
+every option of a decision is representable.
+
+### 8.1 Decision by decision
+
+| Decision | Options (stream B's axes) | HIR structure it parameterises | Blocks | Does not block |
+|---|---|---|---|---|
+| D1 type inference | A constraint inference; B parameter annotations required; C required on `pub` only | `ParamAnnotations` policy in the solver; generalisation per strongly connected component (A only) | H2b | H2a (annotated programs, first-order solver, a strict subset of every option) |
+| D2 effects | A sets in signatures; B inferred, published in metadata; C closed pure/effectful split | `FnTy.effects` (`Known`/`Var`/`Hidden`); legality contexts as one enum on the imposing node | the function-type part of H3 | the effect pass by `DefId` (2.5) is identical under all three |
+| D3 null and Option | A enum, no lifting; B `T?` with lifting, one representation; C flat nullable | `TyKind::Option`; an explicit `Coerce::Some` node under B; `Some`/`None` as resolved constructors | H2b (lifting), the `null`/`??` operators of H4 | everything else in H4: the executor carries one option representation under A and B, and C normalises on construction |
+| D4 failure and cancellation | A unchecked, typed `Error`, drop `std.result`; B inferred failure sets normative; C `Result` values | `FailureSet` on `FnEffects` (B); `Completion` is the same under all, with `Cancelled` a variant in every option | failure metadata in H3 (ORNA-FAILURE-003); deleting `std.result` | `Completion` and recovery in H4 |
+| D5 overloading and type arguments | A none; B stated rule for all; C platform-only closed list; type application versus `as: T` | `Binding::Overloads`, `Call.targs`, a stored chosen candidate | the overload part of H1, H2b, `decode<T>` in H5, the six `sys.snapshot` overloads (ORNA-SYS-136) in H5 | H1 for single-definition names, which is every name when A holds |
+| D6 collections | `Map`/`Set`/`Bytes` core, library-only, or deferred | builtin generic `TyKind`s or `Adt`s | the new natives of H5 | every existing list operation |
+| D7 integers | unbounded with cap; add fixed widths; `i64` plus separate big | `TyKind::Int(IntKind)`; the literal node; the operator table | the width-specific operators of H2b and H4 | H4's `Small(i64)`/`Big` value representation (7.2) serves A and C; B adds kinds |
+| D8 units | runtime `Quantity`; checked-only; cut | `TyKind::Quantity`, unit `DefId`s, an elaboration step | H2c, the units rules of H3, a quantity value in H4 | all other typing |
+| D9 keys and indexes | auto Int vs Uuid vs required keys; index and unique declarations vs assert-only | `TableDef.key`, `TableDef.indexes`, key-default bodies | key defaults and indexes in H6 | cursors, `apply`, the caps (H6 without indexes) |
+| D10 bindings and closures | reassignable `let` with by-value capture; `let`/`let mut`; no reassignment | `Local.mutable`; the capture list; rejection of assignment to a captured local | the mutability check in H1 lowering | capture lists (needed under every option, 7.2) |
+| D11 modules | `pub use` re-export or not; `std` replaceable or pinned; package/version | `DefKind::Reexport`, `Binding` aliases, a package id in `DefId` | re-export in H1; package identity in H5 | everything that resolves a `use` without re-export |
+| D12 where host functions live | `core` and `sys` with the engine and a pure-Orna `std`, or natives in `std`; one `native fn` form | which package owns each `FnBody::Native`; `Callee::Intrinsic` versus `Native` for `Some`, `now`, `uuid7`, `error` | the std natives of H5, and the classification of those four names in H1 | `core.orna`, `sys.orna`, `link`, `Host`, and every native not in `std` |
+| D13 specification hygiene | split the spec | nothing structural | nothing | everything; but the typing, effect and evaluation rules the HIR implements must live in that reference, not in the checker (D13 section "What the HIR needs") |
+
+### 8.2 Stage by stage
+
+| Stage | Can start now | Needs a decision to finish |
+|---|---|---|
+| H0 | everything | none |
+| H1 | lowering, resolver, binder, `Callee` for single-definition names, LSP queries | D5 (overloads), D11 (re-export), D12 (four root names), D10 (mutability check) |
+| H2 | H2a | H2b: D1, D3, D5, D7; H2c: D8 |
+| H3 | effect pass; rules that do not read types of options, units or failure sets | D2 (effects in types), D4 (failure sets), D8 (units rules) |
+| H4 | everything except what follows | D3 (null, `??`), D7 (width operators), D8 (quantity values) |
+| H5 | `Host`, `link`, `sys.orna`, families that depend on none of D5/D6/D12 (bits, hash, text, base64, json, codecs, math, time, random, money) | D12 (std natives), D5 (`decode`, `sys.snapshot`), D6, D11 |
+| H6 | all but indexes | D9 |
+| H7 | everything | none |
+| H8 | everything | none (the generic-function pin turns green only if H2 handles generics) |
+| H9 | no: needs everything above | the union of the above, resolved or defaulted |
+
+Stages that start with no dependency on any open decision: **H0, H1, H2a, H4,
+H6, H7, H8**, and the undecided-independent parts of H3 and H5.
+
+### 8.3 If a decision stays open
+
+Each decision has a status-quo reading that is representable, so a stage may
+finish on it and be amended when the owner decides: D1 on required annotations
+is a strict subset of inference; D2 on hidden effects is today's behaviour with
+the effect pass made explicit; D3 B is today's `T?` with the second null removed;
+D5 A forbids what only the platform uses and is reached by listing the platform
+overloads as distinct names; D12 "natives in `std`" is today's layout with
+`native fn` in place of marker bodies. The cost of finishing on a status-quo
+reading and later switching is stated per decision in stream B's document; the
+structural cost is the `[Dn]` marks in section 2, which are fields or enum
+variants, not redesigns.
+
+--------------------------------------------------------------------------
+
+## 9. Risks, rejected alternatives
+
+### 9.1 Risks
+
+| # | Risk | Where | Likelihood and impact | Mitigation |
+|---|---|---|---|---|
+| K1 | Typing parity: `orna-check` is 36,352 lines of accumulated special cases (checkpoints, snapshot contexts, secrets, money) and the specification gives typing rules only as INFER-1 | H2, H3 | high likelihood, high impact; it is the long pole | H2a ships a strict subset and the harness counts "typed on HIR" as a ratchet; rule families keep a `Ty`-to-`Type` adapter until ported; nothing switches until the corpus agrees |
+| K2 | Step-count parity: counts are asserted by tests and observable | H4 | medium, medium | `weight` per node, an allowance list with reasons (6.4), one re-baseline at H9 |
+| K3 | Native families exist twice until H9 (old evaluator and `orna-exec`), because the old `Value` is private and differently shaped | H5 | certain, medium | bounded and one-directional; the harness runs both on every family; ports are one family per PR |
+| K4 | Parity with defects: the corpus encodes the old pipeline's behaviour, including its wrong answers (critique F31: valid fixtures are parsed and checked but never executed) | all | medium, medium | an expected difference needs a reason and a bead, and fixes are made in the new pipeline only; the first executed run of the valid corpus is itself a finding list |
+| K5 | Churn: about 30 PRs a day land on `orna-evaluator` and `orna-check` (critique F05) while a second implementation grows | all | high, high | stream G's merge budget; a fix to the old pipeline during migration must arrive with a corpus case and, if it changes behaviour, an expected-difference entry in the same PR |
+| K6 | Corpus gaps: a production path covered by no case | H9 | medium, high | the shadow period; any later production discrepancy becomes a case first |
+| K7 | Browser and wasm profile: the evaluator has a browser profile (`orna-evaluator/src/browser_profile.rs`) and the checker a `wasm32` arm (`system_api.rs:21-24`) | H4, H5 | medium, medium | `orna-exec` and `orna-hir` take no thread, file or process dependency; they are `Host` consumers, and `Host::io() = None` is the browser case; the wasm parity workflow (`browser-profile-wasm-parity.yml`) runs from H4 |
+| K8 | HIR build cost on large projects and per-keystroke rebuilds in the language server | H1 | low to medium, medium | a `Program` is rebuilt per changed module with the other modules' items reused by `Arc` `[INFERENCE]`; measured in H1 with the LSP suite |
+| K9 | Deep expressions overflow the native stack in lowering and typing (the checker already uses `stacker::maybe_grow`, `lib.rs:3682`) | H1, H2 | medium, low | same technique at the recursive entry points; a deep-nesting corpus case |
+| K10 | The design is wrong in a detail only an implementation finds | all | certain, low | H0 to H1 are cheap and additive; H1's classification test is the first real feedback, before any consumer depends on the structure |
+| K11 | Specification gaps: INFER-1 without typing rules, no effect lattice, no evaluation semantics (critique 3.1, 3.2) | H2, H3 | high, medium | stream B's reference is the authority for rules; where it is silent the HIR follows the old behaviour and records the gap as a difference with a bead |
+
+### 9.2 Alternatives considered and rejected
+
+**Big-bang rewrite.** Build the whole new pipeline, switch once. Rejected: the
+tree would not be green for months, nothing would be measured against the old
+behaviour until the end, and a pipeline of this size (the six crates of section
+1.1, `orna-check`, `orna-evaluator`, `orna-application`, `orna-lsp`,
+`orna-project-repl` and `orna-intrinsics`, total 107,875 lines) cannot be reviewed as one change. The
+owner's instruction is a strangler with differential tests.
+
+**Bytecode VM first.** Compile to a register or stack bytecode now. Rejected
+for this design: the cost centres of 7.1 (map lookups, scope clones, string
+matching, decimal digit counting) are removed by slots, resolved callees and an
+enum tree without a new instruction set; a bytecode design needs the typed HIR
+anyway as its input; and a VM adds an encoding, a verifier and a debugging
+story. It remains open: the HIR is the input to a later compiler if the
+benchmarks of 7.4 say the tree is too slow `[INFERENCE: not measured]`.
+
+**Keep patching.** Continue to add arms to `route_call`, `infer_call` and the
+handlers. Rejected: each feature already needs changes in up to six resolution
+sites (section 1.2), the two implementations agree only by tests, and the
+defects the critique lists (F07, F12, F17, F27, F38) are symptoms of the
+structure, not of individual bugs.
+
+**Enrich `Analysis` and feed it to the evaluator.** Keep `orna-check` as the
+front end, make it retain a typed tree, and let the evaluator consume that.
+Rejected: the checker's data structures are the problem. `Scope` has 35
+string-keyed fields (section 1.1), `Type` has `Named(String)`, and a retained
+tree would still be keyed by spelling; the language server, REPL and admission
+would each still need their own resolution.
+
+**Put the HIR inside `orna-check`.** Rejected on layering: the executor, the
+language server and the REPL would depend on the checker, which depends on
+`orna-sys` (`layers.toml` V1). The HIR is a lower layer that the checker uses.
+
+**Evolve `orna-evaluator` in place onto HIR.** Rejected: the crate is 30,818
+lines whose `Context` mixes activation mode, REPL state, effect handler,
+namespace and transfer, whose `Value` carries names, and whose natives match
+strings. Switching them in place is a rewrite with the old tests as the only
+guard and no way to run both. The strangler keeps both runnable. The price is
+K3.
+
+**Typed sys ids and crate-layering stages first (the paused reform epics).**
+Rejected as an ordering. Their goals survive and are met inside this plan:
+"a catalogue entry with no implementation is a compile error" is H5's build
+script; the layering enforcement (`layers.toml`, `check_architecture.py`) is
+kept and used from H0; the native declaration form is adopted as written.
+Their pure-move stages would split the crates this design replaces.
+
+**A query framework (salsa-style) from the start.** Rejected for now: plain
+tables and passes are enough for a batch checker and an append-only REPL
+session, and an incremental framework can be layered over `orna-hir` for the
+language server later without changing the data model.
+
+**Add types to the syntax tree.** Rejected: the AST is a faithful parse tree
+shared with the formatter and the tolerant editor parse; resolved names, slots
+and types belong in a separate structure with a different lifetime.
