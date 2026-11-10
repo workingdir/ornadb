@@ -368,10 +368,10 @@ pub struct FnDef {
 pub enum FnBody {
     /// An Orna body. Lambdas and initializers use the same `Body`.
     Source(BodyId),
-    /// `core.orna` or `sys.orna`, both engine-embedded [D12]. No body, so
-    /// the signature above is the only signature. Bound at link time to the
-    /// engine implementation keyed by this DefId (section 4). Natives are
-    /// declared nowhere else: not in user code, not in std.
+    /// Any body-less `native fn`, in any module [D12, amended 2026-11-10]. No body,
+    /// so the signature above is the only signature. Bound at link time, by
+    /// `DefId`, to an engine implementation (`core`, `sys`) or a library symbol
+    /// (`docs/design/native-libraries.md`).
     Native(NativeDecl),
 }
 pub struct NativeDecl { pub abi: NativeAbi, pub key: NativeKey }   // key = (module path, name)
@@ -560,8 +560,8 @@ DefId, so the effect is a table lookup) plus its table operations; mutually
 recursive functions are joined over strongly connected components. Effects are
 inferred and published in signature metadata; legality is checked at the use
 site against the inferred set [D2]. There is no effect syntax for user
-functions. Only body-less native declarations in `core.orna` and `sys.orna`
-declare effects, in the same syntax, because they have no body to infer from.
+functions. Only body-less native declarations, in any module, declare effects, in
+the same syntax, because they have no body to infer from.
 
 Two vocabularies today (section 1.5) become one: `EffectKind` is the single
 enumeration, and `orna_intrinsics::Effect` is deleted in stage H5. The
@@ -586,7 +586,8 @@ pub struct Call { pub callee: Callee, pub args: Box<[Arg]>, pub piped: bool }
 pub enum Callee {
     /// A function with an Orna body.
     Source    { def: DefId, targs: Box<[Ty]> },
-    /// A `native fn` in `core.orna`. Host-implemented, engine-embedded [D12].
+    /// A `native fn` in any module, bound at link (engine natives in `core`, and
+    /// library natives [D12]).
     Native    { def: DefId, targs: Box<[Ty]> },
     /// A `native fn` in `sys.orna`. Same declaration and link mechanism as
     /// Native; a separate variant because the host capability and the
@@ -930,14 +931,14 @@ Three modules of such declarations exist, in three packages:
 | `sys.orna` | `PackageKind::Sys`, embedded in `orna-hir`, never shadowable | the engine | `api/sys.json` as a source of truth, `SystemType`, `AbiType`, the signature half of `orna-sys-codegen` |
 | the pinned `std` | `PackageKind::Std`, captured with the project | the project's std pin | the `fail(..)` marker bodies; std holds no natives under D12 |
 
-`[D12]` decided: host functions live in engine-embedded `core.orna` and
-`sys.orna`, declared body-less and bound by `DefId`. `std` is pure Orna and
-re-exports `core` where it wants stable paths (`pub use`, D11). The 113 std
-natives move into `core.orna`. Natives are declared in no other module: user
-code and std may not declare `native fn`; native-declarations.md 3.5 enforces
-this. The HIR form is `FnBody::Native` (section 2.2) in a function of the
-`core` or `sys` package. `Callee::Native` versus `Callee::Sys` (section 2.6)
-is decided by the declaring package, not by a spelling.
+`[D12]` decided, amended 2026-11-10 (`docs/language/DECIDED.md`): a `native fn` may
+appear in any module unit. Engine natives are declared body-less in the
+engine-embedded `core.orna` and `sys.orna` and bound by `DefId` to engine
+implementations. Every other native is bound at link to a shared library that the
+project names (`docs/design/native-libraries.md`). `std` is pure Orna and re-exports
+`core` where it wants stable paths (`pub use`, D11). The HIR form is `FnBody::Native`
+(section 2.2) in a function of any package; `Callee::Native` versus `Callee::Sys`
+(section 2.6) is decided by the declaration, not by a spelling.
 
 What this removes, concretely: `leaf`, `binds_declaration`, `Dispatch`,
 `Justification` and the signature and effect fields of `Intrinsic`;
@@ -979,6 +980,12 @@ binds it:
   checker already admitted (`orna-check/src/system_api.rs`, the
   `SystemProviders::{DeclaredSurface, Production}` split at `lib.rs:1351-1362`
   exists only to paper over this).
+- **Library natives.** A `native fn` whose key is not in `core` or `sys` is bound
+  at link to a function in a shared library that the root project names in its
+  manifest, with a digest pinned in Git (`docs/design/native-libraries.md`,
+  sections 5 to 10). Link errors are distinct per cause and name the declaration:
+  library not found, digest mismatch, ABI mismatch, symbol missing. Binding is
+  before evaluation, as for engine natives.
 - **Both directions are load errors**, before anything runs
   (native-declarations.md 3.6): a declaration at the current ABI with no
   implementation, and an implementation with no declaration. Error codes are
@@ -1034,8 +1041,9 @@ Key differences from the handlers it replaces:
 - One value type. Values cross the boundary as `Value` and are converted to
   `CanonicalValue` or `ContextValue` by the host where it needs them, so the
   value profile is not encoded in which trait object the caller holds.
-- The browser build (`orna-evaluator/src/browser_profile.rs`) is a `Host` with
-  `io() = None` and `store()` over memory, not a different crate configuration.
+- The browser build is specified as a `Host` with `io() = None` and `store()` over
+  memory. The `Host` trait is not in code yet, and `orna-evaluator/src/browser_profile.rs`
+  has no `io()` today (see `docs/design/native-libraries.md`).
 
 ### 4.5 Versioning the native ABI
 
@@ -1062,8 +1070,8 @@ The `effect` clause draws from the 12 `sys.EffectKind` values or `none`
 (native-declarations.md 3.8). It is mandatory for a body-less declaration
 because there is no call graph to infer from, and the effect pass of section
 2.5 reads it into `FnDef.effects`. `[D2]` decided: there is no effect syntax
-for user functions, so the clause appears only on natives in `core.orna` and
-`sys.orna`. A native with callback parameters declares an effect variable for
+for user functions, so the clause appears on every native declaration, in any
+module. A native with callback parameters declares an effect variable for
 the callback (section 2.5), and the callback's effects join into the call.
 
 ### 4.7 Deleted when this lands (stage H5)
@@ -1402,7 +1410,7 @@ type, and H4 only needs types from H2 for arithmetic selection; section 7.2).
   | 8 native, 2 codec decode, 3 `std.ui.action` | `Native` |
   | 7 system host | `Sys` |
   | 6 relation stage or terminal | `Relational` (via `Pending::Container` until H2) |
-  | 4 root intrinsic | `Native` (D12, `core.orna`) or `Intrinsic` for the forms in `IntrinsicForm` |
+  | 4 root intrinsic | `Native` (D12) or `Intrinsic` for the forms in `IntrinsicForm` |
   | effect-handler table write | `TableOp` |
   | 1 `.divide` | `Pending::Member` until H2 |
 
@@ -1828,8 +1836,8 @@ keeping it behind a flag.
 | D8 units | amended 2026-11-10 by owner direction: user units and dimensions return as enum-shaped families (D15, `enum Length { metre, kilometre = 1000 metre }`); dimensional algebra kept and rewritten; built-in units are `core` declarations; native minimum in `units.md` section 5 | `Quantity<N, U>` as a native type kind; unit families as enum `DefId`s with unit variants; no unit-name `Binding` beyond the variant lookup |
 | D9 keys and indexes | default key `Uuid` via `uuid7()`; explicit integer keys allowed; no index or unique declarations; the engine serves canonical key-shaped assertions from an index | `TableDef.key` with the Uuid default; no `TableDef.indexes` |
 | D10 bindings and closures | `let` binds, `x = value;` reassigns; no `mut` or `var`; closures capture the variable slot; `parallel` and task bodies capture snapshots and may not assign outer variables | capture list names the slot; snapshot capture for parallel/task bodies; assignment check in H1 lowering |
-| D11 modules | `pub use path;` and `pub use path as name;`; `std` replaceable ordinary Orna; no package ships native code | `DefKind::Reexport` and `Binding` aliases; package identity in `DefId` |
-| D12 host functions | `core` and `sys` engine-embedded, body-less natives bound by `DefId`; `std` pure and re-exports; natives declared only in embedded modules | `FnBody::Native` in `core`/`sys` only; `Callee::Native` versus `Callee::Sys` by declaring package (2.6) |
+| D11 modules | `pub use path;` and `pub use path as name;`; `std` replaceable ordinary Orna | `DefKind::Reexport` and `Binding` aliases; package identity in `DefId` |
+| D12 host functions | Amended 2026-11-10: a `native fn` may appear in any module; engine natives in `core`/`sys` bound from the engine registry; other natives bound at link to a project-named shared library (`docs/design/native-libraries.md`) | `FnBody::Native` in any package; `Callee::Native` for every native declaration; `Callee::Sys` for `sys` (2.6) |
 | D13 specification | 1.1.0 frozen; new language reference 1.2 with grammar, typing, effect, evaluation and numeric rules | the HIR implements rules that live in the reference, not in the checker |
 
 ### 8.2 Stage by stage

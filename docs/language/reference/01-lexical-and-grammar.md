@@ -139,15 +139,16 @@ pub use geometry.shapes as g;      // re-export under another name
 ## Native declarations
 
 ```orna
-native fn bit_or(a: Int, b: Int): Int;     // only in engine-embedded modules
+native fn bit_or(a: Int, b: Int): Int;     // bound at link by key
 ```
 
-A `native fn` has no body and ends with `;`. The parser accepts it in any
-module. The checker accepts it only in the engine-embedded `core.orna` and
-`sys.orna`, and binds it to the engine implementation by declaration identity.
-Anywhere else it is an error. A native declaration lists its effects in the
-engine's declaration metadata (chapter 4); there is no effect syntax for
-Orna-written functions.
+A `native fn` has no body and ends with `;`. The parser and the checker accept
+it in any module unit. The binding key is `(module path, name)`. Keys in `core`
+and `sys` bind to the engine implementation; every other key binds at link to a
+symbol in the shared library the root project names in its manifest, with a
+pinned digest. An unbound key is a link error before evaluation.
+A native declaration lists its effects in the engine's declaration metadata
+(chapter 4); there is no effect syntax for Orna-written functions.
 
 ## Grammar
 
@@ -409,8 +410,9 @@ Unary operators bind tighter than `^`, so `-2 ^ 2` is `(-2) ^ 2`; write `-(2 ^ 2
 
 * Added `pub use path;` and `pub use path as name;`. The 1.1 grammar had no
   re-export.
-* Added `native fn` declarations (parsed everywhere, accepted only in embedded
-  `core.orna` and `sys.orna`) and the keyword `native`.
+* Added `native fn` declarations (any module unit; keys outside `core` and
+  `sys` bind at link to a manifest-named shared library) and the keyword
+  `native`.
 * Removed `dimension_declaration` and `unit_declaration` from
   `top_level_item`, and the `*` and `/` operators from `type_expression`
   (`Money<GBP> / kWh` no longer exists). The words `dim`, `unit`, `base`,
@@ -433,4 +435,5 @@ Unary operators bind tighter than `^`, so `-2 ^ 2` is `(-2) ^ 2`; write `-(2 ^ 2
 D1 (annotation rules reflected in function declarations), D3 (`T??` error),
 D5 (type arguments, no overloading), D8 (units as enum families, amended 2026-11-10),
 D10 (assignment),
-D11 (`pub use`), D12 (`native fn`, `core`).
+D11 (`pub use`), D12 (`native fn`, `core`; amended 2026-11-10: any module may
+declare a native, see `docs/language/DECIDED.md`).

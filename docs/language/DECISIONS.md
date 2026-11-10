@@ -8,6 +8,11 @@ Companion: [README.md](README.md) outlines the language reference that will
 be written once these are answered, and says which chapters can be written
 before which decision.
 
+Amendment 2026-11-10: the owner reopened D11 and D12 ("any .orna should be able to use native functions, you just
+gotta load the .so with the declaration"). Option text below is kept as analysed; where it says natives are "only in
+std", "only in `core` and `sys`" or "not in packages", that describes the state before the amendment. See
+`docs/language/DECIDED.md` (amendment section) and `docs/design/native-libraries.md`.
+
 ## How to read this document
 
 Sources and pins:
@@ -64,8 +69,8 @@ list); they are good to a few percent, not exact.
 | D8 | `ornadb-csenl.8` | Units of measure in 1.x? | A implement with runtime quantities; B implement erased; C restrict; D cut | D1, D7 |
 | D9 | `ornadb-csenl.9` | Default key, indexes, uniqueness? | Key: A keep, B `Uuid` default, C key required. Index: X assert-only, Y `unique` and `index` declarations, Z key-shaped assertions only | D2 |
 | D10 | `ornadb-csenl.10` | Are bindings mutable, and what do closures capture? | A status quo plus a capture rule; B `let` and `let mut`; C no reassignment | D2 |
-| D11 | `ornadb-csenl.11` | Re-export, packages, std replaceability? | Re-export: A `pub use`, B none. Std: P pinned and privileged, Q replaceable and pure | D12 |
-| D12 | `ornadb-csenl.12` | Where do host functions live? | A `core` + `sys` with the engine, pure std; B std with natives; C natives in any pinned package | D2, D11 |
+| D11 | `ornadb-csenl.11` | Re-export, packages, std replaceability? | Re-export: A `pub use`, B none. Std: P pinned and privileged, Q replaceable and pure. Amended 2026-11-10: native code in any module, see DECIDED.md amendment | D12 |
+| D12 | `ornadb-csenl.12` | Where do host functions live? | A `core` + `sys` with the engine, pure std; B std with natives; C natives in any pinned package. Amended 2026-11-10: natives in any module, bound at link to the engine registry or a project-named shared library (`docs/design/native-libraries.md`); none of A, B, C as written | D2, D11 |
 | D13 | `ornadb-csenl.13` | What is the specification? | A three documents; B one document, cleaned; C reference beside the frozen 1.1.0 | all |
 
 The order in which answers unblock work: D12 and D2 gate the host-function
@@ -2732,8 +2737,10 @@ package is arbitrary code in the engine, against the trust model in
 `26-security.md` `[INFERENCE: not read in full]`; every native needs an ABI
 version and a signature check.
 
-Weak for 1.x: nothing in the corpus needs it and the owner's draft
-deliberately excludes it.
+Amendment 2026-11-10: the owner chose native declarations in any module, including packages. That is this option's
+direction, but the library is supplied only by the root project, with a digest pinned in Git and link-time binding
+(`docs/design/native-libraries.md`). It is not C as written; the ABI manifest and package trust text above describe
+option C alone and do not describe the chosen model.
 
 ### Migration cost
 
@@ -2753,6 +2760,9 @@ deliberately excludes it.
   table behind a lookup that yields a `DefId`.
 * An ABI version carried by the engine (A), by a pin (B) or by a package
   (C), checked once at load.
+* Amended 2026-11-10: a `native fn` may appear in any module unit, so the HIR has `Callee::Native` for every native
+  declaration and binds it at link by its `DefId` to the engine registry (`core`, `sys`) or to a project-named shared
+  library. See `docs/design/native-libraries.md`, sections 10 and 12.
 
 --------------------------------------------------------------------------
 
@@ -2910,8 +2920,9 @@ These are decisions about intent, not options that more analysis can rank:
 8. D9: is the branch-and-merge workflow the default workflow, so that the
    default key should be merge-safe?
 9. D10: why was `var` removed in 1.1, and does that reason forbid `let mut`?
-10. D11 and D12: is `std` a replaceable library or a privileged part of
-    the distribution, and may a third-party package ever ship native code?
+10. D11 and D12: is `std` a replaceable library or a privileged part of the distribution? (Amended 2026-11-10: the
+    owner decided native code may appear in any `.orna` module; the open points are the library model, listed in
+    `docs/language/DECIDED.md` amendment and `docs/design/native-libraries.md` section 14.)
 11. D13: is the 1.1.0 publication frozen (hash-pinned) or editable?
 
 --------------------------------------------------------------------------

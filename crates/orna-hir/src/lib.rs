@@ -44,6 +44,7 @@ mod pat;
 pub mod print;
 mod program;
 mod resolve;
+mod rules;
 mod ty;
 pub mod typeck;
 mod validate;

@@ -627,8 +627,9 @@ impl<'a> BodyCheck<'a> {
 
     /// Checks a value against its expected type, applying the lift rule of
     /// decision D3: a `T` where `T?` is expected is accepted as `Some(T)`. The
-    /// value keeps its flat representation, so no node is added.
-    fn coerce(&mut self, actual: Ty, expected: Ty, span: SyntaxSpan) {
+    /// value keeps its flat representation, so no node is added. Returns the
+    /// type the value has at the site: `expected` when the lift applies.
+    fn coerce(&mut self, actual: Ty, expected: Ty, span: SyntaxSpan) -> Ty {
         let actual_resolved = self.resolved(actual);
         let expected_resolved = self.resolved(expected);
         if let Some(TyKind::Option(inner)) = self.kind_of(expected_resolved) {
@@ -638,10 +639,11 @@ impl<'a> BodyCheck<'a> {
             };
             if lifts {
                 self.unify(actual, inner, span);
-                return;
+                return expected;
             }
         }
         self.unify(actual, expected, span);
+        actual
     }
 
     /// Checks one expression, using `expected` for the constructs where context
@@ -683,12 +685,18 @@ impl<'a> BodyCheck<'a> {
             (ExprKind::Construct { def, fields }, expected) => {
                 self.check_construct(body, def, &fields, expected, span.clone())?
             }
+            (ExprKind::If { cond, then, els }, expected) => {
+                self.check_if(body, cond, then, els, expected, span.clone())?
+            }
+            (ExprKind::Case { scrutinee, arms }, expected) => {
+                self.check_case(body, scrutinee, &arms, expected, span.clone())?
+            }
             (kind, expected) => {
                 let ty = self.infer_shallow(body, id, kind, span.clone())?;
-                if let Some(expected) = expected {
-                    self.coerce(ty, expected, span.clone());
+                match expected {
+                    Some(expected) => self.coerce(ty, expected, span.clone()),
+                    None => ty,
                 }
-                ty
             }
         };
         body.exprs[id].ty = ty;
@@ -704,6 +712,8 @@ impl<'a> BodyCheck<'a> {
             crate::Lit::Bool(_) => TyKind::Bool,
             crate::Lit::Date(_) => TyKind::Date,
             crate::Lit::Instant { .. } => TyKind::Instant,
+            crate::Lit::Period(_) => TyKind::Period,
+            crate::Lit::Duration { .. } => TyKind::Duration,
             crate::Lit::None => {
                 let payload = self.infer.new_var(&mut self.program.tys, span);
                 return Ok(self.intern(TyKind::Option(payload)));
