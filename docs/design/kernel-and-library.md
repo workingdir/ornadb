@@ -113,12 +113,14 @@ applies this test to every special case in Rust today.
   values; natives ([D12](../language/DECIDED.md)); tables, transactions, assertions and Git; resource accounting.
 * **Library**: Orna source in `core` and `std`. `core` is embedded in the engine and versioned with it (D12). `std` is
   pinned to a Git commit and replaceable (D11). Library code uses only declarations a user can write: `type`, `enum`,
-  `protocol`, nested `impl`, `fn`, `static`, `use`, `pub use`. The one exception is `native fn`, which is accepted
-  only in `core` and `sys`. This document proposes `native type` as a second exception (section 4, P9).
+  `protocol`, nested `impl`, `fn`, `static`, `use`, `pub use` and `native fn`. Any module may declare a `native fn`
+  (D12, amended 2026-11-10). The engine registry binds the natives of `core` and `sys`, and a shared library that the
+  project names binds every other native. This document proposes one declaration that a user cannot write:
+  `native type` (section 4, P9). It names a representation that the engine owns, so only the registry binds it.
 * **Glass box**: go-to-definition from any name a user can write ends in Orna source, except at a `native`
-  declaration, where it ends at a signature, an effect clause and the name of the Rust function bound to it. The
-  editor and the engine share one resolver (hir.md section 3.4), so this holds by construction once `core` is
-  ordinary HIR.
+  declaration, where it ends at a signature, an effect clause and the name of the Rust function or the shared-library
+  symbol bound to it. The editor and the engine share one resolver (hir.md section 3.4), so this holds by construction
+  once `core` is ordinary HIR.
 
 ### 1.2 Three tests
 
@@ -139,7 +141,7 @@ A candidate feature is library when all three hold.
 | D5 no overloading | Operator protocols are not overloading (D16). Section 4, P1 states why and what it costs. |
 | D8 units | Amended by owner direction on PR #9854. D15 sets the surface: enum-shaped families. Sections 5 and 10. |
 | D11 `pub use`, replaceable std | Used for re-exports such as `pub use Length.kilometre as km;`. |
-| D12 natives in `core` and `sys` | Extended to `native type` and to body-less impl members in `core` (P9). |
+| D12 natives (amended) | `native fn` in any module. `native type` stays in `core` and `sys` (P9). |
 | D14 to D18 | Decided on 2026-11-10 under the owner's delegation. Section 11 states each; sections 4 and 5 use them. |
 
 Principle 4 of DECIDED.md says: "The core is small and ships with the engine; the library is ordinary code." This
@@ -182,7 +184,7 @@ Sources: reference chapters 1 to 4 under [../language/reference/](../language/re
 | U14 | Ranges `a..b`, `a..=b`, `x in r` | 02-types (kernel type today) | uses only |
 | U15 | String interpolation `{expr}` | 01 | formatting |
 | U16 | Modules, `use`, `pub use`, reserved namespaces | 01; D11 | replaceable std |
-| U17 | `native fn` in `core` and `sys` only | 01; D12 | the kernel boundary |
+| U17 | `native fn` in any module; registry for `core` and `sys`, a shared library otherwise | 01; D12 | host access |
 | U18 | Default and named arguments | 03 | `divide(scale:, rounding:)` |
 | U19 | Int unbounded, Decimal exact, Float; no implicit conversion | 02-types; D7 | exact money |
 | U20 | `Instant`, `Duration`, `Period`, `Date` (kernel types) | 02-types | uses only |
@@ -806,7 +808,9 @@ added only where a measured need appears. The one re-baseline is at H9.
 ### 4.9 P9: `native type` and the wire registry
 
 Conclusion: library types keep today's bytes through an engine-side registry keyed by `DefId` and guarded at build time.
-`core` declares kernel representation types with `native type`, so impls can be nested in them.
+`core` declares kernel representation types with `native type`, so impls can be nested in them. The registry binds
+them. A shared library cannot add a value representation or a wire codec, and the 2026-11-10 amendment of D12 concerns
+`native fn` only, so `native type` stays in `core` and `sys`.
 
 **Facts** (`reference/Orna-1.1.0/source/29-formats.md`):
 
@@ -849,11 +853,12 @@ library type that moves or is renamed therefore changes identity and bytes. The 
 **Options for problem 2.**
 
 * **`native type` declarations in `core`.** `pub native type Instant { impl Add<Duration, Instant> { ... } }`. The
-  engine owns the representation and the codec. The impls are ordinary Orna. PR #9854 already declares `Duration` "as a
-  body-less native type, bound by DefId (D12)" (units.md section 8.4). Scalars get the same treatment with body-less
+  engine owns the representation and the codec. The impls are ordinary Orna. The first draft of PR #9854 declared
+  `Duration` "as a body-less native type, bound by DefId (D12)"; its current text makes `Duration` a unit family and
+  binds the wire form through the registry (units.md section 8.4). Scalars get the same treatment with body-less
   members, so that go-to-definition on `+` for `Int` lands on `native fn add(self, right: Int): Int effect none;` and
-  not in Rust. Buys: the whole operator table is readable. Costs: one new declaration form, legal only in `core` (D12
-  pattern).
+  not in Rust. Buys: the whole operator table is readable. Costs: one new declaration form, legal only where the
+  registry binds the key, that is `core` and `sys`.
 * **Relax ownership** so an impl may nest in any type named in the protocol arguments. Buys: `Duration` could host both
   sides. Costs: it needs a `for` form that 1.2 removed (ORNA091-E-IMPL-FOR) and breaks the one-owner rule.
 
@@ -1194,7 +1199,7 @@ and what the browser profile must carry. Nothing here needs a new language featu
 
 * **Effects.** An operator instance is an ordinary function with an inferred effect set. `a + b` lowers to
   `Callee::Source { def }` (hir.md 2.6), so the effect pass joins the instance's set (hir.md 2.5). A native member
-  declares its effects in `core` (D12).
+  declares its effects in its declaration (D12).
 * **Restricted contexts.** `a + b` inside a computed field or an assertion is legal exactly when the instance has an
   empty effect set (chapter 4). A user instance that reads a table makes `+` illegal there. The diagnostic uses the
   existing rule, "the first forbidden kind found and the call chain", and the chain names the operator and the instance:
@@ -1230,8 +1235,9 @@ and what the browser profile must carry. Nothing here needs a new language featu
 ### 6.3 The browser and Wasm profile
 
 * The library is Orna. It runs wherever the executor runs. Only natives touch the host, and each declares its effects.
-  The browser build is a `Host` with `io() = None` (hir.md 4.4), so features built on pure `core` work unchanged. The
-  wasm parity workflow runs from H4 (hir.md 10.3).
+  The browser build is a `Host` with `io() = None` (hir.md 4.4), so features built on pure `core` work unchanged. A
+  native bound from a shared library cannot load in the browser build; the native-libraries design proposes rejection
+  at link (`docs/design/native-libraries.md`, section 7). The wasm parity workflow runs from H4 (hir.md 10.3).
 * Two costs belong to library-defined features. (1) Start-up: `core` is parsed, lowered and checked at start, once per
   page load in a browser. (2) Size: the embedded source. Neither is measured. Options for (1): ship a pre-lowered
   `Program` for `core` built at compile time and checked against the source digest; or lower `core` modules lazily on
@@ -1822,7 +1828,8 @@ that stay in Rust are listed in 9.3. Tooling gets the open-the-box experience fo
 * **Implicit `Int` to `Decimal` widening for quantities.** Rejected by D7. Where PR #9854 widens, it is by a stated rule
   (`ORNA-UNIT-016`).
 * **Attributes for lang items.** Rejected: the grammar has none (native-declarations.md 3.1).
-* **`native fn` in `std`.** Rejected by D12.
+* **Natives bound by the engine outside `core` and `sys`.** Rejected. D12 (amended 2026-11-10) lets any module declare a
+  `native fn`, and a shared library that the project names binds every key outside the registry.
 * **Several functions with one name.** Rejected by D5. P1 selects an instance of one member instead.
 * **New operator symbols.** Rejected. Rust's operator module says it "does not provide any mechanism to create new
   operators"; the set stays fixed.
@@ -1845,6 +1852,8 @@ that stay in Rust are listed in 9.3. Tooling gets the open-the-box experience fo
   items 2 and 3 (D14). P4-B adds no second evaluator: the check-time evaluator is the HIR executor.
 * Diagnostic codes, spans and printing. The library supplies words, never codes.
 * The formatter and the parser.
+* The link step, the effect label and the digest check of natives. A native that a project binds from a shared library
+  is that project's code, not the engine's (D12, amended 2026-11-10).
 
 ### 9.4 Tooling: hover and go-to-definition are the open-the-box experience
 
@@ -1871,7 +1880,9 @@ at H2 for operators, suffixes and interpolation.
 
 Facts: D12 versions natives by `NativeAbi(u32)`, each `core.orna` declaration carries `since` and optionally `until`, a
 captured program records its ABI, and a retired native stays under a retired name (hir.md 4.5). ORNA-LIB-001 says "a
-program's library behaviour MUST be determined by its captured dependency snapshots".
+program's library behaviour MUST be determined by its captured dependency snapshots". A native bound from a shared
+library carries a link-time ABI check of its own (`docs/design/native-libraries.md`, section 4). This section is about
+`core`.
 
 New with Orna-bodied `core`: the behaviour of `Money + Money` is now an ABI fact, and identity derives from `core` paths
 (`E:source_enums.rs:23-60`). Options:

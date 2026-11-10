@@ -37,8 +37,8 @@ the owner; each says what reopening would cost.
 | D8 | Cut user-declared units and dimensions from 1.x (reserved syntax). `Duration`, `Instant`, `Decimal` and `Money<C>` stay as built-in types with their literal postfixes (`1.day`). The checker's dimensional algebra is deleted. |
 | D9 | Default key is `Uuid` (`uuid7()`), because the product's core workflow is branch and merge. Auto-increment integer keys remain available by explicit declaration with the merge-conflict caveat documented. No index or unique declarations: uniqueness stays an assertion, and the engine MUST recognise the canonical key-shaped forms and serve them from an index (the spec only allowed this before, ASSERT-058). |
 | D10 | Mutation just works. `let` binds a variable and `x = value;` reassigns it, exactly as 1.1 allows; there is no `mut`, no `var`, and no immutability ceremony. Closures capture the variable itself (a shared slot within the activation), so assigning to an outer variable inside a closure updates that variable and the closure sees later assignments. Values stay immutable; only the variable slot changes. The one boundary: `parallel` and task bodies capture snapshots, and assigning to an outer variable from them is a compile error, so concurrent children cannot race on a slot. |
-| D11 | Add `pub use path;` and `pub use path as name;`. `std` is replaceable ordinary Orna. A package may not ship native code. |
-| D12 | Host functions live in an engine-versioned `core` and `sys`, declared body-less in embedded `core.orna` and `sys.orna` and bound by `DefId` to implementations in the engine. `std` is pure Orna on top and re-exports `core` where it wants stable paths (`std.bits.bit_or` is `pub use core.bits.bit_or`). Natives are declared only in engine-embedded modules; this supersedes the earlier native-declarations decision that allowed them in pinned std modules. Old pinned std keeps working through an engine `NativeAbi` version. |
+| D11 | Add `pub use path;` and `pub use path as name;`. `std` is replaceable ordinary Orna. ~~A package may not ship native code.~~ Superseded 2026-11-10 (see the amendment section). |
+| D12 | **Amended 2026-11-10** (see the amendment section). A `native fn` may appear in any module; the engine registry binds `core` and `sys`, and a project-named shared library binds every other module. `std` stays pure Orna on top and re-exports `core` where it wants stable paths. The original D12 text is kept there, marked superseded. |
 | D13 | Write a language reference beside the frozen 1.1.0 publication: grammar, typing rules, effect rules, evaluation rules, numeric tower, strings, modules. Format and storage specs and product requirements are separate documents. Orchestrator text and the vendor name leave the normative corpus (the store requirement becomes a transactional contract). Fossils of unshipped syntax move to a migration appendix. The frozen 1.1.0 stays hash-pinned as history; the new reference is 1.2. |
 | D14 | Compile-time evaluation of a pure fragment of Orna is the destination, in two stages. Now: P4-A, the unit-key algebra in Rust behind the four-item interface of `docs/design/kernel-and-library.md` section 5.6, so library source never changes. After H4 and H5: P4-B, where the check-time evaluator is the HIR executor running pure `core` bodies (empty inferred effect set, no `const fn` marker); it then takes over interface items 2 and 3. |
 | D15 | Units of measure are enum-shaped families (`Length.kilometre`, `5.kilometre`, user-declared families): one declaration form for built-in and user units. The keyword forms `dim` and `unit` of PR #9854 are not shipped; no program declares a unit yet, so nothing migrates. The text after `=` in an enum body is a unit expression under P4-A and an ordinary Orna expression under P4-B. Dimensional algebra is kept (D8, as amended by owner direction). `impl` and `static` members in enums (P3a) are the first parser change. Two unit families in scope that define the same suffix are an ambiguity error (ORNA-S011 style); the qualified form resolves it; there is no last-import-wins rule. The exact surface is in section 5.5 of the design. |
@@ -57,7 +57,8 @@ the owner; each says what reopening would cost.
 7. D8: a closed set (time, size, money) is enough for 1.x.
 8. D9: branch-and-merge is the default workflow; the default key is merge-safe.
 9. D10: `var` was removed to keep one binding form; that is a reason for one form (`let`, reassignable), not for immutability. Mutation stays plain assignment.
-10. D11/D12: `std` is replaceable; no third-party native code.
+10. D11/D12: `std` is replaceable. Amended 2026-11-10: any `.orna` may declare a native function; the implementation
+    comes from the engine (`core`, `sys`) or from a shared library the project names.
 11. D13: 1.1.0 is frozen history; the language reference is new.
 
 ## Answers to the five questions of the kernel and library design
@@ -148,8 +149,9 @@ weights: one annotation per `core` function that readers must trust.
 
 - HIR stages H1 onward: D1, D3, D4, D5 give the type and call model; D2 the effect field; D6 to D8 the value model;
   D9 the table-op and index model; D12 the host-function declaration form and the `Callee` set.
-- The native-declaration work resumes in a changed form: body-less `native fn` is parsed everywhere (N1 stands) but
-  accepted only in engine-embedded `core.orna` and `sys.orna`.
+- The native-declaration work resumes in a changed form: body-less `native fn` is parsed everywhere and is accepted in
+  any module (amended 2026-11-10, see the amendment section). The binding is at link: the engine registry for `core`
+  and `sys`, a project-named shared library for every other module. Design: `docs/design/native-libraries.md`.
 - Typed sys ids resume as the generated binding of `sys.orna`, not as a second source of truth.
 - HIR stage H2 (typing): step zero, protocol member calls resolve, then operator protocols (D16) and the H2c units work:
   the P4-A unit-key kernel behind a four-item interface (D14), then the enum-shaped families (D15).
@@ -164,3 +166,38 @@ tracked as beads under `ornadb-csenl` (see the bd comments on `ornadb-csenl.1` t
 
 The work for D14 to D18 is ordered by HIR stage in `docs/design/kernel-and-library.md`, section 8.2. The first parser
 change is `impl` and `static` members in enums.
+
+## Amendment 2026-11-10: native code in any module (D11 and D12 amended)
+
+The owner overruled the part of D11 and D12 that confined native code to the engine. The owner's words:
+
+> any .orna should be able to use native functions, you just gotta load the .so with the declaration
+
+New rule, replacing the superseded text below:
+
+1. A body-less `native fn` declaration is accepted in any module unit of a project, a package or `std`.
+2. Every native declaration is bound exactly once, at link and before evaluation, by its key (module path, name).
+3. A key in the engine-embedded modules `core` and `sys` is bound from the engine registry, as before.
+4. Any other key is bound from a shared library (`.so`, `.dylib` or `.dll`) that the root project names in its
+   manifest, with a SHA-256 digest of the file pinned in Git. A library that cannot be found, does not match its
+   digest, has the wrong ABI, or lacks a symbol is a distinct link error that names the declaration and the library.
+5. Every native still declares its `effect` clause. The engine cannot verify a library's effect; a library native is
+   labelled "host trust, not sandboxed" (ORNA-EXT-005).
+
+Open owner decisions (options and trade-offs in `docs/design/native-libraries.md`, section 14): the manifest name and
+format, whether only the root project may name libraries, in-process `.so` versus out-of-process execution given the
+ORNA-MEDIA-005 time and memory MUST, the effect model for libraries, digest-only versus an operator allowlist, and
+whether the browser profile rejects a program that uses a library native (the design proposes rejection at link).
+This amendment changes no Rust code. The superseded text follows, verbatim, for the record.
+
+Superseded D11 sentence: "A package may not ship native code."
+
+Superseded D12 text (2026-11-10, before this amendment): "Host functions live in an engine-versioned `core` and `sys`,
+declared body-less in embedded `core.orna` and `sys.orna` and bound by `DefId` to implementations in the engine.
+`std` is pure Orna on top and re-exports `core` where it wants stable paths (`std.bits.bit_or` is
+`pub use core.bits.bit_or`). Natives are declared only in engine-embedded modules; this supersedes the earlier
+native-declarations decision that allowed them in pinned std modules. Old pinned std keeps working through an engine
+`NativeAbi` version."
+
+Superseded answer 10 text: "D11/D12: `std` is replaceable; no third-party native code."
+Superseded "What this unblocks" text: "accepted only in engine-embedded `core.orna` and `sys.orna`."

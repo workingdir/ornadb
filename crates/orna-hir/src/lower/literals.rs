@@ -6,7 +6,7 @@
 //! seconds since the epoch. A spelling without a canonical payload returns
 //! `None`, and lowering reports one diagnostic instead of guessing.
 
-use num_bigint::BigInt;
+use num_bigint::{BigInt, Sign};
 use orna_syntax::LiteralKind;
 
 use crate::Lit;
@@ -35,6 +35,104 @@ pub(crate) fn lower_literal(text: &str, kind: LiteralKind) -> Option<Lit> {
             nanoseconds,
         }),
     }
+}
+
+/// The payload of a numeric literal followed by a built-in postfix name
+/// (`12.34.decimal`, `1.day`, `3.hour`). `None` when the name is not one of
+/// them, or the value has no canonical payload (a duration that is not on the
+/// nanosecond grid, or a day count on a decimal literal).
+pub(crate) fn lower_numeric_postfix(text: &str, kind: LiteralKind, name: &str) -> Option<Lit> {
+    if !matches!(kind, LiteralKind::Integer | LiteralKind::Decimal) {
+        return None;
+    }
+    match builtin_postfix(name)? {
+        PostfixUnit::Decimal => parse_decimal(text),
+        PostfixUnit::Days if matches!(kind, LiteralKind::Integer) => {
+            parse_int(text).map(Lit::Period)
+        }
+        PostfixUnit::Days => None,
+        PostfixUnit::Duration(seconds_per_unit) => duration_postfix(text, seconds_per_unit),
+    }
+}
+
+/// The unit a built-in postfix name denotes and how its literal's value is read.
+#[derive(Clone, Copy)]
+enum PostfixUnit {
+    /// `12.34.decimal`: the literal is a decimal value.
+    Decimal,
+    /// `1.day`: a whole-day count, read as a period.
+    Days,
+    /// `3.hour`: an elapsed duration, the value times this many seconds.
+    Duration(u32),
+}
+
+/// The single table of built-in postfix names. Declared unit families replace it
+/// when stage D8 resolves postfixes against them; nothing else names these units.
+fn builtin_postfix(name: &str) -> Option<PostfixUnit> {
+    Some(match name {
+        "decimal" => PostfixUnit::Decimal,
+        "day" | "days" => PostfixUnit::Days,
+        "hour" | "hours" => PostfixUnit::Duration(3_600),
+        "minute" | "minutes" | "min" => PostfixUnit::Duration(60),
+        "second" | "seconds" | "s" => PostfixUnit::Duration(1),
+        _ => return None,
+    })
+}
+
+/// An elapsed-duration postfix: the literal's value times `seconds_per_unit`,
+/// as whole seconds and nanoseconds. A value finer than one nanosecond has no
+/// canonical payload and yields `None`.
+fn duration_postfix(text: &str, seconds_per_unit: u32) -> Option<Lit> {
+    let Lit::Decimal {
+        coefficient,
+        exponent,
+    } = parse_decimal(text)?
+    else {
+        return None;
+    };
+    let shift = small_exponent(&exponent)?.checked_add(9)?;
+    let mut total = coefficient * BigInt::from(seconds_per_unit);
+    if total.sign() == Sign::Minus {
+        return None;
+    }
+    let scale = BigInt::from(10u32);
+    if shift >= 0 {
+        total *= scale.pow(u32::try_from(shift).ok()?);
+    } else {
+        let divisor = scale.pow(u32::try_from(shift.checked_neg()?).ok()?);
+        if &total % &divisor != BigInt::from(0u32) {
+            return None;
+        }
+        total /= divisor;
+    }
+    let nanos_per_second = BigInt::from(1_000_000_000u32);
+    let nanoseconds = match (&total % &nanos_per_second)
+        .magnitude()
+        .to_u64_digits()
+        .as_slice()
+    {
+        [] => 0,
+        [digit] => u32::try_from(*digit).ok()?,
+        _ => return None,
+    };
+    Some(Lit::Duration {
+        seconds: &total / &nanos_per_second,
+        nanoseconds,
+    })
+}
+
+/// A base-ten exponent small enough to shift by, as an `i64`.
+fn small_exponent(exponent: &BigInt) -> Option<i64> {
+    let magnitude = match exponent.magnitude().to_u64_digits().as_slice() {
+        [] => 0,
+        [digit] => i64::try_from(*digit).ok()?,
+        _ => return None,
+    };
+    Some(if exponent.sign() == Sign::Minus {
+        -magnitude
+    } else {
+        magnitude
+    })
 }
 
 /// An integer spelling, with `_` separators removed.

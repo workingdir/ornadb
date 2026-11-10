@@ -1023,6 +1023,29 @@ reason = "same cause as count_is_positive: `values | count` over a list paramete
 bead = "ornadb-csenl.18"
 
 [[difference]]
+case = "invalid/assert-effectful-table.orna"
+field = "rules"
+first = "ORNA-A091-007: declaration assertion uses forbidden network effect"
+second = ""
+reason = "the pinned std module does not export `http.get`, so the call does not lower (`ORNA-S012-UNRESOLVED`) and the effect pass cannot see the network effect; closed when H2 resolves std exports"
+bead = "ornadb-csenl.18"
+
+[[difference]]
+case = "invalid/legacy-assert-owner-pipe.orna"
+field = "rules"
+first = "ORNA-A091-002: remove the repeated table owner before the assertion predicate"
+second = ""
+reason = "`all_unique` is not in scope in the case, so the piped call does not lower (`ORNA-S012-UNRESOLVED`) and the owner-pipe rule has no call to judge; closed when the resolver carries the fixture-catalogue environment"
+bead = "ornadb-csenl.15"
+
+[[difference]]
+case = "invalid/legacy-assert-self-pipe.orna"
+field = "rules"
+first = "ORNA-A091-002: remove `self |`; the table already supplies its candidate relation"
+second = ""
+reason = "`all_unique` is not in scope in the case, so the piped call does not lower (`ORNA-S012-UNRESOLVED`) and the `self |` rule has no call to judge; closed when the resolver carries the fixture-catalogue environment"
+bead = "ornadb-csenl.15"
+[[difference]]
 case = "valid/formatting-does-not-serialize.orna"
 field = "public-signature"
 first = "examples.valid.formatting-does-not-serialize::both=both(Duration) -> {display: Str, encoded: ByteStream}"
@@ -1061,7 +1084,37 @@ reason = "currencies (Money, GBP, EUR, USD) exist only as a legacy parser constr
 bead = "ornadb-csenl.15"
 
 [[environment]]
+category = "legacy-rejection-names"
+count = 12
+reason = "legacy 1.0.0 programs (invalid/legacy-*) use names the HIR does not declare (DecodeError, Ok, Result, decode, ensure, match, name, var, all_unique). The HIR does not reject them with the published code; the environment test asserts each published code against the old checker, which is the evidence for the legacy class"
+bead = "ornadb-csenl.16"
+
+[[environment]]
+category = "harness-environment-names"
+count = 13
+reason = "harness bindings: the expression fixtures (fallback, left, middle, missing) and the example cases use names the harness supplies (log, process, read, rows, get, valid_email). The case declares none of them, so each use is an environment blocker that the harness fidelity work closes"
+bead = "ornadb-csenl.15"
+
+[[environment]]
+category = "missing-import-names"
+count = 8
+reason = "stdlib names (for_each, mean, ref, open) used without the import that declares them. Each closes when the std declaration is imported by the case; the spec's root intrinsic environment conflict for for_each is open and is not decided here"
+bead = "ornadb-csenl.16"
+
+[[environment]]
+category = "pending-p3b-names"
+count = 2
+reason = "names that need a later typed-pipeline phase (phase 3b): half_even of a decimal division, and Str used as an as:-argument of a secret display. They resolve only once that phase lands"
+bead = "ornadb-csenl.16"
+
+[[environment]]
+category = "implement-declaration-names"
+count = 4
+reason = "names the HIR must declare before they resolve: Ordering and Self (generic protocol), List (live page fallback) and all_unique (table assertions). These are real declarations, not environment; each is open work"
+bead = "ornadb-csenl.16"
+
+[[environment]]
 category = "unclassified-names"
-count = 39
-reason = "names in no environment class, including std and core names the pinned std does not declare (Str, Result, Ok, Self, Ordering) and lowercase names that may be genuine resolver scope defects. Not accepted as environment: each needs a per-name decision, a HIR declaration or a resolver fix"
+count = 0
+reason = "every unresolved name is in a named category above; a new unclassified name fails the ratchet and needs a per-name decision"
 bead = "ornadb-csenl.16"

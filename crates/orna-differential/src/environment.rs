@@ -27,15 +27,39 @@ pub const FIXTURE_TABLES: &str = "fixture-tables-and-modules";
 /// construct, and the fixture units are supplied by the observer.
 pub const CURRENCY_AND_UNIT: &str = "currency-and-unit-names";
 
+/// Legacy 1.0.0 programs. The HIR does not reject them with the published
+/// code, so each use is an expected difference. The environment test asserts
+/// the published code against the old checker instead.
+pub const LEGACY_REJECTION: &str = "legacy-rejection-names";
+
+/// Harness bindings: names the expression and example harness supplies and the
+/// case does not declare.
+pub const HARNESS_ENVIRONMENT: &str = "harness-environment-names";
+
+/// Stdlib names used without the import that declares them.
+pub const MISSING_IMPORT: &str = "missing-import-names";
+
+/// Names that await a later phase of the typed pipeline (phase 3b).
+pub const PENDING_P3B: &str = "pending-p3b-names";
+
+/// Names the HIR must declare before they resolve: core enums, `Self`, and the
+/// relational predicate constructors.
+pub const IMPLEMENT: &str = "implement-declaration-names";
+
 /// Names no class above covers. Not accepted as environment: each needs a
 /// per-name decision, either a HIR declaration or a resolver defect.
 pub const UNCLASSIFIED: &str = "unclassified-names";
 
 /// Every category a ratchet entry may name, in report order.
-pub const CATEGORIES: [&str; 4] = [
+pub const CATEGORIES: [&str; 9] = [
     CONNECTOR_AND_HOST,
     FIXTURE_TABLES,
     CURRENCY_AND_UNIT,
+    LEGACY_REJECTION,
+    HARNESS_ENVIRONMENT,
+    MISSING_IMPORT,
+    PENDING_P3B,
+    IMPLEMENT,
     UNCLASSIFIED,
 ];
 
@@ -54,10 +78,20 @@ fn unresolved_name(diagnostic: &str) -> Option<&str> {
     Some(&diagnostic[start..end])
 }
 
-/// The category of one lowering diagnostic, or `None` when it is not an
-/// unresolved name at all.
+/// Whether a case is a legacy 1.0.0 rejection program, by its file name.
 #[must_use]
-pub fn classify(diagnostic: &str) -> Option<&'static str> {
+pub fn is_legacy_case(case_id: &str) -> bool {
+    case_id
+        .rsplit('/')
+        .next()
+        .is_some_and(|file| file.starts_with("legacy-"))
+}
+
+/// The category of one lowering diagnostic of one case, or `None` when it is
+/// not an unresolved name at all. The name classes come first, then the legacy
+/// case class, then the per-name classes.
+#[must_use]
+pub fn classify(case_id: &str, diagnostic: &str) -> Option<&'static str> {
     let name = unresolved_name(diagnostic)?;
     Some(match name {
         "mail" | "google" | "finance" | "energy" | "HEAD" | "CWD" | "work" => CONNECTOR_AND_HOST,
@@ -65,6 +99,13 @@ pub fn classify(diagnostic: &str) -> Option<&'static str> {
         "Contact" | "contacts" | "Message" | "Audit" | "Order" | "Note" | "Page" | "Customer"
         | "Account" | "Payment" | "Reading" | "Status" | "Locale" | "DisplayContext" | "Europe"
         | "vehicle" | "openbanking" | "bank" => FIXTURE_TABLES,
+        _ if is_legacy_case(case_id) => LEGACY_REJECTION,
+        "log" | "process" | "read" | "rows" | "get" | "valid_email" | "fallback" | "left"
+        | "middle" | "missing" => HARNESS_ENVIRONMENT,
+        "for_each" | "mean" | "ref" | "open" => MISSING_IMPORT,
+        "half_even" => PENDING_P3B,
+        "Str" if case_id.ends_with("secret-display.orna") => PENDING_P3B,
+        "Ordering" | "Self" | "List" | "all_unique" => IMPLEMENT,
         _ => UNCLASSIFIED,
     })
 }
@@ -153,25 +194,66 @@ mod tests {
 
     #[test]
     fn classifies_by_the_unresolved_name() {
+        let case = "valid/lambda.orna";
         assert_eq!(
-            classify("examples.valid.x: ORNA-S012-UNRESOLVED: `mail` is not in scope"),
+            classify(
+                case,
+                "examples.valid.x: ORNA-S012-UNRESOLVED: `mail` is not in scope"
+            ),
             Some(CONNECTOR_AND_HOST)
         );
         assert_eq!(
-            classify("m: ORNA-S012-UNRESOLVED: `Money` is not a declared type"),
+            classify(
+                case,
+                "m: ORNA-S012-UNRESOLVED: `Money` is not a declared type"
+            ),
             Some(CURRENCY_AND_UNIT)
         );
         assert_eq!(
-            classify("m: ORNA-S012-UNRESOLVED: `Contact` is not in scope"),
+            classify(case, "m: ORNA-S012-UNRESOLVED: `Contact` is not in scope"),
             Some(FIXTURE_TABLES)
         );
         assert_eq!(
-            classify("m: ORNA-S012-UNRESOLVED: `mean` is not in scope"),
-            Some(UNCLASSIFIED)
+            classify(case, "m: ORNA-S012-UNRESOLVED: `mean` is not in scope"),
+            Some(MISSING_IMPORT)
         );
         assert_eq!(
-            classify("m: ORNA-INFER-007: the type of this expression is ambiguous"),
+            classify(
+                case,
+                "m: ORNA-INFER-007: the type of this expression is ambiguous"
+            ),
             None
+        );
+    }
+
+    #[test]
+    fn classifies_a_name_by_its_case_when_no_name_class_applies() {
+        let legacy = "invalid/legacy-result.orna";
+        assert!(is_legacy_case(legacy));
+        assert_eq!(
+            classify(legacy, "m: ORNA-S012-UNRESOLVED: `Result` is not in scope"),
+            Some(LEGACY_REJECTION)
+        );
+        assert_eq!(
+            classify(
+                "valid/secret-display.orna",
+                "m: ORNA-S012-UNRESOLVED: `Str` is not in scope"
+            ),
+            Some(PENDING_P3B)
+        );
+        assert_eq!(
+            classify(
+                "valid/generic-protocol.orna",
+                "m: ORNA-S012-UNRESOLVED: `Self` is not in scope"
+            ),
+            Some(IMPLEMENT)
+        );
+        assert_eq!(
+            classify(
+                "valid/x.orna",
+                "m: ORNA-S012-UNRESOLVED: `Mystery` is not in scope"
+            ),
+            Some(UNCLASSIFIED)
         );
     }
 
