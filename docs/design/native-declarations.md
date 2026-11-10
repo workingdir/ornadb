@@ -692,14 +692,8 @@ Three layers, each with a distinct failure mode:
    `grammar/orna.ebnf:7-11`) does not admit it, so a prompt cannot declare
    one. `impl_member` and `protocol_member` do not admit it, so a nested
    implementation cannot either.
-2. **Admission**: only a module whose logical path is a standard module path
-   and whose bytes were verified against the admitted
-   `StandardDependencyProfile` (`crates/orna-check/src/lib.rs:108-114`,
-   `from_sources` at `:133`) may contain one (ORNA-NATIVE-004). The
-   predicate already exists; the check is one branch in the loader.
-3. **Pin**: only the reference or a project-captured standard dependency. A
-   module loaded from the project's own tree, from an attachment, or from a
-   generated stub is not a standard module.
+2. **Admission**: only a module whose logical path is an engine-embedded module, `core.orna` or `sys.orna`, may contain one (ORNA-NATIVE-004). Standard modules such as `std` may not. The check is one branch in the loader.
+3. **Pin**: only the engine-embedded sources. A module loaded from the project's own tree, from an attachment, from a generated stub, or from a pinned std module is not a native carrier.
 
 Consequence: "user code may not declare native" is not a policy, it is a
 parse error followed by a load error. A test asserts both.
@@ -1044,27 +1038,25 @@ pin is a Git commit, and a capture names it. Consequences, all normative
 
 ### 3.16 What the pin looks like afterwards
 
-`stdlib/std` keeps 630 minus the declarations it deletes, plus the 129 it
-adds. What each existing shape becomes:
+`stdlib/std` keeps its validating wrappers as pure Orna and gains `pub use` lines for its re-exports (N8). After N4 and N8 it declares no native; the natives live in `core.orna` and `sys.orna`. What each existing shape becomes:
 
 | Today's shape | After |
 |---|---|
-| pure-forwarder wrapper plus marker leaf (`stdlib/std/text.orna:17-28`) | one `pub native fn` carrying the wrapper's parameter list and the leaf's result; both old declarations deleted |
-| marker leaf under a validating wrapper (`stdlib/std/query.orna:202-207`) | the wrapper stays as source; the leaf keeps its spelling as a `native fn` |
-| marker leaf with no public counterpart (`stdlib/std/ui.orna:5-15`) | `native fn __node` keeps its spelling; visibility is the reachability |
-| marker-bodied public re-export (`stdlib/std/query.orna:254-284`) | `pub native fn`, binding the same `IntrinsicId` |
-| self-recursive public declaration (`stdlib/std/stream.orna:26-65`) | `pub native fn`; the self-call cannot be written |
-| public-bound name with a forwarder body (`stdlib/std/hash.orna:12-17`) | `pub native fn`; the unreachable leaf is deleted |
-| spelling with no declaration at all | its first `native fn` |
+| pure-forwarder wrapper plus marker leaf (`stdlib/std/text.orna:17-28`) | `native fn` moves to `core.orna`; std keeps `pub use core.<module>.<name>` (N8) and the wrapper is deleted |
+| marker leaf under a validating wrapper (`stdlib/std/query.orna:202-207`) | the wrapper stays as pure Orna in std; the leaf's `native fn` moves to `core.orna` |
+| marker leaf with no public counterpart (`stdlib/std/ui.orna:5-15`) | `native fn __node` moves to `core.orna` with its spelling |
+| marker-bodied public re-export (`stdlib/std/query.orna:254-284`) | `pub use core.<...>` in std (N8); no declaration in std |
+| self-recursive public declaration (`stdlib/std/stream.orna:26-65`) | `native fn` in `core.orna`; std re-exports it with `pub use` |
+| public-bound name with a forwarder body (`stdlib/std/hash.orna:12-17`) | `pub use core.<...>`; the unreachable leaf is deleted |
+| spelling with no declaration at all | its `native fn` in `core.orna` |
 
 The per-file split is produced by the stage's generator and asserted by its
-parity test; this document states the total (129 declarations over 113
-identities, section 1.1) and the rules, not a hand-counted breakdown.
+parity test; this document states the total (113 catalogue identities, section 1.1, moved to `core.orna` by N4) and the rules, not a hand-counted breakdown.
 
-The 15 `std.io` leaves are `Dispatch::Host` and are untouched by this design
-(they bind through `orna-sys`;
+The 15 `std.io` leaves are `Dispatch::Host`. Under D12 they are declared in
+`sys.orna` (N4) and bound through `orna-sys`;
 [`docs/design/std-native.md`](std-native.md) section 3.10 keeps the parity
-check between the two registries).
+check between the two registries.
 
 Every `fail(error(...))` that remains in the pin is a real failure of a real
 implementation. That is the test of whether the migration is complete:
@@ -1074,21 +1066,23 @@ implementation. That is the test of whether the migration is complete:
 
 ## 4. Migration plan
 
-Seven stages. Each is one PR, independently mergeable, ordered so that no
+Eight stages. Each is one PR, independently mergeable, ordered so that no
 stage depends on a later one. "Corpus gate" means: the full
 `cargo test -p orna-syntax -p orna-check -p orna-evaluator -p orna-project`
 suite plus the byte-identical REPL golden outputs and
 `python3 scripts/check_fixture_manifest.py`.
+D12 of the owner's language decisions (DECIDED.md, PR #9832) supersedes the earlier decision that natives may be declared in pinned std modules. Native declarations are accepted only in engine-embedded `core.orna` and `sys.orna`. This plan moves every native there and adds a re-export stage (N8).
 
 | Stage | Title | Depends on |
 |---|---|---|
 | N1 | grammar, AST, parser, corpus tests | - |
-| N2 | admission binding, both load errors, evaluator dispatch | N1 |
+| N2 | admission binding (native accepted only in engine-embedded `core.orna` and `sys.orna`), both load errors, evaluator dispatch | N1 |
 | N3 | checker types from the declaration and consumes the effect clause | N1 (typing), N4 (effect clause) |
-| N4 | `ornadb-std` migration of all 113 natives and the pin bump | N2 |
+| N4 | migrate the natives into engine-embedded `core.orna` and `sys.orna`; pin bump | N2 |
 | N5 | delete the duplicated tables and the marker machinery | N3, N4 |
 | N6 | LSP, formatter, docs, runbook | N4 |
 | N7 | specification amendment and publication | N1 |
+| N8 | `pub use` re-exports in std; std declares no native | N4 |
 
 ### N1 - grammar, AST, parser, corpus tests
 
@@ -1141,7 +1135,7 @@ cargo test -p orna-check -p orna-evaluator --locked
     implementation_without_declaration_is_a_load_error names the same, at the reference pin
     duplicate_declaration_of_one_key_is_rejected
     two_spellings_of_one_identity_bind_one_id        std.query.count == std.collection.count
-    native_outside_a_standard_module_is_rejected      user module, attachment, generated stub
+    native_outside_engine_modules_is_rejected        user module, std module, attachment, generated stub
     historical_pin_still_loads                       v4/v5 fixtures unchanged
     qualified_spelling_without_a_declaration_is_unresolved
 ```
@@ -1177,35 +1171,41 @@ cargo test -p orna-check --locked
 Risk: the family-specific rules must keep their exact semantics. The corpus
 snapshot is the oracle; any diff is a bug in the rewrite, not a fix.
 
-### N4 - `ornadb-std` migration of all 113 natives and the pin bump
+### N4 - migrate the natives into engine-embedded `core.orna` and `sys.orna`, then bump the pin
 
-Two PRs, `github.com/workingdir/ornadb-std` then the superproject pin bump.
+Two PRs: the engine PR (embedded modules and loader), then the superproject pin bump. Per D12, native declarations leave the std pin. The 113 catalogue identities are declared body-less in `core.orna`, the 15 `std.io` host leaves are declared in `sys.orna`, and each is bound by `DefId` to an engine implementation. No std module declares a native after this stage; `std` re-exports them in N8.
 
-Std repo: 129 `native fn ... effect ...;` declarations (113 catalogue
-identities plus the 16 core re-export declarations in `std.query`); delete the
-pure-forwarder wrappers, the marker leaves and the 16 marker-bodied
-re-exports; keep the 15 `std.io` leaves. Section 3.16 gives the per-shape rule.
+Engine: `core.orna` and `sys.orna` (new, embedded), `crates/orna-standard-sources/src/lib.rs` (embeds both files), `crates/orna-intrinsics/src/pin.rs:7` (`CURRENT_STD_PIN`, and the `NativeAbi` version that old pins bind against), `crates/orna-intrinsics/src/modules/*.rs` (`declaration_path` for the duration formatters), `scripts/fixture-manifest.sha256` if mirror rows change.
 
-Superproject: `crates/orna-intrinsics/src/pin.rs:7` (`CURRENT_STD_PIN`),
-`crates/orna-intrinsics/src/modules/*.rs` (`declaration_path` for the
-duration formatters), `stdlib/std` gitlink, `scripts/fixture-manifest.sha256`
-if the mirror rows change, `crates/orna-standard-sources/src/lib.rs` if a
-module file is added.
+Std: `stdlib/std` gitlink. Delete every `native fn` declaration and every marker body. Validating wrappers stay as pure Orna; forwarders and marker-bodied re-exports are replaced by `pub use` in N8.
 
 Acceptance:
 ```
 python3 scripts/check_standard_library_pin.py
 cargo test -p orna-intrinsics -p orna-evaluator -p orna-check --locked
-    every_native_declaration_binds         129 declarations, 129 bindings, 0 unbound
-    every_bound_identity_is_declared       129 declarations over 113 distinct identities
+    every_native_declaration_binds         every native in core.orna and sys.orna binds by DefId, 0 unbound
+    every_bound_identity_is_declared       113 core identities and 15 sys leaves, no extras
     signatures_are_equal                   declaration digest == catalogue digest per identity
+    no_native_in_std                       grep 'native fn' stdlib/std returns nothing
     no_marker_remains                      grep 'is a native intrinsic' stdlib/std returns nothing
 ```
 plus the 115-file `standard_*.rs` suite unchanged.
 
-Risk: the std PR must merge before the pin bump; a half-landed pair fails the
-pin checker and, with N2 in place, the loader. The bump is atomic in the
-superproject, so the window is one PR.
+Risk: the engine PR must merge before the pin bump; a half-landed pair fails the pin checker and the loader. Old pins keep loading through the engine `NativeAbi` version (D12), so the bump does not break historical pins.
+
+### N8 - `pub use` re-exports in std
+
+Files: `stdlib/std/*.orna` (pure Orna `pub use core.<module>.<name>` lines replacing the forwarders and re-export declarations), `crates/orna-check` (the resolver accepts `pub use` of a native declared in `core` or `sys`), `crates/orna-syntax` for `pub use` if not yet parsed.
+
+Acceptance:
+```
+cargo test -p orna-check -p orna-evaluator --locked
+    std_reexport_binds_core_declaration    std.bits.bit_or resolves to core.bits.bit_or, same DefId
+    user_module_cannot_declare_native      parse error plus load error
+    std_declares_no_native                 grep 'native fn' stdlib/std returns nothing
+```
+
+Risk: `pub use` must exist in the grammar before this stage; the parser work is tracked under `ornadb-csenl`.
 
 ### N5 - delete the duplicated tables and the marker machinery
 
@@ -1378,11 +1378,8 @@ cannot do. Proposal: `orna std api-export` in `crates/orna-cli`, so the
 artefact is produced by the production loader. Alternative: keep a small tool
 crate above `orna-standard-sources`.
 
-**Q5. Does a user package ever get to declare a native?** The design says no
-(ORNA-NATIVE-004/012), which keeps `std` the only native carrier and keeps
-every user-visible operation reproducible from source. If a future pinned
-third-party package is meant to ship native operations, the rule has to
-change, and this design deliberately does not pre-judge it.
+**Q5. Does a user package ever get to declare a native?** Resolved by D12: no. Natives are declared only in the engine-embedded `core.orna` and `sys.orna`, so neither user code nor `std` may declare one (ORNA-NATIVE-004/012). D12 also records that there is no third-party native code.
+
 
 --------------------------------------------------------------------------
 
