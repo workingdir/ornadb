@@ -43,7 +43,10 @@ fn executor_agreement_with_the_old_pipeline_only_grows() {
                     }
                 };
                 if observation.outcome.as_ref() != Some(&outcome) {
-                    mismatches.push(format!("{}: executor {outcome:?}, old {:?}", case.id, observation.outcome));
+                    mismatches.push(format!(
+                        "{}: executor {outcome:?}, old {:?}",
+                        case.id, observation.outcome
+                    ));
                     continue;
                 }
                 agreed += 1;
@@ -58,9 +61,14 @@ fn executor_agreement_with_the_old_pipeline_only_grows() {
     let allowances = compare::load_step_allowances().expect("the step allowances parse");
     let mut used = vec![false; allowances.len()];
     for (id, old, executor) in step_differences {
-        match allowances.iter().position(|allowance| allowance.matches(&id, old, executor)) {
+        match allowances
+            .iter()
+            .position(|allowance| allowance.matches(&id, old, executor))
+        {
             Some(index) => used[index] = true,
-            None => mismatches.push(format!("{id}: executor charges {executor} steps, old pipeline {old}")),
+            None => mismatches.push(format!(
+                "{id}: executor charges {executor} steps, old pipeline {old}"
+            )),
         }
     }
     for (allowance, used) in allowances.iter().zip(&used) {
@@ -75,7 +83,9 @@ fn executor_agreement_with_the_old_pipeline_only_grows() {
         "executor agreement: {agreed}/{ran} run cases agree with the old pipeline ({} cases in the corpus)",
         corpus.cases.len()
     );
-    println!("exact step parity: {steps_exact}/{agreed} agreeing run cases charge the old pipeline's steps");
+    println!(
+        "exact step parity: {steps_exact}/{agreed} agreeing run cases charge the old pipeline's steps"
+    );
     for (reason, ids) in &reasons {
         println!("  {:>5} {reason}", ids.len());
         if std::env::var_os("EXEC_SHARE_IDS").is_some() {

@@ -140,7 +140,12 @@ pub struct Run {
     pub steps: u64,
 }
 
-fn run(program: &Program, entry: DefId, limits: ExecLimits, cancel: Option<Arc<AtomicBool>>) -> Run {
+fn run(
+    program: &Program,
+    entry: DefId,
+    limits: ExecLimits,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Run {
     let mut machine = Machine::new(program, limits, cancel);
     let result = start(&mut machine, program, entry);
     Run {

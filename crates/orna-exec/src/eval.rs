@@ -153,7 +153,8 @@ impl<'p> Machine<'p> {
                 };
                 let program = self.program;
                 let callee_body = &program.bodies[closure.body];
-                let arguments = self.closure_arguments(body, frame, call, callee_body.params.len())?;
+                let arguments =
+                    self.closure_arguments(body, frame, call, callee_body.params.len())?;
                 if arguments.len() != callee_body.params.len()
                     || binders::binds_a_name_twice(callee_body)
                 {
