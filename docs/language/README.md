@@ -1,9 +1,9 @@
 # Orna language reference: outline and status
 
-Status: outline for a document that does not exist yet. It says what each
-chapter must define precisely and which owner decisions in
-[DECISIONS.md](DECISIONS.md) each chapter waits for. Nothing here decides
-anything.
+Status: the decisions are made ([DECIDED.md](DECIDED.md)) and the first
+chapters are written under [reference/](reference/00-overview.md). The outline
+below says what each chapter must define precisely; the table "Written
+chapters" says what exists.
 
 ## Why a new document
 
@@ -88,6 +88,25 @@ wait. "Waits" means the chapter's central rules depend on the decision.
 
 Counting the table: 4 chapters can start now (1, 12, 14, 18) plus the
 appendix; 8 can be partly written; 5 wait on a decision (5, 6, 9, 10, 16).
+
+## Written chapters
+
+The reference files are numbered by writing order. One file can cover several
+outline chapters above.
+
+| File | Outline chapters covered | Status |
+|---|---|---|
+| [reference/00-overview.md](reference/00-overview.md) | introduction | written |
+| [reference/01-lexical-and-grammar.md](reference/01-lexical-and-grammar.md) | 1, 2, and the import and native parts of 3 | written |
+| [reference/02-types.md](reference/02-types.md) | 4, the typing rules of 5, 6, the `Bytes` part of 7 | written |
+| [reference/03-bindings-and-expressions.md](reference/03-bindings-and-expressions.md) | 8 | written |
+| [reference/04-effects-and-failure.md](reference/04-effects-and-failure.md) | 9, 10 | written |
+
+Not yet written: tables and rows (11), assertions (12), relations and queries
+(13), activations and tasks as a chapter of their own (14; rollback and
+cancellation are in 04), units, money and time as a chapter (15; the types are
+in 02), the core environment contract (16), diagnostics (17), conformance (18)
+and the migration appendix.
 
 ## Order in which decisions unblock chapters
 
