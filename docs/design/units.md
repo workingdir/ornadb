@@ -1,8 +1,8 @@
 # Units, dimensions and dimensional algebra
 
-Status: proposed. Amends decision D8 (`docs/language/DECISIONS.md`, D8 amendment
-of 2026-11-10). D8 stays the decided position until the owner ratifies this
-amendment. The document is a clean-sheet specification. It does not port the
+Status: decided. AMENDED by owner direction 2026-11-10 (`docs/language/DECISIONS.md`,
+D8 amendment). Section 12 sub-questions Q1-Q6 are open, each with the default this
+document uses. The document is a clean-sheet specification. It does not port the
 1.1.0 implementation in `orna-check/src/units.rs`. It is the input for HIR stage
 H2c, which implements it as one module in `orna-hir`.
 
@@ -566,6 +566,8 @@ view (section 5, item 5). Recommendation: the primitive, as above.
   money rules, the intrinsic suffixes in `lib.rs`) are replaced by section 6.
 
 ## 12. Open questions
+
+Each sub-question below is open for the owner and has the default this design uses.
 
 * Q1. `day` and `days`. The reference `02-types.md` says `1.day` is an elapsed
   `Duration`; the checker and ORNA-TIME-004 say a calendar `Period`. This design
