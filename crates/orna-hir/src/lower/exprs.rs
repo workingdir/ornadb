@@ -724,6 +724,10 @@ fn call_type(builder: &mut Builder<'_>, callee: &crate::Callee) -> Ty {
 
 /// Records the module and definition prefixes of a dotted path, excluding the
 /// final segment, which the caller records with the resolution it computed.
+/// A prefix that does not resolve is not recorded here: the caller reports the
+/// failing root itself, so recording it again would count one unresolved name
+/// twice. Only the root segment carries `context`; a later segment is a member
+/// and records as a field.
 pub(crate) fn record_prefix_uses(
     builder: &mut Builder<'_>,
     module: crate::ModuleId,
@@ -740,7 +744,10 @@ pub(crate) fn record_prefix_uses(
             crate::resolve::PathKind::Module(module) => NameTarget::Module(module),
             crate::resolve::PathKind::Def(def) => NameTarget::Def(def),
             crate::resolve::PathKind::Ambiguous => NameTarget::Ambiguous,
-            _ => NameTarget::Unresolved,
+            crate::resolve::PathKind::Member { base, member } if member == index => {
+                NameTarget::Def(base)
+            }
+            _ => continue,
         };
         let (name, span) = &segments[index];
         match body {
@@ -750,7 +757,11 @@ pub(crate) fn record_prefix_uses(
                 body,
                 span.clone(),
                 name.clone(),
-                context,
+                if index == 0 {
+                    context
+                } else {
+                    crate::UseContext::Field
+                },
                 target,
             ),
             None => super::record_use(
@@ -758,7 +769,11 @@ pub(crate) fn record_prefix_uses(
                 module,
                 span.clone(),
                 name.clone(),
-                context,
+                if index == 0 {
+                    context
+                } else {
+                    crate::UseContext::Field
+                },
                 target,
             ),
         }
