@@ -12,9 +12,9 @@
 use std::collections::BTreeMap;
 
 use orna_syntax::{
-    Declaration, EnumVariant, Expr, FunctionSignature, GenericParameter, Item, NativeEffectSet,
-    Parameter, Pattern, ProtocolMember, SyntaxSpan, TableMember, TypeExpr, TypeRepresentation,
-    UnitDefinition, UseTail,
+    Declaration, EnumVariant, Expr, FunctionSignature, GenericParameter, Implementation, Item,
+    NativeEffectSet, Parameter, Pattern, ProtocolMember, SyntaxSpan, TableMember, TypeExpr,
+    TypeRepresentation, UnitDefinition, UseTail,
 };
 
 use crate::Idx;
@@ -96,8 +96,8 @@ pub(crate) enum DeclAst {
     Table(Vec<Parameter>, Vec<TableMember>),
     /// A protocol.
     Protocol(Vec<GenericParameter>, Vec<ProtocolMember>),
-    /// An enum.
-    Enum(Vec<GenericParameter>, Vec<EnumVariant>),
+    /// An enum, with its variants and nested implementations.
+    Enum(Vec<GenericParameter>, Vec<EnumVariant>, Vec<Implementation>),
     /// A dimension.
     Dimension,
     /// A unit.
@@ -122,8 +122,11 @@ impl DeclAst {
                 generics, members, ..
             } => Self::Protocol(generics.clone(), members.clone()),
             Declaration::Enum {
-                generics, variants, ..
-            } => Self::Enum(generics.clone(), variants.clone()),
+                generics,
+                variants,
+                implementations,
+                ..
+            } => Self::Enum(generics.clone(), variants.clone(), implementations.clone()),
             Declaration::Dimension { .. } => Self::Dimension,
             Declaration::Unit {
                 dimension,
@@ -450,18 +453,60 @@ impl<'a> Builder<'a> {
         (candidates.len() == 1).then(|| candidates[0])
     }
 
-    /// The member of `base` named `name`: a variant, field or nested member.
+    /// The member of `base` named `name`: a variant, field or nested member. A static member of one of the
+    /// base's implementations is a member too, so `Shape.name` reads the constant `static name` declares.
     pub(crate) fn member_def(&self, base: DefId, name: &Name) -> Option<DefId> {
-        let members = match &self.pending[base.index()].kind {
-            PendingKind::Built(crate::DefKind::Enum(enumeration)) => enumeration.variants.clone(),
-            PendingKind::Built(crate::DefKind::Type(definition)) => definition.members.clone(),
-            PendingKind::Built(crate::DefKind::Table(table)) => table.fields.clone(),
-            PendingKind::Built(crate::DefKind::Variant(variant)) => variant.fields.clone(),
-            _ => Vec::new(),
+        let (members, implementations) = match &self.pending[base.index()].kind {
+            PendingKind::Built(crate::DefKind::Enum(enumeration)) => {
+                (enumeration.variants.clone(), enumeration.members.clone())
+            }
+            PendingKind::Built(crate::DefKind::Type(definition)) => {
+                (definition.members.clone(), definition.members.clone())
+            }
+            PendingKind::Built(crate::DefKind::Table(table)) => (table.fields.clone(), Vec::new()),
+            PendingKind::Built(crate::DefKind::Variant(variant)) => {
+                (variant.fields.clone(), Vec::new())
+            }
+            _ => (Vec::new(), Vec::new()),
         };
-        members
+        let direct = members
             .into_iter()
-            .find(|member| &self.pending[member.index()].name == name)
+            .find(|member| &self.pending[member.index()].name == name);
+        direct.or_else(|| self.implementation_static(&implementations, name))
+    }
+
+    /// The static constant named `name` in one of the implementations `implementations` holds.
+    fn implementation_static(&self, implementations: &[DefId], name: &Name) -> Option<DefId> {
+        implementations.iter().find_map(|implementation| {
+            let PendingKind::Built(crate::DefKind::Impl(implementation)) =
+                &self.pending[implementation.index()].kind
+            else {
+                return None;
+            };
+            implementation.members.iter().copied().find(|member| {
+                &self.pending[member.index()].name == name
+                    && matches!(
+                        self.pending[member.index()].kind,
+                        PendingKind::Built(crate::DefKind::Let(_))
+                    )
+            })
+        })
+    }
+
+    /// Whether `def` is an enum variant.
+    pub(crate) fn is_variant(&self, def: DefId) -> bool {
+        matches!(
+            self.pending[def.index()].kind,
+            PendingKind::Built(crate::DefKind::Variant(_))
+        )
+    }
+
+    /// Whether `def` is a `static` constant an enum or type implementation declares.
+    pub(crate) fn is_static(&self, def: DefId) -> bool {
+        matches!(
+            self.pending[def.index()].kind,
+            PendingKind::Built(crate::DefKind::Let(_))
+        )
     }
 
     /// Whether the definition is a table, type or enum: a value type.

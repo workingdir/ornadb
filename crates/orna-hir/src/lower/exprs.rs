@@ -201,8 +201,10 @@ fn lower_field(
     }
     let member_of_path = qualified_member(builder, state, base, name);
     let base = lower_expr(builder, state, base);
-    if let Some(variant) = member_of_path.filter(|def| is_variant(builder, *def)) {
-        // `Enum.variant` names the variant itself; the enum path is only recorded.
+    if let Some(member) =
+        member_of_path.filter(|def| builder.is_variant(*def) || builder.is_static(*def))
+    {
+        // `Enum.variant` and `Type.static` name the member itself; the owner path is only recorded.
         let name_span = SyntaxSpan::new(span.end.saturating_sub(name.len()), span.end);
         super::record_body_use(
             &mut builder.program,
@@ -211,9 +213,9 @@ fn lower_field(
             name_span,
             Name::new(name),
             crate::UseContext::Value,
-            NameTarget::Def(variant),
+            NameTarget::Def(member),
         );
-        return push(builder, state, ExprKind::Def(variant), span.clone());
+        return push(builder, state, ExprKind::Def(member), span.clone());
     }
     let field_name = Name::new(name);
     let name_span = SyntaxSpan::new(span.end.saturating_sub(name.len()), span.end);
@@ -425,14 +427,6 @@ fn field_type(builder: &mut Builder<'_>, field: DefId) -> Ty {
     }
 }
 
-/// Whether `def` is an enum variant.
-fn is_variant(builder: &Builder<'_>, def: DefId) -> bool {
-    matches!(
-        builder.pending[def.index()].kind,
-        super::declare::PendingKind::Built(DefKind::Variant(_))
-    )
-}
-
 /// The field definitions a table, nominal type or enum variant owns.
 fn payload_fields(builder: &Builder<'_>, owner: DefId) -> Vec<DefId> {
     payload(builder, owner)
@@ -517,15 +511,9 @@ pub(crate) fn lower_name(
             );
             error_expr(builder, state, span)
         }
-        NameTarget::Unresolved => {
-            builder.diagnose(
-                module,
-                crate::diag::UNRESOLVED,
-                format!("`{name}` is not in scope"),
-                span.clone(),
-            );
-            error_expr(builder, state, span)
-        }
+        // Typeck resolves a bare word to a payload-free variant of the expected
+        // enum type (decision P3b) and reports it as unresolved otherwise.
+        NameTarget::Unresolved => push(builder, state, ExprKind::BareName(name), span),
     }
 }
 

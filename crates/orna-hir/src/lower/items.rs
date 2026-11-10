@@ -147,8 +147,8 @@ impl Builder<'_> {
             DeclAst::Protocol(generics, members) => {
                 self.build_protocol(def, module, &generics, &members);
             }
-            DeclAst::Enum(generics, variants) => {
-                self.build_enum(def, module, &generics, &variants);
+            DeclAst::Enum(generics, variants, implementations) => {
+                self.build_enum(def, module, &generics, &variants, &implementations);
             }
             DeclAst::Dimension => {
                 self.pending[def.index()].kind =
@@ -348,13 +348,14 @@ impl Builder<'_> {
         }));
     }
 
-    /// Builds an enum and its variants.
+    /// Builds an enum, its variants and its nested implementations.
     fn build_enum(
         &mut self,
         def: DefId,
         module: ModuleId,
         generics: &[GenericParameter],
         variants: &[EnumVariant],
+        implementations: &[Implementation],
     ) {
         let names = generic_names(generics);
         let mut lowered = Vec::new();
@@ -372,8 +373,15 @@ impl Builder<'_> {
                 DefKind::Variant(VariantDef { fields }),
             ));
         }
-        self.pending[def.index()].kind =
-            PendingKind::Built(DefKind::Enum(EnumDef { variants: lowered }));
+        let mut members = Vec::new();
+        for implementation in implementations {
+            let span = implementation.span.clone();
+            members.push(self.build_implementation(def, module, implementation, span));
+        }
+        self.pending[def.index()].kind = PendingKind::Built(DefKind::Enum(EnumDef {
+            variants: lowered,
+            members,
+        }));
     }
 
     /// Builds one enum payload field.
@@ -441,7 +449,9 @@ impl Builder<'_> {
                     implementation,
                     span,
                 } => {
-                    self.build_implementation(def, module, implementation, span.clone());
+                    let implementation =
+                        self.build_implementation(def, module, implementation, span.clone());
+                    members.push(implementation);
                 }
             }
         }

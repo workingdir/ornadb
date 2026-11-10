@@ -228,6 +228,8 @@ pub struct TypeDef {
 pub struct EnumDef {
     /// Its variants, in declaration order.
     pub variants: Vec<DefId>,
+    /// Its nested implementations, in declaration order. Each is a [`DefKind::Impl`].
+    pub members: Vec<DefId>,
 }
 
 /// One enum variant.

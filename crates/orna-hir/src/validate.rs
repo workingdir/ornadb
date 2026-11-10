@@ -364,6 +364,7 @@ impl Program {
                     DefKind::is_variant,
                     errors,
                 );
+                self.validate_def_refs(&enumeration.members, "enum implementation", errors);
             }
             DefKind::Variant(variant) => {
                 self.validate_kinds(&variant.fields, "variant field", DefKind::is_field, errors);
@@ -546,6 +547,7 @@ impl Program {
         match &expr.kind {
             ExprKind::Lit(_)
             | ExprKind::Error
+            | ExprKind::BareName(_)
             | ExprKind::Local(_)
             | ExprKind::Def(_)
             | ExprKind::Unary { .. }
@@ -590,7 +592,7 @@ impl Program {
         errors: &mut Vec<ValidationError>,
     ) {
         match kind {
-            ExprKind::Lit(_) | ExprKind::Error => {}
+            ExprKind::Lit(_) | ExprKind::Error | ExprKind::BareName(_) => {}
             ExprKind::Local(local) => self.validate_local(body_id, body, *local, errors),
             ExprKind::Def(def) => self.validate_def_ref(*def, errors),
             ExprKind::Unary { operand, .. } => {

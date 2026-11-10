@@ -222,3 +222,70 @@ fn a_member_call_without_an_implementation_is_not_typed() {
     let summary = typeck(&mut program);
     assert!(!test_accepted(&program, &summary), "{summary:?}");
 }
+
+#[test]
+fn an_enum_implementation_static_is_read_through_the_enum() {
+    let mut program = program(
+        "pub protocol Named { fn name(self): Str; }\n\
+             pub enum Rounding {\n\
+                 half_up,\n\
+                 half_even,\n\
+                 impl Named {\n\
+                     static label = \"rounding\";\n\
+                     fn name(self): Str = \"rounding\";\n\
+                 }\n\
+             }\n\
+             pub fn f(): Str = Rounding.label;\n",
+    );
+    let summary = typeck(&mut program);
+    assert!(test_accepted(&program, &summary), "{summary:?}");
+    assert_eq!(result(&program, "f"), "Str");
+}
+
+#[test]
+fn an_unknown_enum_static_is_not_a_member() {
+    let mut program = program(
+        "pub protocol Named { fn name(self): Str; }\n\
+             pub enum Rounding {\n\
+                 half_up,\n\
+                 impl Named {\n\
+                     static label = \"rounding\";\n\
+                     fn name(self): Str = \"rounding\";\n\
+                 }\n\
+             }\n\
+             pub fn f(): Str = Rounding.missing;\n",
+    );
+    let summary = typeck(&mut program);
+    assert!(!test_accepted(&program, &summary), "{summary:?}");
+}
+
+#[test]
+fn a_bare_variant_is_named_by_its_expected_enum_type() {
+    let mut program =
+        program("pub enum Status { draft, published }\npub fn start(): Status = draft;\n");
+    let summary = typeck(&mut program);
+    assert!(test_accepted(&program, &summary), "{summary:?}");
+    assert!(
+        program.modules[test_module(&program)]
+            .diagnostics
+            .is_empty(),
+        "{:?}",
+        program.modules[test_module(&program)].diagnostics
+    );
+}
+
+#[test]
+fn a_bare_name_that_is_no_expected_variant_is_unresolved() {
+    let mut program =
+        program("pub enum Status { draft, published }\npub fn start(): Status = archived;\n");
+    let summary = typeck(&mut program);
+    assert!(!test_accepted(&program, &summary), "{summary:?}");
+    assert!(
+        program.modules[test_module(&program)]
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == crate::diag::UNRESOLVED),
+        "{:?}",
+        program.modules[test_module(&program)].diagnostics
+    );
+}
