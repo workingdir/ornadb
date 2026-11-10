@@ -100,6 +100,7 @@ fn the_old_pipeline_agrees_with_itself_on_every_case() {
     let expected = compare::load_expected_differences().expect("the ratchet file parses");
     let started = Instant::now();
     let mut differences = Vec::new();
+    let mut flaky = Vec::new();
     let mut errors = Vec::new();
     let mut measured_steps = 0usize;
     let mut tally = Tally::new();
@@ -120,16 +121,27 @@ fn the_old_pipeline_agrees_with_itself_on_every_case() {
         };
         measured_steps += usize::from(first.steps.is_some());
         tally_case(&mut tally, case, &first);
-        differences.extend(compare::compare(&case.id, &first, &second));
+        // H0 has one pipeline, so the two comparisons the harness makes later
+        // (old against new, and each pipeline against itself) are the same
+        // comparison here. They stay separate lists anyway: the ratchet may
+        // accept a difference between pipelines, but it must never accept a
+        // pipeline that disagrees with itself, so flakiness is checked before
+        // and independently of `expected-differences.toml`.
+        let repeated = compare::compare(&case.id, &first, &second);
+        if !repeated.is_empty() {
+            flaky.push(case.id.clone());
+        }
+        differences.extend(repeated);
     }
     let elapsed = started.elapsed();
     println!(
         "self-differential: {} cases observed twice in {:.1}s; {} with a step count; \
-         {} differences (all flakiness by construction), {} errors",
+         {} differences, {} flaky cases, {} errors",
         corpus.cases.len(),
         elapsed.as_secs_f64(),
         measured_steps,
         differences.len(),
+        flaky.len(),
         errors.len(),
     );
     for ((family, published, outcome), count) in &tally {
@@ -153,6 +165,11 @@ fn the_old_pipeline_agrees_with_itself_on_every_case() {
         rejected, REFERENCE_VALID_REJECTED,
         "the number of valid reference fixtures the harness cannot drive to acceptance changed; \
          update the constant (and the exclusion reason) in the same PR"
+    );
+    assert!(
+        flaky.is_empty(),
+        "the old pipeline is not deterministic on these cases, and no accepted difference may \
+         excuse that: {flaky:?}"
     );
     let failures = compare::ratchet(&expected, &differences);
     assert!(
