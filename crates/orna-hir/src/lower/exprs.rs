@@ -180,80 +180,89 @@ fn lower_operator(
                 span.clone(),
             )
         }
-        AstExpr::Field { base, name, span } => {
-            if let AstExpr::Literal { text, kind, .. } = base.as_ref()
-                && let Some(literal) = super::literals::lower_numeric_postfix(text, *kind, name)
-            {
-                return Some(push(builder, state, ExprKind::Lit(literal), span.clone()));
-            }
-            let member_of_path = qualified_member(builder, state, base.as_ref(), name);
-            let base = lower_expr(builder, state, base);
-            if let Some(variant) = member_of_path.filter(|def| is_variant(builder, *def)) {
-                // `Enum.variant` names the variant itself; the enum path is only recorded.
-                let name_span = SyntaxSpan::new(span.end.saturating_sub(name.len()), span.end);
-                super::record_body_use(
-                    &mut builder.program,
-                    state.module,
-                    state.id,
-                    name_span,
-                    Name::new(name),
-                    crate::UseContext::Value,
-                    NameTarget::Def(variant),
-                );
-                return Some(push(builder, state, ExprKind::Def(variant), span.clone()));
-            }
-            let field_name = Name::new(name);
-            let name_span = SyntaxSpan::new(span.end.saturating_sub(name.len()), span.end);
-            let base_ty = state.exprs[base].ty;
-            match field_of_type(builder, base_ty, &field_name) {
-                Some(field) => {
-                    let ty = field_type(builder, field);
-                    super::record_body_use(
-                        &mut builder.program,
-                        state.module,
-                        state.id,
-                        name_span,
-                        field_name,
-                        crate::UseContext::Field,
-                        NameTarget::Def(field),
-                    );
-                    push_typed(
-                        builder,
-                        state,
-                        ExprKind::Field {
-                            base,
-                            field: FieldRef::Def(field),
-                        },
-                        span.clone(),
-                        ty,
-                    )
-                }
-                None => {
-                    let member = member_of_path;
-                    super::record_body_use(
-                        &mut builder.program,
-                        state.module,
-                        state.id,
-                        name_span,
-                        field_name.clone(),
-                        crate::UseContext::Field,
-                        member.map_or(NameTarget::Unresolved, NameTarget::Def),
-                    );
-                    push(
-                        builder,
-                        state,
-                        ExprKind::Field {
-                            base,
-                            field: FieldRef::Name(field_name),
-                        },
-                        span.clone(),
-                    )
-                }
-            }
-        }
+        AstExpr::Field { base, name, span } => lower_field(builder, state, base, name, span),
         AstExpr::Group { inner, .. } => lower_expr(builder, state, inner),
         _ => return None,
     })
+}
+
+/// Lowers `base.name`: a numeric postfix literal, an enum variant, a field or an unresolved member.
+fn lower_field(
+    builder: &mut Builder<'_>,
+    state: &mut BodyState,
+    base: &AstExpr,
+    name: &str,
+    span: &SyntaxSpan,
+) -> ExprId {
+    if let AstExpr::Literal { text, kind, .. } = base
+        && let Some(literal) = super::literals::lower_numeric_postfix(text, *kind, name)
+    {
+        return push(builder, state, ExprKind::Lit(literal), span.clone());
+    }
+    let member_of_path = qualified_member(builder, state, base, name);
+    let base = lower_expr(builder, state, base);
+    if let Some(variant) = member_of_path.filter(|def| is_variant(builder, *def)) {
+        // `Enum.variant` names the variant itself; the enum path is only recorded.
+        let name_span = SyntaxSpan::new(span.end.saturating_sub(name.len()), span.end);
+        super::record_body_use(
+            &mut builder.program,
+            state.module,
+            state.id,
+            name_span,
+            Name::new(name),
+            crate::UseContext::Value,
+            NameTarget::Def(variant),
+        );
+        return push(builder, state, ExprKind::Def(variant), span.clone());
+    }
+    let field_name = Name::new(name);
+    let name_span = SyntaxSpan::new(span.end.saturating_sub(name.len()), span.end);
+    let base_ty = state.exprs[base].ty;
+    match field_of_type(builder, base_ty, &field_name) {
+        Some(field) => {
+            let ty = field_type(builder, field);
+            super::record_body_use(
+                &mut builder.program,
+                state.module,
+                state.id,
+                name_span,
+                field_name,
+                crate::UseContext::Field,
+                NameTarget::Def(field),
+            );
+            push_typed(
+                builder,
+                state,
+                ExprKind::Field {
+                    base,
+                    field: FieldRef::Def(field),
+                },
+                span.clone(),
+                ty,
+            )
+        }
+        None => {
+            let member = member_of_path;
+            super::record_body_use(
+                &mut builder.program,
+                state.module,
+                state.id,
+                name_span,
+                field_name.clone(),
+                crate::UseContext::Field,
+                member.map_or(NameTarget::Unresolved, NameTarget::Def),
+            );
+            push(
+                builder,
+                state,
+                ExprKind::Field {
+                    base,
+                    field: FieldRef::Name(field_name),
+                },
+                span.clone(),
+            )
+        }
+    }
 }
 
 /// Lowers tuple, list and record expressions.
