@@ -7,9 +7,9 @@ Input documents: `local://critique-fable-5-2.md` sections 4 and 5 (the
 critique), [`architecture.md`](architecture.md), [`sys-identity.md`](sys-identity.md),
 [`std-native.md`](std-native.md), [`native-declarations.md`](native-declarations.md).
 Language decisions this design depends on live in
-the file docs/language/DECISIONS.md (branch `docs/pivot-language-decisions`, written
-in parallel). They are cited here as D1 to D13 and stay OPEN until the owner
-answers; section 8 says which stage each one blocks.
+docs/language/DECIDED.md (branch `docs/pivot-language-decisions`, PR #9832).
+They are cited here as D1 to D13 and are decided: section 8 says which stage
+each one unblocks.
 
 Authority for behaviour is `/home/kieran/dev/ornadb/reference/Orna-1.1.0`.
 Implementation evidence is `origin/main` = `026faee90`. Every `file:line`
@@ -65,10 +65,10 @@ The four claims the rest of the document defends:
    resolution for the language server and a test that pins the new call
    classification against the old evaluator's routing.
 
-What this design deliberately does not decide: the language questions in
-`DECISIONS.md`. Where a decision changes a data structure, the structure is
+This document does not reopen the language questions: they are answered in
+`DECIDED.md`. Where a decision changes a data structure, the structure is
 written with the decision as a parameter (marked `[D1]`, `[D2]`, ...) and the
-cost of each answer is stated in section 8.
+answer is stated in section 8.
 
 --------------------------------------------------------------------------
 
@@ -344,8 +344,6 @@ pub enum DefKind {
     Variant(VariantDef),
     Protocol(ProtocolDef),
     Impl(ImplDef),               // protocol implementation (table or type member)
-    Dimension(DimensionDef),     // [D8]
-    Unit(UnitDef),               // [D8]
     Let(LetDef),                 // module-level binding
     Assertion(AssertionDef),
     Field(FieldDef),             // table, nominal and enum-payload fields
@@ -370,9 +368,10 @@ pub struct FnDef {
 pub enum FnBody {
     /// An Orna body. Lambdas and initializers use the same `Body`.
     Source(BodyId),
-    /// `native fn` in `core.orna`, `sys.orna` or the pinned `std`. No body, so
-    /// the signature above is the only signature. Bound at link time to a
-    /// host implementation keyed by this DefId (section 4).
+    /// `core.orna` or `sys.orna`, both engine-embedded [D12]. No body, so
+    /// the signature above is the only signature. Bound at link time to the
+    /// engine implementation keyed by this DefId (section 4). Natives are
+    /// declared nowhere else: not in user code, not in std.
     Native(NativeDecl),
 }
 pub struct NativeDecl { pub abi: NativeAbi, pub key: NativeKey }   // key = (module path, name)
@@ -391,18 +390,22 @@ pub struct Ty(u32);
 
 pub enum TyKind {
     // Scalars, spec spellings (F43): Str, not Text.
-    Bool, Int, Decimal, Float, Str, Blob, Uuid, Date, Instant, Duration, Period,
+    Bool, Int, Decimal, Float, Str, Bytes, Uuid, Date, Instant, Duration, Period,
     Digest, Unit,
     /// The type of an expression that cannot complete (fail, return, break).
     Never,
     /// A diagnostic was already emitted. Never a dynamic Any.
     Error,
 
-    /// `T?`. [D3] one option representation: there is no `Null` type and no
-    /// `Value::Null`; the literal `null` lowers to `None` of an inferred
-    /// payload. If D3 keeps two nulls, `Null` returns here as a scalar and
-    /// section 8 lists the extra lowering rules.
+    /// `T?`, flat [D3]. `null` is the only absent value and the literal `null`
+    /// lowers to `None` of an inferred payload. `T??` is a type error, so
+    /// `Option` never nests. `Some(x)` is the explicit constructor and implicit
+    /// lifting `T` to `T?` applies.
     Option(Ty),
+    /// `Map<K, V>`, `Set<T>`: immutable, persistent, keys under the canonical
+    /// total order [D6].
+    Map(Ty, Ty),
+    Set(Ty),
 
     List(Ty),
     Tuple(Box<[Ty]>),
@@ -415,8 +418,6 @@ pub enum TyKind {
     /// generic arguments.
     Adt(DefId, Box<[Ty]>),
     Fn(FnTy),
-    /// `Quantity`, `Money<C>` etc. only if D8 keeps them. [D8]
-    Quantity(QuantityTy),
 
     /// A generic parameter of the enclosing definition.
     Param(ParamIdx),
@@ -424,7 +425,7 @@ pub enum TyKind {
     Infer(TyVar),
 }
 
-pub struct FnTy { pub params: Box<[Ty]>, pub ret: Ty, pub effects: EffectRow }  // [D2]
+pub struct FnTy { pub params: Box<[Ty]>, pub ret: Ty, pub effects: EffectSet }  // [D2] inferred, no user syntax
 ```
 
 Unification is standard: `InferCtxt` holds a union-find table of `TyVar`
@@ -435,24 +436,14 @@ of the expression that introduced the variable (the empty list literal, the
 `let xs = []; union(xs, [1])` type-check: `xs : List<?T>` with `?T := Int` at
 the use. Today it fails with "empty list needs an expected element type".
 
-`[D1]` parameterises the solver, not the data model. The `Ty` above is the
-same under both answers.
-
-- **D1 = constraint inference (HM-style, principal types).** A function
-  signature may omit parameter types; its parameters start as fresh `Infer`
-  variables, are solved from the body and generalised at the function boundary
-  into `Param`s with inferred protocol bounds. The solver needs let-level
-  generalisation, defaulting rules for numeric literals, and a protocol
-  obligation queue. This is the "implement INFER-1" option.
-- **D1 = required parameter annotations.** Parameters and generic parameters
-  must be written. `Infer` variables exist only for locals, literals and lambda
-  parameters whose type is fixed by the context at the call. There is no
-  generalisation and no obligation queue; unification is first-order and local
-  to a body. This removes `lambda_numeric_parameter_usage`
-  (`orna-check/src/inference.rs:1455`) either way.
-
-Stage H2 (section 6) builds the solver for the second option first, because it
-is a strict subset of the first. The first option adds generalisation on top.
+`[D1]` decided: unification-based inference inside bodies and lambdas.
+`pub` functions need full parameter and result annotations. A private
+function may omit parameter types; they are solved by unification from its
+body and its uses, and an unresolved type variable is an error that asks for
+an annotation. No syntactic guessing. The solver is first-order unification
+over `InferCtxt` with a numeric-literal default. Stage H2a ships the
+annotated subset; H2b adds the private-omission rule. Full HM generalisation
+is not part of D1.
 
 ### 2.4 Bodies, locals in slots, patterns
 
@@ -464,13 +455,16 @@ pub struct Body {
     /// One entry per binding in the body. `LocalId` is the frame slot.
     pub locals: IndexVec<LocalId, Local>,
     pub params: Box<[LocalId]>,           // slots 0..n bound by the argument binder
-    /// Only for lambdas: the outer slot each captured slot is copied from.
-    /// Capture is by value (VALUE-003); [D10] changes the checks, not this shape.
+    /// Only for closures: the outer slot each captured variable is taken from.
+    /// Capture is by variable slot [D10]: closures share the slot, so later
+    /// assignments are visible. `parallel` and task bodies snapshot instead.
     pub captures: Box<[Capture]>,
     pub root: ExprId,
     pub effects: EffectSet,               // body's own effects, see 2.5
 }
-pub struct Local { pub name: Name, pub ty: Ty, pub mutable: bool, pub span: SourceSpan }
+pub struct Local { pub name: Name, pub ty: Ty, pub span: SourceSpan }
+// Assignment `x = value;` stays in the language [D10]: it rewrites the slot,
+// and values stay immutable. There is no `mutable` flag and no `mut`/`var`.
 pub struct Capture { pub outer: LocalId, pub inner: LocalId }
 
 pub struct Expr { pub kind: ExprKind, pub ty: Ty, pub span: SourceSpan }
@@ -478,9 +472,12 @@ pub struct Expr { pub kind: ExprKind, pub ty: Ty, pub span: SourceSpan }
 
 A local read is `ExprKind::Local(LocalId)`: an array index, not a
 `BTreeMap<String, Value>` lookup (`orna-evaluator/src/lib.rs:4797`). A lambda
-is its own `Body` with `captures`; at run time a closure is a body id plus a
-`Box<[Value]>` of the captured slots, replacing `Closure { captured: Scope }`
-(`lib.rs:3667-3673`) which clones a whole scope per closure.
+is its own `Body` with `captures`. At run time a closure is a body id plus
+shared references to its captured variable slots: it sees later assignments
+to those variables [D10]. `parallel` and task bodies instead copy the values
+at creation and may not assign to outer variables. This replaces
+`Closure { captured: Scope }` (`lib.rs:3667-3673`), which clones a whole scope
+per closure.
 
 Expressions. Operators are enums; `if`, `case`, `for`, `while` and `loop` are
 separate variants with required fields, replacing
@@ -553,21 +550,18 @@ Exhaustiveness and constructor-arity checks run over `Pat`, once, in
 /// and `MayFail`.
 pub struct EffectSet(u16);
 
-pub enum EffectRow {
-    Known(EffectSet),     // [D2-signature] written or inferred, part of the type
-    Var(EffectVar),       // [D2-signature] polymorphic over a callback's effects
-    Hidden,               // [D2-hidden] function types carry no effect information
-}
+// D2: no effect polymorphism syntax. A function type carries the inferred set;
+// a callback's set is the set inferred for the argument it is passed.
 ```
 
 `FnDef.effects` and `Body.effects` are computed by one pass in `orna-hir`: a
 body's effects are the join of its calls' callee effects (`Callee` carries the
 DefId, so the effect is a table lookup) plus its table operations; mutually
-recursive functions are joined over strongly connected components. A `native
-fn` takes its effects from its declaration, so `core.orna`, `sys.orna` and the
-std natives all state effects in the same syntax, which resolves the critique's
-objection to an `effect` clause that exists "for natives alone"
-(`local://critique-fable-5-2.md` section 4.2 item 3).
+recursive functions are joined over strongly connected components. Effects are
+inferred and published in signature metadata; legality is checked at the use
+site against the inferred set [D2]. There is no effect syntax for user
+functions. Only body-less native declarations in `core.orna` and `sys.orna`
+declare effects, in the same syntax, because they have no body to infer from.
 
 Two vocabularies today (section 1.5) become one: `EffectKind` is the single
 enumeration, and `orna_intrinsics::Effect` is deleted in stage H5. The
@@ -576,20 +570,13 @@ mapping, from the intrinsic classes: `Pure` and `PinnedData` to the empty set,
 `EffectKind` the declaration names (today decided per callee by
 `host_effect`, `effects.rs`), `Stream` to `Opaque`, `Query` to `TableRead`.
 
-`[D2]` selects how a function *value* is treated:
-
-- **hidden** (status quo made explicit): `FnTy.effects = Hidden`. A callee that
-  is a parameter or a local of function type has unknown effects and counts as
-  `Opaque`, as `EffectSummary.opaque` does today. A callback passed to `filter`
-  is checked at the argument site: a `Lambda` has its `Body.effects`, a
-  `Def(fn)` has `FnDef.effects`, anything else is `Opaque`.
-- **signature**: `FnTy.effects` is `Known` or `Var`. Callback-taking natives
-  (`filter`, `map`, `every`) are declared `native fn filter<T, E>(rows:
-  Relation<T>, f: fn(T): Bool effect E): Relation<T> effect E`. Unification
-  gains an effect-row component (set join and equality, no row polymorphism
-  beyond a single variable per function type).
-
-The pass and the field exist in both cases. Only `FnTy.effects` changes.
+`[D2]` decided: effects are inferred, and `FnTy.effects` is the inferred set
+(`EffectSet`), shown by the tools. A function value's effects are the set
+inferred for its body (a `Lambda` has `Body.effects`, a `Def(fn)` has
+`FnDef.effects`). A callback parameter of a native declares its effect as a
+type-level variable in the native declaration only (for example `filter`,
+`map`, `every`), and a call's effects are the join of the callee and the
+callbacks it is given. Unification joins sets; there is no row polymorphism.
 
 ### 2.6 Calls: classified once
 
@@ -599,7 +586,7 @@ pub struct Call { pub callee: Callee, pub args: Box<[Arg]>, pub piped: bool }
 pub enum Callee {
     /// A function with an Orna body.
     Source    { def: DefId, targs: Box<[Ty]> },
-    /// A `native fn` in `core` or the pinned `std`. Host-implemented.
+    /// A `native fn` in `core.orna`. Host-implemented, engine-embedded [D12].
     Native    { def: DefId, targs: Box<[Ty]> },
     /// A `native fn` in `sys.orna`. Same declaration and link mechanism as
     /// Native; a separate variant because the host capability and the
@@ -636,11 +623,12 @@ The shadowing rule that `root_intrinsic` implements by `scope.0.contains_key`
 `core.orna` export, a local named `Some` shadows it because the resolver finds
 the local first.
 
-Which names are in `Intrinsic` versus `Native` is not an implementation
-detail: if D12 moves `Some`, `now`, `uuid7` and `error` into `core.orna`
-they are `Native`; if not they must be `Intrinsic`. Stage H1 (section 6) pins
-the current classification with a test against the old evaluator's routing
-before any behaviour changes.
+Which names are `Intrinsic` versus `Native` follows D12: `Some`, `now`,
+`uuid7` and `error` are `core` natives declared body-less in `core.orna`,
+so they are `Native`; only the forms in `IntrinsicForm` (the non-function
+evaluation rules) stay `Intrinsic`. `std` is pure Orna and adds no `Callee`
+variant. Stage H1 (section 6) pins the classification with a test against the
+old evaluator's routing before any behaviour changes.
 
 ### 2.7 One argument binder
 
@@ -682,10 +670,10 @@ The executor returns `Completion` from every operator. A caller that wants a
 value matches once; a `?`-style helper short-circuits every non-`Value`
 variant to the enclosing operator. This replaces `Context.transfer:
 Option<Transfer>` plus `Result` plus the cancellation flag, and the 43
-`if self.transfer.is_some()` checks (section 1.6). `Cancelled` is a variant so
-"failed while cancellation was requested" and "cancelled" are different values;
-`[D4]` decides whether `Recover` (`|?`) may catch it (the critique argues it
-must not).
+`if self.transfer.is_some()` checks (section 1.6).
+`Cancelled` is a variant of its own, so "failed" and "cancelled" are different
+values [D4]. `Recover` (`|?`) catches `Fail` only; `Cancelled` passes through
+every handler, and cleanup observes it as a completion, not as an error.
 
 ### 2.9 What HIR does not contain
 
@@ -705,12 +693,12 @@ as source, reaches the `__bit_or` leaf, takes `CallRoute::Native`, orders
 arguments from the catalogue's copy of the signature, and `dispatch` matches
 the name string in `bits` (`intrinsics/bits.rs:10-12`).
 
-With HIR: `std/bits.orna` declares `pub native fn bit_or(a: Int, b: Int):
-Int effect none;`. Lowering resolves `bits.bit_or` through the import to a
-`DefId`, whose `FnBody` is `Native`, and emits `Call { callee: Native { def },
-args: [Expr(a), Expr(b)] }`. Link binds `(std.bits, bit_or)` to a Rust
-function once and records it under that `DefId`. Execution evaluates two
-arguments and calls a function pointer. There is no name in the executed
+With HIR: `core.orna` declares `native fn bit_or(a: Int, b: Int): Int effect none;`
+(engine-embedded, body-less, D12), and `std/bits.orna` says `pub use core.bits.bit_or;`
+(D11). Lowering resolves `bits.bit_or` through the re-export to the `DefId`
+whose `FnBody` is `Native`, and emits `Call { callee: Native { def },
+args: [Expr(a), Expr(b)] }`. Link binds that `DefId` to a Rust function once.
+Execution evaluates two arguments and calls a function pointer. There is no name in the executed
 program.
 
 --------------------------------------------------------------------------
@@ -720,7 +708,7 @@ program.
 ```mermaid
 flowchart LR
     I["core.orna, sys.orna (embedded)"] --> L
-    D["pinned std, project modules, REPL input"] --> P["orna-syntax: AST"]
+    D["std (pure Orna), project modules, REPL input"] --> P["orna-syntax: AST"]
     P --> L["orna-hir: lower + resolve"]
     L --> T["orna-check: typeck, effects, rules"]
     T --> PR[("Program")]
@@ -747,7 +735,7 @@ passes over a `Program`:
 | `resolve` | `orna-hir` | defs, `use` | `Module.exports/imports`, `Local` slots, `Callee` for path callees, bound `Arg`s | the 26 sites R01..R26 of section 1.2 |
 | `typeck` | `orna-check` | resolved program | `Expr.ty`, `Local.ty`, `FnDef` signatures, settled calls | `infer*`, `Scope`, `Type` |
 | `effects` | `orna-check` | call graph | `FnDef.effects`, `Body.effects` | `EffectSummary` joins, `host_effect`, `stabilize_function_summaries` (`units.rs:349`) |
-| rules | `orna-check` | typed program | diagnostics | assertion scope, table admission, secrets, computed fields, currency, checkpoints, units |
+| rules | `orna-check` | typed program | diagnostics | assertion scope, table admission, secrets, computed fields, currency, checkpoints (units are cut, D8) |
 
 The new public entry point returns the program and the diagnostics together:
 
@@ -757,8 +745,8 @@ pub struct Checked { pub program: Program, pub diagnostics: Vec<Diagnostic> }
 ```
 
 `Environment` carries what `Catalogue` carries today as string-keyed maps
-(`orna-check/src/catalogue.rs:9-30`): already-lowered packages (`core`, `sys`, a
-pinned `std`), attached databases and the object identity manifest. The legacy
+(`orna-check/src/catalogue.rs:9-30`): already-lowered packages (`core`, `sys`,
+`std`), attached databases and the object identity manifest. The legacy
 `analyze*` functions stay until stage H9 and are reimplemented, one at a time,
 as `check(..)` followed by a conversion to `Analysis`. Until each is
 reimplemented it runs the old code, so no caller changes in the intermediate
@@ -775,7 +763,7 @@ order they port, with their present size:
 | scalar typing and operators | `inference.rs` 3,294, `types.rs` | `typeck` operator tables over `Ty` |
 | calls, pipelines, collections | `calls.rs` 2,877, `intrinsics.rs` 1,255, `collection_calls.rs`, `collections.rs`, `flow.rs` 1,234 | one call rule per `Callee` variant |
 | tables and assertions | `assertions.rs` 979, `item_checks.rs` 1,600, `source_row.rs` | rules over `TableDef` and `Call.callee = TableOp` |
-| units and money | `units.rs` 1,498, parts of `inference.rs` | rules over `TyKind::Quantity` [D8] |
+| money and built-in durations | `units.rs` 1,498 (money parts), parts of `inference.rs` | rules over `Money<C>` and the built-in types; user units are cut [D8] |
 | `sys` | `system_api.rs` 3,544, `system_calls.rs` 1,915 | none: `sys.orna` is lowered like any module (section 4) |
 | checkpoints, secrets | `checkpoint.rs` 3,574, `secrets.rs` 414, `semantic_payload.rs` 1,831 | ported last; they are type-directed and port with `typeck` |
 
@@ -940,18 +928,16 @@ Three modules of such declarations exist, in three packages:
 |---|---|---|---|
 | `core.orna` | `PackageKind::Core`, embedded in `orna-hir` (below the checker, so the checker, the language server and the executor read the same declarations; the build script of 4.3 reads the same file) | the engine | `orna-intrinsics` tables for the root environment and for every native that is language-defined (collections, text, bits, hash, codecs, stats, time) |
 | `sys.orna` | `PackageKind::Sys`, embedded in `orna-hir`, never shadowable | the engine | `api/sys.json` as a source of truth, `SystemType`, `AbiType`, the signature half of `orna-sys-codegen` |
-| the pinned `std` | `PackageKind::Std`, captured with the project | the project's std pin | the `fail(..)` marker bodies; only if D12 keeps natives there |
+| the pinned `std` | `PackageKind::Std`, captured with the project | the project's std pin | the `fail(..)` marker bodies; std holds no natives under D12 |
 
-`[D12]` decides the third row and nothing else. Under D12 option "core and
-`sys` with the engine, pure-Orna `std`", the 113 std natives move into
-`core.orna`, `std` becomes ordinary replaceable source (ORNA-NS-007), and the
-historical-pin problem (ORNA-LIB-001) becomes a question about the engine's
-native ABI alone (section 4.4). Under "std keeps natives" the std package also
-contains `native fn`s, subject to the admission scope check of
-native-declarations.md 3.5. The HIR is identical in both: `FnBody::Native`
-(section 2.2) in a function of some package. `Callee::Native` versus
-`Callee::Sys` (section 2.6) is decided by the package kind of the declaring
-module, not by a spelling.
+`[D12]` decided: host functions live in engine-embedded `core.orna` and
+`sys.orna`, declared body-less and bound by `DefId`. `std` is pure Orna and
+re-exports `core` where it wants stable paths (`pub use`, D11). The 113 std
+natives move into `core.orna`. Natives are declared in no other module: user
+code and std may not declare `native fn`; native-declarations.md 3.5 enforces
+this. The HIR form is `FnBody::Native` (section 2.2) in a function of the
+`core` or `sys` package. `Callee::Native` versus `Callee::Sys` (section 2.6)
+is decided by the declaring package, not by a spelling.
 
 What this removes, concretely: `leaf`, `binds_declaration`, `Dispatch`,
 `Justification` and the signature and effect fields of `Intrinsic`;
@@ -1075,12 +1061,10 @@ native-declarations.md legacy-reading rule (section 3.14) covers old std pins.
 The `effect` clause draws from the 12 `sys.EffectKind` values or `none`
 (native-declarations.md 3.8). It is mandatory for a body-less declaration
 because there is no call graph to infer from, and the effect pass of section
-2.5 reads it into `FnDef.effects`. `[D2]` decides whether the clause is also
-*permitted on source functions*; the critique's objection (a clause that exists
-for natives alone) is met either way because the field and the checker rule are
-shared. A native with callback parameters is declared with an effect variable
-under D2-signature and is treated as `Opaque` for its callback under D2-hidden
-(section 2.5).
+2.5 reads it into `FnDef.effects`. `[D2]` decided: there is no effect syntax
+for user functions, so the clause appears only on natives in `core.orna` and
+`sys.orna`. A native with callback parameters declares an effect variable for
+the callback (section 2.5), and the callback's effects join into the call.
 
 ### 4.7 Deleted when this lands (stage H5)
 
@@ -1289,8 +1273,9 @@ operators that retain, so the gate can be re-earned through `orna run`.
 4. **Deletion belongs to the stage that makes the code dead.** A stage's
    acceptance includes the line count it removes. Nothing is deleted before its
    replacement is the only consumer.
-5. **No stage depends on a language decision it does not need** (section 8), so
-   the owner's answers to D1 to D13 can arrive while work proceeds.
+5. **No stage depends on an open language decision.** D1 to D13 are decided
+   (section 8), so every stage is unblocked; section 8.2 says what each stage
+   needs from them.
 
 ### 6.2 The differential harness (stage H0)
 
@@ -1417,7 +1402,7 @@ type, and H4 only needs types from H2 for arithmetic selection; section 7.2).
   | 8 native, 2 codec decode, 3 `std.ui.action` | `Native` |
   | 7 system host | `Sys` |
   | 6 relation stage or terminal | `Relational` (via `Pending::Container` until H2) |
-  | 4 root intrinsic | `Intrinsic` or `Native` (D12) |
+  | 4 root intrinsic | `Native` (D12, `core.orna`) or `Intrinsic` for the forms in `IntrinsicForm` |
   | effect-handler table write | `TableOp` |
   | 1 `.divide` | `Pending::Member` until H2 |
 
@@ -1433,9 +1418,9 @@ type, and H4 only needs types from H2 for arithmetic selection; section 7.2).
   `orna-evaluator/src/lib.rs:9804` that ORNA-NS-006 says should be a resolution
   error). Quirks that the specification does not require are listed as
   differences and fixed in the HIR; quirks it does require are copied. The
-  tolerant parse must lower to a total `Program`. Decisions: D5 and D11 affect
-  `Binding::Overloads` and re-exports; lowering produces the single-definition
-  forms and the other forms are added when decided.
+  tolerant parse must lower to a total `Program`. D5 forbids overloads, so
+  `Binding::Overloads` is not built and lowering produces the single-definition
+  forms; D11 adds `pub use`, which lowers to a re-export binding.
 
 #### H2: `Ty`, inference and expression typing on HIR (`ornadb-csenl.17`)
 
@@ -1448,9 +1433,11 @@ type, and H4 only needs types from H2 for arithmetic selection; section 7.2).
   they become the source of truth in H5. Three parts, in order:
   - **H2a, no decision needed.** Fully annotated programs and the
     annotation-required solver (2.3), first-order and local to a body.
-  - **H2b, needs D1, D3, D5.** The parameter-annotation policy, the option
-    representation and lifting, overloading and type arguments.
-  - **H2c, needs D8.** `Quantity`, or its removal.
+  - **H2b, unblocked by D1, D3, D5 (decided).** The parameter-annotation
+    policy (`pub` annotated, private may omit), the flat option representation
+    and lifting, and type arguments with no overloading.
+  - **H2c, unblocked by D8 (decided).** `Quantity` is removed; there is no unit
+    algebra, so H2c is the deletion of the dimensional checks.
 - **Acceptance.** Over the corpus, for every program the old checker accepts
   and the new one accepts, the printed type of every public signature is equal
   or listed; for every program one rejects and the other accepts, an entry with
@@ -1524,10 +1511,10 @@ type, and H4 only needs types from H2 for arithmetic selection; section 7.2).
 - **Deletes.** Section 4.7, but only at H9 for the parts the old evaluator
   still uses; `orna-sys-macros` and the codegen half of `orna-sys-codegen` go
   in H5 because nothing else consumes them.
-- **Risk.** D12 decides where std natives live, and the pinned std changes in
-  a separate repository (native-declarations.md N4). Mitigation: the
-  declaration form is the same under both answers; the first ports (bits,
-  hash) need only `core.orna`. Native families are copied, not shared: the old
+- **Risk.** Under D12 the 113 std natives move into `core.orna` and the pinned
+  std changes in a separate repository (native-declarations.md N4). Mitigation:
+  the declaration form is the same as before; the first ports (bits, hash) need
+  only `core.orna`. Native families are copied, not shared: the old
   evaluator's `Value` is private to it and differently shaped, so each family
   exists twice until H9. That duplication is bounded and one-directional, and
   the harness is the guard against drift.
@@ -1697,9 +1684,9 @@ There is no `ArgumentKey`, no `order_arguments`, no `supplied` map.
 
 **Small integers inline.** `Value::Int` is `Small(i64)` or `Big(Rc<BigInt>)`;
 arithmetic uses `checked_*` on the small form and promotes on overflow, so
-loop counters and sums never allocate. The language's integers stay unbounded
-(under D7's first option) or take a fixed width (other options); the
-representation serves both.
+loop counters and sums never allocate. `Int` is arbitrary precision (D7); the
+digit cap is a resource quota, not a language rule. The small/big split serves
+that directly.
 
 **Shared immutable aggregates.** Lists already share storage and append at the
 end of the longest view without copying (`Value::List(List)`,
@@ -1817,64 +1804,49 @@ to the baseline, so the numbers are published (critique item 6).
 
 --------------------------------------------------------------------------
 
-## 8. Which language decisions block which stage
+## 8. Language decisions and the stages they unblock
 
-The decisions are stream B's D1 to D13 in the file docs/language/DECISIONS.md
-(draft PR #9832, every decision open, no recommendation recorded). Each section
-there ends with "What the HIR needs from the answer"; this section is the
-inverse: for each stage, what it needs decided before it can finish, and what
-it can do first. The rule of 6.1.5 applies: a stage ships the part that no
-decision affects, and the data structures of section 2 are written so that
-every option of a decision is representable.
+The decisions are D1 to D13, decided by the owner on 2026-11-10 and recorded in
+docs/language/DECIDED.md (PR #9832). This section says, per decision, what the
+HIR implements, and per stage, what is now unblocked. No stage waits on a
+decision. Where a decision is a cut, the HIR removes the structure rather than
+keeping it behind a flag.
 
 ### 8.1 Decision by decision
 
-| Decision | Options (stream B's axes) | HIR structure it parameterises | Blocks | Does not block |
-|---|---|---|---|---|
-| D1 type inference | A constraint inference; B parameter annotations required; C required on `pub` only | `ParamAnnotations` policy in the solver; generalisation per strongly connected component (A only) | H2b | H2a (annotated programs, first-order solver, a strict subset of every option) |
-| D2 effects | A sets in signatures; B inferred, published in metadata; C closed pure/effectful split | `FnTy.effects` (`Known`/`Var`/`Hidden`); legality contexts as one enum on the imposing node | the function-type part of H3 | the effect pass by `DefId` (2.5) is identical under all three |
-| D3 null and Option | A enum, no lifting; B `T?` with lifting, one representation; C flat nullable | `TyKind::Option`; an explicit `Coerce::Some` node under B; `Some`/`None` as resolved constructors | H2b (lifting), the `null`/`??` operators of H4 | everything else in H4: the executor carries one option representation under A and B, and C normalises on construction |
-| D4 failure and cancellation | A unchecked, typed `Error`, drop `std.result`; B inferred failure sets normative; C `Result` values | `FailureSet` on `FnEffects` (B); `Completion` is the same under all, with `Cancelled` a variant in every option | failure metadata in H3 (ORNA-FAILURE-003); deleting `std.result` | `Completion` and recovery in H4 |
-| D5 overloading and type arguments | A none; B stated rule for all; C platform-only closed list; type application versus `as: T` | `Binding::Overloads`, `Call.targs`, a stored chosen candidate | the overload part of H1, H2b, `decode<T>` in H5, the six `sys.snapshot` overloads (ORNA-SYS-136) in H5 | H1 for single-definition names, which is every name when A holds |
-| D6 collections | `Map`/`Set`/`Bytes` core, library-only, or deferred | builtin generic `TyKind`s or `Adt`s | the new natives of H5 | every existing list operation |
-| D7 integers | unbounded with cap; add fixed widths; `i64` plus separate big | `TyKind::Int(IntKind)`; the literal node; the operator table | the width-specific operators of H2b and H4 | H4's `Small(i64)`/`Big` value representation (7.2) serves A and C; B adds kinds |
-| D8 units | runtime `Quantity`; checked-only; cut | `TyKind::Quantity`, unit `DefId`s, an elaboration step | H2c, the units rules of H3, a quantity value in H4 | all other typing |
-| D9 keys and indexes | auto Int vs Uuid vs required keys; index and unique declarations vs assert-only | `TableDef.key`, `TableDef.indexes`, key-default bodies | key defaults and indexes in H6 | cursors, `apply`, the caps (H6 without indexes) |
-| D10 bindings and closures | reassignable `let` with by-value capture; `let`/`let mut`; no reassignment | `Local.mutable`; the capture list; rejection of assignment to a captured local | the mutability check in H1 lowering | capture lists (needed under every option, 7.2) |
-| D11 modules | `pub use` re-export or not; `std` replaceable or pinned; package/version | `DefKind::Reexport`, `Binding` aliases, a package id in `DefId` | re-export in H1; package identity in H5 | everything that resolves a `use` without re-export |
-| D12 where host functions live | `core` and `sys` with the engine and a pure-Orna `std`, or natives in `std`; one `native fn` form | which package owns each `FnBody::Native`; `Callee::Intrinsic` versus `Native` for `Some`, `now`, `uuid7`, `error` | the std natives of H5, and the classification of those four names in H1 | `core.orna`, `sys.orna`, `link`, `Host`, and every native not in `std` |
-| D13 specification hygiene | split the spec | nothing structural | nothing | everything; but the typing, effect and evaluation rules the HIR implements must live in that reference, not in the checker (D13 section "What the HIR needs") |
+| Decision | Decided | HIR structure it fixes |
+|---|---|---|
+| D1 type inference | unification inside bodies and lambdas; `pub` functions need full parameter and result annotations; private functions may omit parameter types; an unresolved variable is an error asking for an annotation | solver policy in `orna-check`; annotation check at `pub` boundaries (H2b) |
+| D2 effects | inferred, published in metadata, checked at the use site; no user effect syntax; natives declare effects; vocabulary `sys.EffectKind` | `FnDef.effects` as an inferred set; the effect pass by `DefId` (2.5); no effect variables in user types |
+| D3 absent values | flat `T?`, `null` the only absent value, `T??` a type error, `Some(x)` explicit, implicit lifting `T` to `T?` | one option representation; `TyKind::Option` is flat (2.3); no nested option |
+| D4 failure and cancellation | unchecked failures with typed `Error` and activation rollback; failure sets are tooling metadata; `std.result` deleted; cancellation is a separate completion | `Completion` variants include `Cancelled` distinct from failure (2.8); no `Result` type in the HIR |
+| D5 overloading and type arguments | no overloading; arity variants become default parameters; type-directed variants are distinct functions; types are passed only as type arguments | no `Binding::Overloads`; `Call.targs` only; lowering yields single-definition names |
+| D6 collections | core `Map<K, V>`, `Set<T>`, `Bytes`; immutable, persistent, canonical key order | `Map`, `Set` and `Bytes` are core `TyKind`s (2.3); canonical value tags are format work |
+| D7 integers | `Int` arbitrary precision with a digit quota; no fixed-width types; no implicit numeric conversions | `TyKind::Int` is one kind; the `Small`/`Big` value split (7.2) serves it |
+| D8 units | user units and dimensions cut; built-in `Duration`, `Instant`, `Decimal`, `Money<C>` remain | no `Quantity` type kind, no unit `DefId`s, no dimensional algebra (2.3) |
+| D9 keys and indexes | default key `Uuid` via `uuid7()`; explicit integer keys allowed; no index or unique declarations; the engine serves canonical key-shaped assertions from an index | `TableDef.key` with the Uuid default; no `TableDef.indexes` |
+| D10 bindings and closures | `let` binds, `x = value;` reassigns; no `mut` or `var`; closures capture the variable slot; `parallel` and task bodies capture snapshots and may not assign outer variables | capture list names the slot; snapshot capture for parallel/task bodies; assignment check in H1 lowering |
+| D11 modules | `pub use path;` and `pub use path as name;`; `std` replaceable ordinary Orna; no package ships native code | `DefKind::Reexport` and `Binding` aliases; package identity in `DefId` |
+| D12 host functions | `core` and `sys` engine-embedded, body-less natives bound by `DefId`; `std` pure and re-exports; natives declared only in embedded modules | `FnBody::Native` in `core`/`sys` only; `Callee::Native` versus `Callee::Sys` by declaring package (2.6) |
+| D13 specification | 1.1.0 frozen; new language reference 1.2 with grammar, typing, effect, evaluation and numeric rules | the HIR implements rules that live in the reference, not in the checker |
 
 ### 8.2 Stage by stage
 
-| Stage | Can start now | Needs a decision to finish |
+| Stage | Unblocked by | Remaining work |
 |---|---|---|
-| H0 | everything | none |
-| H1 | lowering, resolver, binder, `Callee` for single-definition names, LSP queries | D5 (overloads), D11 (re-export), D12 (four root names), D10 (mutability check) |
-| H2 | H2a | H2b: D1, D3, D5, D7; H2c: D8 |
-| H3 | effect pass; rules that do not read types of options, units or failure sets | D2 (effects in types), D4 (failure sets), D8 (units rules) |
-| H4 | everything except what follows | D3 (null, `??`), D7 (width operators), D8 (quantity values) |
-| H5 | `Host`, `link`, `sys.orna`, families that depend on none of D5/D6/D12 (bits, hash, text, base64, json, codecs, math, time, random, money) | D12 (std natives), D5 (`decode`, `sys.snapshot`), D6, D11 |
-| H6 | all but indexes | D9 |
-| H7 | everything | none |
-| H8 | everything | none (the generic-function pin turns green only if H2 handles generics) |
-| H9 | no: needs everything above | the union of the above, resolved or defaulted |
+| H0 | nothing | none |
+| H1 | D5, D10, D11, D12 | lowering, resolver, binder, `Callee`, LSP queries, the assignment check, `pub use` |
+| H2 | D1, D3, D5, D7, D8 | H2a annotated programs; H2b inference, flat option, type arguments; H2c removal of unit algebra |
+| H3 | D2, D4 | effect pass and failure metadata |
+| H4 | D3, D7, D10 | executor, `null`, `??`, `Completion` with `Cancelled`, closure slots |
+| H5 | D5, D6, D11, D12 | `Host`, `link`, `sys.orna`, the native families in `core.orna`, `Map`, `Set`, `Bytes` natives |
+| H6 | D9 | key defaults and assertion-to-index recognition |
+| H7 | nothing | none |
+| H8 | nothing | generic-function pin via H2 |
+| H9 | all of the above | resolved by the stages above; the old pipeline is removed |
 
-Stages that start with no dependency on any open decision: **H0, H1, H2a, H4,
-H6, H7, H8**, and the undecided-independent parts of H3 and H5.
-
-### 8.3 If a decision stays open
-
-Each decision has a status-quo reading that is representable, so a stage may
-finish on it and be amended when the owner decides: D1 on required annotations
-is a strict subset of inference; D2 on hidden effects is today's behaviour with
-the effect pass made explicit; D3 B is today's `T?` with the second null removed;
-D5 A forbids what only the platform uses and is reached by listing the platform
-overloads as distinct names; D12 "natives in `std`" is today's layout with
-`native fn` in place of marker bodies. The cost of finishing on a status-quo
-reading and later switching is stated per decision in stream B's document; the
-structural cost is the `[Dn]` marks in section 2, which are fields or enum
-variants, not redesigns.
+Every stage is unblocked. The status-quo fallbacks of the earlier draft no longer
+apply, and the `[Dn]` marks in section 2 are now the decided forms.
 
 --------------------------------------------------------------------------
 
@@ -1894,7 +1866,7 @@ variants, not redesigns.
 | K8 | HIR build cost on large projects and per-keystroke rebuilds in the language server | H1 | low to medium, medium | a `Program` is rebuilt per changed module with the other modules' items reused by `Arc` `[INFERENCE]`; measured in H1 with the LSP suite |
 | K9 | Deep expressions overflow the native stack in lowering and typing (the checker already uses `stacker::maybe_grow`, `lib.rs:3682`) | H1, H2 | medium, low | same technique at the recursive entry points; a deep-nesting corpus case |
 | K10 | The design is wrong in a detail only an implementation finds | all | certain, low | H0 to H1 are cheap and additive; H1's classification test is the first real feedback, before any consumer depends on the structure |
-| K11 | Specification gaps: INFER-1 without typing rules, no effect lattice, no evaluation semantics (critique 3.1, 3.2) | H2, H3 | high, medium | stream B's reference is the authority for rules; where it is silent the HIR follows the old behaviour and records the gap as a difference with a bead |
+| K11 | Specification gaps: INFER-1 without typing rules, no effect lattice, no evaluation semantics (critique 3.1, 3.2) | H2, H3 | high, medium | the 1.2 language reference (D13) is the authority for rules; where it is silent the HIR follows the old behaviour and records the gap as a difference with a bead |
 
 ### 9.2 Alternatives considered and rejected
 
