@@ -181,13 +181,9 @@ name = "orna-live"
 name = "orna-lsp"
 [crate.files]
 "src/analysis.rs" = 1468
-"src/names.rs" = 1485
 "src/server.rs" = 2585
 [crate.functions]
 "src/analysis.rs::completion_at" = 183
-"src/names.rs::bind_pattern" = 147
-"src/names.rs::expr" = 168
-"src/names.rs::item" = 219
 
 [[crate]]
 name = "orna-project"
