@@ -1,0 +1,15 @@
+{
+  "note": "H4 baseline of the executor's share of the three benchmarks of the HIR design section 7.4, measured on orna-exec by crates/orna-differential/src/bin/hir_exec_bench.rs. steps is the executor's expression-evaluation count; calls counts every source-level call, because orna-exec does not memoise (B1 makes the design's 242,785 calls). B3 is not measured: orna-exec has no table scan yet, so it is listed under not_yet in the record. Wall time is recorded and not part of this baseline. Re-record only in a PR that explains why the counters changed.",
+  "benchmarks": {
+    "b1_fib_25": {
+      "steps": 2670631,
+      "calls": 242785,
+      "gated": true
+    },
+    "b2_fold_1000000": {
+      "steps": 8000008,
+      "calls": 1,
+      "gated": true
+    }
+  }
+}
