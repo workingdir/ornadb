@@ -1,0 +1,3 @@
+native fn __window_rate<T>(
+    points: [(Instant, T)], size: Int, step: Int
+): [T?] effect none;

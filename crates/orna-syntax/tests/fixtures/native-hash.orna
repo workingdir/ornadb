@@ -1,0 +1,1 @@
+pub native fn sha256(input: Blob): Digest effect none;

@@ -25,12 +25,13 @@ pub use lexer::{
 };
 pub use parser::{
     Argument, AssignmentOperator, AssignmentTarget, CaseArm, ControlKind, Declaration,
-    Diagnostic as SyntaxDiagnostic, DimensionExpr, EntryPoint, EnumPayloadField, EnumVariant, Expr,
-    FieldInitializer, FunctionSignature, GenericParameter, ImplMember, Implementation,
-    ImportSegment, Item, ItemKind, Label, LambdaParameter, LiteralKind, NameSegment, Parameter,
-    Parse, ParseError, Pattern, PatternField, ProtocolMember, RecordField, ReplInput,
-    SourcePosition, SourceSpan as SyntaxSpan, SpanLocation, Statement, StringSegment, SyntaxTree,
-    TableMember, TypeExpr, TypeMember, TypeRepresentation, UnitDefinition, UseTail, Visibility,
-    parse_expression, parse_expression_with_file, parse_module, parse_module_with_file, parse_repl,
-    parse_repl_with_file, parse_row, parse_row_with_file,
+    Diagnostic as SyntaxDiagnostic, DimensionExpr, EFFECT_CLASSES, EntryPoint, EnumPayloadField,
+    EnumVariant, Expr, FieldInitializer, FunctionSignature, GenericParameter, ImplMember,
+    Implementation, ImportSegment, Item, ItemKind, Label, LambdaParameter, LiteralKind,
+    NameSegment, NativeEffectSet, Parameter, Parse, ParseError, Pattern, PatternField,
+    ProtocolMember, RecordField, ReplInput, SourcePosition, SourceSpan as SyntaxSpan, SpanLocation,
+    Statement, StringSegment, SyntaxTree, TableMember, TypeExpr, TypeMember, TypeRepresentation,
+    UnitDefinition, UseTail, Visibility, parse_expression, parse_expression_with_file,
+    parse_module, parse_module_with_file, parse_repl, parse_repl_with_file, parse_row,
+    parse_row_with_file,
 };

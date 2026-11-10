@@ -8103,6 +8103,13 @@ fn admitted_transaction_module(
                     "transactional source seam does not execute module-level bindings".into(),
                 );
             }
+            // ORNA-NATIVE-001: a native declaration has no body. This bounded
+            // seam retains executable source, so it rejects the declaration
+            // rather than reading it as a function. ORNA-NATIVE-004 admits one
+            // only in a pinned standard module; stage N2 binds that case.
+            Declaration::Native { .. } => {
+                return Err("transactional source seam does not bind native declarations".into());
+            }
         }
     }
     Ok(AdmittedTransaction {

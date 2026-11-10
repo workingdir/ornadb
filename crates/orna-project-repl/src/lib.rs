@@ -776,6 +776,12 @@ fn admitted_runtime_sources(
                 // Dimension, Unit and alias declarations, which have no runtime
                 // representation. Non-standard namespaced declarations of those
                 // kinds do not match it and fall through to the unsupported arm.
+                // ORNA-NATIVE-001: a native declaration has no body, so this
+                // session boundary cannot retain it as executable source.
+                // Stage N2 binds it to its implementation by identity.
+                Declaration::Native { .. } => {
+                    return Err(ReplError::fixed("ORNA-REPL-UNSUPPORTED"));
+                }
                 _ if standard => {}
                 _ => return Err(ReplError::fixed("ORNA-REPL-UNSUPPORTED")),
             }
