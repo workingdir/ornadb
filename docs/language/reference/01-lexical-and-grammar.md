@@ -71,10 +71,9 @@ Rules:
    exponent sign belongs to the exponent.
 6. A dot after an integer starts a fraction only when a digit follows. Otherwise
    it is a member access on the integer literal: `1.day`, `12.34.decimal` and
-   `12.34.GBP` are a literal followed by `.name`. The names `decimal`, a
-   currency type and the built-in duration names (`day`, `days` and the rest of
-   the duration set) are resolved by the checker; any other name is an error.
-   There is no user-declared unit suffix.
+   `12.34.GBP` are a literal followed by `.name`. The name is resolved as chapter 5
+   describes: a unit variant in scope first, then a type with a literal target, such as a
+   currency. Any other name is an error.
 
 ### Dates and instants
 
@@ -423,10 +422,12 @@ Unary operators bind tighter than `^`, so `-2 ^ 2` is `(-2) ^ 2`; write `-(2 ^ 2
   variable captured from an enclosing function (chapter 3).
 * No literal syntax is added for `Map`, `Set` or `Bytes`; they are built by core
   functions and printed in the canonical text form (chapter 2).
-* The `Quantity` literal forms and unit suffixes (`3.kWh`) are removed.
+* The 1.1 `Quantity` literal forms are removed. A unit suffix comes back only as a unit
+  variant in scope (chapter 5); `dim` and `unit` declarations stay removed.
 
 ## Decided by
 
 D1 (annotation rules reflected in function declarations), D3 (`T??` error),
-D5 (type arguments, no overloading), D8 (units removed), D10 (assignment),
+D5 (type arguments, no overloading), D8 (units as enum families, amended 2026-11-10),
+D10 (assignment),
 D11 (`pub use`), D12 (`native fn`, `core`).

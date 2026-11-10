@@ -1806,7 +1806,7 @@ Bead `ornadb-csenl.8`. Critique F10, section 3.2.
   (`29-formats.md:28`, `:110`). Unit identities are stable ObjectIds
   (ORNA-OBJECT-001, `07-tables.md:350`).
 * Time units (`1.day`, `5.minutes`) are described separately as Duration and
-  calendar period (ORNA-TIME-001 to 004, `05-types.md:141-161`).
+  calendar period (ORNA-TIME-001 to 004, `reference/05-units.md`).
 
 ### Implementation today
 
