@@ -170,6 +170,21 @@ fn classify_path(
             classified_def(builder, state, def, span)
         }
         crate::resolve::PathKind::Member { base, .. } => {
+            if let Some(unit) = builder
+                .member_def(base, &last)
+                .filter(|def| builder.is_unit(*def))
+            {
+                super::record_body_use(
+                    &mut builder.program,
+                    module,
+                    state.id,
+                    last_span.clone(),
+                    last,
+                    crate::UseContext::Value,
+                    NameTarget::Def(unit),
+                );
+                return classified_def(builder, state, unit, span);
+            }
             super::record_body_use(
                 &mut builder.program,
                 module,

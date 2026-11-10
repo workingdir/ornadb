@@ -55,6 +55,14 @@ pub(crate) struct PendingDef {
     pub(crate) kind: PendingKind,
 }
 
+/// What a unit suffix resolves to: no unit of that name, the one unit, or several that are ambiguous.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum UnitLookup {
+    None,
+    Found(DefId),
+    Ambiguous(Vec<DefId>),
+}
+
 /// The state of one definition while lowering.
 pub(crate) enum PendingKind {
     /// A top-level declaration whose `DefKind` needs types or bodies.
@@ -442,9 +450,9 @@ impl<'a> Builder<'a> {
         &self.pending[def.index()].name
     }
 
-    /// The unit declaration a unit suffix names: one of this module first,
-    /// otherwise the one unit of the program with that name.
-    pub(crate) fn resolve_unit(&self, module: ModuleId, name: &Name) -> Option<DefId> {
+    /// The unit declarations a unit suffix may name: those of this module first, otherwise those of the whole
+    /// program. One candidate is the unit; several are ambiguous, and the caller reports them.
+    pub(crate) fn resolve_unit(&self, module: ModuleId, name: &Name) -> UnitLookup {
         let candidates = self
             .pending
             .iter()
@@ -455,13 +463,25 @@ impl<'a> Builder<'a> {
             })
             .filter(|def| &self.pending[def.index()].name == name)
             .collect::<Vec<_>>();
-        if let Some(own) = candidates
+        let own = candidates
             .iter()
-            .find(|def| self.pending[def.index()].module == module)
-        {
-            return Some(*own);
+            .copied()
+            .filter(|def| self.pending[def.index()].module == module)
+            .collect::<Vec<_>>();
+        let scoped = if own.is_empty() { candidates } else { own };
+        match scoped.as_slice() {
+            [] => UnitLookup::None,
+            [unit] => UnitLookup::Found(*unit),
+            _ => UnitLookup::Ambiguous(scoped),
         }
-        (candidates.len() == 1).then(|| candidates[0])
+    }
+
+    /// Whether `def` is a unit declaration.
+    pub(crate) fn is_unit(&self, def: DefId) -> bool {
+        matches!(
+            self.pending.get(def.index()).map(|pending| &pending.kind),
+            Some(PendingKind::Built(crate::DefKind::Unit(_)))
+        )
     }
 
     /// The member of `base` named `name`: a variant, field or nested member. A static member of one of the

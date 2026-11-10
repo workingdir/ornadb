@@ -5,13 +5,94 @@
 //! factors. Nothing is evaluated here: coefficients and exponents stay as written, and the dimension
 //! of a derived family is computed by the checker.
 
-use orna_syntax::{EnumVariant, UnitExpr, UnitTerm};
+use orna_syntax::{EnumVariant, Expr as AstExpr, LiteralKind, SyntaxSpan, UnitExpr, UnitTerm};
 
-use super::declare::{Builder, PendingKind};
-use crate::diag::UNIT_UNRESOLVED;
+use super::BodyState;
+use super::declare::{Builder, PendingKind, UnitLookup};
+use super::exprs::{error_expr, lower_expr, push};
+use crate::diag::{AMBIGUOUS, UNIT_UNRESOLVED};
 use crate::{
-    DefId, DefKind, DimensionDef, Idx, ModuleId, Name, NameTarget, UnitDef, UnitFactor, Visibility,
+    Arg, ArgValue, Call, Callee, DefId, DefKind, DimensionDef, ExprId, ExprKind, Idx, ModuleId,
+    Name, NameTarget, ParamIdx, UnitDef, UnitFactor, UseContext, Visibility,
 };
+
+/// Lowers `literal.name`, a numeric literal with a unit suffix, as a call of that unit's constructor, so the
+/// checker types it as the unit. `None` when no unit of that name is in scope; the caller then tries the
+/// builtin postfix table. Several families in scope defining the name are ambiguous and reported by name.
+pub(crate) fn lower_suffix_unit(
+    builder: &mut Builder<'_>,
+    state: &mut BodyState,
+    base: &AstExpr,
+    name: &str,
+    span: &SyntaxSpan,
+) -> Option<ExprId> {
+    if !matches!(
+        base,
+        AstExpr::Literal {
+            kind: LiteralKind::Integer | LiteralKind::Decimal | LiteralKind::Float,
+            ..
+        }
+    ) {
+        return None;
+    }
+    let suffix = Name::new(name);
+    let name_span = SyntaxSpan::new(span.end.saturating_sub(name.len()), span.end);
+    match builder.resolve_unit(state.module, &suffix) {
+        UnitLookup::None => None,
+        UnitLookup::Ambiguous(candidates) => {
+            let families = candidates
+                .iter()
+                .map(|unit| family_name(builder, *unit))
+                .collect::<Vec<_>>()
+                .join(" and ");
+            builder.diagnose(
+                state.module,
+                AMBIGUOUS,
+                format!("unit suffix `{name}` is ambiguous: it names a unit of {families}"),
+                name_span,
+            );
+            Some(error_expr(builder, state, span.clone()))
+        }
+        UnitLookup::Found(unit) => {
+            super::record_body_use(
+                &mut builder.program,
+                state.module,
+                state.id,
+                name_span.clone(),
+                suffix,
+                UseContext::Value,
+                NameTarget::Def(unit),
+            );
+            let literal = lower_expr(builder, state, base);
+            let call = Call {
+                callee: Callee::Ctor { def: unit },
+                callee_span: name_span,
+                args: Box::new([Arg {
+                    slot: ParamIdx::new(0),
+                    value: ArgValue::Expr(literal),
+                }]),
+                piped: false,
+            };
+            Some(push(
+                builder,
+                state,
+                ExprKind::Call(Box::new(call)),
+                span.clone(),
+            ))
+        }
+    }
+}
+
+/// The name of the family a unit belongs to, for a diagnostic.
+fn family_name(builder: &Builder<'_>, unit: DefId) -> String {
+    match &builder.pending[unit.index()].kind {
+        PendingKind::Built(DefKind::Unit(UnitDef {
+            family: Some(family),
+            ..
+        })) => builder.def_name(*family).to_string(),
+        _ => String::from("an unnamed family"),
+    }
+}
 
 /// A derived unit whose expression is resolved once every definition is built.
 #[derive(Clone, Debug)]
@@ -83,16 +164,37 @@ impl<'a> Builder<'a> {
     }
 
     /// Resolves one factor of a derived unit. A qualified name (`Length.kilometre`) names a unit of
-    /// that family; a bare name is a sibling variant first, otherwise a unit in scope.
+    /// that family; a bare name is a sibling variant first, otherwise a unit in scope. Several units in
+    /// scope with that name are ambiguous, as a suffix is.
     fn unit_factor(&mut self, job: &UnitJob, term: &UnitTerm) -> Option<UnitFactor> {
-        let Some(unit) = self.resolve_unit_term(job, term) else {
-            self.diagnose(
-                job.module,
-                UNIT_UNRESOLVED,
-                format!("unit `{}` is not declared in scope", term.name),
-                term.span.clone(),
-            );
-            return None;
+        let unit = match self.resolve_unit_term(job, term) {
+            UnitLookup::Found(unit) => unit,
+            UnitLookup::Ambiguous(candidates) => {
+                let families = candidates
+                    .iter()
+                    .map(|unit| family_name(self, *unit))
+                    .collect::<Vec<_>>()
+                    .join(" and ");
+                self.diagnose(
+                    job.module,
+                    AMBIGUOUS,
+                    format!(
+                        "unit `{}` is ambiguous: it names a unit of {families}",
+                        term.name
+                    ),
+                    term.span.clone(),
+                );
+                return None;
+            }
+            UnitLookup::None => {
+                self.diagnose(
+                    job.module,
+                    UNIT_UNRESOLVED,
+                    format!("unit `{}` is not declared in scope", term.name),
+                    term.span.clone(),
+                );
+                return None;
+            }
         };
         Some(UnitFactor {
             divide: term.divide,
@@ -102,23 +204,22 @@ impl<'a> Builder<'a> {
         })
     }
 
-    /// The unit a factor names, or `None` when no unit of that name is in scope.
-    fn resolve_unit_term(&self, job: &UnitJob, term: &UnitTerm) -> Option<DefId> {
+    /// The unit a factor names: a qualified factor names a unit of that family, a bare one a sibling
+    /// variant or a unit in scope.
+    fn resolve_unit_term(&self, job: &UnitJob, term: &UnitTerm) -> UnitLookup {
         let name = Name::new(term.name.as_str());
-        let unit = match &term.family {
+        let member = match &term.family {
             Some(family) => match self.resolve_bare(job.module, &Name::new(family.as_str())) {
                 NameTarget::Def(base) => self.member_def(base, &name),
                 _ => None,
             },
-            None => self
-                .member_def(job.family, &name)
-                .or_else(|| self.resolve_unit(job.module, &name)),
-        };
-        unit.filter(|def| {
-            matches!(
-                self.pending[def.index()].kind,
-                PendingKind::Built(DefKind::Unit(_))
-            )
-        })
+            None => self.member_def(job.family, &name),
+        }
+        .filter(|def| self.is_unit(*def));
+        match (member, &term.family) {
+            (Some(unit), _) => UnitLookup::Found(unit),
+            (None, Some(_)) => UnitLookup::None,
+            (None, None) => self.resolve_unit(job.module, &name),
+        }
     }
 }
