@@ -4,29 +4,48 @@
 //! constructors to definitions. Every binding in the pattern gets a slot before
 //! the pattern is built, so a body can refer to a name a pattern introduced
 //! without a second pass.
+//!
+//! Lowering records the type a binding was written with when it can: `let`
+//! annotations and annotated parameters reach [`crate::Local::ty`], so the type
+//! pass of stage H2 has an expected type for the initializer without keeping a
+//! second, syntax-side annotation table.
 
 use orna_syntax::{Pattern as AstPattern, SyntaxSpan};
 
 use crate::Idx;
 use crate::resolve::PathKind;
-use crate::{DefId, Name, NameTarget, Pat, PatId};
+use crate::{DefId, DefKind, Name, NameTarget, Pat, PatId, Ty, TyKind};
 
 use super::BodyState;
 use super::declare::{Builder, PendingKind};
 use super::literals::lower_literal;
 
-/// Lowers one pattern in the body's current scope.
+/// Lowers one pattern with no written type.
 pub(crate) fn lower_pattern(
     builder: &mut Builder<'_>,
     state: &mut BodyState,
     pattern: &AstPattern,
+) -> PatId {
+    lower_pattern_with(builder, state, pattern, None)
+}
+
+/// Lowers one pattern whose value is written to have type `expected`.
+///
+/// The expected type is pushed into binding slots and, where the pattern
+/// destructures a tuple, list, record or constructor, into the sub-patterns.
+pub(crate) fn lower_pattern_with(
+    builder: &mut Builder<'_>,
+    state: &mut BodyState,
+    pattern: &AstPattern,
+    expected: Option<Ty>,
 ) -> PatId {
     let module = state.module;
     let error_ty = builder.program.tys.error();
     match pattern {
         AstPattern::Name(text, span) => {
             let name = Name::new(text);
-            let local = state.add_local(name.clone(), error_ty, span.clone());
+            let ty = expected.unwrap_or(error_ty);
+            let local = state.add_local(name.clone(), ty, span.clone());
             super::record_binding_use(
                 &mut builder.program,
                 module,
@@ -52,16 +71,28 @@ pub(crate) fn lower_pattern(
             }
         },
         AstPattern::Tuple { elements, .. } => {
-            let elements = elements
+            let element_types = match expected.and_then(|ty| builder.program.tys.kind(ty).cloned())
+            {
+                Some(TyKind::Tuple(types)) if types.len() == elements.len() => {
+                    types.iter().copied().map(Some).collect::<Vec<_>>()
+                }
+                _ => vec![None; elements.len()],
+            };
+            let lowered = elements
                 .iter()
-                .map(|element| lower_pattern(builder, state, element))
+                .zip(element_types)
+                .map(|(element, ty)| lower_pattern_with(builder, state, element, ty))
                 .collect::<Vec<_>>();
-            state.push_pat(Pat::Tuple(elements.into_boxed_slice()))
+            state.push_pat(Pat::Tuple(lowered.into_boxed_slice()))
         }
         AstPattern::List { elements, .. } => {
+            let element_ty = match expected.and_then(|ty| builder.program.tys.kind(ty).cloned()) {
+                Some(TyKind::List(element)) => Some(element),
+                _ => None,
+            };
             let prefix = elements
                 .iter()
-                .map(|element| lower_pattern(builder, state, element))
+                .map(|element| lower_pattern_with(builder, state, element, element_ty))
                 .collect::<Vec<_>>();
             state.push_pat(Pat::List {
                 prefix: prefix.into_boxed_slice(),
@@ -72,6 +103,7 @@ pub(crate) fn lower_pattern(
         AstPattern::Record { fields, .. } => {
             let mut lowered = Vec::with_capacity(fields.len());
             for (name, field_pattern, span) in fields {
+                let field_ty = expected.and_then(|ty| field_type(builder, ty, name));
                 super::record_body_use(
                     &mut builder.program,
                     module,
@@ -82,9 +114,15 @@ pub(crate) fn lower_pattern(
                     NameTarget::Unresolved,
                 );
                 let sub = match field_pattern {
-                    Some(field_pattern) => lower_pattern(builder, state, field_pattern),
+                    Some(field_pattern) => {
+                        lower_pattern_with(builder, state, field_pattern, field_ty)
+                    }
                     None => {
-                        let local = state.add_local(Name::new(name), error_ty, span.clone());
+                        let local = state.add_local(
+                            Name::new(name),
+                            field_ty.unwrap_or(error_ty),
+                            span.clone(),
+                        );
                         super::record_binding_use(
                             &mut builder.program,
                             module,
@@ -108,6 +146,45 @@ pub(crate) fn lower_pattern(
             fields,
             span,
         } => lower_constructor(builder, state, path, arguments, fields, span),
+    }
+}
+
+/// The declared type of a record-pattern field, when the expected type names
+/// one.
+fn field_type(builder: &Builder<'_>, expected: Ty, name: &str) -> Option<Ty> {
+    match builder.program.tys.kind(expected).cloned() {
+        Some(TyKind::Record(fields)) => fields
+            .iter()
+            .find(|(field, _)| field.as_str() == name)
+            .map(|(_, ty)| *ty),
+        Some(TyKind::Adt(def, _)) => field_definition(builder, def, name),
+        _ => None,
+    }
+}
+
+/// The type of a field definition named `name` on `owner`.
+fn field_definition(builder: &Builder<'_>, owner: DefId, name: &str) -> Option<Ty> {
+    let field = match &builder.pending[owner.index()].kind {
+        PendingKind::Built(DefKind::Table(table)) => table
+            .fields
+            .iter()
+            .copied()
+            .find(|field| builder.def_name(*field).as_str() == name),
+        PendingKind::Built(DefKind::Type(definition)) => definition
+            .members
+            .iter()
+            .copied()
+            .find(|member| builder.def_name(*member).as_str() == name),
+        PendingKind::Built(DefKind::Variant(variant)) => variant
+            .fields
+            .iter()
+            .copied()
+            .find(|field| builder.def_name(*field).as_str() == name),
+        _ => None,
+    }?;
+    match &builder.pending[field.index()].kind {
+        PendingKind::Built(DefKind::Field(definition)) => Some(definition.ty),
+        _ => None,
     }
 }
 
@@ -149,37 +226,26 @@ fn lower_constructor(
         other => other,
     };
     let def = match resolved {
-        PathKind::Def(def) => {
-            super::record_body_use(
-                &mut builder.program,
-                module,
-                state.id,
-                last_span.clone(),
-                segments.last().cloned().unwrap_or_else(|| Name::new("")),
-                crate::UseContext::Pattern,
-                NameTarget::Def(def),
-            );
-            Some(def)
-        }
-        _ => {
-            super::record_body_use(
-                &mut builder.program,
-                module,
-                state.id,
-                last_span.clone(),
-                segments.last().cloned().unwrap_or_else(|| Name::new("")),
-                crate::UseContext::Pattern,
-                NameTarget::Unresolved,
-            );
-            builder.diagnose(
-                module,
-                crate::diag::UNRESOLVED,
-                "pattern constructor does not resolve",
-                span.clone(),
-            );
-            None
-        }
+        PathKind::Def(def) => Some(def),
+        _ => None,
     };
+    super::record_body_use(
+        &mut builder.program,
+        module,
+        state.id,
+        last_span.clone(),
+        last_name.clone(),
+        crate::UseContext::Pattern,
+        def.map_or(NameTarget::Unresolved, NameTarget::Def),
+    );
+    if def.is_none() {
+        builder.diagnose(
+            module,
+            crate::diag::UNRESOLVED,
+            "pattern constructor does not resolve",
+            span.clone(),
+        );
+    }
     let mut lowered_fields = Vec::new();
     for field in fields {
         let name_span = SyntaxSpan::new(field.span.start, field.span.start + field.name.len());
@@ -193,10 +259,15 @@ fn lower_constructor(
             crate::UseContext::Field,
             field_def.map_or(NameTarget::Unresolved, NameTarget::Def),
         );
+        let field_ty = field_def.and_then(|field| field_definition_of(builder, field));
         let sub = match &field.pattern {
-            Some(pattern) => lower_pattern(builder, state, pattern),
+            Some(pattern) => lower_pattern_with(builder, state, pattern, field_ty),
             None => {
-                let local = state.add_local(Name::new(&field.name), error_ty, field.span.clone());
+                let local = state.add_local(
+                    Name::new(&field.name),
+                    field_ty.unwrap_or(error_ty),
+                    field.span.clone(),
+                );
                 super::record_binding_use(
                     &mut builder.program,
                     module,
@@ -214,8 +285,10 @@ fn lower_constructor(
         }
     }
     for (index, argument) in arguments.iter().enumerate() {
-        let sub = lower_pattern(builder, state, argument);
-        if let Some(field_def) = def.and_then(|def| field_at(builder, def, index)) {
+        let field_def = def.and_then(|def| field_at(builder, def, index));
+        let field_ty = field_def.and_then(|field| field_definition_of(builder, field));
+        let sub = lower_pattern_with(builder, state, argument, field_ty);
+        if let Some(field_def) = field_def {
             lowered_fields.push((field_def, sub));
         }
     }
@@ -225,6 +298,14 @@ fn lower_constructor(
             fields: lowered_fields.into_boxed_slice(),
         }),
         None => state.push_pat(Pat::Wild),
+    }
+}
+
+/// The declared type of one field definition.
+fn field_definition_of(builder: &Builder<'_>, field: DefId) -> Option<Ty> {
+    match &builder.pending[field.index()].kind {
+        PendingKind::Built(DefKind::Field(definition)) => Some(definition.ty),
+        _ => None,
     }
 }
 

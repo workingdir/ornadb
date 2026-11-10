@@ -1,0 +1,21 @@
+# The H2a typed-share ratchet (docs/design/hir.md section 6.3, stage H2).
+#
+# `typed` is the number of corpus cases whose owned top-level bodies the HIR
+# type pass finished and whose owned modules lower without a diagnostic.
+# `lowered` is the number of corpus cases the HIR lowers and the pass examines
+# (a REPL case is an incremental module and stage H8 lowers it).
+#
+# The typed count may only grow: update it in the commit that types more of the
+# corpus. A change to `lowered` is a corpus change or a lowering change, and the
+# measured denominator must be recorded in the same PR, exactly as the exclusion
+# account does.
+#
+# H2a is a strict subset: a body the subset cannot type is written to stderr by
+# the test with the reason and is not a program error ("not yet on HIR"). The
+# remaining families are the parameter-annotation policy (H2b), the `core`
+# `Error`/native declarations (H2b/H5), user-declared units and dimensions (H2c)
+# and the checker's special cases (H3).
+
+[[typed-share]]
+typed = 44
+lowered = 212

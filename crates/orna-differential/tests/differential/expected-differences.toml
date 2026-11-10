@@ -1002,3 +1002,14 @@ first = "ref:0"
 second = "ref:1"
 reason = "the fixture-catalogue environment the reference corpus is admitted against supplies this name; the case carries no declaration for it and HIR lowering's environment is source-only, so carrying each case's environment is H0 corpus-fidelity work"
 bead = "ornadb-csenl.15"
+# Stage H2a (ornadb-csenl.17) public-signature comparison. The checker stays
+# authoritative; these are measured differences the type pass records instead
+# of hiding.
+
+[[difference]]
+case = "valid/empty-record-lambda.orna"
+field = "public-signature"
+first = "examples.valid.empty-record-lambda::do_nothing=do_nothing() -> () -> {}"
+second = "examples.valid.empty-record-lambda::do_nothing=do_nothing() -> () -> Unit"
+reason = "the checker gives an empty braced lambda body `{}` the empty record type; the HIR lowers that body as a block with no tail, whose value is Unit (ORNA-CFLOW-001). Which reading is normative is a checker rule that H3 decides; H2a does not guess"
+bead = "ornadb-csenl.18"

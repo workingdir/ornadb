@@ -377,3 +377,114 @@ pub fn resolution(lowered: &LoweredProgram) -> ResolutionObservation {
     }
     observation
 }
+
+/// What the H2a type pass did with one lowered case.
+///
+/// The pass itself is [`orna_hir::typeck`]; this record narrows it to the
+/// case's own modules. A dependency's body may be outside the subset (pinned
+/// `std` still omits parameter annotations in places) without making the case
+/// untyped, exactly as the checker's dependency analysis does not make a
+/// project module's signatures unavailable.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct TypeObservation {
+    /// Whether the HIR accepts the case: no lowering diagnostic in an owned
+    /// module and every owned top-level body typed.
+    pub accepted: bool,
+    /// Owned top-level bodies with finished static types.
+    pub typed_bodies: usize,
+    /// Owned top-level bodies examined.
+    pub total_bodies: usize,
+    /// One line per owned body the subset cannot type, with the reason.
+    pub not_yet: Vec<String>,
+    /// One line per lowering diagnostic in an owned module.
+    pub diagnostics: Vec<String>,
+    /// The printed type of every public signature, keyed by
+    /// `module.path::name`.
+    pub signatures: BTreeMap<String, String>,
+}
+
+impl TypeObservation {
+    /// Whether this case contributes to the typed-share ratchet.
+    ///
+    /// A program with no top-level body has nothing to type, so it is accepted
+    /// but does not claim a share.
+    #[must_use]
+    pub fn typed_case(&self) -> bool {
+        self.accepted && self.total_bodies > 0
+    }
+}
+
+/// Runs the type pass over one lowered case and records the owned modules'
+/// result.
+pub fn type_observation(lowered: &mut LoweredProgram) -> TypeObservation {
+    let summary = orna_hir::typeck(&mut lowered.program);
+    let mut observation = TypeObservation::default();
+    for outcome in &summary.outcomes {
+        if !owned(lowered, outcome.module) {
+            continue;
+        }
+        observation.total_bodies += 1;
+        if outcome.typed {
+            observation.typed_bodies += 1;
+        } else if let Some(reason) = &outcome.not_yet {
+            observation.not_yet.push(format!(
+                "{}: {}.{}: {}",
+                outcome.body.as_u32(),
+                module_name(lowered, outcome.module),
+                definition_name(lowered, outcome.owner),
+                reason.message()
+            ));
+        }
+    }
+    for (module_id, module) in lowered.program.modules.iter_enumerated() {
+        if !owned(lowered, module_id) {
+            continue;
+        }
+        for diagnostic in &module.diagnostics {
+            observation.diagnostics.push(format!(
+                "{}: {}: {}",
+                module.path, diagnostic.code, diagnostic.message
+            ));
+        }
+    }
+    for (module_id, module) in lowered.program.modules.iter_enumerated() {
+        if !owned(lowered, module_id) {
+            continue;
+        }
+        for def in &module.items {
+            let definition = &lowered.program.defs[*def];
+            if definition.vis != orna_hir::Visibility::Public {
+                continue;
+            }
+            if !matches!(&definition.kind, orna_hir::DefKind::Fn(_)) {
+                continue;
+            }
+            let Some(signature) = orna_hir::print_signature(&lowered.program, *def) else {
+                continue;
+            };
+            observation
+                .signatures
+                .insert(format!("{}::{}", module.path, definition.name), signature);
+        }
+    }
+    observation.accepted =
+        observation.diagnostics.is_empty() && observation.typed_bodies == observation.total_bodies;
+    observation
+}
+
+fn owned(lowered: &LoweredProgram, module: orna_hir::ModuleId) -> bool {
+    lowered.owned.get(module.index()).copied().unwrap_or(false)
+}
+
+fn module_name(lowered: &LoweredProgram, module: orna_hir::ModuleId) -> String {
+    lowered
+        .logical_paths
+        .get(module.index())
+        .cloned()
+        .flatten()
+        .unwrap_or_else(|| lowered.program.modules[module].path.to_string())
+}
+
+fn definition_name(lowered: &LoweredProgram, def: orna_hir::DefId) -> String {
+    lowered.program.defs[def].name.as_str().to_owned()
+}

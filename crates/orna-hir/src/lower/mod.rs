@@ -41,6 +41,7 @@ use crate::{
     Name, NameUse, Pat, PatId, Program, SourceId, Ty,
 };
 
+pub(crate) use classify::{rel_op as relation_operation, table_op as table_operation};
 pub(crate) use declare::Builder;
 
 /// One parsed source and the module path its spans belong to.

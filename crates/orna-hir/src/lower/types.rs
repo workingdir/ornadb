@@ -251,6 +251,11 @@ fn language_constructor(name: &Name, args: &[Ty]) -> Option<TyKind> {
 }
 
 /// The type of a declared nominal, enum, table or alias.
+///
+/// Lowering builds definitions in `Builder::pending` and writes them into the
+/// program only in `Builder::finish`, so this asks the pending table: reading
+/// `program.defs` here would answer "not a type" for every declaration and turn
+/// each written nominal type into the diagnostic type.
 fn nominal(builder: &mut Builder<'_>, def: DefId, args: Vec<Ty>) -> Ty {
     if builder.is_nominal(def) {
         builder
