@@ -27,6 +27,16 @@ pub const DUPLICATE: &str = "ORNA-S013-DUPLICATE";
 pub const UNSUPPORTED: &str = "ORNA-S022-UNSUPPORTED";
 /// A unit name that names no unit of a family or unit declaration in scope (units.md ORNA-UNIT-UNRESOLVED).
 pub const UNIT_UNRESOLVED: &str = "ORNA-UNIT-UNRESOLVED";
+/// A unit family whose variants do not share the family's dimension (units.md ORNA-UNIT-010).
+pub const UNIT_DIM: &str = "ORNA-UNIT-DIM";
+/// A unit whose definition depends on itself (units.md ORNA-UNIT-009).
+pub const UNIT_CYCLE: &str = "ORNA-UNIT-CYCLE";
+/// A unit key whose exponent or rational leaves the evaluator's budget (units.md ORNA-UNIT-019).
+pub const UNIT_LIMIT: &str = "ORNA-UNIT-LIMIT";
+/// An exact conversion or fold that has no finite decimal form (units.md ORNA-UNIT-016).
+pub const UNIT_INEXACT: &str = "ORNA-UNIT-INEXACT";
+/// A power whose exponent is not a literal `Int` (units.md ORNA-UNIT-013).
+pub const UNIT_POW: &str = "ORNA-UNIT-POW";
 /// A `native fn` outside the engine-embedded `core` and `sys` modules (D12).
 pub const NATIVE_ADMISSION: &str = "ORNA-NATIVE-004";
 /// A call whose arguments do not bind to its parameters.

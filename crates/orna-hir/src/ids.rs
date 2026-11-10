@@ -91,6 +91,10 @@ define_id! {
     PatId
 }
 define_id! {
+    /// One interned unit key of the program (units.md section 11.1): equal keys share one id.
+    UnitKeyId
+}
+define_id! {
     /// One source text, referenced by spans for diagnostics and editor queries.
     SourceId
 }

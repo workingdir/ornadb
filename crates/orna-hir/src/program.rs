@@ -81,6 +81,8 @@ pub struct Program {
     /// Which engine native ABI the `core` and `sys` declarations were loaded
     /// against.
     pub native_abi: NativeAbi,
+    /// The unit keys and family dimensions, computed once after lowering (units.md section 3).
+    pub units: crate::units::UnitTable,
 }
 
 impl Program {
@@ -96,6 +98,7 @@ impl Program {
             bodies: IndexVec::new(),
             tys: TyInterner::new(),
             instances: BTreeMap::new(),
+            units: crate::units::UnitTable::default(),
             native_abi: NativeAbi::new(0),
         }
     }
