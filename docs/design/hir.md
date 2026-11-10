@@ -1856,6 +1856,14 @@ keeping it behind a flag.
 Every stage is unblocked. The status-quo fallbacks of the earlier draft no longer
 apply, and the `[Dn]` marks in section 2 are now the decided forms.
 
+### 8.3 Language features written in Orna
+
+Units, `Money<C>`, `Duration`, ranges and formatting are Rust special cases today. The stages above would port them
+one by one. [kernel-and-library.md](kernel-and-library.md) writes them as ordinary Orna in `core` and `std` and says
+which stage each piece lands in (its section 8.2). It adds work to H1, H2, H3, H4 and H5 and changes no stage
+boundary. Five decisions, D14 to D18 (its section 11), fix its open points. The first parser change is impls in enums
+(P3a), in H1.
+
 --------------------------------------------------------------------------
 
 ## 9. Risks, rejected alternatives
