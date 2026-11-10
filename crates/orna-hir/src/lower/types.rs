@@ -13,11 +13,9 @@
 
 use orna_syntax::TypeExpr;
 
-use crate::{
-    DefId, DefKind, EffectRow, FnTy, Idx, ModuleId, Name, NameTarget, ParamIdx, Ty, TyKind,
-};
+use crate::{DefId, EffectRow, FnTy, ModuleId, Name, NameTarget, ParamIdx, Ty, TyKind};
 
-use super::declare::{Builder, DeclAst, PendingKind};
+use super::declare::Builder;
 
 /// A language-defined type constructor with no declaration.
 fn builtin(name: &str) -> Option<&'static str> {
@@ -117,24 +115,8 @@ fn lower_named(
         .collect::<Vec<_>>();
     if path.len() == 1 {
         let spelling = path[0].as_str();
-        if let Some(scalar) = builtin(spelling) {
-            return match scalar {
-                "Bool" => builder.program.tys.intern(TyKind::Bool),
-                "Int" => builder.program.tys.intern(TyKind::Int),
-                "Decimal" => builder.program.tys.intern(TyKind::Decimal),
-                "Float" => builder.program.tys.intern(TyKind::Float),
-                "Str" => builder.program.tys.intern(TyKind::Str),
-                "Blob" => builder.program.tys.intern(TyKind::Blob),
-                "Uuid" => builder.program.tys.intern(TyKind::Uuid),
-                "Date" => builder.program.tys.intern(TyKind::Date),
-                "Instant" => builder.program.tys.intern(TyKind::Instant),
-                "Duration" => builder.program.tys.intern(TyKind::Duration),
-                "Period" => builder.program.tys.intern(TyKind::Period),
-                "Digest" => builder.program.tys.intern(TyKind::Digest),
-                "Unit" => builder.program.tys.intern(TyKind::Unit),
-                "Never" => builder.program.tys.intern(TyKind::Never),
-                _ => builder.program.tys.error(),
-            };
+        if let Some(ty) = lower_builtin(builder, module, spelling, span) {
+            return ty;
         }
         let name = Name::new(spelling);
         if let Some(index) = generics.iter().position(|generic| *generic == name) {
@@ -218,6 +200,41 @@ fn lower_named(
     }
 }
 
+/// Lowers a builtin scalar spelling and records its use; `None` when the spelling is not builtin.
+fn lower_builtin(
+    builder: &mut Builder<'_>,
+    module: ModuleId,
+    spelling: &str,
+    span: &orna_syntax::SyntaxSpan,
+) -> Option<Ty> {
+    let scalar = builtin(spelling)?;
+    super::record_use(
+        &mut builder.program,
+        module,
+        span.clone(),
+        Name::new(spelling),
+        crate::UseContext::Type,
+        NameTarget::Unresolved,
+    );
+    Some(match scalar {
+        "Bool" => builder.program.tys.intern(TyKind::Bool),
+        "Int" => builder.program.tys.intern(TyKind::Int),
+        "Decimal" => builder.program.tys.intern(TyKind::Decimal),
+        "Float" => builder.program.tys.intern(TyKind::Float),
+        "Str" => builder.program.tys.intern(TyKind::Str),
+        "Blob" => builder.program.tys.intern(TyKind::Blob),
+        "Uuid" => builder.program.tys.intern(TyKind::Uuid),
+        "Date" => builder.program.tys.intern(TyKind::Date),
+        "Instant" => builder.program.tys.intern(TyKind::Instant),
+        "Duration" => builder.program.tys.intern(TyKind::Duration),
+        "Period" => builder.program.tys.intern(TyKind::Period),
+        "Digest" => builder.program.tys.intern(TyKind::Digest),
+        "Unit" => builder.program.tys.intern(TyKind::Unit),
+        "Never" => builder.program.tys.intern(TyKind::Never),
+        _ => builder.program.tys.error(),
+    })
+}
+
 /// The language's own generic type constructors.
 fn language_constructor(name: &Name, args: &[Ty]) -> Option<TyKind> {
     let first = args.first().copied()?;
@@ -240,15 +257,7 @@ fn language_constructor(name: &Name, args: &[Ty]) -> Option<TyKind> {
 /// `program.defs` here would answer "not a type" for every declaration and turn
 /// each written nominal type into the diagnostic type.
 fn nominal(builder: &mut Builder<'_>, def: DefId, args: Vec<Ty>) -> Ty {
-    let nominal = match &builder.pending[def.index()].kind {
-        PendingKind::Unbuilt(declaration) => matches!(
-            &**declaration,
-            DeclAst::Type(..) | DeclAst::Enum(..) | DeclAst::Table(..)
-        ),
-        PendingKind::Built(DefKind::Type(_) | DefKind::Enum(_) | DefKind::Table(_)) => true,
-        PendingKind::Function(_) | PendingKind::Built(_) => false,
-    };
-    if nominal {
+    if builder.is_nominal(def) {
         builder
             .program
             .tys

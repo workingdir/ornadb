@@ -46,10 +46,12 @@ impl Builder<'_> {
         let target_path =
             ModulePath::new(pending.path.iter().map(|segment| Name::new(&segment.name)));
         if target_path.segments().first().map(Name::as_str) == Some("sys") {
+            self.record_import_path(pending);
             self.apply_builtin_use(pending, &target_path);
             return;
         }
         let Some(target) = self.by_path.get(&target_path).copied() else {
+            self.record_import_path(pending);
             self.diagnose(
                 importer,
                 crate::diag::IMPORT,
@@ -58,6 +60,7 @@ impl Builder<'_> {
             );
             return;
         };
+        self.record_import_path(pending);
         match &pending.tail {
             UseTail::None => {
                 let Some(root) = target_path.segments().last().cloned() else {
@@ -95,25 +98,51 @@ impl Builder<'_> {
                     return;
                 }
                 self.bind_root(importer, Name::new(name), target, pending.span.clone());
+                super::record_use(
+                    &mut self.program,
+                    importer,
+                    span.clone(),
+                    Name::new(name),
+                    crate::UseContext::Import,
+                    NameTarget::Module(target),
+                );
             }
             UseTail::Names(names) => {
                 for name in names {
                     let spelling = Name::new(&name.name);
                     match self.program.modules[target].exports.get(&spelling).copied() {
                         Some(def) => {
-                            self.bind_explicit(importer, spelling, def, name.span.clone());
+                            self.bind_explicit(importer, spelling.clone(), def, name.span.clone());
                             self.record_import(
                                 importer,
                                 target_path.clone(),
                                 ImportTarget::Def(def),
                             );
+                            super::record_use(
+                                &mut self.program,
+                                importer,
+                                name.span.clone(),
+                                spelling,
+                                crate::UseContext::Import,
+                                NameTarget::Def(def),
+                            );
                         }
-                        None => self.diagnose(
-                            importer,
-                            crate::diag::IMPORT,
-                            "named import is unavailable or private",
-                            name.span.clone(),
-                        ),
+                        None => {
+                            super::record_use(
+                                &mut self.program,
+                                importer,
+                                name.span.clone(),
+                                spelling,
+                                crate::UseContext::Import,
+                                NameTarget::Unresolved,
+                            );
+                            self.diagnose(
+                                importer,
+                                crate::diag::IMPORT,
+                                "named import is unavailable or private",
+                                name.span.clone(),
+                            );
+                        }
                     }
                 }
             }
@@ -265,6 +294,32 @@ impl Builder<'_> {
         }
         for (name, def) in single {
             self.scopes[importer.index()].values.insert(name, def);
+        }
+    }
+
+    /// Records every segment of a `use` path, resolving each prefix, so an
+    /// editor can navigate a module path segment and a name at its end.
+    fn record_import_path(&mut self, pending: &PendingUse) {
+        let names = pending
+            .path
+            .iter()
+            .map(|segment| Name::new(&segment.name))
+            .collect::<Vec<_>>();
+        for (index, segment) in pending.path.iter().enumerate() {
+            let target = match self.resolve_path(pending.module, &names[..=index]) {
+                PathKind::Module(module) => NameTarget::Module(module),
+                PathKind::Def(def) => NameTarget::Def(def),
+                PathKind::Ambiguous => NameTarget::Ambiguous,
+                _ => NameTarget::Unresolved,
+            };
+            super::record_use(
+                &mut self.program,
+                pending.module,
+                segment.span.clone(),
+                names[index].clone(),
+                crate::UseContext::Import,
+                target,
+            );
         }
     }
 
