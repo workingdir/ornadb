@@ -1,0 +1,4 @@
+fn trim(): Int {
+    native fn inner(value: Str): Str effect none;
+    1
+}

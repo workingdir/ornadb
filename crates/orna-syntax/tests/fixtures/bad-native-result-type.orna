@@ -1,0 +1,1 @@
+pub native fn trim(value: Str) effect none;

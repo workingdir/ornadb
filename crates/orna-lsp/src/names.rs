@@ -537,6 +537,14 @@ impl Walker<'_> {
                 self.parameters(&signature.parameters, &body.span(), None);
                 self.expr(body);
             }
+            // ORNA-NATIVE-014: the declaration declares a function name with
+            // its declared parameter names and types. It has no body, so no
+            // expression or statement is walked.
+            Declaration::Native { signature, .. } => {
+                self.declare_function(signature, &item.span, DeclaredKind::Function);
+                self.signature_types(signature);
+                self.parameters(&signature.parameters, &item.span, None);
+            }
             Declaration::Table {
                 name,
                 keys,

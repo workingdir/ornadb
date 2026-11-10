@@ -28,11 +28,12 @@ pub enum MissingSemicolon {
     ProtocolFunction,
     ImplementationStaticProperty,
     TypeAssertion,
+    NativeDeclaration,
 }
 
 impl MissingSemicolon {
     /// Every repairable terminator, for the classifier and its tests.
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::DimensionDeclaration,
         Self::UnitDeclaration,
         Self::AssertionItem,
@@ -47,6 +48,7 @@ impl MissingSemicolon {
         Self::ProtocolFunction,
         Self::ImplementationStaticProperty,
         Self::TypeAssertion,
+        Self::NativeDeclaration,
     ];
 
     /// The `ORNA-PARSE-002` message that names this production.
@@ -66,6 +68,7 @@ impl MissingSemicolon {
             Self::ProtocolFunction => "protocol functions require `;`",
             Self::ImplementationStaticProperty => "implementation static properties require `;`",
             Self::TypeAssertion => "expected `;` after type assertion",
+            Self::NativeDeclaration => "native declarations require `;`",
         }
     }
 

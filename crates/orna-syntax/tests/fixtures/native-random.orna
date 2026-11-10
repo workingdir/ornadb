@@ -1,0 +1,2 @@
+pub native fn integer(lower_inclusive: Int, upper_exclusive: Int): Int
+    effect randomness;

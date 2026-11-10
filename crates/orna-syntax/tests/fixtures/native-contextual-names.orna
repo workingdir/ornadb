@@ -1,0 +1,6 @@
+// `native` and `effect` remain ordinary identifiers (ORNA-NATIVE-002):
+// they are a declared function name, a parameter name and a function name
+// in the same source as the native declaration itself.
+pub native fn native(effect: Int): Int effect none;
+
+pub fn effect(native: Int): Int = native;

@@ -1,0 +1,2 @@
+pub native fn mean<T>(rows: [T], scale: Int? = null, rounding: Str? = null): T?
+    effect none;

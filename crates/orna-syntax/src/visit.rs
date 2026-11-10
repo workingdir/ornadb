@@ -16,9 +16,10 @@
 use crate::parser::{
     Argument, AssignmentTarget, CaseArm, ControlKind, Declaration, DimensionExpr, EnumPayloadField,
     EnumVariant, Expr, FieldInitializer, FunctionSignature, GenericParameter, ImplMember,
-    Implementation, ImportSegment, Item, LambdaParameter, NameSegment, Parameter, Pattern,
-    PatternField, ProtocolMember, RecordField, SourceSpan, Statement, StringSegment, SyntaxTree,
-    TableMember, TypeExpr, TypeMember, TypeRepresentation, UnitDefinition, UseTail, Visibility,
+    Implementation, ImportSegment, Item, LambdaParameter, NameSegment, NativeEffectSet, Parameter,
+    Pattern, PatternField, ProtocolMember, RecordField, SourceSpan, Statement, StringSegment,
+    SyntaxTree, TableMember, TypeExpr, TypeMember, TypeRepresentation, UnitDefinition, UseTail,
+    Visibility,
 };
 
 /// A whole-tree traversal with hooks for each node kind.
@@ -52,6 +53,9 @@ pub trait Visit {
     }
     fn visit_signature(&mut self, signature: &FunctionSignature) {
         walk_signature(self, signature);
+    }
+    fn visit_native_effect_set(&mut self, effects: &NativeEffectSet) {
+        walk_native_effect_set(self, effects);
     }
     fn visit_table_member(&mut self, member: &TableMember) {
         walk_table_member(self, member);
@@ -176,6 +180,12 @@ pub fn walk_declaration<V: Visit + ?Sized>(visitor: &mut V, declaration: &Declar
             visitor.visit_signature(signature);
             visitor.visit_expr(body);
         }
+        Declaration::Native { signature, effects } => {
+            visitor.visit_signature(signature);
+            if let Some(effects) = effects {
+                visitor.visit_native_effect_set(effects);
+            }
+        }
         Declaration::Protocol {
             generics, members, ..
         } => {
@@ -284,6 +294,16 @@ pub fn walk_signature<V: Visit + ?Sized>(visitor: &mut V, signature: &FunctionSi
         visitor.visit_type(result);
     }
     visitor.visit_span(&signature.span);
+}
+
+/// Visits the span and class names of a native declaration's effect clause.
+pub fn walk_native_effect_set<V: Visit + ?Sized>(visitor: &mut V, effects: &NativeEffectSet) {
+    visitor.visit_span(effects.span());
+    if let NativeEffectSet::Classes { classes, .. } = effects {
+        for class in classes {
+            visitor.visit_name_segment(class);
+        }
+    }
 }
 
 /// Visits every child of a table member.

@@ -1,0 +1,1 @@
+declare fn trim(value: Str): Str;

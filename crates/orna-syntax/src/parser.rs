@@ -259,6 +259,18 @@ pub enum Declaration {
         signature: FunctionSignature,
         body: Expr,
     },
+    /// `pub native fn name(parameter: Type = default): Result effect classes;`
+    ///
+    /// A native declaration states that the admitted pinned dependency supplies
+    /// the implementation, so it has no body and no body field: every consumer
+    /// that reads a function body must name this variant explicitly
+    /// (ORNA-NATIVE-001).
+    Native {
+        signature: FunctionSignature,
+        /// The mandatory effect clause. `None` is a recovered parse: the clause
+        /// was absent or malformed and ORNA091-E-NATIVE-EFFECT was reported.
+        effects: Option<NativeEffectSet>,
+    },
     Protocol {
         name: String,
         generics: Vec<GenericParameter>,
@@ -324,6 +336,45 @@ pub struct FunctionSignature {
     pub parameters: Vec<Parameter>,
     pub result: Option<TypeExpr>,
     pub span: SourceSpan,
+}
+/// The spellings of the closed `sys.EffectKind` vocabulary, in declaration
+/// order. A native declaration's effect clause names one or more of these or
+/// the `none` spelling of the empty set (ORNA-NATIVE-009).
+///
+/// Recognition lives here; classification lives in `orna_check`'s
+/// `effects::EffectKind`, whose spellings these are. Stage N3/N5 unify the two
+/// when the checker consumes the clause.
+pub const EFFECT_CLASSES: [&str; 12] = [
+    "table_read",
+    "table_write",
+    "network",
+    "filesystem",
+    "process",
+    "clock",
+    "randomness",
+    "secret_access",
+    "ui",
+    "git",
+    "storage_admin",
+    "runtime_admin",
+];
+/// The mandatory effect clause of a native declaration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NativeEffectSet {
+    /// The `none` spelling: the empty host-effect set.
+    None { span: SourceSpan },
+    /// One or more `sys.EffectKind` class names, in source order.
+    Classes {
+        classes: Vec<NameSegment>,
+        span: SourceSpan,
+    },
+}
+impl NativeEffectSet {
+    pub fn span(&self) -> &SourceSpan {
+        match self {
+            Self::None { span } | Self::Classes { span, .. } => span,
+        }
+    }
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FieldInitializer {
@@ -475,6 +526,7 @@ pub enum ItemKind {
     Use,
     Table,
     Function,
+    Native,
     Protocol,
     Enum,
     Dimension,
@@ -1026,6 +1078,13 @@ pub fn parse_repl(source: &str) -> Parse<ReplInput> {
             "public table declarations are not valid REPL input",
         );
         None
+    } else if p.at_native_declaration() {
+        p.error_here(
+            "ORNA091-E-NATIVE-PLACE",
+            "the REPL does not admit native declarations",
+        );
+        p.skip_native_declaration();
+        None
     } else if matches!(
         p.keyword(),
         Some(Keyword::Use | Keyword::Let | Keyword::Fn | Keyword::Pub)
@@ -1237,6 +1296,12 @@ fn annotate_item(item: &mut Item, source: &SourceLines<'_>, file: &str) {
             }
         }
         Declaration::Assertion { value } => annotate_expr(value, source, file),
+        Declaration::Native { signature, effects } => {
+            annotate_signature(signature, source, file);
+            if let Some(effects) = effects {
+                annotate_native_effect_set(effects, source, file);
+            }
+        }
         Declaration::Let {
             pattern,
             annotation,
@@ -1367,6 +1432,17 @@ fn annotate_signature(signature: &mut FunctionSignature, source: &SourceLines<'_
         annotate_type(result, source, file)
     }
     annotate_span(&mut signature.span, source, file)
+}
+fn annotate_native_effect_set(effects: &mut NativeEffectSet, source: &SourceLines<'_>, file: &str) {
+    match effects {
+        NativeEffectSet::None { span } => annotate_span(span, source, file),
+        NativeEffectSet::Classes { classes, span } => {
+            for class in classes {
+                annotate_span(&mut class.span, source, file)
+            }
+            annotate_span(span, source, file)
+        }
+    }
 }
 fn annotate_implementation(
     implementation: &mut Implementation,
@@ -2594,7 +2670,17 @@ impl Parser {
                 ItemKind::Let
             }
             _ => {
-                if module {
+                if self.at_native_declaration() {
+                    if !module {
+                        self.error_here(
+                            "ORNA091-E-NATIVE-PLACE",
+                            "the REPL does not admit native declarations",
+                        );
+                        self.skip_native_declaration();
+                        return None;
+                    }
+                    ItemKind::Native
+                } else {
                     let code = if matches!(self.current().kind, TokenKind::Identifier { .. })
                         && matches!(
                             self.tokens.get(self.at + 1).map(|t| &t.kind),
@@ -2604,17 +2690,20 @@ impl Parser {
                     } else {
                         "ORNA-PARSE-001"
                     };
-                    self.error_here(code, "module top level accepts declarations only")
-                } else {
-                    self.error_here("ORNA-PARSE-001", "expected a REPL declaration")
-                };
-                return None;
+                    self.error_here(code, "module top level accepts declarations only");
+                    return None;
+                }
             }
         };
         self.bump();
         let declaration = match kind {
             ItemKind::Use => self.use_declaration(),
             ItemKind::Function => self.function_declaration(start),
+            ItemKind::Native => {
+                // `at_native_declaration` proved the keyword before `native`.
+                self.bump();
+                self.native_declaration(start)
+            }
             ItemKind::Table | ItemKind::Protocol => self.table_or_protocol_declaration(kind),
             ItemKind::Dimension => self.dimension_declaration(),
             ItemKind::Unit => self.unit_declaration(),
@@ -2640,6 +2729,279 @@ impl Parser {
         let name = self.require_name_text();
         let (signature, body) = self.parse_function_tail(name, start);
         Declaration::Function { signature, body }
+    }
+
+    /// True when the current tokens begin a native declaration: the identifier
+    /// `native` immediately followed by the keyword `fn` (ORNA-NATIVE-002).
+    /// `native` is not a keyword and stays usable as an identifier, so the
+    /// recognition needs the second token. A leading `pub` belongs to the
+    /// declaration, so a nested `pub native fn` is recognised as one too.
+    fn at_native_declaration(&self) -> bool {
+        let offset = usize::from(self.keyword() == Some(Keyword::Pub));
+        let Some(declarator) = self.tokens.get(self.at + offset) else {
+            return false;
+        };
+        matches!(&declarator.kind, TokenKind::Identifier { .. })
+            && declarator.text == "native"
+            && matches!(
+                self.tokens
+                    .get(self.at + offset + 1)
+                    .map(|token| &token.kind),
+                Some(TokenKind::Keyword(Keyword::Fn))
+            )
+    }
+
+    /// Reports a native declaration written outside a module unit's top level
+    /// (ORNA-NATIVE-003) and skips it, so the enclosing production reports one
+    /// diagnostic instead of cascading. Returns true when it skipped one.
+    fn reject_nested_native_declaration(&mut self) -> bool {
+        if !self.at_native_declaration() {
+            return false;
+        }
+        self.error_here(
+            "ORNA091-E-NATIVE-PLACE",
+            "a native declaration is permitted only as a module top-level item",
+        );
+        self.skip_native_declaration();
+        true
+    }
+
+    /// Skips one native declaration's tokens, stopping after its `;` or before
+    /// the `}` that closes the enclosing production.
+    fn skip_native_declaration(&mut self) {
+        let mut depth = 0usize;
+        while !self.eof() {
+            match &self.current().kind {
+                TokenKind::Punct("(" | "[" | "{") => depth += 1,
+                TokenKind::Punct(")" | "]" | "}") => {
+                    if depth == 0 {
+                        return;
+                    }
+                    depth -= 1;
+                }
+                TokenKind::Punct(";") if depth == 0 => {
+                    self.bump();
+                    return;
+                }
+                _ => {}
+            }
+            self.bump();
+        }
+    }
+
+    /// `native_declaration`. The caller has consumed `native` and `fn`.
+    ///
+    /// ```ebnf
+    /// native_declaration = visibility , "native" , "fn" , identifier ,
+    ///                      [ generic_parameters ] ,
+    ///                      "(" , [ native_parameters ] , ")" ,
+    ///                      ":" , type_expression ,
+    ///                      "effect" , native_effect_set , ";" ;
+    /// native_parameters  = native_parameter , { "," , native_parameter } , [ "," ] ;
+    /// native_parameter   = identifier , ":" , type_expression , [ "=" , expression ] ;
+    /// native_effect_set  = "none" | effect_class , { "," , effect_class } ;
+    /// effect_class       = identifier ;
+    /// ```
+    ///
+    /// A native declaration has no body, so the result type and every
+    /// parameter type are required (ORNA-NATIVE-001).
+    fn native_declaration(&mut self, start: usize) -> Declaration {
+        let name = self.require_name_text();
+        let generics = if self.is_punct("<") {
+            self.parse_generic_parameters()
+        } else {
+            Vec::new()
+        };
+        let parameters = if self.is_punct("(") {
+            self.parse_native_parameters()
+        } else {
+            self.error_here(
+                "ORNA-PARSE-001",
+                "expected native declaration parameter list",
+            );
+            Vec::new()
+        };
+        let result = if self.is_punct(":") {
+            self.bump();
+            self.parse_type_expr()
+        } else {
+            self.error_here(
+                "ORNA091-E-NATIVE-TYPE",
+                "a native declaration requires a result type",
+            );
+            None
+        };
+        let effects = self.parse_native_effect_set();
+        if self.is_punct("=") {
+            self.error_here("ORNA091-E-NATIVE-BODY", "a native declaration has no body");
+            self.bump();
+            let _ = self.expr();
+            self.require_semicolon(MissingSemicolon::FunctionExpression);
+        } else if self.is_punct("{") {
+            self.error_here("ORNA091-E-NATIVE-BODY", "a native declaration has no body");
+            self.parse_block();
+        } else {
+            self.require_semicolon(MissingSemicolon::NativeDeclaration);
+        }
+        Declaration::Native {
+            signature: FunctionSignature {
+                name,
+                generics,
+                parameters,
+                result,
+                span: SourceSpan::new(start, self.previous().span.end),
+            },
+            effects,
+        }
+    }
+
+    /// `native_parameters`. A native parameter is a function parameter without
+    /// its `self` alternative and with a mandatory type.
+    fn parse_native_parameters(&mut self) -> Vec<Parameter> {
+        let mut parameters = Vec::new();
+        self.bump();
+        while !self.eof() && !self.is_punct(")") {
+            let start = self.current().span.clone();
+            let pattern = if self.keyword() == Some(Keyword::SelfValue) {
+                let token = self.current().clone();
+                self.error_here(
+                    "ORNA091-E-NATIVE-SELF",
+                    "a native declaration must not declare a `self` parameter",
+                );
+                self.bump();
+                Pattern::Name(token.text, token.span)
+            } else {
+                let token = self.current().clone();
+                self.require_name();
+                Pattern::Name(token.text, token.span)
+            };
+            let annotation = if self.is_punct(":") {
+                self.bump();
+                self.parse_type_expr()
+            } else {
+                self.error_here(
+                    "ORNA091-E-NATIVE-TYPE",
+                    "a native declaration requires a type for every parameter",
+                );
+                None
+            };
+            let default = if self.is_punct("=") {
+                self.bump();
+                self.expr()
+            } else {
+                None
+            };
+            let end = default
+                .as_ref()
+                .map(Expr::span)
+                .or_else(|| {
+                    annotation
+                        .as_ref()
+                        .map(|annotation| annotation.span().clone())
+                })
+                .unwrap_or_else(|| pattern.span().clone());
+            parameters.push(Parameter {
+                pattern,
+                annotation,
+                default,
+                span: start.join(end),
+            });
+            if self.is_punct(",") {
+                self.bump();
+                continue;
+            }
+            if !self.is_punct(")") {
+                self.error_here("ORNA-PARSE-001", "expected `,` or `)` after parameter");
+                break;
+            }
+        }
+        if self.is_punct(")") {
+            self.bump()
+        } else {
+            self.error_here("ORNA-PARSE-003", "unterminated parameter list")
+        }
+        parameters
+    }
+
+    /// `native_effect_set` after the `effect` introducer. The introducer is a
+    /// contextual identifier, not a keyword (ORNA-NATIVE-002), and the clause is
+    /// mandatory (ORNA-NATIVE-009).
+    fn parse_native_effect_set(&mut self) -> Option<NativeEffectSet> {
+        if !(self.contextual() && self.current().text == "effect") {
+            self.error_here(
+                "ORNA091-E-NATIVE-EFFECT",
+                "a native declaration requires an `effect` clause",
+            );
+            return None;
+        }
+        let start = self.current().span.clone();
+        self.bump();
+        if matches!(self.current().kind, TokenKind::Identifier { .. })
+            && self.current().text == "none"
+        {
+            self.bump();
+            if self.is_punct(",") {
+                self.error_here(
+                    "ORNA091-E-NATIVE-EFFECT",
+                    "`none` is the whole effect set of a native declaration",
+                );
+                self.skip_native_effect_tail();
+            }
+            return Some(NativeEffectSet::None {
+                span: start.join(self.previous().span.clone()),
+            });
+        }
+        let mut classes = Vec::new();
+        loop {
+            if !matches!(self.current().kind, TokenKind::Identifier { .. }) {
+                self.error_here(
+                    "ORNA091-E-NATIVE-EFFECT",
+                    "expected an effect class name or `none`",
+                );
+                break;
+            }
+            let token = self.current().clone();
+            if !EFFECT_CLASSES.contains(&token.text.as_str()) {
+                self.error_here(
+                    "ORNA091-E-NATIVE-EFFECT",
+                    "unknown effect class; name a `sys.EffectKind` value or `none`",
+                );
+            }
+            self.bump();
+            classes.push(NameSegment {
+                text: token.text,
+                span: token.span,
+            });
+            if self.is_punct(",") {
+                self.bump();
+                continue;
+            }
+            break;
+        }
+        Some(NativeEffectSet::Classes {
+            classes,
+            span: start.join(self.previous().span.clone()),
+        })
+    }
+
+    /// Skips a malformed effect-class tail up to the declaration's `;` or the
+    /// enclosing `}`, leaving that terminator for the caller.
+    fn skip_native_effect_tail(&mut self) {
+        let mut depth = 0usize;
+        while !self.eof() {
+            match &self.current().kind {
+                TokenKind::Punct("(" | "[" | "{") => depth += 1,
+                TokenKind::Punct(")" | "]" | "}") => {
+                    if depth == 0 {
+                        return;
+                    }
+                    depth -= 1;
+                }
+                TokenKind::Punct(";") if depth == 0 => return,
+                _ => {}
+            }
+            self.bump();
+        }
     }
 
     fn table_or_protocol_declaration(&mut self, kind: ItemKind) -> Declaration {
@@ -3372,6 +3734,9 @@ impl Parser {
         }
         self.bump();
         while !self.eof() && !self.is_punct("}") {
+            if self.reject_nested_native_declaration() {
+                continue;
+            }
             let step = match self.keyword() {
                 Some(Keyword::Let) => self.block_let_statement(&mut statements),
                 Some(Keyword::Assert) => self.block_assert_statement(&mut statements),
@@ -3663,6 +4028,9 @@ impl Parser {
         let mut members = Vec::new();
         self.bump();
         while !self.eof() && !self.is_punct("}") {
+            if self.reject_nested_native_declaration() {
+                continue;
+            }
             if self.keyword() == Some(Keyword::Assert) {
                 let start = self.current().span.clone();
                 self.bump();
@@ -3735,6 +4103,9 @@ impl Parser {
         let mut members = Vec::new();
         self.bump();
         while !self.eof() && !self.is_punct("}") {
+            if self.reject_nested_native_declaration() {
+                continue;
+            }
             if self.keyword() == Some(Keyword::Static) {
                 let start = self.current().span.clone();
                 self.bump();
@@ -3815,6 +4186,9 @@ impl Parser {
         let mut variants = Vec::new();
         self.bump();
         while !self.eof() && !self.is_punct("}") {
+            if self.reject_nested_native_declaration() {
+                continue;
+            }
             let start = self.current().span.clone();
             if !self.contextual() {
                 self.error_here("ORNA-PARSE-001", "expected enum variant");
@@ -3879,6 +4253,9 @@ impl Parser {
         let mut members = Vec::new();
         self.bump();
         while !self.eof() && !self.is_punct("}") {
+            if self.reject_nested_native_declaration() {
+                continue;
+            }
             let start = self.current().span.clone();
             if self.keyword() == Some(Keyword::Assert) {
                 self.bump();
@@ -3949,6 +4326,9 @@ impl Parser {
         self.require_punct("{", "expected implementation body");
         let mut members = Vec::new();
         while !self.eof() && !self.is_punct("}") {
+            if self.reject_nested_native_declaration() {
+                continue;
+            }
             let member_start = self.current().span.clone();
             if self.keyword() == Some(Keyword::Fn) {
                 self.bump();
@@ -4781,6 +5161,9 @@ impl Parser {
             return fields;
         }
         loop {
+            if self.reject_nested_native_declaration() {
+                break;
+            }
             if !self.contextual() {
                 self.error_here("ORNA-PARSE-001", "expected record field name");
                 break;
