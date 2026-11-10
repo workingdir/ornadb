@@ -5,7 +5,7 @@ use std::rc::Rc;
 use num_traits::ToPrimitive;
 use orna_hir::{
     Arg, ArgValue, Arm, AssignOp, BinOp, Body, BodyId, Call, Callee, DefKind, ExprId, ExprKind,
-    FieldRef, FnBody, Lit, LocalId, LogicOp, Name, Pat, PatId, Place, Stmt,
+    FieldRef, FnBody, Lit, LocalId, LogicOp, Name, ParamDef, Pat, PatId, Place, Stmt,
 };
 
 use crate::binders;
@@ -139,14 +139,14 @@ impl<'p> Machine<'p> {
                 let FnBody::Source(callee_body) = function.body else {
                     return Err(Stop::NotYet("call of a function without a source body"));
                 };
-                let arguments = self.arguments(body, frame, call)?;
+                let arguments = self.arguments(body, frame, call, &function.params)?;
                 self.invoke(callee_body, arguments, &[])
             }
             Callee::Value { callee } => {
                 let Value::Closure(closure) = self.eval(body, frame, *callee)? else {
                     return Err(Stop::NotYet("call of a non-closure value"));
                 };
-                let arguments = self.arguments(body, frame, call)?;
+                let arguments = self.arguments(body, frame, call, &[])?;
                 let callee_body = &self.program.bodies[closure.body];
                 if arguments.len() != callee_body.params.len() {
                     return Err(Stop::Error("ORNA-EVAL-ARGUMENT"));
@@ -162,10 +162,11 @@ impl<'p> Machine<'p> {
         body: &'p Body,
         frame: &mut Frame,
         call: &Call,
+        params: &[ParamDef],
     ) -> Result<Vec<(usize, Value)>, Stop> {
         let mut arguments = Vec::with_capacity(call.args.len());
         for argument in call.args.iter() {
-            arguments.push(self.argument(body, frame, argument)?);
+            arguments.push(self.argument(body, frame, argument, params)?);
         }
         Ok(arguments)
     }
@@ -175,13 +176,21 @@ impl<'p> Machine<'p> {
         body: &'p Body,
         frame: &mut Frame,
         argument: &Arg,
+        params: &[ParamDef],
     ) -> Result<(usize, Value), Stop> {
+        let slot = argument.slot.as_u32() as usize;
         match argument.value {
             ArgValue::Expr(id) => {
                 let value = self.eval(body, frame, id)?;
-                Ok((argument.slot.as_u32() as usize, value))
+                Ok((slot, value))
             }
-            ArgValue::Default => Err(Stop::NotYet("default argument")),
+            ArgValue::Default => {
+                let Some(default) = params.get(slot).and_then(|param| param.default) else {
+                    return Err(Stop::NotYet("default argument without a default body"));
+                };
+                let value = self.invoke(default, Vec::new(), &[])?;
+                Ok((slot, value))
+            }
         }
     }
 
