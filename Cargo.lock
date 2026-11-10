@@ -1578,9 +1578,12 @@ name = "orna-format3"
 version = "1.0.0"
 dependencies = [
  "orna-base",
+ "orna-syntax",
+ "orna-value",
  "serde_json",
  "sha1",
  "sha2 0.11.0",
+ "uuid",
 ]
 
 [[package]]
