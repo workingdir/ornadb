@@ -735,7 +735,7 @@ passes over a `Program`:
 | `resolve` | `orna-hir` | defs, `use` | `Module.exports/imports`, `Local` slots, `Callee` for path callees, bound `Arg`s | the 26 sites R01..R26 of section 1.2 |
 | `typeck` | `orna-check` | resolved program | `Expr.ty`, `Local.ty`, `FnDef` signatures, settled calls | `infer*`, `Scope`, `Type` |
 | `effects` | `orna-check` | call graph | `FnDef.effects`, `Body.effects` | `EffectSummary` joins, `host_effect`, `stabilize_function_summaries` (`units.rs:349`) |
-| rules | `orna-check` | typed program | diagnostics | assertion scope, table admission, secrets, computed fields, currency, checkpoints (units are cut, D8) |
+| rules | `orna-check` | typed program | diagnostics | assertion scope, table admission, secrets, computed fields, currency, checkpoints, units (`units.md` section 5) |
 
 The new public entry point returns the program and the diagnostics together:
 
@@ -763,7 +763,7 @@ order they port, with their present size:
 | scalar typing and operators | `inference.rs` 3,294, `types.rs` | `typeck` operator tables over `Ty` |
 | calls, pipelines, collections | `calls.rs` 2,877, `intrinsics.rs` 1,255, `collection_calls.rs`, `collections.rs`, `flow.rs` 1,234 | one call rule per `Callee` variant |
 | tables and assertions | `assertions.rs` 979, `item_checks.rs` 1,600, `source_row.rs` | rules over `TableDef` and `Call.callee = TableOp` |
-| money and built-in durations | `units.rs` 1,498 (money parts), parts of `inference.rs` | rules over `Money<C>` and the built-in types; user units are cut [D8] |
+| money and built-in durations | `units.rs` 1,498 (money parts), parts of `inference.rs` | rules over `Money<C>` and the built-in types; units follow `units.md` section 5 (D8 amendment, proposed) |
 | `sys` | `system_api.rs` 3,544, `system_calls.rs` 1,915 | none: `sys.orna` is lowered like any module (section 4) |
 | checkpoints, secrets | `checkpoint.rs` 3,574, `secrets.rs` 414, `semantic_payload.rs` 1,831 | ported last; they are type-directed and port with `typeck` |
 
@@ -1436,8 +1436,8 @@ type, and H4 only needs types from H2 for arithmetic selection; section 7.2).
   - **H2b, unblocked by D1, D3, D5 (decided).** The parameter-annotation
     policy (`pub` annotated, private may omit), the flat option representation
     and lifting, and type arguments with no overloading.
-  - **H2c, unblocked by D8 (decided).** `Quantity` is removed; there is no unit
-    algebra, so H2c is the deletion of the dimensional checks.
+  - **H2c, unblocked by D8 (amendment proposed).** Units are ordinary Orna declarations
+    with a small native core. H2c implements `units.md` sections 5 and 6. It is a rewrite, not a deletion.
 - **Acceptance.** Over the corpus, for every program the old checker accepts
   and the new one accepts, the printed type of every public signature is equal
   or listed; for every program one rejects and the other accepts, an entry with
@@ -1823,7 +1823,7 @@ keeping it behind a flag.
 | D5 overloading and type arguments | no overloading; arity variants become default parameters; type-directed variants are distinct functions; types are passed only as type arguments | no `Binding::Overloads`; `Call.targs` only; lowering yields single-definition names |
 | D6 collections | core `Map<K, V>`, `Set<T>`, `Bytes`; immutable, persistent, canonical key order | `Map`, `Set` and `Bytes` are core `TyKind`s (2.3); canonical value tags are format work |
 | D7 integers | `Int` arbitrary precision with a digit quota; no fixed-width types; no implicit numeric conversions | `TyKind::Int` is one kind; the `Small`/`Big` value split (7.2) serves it |
-| D8 units | user units and dimensions cut; built-in `Duration`, `Instant`, `Decimal`, `Money<C>` remain | no `Quantity` type kind, no unit `DefId`s, no dimensional algebra (2.3) |
+| D8 units | proposed amendment: units return as ordinary Orna declarations, with a native core of exponent-vector and rational arithmetic, `Quantity<N, U>`, postfix resolution, currency axes and `canonical`/`repr` (`units.md` section 5); the cut stands until ratified | `Quantity<N, U>` as a native type kind; `dim`/`unit` declarations as ordinary `DefId`s; no `Binding` for unit names beyond the declaration form |
 | D9 keys and indexes | default key `Uuid` via `uuid7()`; explicit integer keys allowed; no index or unique declarations; the engine serves canonical key-shaped assertions from an index | `TableDef.key` with the Uuid default; no `TableDef.indexes` |
 | D10 bindings and closures | `let` binds, `x = value;` reassigns; no `mut` or `var`; closures capture the variable slot; `parallel` and task bodies capture snapshots and may not assign outer variables | capture list names the slot; snapshot capture for parallel/task bodies; assignment check in H1 lowering |
 | D11 modules | `pub use path;` and `pub use path as name;`; `std` replaceable ordinary Orna; no package ships native code | `DefKind::Reexport` and `Binding` aliases; package identity in `DefId` |
@@ -1836,7 +1836,7 @@ keeping it behind a flag.
 |---|---|---|
 | H0 | nothing | none |
 | H1 | D5, D10, D11, D12 | lowering, resolver, binder, `Callee`, LSP queries, the assignment check, `pub use` |
-| H2 | D1, D3, D5, D7, D8 | H2a annotated programs; H2b inference, flat option, type arguments; H2c removal of unit algebra |
+| H2 | D1, D3, D5, D7, D8 | H2a annotated programs; H2b inference, flat option, type arguments; H2c native unit checks per `units.md` sections 5 and 6 (D8 amendment, proposed) |
 | H3 | D2, D4 | effect pass and failure metadata |
 | H4 | D3, D7, D10 | executor, `null`, `??`, `Completion` with `Cancelled`, closure slots |
 | H5 | D5, D6, D11, D12 | `Host`, `link`, `sys.orna`, the native families in `core.orna`, `Map`, `Set`, `Bytes` natives |

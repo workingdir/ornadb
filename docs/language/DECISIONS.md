@@ -1976,6 +1976,40 @@ question under D13).
 * Under every option, the numeric-postfix rule must resolve through
   declared names, not the hard-coded list at `lib.rs:5867-5900`.
 
+### Amendment 2026-11-10 (proposed): units return as ordinary declarations
+
+Status: proposed. The D8 cut (no user units; dimensional algebra deleted) stands as
+the decided position until the owner ratifies this amendment. Specification: `docs/design/units.md`.
+
+What changes. The cut is replaced. `dim` and `unit` return in 1.x as ordinary
+Orna declarations, with the grammar of units.md section 2. The embedded `core`
+declares the time units, the size units, the `Currency` protocol and `Money<C>`
+in the same form a user writes (units.md section 8). The checker natively knows
+only the minimum listed in units.md section 5.
+
+Why. Language features are dogfooded: a reader who opens the source of `Duration`,
+a unit family or `Money<C>` must find plain Orna, not Rust special cases. The cut
+removed user units but left the built-in units as Rust special cases that a reader
+could not see as Orna. Ordinary declarations plus a small native core let one rule
+serve built-in and user families alike.
+
+Consequences for the decision:
+
+* The 1.1.0 clauses ORNA-UNIT-001 to 008 are carried forward with their meaning
+  (units.md section 10.2). Numbers 009 to 019 are new.
+* `Duration` stays the 1.1.0 primitive, wire tag 60005. The time dimension names
+  it with the `repr` attribute. `Duration` is not an alias of `Quantity<Decimal, s>`
+  (units.md O6, Q5).
+* The finer-unit rule for mixed-scale add is the rule the 1.1.0 checker already
+  implements (`inference.rs:1163`). It is restated as ORNA-UNIT-011.
+* Stage H2c of `docs/design/hir.md` is rewritten to implement units.md, not deleted.
+* Open for the owner: `day` and `days` (Q1), the conversion name `to` (Q2), rounding
+  (Q3), whether `canonical` is general (Q4), the nominal form of `Duration` (Q5),
+  and annotation of an `Int` time quantity as `Duration` (Q6).
+
+Until ratified, the D8 row of `DECIDED.md` is marked proposed, and the text above
+is the decision of record.
+
 --------------------------------------------------------------------------
 
 ## D9. Table keys and indexes
