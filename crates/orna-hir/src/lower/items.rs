@@ -182,7 +182,7 @@ impl Builder<'_> {
             DeclAst::Assertion(value) => {
                 let body = self.allocate_body(def);
                 self.pending[def.index()].kind =
-                    PendingKind::Built(DefKind::Assertion(AssertionDef { body }));
+                    PendingKind::Built(DefKind::Assertion(AssertionDef { body, owner: def }));
                 self.body_jobs.push(BodyJob::Expression {
                     def,
                     body,
@@ -287,7 +287,7 @@ impl Builder<'_> {
             "assert",
             Visibility::Private,
             span,
-            DefKind::Assertion(AssertionDef { body }),
+            DefKind::Assertion(AssertionDef { body, owner }),
         );
         self.body_jobs.push(BodyJob::Expression {
             def,

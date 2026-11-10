@@ -63,6 +63,24 @@ pub const PUBLIC_ANNOTATION: &str = "ORNA-S020-ANNOTATION";
 /// the call cannot pick one of them.
 pub const GENERIC_OVERLAP: &str = "ORNA-GENERIC-014";
 
+/// A source module whose first segment is the reserved `sys` or `std` root (S003).
+pub const RESERVED: &str = "ORNA-S003-RESERVED";
+/// Two source namespaces that Unicode folding makes siblings, or a repeated
+/// module namespace (S002).
+pub const NAMESPACE: &str = "ORNA-S002-NAMESPACE";
+/// A table named `sys`, which is reserved (E1008).
+pub const RESERVED_SYS: &str = "E1008";
+/// A table named `std`, which is reserved (E1009).
+pub const RESERVED_STD: &str = "E1009";
+/// A module assertion that depends on no table (A091-012).
+pub const ASSERTION_SCOPE: &str = "ORNA-A091-012";
+/// A module assertion that depends on exactly one table (A091-003).
+pub const ASSERTION_ONE_TABLE: &str = "ORNA-A091-003";
+/// An assertion that performs an effect or can fail (A091-007).
+pub const ASSERTION_EFFECT: &str = "ORNA-A091-007";
+/// A table assertion that pipes its own table into the predicate (A091-002).
+pub const ASSERTION_OWNER_PIPE: &str = "ORNA-A091-002";
+
 /// One diagnostic raised while lowering a module.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HirDiagnostic {
