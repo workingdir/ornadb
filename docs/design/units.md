@@ -421,7 +421,7 @@ pub protocol Currency {
     static code: Str;
     static minor_digits: Int;
 }
-pub alias Money<C: Currency> = Quantity<Decimal, C> repr Money;   // wire tag 60007
+pub alias Money<C impl Currency> = Quantity<Decimal, C> repr Money;   // wire tag 60007
 
 // core.units: energy, used by the rate examples. Library, not core.
 pub dim Mass;
