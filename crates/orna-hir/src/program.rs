@@ -80,6 +80,9 @@ pub struct Program {
 
 impl Program {
     /// An empty program: no modules, definitions, bodies or types.
+    ///
+    /// The native ABI is `0` until lowering admits the `core` and `sys`
+    /// declarations, which is where the engine's ABI number is recorded.
     #[must_use]
     pub fn empty() -> Self {
         Self {

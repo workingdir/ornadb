@@ -248,7 +248,7 @@ impl<I: Idx, T> FromIterator<T> for IndexVec<I, T> {
 pub struct Name(Arc<str>);
 
 impl Name {
-    /// Normalises `text` to NFC and interns it.
+    /// Normalises `text` to NFC and stores it once behind a shared arc.
     #[must_use]
     pub fn new(text: &str) -> Self {
         let normalized = text.nfc().collect::<String>();

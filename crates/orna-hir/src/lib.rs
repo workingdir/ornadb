@@ -13,10 +13,11 @@
 //! passes yet, so it returns an empty program; the resolver, the inference
 //! pass and the executor arrive in H1 to H4 behind the same types.
 //!
-//! The crate depends only on `orna-syntax` (input), `orna-value` (the
-//! diagnostic type) and `unicode-normalization` (identifier NFC). It must never
-//! depend on `orna-check`, `orna-evaluator`, `orna-intrinsics`, `orna-sys` or a
-//! storage crate; `scripts/check_architecture.py` enforces the layer table.
+//! The crate depends on `orna-syntax` (input), `orna-value` (the diagnostic
+//! type), `num-bigint` (literal payloads) and `unicode-normalization`
+//! (identifier NFC). It must never depend on `orna-check`, `orna-evaluator`,
+//! `orna-intrinsics`, `orna-sys` or a storage crate; `scripts/check_architecture.py`
+//! enforces the layer table.
 
 #![forbid(unsafe_code)]
 

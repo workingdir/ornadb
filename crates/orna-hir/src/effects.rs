@@ -53,6 +53,9 @@ impl EffectKind {
     ];
 
     const fn bit(self) -> u16 {
+        // The two non-`EffectKind` bits start after every named kind.
+        const _: () = assert!(EffectKind::ALL.len() <= 12);
+        assert!((self as u16) < 12, "EffectKind bit collides with Opaque");
         1 << (self as u16)
     }
 }

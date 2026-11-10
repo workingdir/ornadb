@@ -339,7 +339,6 @@ impl Program {
                 }
             }
             DefKind::Table(table) => {
-                self.validate_def_refs(&table.fields, "table field", errors);
                 self.validate_kinds(&table.fields, "table field", DefKind::is_field, errors);
                 self.validate_kinds(&table.key, "table key", DefKind::is_field, errors);
                 self.validate_kinds(

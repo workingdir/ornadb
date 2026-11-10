@@ -28,8 +28,7 @@ pub struct SourceUnit<'a> {
 /// The result satisfies [`Program::validate`]: lowering represents a malformed
 /// input rather than rejecting it, so validation failures are lowering bugs.
 #[must_use]
-pub fn lower(sources: &[SourceUnit<'_>]) -> Program {
-    let _ = sources;
+pub fn lower(_sources: &[SourceUnit<'_>]) -> Program {
     Program::empty()
 }
 
