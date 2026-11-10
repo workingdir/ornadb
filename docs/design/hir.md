@@ -1632,3 +1632,179 @@ pipeline never stopped being authoritative; the only shipped-code edits are the
 check`) gate behind an environment variable for a fixed period. H9's per-entry
 switches are single-line defaults with the old path intact until the final
 deletion PR.
+
+--------------------------------------------------------------------------
+
+## 7. Performance design
+
+The critique's verdict (F26) is that overhead is structural, with "no budget,
+no benchmark, no ceiling". Nothing below is a measurement of the old
+evaluator: the repository has no `benches/` directory and no benchmark
+dependency (checked at `026faee90`), so stage H0 measures first. What follows
+is where the structure costs, read from the code, and the design that removes
+each cost. Expected gains are design goals to be confirmed against H0's
+numbers, marked as such.
+
+### 7.1 Where the old evaluator spends work, from the code
+
+| Operation | What it does today | Location |
+|---|---|---|
+| read a local | string lookup in a `BTreeMap<String, Value>`, then clone the `Value` | `name_lookup`, `lib.rs:6105-6109`; `Scope`, `:4798` |
+| call a source function | evaluate the callee (`:10012`), build a fresh `Scope` from the function's environment, clone the nominal-definition map, insert each argument into a `BTreeMap<ArgumentKey, Value>` keyed by an owned `String` or position, then `invoke_pure_reusing` | `lib.rs:10012-10100`, `:4882-4906`, `:2724` |
+| create a closure | clone the whole `Scope` | `Closure { captured: Scope }`, `:3668-3673` |
+| every integer result | render to decimal text to count digits, then throw the text away | `integer`, `:5955-5958` (five such renders in the file) |
+| every expression | `stacker::maybe_grow`, one cancellation check, one step, one transfer re-check | `evaluate`, `:5984-5996`; `step`, `:5737-5750`; 43 re-checks |
+| choose arithmetic | match on the operator string, then on the two value tags, on every evaluation | `binary`, `:6899`; `apply_binary`, `:7005` onward |
+| a pipe | decide table-versus-value by syntax, evaluate, then resolve the stage name again | `:6931-6949`, `relation_call` `:7752` |
+
+The gate-C probe recorded 47 ms for one capture expression (critique F26). That
+figure comes from the repository's own evidence and is the only timing this
+document cites; it was not reproduced.
+
+### 7.2 The design
+
+**Slot locals.** A body's frame is a slice of one contiguous `Vec<Value>`
+stack: `Local(LocalId)` is `stack[base + slot]`. A call pushes its arguments
+into the next frame's first slots (the binder already ordered them, 2.7) and
+pops on return. No map, no string, no per-call allocation in steady state.
+Names exist only in `Local.name` for diagnostics.
+
+**An operator tree of enums, built once per body.** `orna-exec` turns each
+`Body` into a tree of `enum Op` nodes the first time a function is called (and
+caches it in the `Linked` program). Nodes are chosen from HIR operators and
+operand types: `AddInt`, `AddDecimal`, `LtInt`, `CallSource { body }`,
+`CallNative { f: NativeFn }`, `TableInsert { table }`, `RelScan`,
+`Local(slot)`. There is no operator string, no tag match to choose an
+implementation at run time, and a native call node holds the function pointer
+resolved at link (section 4.3). Before H2 supplies operand types, the builder
+emits generic `Add` nodes that match on the runtime tags (the old behaviour);
+H2 turns them into the typed forms. An enum tree is chosen over bytecode in
+9.2.
+
+**Closures are a body and captured values.** `Closure { body: BodyId,
+captured: Rc<[Value]> }`; creation copies exactly the slots in
+`Body.captures` (by value, ORNA-VALUE-003).
+
+**One argument binder.** Lowering orders and defaults arguments (2.7). The
+executor's call path evaluates arguments left to right into the next frame.
+There is no `ArgumentKey`, no `order_arguments`, no `supplied` map.
+
+**Small integers inline.** `Value::Int` is `Small(i64)` or `Big(Rc<BigInt>)`;
+arithmetic uses `checked_*` on the small form and promotes on overflow, so
+loop counters and sums never allocate. The language's integers stay unbounded
+(under D7's first option) or take a fixed width (other options); the
+representation serves both.
+
+**Shared immutable aggregates.** Lists already share storage and append at the
+end of the longest view without copying (`Value::List(List)`,
+`orna-evaluator/src/list.rs`); strings become `Rc<str>`; records are sorted
+slices of `(Symbol, Value)`. Cloning a `Value` is a refcount increment for
+every aggregate.
+
+**The integer-digit check by bit length.** The quota is `L` decimal digits
+(1,024 by default). A value `n` fits iff `|n| < 10^L`. At quota construction
+compute `B = bit_length(10^L)` once (3,402 for `L = 1,024`, because
+`2^3401 <= 10^1024 < 2^3402`). Then, with `b = bit_length(|n|)`:
+
+| `b` | Decision | Reason |
+|---|---|---|
+| `b <= B - 1` | fits | `|n| < 2^(B-1) <= 10^L` |
+| `b >= B + 1` | exceeds | `|n| >= 2^B > 10^L` |
+| `b == B` | compare `|n|` with the cached `10^L` | exact, rare |
+
+No decimal rendering, no floating point. `Small(i64)` results skip the check
+(an `i64` has at most 19 digits and the quota is validated to be at least 19).
+One parity subtlety: the old check counts characters of `to_str_radix(10)`,
+which includes the minus sign of a negative number (`lib.rs:5956`), so today a
+negative value with 1,024 digits is refused and a positive one is not. The new
+check measures digits of `|n|`; this is listed as an expected difference with
+the limit-boundary case that exposes it, rather than copied, because the
+specification states a digit limit and not a character limit (the limit is a
+quota, ORNA-CLOSURE-004).
+
+**Cheaper accounting without changing counts.** The step counter decrements
+per node as today (counts are observable, 6.4). The cancellation token is
+polled at calls, loop back-edges and every 256 steps, not at every node
+(`step`, `lib.rs:5737`, polls each time); the delay is bounded by 256 nodes.
+`stacker::maybe_grow` moves from every `evaluate` to call and block entry:
+expression nesting inside one body is bounded by the parser (the comment at
+`lib.rs:5985-5992` says so), and active calls are bounded by `max_depth`.
+
+**Completion costs nothing on the happy path.** `Step = Result<Value,
+Abrupt>` with `?` replaces the 43 `transfer` re-checks; `Value` is the `Ok`
+payload, so a straight-line expression pays no flag test.
+
+### 7.3 What is deliberately not promised
+
+No claim is made about absolute speed, about a bytecode VM, or about
+parallel execution (`parallel` runs children on separate hosts, section 4.4;
+whether the old evaluator interleaves them is not established, critique 3.7).
+The targets below are relative to H0's baseline and are goals. If the enum tree
+misses them, the profile decides the next step; the HIR is the same input to a
+bytecode compiler, which is why the tree-first choice does not foreclose it.
+
+### 7.4 Three benchmarks in CI
+
+Added in H0 against the old evaluator and re-run unchanged on `orna-exec` from
+H4. They live in `orna-differential` as a small binary (no new dependency;
+the repository has none) that prints a JSON record, compared with a
+checked-in baseline by a script in `scripts/`. Each run passes explicit limits,
+because the defaults (419,600 steps, 2,048 items) refuse all three.
+
+**B1, recursion.** `fib(25)` makes 242,785 calls and stays well inside the
+64-call depth bound.
+
+```orna
+pub fn fib(n: Int): Int {
+    if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
+}
+```
+
+**B2, fold over 10^6 integers.** A `while` loop avoids materialising a
+million-element collection, so it measures the evaluator and not the list.
+
+```orna
+pub fn total(n: Int): Int {
+    let sum = 0;
+    let i = 1;
+    while i <= n {
+        sum += i;
+        i += 1;
+    }
+    sum
+}
+```
+
+A second variant sums a range, `sum(1..=n)`, to measure the collection path;
+it is reported but not gated until H6 defines range iteration cost.
+
+**B3, filter over 10^5 rows.** Rows come from the activation's table store
+(in-memory), so the benchmark isolates the operator tree from SQLite and Git.
+
+```orna
+pub table Reading(id: Int) {
+    value: Int,
+}
+pub fn hot(): Int {
+    Reading | filter(r => r.value > 50) | count
+}
+```
+
+Under the old evaluator B3 needs `max_collection_items` raised above the row
+count and rows supplied through `evaluate_staged_with_source_rows`
+(`orna-application/src/lib.rs:658`), which is itself the cap this design
+removes; on `orna-exec` it needs no such setting.
+
+**What is gated.** Deterministic counters are gated strictly: step count (equal
+to the baseline, or an allowance per 6.4), heap allocations through a counting
+allocator (the repository already has one in tests, `CountingAllocator`,
+`orna-evaluator/src/lib.rs:15554`), and for B3 `Usage.rows_scanned = 100000`
+and `Usage.peak_retained_bytes` below a small constant, since `count` retains
+nothing. Allocation goals for the new executor, checkable exactly: zero heap
+allocations per call in steady state for B1 and per iteration for B2.
+Wall time is gated loosely (a regression of more than 30% against the checked-in
+baseline on a pinned runner label) because shared runners are noisy; the goal
+is at least a fivefold improvement on B1 and B2 over the H0 baseline, to be
+confirmed or revised when H4 lands. The numbers of every CI run are written to
+the job summary, and the H0 and H4 results are committed as a results file next
+to the baseline, so the numbers are published (critique item 6).
