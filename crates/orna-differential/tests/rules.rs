@@ -178,7 +178,8 @@ fn unresolved_and_arity_codes_match_the_checker() {
     let corpus = Corpus::load().expect("the corpus loads and reconciles");
     let mut compared = 0usize;
     let mut skipped = 0usize;
-    let mut per_code: BTreeMap<&str, [usize; 3]> = CODE_FAMILIES.iter().map(|code| (*code, [0; 3])).collect();
+    let mut per_code: BTreeMap<&str, [usize; 3]> =
+        CODE_FAMILIES.iter().map(|code| (*code, [0; 3])).collect();
     let mut differences = Vec::new();
     for case in &corpus.cases {
         if matches!(case.kind, CaseKind::Repl | CaseKind::StandardBundle) {
@@ -201,12 +202,22 @@ fn unresolved_and_arity_codes_match_the_checker() {
             }
         }
         if old != new {
-            differences.push(compare::difference(&case.id, "codes", old.join("; "), new.join("; ")));
+            differences.push(compare::difference(
+                &case.id,
+                "codes",
+                old.join("; "),
+                new.join("; "),
+            ));
         }
     }
-    println!("code agreement over {compared} cases ({skipped} skipped); columns: agree, checker-only, hir-only");
+    println!(
+        "code agreement over {compared} cases ({skipped} skipped); columns: agree, checker-only, hir-only"
+    );
     for (code, row) in &per_code {
-        println!("{code}: agree {} checker-only {} hir-only {}", row[0], row[1], row[2]);
+        println!(
+            "{code}: agree {} checker-only {} hir-only {}",
+            row[0], row[1], row[2]
+        );
     }
     for difference in &differences {
         println!("{}", difference.describe());
