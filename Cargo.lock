@@ -1542,6 +1542,7 @@ dependencies = [
  "orna-application",
  "orna-check",
  "orna-evaluator",
+ "orna-exec",
  "orna-hir",
  "orna-project-repl",
  "orna-standard-sources",
@@ -1587,6 +1588,15 @@ dependencies = [
  "orna-syntax",
  "orna-value",
  "serde_json",
+]
+
+[[package]]
+name = "orna-exec"
+version = "1.0.0"
+dependencies = [
+ "num-bigint 0.4.8",
+ "orna-hir",
+ "orna-value",
 ]
 
 [[package]]

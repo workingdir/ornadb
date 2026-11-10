@@ -12,6 +12,7 @@ description = "Corpus, old-pipeline observer and comparator for the HIR differen
 # architecture check enforces both facts.
 
 [dependencies]
+orna-exec = { path = "../orna-exec" }
 orna-application = { path = "../orna-application" }
 orna-check = { path = "../orna-check" }
 orna-hir = { path = "../orna-hir" }

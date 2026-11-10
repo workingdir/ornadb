@@ -1,0 +1,15 @@
+[package]
+name = "orna-exec"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.95"
+license.workspace = true
+description = "Executor over the typed HIR for the Orna 1.1.0 language (stage H4 of the HIR strangler)"
+
+# Layer 4 (docs/design/layers.toml): above orna-hir and orna-value, below the
+# shipped binary. The old evaluator stays authoritative until the cutover.
+
+[dependencies]
+num-bigint = "0.4.6"
+orna-hir = { path = "../orna-hir" }
+orna-value = { path = "../orna-value" }
