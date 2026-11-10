@@ -56,8 +56,10 @@ merged result.
 engine and are versioned with it: `core` holds the intrinsic types and
 operations, `sys` the typed introspection and control plane. `std` is ordinary
 Orna written on top of them, pinned to a Git commit, optional and replaceable.
-A package cannot ship native code; only the engine's embedded modules declare
-native functions (chapter 1, "Native declarations").
+A package may declare native functions; the project's own shared library
+supplies the code for every declaration outside `core` and `sys`, which the
+engine supplies (chapter 1, "Native declarations", and
+`docs/design/native-libraries.md`).
 
 ## The execution pipeline
 

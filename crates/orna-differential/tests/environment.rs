@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 
 use orna_differential::case::Corpus;
 use orna_differential::environment::{self, CATEGORIES};
-use orna_differential::observe_new;
+use orna_differential::{observe_new, observe_old};
 
 #[test]
 fn environment_names_only_shrink_as_declarations_arrive() {
@@ -20,13 +20,33 @@ fn environment_names_only_shrink_as_declarations_arrive() {
         environment::load_environment_categories().expect("the environment ratchet parses");
     let mut observed: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut names: BTreeMap<String, usize> = BTreeMap::new();
+    let mut legacy_gaps: Vec<String> = Vec::new();
     for case in &corpus.cases {
+        if environment::is_legacy_case(&case.id)
+            && let Some(code) = case
+                .expectation
+                .as_ref()
+                .and_then(|expected| expected.code.as_deref())
+        {
+            let observation =
+                observe_old::observe(case).expect("the old pipeline observes the legacy case");
+            if !observation
+                .diagnostics
+                .iter()
+                .any(|reported| reported == code)
+            {
+                legacy_gaps.push(format!(
+                    "{}: the old pipeline does not report {code}",
+                    case.id
+                ));
+            }
+        }
         let Ok(mut program) = observe_new::lower_case(case) else {
             continue;
         };
         let observation = observe_new::type_observation(&mut program);
         for diagnostic in &observation.diagnostics {
-            let Some(category) = environment::classify(diagnostic) else {
+            let Some(category) = environment::classify(&case.id, diagnostic) else {
                 continue;
             };
             *observed.entry(category).or_insert(0) += 1;
@@ -34,7 +54,9 @@ fn environment_names_only_shrink_as_declarations_arrive() {
                 && let Some(length) = diagnostic[start + 1..].find('`')
             {
                 let name = &diagnostic[start + 1..start + 1 + length];
-                *names.entry(format!("{category}: {name}")).or_insert(0) += 1;
+                *names
+                    .entry(format!("{category}: {name} @ {}", case.id))
+                    .or_insert(0) += 1;
             }
         }
     }
@@ -47,6 +69,11 @@ fn environment_names_only_shrink_as_declarations_arrive() {
     for (name, count) in &names {
         println!("  {count:>4} {name}");
     }
+    assert!(
+        legacy_gaps.is_empty(),
+        "the legacy published codes are not reported by the old checker:\n{}",
+        legacy_gaps.join("\n")
+    );
     let failures = environment::ratchet(&recorded, &observed);
     assert!(
         failures.is_empty(),

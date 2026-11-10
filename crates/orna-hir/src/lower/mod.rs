@@ -82,6 +82,7 @@ pub fn lower(sources: &[SourceUnit<'_>]) -> Program {
     builder.lower_items();
     let mut program = builder.finish();
     crate::effect_pass::run(&mut program);
+    crate::rules::run(&mut program);
     program
 }
 
