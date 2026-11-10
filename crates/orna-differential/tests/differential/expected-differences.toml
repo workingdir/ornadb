@@ -1045,3 +1045,46 @@ first = "ORNA-A091-002: remove `self |`; the table already supplies its candidat
 second = ""
 reason = "`all_unique` is not in scope in the case, so the piped call does not lower (`ORNA-S012-UNRESOLVED`) and the `self |` rule has no call to judge; closed when the resolver carries the fixture-catalogue environment"
 bead = "ornadb-csenl.15"
+[[difference]]
+case = "valid/formatting-does-not-serialize.orna"
+field = "public-signature"
+first = "examples.valid.formatting-does-not-serialize::both=both(Duration) -> {display: Str, encoded: ByteStream}"
+second = "examples.valid.formatting-does-not-serialize::both=both(Duration) -> {display: Str, encoded: Str}"
+reason = "std.encoding.orna.encode is declared `: Str` in the pinned std wrapper and the HIR signature follows it; the checker publishes `ByteStream` for the same call. Which result type is normative is a checker/H2a decision that this slice does not change"
+bead = "ornadb-csenl.17"
+
+[[difference]]
+case = "valid/affine-max.orna"
+field = "public-signature"
+first = "examples.valid.affine-max::hottest=hottest([Quantity]) -> Quantity?"
+second = "examples.valid.affine-max::hottest=hottest([Float]) -> Float?"
+reason = "the fixture unit `C` now resolves in the HIR observer (the reference catalogue supplies it), so the HIR lowers `Float<C>` but its public signature renders the unit-applied Float as plain Float; the checker renders the same parameter as Quantity. The unit argument is dropped by the HIR signature rendering, which the H2a signature slice does not yet carry"
+bead = "ornadb-csenl.18"
+
+# H0 environment categories. Each count is the measured number of lowering
+# diagnostics whose unresolved name falls in the class (tests/environment.rs).
+# A count may only shrink as declarations arrive; update it in the same change.
+
+[[environment]]
+category = "connector-and-host-names"
+count = 25
+reason = "connector and host names (mail, google, finance, energy, HEAD, CWD, work) are a documented not-in-scope class: they name external connectors and host paths that the reference fixture supplies, and HIR does not invent declarations for them. They are not resolvable in HIR until a connector surface is declared"
+bead = "ornadb-csenl.15"
+
+[[environment]]
+category = "fixture-tables-and-modules"
+count = 53
+reason = "fixture tables and modules (Contact, Message, Order, Account, and the like) come from the old checker's Rust Type objects, not from source. Lowering them is not done: the reference environment is carried by name only until real declarations exist, so each use is an H0 environment blocker that shrinks as declarations land"
+bead = "ornadb-csenl.15"
+
+[[environment]]
+category = "currency-and-unit-names"
+count = 23
+reason = "currencies (Money, GBP, EUR, USD) exist only as a legacy parser construct (LegacyCheck::Currency) and have no HIR item; kWh and mph are fixture units the observer supplies through fixture.units only where the catalogue admits them. Each use is an H0 environment blocker until HIR carries currency and unit declarations"
+bead = "ornadb-csenl.15"
+
+[[environment]]
+category = "unclassified-names"
+count = 39
+reason = "names in no environment class, including std and core names the pinned std does not declare (Str, Result, Ok, Self, Ordering) and lowercase names that may be genuine resolver scope defects. Not accepted as environment: each needs a per-name decision, a HIR declaration or a resolver fix"
+bead = "ornadb-csenl.16"

@@ -7,6 +7,7 @@
 //! yet is reported as [`ExecError::NotYet`] with the construct named, never
 //! guessed at, so the harness can count what has been executed.
 
+mod binders;
 mod error;
 mod eval;
 mod frame;

@@ -372,39 +372,61 @@ pub fn typed_share_ratchet(recorded: TypedShare, observed: TypedShare) -> Vec<St
     failures
 }
 
-/// Reads `tests/differential/exec-share.toml`: the number of corpus cases the
-/// executor ran whose outcome matches the old pipeline.
-pub fn load_exec_agreed() -> Result<usize, String> {
+/// The recorded executor ratchet: the agreed count (grow-only) and the measured
+/// denominator, the corpus cases the old pipeline can evaluate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExecShare {
+    /// Cases the executor ran whose outcome matches the old pipeline.
+    pub agreed: usize,
+    /// Corpus cases with `evaluate == true` (the old pipeline yields an outcome).
+    pub evaluable: usize,
+}
+
+/// Reads `tests/differential/exec-share.toml`.
+pub fn load_exec_share() -> Result<ExecShare, String> {
     let path = differential_dir().join("exec-share.toml");
-    parse_exec_agreed(&read_file(&path)?)
+    parse_exec_share(&read_file(&path)?)
 }
 
 /// Parses the exec-share ratchet text.
-pub fn parse_exec_agreed(source: &str) -> Result<usize, String> {
+pub fn parse_exec_share(source: &str) -> Result<ExecShare, String> {
     let document = toml_lite::parse(source)?;
     let table = document
         .tables_named("exec-share")
         .next()
         .ok_or_else(|| "exec-share.toml: no `[[exec-share]]` table".to_owned())?;
-    usize::try_from(table.integer("agreed")?)
-        .map_err(|_| "exec-share.toml: `agreed` must be non-negative".to_owned())
+    let agreed = usize::try_from(table.integer("agreed")?)
+        .map_err(|_| "exec-share.toml: `agreed` must be non-negative".to_owned())?;
+    let evaluable = usize::try_from(table.integer("evaluable")?)
+        .map_err(|_| "exec-share.toml: `evaluable` must be non-negative".to_owned())?;
+    Ok(ExecShare { agreed, evaluable })
 }
 
 /// Applies the exec-share ratchet.
 ///
 /// The agreed count may only grow, and a grown count must be recorded in the
-/// same commit: an unrecorded rise would let a later fall pass unseen.
+/// same commit: an unrecorded rise would let a later fall pass unseen. The
+/// evaluable denominator must equal the recorded one: a corpus change moves it
+/// and the new measured value is recorded in the same PR.
 #[must_use]
-pub fn exec_share_ratchet(recorded: usize, observed: usize) -> Vec<String> {
+pub fn exec_share_ratchet(recorded: ExecShare, observed: ExecShare) -> Vec<String> {
     let mut failures = Vec::new();
-    if observed < recorded {
+    if observed.agreed < recorded.agreed {
         failures.push(format!(
-            "executor agreement fell from {recorded} to {observed} cases; the ratchet only grows"
+            "executor agreement fell from {} to {} cases; the ratchet only grows",
+            recorded.agreed, observed.agreed
         ));
     }
-    if observed > recorded {
+    if observed.agreed > recorded.agreed {
         failures.push(format!(
-            "executor agreement rose from {recorded} to {observed}; record {observed} in exec-share.toml"
+            "executor agreement rose from {} to {}; record {} in exec-share.toml",
+            recorded.agreed, observed.agreed, observed.agreed
+        ));
+    }
+    if observed.evaluable != recorded.evaluable {
+        failures.push(format!(
+            "evaluable denominator moved from {} to {}; record {} in exec-share.toml",
+            recorded.evaluable, observed.evaluable, observed.evaluable
         ));
     }
     failures

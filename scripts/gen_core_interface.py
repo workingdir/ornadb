@@ -59,6 +59,7 @@ HOST_TABLE = {}
 
 # Default expressions, from the std wrapper of each row (stdlib/std). Keys: (module, row, param).
 DEFAULTS = {
+    ("core", "error", "cause"): "null",
     ("std.collection", "window", "step"): "1",
     ("std.collection", "one", "predicate"): "value => true",
     ("std.stats", "mean", "scale"): "null",
