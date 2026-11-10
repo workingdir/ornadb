@@ -66,12 +66,21 @@ fn classify_name(
     }
     let module = state.module;
     let target = builder.resolve_bare(module, &name);
-    super::record_use(
+    // A bare name with no declaration is still a language-defined relation
+    // stage or terminal when its spelling is one; record it as the form it
+    // denotes, not as an unresolved name.
+    let recorded =
+        if target == NameTarget::Unresolved && super::classify::rel_op(name.as_str()).is_some() {
+            NameTarget::Intrinsic
+        } else {
+            target
+        };
+    super::record_value_use(
         &mut builder.program,
         module,
         span.clone(),
         name.clone(),
-        target,
+        recorded,
     );
     match target {
         NameTarget::Def(def) => classified_def(builder, state, def, span),
@@ -135,7 +144,7 @@ fn classify_path(
     }
     match builder.resolve_path(module, &names) {
         crate::resolve::PathKind::Def(def) => {
-            super::record_use(
+            super::record_value_use(
                 &mut builder.program,
                 module,
                 last_span.clone(),
@@ -145,7 +154,7 @@ fn classify_path(
             classified_def(builder, state, def, span)
         }
         crate::resolve::PathKind::Member { base, .. } => {
-            super::record_use(
+            super::record_value_use(
                 &mut builder.program,
                 module,
                 last_span,
@@ -164,7 +173,7 @@ fn classify_path(
             Some((Callee::Pending { base, name: last }, None))
         }
         crate::resolve::PathKind::MissingMember { module: target, .. } => {
-            super::record_use(
+            super::record_value_use(
                 &mut builder.program,
                 module,
                 last_span.clone(),
@@ -191,11 +200,13 @@ fn classify_path(
         crate::resolve::PathKind::NotAModule
         | crate::resolve::PathKind::Ambiguous
         | crate::resolve::PathKind::Unresolved => {
-            super::record_use(
+            // The root is the name that failed, not the member written after
+            // it: a member spelling is not a name in any scope.
+            super::record_value_use(
                 &mut builder.program,
                 module,
-                last_span.clone(),
-                last.clone(),
+                segments[0].1.clone(),
+                names[0].clone(),
                 NameTarget::Unresolved,
             );
             builder.diagnose(

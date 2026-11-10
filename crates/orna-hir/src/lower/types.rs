@@ -150,6 +150,7 @@ fn lower_named(
             module,
             span.clone(),
             name.clone(),
+            crate::UseContext::Type,
             target,
         );
         return match target {
@@ -190,6 +191,7 @@ fn lower_named(
                 module,
                 span.clone(),
                 last,
+                crate::UseContext::Type,
                 NameTarget::Def(def),
             );
             nominal(builder, def, args)
@@ -200,6 +202,7 @@ fn lower_named(
                 module,
                 span.clone(),
                 last.clone(),
+                crate::UseContext::Type,
                 NameTarget::Unresolved,
             );
             builder.diagnose(

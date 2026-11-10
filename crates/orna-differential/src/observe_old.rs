@@ -26,13 +26,14 @@ use std::sync::LazyLock;
 
 use orna_application::{ApplicationAuthority, ApplicationError, StagedActivation};
 use orna_check::{Catalogue, StandardDependencyProfile};
+use orna_evaluator::route_trace::{self, CallKind};
 use orna_evaluator::{Functions, Limits, StepBudget, evaluate_with_functions_and_budget};
 use orna_project_repl::AdmittedReplSession;
 use orna_syntax::parse_expression;
 use orna_value::CanonicalValue;
 
 use crate::case::{Case, CaseKind, Family, Source};
-use crate::{InputOutcome, Observation, Write};
+use crate::{CallRecord, InputOutcome, Observation, Route, Write};
 
 /// The step budget every unbounded probe runs with.
 ///
@@ -66,6 +67,8 @@ struct Run {
     diagnostics: Vec<String>,
     outcome: Option<Result<Vec<u8>, String>>,
     writes: Vec<Write>,
+    /// The calls the run executed, in execution order.
+    calls: Vec<CallRecord>,
     /// Whether the evaluator ran. An admission rejection produces an outcome
     /// without executing anything, and such a case has no step count.
     evaluated: bool,
@@ -90,7 +93,7 @@ fn observe_module(case: &Case) -> Result<Observation, String> {
         diagnostics: run.diagnostics,
         outcome: run.outcome,
         steps,
-        calls: Vec::new(),
+        calls: run.calls,
         writes: run.writes,
         inputs: Vec::new(),
     })
@@ -105,26 +108,57 @@ fn run_module(
 ) -> Result<Run, String> {
     let authority = ApplicationAuthority::new(catalogue.clone(), limits);
     let entry = case.entry.clone().unwrap_or_default();
-    let admitted =
-        match authority.admit_module(source.logical_path.clone(), source.text.clone(), entry) {
-            Ok(application) => application,
-            Err(error) => return Ok(rejection(&error, case.entry.is_some())),
-        };
-    if !case.evaluate {
-        return Ok(Run::default());
-    }
-    match authority.evaluate_staged(&admitted, &case.arguments) {
-        Ok(activation) => Ok(Run {
-            outcome: Some(Ok(encode(activation.value())?)),
-            writes: writes_of(&activation),
-            evaluated: true,
-            ..Run::default()
-        }),
-        Err(error) => Ok(Run {
-            outcome: Some(Err(application_code(&error))),
-            evaluated: true,
-            ..Run::default()
-        }),
+    let (outcome, calls) = route_trace::collect(|| {
+        let admitted =
+            match authority.admit_module(source.logical_path.clone(), source.text.clone(), entry) {
+                Ok(application) => application,
+                Err(error) => return Ok::<Run, String>(rejection(&error, case.entry.is_some())),
+            };
+        if !case.evaluate {
+            return Ok(Run::default());
+        }
+        match authority.evaluate_staged(&admitted, &case.arguments) {
+            Ok(activation) => Ok(Run {
+                outcome: Some(Ok(encode(activation.value())?)),
+                writes: writes_of(&activation),
+                evaluated: true,
+                ..Run::default()
+            }),
+            Err(error) => Ok(Run {
+                outcome: Some(Err(application_code(&error))),
+                evaluated: true,
+                ..Run::default()
+            }),
+        }
+    });
+    let mut run = outcome?;
+    run.calls = calls
+        .into_iter()
+        .map(|record| CallRecord {
+            logical_path: record.span.location.as_ref().map_or_else(
+                || source.logical_path.clone(),
+                |location| location.file.clone(),
+            ),
+            start: record.span.start,
+            end: record.span.end,
+            route: route_of(record.kind),
+        })
+        .collect();
+    Ok(run)
+}
+
+/// The differential route a cascade branch records.
+fn route_of(kind: CallKind) -> Route {
+    match kind {
+        CallKind::DecimalDivide => Route::DecimalDivide,
+        CallKind::CodecDecode => Route::CodecDecode,
+        CallKind::UiAction => Route::UiAction,
+        CallKind::RootIntrinsic => Route::RootIntrinsic,
+        CallKind::RelationSource => Route::RelationSource,
+        CallKind::RelationStage => Route::RelationStage,
+        CallKind::SystemHost => Route::SysHost,
+        CallKind::Native => Route::Native,
+        CallKind::Source => Route::SourceFunction,
     }
 }
 
@@ -229,21 +263,37 @@ fn observe_expression(case: &Case) -> Result<Observation, String> {
     };
     let functions = Functions::new();
     let mut budget = StepBudget::new(limits.max_steps);
-    let outcome = match evaluate_with_functions_and_budget(
-        &parsed.value,
-        &case.arguments,
-        &functions,
-        limits,
-        &mut budget,
-    ) {
+    let (evaluated, calls) = route_trace::collect(|| {
+        evaluate_with_functions_and_budget(
+            &parsed.value,
+            &case.arguments,
+            &functions,
+            limits,
+            &mut budget,
+        )
+    });
+    let outcome = match evaluated {
         Ok(value) => Ok(encode(&value)?),
         Err(error) => Err(error.code().to_owned()),
     };
     let consumed = limits.max_steps - budget.remaining();
     let steps = (!is_other_limit(&outcome)).then_some(consumed);
+    let calls = calls
+        .into_iter()
+        .map(|record| CallRecord {
+            logical_path: record.span.location.as_ref().map_or_else(
+                || source.logical_path.clone(),
+                |location| location.file.clone(),
+            ),
+            start: record.span.start,
+            end: record.span.end,
+            route: route_of(record.kind),
+        })
+        .collect();
     Ok(Observation {
         outcome: Some(outcome),
         steps,
+        calls,
         ..Observation::default()
     })
 }
@@ -253,8 +303,22 @@ fn observe_repl(case: &Case) -> Result<Observation, String> {
     let mut session = AdmittedReplSession::new(case.limits);
     let mut diagnostics = Vec::new();
     let mut inputs = Vec::new();
+    let mut calls = Vec::new();
     for (index, input) in case.inputs.iter().enumerate() {
-        let result = match session.submit(input) {
+        let (submitted, recorded) = route_trace::collect(|| session.submit(input));
+        calls.extend(recorded.into_iter().map(|record| {
+            CallRecord {
+                logical_path: record
+                    .span
+                    .location
+                    .as_ref()
+                    .map_or_else(|| case.id.clone(), |location| location.file.clone()),
+                start: record.span.start,
+                end: record.span.end,
+                route: route_of(record.kind),
+            }
+        }));
+        let result = match submitted {
             Ok(Some(value)) => Some(Ok(encode(&value)?)),
             Ok(None) => None,
             Err(error) => {
@@ -273,7 +337,7 @@ fn observe_repl(case: &Case) -> Result<Observation, String> {
         diagnostics: sorted_codes(diagnostics),
         outcome,
         steps: None,
-        calls: Vec::new(),
+        calls,
         writes: Vec::new(),
         inputs,
     })
@@ -385,7 +449,7 @@ fn first_code(codes: &[String], fallback: &str) -> String {
 /// conformance harness uses: it declares the dimensions and units the fixtures'
 /// environments supply. Every other family is admitted against the catalogue
 /// the binary builds.
-fn catalogue_for(case: &Case) -> Result<&'static Catalogue, String> {
+pub(crate) fn catalogue_for(case: &Case) -> Result<&'static Catalogue, String> {
     match case.family {
         Family::Reference => Ok(&FIXTURE_CATALOGUE),
         Family::Expression | Family::Repl | Family::Standard => Ok(&CORE_CATALOGUE),

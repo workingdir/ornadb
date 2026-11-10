@@ -35,7 +35,32 @@ pub(crate) fn lower_expr(
     state: &mut BodyState,
     expr: &AstExpr,
 ) -> ExprId {
+    if let Some(id) = lower_atom(builder, state, expr) {
+        return id;
+    }
+    if let Some(id) = lower_operator(builder, state, expr) {
+        return id;
+    }
+    if let Some(id) = lower_collection(builder, state, expr) {
+        return id;
+    }
+    if let Some(id) = lower_invocation(builder, state, expr) {
+        return id;
+    }
     match expr {
+        AstExpr::Block {
+            statements,
+            tail,
+            span,
+        } => lower_block(builder, state, statements, tail.as_deref(), span),
+        AstExpr::Control { .. } => lower_control(builder, state, expr),
+        _ => unreachable!("every expression shape is handled by one of the four groups"),
+    }
+}
+
+/// Lowers names, literals and interpolated strings.
+fn lower_atom(builder: &mut Builder<'_>, state: &mut BodyState, expr: &AstExpr) -> Option<ExprId> {
+    Some(match expr {
         AstExpr::Name { text, span } => lower_name(builder, state, text, span),
         AstExpr::Literal { text, kind, span } => match lower_literal(text, *kind) {
             Some(literal) => push(builder, state, ExprKind::Lit(literal), span.clone()),
@@ -88,6 +113,17 @@ pub(crate) fn lower_expr(
             );
             error_expr(builder, state, span.clone())
         }
+        _ => return None,
+    })
+}
+
+/// Lowers unary, binary, range, index, field and grouped expressions.
+fn lower_operator(
+    builder: &mut Builder<'_>,
+    state: &mut BodyState,
+    expr: &AstExpr,
+) -> Option<ExprId> {
+    Some(match expr {
         AstExpr::Unary { op, rhs, span } => {
             let operand = lower_expr(builder, state, rhs);
             let op = match op.as_str() {
@@ -100,7 +136,7 @@ pub(crate) fn lower_expr(
                         "unknown unary operator",
                         span.clone(),
                     );
-                    return error_expr(builder, state, span.clone());
+                    return Some(error_expr(builder, state, span.clone()));
                 }
             };
             push(
@@ -134,25 +170,6 @@ pub(crate) fn lower_expr(
                 span.clone(),
             )
         }
-        AstExpr::Call {
-            callee,
-            arguments,
-            span,
-        } => lower_call(builder, state, callee, &[], arguments, None, span),
-        AstExpr::GenericCall {
-            callee,
-            type_arguments,
-            arguments,
-            span,
-        } => lower_call(
-            builder,
-            state,
-            callee,
-            type_arguments,
-            arguments,
-            None,
-            span,
-        ),
         AstExpr::Index { base, index, span } => {
             let base = lower_expr(builder, state, base);
             let index = lower_expr(builder, state, index);
@@ -176,6 +193,17 @@ pub(crate) fn lower_expr(
             )
         }
         AstExpr::Group { inner, .. } => lower_expr(builder, state, inner),
+        _ => return None,
+    })
+}
+
+/// Lowers tuple, list and record expressions.
+fn lower_collection(
+    builder: &mut Builder<'_>,
+    state: &mut BodyState,
+    expr: &AstExpr,
+) -> Option<ExprId> {
+    Some(match expr {
         AstExpr::Tuple { elements, span } => {
             let elements = lower_all(builder, state, elements);
             push(builder, state, ExprKind::Tuple(elements), span.clone())
@@ -202,6 +230,36 @@ pub(crate) fn lower_expr(
             let elements = lower_all(builder, state, elements);
             push(builder, state, ExprKind::List(elements), span.clone())
         }
+        _ => return None,
+    })
+}
+
+/// Lowers calls, constructions and lambdas.
+fn lower_invocation(
+    builder: &mut Builder<'_>,
+    state: &mut BodyState,
+    expr: &AstExpr,
+) -> Option<ExprId> {
+    Some(match expr {
+        AstExpr::Call {
+            callee,
+            arguments,
+            span,
+        } => lower_call(builder, state, callee, &[], arguments, None, span),
+        AstExpr::GenericCall {
+            callee,
+            type_arguments,
+            arguments,
+            span,
+        } => lower_call(
+            builder,
+            state,
+            callee,
+            type_arguments,
+            arguments,
+            None,
+            span,
+        ),
         AstExpr::Nominal { path, fields, span } => {
             lower_construct(builder, state, path, fields, span)
         }
@@ -210,13 +268,8 @@ pub(crate) fn lower_expr(
             body,
             span,
         } => lower_lambda(builder, state, parameters, body, span),
-        AstExpr::Block {
-            statements,
-            tail,
-            span,
-        } => lower_block(builder, state, statements, tail.as_deref(), span),
-        AstExpr::Control { .. } => lower_control(builder, state, expr),
-    }
+        _ => return None,
+    })
 }
 
 /// Adds one expression with the untyped stage's type.
@@ -257,7 +310,7 @@ pub(crate) fn lower_name(
     let name = Name::new(text);
     let span = span.clone();
     if let Some(local) = state.local(&name) {
-        super::record_use(
+        super::record_value_use(
             &mut builder.program,
             state.module,
             span.clone(),
@@ -268,7 +321,7 @@ pub(crate) fn lower_name(
     }
     let module = state.module;
     let target = builder.resolve_bare(module, &name);
-    super::record_use(
+    super::record_value_use(
         &mut builder.program,
         module,
         span.clone(),
@@ -432,7 +485,9 @@ fn lower_stage(
             input,
             call_span,
         ),
-        AstExpr::Group { inner, .. } => lower_stage(builder, state, inner, input, span),
+        // A parenthesised stage stays the callee exactly as the evaluator sees
+        // it, so the recorded callee span keeps its parentheses; the group
+        // lowers to its inner expression as a value.
         other => lower_call(builder, state, other, &[], &[], input, span),
     }
 }
@@ -470,6 +525,7 @@ fn lower_call(
     span: &SyntaxSpan,
 ) -> ExprId {
     let module = state.module;
+    let callee_span = callee.span();
     let target = classify_callee(builder, state, callee, span);
     let (callee, params) = match target {
         Some(classified) => classified,
@@ -500,6 +556,7 @@ fn lower_call(
         state,
         ExprKind::Call(Box::new(Call {
             callee,
+            callee_span: callee_span.clone(),
             args: args.into_boxed_slice(),
             piped,
         })),
@@ -523,7 +580,7 @@ fn lower_construct(
     let last = segments.last().cloned().unwrap_or_else(|| Name::new(""));
     let def = match builder.resolve_path(module, &segments) {
         crate::resolve::PathKind::Def(def) => {
-            super::record_use(
+            super::record_value_use(
                 &mut builder.program,
                 module,
                 span.clone(),
@@ -533,7 +590,7 @@ fn lower_construct(
             Some(def)
         }
         _ => {
-            super::record_use(
+            super::record_value_use(
                 &mut builder.program,
                 module,
                 span.clone(),
@@ -608,8 +665,35 @@ fn lower_lambda(
             lambda.captures.push(Capture { outer, inner });
         }
     }
+    let mut prologue = Vec::new();
+    for (index, parameter) in parameters.iter().enumerate() {
+        if matches!(parameter.pattern, orna_syntax::Pattern::Name(..)) {
+            continue;
+        }
+        let slot = lambda.params[index];
+        let init = push(
+            builder,
+            &mut lambda,
+            ExprKind::Local(slot),
+            parameter.pattern.span().clone(),
+        );
+        let pat = pats::lower_pattern(builder, &mut lambda, &parameter.pattern);
+        prologue.push(Stmt::Let { pat, init });
+    }
     let root = lower_expr(builder, &mut lambda, body);
-    lambda.root = Some(root);
+    lambda.root = Some(if prologue.is_empty() {
+        root
+    } else {
+        push(
+            builder,
+            &mut lambda,
+            ExprKind::Block {
+                stmts: prologue.into_boxed_slice(),
+                tail: Some(root),
+            },
+            body.span(),
+        )
+    });
     lambda.pop_scope();
     let error_ty = builder.program.tys.error();
     builder.complete_body(lambda, error_ty);
@@ -726,7 +810,7 @@ fn lower_place(
             match state.local(&name) {
                 Some(local) => Place::Local(local),
                 None => {
-                    super::record_use(
+                    super::record_value_use(
                         &mut builder.program,
                         state.module,
                         span.clone(),

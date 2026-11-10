@@ -176,15 +176,37 @@ impl BodyState {
     }
 }
 
-/// Appends one name use to the module's index.
-pub(crate) fn record_use(
+/// Appends one value-position name use to the module's index.
+pub(crate) fn record_value_use(
     program: &mut Program,
     module: ModuleId,
     span: SyntaxSpan,
     name: Name,
     target: crate::NameTarget,
 ) {
-    program.modules[module]
-        .name_uses
-        .push(NameUse { span, name, target });
+    record_use(
+        program,
+        module,
+        span,
+        name,
+        crate::UseContext::Value,
+        target,
+    );
+}
+
+/// Appends one name use to the module's index.
+pub(crate) fn record_use(
+    program: &mut Program,
+    module: ModuleId,
+    span: SyntaxSpan,
+    name: Name,
+    context: crate::UseContext,
+    target: crate::NameTarget,
+) {
+    program.modules[module].name_uses.push(NameUse {
+        span,
+        name,
+        context,
+        target,
+    });
 }

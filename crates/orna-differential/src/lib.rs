@@ -41,10 +41,14 @@
 
 pub mod case;
 pub mod compare;
+pub mod observe_checker;
+pub mod observe_new;
 pub mod observe_old;
 mod toml_lite;
 
 use std::path::{Path, PathBuf};
+
+pub use observe_new::ResolutionObservation;
 
 /// What one pipeline did with one case.
 ///
@@ -103,7 +107,7 @@ pub struct CallRecord {
 ///
 /// Section 1.3: the order is the semantics, so a classification that disagrees
 /// with this order is a behaviour difference, not a cosmetic one.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum Route {
     /// Decimal `.divide` on an unresolved callee.
     DecimalDivide,

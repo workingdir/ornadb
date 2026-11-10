@@ -32,6 +32,7 @@ pub(crate) fn lower_pattern(
                 module,
                 span.clone(),
                 name,
+                crate::UseContext::Pattern,
                 NameTarget::Local(local),
             );
             state.push_pat(Pat::Bind { local })
@@ -79,6 +80,7 @@ pub(crate) fn lower_pattern(
                             module,
                             span.clone(),
                             Name::new(name),
+                            crate::UseContext::Pattern,
                             NameTarget::Local(local),
                         );
                         state.push_pat(Pat::Bind { local })
@@ -120,6 +122,7 @@ fn lower_constructor(
                 module,
                 span.clone(),
                 segments.last().cloned().unwrap_or_else(|| Name::new("")),
+                crate::UseContext::Pattern,
                 NameTarget::Def(def),
             );
             Some(def)
@@ -130,6 +133,7 @@ fn lower_constructor(
                 module,
                 span.clone(),
                 segments.last().cloned().unwrap_or_else(|| Name::new("")),
+                crate::UseContext::Pattern,
                 NameTarget::Unresolved,
             );
             builder.diagnose(

@@ -23,7 +23,7 @@
 mod body;
 mod call;
 mod def;
-mod diag;
+pub mod diag;
 mod effects;
 mod ids;
 mod lower;
@@ -50,7 +50,7 @@ pub use ids::{
     BodyId, DefId, ExprId, Idx, IndexVec, LocalId, ModuleId, ModulePath, Name, PatId, SourceId,
 };
 pub use lower::{SourceUnit, lower};
-pub use name_use::{NameTarget, NameUse};
+pub use name_use::{NameTarget, NameUse, UseContext};
 pub use pat::Pat;
 pub use program::{Import, ImportTarget, Module, ModuleOrigin, Program};
 pub use ty::{FnTy, ParamIdx, Ty, TyInterner, TyKind, TyVar};

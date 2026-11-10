@@ -14,6 +14,12 @@ use crate::{DefId, ExprId, ParamIdx, Ty};
 pub struct Call {
     /// What the call invokes.
     pub callee: Callee,
+    /// The written callee's span.
+    ///
+    /// The H1 classification proof keys the old evaluator's route trace by the
+    /// callee span (design section 6.3), so the span is kept beside the
+    /// classification instead of being recomputed from the call's extent.
+    pub callee_span: orna_syntax::SyntaxSpan,
     /// One entry per parameter, in parameter order.
     pub args: Box<[Arg]>,
     /// Whether argument 0 is the piped value.
@@ -136,12 +142,16 @@ pub enum RelOp {
     Filter,
     /// `map`.
     Map,
+    /// `project`, the projection spelling of `map`.
+    Project,
     /// `sort_by`.
     SortBy,
     /// `bucket_by`.
     BucketBy,
     /// `distinct`.
     Distinct,
+    /// `unique`, the list spelling of `distinct`.
+    Unique,
     /// `pairs`.
     Pairs,
     /// `window`.
@@ -152,6 +162,32 @@ pub enum RelOp {
     Drop,
     /// `flat_map`.
     FlatMap,
+    /// `union`, a two-input relation constructor.
+    Union,
+    /// `zip`.
+    Zip,
+    /// `zip_exact`.
+    ZipExact,
+    /// `asof_join`.
+    AsOfJoin,
+    /// `count`, the row-count terminal.
+    Count,
+    /// `first`, the first-row terminal.
+    First,
+    /// `last`, the last-row terminal.
+    Last,
+    /// `one`, the exactly-one-row terminal.
+    One,
+    /// `every`, the all-rows terminal.
+    Every,
+    /// `exists`, the any-row terminal.
+    Exists,
+    /// `sum`, the integer-sum terminal.
+    Sum,
+    /// `min`, the minimum terminal.
+    Min,
+    /// `max`, the maximum terminal.
+    Max,
 }
 
 /// A form with a non-call evaluation rule.

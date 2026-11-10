@@ -16,7 +16,13 @@
 //! A run fails on a difference with no entry in `expected-differences.toml` and
 //! on an entry that no longer differs, so the recorded list only shrinks.
 
-use crate::{InputOutcome, Observation, Write, differential_dir, read_file, toml_lite};
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::observe_new::ClassifiedCall;
+use crate::{
+    CallRecord, InputOutcome, Observation, ResolutionObservation, Route, Write, differential_dir,
+    read_file, toml_lite,
+};
 
 /// One disagreement between two observations.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -168,6 +174,108 @@ fn render_inputs(inputs: &[InputOutcome]) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Compares the old evaluator's route trace with the HIR classification.
+///
+/// Design H1 compares a call *at its span*: for every call the old evaluator
+/// executed, the HIR `Callee` at the callee's span must map to the recorded
+/// route. Execution order, repetition and HIR calls that never run are not
+/// differences, so the comparison keys by `(module, start, end)`.
+#[must_use]
+pub fn compare_calls(
+    case_id: &str,
+    old: &[CallRecord],
+    new: &[ClassifiedCall],
+) -> (Vec<Difference>, usize) {
+    let mut classified: BTreeMap<(String, usize, usize), BTreeSet<Route>> = BTreeMap::new();
+    let mut unobservable: BTreeSet<(String, usize, usize)> = BTreeSet::new();
+    for record in new {
+        let key = (record.logical_path.clone(), record.start, record.end);
+        match record.route {
+            Some(route) => {
+                classified.entry(key).or_default().insert(route);
+            }
+            None => {
+                unobservable.insert(key);
+            }
+        }
+    }
+    let mut differences = Vec::new();
+    let mut skipped = 0usize;
+    let mut seen: BTreeSet<(String, String, String)> = BTreeSet::new();
+    for record in old {
+        let key = (record.logical_path.clone(), record.start, record.end);
+        let left = format!(
+            "{}@{}..{}={:?}",
+            record.logical_path, record.start, record.end, record.route
+        );
+        let rendered = match classified.get(&key) {
+            Some(routes) if routes.contains(&record.route) => continue,
+            Some(routes) => (
+                left,
+                routes
+                    .iter()
+                    .map(|route| format!("{route:?}"))
+                    .collect::<Vec<_>>()
+                    .join("|"),
+            ),
+            None if unobservable.contains(&key) => {
+                skipped += 1;
+                continue;
+            }
+            None => (left, "no HIR call".to_owned()),
+        };
+        if seen.insert((rendered.0.clone(), rendered.1.clone(), case_id.to_owned())) {
+            differences.push(difference(
+                case_id,
+                "call-classification",
+                rendered.0,
+                rendered.1,
+            ));
+        }
+    }
+    (differences, skipped)
+}
+
+/// Compares the old checker's name resolution with the HIR resolver's.
+///
+/// The comparison is by name because the checker's diagnostics carry no span:
+/// the two pipelines agree when every spelling is unresolved in both, with the
+/// same occurrence count, and when they report the same number of ambiguities.
+#[must_use]
+pub fn compare_resolution(
+    case_id: &str,
+    old: &ResolutionObservation,
+    new: &ResolutionObservation,
+) -> Vec<Difference> {
+    let mut differences = Vec::new();
+    let names = old
+        .unresolved
+        .keys()
+        .chain(new.unresolved.keys())
+        .collect::<BTreeSet<_>>();
+    for name in names {
+        let left = old.unresolved.get(name).copied().unwrap_or(0);
+        let right = new.unresolved.get(name).copied().unwrap_or(0);
+        if left != right {
+            differences.push(difference(
+                case_id,
+                "resolution-unresolved",
+                format!("{name}:{left}"),
+                format!("{name}:{right}"),
+            ));
+        }
+    }
+    if old.ambiguous != new.ambiguous {
+        differences.push(difference(
+            case_id,
+            "resolution-ambiguous",
+            old.ambiguous.to_string(),
+            new.ambiguous.to_string(),
+        ));
+    }
+    differences
 }
 
 /// Lowercase hex, the canonical rendering both ratchets and messages use.

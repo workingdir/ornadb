@@ -1134,6 +1134,7 @@ mod tests {
                     def: crate::DefId::new(0),
                     targs: Box::new([]),
                 },
+                callee_span: span(1),
                 args: Box::new([Arg {
                     slot: ParamIdx::new(0),
                     value: ArgValue::Expr(argument),

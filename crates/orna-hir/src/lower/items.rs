@@ -38,6 +38,8 @@ pub(crate) enum BodyJob {
         body: BodyId,
         /// The expression the body evaluates.
         expr: Box<Expr>,
+        /// The owner whose row an assertion body writes as `self`.
+        self_ty: Option<DefId>,
     },
 }
 
@@ -68,9 +70,12 @@ impl Builder<'_> {
         for job in jobs {
             match job {
                 BodyJob::Function(def) => self.lower_function_body(def),
-                BodyJob::Expression { def, body, expr } => {
-                    self.lower_expression_body(def, body, &expr)
-                }
+                BodyJob::Expression {
+                    def,
+                    body,
+                    expr,
+                    self_ty,
+                } => self.lower_expression_body(def, body, &expr, self_ty),
             }
         }
     }
@@ -88,6 +93,7 @@ impl Builder<'_> {
                         def,
                         body,
                         expr: Box::new(expr),
+                        self_ty: None,
                     });
                 }
                 let ret = self.build_result(module, signature.result.as_ref());
@@ -134,6 +140,7 @@ impl Builder<'_> {
                     def,
                     body,
                     expr: Box::new(value),
+                    self_ty: None,
                 });
             }
             DeclAst::Let(annotation, value) => {
@@ -146,6 +153,7 @@ impl Builder<'_> {
                     def,
                     body,
                     expr: Box::new(value),
+                    self_ty: None,
                 });
             }
         }
@@ -238,6 +246,7 @@ impl Builder<'_> {
             def,
             body,
             expr: Box::new(value.clone()),
+            self_ty: Some(owner),
         });
         def
     }
@@ -408,30 +417,34 @@ impl Builder<'_> {
                         DefKind::Unit(UnitDef),
                     );
                     let body_id = self.allocate_body(member_def);
-                    self.body_jobs.push(BodyJob::Expression {
-                        def: member_def,
-                        body: body_id,
-                        expr: Box::new(body.clone()),
-                    });
+                    let generics = self.build_generics(module, &signature.generics);
                     let (params, defaults) =
                         self.build_parameters(member_def, module, &signature.parameters);
-                    for (body, expr) in defaults {
+                    for (default_body, expr) in defaults {
                         self.body_jobs.push(BodyJob::Expression {
                             def: member_def,
-                            body,
+                            body: default_body,
                             expr: Box::new(expr),
+                            self_ty: None,
                         });
                     }
                     let ret = self.build_result(module, signature.result.as_ref());
-                    let generics = self.build_generics(module, &signature.generics);
+                    let patterns = signature
+                        .parameters
+                        .iter()
+                        .map(|parameter| parameter.pattern.clone())
+                        .collect();
                     self.pending[member_def.index()].kind =
-                        PendingKind::Built(DefKind::Fn(crate::FnDef {
+                        PendingKind::Function(Box::new(PendingFunction {
                             generics,
                             params,
                             ret,
                             effects: crate::EffectSet::empty(),
-                            body: crate::FnBody::Source(body_id),
+                            body: Some(body_id),
+                            body_expr: Some(body.clone()),
+                            patterns,
                         }));
+                    self.body_jobs.push(BodyJob::Function(member_def));
                     members.push(member_def);
                 }
                 ImplMember::Static {
@@ -457,6 +470,7 @@ impl Builder<'_> {
                         def: member_def,
                         body,
                         expr: Box::new(value.clone()),
+                        self_ty: None,
                     });
                     members.push(member_def);
                 }
@@ -633,10 +647,27 @@ impl Builder<'_> {
     }
 
     /// Lowers one standalone expression body.
-    fn lower_expression_body(&mut self, def: DefId, body_id: BodyId, expr: &Expr) {
+    fn lower_expression_body(
+        &mut self,
+        def: DefId,
+        body_id: BodyId,
+        expr: &Expr,
+        self_ty: Option<DefId>,
+    ) {
         let module = self.pending[def.index()].module;
         let mut state = BodyState::new(body_id, def, module);
         state.push_scope();
+        if let Some(owner) = self_ty {
+            // An assertion's owner row is written as `self` (design section
+            // 2.4); the slot is the body's only parameter.
+            let ty = self
+                .program
+                .tys
+                .intern(crate::TyKind::Adt(owner, Box::new([])));
+            let span = orna_syntax::SyntaxSpan::new(0, 0);
+            let slot = state.add_local(crate::Name::new("self"), ty, span);
+            state.params.push(slot);
+        }
         let root = lower_expr(self, &mut state, expr);
         state.root = Some(root);
         state.pop_scope();

@@ -14,7 +14,8 @@ description = "Corpus, old-pipeline observer and comparator for the HIR differen
 [dependencies]
 orna-application = { path = "../orna-application" }
 orna-check = { path = "../orna-check" }
-orna-evaluator = { path = "../orna-evaluator" }
+orna-hir = { path = "../orna-hir" }
+orna-evaluator = { path = "../orna-evaluator", features = ["route-trace"] }
 orna-project-repl = { path = "../orna-project-repl" }
 orna-standard-sources = { path = "../orna-standard-sources" }
 orna-syntax = { path = "../orna-syntax" }

@@ -35,6 +35,21 @@ pub enum NameTarget {
     Unresolved,
 }
 
+/// Where a name was written.
+///
+/// The position decides which resolution rules apply and, for the H1
+/// comparison, which occurrences the old checker can answer for: its
+/// unresolved-name diagnostic names a value use, not a type or pattern.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UseContext {
+    /// A value expression or a callee.
+    Value,
+    /// A type annotation, argument, alias or constructor path.
+    Type,
+    /// A binding pattern or a pattern constructor.
+    Pattern,
+}
+
 /// One name occurrence and its resolution.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NameUse {
@@ -42,6 +57,8 @@ pub struct NameUse {
     pub span: SourceSpan,
     /// The normalized identifier as written.
     pub name: Name,
+    /// Where it was written.
+    pub context: UseContext,
     /// What it denotes.
     pub target: NameTarget,
 }
