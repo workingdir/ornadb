@@ -115,6 +115,10 @@ pub enum FnBody {
     /// An Orna body. Lambdas and initializers use the same [`crate::Body`]
     /// shape and are not `FnDef`s.
     Source(BodyId),
+    /// A declaration with no implementation: a protocol member. Callers reach
+    /// it through a protocol bound, never through a `DefId` call, so there is
+    /// nothing to lower or link.
+    Signature,
     /// A `native fn` declaration in `core.orna`, `sys.orna` or the pinned
     /// `std`: no body, so the signature above is its only signature. The link
     /// step binds it to a host implementation keyed by this definition.
@@ -199,6 +203,9 @@ pub struct TableDef {
 pub struct TypeDef {
     /// Its generic parameters.
     pub params: Vec<GenericParam>,
+    /// Its declared fields, refinements and nested implementations. A field
+    /// is a [`DefKind::Field`]; an implementation is a [`DefKind::Impl`].
+    pub members: Vec<DefId>,
 }
 
 /// An enum.

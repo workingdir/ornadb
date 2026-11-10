@@ -2,11 +2,9 @@
 
 use std::collections::BTreeMap;
 
-use orna_value::Diagnostic;
-
 use crate::{
-    Body, BodyId, Def, DefId, EffectSet, FnBody, IndexVec, ModuleId, ModulePath, Name, NativeAbi,
-    SourceId, TyInterner,
+    Body, BodyId, Def, DefId, EffectSet, FnBody, HirDiagnostic, IndexVec, ModuleId, ModulePath,
+    Name, NameUse, NativeAbi, SourceId, TyInterner,
 };
 
 /// Where a module came from.
@@ -58,7 +56,11 @@ pub struct Module {
     /// Its imports, already resolved.
     pub imports: Vec<Import>,
     /// Diagnostics produced while lowering this module.
-    pub diagnostics: Vec<Diagnostic>,
+    pub diagnostics: Vec<HirDiagnostic>,
+    /// Every name occurrence in this module and what it denotes, in source
+    /// order. This is the index the language server and the resolution
+    /// comparison read (design H1).
+    pub name_uses: Vec<NameUse>,
 }
 
 /// One lowered program: every module, definition, body and type of a

@@ -237,6 +237,9 @@ pub enum Lit {
     Str(Box<str>),
     /// A boolean.
     Bool(bool),
+    /// The absent option value, `null`. Its payload type is inferred at the
+    /// use (design section 2.3, D3), so the literal carries no payload.
+    None,
     /// A date, as days since the epoch.
     Date(i64),
     /// An instant, as seconds since the epoch and a nanoseconds component.
@@ -297,13 +300,19 @@ pub enum LogicOp {
     Coalesce,
 }
 
-/// A field reference: a declared field, or a structural record position.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// A field reference: a declared field, a structural record position, or a
+/// member name the type pass settles.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FieldRef {
     /// A field definition of a nominal type, table or enum payload.
     Def(DefId),
     /// The position of a field in a structural record, sorted by name.
     Index(u32),
+    /// A member name whose field definition depends on the base's type. The
+    /// type pass of stage H2 replaces it with [`FieldRef::Def`] or
+    /// [`FieldRef::Index`]; until then it is the only total representation of
+    /// `row.field` that keeps the written name.
+    Name(crate::Name),
 }
 
 /// A place an assignment can write.
